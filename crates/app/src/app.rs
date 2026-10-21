@@ -7,16 +7,17 @@ use std::time::Duration;
 
 use eframe::egui;
 use musicable_commands::{Keymap, KeymapFile, KeymapFileError, Request};
+use musicable_engine::{Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_model::Project;
-use musicable_ui::{Action, Audio, KeyPresses, Playback, SaveChoice, Shell, View};
+use musicable_ui::{Action, Audio, KeyPresses, Level, Levels, Playback, SaveChoice, Shell, View};
 
 use crate::audio_window::AudioWindow;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
 use crate::{Output, Session};
 
-/// How often the window redraws while the transport plays, to move the
-/// playhead, and while it doesn't, to update the meters.
+/// How often the window redraws while the transport plays or the mixer's
+/// meters move, and while neither does, to update the CPU meter.
 const PLAYING_FRAME: Duration = Duration::from_millis(16);
 const STOPPED_FRAME: Duration = Duration::from_millis(250);
 /// How often the app looks for a graph while one compiles, to send it to the
@@ -37,6 +38,8 @@ pub struct App {
     folder: Option<PathBuf>,
     /// Errors and notices for the status bar, oldest first.
     messages: Vec<String>,
+    /// The mixer's meters, as last read.
+    levels: Levels,
     /// Where the settings and the user's keymap live.
     config_dir: Option<PathBuf>,
     settings: Settings,
@@ -94,6 +97,7 @@ impl App {
             path,
             folder,
             messages,
+            levels: Levels::default(),
             config_dir,
             settings,
             keymap_problems,
@@ -126,6 +130,8 @@ impl App {
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
             Action::BeginGesture => self.session.begin_gesture(),
             Action::EndGesture => self.session.end_gesture(),
+            Action::Mixer(change) => self.session.change_mixer(change),
+            Action::ClearPeaks => self.session.meters().clear_highest(),
             Action::AudioSettings => self.audio_window.open(&self.output),
             Action::ReloadKeymap => self.reload_keymap(),
             Action::CreateKeymap => self.create_keymap(),
@@ -341,11 +347,15 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending.get_or_insert(Request::Quit);
         }
+        self.levels = levels(self.session.meters(), self.session.project());
+        // The meters fall back for a few seconds after the music stops. They
+        // only move while a device plays.
+        let metering = self.output.info().is_some() && self.levels.moving();
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
         let frame = if self.session.compiling() {
             COMPILING_FRAME
-        } else if self.session.stats().playing {
+        } else if self.session.stats().playing || metering {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
@@ -377,6 +387,7 @@ impl eframe::App for App {
                 playhead: self.session.playhead(),
                 seconds: stats.position as f64 / f64::from(rate),
             },
+            levels: &self.levels,
             audio: Audio {
                 summary: &summary,
                 running: self.output.info().is_some(),
@@ -423,6 +434,27 @@ fn read_keymap(path: Option<&Path>) -> (Keymap, Vec<String>) {
             );
             (keymap, vec![problem])
         }
+    }
+}
+
+/// The readings of the meters of `project`'s channels, for the mixer.
+fn levels(meters: &Meters, project: &Project) -> Levels {
+    let read = |meter: &Meter| {
+        let level = meter.level();
+        Level {
+            peak: level.peak,
+            rms: level.rms,
+            highest: level.highest,
+        }
+    };
+    let tracks = project
+        .tracks
+        .iter()
+        .filter_map(|track| Some((track.id, read(meters.track(track.id)?))))
+        .collect();
+    Levels {
+        tracks,
+        master: read(meters.master()),
     }
 }
 

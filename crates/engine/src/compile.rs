@@ -1,33 +1,43 @@
 //! Compiling the project model into a graph, off the audio thread.
 //!
-//! Each track becomes a channel strip feeding the master bus: its test tone,
-//! if it has one, then its gain stage, with built-in slots for native stages
-//! along the way (see [`Slot`]). Empty slots add no nodes. The metronome
-//! feeds the cue bus, which the engine plays alongside the master, not
-//! through it. Node keys come from track ids and slots (see [`keys`]), so a
-//! track's nodes keep their identity when the project is recompiled.
+//! Each track becomes a channel strip: its source, its devices, its fader
+//! and its output stage, with built-in slots for native stages along the way
+//! (see [`Slot`]). Group and return tracks are buses with strips of their
+//! own: what feeds them sums at the head of their strip. Tracks feed the
+//! master or a group, sends feed return tracks, and the master's strip feeds
+//! the audio device. Empty slots add no nodes. The metronome feeds the cue
+//! bus, which the engine plays alongside the master, not through it. Node
+//! keys come from model ids and slots (see [`keys`]), so a channel's nodes
+//! keep their identity when the project is recompiled.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
-use musicable_model::{ClipType, Project, Track};
+use musicable_model::mixer::Bus;
+use musicable_model::{ClipType, ConsoleSettings, Device, DeviceKind, Master, Project, Track};
 
-use crate::nodes::{Gain, Metronome, Sine, Sum};
+use crate::meter::Meters;
+use crate::nodes::{Clip, Gain, Metronome, Sine, Sum};
 use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
 ///
 /// A track's nodes have its id in the low 32 bits of the key and their role
-/// in the 16 bits above: 1 for the gain stage, 2 for the test tone and 3 to 6
-/// for the built-in slots. The slot in front of a device also has the
-/// device's position in the top 16 bits. Keys with role 0 belong to no track.
+/// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 6 for
+/// the built-in slots, 7 for the output stage and 8 for a group's or a
+/// return's bus. The slot in front of a device also has the device's
+/// position in the top 16 bits. The master's strip has the keys of a track
+/// whose id is `u32::MAX`, which no track has. Sends and devices have their
+/// own ids in the low 32 bits, with role 9 for sends and 10 for devices.
+/// Keys with role 0 belong to no channel.
 pub mod keys {
-    use musicable_model::TrackId;
+    use musicable_model::{DeviceId, SendId, TrackId};
 
     use super::Slot;
     use crate::NodeKey;
 
-    /// The master bus.
+    /// The master bus, where the tracks that don't feed a group sum.
     pub const MASTER: NodeKey = NodeKey(0);
 
     /// The [`Metronome`](crate::nodes::Metronome).
@@ -37,7 +47,12 @@ pub mod keys {
     /// the metronome feeds.
     pub const CUE: NodeKey = NodeKey(2);
 
-    /// A track's gain stage, a [`Gain`](crate::nodes::Gain).
+    /// The track id the master's strip has the keys of. Ids are handed out
+    /// only below it.
+    const MASTER_STRIP: TrackId = TrackId(u32::MAX);
+
+    /// A track's fader, a [`Gain`](crate::nodes::Gain) with the track's gain
+    /// and pan.
     pub fn track_gain(track: TrackId) -> NodeKey {
         track_key(1, track)
     }
@@ -58,6 +73,44 @@ pub mod keys {
         track_key(role, track)
     }
 
+    /// A track's output stage, a [`Gain`](crate::nodes::Gain) at unity
+    /// where mute and solo cut the track's output and its meter measures.
+    pub fn track_output(track: TrackId) -> NodeKey {
+        track_key(7, track)
+    }
+
+    /// The bus of a group or return track, where what feeds it sums.
+    pub fn track_bus(track: TrackId) -> NodeKey {
+        track_key(8, track)
+    }
+
+    /// A send, a [`Gain`](crate::nodes::Gain) at the send's level that feeds
+    /// a return track's bus.
+    pub fn send(send: SendId) -> NodeKey {
+        NodeKey(9 << 32 | u64::from(send.0))
+    }
+
+    /// A device, on a track or on the master.
+    pub fn device(device: DeviceId) -> NodeKey {
+        NodeKey(10 << 32 | u64::from(device.0))
+    }
+
+    /// The master's fader, a [`Gain`](crate::nodes::Gain).
+    pub fn master_gain() -> NodeKey {
+        track_gain(MASTER_STRIP)
+    }
+
+    /// The native stage in one of the master's built-in slots.
+    pub fn master_slot(slot: Slot) -> NodeKey {
+        track_slot(MASTER_STRIP, slot)
+    }
+
+    /// The master's output stage, where its meter measures: the graph's
+    /// output.
+    pub fn master_output() -> NodeKey {
+        track_output(MASTER_STRIP)
+    }
+
     fn track_key(role: u64, track: TrackId) -> NodeKey {
         NodeKey(role << 32 | u64::from(track.0))
     }
@@ -68,12 +121,15 @@ pub mod keys {
 /// device list. In signal order:
 ///
 /// ```text
-/// source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → bus
+/// source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → output → bus
 /// ```
+///
+/// Pre-fader sends take the signal after the pre-fader slot, post-fader
+/// sends after the post-fader slot. A channel's clip stage sits in its
+/// post-fader slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// In front of the track's device `n`, counting from 0. Tracks have no
-    /// devices yet, so these don't occur in Tier 0.
+    /// In front of the channel's device `n`, counting from 0.
     BeforeDevice(u16),
     /// After the devices, in front of the fader.
     PreFader,
@@ -81,6 +137,59 @@ pub enum Slot {
     PostFader,
     /// Where the channel feeds its bus.
     BusFeed,
+}
+
+/// A channel strip [`compile`] builds: a track's or the master's.
+#[derive(Debug, Clone, Copy)]
+pub enum Channel<'a> {
+    Track(&'a Track),
+    Master(&'a Master),
+}
+
+impl<'a> Channel<'a> {
+    pub fn clip_type(self) -> ClipType {
+        match self {
+            Self::Track(track) => track.clip_type,
+            Self::Master(master) => master.clip_type,
+        }
+    }
+
+    pub fn console(self) -> &'a ConsoleSettings {
+        match self {
+            Self::Track(track) => &track.console,
+            Self::Master(master) => &master.console,
+        }
+    }
+
+    fn devices(self) -> &'a [Device] {
+        match self {
+            Self::Track(track) => &track.devices,
+            Self::Master(master) => &master.devices,
+        }
+    }
+
+    /// The fader's gain and pan.
+    fn fader(self) -> Gain {
+        let (gain, pan) = match self {
+            Self::Track(track) => (track.gain, track.pan),
+            Self::Master(master) => (master.gain, master.pan),
+        };
+        Gain::new(gain).with_pan(pan)
+    }
+
+    fn slot_key(self, slot: Slot) -> NodeKey {
+        match self {
+            Self::Track(track) => keys::track_slot(track.id, slot),
+            Self::Master(_) => keys::master_slot(slot),
+        }
+    }
+
+    fn fader_key(self) -> NodeKey {
+        match self {
+            Self::Track(track) => keys::track_gain(track.id),
+            Self::Master(_) => keys::master_gain(),
+        }
+    }
 }
 
 /// How a bus sums its inputs. Every bus, including the master, sums through
@@ -99,16 +208,25 @@ impl Summing {
     }
 }
 
-/// Builds the graph for `project`.
+/// Builds the graph for `project`, with meters nobody reads. See
+/// [`compile_metered`].
 pub fn compile(project: &Project) -> Graph {
-    compile_with(project, native_stage)
+    compile_metered(project, &Meters::new())
 }
 
-/// Like [`compile`], with `stages` choosing the native stage for each slot of
-/// each track. `None` leaves the slot empty.
+/// Builds the graph for `project`. Each channel's output stage measures
+/// into its meter in `meters`: call [`Meters::follow`] first, or channels
+/// without a meter there get one nobody reads.
+pub fn compile_metered(project: &Project, meters: &Meters) -> Graph {
+    compile_with(project, meters, native_stage)
+}
+
+/// Like [`compile_metered`], with `stages` choosing the native stage for
+/// each slot of each channel. `None` leaves the slot empty.
 pub(crate) fn compile_with(
     project: &Project,
-    mut stages: impl FnMut(&Track, Slot) -> Option<Box<dyn Node>>,
+    meters: &Meters,
+    mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
     let master = graph.add_boxed(keys::MASTER, Summing::Plain.node());
@@ -118,39 +236,89 @@ pub(crate) fn compile_with(
     let metronome = Metronome::new().with_enabled(project.metronome);
     let metronome = graph.add(keys::METRONOME, metronome);
     connect(&mut graph, metronome, cue);
-    for track in &project.tracks {
-        let mut strip = Strip {
-            graph: &mut graph,
-            tail: None,
-        };
-        let mut slot = |strip: &mut Strip<'_>, at: Slot| {
-            if let Some(stage) = stages(track, at) {
-                strip.push(keys::track_slot(track.id, at), stage);
-            }
-        };
+
+    // The buses first, so tracks anywhere in the list can feed them. A bus
+    // track's test tone sums in with what feeds it.
+    let mut buses = HashMap::new();
+    for track in project.tracks.iter().filter(|t| t.kind.is_bus()) {
+        let bus = graph.add_boxed(keys::track_bus(track.id), Summing::Plain.node());
         if let Some(tone) = track.tone {
             let sine = Sine::new(tone.frequency, tone.level);
-            strip.push(keys::track_tone(track.id), Box::new(sine));
+            let sine = graph.add(keys::track_tone(track.id), sine);
+            connect(&mut graph, sine, bus);
         }
-        // Devices go here, each with a `Slot::BeforeDevice` in front of it.
-        slot(&mut strip, Slot::PreFader);
-        let fader = Gain::new(track.gain).with_muted(track.muted);
-        strip.push(keys::track_gain(track.id), Box::new(fader));
-        slot(&mut strip, Slot::PostFader);
-        slot(&mut strip, Slot::BusFeed);
-        strip.feed(master);
+        buses.insert(track.id, bus);
     }
-    graph.set_output(master).expect("the master was just added");
+
+    let silenced = project.silenced();
+    for track in &project.tracks {
+        let head = match buses.get(&track.id) {
+            Some(&bus) => Some(bus),
+            None => track.tone.map(|tone| {
+                let sine = Sine::new(tone.frequency, tone.level);
+                graph.add(keys::track_tone(track.id), sine)
+            }),
+        };
+        let mut strip = Strip {
+            graph: &mut graph,
+            tail: head,
+        };
+        let taps = strip.channel(Channel::Track(track), &mut stages);
+        // Mute and solo cut the output here, after the sends take their
+        // signal, so they can cut each path on its own.
+        let meter = meters.track(track.id).cloned().unwrap_or_default();
+        let output = Gain::new(1.0)
+            .with_muted(silenced.output(track.id))
+            .with_meter(meter);
+        strip.push(keys::track_output(track.id), Box::new(output));
+        let bus = match project.output_of(track) {
+            Bus::Master => master,
+            Bus::Group(group) => buses[&group],
+        };
+        strip.feed(bus);
+        for send in project.sends_of(track) {
+            let node = Gain::new(send.level).with_muted(silenced.send(send.id));
+            let node = graph.add(keys::send(send.id), node);
+            let tap = if send.pre_fader {
+                taps.pre_fader
+            } else {
+                taps.post_fader
+            };
+            if let Some(tap) = tap {
+                connect(&mut graph, tap, node);
+            }
+            connect(&mut graph, node, buses[&send.to]);
+        }
+    }
+
+    let mut strip = Strip {
+        graph: &mut graph,
+        tail: Some(master),
+    };
+    strip.channel(Channel::Master(&project.master), &mut stages);
+    let output = Gain::new(1.0).with_meter(meters.master().clone());
+    strip.push(keys::master_output(), Box::new(output));
+    let output = strip.tail.expect("the master's strip has its output stage");
+    graph.set_output(output).expect("the output was just added");
     graph.set_cue(cue).expect("the cue bus was just added");
     graph
 }
 
-/// The native stage the model puts in `slot`: none yet. Clip types (Tier 1)
-/// and console mode (Tier 2) will fill slots from `Track::clip_type` and
-/// `Track::console`.
-fn native_stage(track: &Track, _slot: Slot) -> Option<Box<dyn Node>> {
-    match track.clip_type {
-        ClipType::Off => None,
+/// The native stage the model puts in `slot`: the channel's clip stage, in
+/// the post-fader slot, unless its clip type is off. Console mode (Tier 2)
+/// will fill slots from `console` as well.
+fn native_stage(channel: Channel<'_>, slot: Slot) -> Option<Box<dyn Node>> {
+    match (channel.clip_type(), slot) {
+        (ClipType::Off, _) => None,
+        (clip_type, Slot::PostFader) => Some(Box::new(Clip::new(clip_type))),
+        _ => None,
+    }
+}
+
+/// A device's node.
+fn device_node(device: &Device) -> Box<dyn Node> {
+    match device.kind {
+        DeviceKind::TestGain { gain } => Box::new(Gain::new(gain)),
     }
 }
 
@@ -161,6 +329,14 @@ struct Strip<'a> {
     tail: Option<NodeId>,
 }
 
+/// Where a channel's sends take its signal: the last node before the
+/// fader, and the last one after the post-fader slot. `None` where the
+/// channel has no node yet.
+struct Taps {
+    pre_fader: Option<NodeId>,
+    post_fader: Option<NodeId>,
+}
+
 impl Strip<'_> {
     fn push(&mut self, key: NodeKey, node: Box<dyn Node>) {
         let id = self.graph.add_boxed(key, node);
@@ -168,6 +344,37 @@ impl Strip<'_> {
             connect(self.graph, tail, id);
         }
         self.tail = Some(id);
+    }
+
+    /// Adds `channel`'s devices, its fader and the stages `stages` puts in
+    /// its slots, up to its output stage.
+    fn channel(
+        &mut self,
+        channel: Channel<'_>,
+        stages: &mut impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
+    ) -> Taps {
+        let mut slot = |strip: &mut Self, at: Slot| {
+            if let Some(stage) = stages(channel, at) {
+                strip.push(channel.slot_key(at), stage);
+            }
+        };
+        for (position, device) in channel.devices().iter().enumerate() {
+            // A key has room for 65,536 slots in front of devices.
+            if let Ok(position) = u16::try_from(position) {
+                slot(self, Slot::BeforeDevice(position));
+            }
+            self.push(keys::device(device.id), device_node(device));
+        }
+        slot(self, Slot::PreFader);
+        let pre_fader = self.tail;
+        self.push(channel.fader_key(), Box::new(channel.fader()));
+        slot(self, Slot::PostFader);
+        let post_fader = self.tail;
+        slot(self, Slot::BusFeed);
+        Taps {
+            pre_fader,
+            post_fader,
+        }
     }
 
     /// Feeds the strip into `bus`.
@@ -181,7 +388,7 @@ impl Strip<'_> {
 fn connect(graph: &mut Graph, from: NodeId, to: NodeId) {
     graph
         .connect(from, to)
-        .expect("a new node can't form a loop");
+        .expect("the model's routing rules leave no loops");
 }
 
 /// Builds and prepares graphs on a thread of its own, so a node that's slow
@@ -350,7 +557,7 @@ mod tests {
     use std::any::{Any, TypeId};
     use std::collections::BTreeSet;
 
-    use musicable_model::{TestTone, TrackId, TrackKind};
+    use musicable_model::{DeviceId, SendId, TestTone, TrackId, TrackKind};
 
     use super::*;
     use crate::{
@@ -429,14 +636,14 @@ mod tests {
         (nodes, key(graph.output), graph.cue.map(key))
     }
 
-    fn no_stages(_: &Track, _: Slot) -> Option<Box<dyn Node>> {
+    fn no_stages(_: Channel<'_>, _: Slot) -> Option<Box<dyn Node>> {
         None
     }
 
     /// Halves the drums after their fader: a test stage.
-    fn half_drums(track: &Track, slot: Slot) -> Option<Box<dyn Node>> {
-        let here = track.name == "Drums" && slot == Slot::PostFader;
-        here.then(|| Box::new(Gain::new(0.5)) as Box<dyn Node>)
+    fn half_drums(channel: Channel<'_>, slot: Slot) -> Option<Box<dyn Node>> {
+        let drums = matches!(channel, Channel::Track(track) if track.name == "Drums");
+        (drums && slot == Slot::PostFader).then(|| Box::new(Gain::new(0.5)) as Box<dyn Node>)
     }
 
     /// Counts the frames it has rendered: state a swap must carry over.
@@ -470,22 +677,36 @@ mod tests {
     fn tracks_get_stable_keys() {
         let p = project();
         let graph = compile(&p).prepare(&CONFIG).unwrap();
-        // Master, cue, metronome, three gain stages and two tones.
-        assert_eq!(graph.len(), 8);
-        assert!(graph.contains(keys::MASTER));
-        assert!(graph.contains(keys::CUE));
-        assert!(graph.contains(keys::METRONOME));
+        // The master bus, the cue bus, the metronome, the reverb's bus, a
+        // fader and an output stage for each track, two tones, and the
+        // master's fader and output stage.
+        assert_eq!(graph.len(), 14);
+        for key in [
+            keys::MASTER,
+            keys::CUE,
+            keys::METRONOME,
+            keys::master_gain(),
+            keys::master_output(),
+        ] {
+            assert!(graph.contains(key), "{key:?}");
+        }
         for track in &p.tracks {
             assert!(graph.contains(keys::track_gain(track.id)));
+            assert!(graph.contains(keys::track_output(track.id)));
             assert_eq!(
                 graph.contains(keys::track_tone(track.id)),
                 track.tone.is_some()
             );
+            assert_eq!(
+                graph.contains(keys::track_bus(track.id)),
+                track.kind.is_bus()
+            );
         }
+        assert_eq!(shape(&graph).1, keys::master_output());
     }
 
     #[test]
-    fn every_node_in_a_strip_has_its_own_key() {
+    fn every_node_has_its_own_key() {
         let slots = [
             Slot::BeforeDevice(0),
             Slot::BeforeDevice(1),
@@ -494,30 +715,49 @@ mod tests {
             Slot::PostFader,
             Slot::BusFeed,
         ];
-        let mut seen = BTreeSet::from([keys::MASTER, keys::METRONOME, keys::CUE]);
-        for track in [TrackId(0), TrackId(1), TrackId(u32::MAX)] {
+        let mut seen = BTreeSet::from([
+            keys::MASTER,
+            keys::CUE,
+            keys::METRONOME,
+            keys::master_gain(),
+            keys::master_output(),
+        ]);
+        seen.extend(slots.map(keys::master_slot));
+        assert_eq!(seen.len(), 11);
+        // The last id a project hands out is one below `u32::MAX`.
+        for id in [0, 1, u32::MAX - 1] {
+            let track = TrackId(id);
             let strip = slots.map(|slot| keys::track_slot(track, slot));
-            for key in strip
-                .into_iter()
-                .chain([keys::track_gain(track), keys::track_tone(track)])
-            {
+            let roles = [
+                keys::track_gain(track),
+                keys::track_tone(track),
+                keys::track_output(track),
+                keys::track_bus(track),
+            ];
+            let others = [keys::send(SendId(id)), keys::device(DeviceId(id))];
+            for key in strip.into_iter().chain(roles).chain(others) {
                 assert!(seen.insert(key), "{key:?} is taken");
             }
         }
     }
 
     #[test]
-    fn empty_slots_leave_the_graph_as_it_was() {
+    fn tier_0_projects_sound_as_they_did() {
         let mut p = project();
+        p.metronome = true;
         p.tracks[0].gain = 0.8;
         p.tracks[1].muted = true;
-        // What compile() built before channel strips: each track's tone feeds
-        // its gain stage, which feeds the master, and the metronome feeds the
+        p.tracks[2].tone = Some(TestTone {
+            frequency: 330.0,
+            level: 0.25,
+        });
+        // What compile() built before the mixer: each track's tone feeds its
+        // gain stage, which feeds the master, and the metronome feeds the
         // cue bus.
         let mut before = Graph::new();
         let master = before.add(keys::MASTER, Sum::default());
         let cue = before.add(keys::CUE, Sum::default());
-        let metronome = before.add(keys::METRONOME, Metronome::new().with_enabled(false));
+        let metronome = before.add(keys::METRONOME, Metronome::new());
         before.connect(metronome, cue).unwrap();
         before.set_cue(cue).unwrap();
         for track in &p.tracks {
@@ -533,16 +773,41 @@ mod tests {
         before.set_output(master).unwrap();
         let before = before.prepare(&CONFIG).unwrap();
 
+        // With the mixer at its defaults, every stage it adds passes the
+        // signal through unchanged, so the samples are the same.
         let now = compile(&p).prepare(&CONFIG).unwrap();
-        assert_eq!(shape(&now), shape(&before));
-        assert!(render(now, 2000) == render(before, 2000));
+        assert!(now.len() > before.len());
+        assert!(render(now, 30_000) == render(before, 30_000));
+    }
+
+    #[test]
+    fn empty_slots_add_no_nodes() {
+        let p = project();
+        let shape_with = |stages| {
+            shape(
+                &compile_with(&p, &Meters::new(), stages)
+                    .prepare(&CONFIG)
+                    .unwrap(),
+            )
+        };
+        let all_off = shape(&compile(&p).prepare(&CONFIG).unwrap());
+        assert_eq!(shape_with(no_stages), all_off);
     }
 
     #[test]
     fn a_slot_switches_on_and_off_during_playback_without_a_glitch() {
         let p = project();
-        let off = || compile_with(&p, no_stages).prepare(&CONFIG).unwrap();
-        let on = || compile_with(&p, half_drums).prepare(&CONFIG).unwrap();
+        let meters = Meters::new();
+        let off = || {
+            compile_with(&p, &meters, no_stages)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
+        let on = || {
+            compile_with(&p, &meters, half_drums)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
         assert_eq!(on().len(), off().len() + 1);
         assert!(on().contains(keys::track_slot(p.tracks[0].id, Slot::PostFader)));
 
@@ -573,9 +838,17 @@ mod tests {
         let mut p = Project::new();
         p.add_track("Ramp", TrackKind::Audio);
         let ramp_in = |at: Slot| {
-            move |_: &Track, slot: Slot| (slot == at).then(|| Box::new(Ramp(0.0)) as Box<dyn Node>)
+            move |channel: Channel<'_>, slot: Slot| {
+                let track = matches!(channel, Channel::Track(_));
+                (track && slot == at).then(|| Box::new(Ramp(0.0)) as Box<dyn Node>)
+            }
         };
-        let graph = |at: Slot| compile_with(&p, ramp_in(at)).prepare(&CONFIG).unwrap();
+        let meters = Meters::new();
+        let graph = |at: Slot| {
+            compile_with(&p, &meters, ramp_in(at))
+                .prepare(&CONFIG)
+                .unwrap()
+        };
         let left = |out: Vec<f32>| -> Vec<f32> { out.into_iter().step_by(2).collect() };
         let count = |from: u16| -> Vec<f32> { (from..from + 100).map(f32::from).collect() };
 
@@ -622,8 +895,9 @@ mod tests {
                 break compiled.graph.unwrap();
             }
         };
-        // The master, the cue, the metronome and five gain stages.
-        assert_eq!(last.len(), 8);
+        // Five nodes for the master, the cue and the metronome, and two per
+        // track.
+        assert_eq!(last.len(), 15);
         assert!(jobs.is_sorted());
         assert!(compiler.try_recv().is_none());
     }

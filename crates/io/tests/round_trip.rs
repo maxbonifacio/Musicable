@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{Project, TestTone, TrackKind};
+use musicable_model::{ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
 
 /// SplitMix64, for making test projects. Seeded, so a failure happens again
@@ -52,6 +52,33 @@ impl Random {
                 return value;
             }
         }
+    }
+
+    /// A balance setting from -1 to 1: often the centre or an end, and
+    /// otherwise any f32 in between, every bit pattern as likely.
+    fn pan(&mut self) -> f32 {
+        match self.below(3) {
+            0 => self.pick(&[0.0, -0.0, 1.0, -1.0, 0.5]),
+            _ => loop {
+                let value = self.f32();
+                if (-1.0..=1.0).contains(&value) {
+                    return value;
+                }
+            },
+        }
+    }
+
+    /// A gain: any finite f32, or a tidy one from 0 to 1.
+    fn gain(&mut self) -> f32 {
+        if self.one_in(2) {
+            self.f32()
+        } else {
+            self.below(101) as f32 / 100.0
+        }
+    }
+
+    fn clip_type(&mut self) -> ClipType {
+        self.pick(&[ClipType::Off, ClipType::Hard, ClipType::Soft])
     }
 
     fn bpm(&mut self) -> f64 {
@@ -126,11 +153,7 @@ fn random_project(random: &mut Random) -> Project {
     ];
     for _ in 0..random.below(8) {
         let id = project.add_track(random.name(), random.pick(&kinds));
-        let gain = if random.one_in(2) {
-            random.f32()
-        } else {
-            random.below(101) as f32 / 100.0
-        };
+        let gain = random.gain();
         let tone = random.one_in(2).then(|| TestTone {
             frequency: random.f64(),
             level: random.f32(),
@@ -154,6 +177,47 @@ fn random_project(random: &mut Random) -> Project {
         project.tracks.swap(a, b);
     }
     project.next_track_id += random.below(3) as u32;
+
+    // The mixer, once the tracks it routes between are settled. Each output
+    // is one the tracks so far allow, so they never loop.
+    let ids: Vec<TrackId> = project.tracks.iter().map(|t| t.id).collect();
+    for &id in &ids {
+        let output = random.pick(&project.buses_for(id));
+        let mut sends = Vec::new();
+        for &to in &ids {
+            if project.can_send(id, to) && random.one_in(2) {
+                let mut send = project.new_send(to);
+                send.level = random.gain();
+                send.pre_fader = random.one_in(2);
+                sends.push(send);
+            }
+        }
+        let devices = (0..random.below(3))
+            .map(|_| {
+                let gain = random.gain();
+                project.new_device(DeviceKind::TestGain { gain })
+            })
+            .collect();
+        let track = project.track_mut(id).unwrap();
+        track.output = output;
+        track.sends = sends;
+        track.devices = devices;
+        track.pan = random.pan();
+        track.solo = random.one_in(4);
+        track.solo_safe = random.one_in(3);
+        track.armed = !track.kind.is_bus() && random.one_in(3);
+        track.clip_type = random.clip_type();
+    }
+    project.master.gain = random.gain();
+    project.master.pan = random.pan();
+    for _ in 0..random.below(3) {
+        let gain = random.gain();
+        let device = project.new_device(DeviceKind::TestGain { gain });
+        project.master.devices.push(device);
+    }
+    project.master.clip_type = random.clip_type();
+    project.next_send_id += random.below(3) as u32;
+    project.next_device_id += random.below(3) as u32;
     project
 }
 
@@ -176,21 +240,36 @@ fn random_projects_round_trip_exactly() {
 fn floats_load_bit_for_bit() {
     let mut random = Random(2);
     let mut project = Project::new();
+    let reverb = project.add_track("Reverb", TrackKind::Return);
     for _ in 0..10_000 {
         let id = project.add_track("", TrackKind::Audio);
+        let mut send = project.new_send(reverb);
+        send.level = random.f32();
+        let gain = random.f32();
+        let device = project.new_device(DeviceKind::TestGain { gain });
         let track = project.track_mut(id).unwrap();
         track.gain = random.f32();
+        track.pan = random.pan();
         track.tone = Some(TestTone {
             frequency: random.f64(),
             level: random.f32(),
         });
+        track.sends.push(send);
+        track.devices.push(device);
     }
     let loaded = project::from_str(&project::to_string(&project).unwrap()).unwrap();
-    for (saved, loaded) in project.tracks.iter().zip(&loaded.tracks) {
+    for (saved, loaded) in project.tracks.iter().zip(&loaded.tracks).skip(1) {
         let (tone, loaded_tone) = (saved.tone.unwrap(), loaded.tone.unwrap());
         assert_eq!(loaded.gain.to_bits(), saved.gain.to_bits());
+        assert_eq!(loaded.pan.to_bits(), saved.pan.to_bits());
         assert_eq!(loaded_tone.frequency.to_bits(), tone.frequency.to_bits());
         assert_eq!(loaded_tone.level.to_bits(), tone.level.to_bits());
+        let level = |track: &musicable_model::Track| track.sends[0].level.to_bits();
+        assert_eq!(level(loaded), level(saved));
+        let gain = |track: &musicable_model::Track| match track.devices[0].kind {
+            DeviceKind::TestGain { gain } => gain.to_bits(),
+        };
+        assert_eq!(gain(loaded), gain(saved));
     }
 }
 

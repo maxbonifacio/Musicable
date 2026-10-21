@@ -10,8 +10,9 @@
 
 use std::collections::HashMap;
 
+use musicable_model::mixer::Bus;
 use musicable_model::time::{self, Beats};
-use musicable_model::{self as model, TrackId};
+use musicable_model::{self as model, DeviceId, SendId, TrackId};
 use serde::{Deserialize, Serialize};
 
 use super::{FORMAT, Invalid, MAX_TICKS, VERSION};
@@ -28,7 +29,10 @@ pub(super) struct File {
     looping: bool,
     metronome: bool,
     next_track_id: u32,
+    next_send_id: u32,
+    next_device_id: u32,
     tracks: Vec<Track>,
+    master: Master,
 }
 
 /// Tempo and time signature changes, each list in order.
@@ -71,16 +75,25 @@ struct Track {
     name: String,
     kind: TrackKind,
     gain: f32,
+    pan: f32,
     muted: bool,
+    solo: bool,
+    solo_safe: bool,
+    armed: bool,
+    /// The group track the output feeds, or `None` for the master.
     // Required like every other field: serde would read a missing `Option`
     // as `None`, but not through `deserialize_with`.
     #[serde(deserialize_with = "Option::deserialize")]
+    output: Option<u32>,
+    sends: Vec<Send>,
+    #[serde(deserialize_with = "Option::deserialize")]
     tone: Option<TestTone>,
+    devices: Vec<Device>,
     clip_type: ClipType,
     console: ConsoleSettings,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TrackKind {
     Audio,
@@ -91,20 +104,58 @@ enum TrackKind {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Send {
+    id: u32,
+    /// The return track it feeds.
+    to: u32,
+    level: f32,
+    pre_fader: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TestTone {
     frequency: f64,
     level: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Device {
+    id: u32,
+    kind: DeviceKind,
+}
+
+/// Externally tagged, `{"test_gain": {..}}`: serde reads an internally
+/// tagged enum through a buffer that holds numbers as f64s, and an f32 read
+/// through an f64 is a bit off for a few values.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum DeviceKind {
+    TestGain { gain: f32 },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ClipType {
     Off,
+    Hard,
+    Soft,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConsoleSettings {}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Master {
+    gain: f32,
+    pan: f32,
+    devices: Vec<Device>,
+    clip_type: ClipType,
+    console: ConsoleSettings,
+}
 
 impl From<&model::Project> for File {
     fn from(project: &model::Project) -> Self {
@@ -113,8 +164,11 @@ impl From<&model::Project> for File {
             loop_region,
             looping,
             metronome,
+            master,
             tracks,
             next_track_id,
+            next_send_id,
+            next_device_id,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -125,7 +179,10 @@ impl From<&model::Project> for File {
             looping: *looping,
             metronome: *metronome,
             next_track_id: *next_track_id,
+            next_send_id: *next_send_id,
+            next_device_id: *next_device_id,
             tracks: tracks.iter().map(Track::from).collect(),
+            master: Master::from(master),
         }
     }
 }
@@ -143,7 +200,10 @@ impl File {
             looping,
             metronome,
             next_track_id,
+            next_send_id,
+            next_device_id,
             tracks,
+            master,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
             let message = format!("must be {}", Beats::TICKS_PER_BEAT);
@@ -151,30 +211,112 @@ impl File {
         }
         let tempo = tempo.to_model()?;
         let loop_region = loop_region.to_model("loop_region")?;
-        let mut ids = HashMap::with_capacity(tracks.len());
+        let mut ids = Ids::new("track", "next_track_id", *next_track_id);
+        let mut send_ids = Ids::new("send", "next_send_id", *next_send_id);
+        let mut device_ids = Ids::new("device", "next_device_id", *next_device_id);
         let mut model_tracks = Vec::with_capacity(tracks.len());
         for (i, track) in tracks.iter().enumerate() {
             let path = format!("tracks[{i}]");
-            if let Some(first) = ids.insert(track.id, i) {
-                let message = format!("tracks[{first}] has id {} too", track.id);
-                return Err(Invalid::new(format!("{path}.id"), message));
+            ids.add(track.id, &path)?;
+            for (j, send) in track.sends.iter().enumerate() {
+                send_ids.add(send.id, &format!("{path}.sends[{j}]"))?;
+            }
+            for (j, device) in track.devices.iter().enumerate() {
+                device_ids.add(device.id, &format!("{path}.devices[{j}]"))?;
             }
             model_tracks.push(track.to_model(&path)?);
         }
-        let highest = tracks.iter().map(|t| t.id).max();
-        if let Some(highest) = highest.filter(|&id| id >= *next_track_id) {
-            let message = format!("must be above every track's id, and a track has id {highest}");
-            return Err(Invalid::new("next_track_id", message));
+        ids.check_next()?;
+        send_ids.check_next()?;
+        let kinds: HashMap<u32, TrackKind> = tracks.iter().map(|t| (t.id, t.kind)).collect();
+        for (i, track) in tracks.iter().enumerate() {
+            track.check_routing(&format!("tracks[{i}]"), &kinds)?;
         }
-        Ok(model::Project {
+        for (j, device) in master.devices.iter().enumerate() {
+            device_ids.add(device.id, &format!("master.devices[{j}]"))?;
+        }
+        device_ids.check_next()?;
+        let project = model::Project {
             tempo,
             loop_region,
             looping: *looping,
             metronome: *metronome,
+            master: master.to_model()?,
             tracks: model_tracks,
             next_track_id: *next_track_id,
-        })
+            next_send_id: *next_send_id,
+            next_device_id: *next_device_id,
+        };
+        check_loops(&project)?;
+        Ok(project)
     }
+}
+
+/// The ids of one kind of object seen so far, where each one is, and the
+/// counter that must stay above them all.
+struct Ids {
+    what: &'static str,
+    next_field: &'static str,
+    next: u32,
+    paths: Vec<String>,
+    seen: HashMap<u32, usize>,
+}
+
+impl Ids {
+    fn new(what: &'static str, next_field: &'static str, next: u32) -> Self {
+        Self {
+            what,
+            next_field,
+            next,
+            paths: Vec::new(),
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Adds the id of the object at `path`, if nothing else has it.
+    fn add(&mut self, id: u32, path: &str) -> Result<(), Invalid> {
+        if let Some(&first) = self.seen.get(&id) {
+            let message = format!("{} has id {id} too", self.paths[first]);
+            return Err(Invalid::new(format!("{path}.id"), message));
+        }
+        self.seen.insert(id, self.paths.len());
+        self.paths.push(path.to_owned());
+        Ok(())
+    }
+
+    /// Whether the counter is above every id.
+    fn check_next(&self) -> Result<(), Invalid> {
+        let highest = self.seen.keys().copied().max();
+        match highest.filter(|&id| id >= self.next) {
+            Some(highest) => {
+                let what = self.what;
+                let message =
+                    format!("must be above every {what}'s id, and a {what} has id {highest}");
+                Err(Invalid::new(self.next_field, message))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// Refuses groups that feed each other in a loop. Every output names a
+/// group track by now, so the first track whose output the model refuses
+/// is in a loop.
+fn check_loops(project: &model::Project) -> Result<(), Invalid> {
+    for (i, track) in project.tracks.iter().enumerate() {
+        if project.output_of(track) != track.output {
+            let Bus::Group(group) = track.output else {
+                unreachable!("the master is always a valid output");
+            };
+            let message = if group == track.id {
+                "can't be the track's own id".to_owned()
+            } else {
+                format!("makes a loop: group track {} feeds this track", group.0)
+            };
+            return Err(Invalid::new(format!("tracks[{i}].output"), message));
+        }
+    }
+    Ok(())
 }
 
 impl From<&time::TempoMap> for TempoMap {
@@ -308,8 +450,15 @@ impl From<&model::Track> for Track {
             name,
             kind,
             gain,
+            pan,
             muted,
+            solo,
+            solo_safe,
+            armed,
+            output,
+            sends,
             tone,
+            devices,
             clip_type,
             console,
         } = track;
@@ -324,11 +473,19 @@ impl From<&model::Track> for Track {
                 model::TrackKind::Group => TrackKind::Group,
             },
             gain: *gain,
+            pan: *pan,
             muted: *muted,
-            tone: tone.map(|model::TestTone { frequency, level }| TestTone { frequency, level }),
-            clip_type: match clip_type {
-                model::ClipType::Off => ClipType::Off,
+            solo: *solo,
+            solo_safe: *solo_safe,
+            armed: *armed,
+            output: match output {
+                Bus::Master => None,
+                Bus::Group(group) => Some(group.0),
             },
+            sends: sends.iter().map(Send::from).collect(),
+            tone: tone.map(|model::TestTone { frequency, level }| TestTone { frequency, level }),
+            devices: devices.iter().map(Device::from).collect(),
+            clip_type: ClipType::from(*clip_type),
             console: ConsoleSettings {},
         }
     }
@@ -341,12 +498,29 @@ impl Track {
             name,
             kind,
             gain,
+            pan,
             muted,
+            solo,
+            solo_safe,
+            armed,
+            output,
+            sends,
             tone,
+            devices,
             clip_type,
             console,
         } = self;
         let ConsoleSettings {} = console;
+        let kind = match kind {
+            TrackKind::Audio => model::TrackKind::Audio,
+            TrackKind::Midi => model::TrackKind::Midi,
+            TrackKind::Return => model::TrackKind::Return,
+            TrackKind::Group => model::TrackKind::Group,
+        };
+        if *armed && kind.is_bus() {
+            let message = "must be false: only audio and MIDI tracks record";
+            return Err(Invalid::new(format!("{path}.armed"), message));
+        }
         let tone = match tone {
             Some(TestTone { frequency, level }) => Some(model::TestTone {
                 frequency: finite(*frequency, || format!("{path}.tone.frequency"))?,
@@ -354,21 +528,197 @@ impl Track {
             }),
             None => None,
         };
+        let sends = sends
+            .iter()
+            .enumerate()
+            .map(|(j, send)| send.to_model(&format!("{path}.sends[{j}]")))
+            .collect::<Result<_, _>>()?;
         Ok(model::Track {
             id: TrackId(*id),
             name: name.clone(),
-            kind: match kind {
-                TrackKind::Audio => model::TrackKind::Audio,
-                TrackKind::Midi => model::TrackKind::Midi,
-                TrackKind::Return => model::TrackKind::Return,
-                TrackKind::Group => model::TrackKind::Group,
-            },
+            kind,
             gain: finite(*gain, || format!("{path}.gain"))?,
+            pan: balance(*pan, || format!("{path}.pan"))?,
             muted: *muted,
-            tone,
-            clip_type: match clip_type {
-                ClipType::Off => model::ClipType::Off,
+            solo: *solo,
+            solo_safe: *solo_safe,
+            armed: *armed,
+            output: match output {
+                None => Bus::Master,
+                Some(group) => Bus::Group(TrackId(*group)),
             },
+            sends,
+            tone,
+            devices: devices_to_model(devices, &format!("{path}.devices"))?,
+            clip_type: model::ClipType::from(*clip_type),
+            console: model::ConsoleSettings {},
+        })
+    }
+
+    /// Checks that the output feeds a group track and the sends feed return
+    /// tracks. `kinds` has the kind of every track, by id. Loops through
+    /// groups are left to [`check_loops`].
+    fn check_routing(&self, path: &str, kinds: &HashMap<u32, TrackKind>) -> Result<(), Invalid> {
+        if let Some(output) = self.output {
+            let path = format!("{path}.output");
+            if self.kind == TrackKind::Return {
+                let message = "must be null: return tracks feed the master";
+                return Err(Invalid::new(path, message));
+            }
+            match kinds.get(&output) {
+                Some(TrackKind::Group) => {}
+                Some(_) => {
+                    let message = format!("track {output} isn't a group track");
+                    return Err(Invalid::new(path, message));
+                }
+                None => return Err(Invalid::new(path, no_track(output))),
+            }
+        }
+        if self.kind == TrackKind::Return && !self.sends.is_empty() {
+            let message = "must be empty: return tracks have no sends";
+            return Err(Invalid::new(format!("{path}.sends"), message));
+        }
+        for (j, send) in self.sends.iter().enumerate() {
+            let path = format!("{path}.sends[{j}].to");
+            match kinds.get(&send.to) {
+                Some(TrackKind::Return) => {}
+                Some(_) => {
+                    let message = format!("track {} isn't a return track", send.to);
+                    return Err(Invalid::new(path, message));
+                }
+                None => return Err(Invalid::new(path, no_track(send.to))),
+            }
+            if let Some(first) = self.sends[..j].iter().position(|s| s.to == send.to) {
+                let message = format!("sends[{first}] goes to track {} too", send.to);
+                return Err(Invalid::new(path, message));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn no_track(id: u32) -> String {
+    format!("there's no track with id {id}")
+}
+
+impl From<&model::Send> for Send {
+    fn from(send: &model::Send) -> Self {
+        let model::Send {
+            id,
+            to,
+            level,
+            pre_fader,
+        } = *send;
+        Self {
+            id: id.0,
+            to: to.0,
+            level,
+            pre_fader,
+        }
+    }
+}
+
+impl Send {
+    fn to_model(&self, path: &str) -> Result<model::Send, Invalid> {
+        let Self {
+            id,
+            to,
+            level,
+            pre_fader,
+        } = *self;
+        Ok(model::Send {
+            id: SendId(id),
+            to: TrackId(to),
+            level: finite(level, || format!("{path}.level"))?,
+            pre_fader,
+        })
+    }
+}
+
+impl From<&model::Device> for Device {
+    fn from(device: &model::Device) -> Self {
+        let model::Device { id, kind } = device;
+        Self {
+            id: id.0,
+            kind: match *kind {
+                model::DeviceKind::TestGain { gain } => DeviceKind::TestGain { gain },
+            },
+        }
+    }
+}
+
+/// A device list, `path` being where it is in the file.
+fn devices_to_model(devices: &[Device], path: &str) -> Result<Vec<model::Device>, Invalid> {
+    let device = |(j, device): (usize, &Device)| {
+        let Device { id, kind } = device;
+        let path = format!("{path}[{j}].kind");
+        Ok(model::Device {
+            id: DeviceId(*id),
+            kind: match *kind {
+                DeviceKind::TestGain { gain } => model::DeviceKind::TestGain {
+                    gain: finite(gain, || format!("{path}.test_gain.gain"))?,
+                },
+            },
+        })
+    };
+    devices.iter().enumerate().map(device).collect()
+}
+
+impl From<model::ClipType> for ClipType {
+    fn from(clip_type: model::ClipType) -> Self {
+        match clip_type {
+            model::ClipType::Off => Self::Off,
+            model::ClipType::Hard => Self::Hard,
+            model::ClipType::Soft => Self::Soft,
+        }
+    }
+}
+
+impl From<ClipType> for model::ClipType {
+    fn from(clip_type: ClipType) -> Self {
+        match clip_type {
+            ClipType::Off => Self::Off,
+            ClipType::Hard => Self::Hard,
+            ClipType::Soft => Self::Soft,
+        }
+    }
+}
+
+impl From<&model::Master> for Master {
+    fn from(master: &model::Master) -> Self {
+        let model::Master {
+            gain,
+            pan,
+            devices,
+            clip_type,
+            console,
+        } = master;
+        let model::ConsoleSettings {} = console;
+        Self {
+            gain: *gain,
+            pan: *pan,
+            devices: devices.iter().map(Device::from).collect(),
+            clip_type: ClipType::from(*clip_type),
+            console: ConsoleSettings {},
+        }
+    }
+}
+
+impl Master {
+    fn to_model(&self) -> Result<model::Master, Invalid> {
+        let Self {
+            gain,
+            pan,
+            devices,
+            clip_type,
+            console,
+        } = self;
+        let ConsoleSettings {} = console;
+        Ok(model::Master {
+            gain: finite(*gain, || "master.gain".to_owned())?,
+            pan: balance(*pan, || "master.pan".to_owned())?,
+            devices: devices_to_model(devices, "master.devices")?,
+            clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
         })
     }
@@ -381,6 +731,15 @@ fn position(ticks: i64, path: impl FnOnce() -> String) -> Result<Beats, Invalid>
     } else {
         let message = format!("must be within {MAX_TICKS} ticks of the start of the song");
         Err(Invalid::new(path(), message))
+    }
+}
+
+/// A balance setting, if it's from -1 to 1.
+fn balance(pan: f32, path: impl FnOnce() -> String) -> Result<f32, Invalid> {
+    if (-1.0..=1.0).contains(&pan) {
+        Ok(pan)
+    } else {
+        Err(Invalid::new(path(), "must be from -1 to 1"))
     }
 }
 

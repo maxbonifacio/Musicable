@@ -16,8 +16,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
+use musicable_model::mixer::Bus;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{Project, TestTone, TrackKind};
+use musicable_model::{ClipType, DeviceKind, Project, TestTone, Track, TrackId, TrackKind};
 
 fn fixtures() -> Vec<(&'static str, Project)> {
     vec![
@@ -25,6 +26,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("demo", demo()),
         ("tempo-changes", tempo_changes()),
         ("awkward-values", awkward_values()),
+        ("mixer", mixer()),
     ]
 }
 
@@ -162,6 +164,81 @@ fn awkward_values() -> Project {
     project.tracks.swap(0, 5);
     // As if three more tracks had come and gone.
     project.next_track_id += 3;
+    project
+}
+
+/// A mix, from version 2: drums in a group inside another group, sends
+/// before and after the fader to two return tracks, pan, mute, solo and
+/// solo-safe, an armed track, test devices on tracks and on the master, every
+/// clip type, and ids with gaps where sends and devices were deleted.
+fn mixer() -> Project {
+    let mut project = Project::new();
+    let names = [
+        ("Kick", TrackKind::Audio, 55.0),
+        ("Snare", TrackKind::Audio, 196.0),
+        ("Bass", TrackKind::Midi, 82.41),
+        ("Vocal", TrackKind::Audio, 440.0),
+        ("Drums", TrackKind::Group, 0.0),
+        ("Band", TrackKind::Group, 0.0),
+        ("Reverb", TrackKind::Return, 0.0),
+        ("Delay", TrackKind::Return, 0.0),
+    ];
+    let ids = names.map(|(name, kind, frequency)| {
+        let id = project.add_track(name, kind);
+        if frequency > 0.0 {
+            project.track_mut(id).unwrap().tone = Some(TestTone {
+                frequency,
+                level: 0.1,
+            });
+        }
+        id
+    });
+    let [kick, snare, bass, vocal, drums, band, reverb, delay] = ids;
+    for (track, group) in [(kick, drums), (snare, drums), (drums, band), (bass, band)] {
+        project.track_mut(track).unwrap().output = Bus::Group(group);
+    }
+    // A send that was deleted, leaving a gap in the ids.
+    project.new_send(reverb);
+    for (track, to, level, pre_fader) in [
+        (snare, reverb, 0.3, false),
+        (vocal, reverb, 0.5, true),
+        (vocal, delay, 0.25, false),
+        (band, delay, f32::from_bits(0x15ae_43fd), false),
+    ] {
+        let mut send = project.new_send(to);
+        send.level = level;
+        send.pre_fader = pre_fader;
+        project.track_mut(track).unwrap().sends.push(send);
+    }
+    let device = |project: &mut Project, gain| project.new_device(DeviceKind::TestGain { gain });
+    let kick_gain = device(&mut project, 0.5);
+    device(&mut project, 1.0);
+    let boost = device(&mut project, 2.0);
+    let invert = device(&mut project, -1.0);
+    let master_gain = device(&mut project, 0.9);
+    project.track_mut(kick).unwrap().devices = vec![kick_gain];
+    project.track_mut(snare).unwrap().devices = vec![boost, invert];
+    project.master.devices = vec![master_gain];
+
+    fn track(project: &mut Project, id: TrackId) -> &mut Track {
+        project.track_mut(id).unwrap()
+    }
+    track(&mut project, snare).pan = -0.3;
+    track(&mut project, snare).clip_type = ClipType::Hard;
+    track(&mut project, bass).pan = 0.25;
+    track(&mut project, bass).muted = true;
+    track(&mut project, vocal).pan = -1.0;
+    track(&mut project, vocal).gain = 0.7;
+    track(&mut project, vocal).solo = true;
+    track(&mut project, vocal).armed = true;
+    track(&mut project, kick).solo_safe = true;
+    track(&mut project, band).pan = 1.0;
+    track(&mut project, band).clip_type = ClipType::Soft;
+    track(&mut project, delay).solo_safe = false;
+    project.master.gain = 0.8;
+    project.master.pan = -0.0;
+    project.master.clip_type = ClipType::Soft;
+    project.next_device_id += 2;
     project
 }
 

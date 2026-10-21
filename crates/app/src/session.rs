@@ -1,23 +1,23 @@
 //! The open project, wired to the engine.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use musicable_commands::{
     CommandId, Context, Document, Edit, KeyChord, Keymap, Registry, Request, Transport,
-    UnknownCommand, transport,
+    UnknownCommand, mixer, transport,
 };
 use musicable_engine::compile::keys;
-use musicable_engine::nodes::Metronome;
+use musicable_engine::nodes::{Gain, Metronome};
 use musicable_engine::{
-    Compiled, Compiler, EngineConfig, EngineHandle, Event, Graph, PreparedGraph, QueueFull, Stats,
-    SwapError, TransportCommand, compile,
+    Compiled, Compiler, EngineConfig, EngineHandle, Event, Graph, Meters, NodeKey, ParamId,
+    PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_metered,
 };
 use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
 
-/// Builds the graph for a project, on the compiler's thread.
-type Build = Arc<dyn Fn(&Project) -> Graph + Send + Sync>;
+/// Builds the graph for a project, with its meters, on the compiler's thread.
+type Build = Arc<dyn Fn(&Project, &Meters) -> Graph + Send + Sync>;
 
 /// The open project, the commands that change it, and the engine that plays
 /// it.
@@ -45,27 +45,34 @@ impl Session {
     /// engine, what's sent to the engine waits for it: the engine plays
     /// silence, and doesn't start playing.
     pub fn new(project: Project, keymap: Keymap, handle: EngineHandle) -> Self {
-        Self::with_compiler(project, keymap, handle, compile)
+        Self::building(project, keymap, handle, Arc::new(compile_metered))
     }
 
     /// Like [`new`](Self::new), with `build` building the project's graphs
-    /// in place of [`compile`]: for tests, such as one with a node that's
-    /// slow to prepare.
+    /// in place of [`compile_metered`]: for tests, such as one with a node
+    /// that's slow to prepare. The session's meters read nothing.
     pub fn with_compiler(
         project: Project,
         keymap: Keymap,
         handle: EngineHandle,
         build: impl Fn(&Project) -> Graph + Send + Sync + 'static,
     ) -> Self {
+        let build = move |project: &Project, _: &Meters| build(project);
+        Self::building(project, keymap, handle, Arc::new(build))
+    }
+
+    fn building(project: Project, keymap: Keymap, handle: EngineHandle, build: Build) -> Self {
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             handle,
             compiler: Compiler::spawn(),
-            build: Arc::new(build),
+            build,
             asked: 0,
             received: 0,
             floor: 0,
             outbox: VecDeque::new(),
+            meters: Meters::new(),
+            gates: BTreeMap::new(),
         };
         engine.set_up(&project);
         engine.flush();
@@ -83,9 +90,13 @@ impl Session {
     /// engine for the old project is dropped, and the undo history starts
     /// again.
     pub fn open(&mut self, project: Project) {
+        // What's waiting is for the old project, and so are the values the
+        // engine would send again: the new project's nodes can have the same
+        // keys.
         self.engine.outbox.clear();
-        // The new project's nodes have its values, not the old one's.
         self.engine.handle.forget_params();
+        self.engine.gates.clear();
+        self.engine.meters = Meters::new();
         self.engine.stop();
         self.engine.locate(Beats::ZERO);
         self.engine.set_up(&project);
@@ -106,6 +117,7 @@ impl Session {
         let playing = self.engine.playing;
         let old = std::mem::replace(&mut self.engine.handle, handle);
         self.engine.outbox.clear();
+        self.engine.gates.clear();
         self.engine.playing = false;
         self.engine.set_up(self.document.project());
         self.engine.locate(at);
@@ -219,6 +231,19 @@ impl Session {
         self.sync();
     }
 
+    /// Makes a change from the mixer's controls, then sends the engine what
+    /// it changed. See [`mixer::change`].
+    pub fn change_mixer(&mut self, change: mixer::Change) {
+        mixer::change(&mut self.document, change);
+        self.sync();
+    }
+
+    /// The level meters of the project's tracks and of the master, as the
+    /// engine last measured them.
+    pub fn meters(&self) -> &Meters {
+        &self.engine.meters
+    }
+
     /// Call regularly, such as once per UI frame. Sends the graphs the
     /// compiler has finished and what the engine had no room for earlier,
     /// and drops the graphs and tempo maps the engine has replaced.
@@ -249,12 +274,23 @@ impl Session {
         self.engine.flush();
     }
 
-    /// Sends the engine what the committed transactions changed.
+    /// Sends the engine what the committed transactions changed: parameter
+    /// values where a node has the value, and a new graph where the
+    /// project's shape changed.
     fn sync(&mut self) {
         let mut tempo = None;
         let mut loop_changed = false;
+        let mut gates_changed = false;
+        let mut recompile = false;
         for committed in self.document.take_committed() {
             for edit in committed.edits {
+                let mut param = |node: NodeKey, param: ParamId, value: f32| {
+                    self.engine.push(Message::Event(Event::Param {
+                        node,
+                        param,
+                        value: f64::from(value),
+                    }));
+                };
                 match edit {
                     // Only the last map counts.
                     Edit::Tempo { to, .. } => tempo = Some(to),
@@ -264,6 +300,30 @@ impl Session {
                         param: Metronome::ENABLED,
                         value: if to { 1.0 } else { 0.0 },
                     })),
+                    Edit::TrackGain { track, to, .. } => {
+                        param(keys::track_gain(track), Gain::GAIN, to);
+                    }
+                    Edit::TrackPan { track, to, .. } => {
+                        param(keys::track_gain(track), Gain::PAN, to);
+                    }
+                    Edit::SendLevel { send, to, .. } => param(keys::send(send), Gain::GAIN, to),
+                    Edit::MasterGain { to, .. } => param(keys::master_gain(), Gain::GAIN, to),
+                    Edit::MasterPan { to, .. } => param(keys::master_gain(), Gain::PAN, to),
+                    Edit::TrackMuted { .. }
+                    | Edit::TrackSolo { .. }
+                    | Edit::TrackSoloSafe { .. } => {
+                        gates_changed = true;
+                    }
+                    // Nothing the engine plays yet.
+                    Edit::TrackName { .. } | Edit::TrackArmed { .. } => {}
+                    Edit::AddTrack { .. }
+                    | Edit::RemoveTrack { .. }
+                    | Edit::TrackOutput { .. }
+                    | Edit::TrackClipType { .. }
+                    | Edit::AddSend { .. }
+                    | Edit::RemoveSend { .. }
+                    | Edit::SendPreFader { .. }
+                    | Edit::MasterClipType { .. } => recompile = true,
                 }
             }
         }
@@ -275,6 +335,11 @@ impl Session {
         if loop_changed {
             let event = loop_event(self.document.project());
             self.engine.push(Message::Event(event));
+        }
+        if recompile {
+            self.engine.recompile(self.document.project());
+        } else if gates_changed {
+            self.engine.set_gates(self.document.project(), false);
         }
         self.engine.flush();
     }
@@ -303,6 +368,12 @@ struct EngineLink {
     /// Whether the transport plays, counting what hasn't reached the engine
     /// yet.
     playing: bool,
+    /// The meters the graphs measure into.
+    meters: Meters,
+    /// Whether each output stage and send mutes, as last sent to the engine
+    /// or built into a graph. Kept for nodes that have gone as well, since
+    /// the engine sends their last value again if they come back.
+    gates: BTreeMap<NodeKey, bool>,
 }
 
 /// Something for the engine, in the order it was sent.
@@ -325,11 +396,16 @@ impl EngineLink {
     /// then, and parameter values sent meanwhile reach the new graph too
     /// (see [`EngineHandle::swap_graph`]). Returns the compiler's job.
     fn recompile(&mut self, project: &Project) -> u64 {
+        self.meters.follow(project);
+        // The new graph has every gate built in. The running one needs the
+        // ones that changed now.
+        self.set_gates(project, true);
         let build = self.build.clone();
+        let meters = self.meters.clone();
         let project = project.clone();
         self.asked = self
             .compiler
-            .compile(self.handle.config(), move || build(&project));
+            .compile(self.handle.config(), move || build(&project, &meters));
         self.asked
     }
 
@@ -344,6 +420,39 @@ impl EngineLink {
         self.push(Message::WaitForGraph(job));
         self.push(Message::Tempo(project.tempo.clone()));
         self.push(Message::Event(loop_event(project)));
+    }
+
+    /// Sets the engine's mute gates, the output stages' and the sends', to
+    /// what mute and solo say now, sending only the ones that changed. With
+    /// `compiled`, a graph built from `project` is on its way, with every
+    /// gate already set, so only gates the engine might send an old value of
+    /// again need sending.
+    fn set_gates(&mut self, project: &Project, compiled: bool) {
+        let silenced = project.silenced();
+        let outputs = project
+            .tracks
+            .iter()
+            .map(|t| (keys::track_output(t.id), silenced.output(t.id)));
+        let sends = project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.sends)
+            .map(|s| (keys::send(s.id), silenced.send(s.id)));
+        let mut changed = Vec::new();
+        for (node, muted) in outputs.chain(sends) {
+            match self.gates.insert(node, muted) {
+                Some(was) if was == muted => {}
+                None if compiled => {}
+                _ => changed.push((node, muted)),
+            }
+        }
+        for (node, muted) in changed {
+            self.push(Message::Event(Event::Param {
+                node,
+                param: Gain::MUTE,
+                value: if muted { 1.0 } else { 0.0 },
+            }));
+        }
     }
 
     /// Takes a graph back from the compiler: in the place that waits for it,
