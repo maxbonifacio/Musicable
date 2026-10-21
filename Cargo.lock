@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-app"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "musicable-audio",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-audio"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "cpal",
  "musicable-engine",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-commands"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "musicable-model",
  "serde",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-engine"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "criterion",
  "musicable-model",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-io"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "musicable-model",
  "serde",
@@ -1545,18 +1545,18 @@ dependencies = [
 
 [[package]]
 name = "musicable-model"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "musicable-plugins"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "musicable-engine",
 ]
 
 [[package]]
 name = "musicable-ui"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "egui",
  "egui_kittest",

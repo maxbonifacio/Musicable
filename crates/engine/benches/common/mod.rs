@@ -224,9 +224,16 @@ pub fn renderer(lanes: usize) -> ParallelRenderer {
     })
 }
 
-/// One thread per physical core: the default.
+/// One thread per physical core, the default, or as many as the
+/// `MUSICABLE_BENCH_THREADS` environment variable says. CI sets it, since its
+/// runners' two logical processors count as one physical core, which leaves
+/// the parallel renderer no workers.
 pub fn cores() -> usize {
-    ParallelRenderer::default_threads() + 1
+    std::env::var("MUSICABLE_BENCH_THREADS")
+        .ok()
+        .and_then(|threads| threads.parse().ok())
+        .filter(|&threads: &usize| threads > 0)
+        .unwrap_or(ParallelRenderer::default_threads() + 1)
 }
 
 /// Thread counts to measure: 1, 2, 4, ... up to one per physical core.

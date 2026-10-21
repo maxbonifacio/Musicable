@@ -27,7 +27,9 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # A debug build, so the engine's allocation checker is on.
+      # A debug build, so the engine's allocation checker is on: the
+      # equivalence tests, the real-time checks, the file round trips and the
+      # Tier 0 demo all run with it. The benchmarks are in bench.yml.
       - run: cargo test --workspace
 
   fmt:

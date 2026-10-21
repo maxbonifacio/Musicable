@@ -2,6 +2,8 @@
 
 How `crates/engine` turns the project model into sound: which thread does
 what, how time and events work, and the rules for code on the audio thread.
+[architecture.md](architecture.md) shows how the engine fits with the rest
+of Musicable, and where Tier 1 work plugs in.
 
 ## Threads
 
@@ -187,14 +189,19 @@ let (engine, handle) = Engine::with_renderer(config, Box::new(renderer));
 ```
 
 Create and drop the renderer off the audio thread, since that starts and
-stops its workers.
+stops its workers. When one renderer replaces another, drop the old one
+first on Windows, so its workers leave their real-time slots to the new
+ones (see Threads, below).
 
 **Threads.** By default there is one worker per physical core, minus one for
 the audio thread, which works too. On Windows, workers join the MMCSS "Pro
 Audio" class at critical priority, as the WASAPI stream's audio thread does
-(see [audio.md](audio.md)). Elsewhere they don't raise their priority yet:
-Linux needs real-time scheduling rights, and on macOS they should join the
-audio device's workgroup, which needs the audio backend.
+(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS,
+since Windows 10, so on a machine with more than about 28 cores the last
+workers to start stay at normal priority; joining fails quietly. Elsewhere
+they don't raise their priority yet: Linux needs real-time scheduling
+rights, and on macOS they should join the audio device's workgroup, which
+needs the audio backend.
 
 Workers run with the default floating-point environment. Nothing sets
 flush-to-zero or denormals-are-zero on the audio thread yet. Anything that
@@ -245,7 +252,8 @@ threads were running nodes, on average, during shared blocks.
 
 **Benchmarks.** `cargo bench -p musicable-engine --bench scheduler` times
 blocks of wide, deep and project-shaped graphs, with and without filled
-channel strip slots, on 1, 2, 4, … threads up to one per physical core.
+channel strip slots, on 1, 2, 4, … threads up to one per physical core, or
+up to the number in the `MUSICABLE_BENCH_THREADS` environment variable.
 `--bench realtime` renders at a device's pace and prints tables: a 64-track
 project scheduled per node against one thread per signal path (how Ableton's
 documentation says Live does it), block times and worker CPU for different
@@ -335,3 +343,7 @@ These still hold for anything else that drives the engine.
 [app.md](app.md). `musicable_app::engine` builds every engine the app plays
 with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
+
+**Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
+where clips, devices and plugins, delay compensation, the mixer, automation
+and recording go in the engine, and what's missing for them.
