@@ -30,7 +30,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/engine` | Real-time audio engine: graph, reference renderer, and later the parallel scheduler. See [docs/engine.md](docs/engine.md). |
 | `crates/audio` | Audio device output: our own WASAPI backend on Windows, cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP, VST3 and ARA hosting. |
-| `crates/io` | Project files and audio/MIDI import and export. |
+| `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/ui` | User interface. Talks to the model through commands. |
 | `crates/app` | The `musicable` binary. |
 
