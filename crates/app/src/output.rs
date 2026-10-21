@@ -245,10 +245,14 @@ impl Output {
         let open = audio::open(request)?;
         let config = open.info().engine_config();
         if self.engine().config() != config {
+            // The old engine's workers stop before the new engine's start.
+            // Windows gives a process 32 real-time (MMCSS) threads, so on a
+            // many-core machine two sets of workers at once would leave some
+            // of the new ones at normal priority for good.
+            drop(self.idle.take());
             let (engine, handle, monitor) = crate::engine(config);
-            let old = session.replace_engine(handle);
-            // Dropped together, here, off the audio thread.
-            drop((self.idle.replace(engine), old));
+            drop(session.replace_engine(handle));
+            self.idle = Some(engine);
             self.monitor = monitor;
         }
         self.play(open)

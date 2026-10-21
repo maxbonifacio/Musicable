@@ -189,14 +189,19 @@ let (engine, handle) = Engine::with_renderer(config, Box::new(renderer));
 ```
 
 Create and drop the renderer off the audio thread, since that starts and
-stops its workers.
+stops its workers. When one renderer replaces another, drop the old one
+first on Windows, so its workers leave their real-time slots to the new
+ones (see Threads, below).
 
 **Threads.** By default there is one worker per physical core, minus one for
 the audio thread, which works too. On Windows, workers join the MMCSS "Pro
 Audio" class at critical priority, as the WASAPI stream's audio thread does
-(see [audio.md](audio.md)). Elsewhere they don't raise their priority yet:
-Linux needs real-time scheduling rights, and on macOS they should join the
-audio device's workgroup, which needs the audio backend.
+(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS,
+since Windows 10, so on a machine with more than about 28 cores the last
+workers to start stay at normal priority; joining fails quietly. Elsewhere
+they don't raise their priority yet: Linux needs real-time scheduling
+rights, and on macOS they should join the audio device's workgroup, which
+needs the audio backend.
 
 Workers run with the default floating-point environment. Nothing sets
 flush-to-zero or denormals-are-zero on the audio thread yet. Anything that

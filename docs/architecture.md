@@ -196,6 +196,13 @@ built yet, except where it says so.
   the workers the same way, or the renderers stop matching.
 - Workers get real-time priority on Windows only. On macOS they should join
   the audio device's workgroup.
+- Windows gives a process 32 real-time (MMCSS) threads, since Windows 10,
+  and other code in the process can take a few of them. The audio thread
+  and the workers take one per physical core, so on a machine with more than
+  about 28 cores the last workers to start run at normal priority, and a
+  shared block can wait on one of them. The app stops an old engine's
+  workers before a new engine's start for the same reason. Capping the
+  workers on such machines is for Tier 1.
 - The metronome feeds the master; it belongs on a cue output.
 - The engine plays in stereo. A device with more channels gets silence on
   the rest.
