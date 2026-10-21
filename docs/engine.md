@@ -95,7 +95,9 @@ time signature changes) says where musical positions fall in it:
   `TempoMap::beats_in`, then keep the ones whose `frame_at` falls in the
   block. Blocks don't end at tempo changes.
 - Tempo changes are steps for now. Ramps (tempo automation, Tier 2) are a new
-  kind of change inside `TempoMap`; nothing else needs to change for them.
+  kind of change inside `TempoMap`; nothing else in the engine needs to
+  change for them. Project files need a new format version for them (see
+  [project-format.md](project-format.md)).
 
 **Looping.** With a loop region set, the playhead jumps back to the loop start
 when it reaches the loop end: the block ends at the loop end's frame and the
@@ -192,6 +194,12 @@ the audio thread, which works too. Workers join the MMCSS "Pro Audio" class
 on Windows. Elsewhere they don't raise their priority yet: Linux needs
 real-time scheduling rights, and on macOS they should join the audio device's
 workgroup, which needs the audio backend.
+
+Workers run with the default floating-point environment. Nothing sets
+flush-to-zero or denormals-are-zero on the audio thread yet. Anything that
+does must set the workers the same way, or a node's output would depend on
+which thread ran it and stop matching the reference renderer; that needs an
+option in `ParallelOptions`.
 
 **A block.** `Graph::prepare` works out which nodes each node feeds and the
 longest path from each node to the end of the graph, so the audio thread
@@ -307,7 +315,8 @@ system gets reworked with plugin hosting.
 
 ## Notes for the next milestones
 
-**Audio backend (M2).**
+**Audio backend (M2).** Done in `crates/audio`: see [audio.md](audio.md).
+These still hold for anything else that drives the engine.
 
 - Render exactly the frames each callback asks for. Drivers don't always
   deliver the period that was requested, so set `max_block` from what the
@@ -320,19 +329,16 @@ system gets reworked with plugin hosting.
   (`TempoMap::beats_at` of the old `Stats::position`).
 - Drop the `Engine` off the audio thread, since that frees its graph. For
   example, hand it back to the control thread when the stream stops.
-- Use the `ParallelRenderer`. Create it when the stream starts, off the audio
-  thread, and keep its `ParallelMonitor` for a CPU meter. The audio thread
-  should join MMCSS "Pro Audio" itself, as the workers do.
-- If the backend sets flush-to-zero or denormals-are-zero on the audio thread,
-  the workers need the same, or a node's output would depend on which thread
-  ran it and stop matching the reference renderer. The renderer doesn't touch
-  the floating-point environment yet, so that needs an option in
-  `ParallelOptions`.
 
 **App shell (M7).**
 
-- Send the tempo map and loop when a project opens and when they change (see
-  Musical time above). Tempo up and down edit `Project::tempo` and send the
-  new map.
+- Play through the `ParallelRenderer` (see Parallel rendering above): build
+  the engine with `Engine::with_renderer` before `start`, and keep its
+  `ParallelMonitor` for a CPU meter.
+- Open and save projects with `musicable_io::project::load` and `save`. Their
+  errors say what's wrong in words a user can act on.
+- `musicable_app::Session` sends the tempo map and loop when a project opens
+  and whenever a transaction changes them (see Musical time above, and
+  [commands.md](commands.md)).
 - Show the playhead from `Stats::position`, in bars and beats with
   `TempoMap::beats_at` and `TempoMap::bar_at`.

@@ -1,18 +1,58 @@
-//! Named command registry and remappable keymaps.
+//! Named command registry, remappable keymaps, and the transactions commands
+//! change the project through.
 //!
 //! Every user action is a named command. Menus, hotkeys, the command palette,
 //! scripting and agent control all go through this registry, so remapping a
-//! hotkey is just editing a [`Keymap`].
+//! hotkey is just editing a [`Keymap`]. The user's changes to the default
+//! keymap live in a [`KeymapFile`]. Commands change the project only through
+//! transactions on its [`Document`]. `docs/commands.md` describes all of it
+//! and lists the commands.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 
-/// Dotted, stable command name, e.g. `"transport.play"`.
+use musicable_model::time::Beats;
+
+mod document;
+mod key;
+mod keymap;
+pub mod transport;
+
+pub use document::{Committed, Document, Edit, Transaction};
+pub use key::{ChordError, Key, KeyChord, Modifiers};
+pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
+
+/// Dotted, stable command name, e.g. `"transport.play"`. Keymap files refer
+/// to commands by it, so a command keeps its id once it has shipped.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CommandId(pub String);
+pub struct CommandId(Cow<'static, str>);
+
+impl CommandId {
+    pub const fn new(id: &'static str) -> Self {
+        Self(Cow::Borrowed(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl From<&str> for CommandId {
     fn from(s: &str) -> Self {
-        Self(s.to_owned())
+        Self(Cow::Owned(s.to_owned()))
+    }
+}
+
+impl From<String> for CommandId {
+    fn from(s: String) -> Self {
+        Self(Cow::Owned(s))
+    }
+}
+
+impl fmt::Display for CommandId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
     }
 }
 
@@ -23,9 +63,36 @@ pub struct Command {
     pub title: String,
 }
 
-#[derive(Debug, Default)]
+/// What a running command can reach.
+pub struct Context<'a> {
+    /// The open project. Commands change it through
+    /// [`Document::transact`].
+    pub document: &'a mut Document,
+    pub transport: &'a mut dyn Transport,
+}
+
+/// The engine's transport, as commands see it. The app implements it on top
+/// of the engine.
+///
+/// The loop, the tempo and the metronome belong to the project, so commands
+/// change them through transactions, and the app passes the changes on to
+/// the engine.
+pub trait Transport {
+    /// Whether playback is running, counting what was asked for but hasn't
+    /// reached the engine yet.
+    fn is_playing(&self) -> bool;
+    fn play(&mut self);
+    /// Stops, leaving the playhead where it is.
+    fn stop(&mut self);
+    /// Moves the playhead to a musical position.
+    fn locate(&mut self, at: Beats);
+}
+
+type Run = Box<dyn Fn(&mut Context<'_>)>;
+
+#[derive(Default)]
 pub struct Registry {
-    commands: BTreeMap<CommandId, Command>,
+    commands: BTreeMap<CommandId, (Command, Run)>,
 }
 
 impl Registry {
@@ -33,127 +100,59 @@ impl Registry {
         Self::default()
     }
 
-    /// Registers a command. Returns `false` if the id was already taken.
-    pub fn register(&mut self, id: impl Into<CommandId>, title: impl Into<String>) -> bool {
+    /// Registers a command that runs `run`. Returns `false` if the id was
+    /// already taken.
+    pub fn register(
+        &mut self,
+        id: impl Into<CommandId>,
+        title: impl Into<String>,
+        run: impl Fn(&mut Context<'_>) + 'static,
+    ) -> bool {
         let id = id.into();
         if self.commands.contains_key(&id) {
             return false;
         }
-        self.commands.insert(
-            id.clone(),
-            Command {
-                id,
-                title: title.into(),
-            },
-        );
+        let command = Command {
+            id: id.clone(),
+            title: title.into(),
+        };
+        self.commands.insert(id, (command, Box::new(run)));
         true
     }
 
     pub fn get(&self, id: &CommandId) -> Option<&Command> {
-        self.commands.get(id)
+        self.commands.get(id).map(|(command, _)| command)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Command> {
-        self.commands.values()
+        self.commands.values().map(|(command, _)| command)
+    }
+
+    /// Runs the command `id`.
+    pub fn run(&self, id: &CommandId, context: &mut Context<'_>) -> Result<(), UnknownCommand> {
+        let (_, run) = self
+            .commands
+            .get(id)
+            .ok_or_else(|| UnknownCommand(id.clone()))?;
+        run(context);
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct Modifiers {
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
-}
-
-/// A key plus modifiers, e.g. Ctrl+Shift+D. Keys are named strings for now
-/// (`"Space"`, `"D"`, `"F5"`) until the UI layer settles on a key type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct KeyChord {
-    pub key: String,
-    pub mods: Modifiers,
-}
-
-impl KeyChord {
-    pub fn new(key: impl Into<String>, mods: Modifiers) -> Self {
-        Self {
-            key: key.into(),
-            mods,
-        }
+impl fmt::Debug for Registry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
-/// Maps key chords to commands. Keymaps are plain data so they can be saved,
-/// shared and swapped (an Ableton-style default, plus user presets).
-#[derive(Debug, Clone, Default)]
-pub struct Keymap {
-    bindings: BTreeMap<KeyChord, CommandId>,
-}
+/// No command has this id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCommand(pub CommandId);
 
-impl Keymap {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Binds `chord` to `command`, returning the command it replaced, if any,
-    /// so the UI can warn about conflicts.
-    pub fn bind(&mut self, chord: KeyChord, command: impl Into<CommandId>) -> Option<CommandId> {
-        self.bindings.insert(chord, command.into())
-    }
-
-    pub fn unbind(&mut self, chord: &KeyChord) -> Option<CommandId> {
-        self.bindings.remove(chord)
-    }
-
-    pub fn lookup(&self, chord: &KeyChord) -> Option<&CommandId> {
-        self.bindings.get(chord)
-    }
-
-    pub fn chords_for<'a>(&'a self, command: &'a CommandId) -> impl Iterator<Item = &'a KeyChord> {
-        self.bindings
-            .iter()
-            .filter(move |(_, c)| *c == command)
-            .map(|(k, _)| k)
-    }
-
-    /// Bindings that point at commands missing from `registry`.
-    pub fn dangling<'a>(
-        &'a self,
-        registry: &'a Registry,
-    ) -> impl Iterator<Item = (&'a KeyChord, &'a CommandId)> {
-        self.bindings
-            .iter()
-            .filter(|(_, c)| registry.get(c).is_none())
+impl fmt::Display for UnknownCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "there's no command called {}", self.0)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rebinding_reports_the_replaced_command() {
-        let mut map = Keymap::new();
-        let space = KeyChord::new("Space", Modifiers::default());
-        assert_eq!(map.bind(space.clone(), "transport.play"), None);
-        assert_eq!(
-            map.bind(space.clone(), "transport.stop"),
-            Some("transport.play".into())
-        );
-        assert_eq!(map.lookup(&space), Some(&"transport.stop".into()));
-    }
-
-    #[test]
-    fn dangling_bindings_are_found() {
-        let mut reg = Registry::new();
-        assert!(reg.register("transport.play", "Play"));
-        assert!(!reg.register("transport.play", "Play again"));
-        let mut map = Keymap::new();
-        map.bind(
-            KeyChord::new("Space", Modifiers::default()),
-            "transport.play",
-        );
-        map.bind(KeyChord::new("X", Modifiers::default()), "does.not.exist");
-        let dangling: Vec<_> = map.dangling(&reg).map(|(_, c)| c.0.as_str()).collect();
-        assert_eq!(dangling, ["does.not.exist"]);
-    }
-}
+impl std::error::Error for UnknownCommand {}

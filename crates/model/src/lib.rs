@@ -3,6 +3,10 @@
 //! Nothing in this crate touches audio devices, threads or the UI. The engine
 //! compiles a [`Project`] into a processing graph; the UI edits it through
 //! commands. [`time`] has musical time: beats, bars and the tempo map.
+//!
+//! Project files (`musicable_io::project`) save every field of the project,
+//! so adding or changing one changes the file format. See
+//! `docs/project-format.md` for how.
 
 pub mod time;
 
@@ -69,7 +73,10 @@ pub struct Project {
     /// Whether the metronome clicks while the transport plays.
     pub metronome: bool,
     pub tracks: Vec<Track>,
-    next_track_id: u32,
+    /// The id [`add_track`](Self::add_track) gives the next track. Ids are
+    /// never reused, so it stays above the id of every track the project has
+    /// had, deleted ones included.
+    pub next_track_id: u32,
 }
 
 impl Default for Project {

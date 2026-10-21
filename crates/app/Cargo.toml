@@ -1,6 +1,6 @@
 [package]
 name = "musicable-app"
-description = "Desktop application binary."
+description = "Desktop application: the session wiring commands to the engine, and the binary."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
