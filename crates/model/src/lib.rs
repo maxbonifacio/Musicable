@@ -26,6 +26,22 @@ pub struct TestTone {
     pub level: f32,
 }
 
+/// How a track's clip stage clips. The engine mixes in floating point, so
+/// nothing clips unless a track asks for it. Tier 1 adds hard and soft
+/// clipping, and Tier 2 circuit-modelled types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipType {
+    /// Clean floating point.
+    #[default]
+    Off,
+}
+
+/// A track's console modelling settings. A placeholder until console mode
+/// arrives (Tier 2 at the earliest), so project files have the field from
+/// the start.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConsoleSettings {}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub id: TrackId,
@@ -35,6 +51,8 @@ pub struct Track {
     pub gain: f32,
     pub muted: bool,
     pub tone: Option<TestTone>,
+    pub clip_type: ClipType,
+    pub console: ConsoleSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -76,6 +94,8 @@ impl Project {
             gain: 1.0,
             muted: false,
             tone: None,
+            clip_type: ClipType::Off,
+            console: ConsoleSettings::default(),
         });
         id
     }
@@ -100,5 +120,12 @@ mod tests {
         let b = p.add_track("Bass", TrackKind::Midi);
         assert_ne!(a, b);
         assert_eq!(p.track(b).unwrap().name, "Bass");
+    }
+
+    #[test]
+    fn new_tracks_dont_clip() {
+        let mut p = Project::new();
+        let id = p.add_track("Vocals", TrackKind::Audio);
+        assert_eq!(p.track(id).unwrap().clip_type, ClipType::Off);
     }
 }

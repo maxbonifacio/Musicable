@@ -69,7 +69,12 @@ impl Graph {
     /// Adds a node. Keys must be unique, which [`prepare`](Graph::prepare)
     /// checks.
     pub fn add(&mut self, key: NodeKey, node: impl Node) -> NodeId {
-        self.nodes.push(Box::new(node));
+        self.add_boxed(key, Box::new(node))
+    }
+
+    /// [`add`](Graph::add), for a node whose type is chosen at run time.
+    pub fn add_boxed(&mut self, key: NodeKey, node: Box<dyn Node>) -> NodeId {
+        self.nodes.push(node);
         self.keys.push(key);
         self.inputs.push(Vec::new());
         self.outputs.push(Vec::new());
