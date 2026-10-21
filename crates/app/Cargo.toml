@@ -17,6 +17,14 @@ musicable-engine.workspace = true
 musicable-plugins.workspace = true
 musicable-io.workspace = true
 musicable-ui.workspace = true
+musicable-audio.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Console"] }
 
 [lints]
 workspace = true

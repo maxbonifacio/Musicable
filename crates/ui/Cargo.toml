@@ -9,6 +9,12 @@ rust-version.workspace = true
 [dependencies]
 musicable-model.workspace = true
 musicable-commands.workspace = true
+egui.workspace = true
+
+[dev-dependencies]
+# The tests lay out text, so they need fonts. The app's come with eframe.
+egui = { workspace = true, features = ["default_fonts"] }
+egui_kittest.workspace = true
 
 [lints]
 workspace = true

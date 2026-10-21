@@ -3,12 +3,14 @@
 use std::collections::VecDeque;
 
 use musicable_commands::{
-    CommandId, Context, Document, Edit, KeyChord, Keymap, Registry, Transport, UnknownCommand,
+    CommandId, Context, Document, Edit, KeyChord, Keymap, Registry, Request, Transport,
+    UnknownCommand, transport,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::nodes::Metronome;
 use musicable_engine::{
-    EngineHandle, Event, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile,
+    EngineConfig, EngineHandle, Event, PreparedGraph, QueueFull, Stats, SwapError,
+    TransportCommand, compile,
 };
 use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
@@ -25,6 +27,8 @@ pub struct Session {
     commands: Registry,
     keymap: Keymap,
     engine: EngineLink,
+    /// What commands asked of the app, oldest first.
+    requests: Vec<Request>,
 }
 
 impl Session {
@@ -32,28 +36,66 @@ impl Session {
     /// graph and sends its tempo map and loop. Key presses go through
     /// `keymap`.
     pub fn new(project: Project, keymap: Keymap, handle: EngineHandle) -> Self {
-        let graph = compile(&project)
-            .prepare(&handle.config())
-            .expect("compiled graphs are valid");
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             handle,
             outbox: VecDeque::new(),
         };
-        engine.push(Message::Graph(Box::new(graph)));
-        engine.push(Message::Tempo(project.tempo.clone()));
-        engine.push(Message::Event(loop_event(&project)));
+        engine.set_up(&project);
         engine.flush();
         Self {
             document: Document::new(project),
             commands: crate::commands(),
             keymap,
             engine,
+            requests: Vec::new(),
         }
+    }
+
+    /// Opens `project` in place of the open one. The transport stops, and the
+    /// playhead goes to the start of the song.
+    pub fn open(&mut self, project: Project) {
+        self.engine.stop();
+        self.engine.locate(Beats::ZERO);
+        self.engine.set_up(&project);
+        self.engine.flush();
+        self.document = Document::new(project);
+    }
+
+    /// Plays the project on the engine `handle` drives from now on, such as
+    /// one built for another audio device or buffer size, and hands back the
+    /// old engine's handle.
+    ///
+    /// The new engine takes over where the old one was: its playhead goes to
+    /// the same place in bars and beats, and it plays if the old one did.
+    /// What the old engine hadn't received yet, it never will.
+    pub fn replace_engine(&mut self, handle: EngineHandle) -> EngineHandle {
+        let at = self.playhead();
+        let playing = self.engine.playing;
+        let old = std::mem::replace(&mut self.engine.handle, handle);
+        self.engine.outbox.clear();
+        self.engine.playing = false;
+        self.engine.set_up(self.document.project());
+        self.engine.locate(at);
+        if playing {
+            self.engine.play();
+        }
+        self.engine.flush();
+        old
     }
 
     pub fn project(&self) -> &Project {
         self.document.project()
+    }
+
+    /// Whether the project changed since it was opened or last saved.
+    pub fn is_modified(&self) -> bool {
+        self.document.is_modified()
+    }
+
+    /// Call once the project is saved.
+    pub fn mark_saved(&mut self) {
+        self.document.mark_saved();
     }
 
     pub fn commands(&self) -> &Registry {
@@ -64,10 +106,27 @@ impl Session {
         &self.keymap
     }
 
+    /// Key presses go through `keymap` from now on.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+    }
+
+    /// What the engine renders for: its sample rate and block size.
+    pub fn engine_config(&self) -> EngineConfig {
+        self.engine.handle.config()
+    }
+
     /// The engine's counters, as of its last block: the playhead, whether it
     /// plays, and what went wrong.
     pub fn stats(&self) -> Stats {
         self.engine.handle.stats()
+    }
+
+    /// Where the playhead is in the song, as of the engine's last block.
+    pub fn playhead(&self) -> Beats {
+        let position = self.stats().position as f64;
+        let rate = self.engine.handle.config().sample_rate;
+        Beats::from_f64(self.project().tempo.beats_at(position, rate))
     }
 
     /// Runs the command the keymap binds to `chord`. Returns `false` if there
@@ -85,10 +144,26 @@ impl Session {
         let mut context = Context {
             document: &mut self.document,
             transport: &mut self.engine,
+            requests: &mut self.requests,
         };
         self.commands.run(id, &mut context)?;
         self.sync();
         Ok(())
+    }
+
+    /// What the commands run so far asked the app to do, such as opening a
+    /// file, oldest first. The app carries them out after each command.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Sets the tempo at the playhead to `bpm`, moving every other tempo in
+    /// the song by as much, then sends the engine the new tempo map. For a
+    /// tempo field: see [`transport::set_tempo`].
+    pub fn set_tempo(&mut self, bpm: f64) {
+        let at = self.playhead();
+        transport::set_tempo(&mut self.document, at, bpm);
+        self.sync();
     }
 
     /// Call regularly, such as once per UI frame. Sends what the engine had no
@@ -150,6 +225,17 @@ enum Message {
 impl EngineLink {
     fn push(&mut self, message: Message) {
         self.outbox.push_back(message);
+    }
+
+    /// Sends what the engine needs to play `project`: its graph, its tempo
+    /// map and its loop.
+    fn set_up(&mut self, project: &Project) {
+        let graph = compile(project)
+            .prepare(&self.handle.config())
+            .expect("compiled graphs are valid");
+        self.push(Message::Graph(Box::new(graph)));
+        self.push(Message::Tempo(project.tempo.clone()));
+        self.push(Message::Event(loop_event(project)));
     }
 
     /// Sends what's waiting, oldest first, until the engine's queue is full.

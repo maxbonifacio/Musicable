@@ -20,3 +20,10 @@ version = 1
 "transport.stop" = ["Ctrl+Period"]
 "transport.tempo_up" = ["Ctrl+Shift+Up"]
 "transport.tempo_down" = ["Ctrl+Shift+Down"]
+
+# Live's keys for its own files.
+"file.new" = ["Ctrl+N"]
+"file.open" = ["Ctrl+O"]
+"file.save" = ["Ctrl+S"]
+"file.save_as" = ["Ctrl+Shift+S"]
+"file.quit" = ["Ctrl+Q"]

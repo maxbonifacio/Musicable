@@ -4,8 +4,9 @@ Every user action in Musicable is a named command, and key presses reach
 commands only through a keymap. Menus, the command palette, scripts and
 agents will run the same commands, so remapping a shortcut is just editing
 the keymap. This page covers the commands so far, the transactions they
-change the project through, how the app runs them, key chords, the keymap
-file, and notes for the app shell.
+change the project through, how the app runs them, key chords and the
+keymap file. How the app's window hands key presses to the keymap is in
+[app.md](app.md#keys).
 
 ## Commands
 
@@ -14,7 +15,8 @@ case for menus and the palette. Keymap files name commands by id, so a
 command keeps its id once it has shipped. Each area registers its commands
 with the `Registry`, as `transport::register` does, and `Registry::run` runs
 one by id. A running command gets a `Context`: the open project's `Document`,
-and the engine's `Transport`.
+the engine's `Transport`, and a list of `Request`s for what only the app can
+do, such as showing a file dialog.
 
 ### Transport
 
@@ -35,6 +37,23 @@ In Live, Space plays from the start marker. Musicable has no start marker
 yet, so for now Space and Shift+Space both play from the playhead. Live has
 no keys for stop and tempo; the ones chosen do nothing in Live outside its
 MIDI note editor.
+
+### File
+
+A file command can't show a dialog or close the window itself, so it pushes
+a `Request` into its `Context`, and the app carries it out once the command
+has run ([app.md](app.md#files)).
+
+| Command | Title | What it does | Default key |
+|---|---|---|---|
+| `file.new` | New Project | Starts a new, empty project | Ctrl+N |
+| `file.new_demo` | New Demo Project | Starts the Tier 0 demo project | none |
+| `file.open` | Open Project... | Asks for a project file and opens it | Ctrl+O |
+| `file.save` | Save Project | Saves the project, asking where if it has no file yet | Ctrl+S |
+| `file.save_as` | Save Project As... | Asks where to save the project, and saves it there | Ctrl+Shift+S |
+| `file.quit` | Quit | Closes Musicable | Ctrl+Q |
+
+New, New Demo, Open and Quit ask about unsaved changes first.
 
 ## Transactions
 
@@ -73,8 +92,10 @@ compiling until it says what the engine should do about the new variant.
 ## Running commands in the app
 
 `musicable_app::Session` holds the open project's document, the commands, the
-keymap and the engine's handle. Opening a project swaps in its graph and
-sends the engine its tempo map and loop. Then:
+keymap and the engine's handle. Opening a project, with `Session::new` or
+`Session::open`, swaps in its graph and sends the engine its tempo map and
+loop; `Session::open` also stops the transport at the start of the song.
+Then:
 
 - `Session::key_pressed` looks a chord up in the keymap and runs the command
   bound to it. It returns `false` if no command is bound, so the key can go
@@ -90,13 +111,23 @@ sends the engine its tempo map and loop. Then:
   | Metronome | The metronome's `Metronome::ENABLED` parameter |
 
   Play, stop and go to start send their `TransportCommand` as they run.
+- `Session::take_requests` hands over what the commands asked of the app,
+  oldest first.
+- `Session::set_tempo` is for a tempo field: it sets the tempo at the
+  playhead, as one transaction, with `transport::set_tempo`.
 - `Session::tick` belongs in every UI frame. While the engine's queue is
   full, as when the audio device has stopped, the session holds on to what
   doesn't fit, and `tick` sends it, in order, once there is room. It also
   drops the graphs and tempo maps the engine is done with.
+- `Session::replace_engine` moves the project to a new engine, such as one
+  built for another device's sample rate or buffer size. The new engine
+  takes over where the old one was, in bars and beats, playing if the old one
+  was.
 
 [`crates/app/tests/key_presses.rs`](../crates/app/tests/key_presses.rs)
-drives an engine this way from key presses, rendering offline.
+drives an engine this way from key presses, rendering offline, and
+[`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
+what the app shell asks of the session.
 
 ## Key chords
 
@@ -127,8 +158,8 @@ The keys:
 - Other spellings: `Esc`, `Return`, `Del`, `PgUp`, `PgDn`, and `ArrowUp`,
   `ArrowDown`, `ArrowLeft`, `ArrowRight`.
 
-How other keyboard layouts map onto these keys is decided with the app shell.
-The default keymap uses Ctrl for now; a macOS default with Cmd comes with
+How key presses on other keyboard layouts get these names is in
+[app.md](app.md#keyboard-layouts). The default keymap uses Ctrl for now; a macOS default with Cmd comes with
 macOS support.
 
 ## The keymap file
@@ -176,8 +207,10 @@ the error.
 
 ### Trying it out
 
-Until the app shell reads your keymap file, this prints the bindings it
-gives, along with any mistakes in it:
+The app reads your keymap file from its config folder at startup
+([app.md](app.md#settings-and-your-keymap)), and Options > Keyboard
+Shortcuts shows the keys and any mistakes. Without opening the window, this
+prints the bindings a keymap file gives, along with any mistakes in it:
 
 ```sh
 cargo run -p musicable-app -- keymap path/to/keymap.toml
@@ -185,23 +218,13 @@ cargo run -p musicable-app -- keymap path/to/keymap.toml
 
 Leave out the path to see the default keymap.
 
-## Notes for the app shell (M7)
+## Notes for remapping keys in the app
 
-- Turn each key press into a `KeyChord` and hand it to
-  `Session::key_pressed`. Key presses never go straight to the engine.
-- Give text fields key presses before the keymap, so typing a space in a
-  track name doesn't start playback.
-- Menus and the palette list `Session::commands`, show each command's chords
-  from `Session::keymap` with `Keymap::chords_for`, and run commands with
-  `Session::run`.
-- Call `Session::tick` once per frame, and show the playhead from
-  `Session::stats`.
-- Loading: start from `Keymap::default_keymap()`, then `KeymapFile::read` the
-  user's file and `apply_to` the keymap, and hand it to `Session::new`. Show
-  the problems. A missing file means no changes. On an error, keep the
-  default keymap and show it.
-- Saving after a remap:
-  `KeymapFile::diff(&Keymap::default_keymap(), &keymap).write(path)`.
+The app doesn't change keys yet: for now you edit the keymap file and reload
+it. When it does:
+
+- Save a remap with
+  `KeymapFile::diff(&Keymap::default_keymap(), &keymap).write(path)`, then
+  hand the keymap to `Session::set_keymap`.
 - `Keymap::bind` returns the command a chord had, for an "already used by"
   warning.
-- On Windows the file could live at `%APPDATA%\Musicable\keymap.toml`.

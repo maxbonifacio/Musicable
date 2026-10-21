@@ -112,7 +112,9 @@ Each dropout counts once in `StreamStats::underruns` and once in the engine's
 `Stats::xruns` (`Engine::record_xrun`). `StreamStats::lost_frames` adds up
 the audio they lost. `late_wakeups`, `max_interval` and `max_busy` show how
 close the stream came: wake-ups more than one and a half periods apart eat into
-the queued audio, but aren't dropouts unless it runs out.
+the queued audio, but aren't dropouts unless it runs out. `busy` adds up the
+time all wake-ups took, so its growth over a stretch of time, as a share of
+it, is the load a CPU meter shows.
 
 On macOS and Linux, a dropout is whatever cpal reports as an xrun: ALSA
 underruns and CoreAudio overloads. cpal doesn't say how much audio they lost.
@@ -126,7 +128,8 @@ the reason, such as `Error::DeviceLost`. A device that stops waking the stream
 without reporting anything ends it with `Error::Timeout` after two seconds.
 
 To carry on, open the same `StreamRequest` again until it works, as the tone
-example does once a second. Reuse the engine if the new stream runs at the same
+example does once a second, and the app every two seconds
+([app.md](app.md#audio)). Reuse the engine if the new stream runs at the same
 rate. Otherwise create a new engine for the new `engine_config`, and set it up
 as [engine.md](engine.md#notes-for-the-next-milestones) describes: tempo map,
 loop, and a locate to where the old engine was.
