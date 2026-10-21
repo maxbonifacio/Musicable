@@ -1,0 +1,263 @@
+//! WAV files: RIFF chunks, little-endian.
+
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+use super::{AudioError, Encoding, Pcm, SampleFormat, Source, frames_of, invalid, unsupported};
+
+const PCM: u16 = 1;
+const FLOAT: u16 = 3;
+const EXTENSIBLE: u16 = 0xFFFE;
+
+/// Finds the format and the samples of a WAV file.
+pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
+    source.seek(SeekFrom::Start(12))?;
+    let mut format = None;
+    loop {
+        let mut header = [0; 8];
+        if super::read_up_to(source.as_mut(), &mut header)? < 8 {
+            return invalid("no data chunk");
+        }
+        let size = u32::from_le_bytes(header[4..].try_into().expect("four bytes"));
+        match &header[..4] {
+            b"fmt " => {
+                let mut fmt = vec![0; size as usize];
+                source
+                    .read_exact(&mut fmt)
+                    .map_err(|_| AudioError::Invalid("a short fmt chunk".into()))?;
+                format = Some(parse_format(&fmt)?);
+                // Chunks start on even bytes.
+                source.seek(SeekFrom::Current(i64::from(size % 2)))?;
+            }
+            b"data" => {
+                let Some((channels, sample_rate, encoding)) = format else {
+                    return invalid("the data chunk comes before the fmt chunk");
+                };
+                let start = source.stream_position()?;
+                // Recorders that stop before finishing the file leave its
+                // size at zero or as large as it goes: the samples run to
+                // the end.
+                let size = match size {
+                    0 | u32::MAX => u64::MAX,
+                    size => u64::from(size),
+                };
+                return Pcm::new(source, start, size, channels, sample_rate, encoding);
+            }
+            _ => {
+                source.seek(SeekFrom::Current(i64::from(size) + i64::from(size % 2)))?;
+            }
+        }
+    }
+}
+
+/// The channels, sample rate and encoding a fmt chunk gives.
+fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Encoding), AudioError> {
+    if fmt.len() < 16 {
+        return invalid("a short fmt chunk");
+    }
+    let u16_at = |i: usize| u16::from_le_bytes([fmt[i], fmt[i + 1]]);
+    let mut tag = u16_at(0);
+    let channels = usize::from(u16_at(2));
+    let sample_rate = u32::from_le_bytes(fmt[4..8].try_into().expect("four bytes"));
+    let bits = u16_at(14);
+    if tag == EXTENSIBLE {
+        if fmt.len() < 26 {
+            return invalid("a short extensible fmt chunk");
+        }
+        // The subformat GUID starts with the format tag.
+        tag = u16_at(24);
+    }
+    let encoding = match (tag, bits) {
+        (PCM, 8) => Encoding::U8,
+        (PCM, 16) => Encoding::I16 { big: false },
+        (PCM, 24) => Encoding::I24 { big: false },
+        (PCM, 32) => Encoding::I32 { big: false },
+        (FLOAT, 32) => Encoding::F32 { big: false },
+        (FLOAT, 64) => Encoding::F64 { big: false },
+        (PCM | FLOAT, bits) => return unsupported(format!("{bits}-bit WAV samples")),
+        (tag, _) => return unsupported(format!("WAV format {tag:#06x}")),
+    };
+    Ok((channels, sample_rate, encoding))
+}
+
+pub(super) fn write(
+    out: &mut impl Write,
+    sample_rate: u32,
+    format: SampleFormat,
+    channels: &[&[f32]],
+) -> io::Result<()> {
+    let frames = frames_of(channels)?;
+    let count = channels.len();
+    let block = count * format.bytes();
+    let data = u32::try_from(frames * block)
+        .ok()
+        .filter(|&size| size < u32::MAX - 64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "too long for a WAV file"))?;
+    let float = format == SampleFormat::Float32;
+    // Float files need a fact chunk with their length.
+    let fact = if float { 12 } else { 0 };
+    let mut bytes = Vec::with_capacity(44 + fact as usize + data as usize + 1);
+    bytes.extend_from_slice(b"RIFF");
+    let riff = 4 + 24 + fact + 8 + data + data % 2;
+    bytes.extend_from_slice(&riff.to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&(if float { FLOAT } else { PCM }).to_le_bytes());
+    bytes.extend_from_slice(&(count as u16).to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * block as u32).to_le_bytes());
+    bytes.extend_from_slice(&(block as u16).to_le_bytes());
+    bytes.extend_from_slice(&(format.bytes() as u16 * 8).to_le_bytes());
+    if float {
+        bytes.extend_from_slice(b"fact");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&(frames as u32).to_le_bytes());
+    }
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for i in 0..frames {
+        for channel in channels {
+            format.encode(channel[i], &mut bytes);
+        }
+    }
+    if data % 2 == 1 {
+        bytes.push(0);
+    }
+    out.write_all(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::super::tests::{decode, signal};
+    use super::super::{Decoder, Format};
+    use super::*;
+
+    /// A WAV file of `samples`, with a fmt chunk of `fmt`, and `extra`
+    /// chunks before the data. `data_size` overrides the data chunk's size.
+    fn wav(
+        fmt: &[u8],
+        extra: &[(&[u8; 4], &[u8])],
+        samples: &[u8],
+        data_size: Option<u32>,
+    ) -> Vec<u8> {
+        let mut chunks = Vec::new();
+        let mut chunk = |id: &[u8; 4], body: &[u8], size: Option<u32>| {
+            chunks.extend_from_slice(id);
+            chunks.extend_from_slice(&size.unwrap_or(body.len() as u32).to_le_bytes());
+            chunks.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                chunks.push(0);
+            }
+        };
+        for &(id, body) in extra {
+            chunk(id, body, None);
+        }
+        chunk(b"fmt ", fmt, None);
+        chunk(b"data", samples, data_size);
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(4 + chunks.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(&chunks);
+        bytes
+    }
+
+    fn fmt(tag: u16, channels: u16, bits: u16) -> Vec<u8> {
+        let block = channels * bits / 8;
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&tag.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&44_100u32.to_le_bytes());
+        fmt.extend_from_slice(&(44_100 * u32::from(block)).to_le_bytes());
+        fmt.extend_from_slice(&block.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt
+    }
+
+    #[test]
+    fn eight_bit_files_are_unsigned() {
+        let mut decoder = decode(wav(&fmt(PCM, 1, 8), &[], &[0, 128, 255, 64], None));
+        assert_eq!(
+            decoder.read_all().unwrap()[0],
+            [-1.0, 0.0, 127.0 / 128.0, -0.5]
+        );
+    }
+
+    #[test]
+    fn extensible_files_and_odd_chunks_before_the_data() {
+        let mut extensible = fmt(EXTENSIBLE, 2, 32);
+        extensible.extend_from_slice(&22u16.to_le_bytes());
+        extensible.extend_from_slice(&32u16.to_le_bytes());
+        extensible.extend_from_slice(&3u32.to_le_bytes());
+        // The float subformat GUID.
+        extensible.extend_from_slice(&[3, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]);
+        let samples: Vec<u8> = [0.25f32, -0.5, 1.0, 0.125]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let extra: [(&[u8; 4], &[u8]); 2] = [(b"LIST", b"odd"), (b"bext", &[0; 10])];
+        let mut decoder = decode(wav(&extensible, &extra, &samples, None));
+        assert_eq!(decoder.info().channels, 2);
+        assert_eq!(
+            decoder.read_all().unwrap(),
+            [vec![0.25, 1.0], vec![-0.5, 0.125]]
+        );
+    }
+
+    #[test]
+    fn a_data_chunk_that_runs_past_the_end_stops_there() {
+        let samples: Vec<u8> = [1i16, 2, 3].iter().flat_map(|s| s.to_le_bytes()).collect();
+        for size in [Some(0), Some(u32::MAX), Some(1000)] {
+            let decoder = decode(wav(&fmt(PCM, 1, 16), &[], &samples, size));
+            assert_eq!(decoder.info().frames, 3, "{size:?}");
+        }
+        // Half a frame at the end doesn't count.
+        let decoder = decode(wav(&fmt(PCM, 2, 16), &[], &samples, None));
+        assert_eq!(decoder.info().frames, 1);
+    }
+
+    #[test]
+    fn twenty_four_and_thirty_two_bit_integers() {
+        let samples = [0x7F_FF_FFu32, 0x80_00_00, 0x40_00_00];
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| s.to_le_bytes()[..3].to_vec())
+            .collect();
+        let mut decoder = decode(wav(&fmt(PCM, 1, 24), &[], &bytes, None));
+        assert_eq!(
+            decoder.read_all().unwrap()[0],
+            [8_388_607.0 / 8_388_608.0, -1.0, 0.5]
+        );
+        let bytes: Vec<u8> = [i32::MIN, 1 << 30]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let mut decoder = decode(wav(&fmt(PCM, 1, 32), &[], &bytes, None));
+        assert_eq!(decoder.read_all().unwrap()[0], [-1.0, 0.5]);
+    }
+
+    #[test]
+    fn compressed_and_broken_files_are_refused() {
+        let adpcm = wav(&fmt(2, 1, 4), &[], &[0; 8], None);
+        let refused = Decoder::new(Box::new(Cursor::new(adpcm)));
+        assert!(matches!(refused, Err(AudioError::Unsupported(_))));
+        // Without its fmt chunk: 12 bytes of header, then 8 + 16 of fmt.
+        let whole = wav(&fmt(PCM, 1, 16), &[], &[0; 4], None);
+        let no_fmt = [&whole[..12], &whole[36..]].concat();
+        let refused = Decoder::new(Box::new(Cursor::new(no_fmt)));
+        assert!(matches!(refused, Err(AudioError::Invalid(_))));
+    }
+
+    #[test]
+    fn written_files_are_padded_to_even_chunks() {
+        let signal = signal(1, 11);
+        let mut bytes = Vec::new();
+        write(&mut bytes, 8000, SampleFormat::Int24, &[&signal[0]]).unwrap();
+        // 33 bytes of samples and a byte of padding.
+        assert_eq!(bytes.len(), 44 + 34);
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(riff as usize, bytes.len() - 8);
+        assert_eq!(decode(bytes).info().format, Format::Wav);
+    }
+}

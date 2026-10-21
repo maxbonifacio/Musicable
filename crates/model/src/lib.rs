@@ -4,15 +4,18 @@
 //! compiles a [`Project`] into a processing graph; the UI edits it through
 //! commands. [`time`] has musical time: beats, bars and the tempo map.
 //! [`mixer`] has the mixer's rules: where tracks can send their signal, and
-//! what mute and solo silence.
+//! what mute and solo silence. [`clip`] has what tracks play: audio clips,
+//! and MIDI clips of notes with per-note expression.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
 //! `docs/project-format.md` for how.
 
+pub mod clip;
 pub mod mixer;
 pub mod time;
 
+use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
 use time::{BeatRange, Beats, TempoMap};
 
@@ -38,8 +41,8 @@ impl TrackKind {
     }
 }
 
-/// A test oscillator: Tier 0's only sound source, standing in for clips and
-/// instruments.
+/// A test oscillator: Tier 0's only sound source. It plays along with a
+/// track's clips.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TestTone {
     /// In Hz.
@@ -87,6 +90,19 @@ pub enum DeviceKind {
     /// Multiplies the signal by a linear gain, 1.0 = unity. It stands in for
     /// real devices until there are some.
     TestGain { gain: f32 },
+    /// Plays the notes of its track's MIDI clips with a plain tone, added to
+    /// what comes into it: a test instrument, standing in for instruments
+    /// until there are plugins. `level` is the linear amplitude of a note
+    /// at full velocity.
+    TestInstrument { level: f32 },
+}
+
+impl DeviceKind {
+    /// Whether the device plays notes. A MIDI track's notes go to its first
+    /// instrument.
+    pub fn is_instrument(&self) -> bool {
+        matches!(self, Self::TestInstrument { .. })
+    }
 }
 
 /// Stable identifier for a send, unique within a project.
@@ -129,10 +145,42 @@ pub struct Track {
     /// At most one to each return track.
     pub sends: Vec<Send>,
     pub tone: Option<TestTone>,
+    /// Audio clips on audio tracks, MIDI clips on MIDI tracks, and none on
+    /// buses. In any order: the arrangement places them by position.
+    pub clips: Vec<Clip>,
     /// In signal order.
     pub devices: Vec<Device>,
     pub clip_type: ClipType,
     pub console: ConsoleSettings,
+}
+
+impl Track {
+    /// Whether the track can hold `content`: audio clips go on audio tracks
+    /// and MIDI clips on MIDI tracks.
+    pub fn holds(&self, content: &ClipContent) -> bool {
+        matches!(
+            (self.kind, content),
+            (TrackKind::Audio, ClipContent::Audio(_)) | (TrackKind::Midi, ClipContent::Midi(_))
+        )
+    }
+
+    pub fn clip(&self, id: ClipId) -> Option<&Clip> {
+        self.clips.iter().find(|c| c.id == id)
+    }
+
+    pub fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
+        self.clips.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Where the clip with `id` is in the track's clip list.
+    pub fn clip_index(&self, id: ClipId) -> Option<usize> {
+        self.clips.iter().position(|c| c.id == id)
+    }
+
+    /// The first of the track's devices that plays notes.
+    pub fn instrument(&self) -> Option<&Device> {
+        self.devices.iter().find(|d| d.kind.is_instrument())
+    }
 }
 
 /// The master bus's channel: every track that doesn't feed a group feeds
@@ -180,6 +228,8 @@ pub struct Project {
     pub next_send_id: u32,
     /// The same for devices, on tracks and on the master.
     pub next_device_id: u32,
+    /// The same for clips.
+    pub next_clip_id: u32,
 }
 
 impl Default for Project {
@@ -196,6 +246,7 @@ impl Default for Project {
             next_track_id: 0,
             next_send_id: 0,
             next_device_id: 0,
+            next_clip_id: 0,
         }
     }
 }
@@ -234,6 +285,7 @@ impl Project {
             output: Bus::Master,
             sends: Vec::new(),
             tone: None,
+            clips: Vec::new(),
             devices: Vec::new(),
             clip_type: ClipType::Off,
             console: ConsoleSettings::default(),
@@ -259,6 +311,22 @@ impl Project {
         }
     }
 
+    /// A clip with the next clip id, for the caller to put on a track.
+    pub fn new_clip(
+        &mut self,
+        name: impl Into<String>,
+        range: BeatRange,
+        content: ClipContent,
+    ) -> Clip {
+        Clip {
+            id: ClipId(next_id(&mut self.next_clip_id, "clip")),
+            name: name.into(),
+            start: range.start,
+            length: range.len(),
+            content,
+        }
+    }
+
     pub fn track(&self, id: TrackId) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == id)
     }
@@ -273,9 +341,9 @@ impl Project {
     }
 }
 
-/// Takes the next id from a project's counter. An id is only handed out if
+/// Takes the next id from a counter in the project. An id is only handed out if
 /// the counter can move past it, so `u32::MAX` is never an id.
-fn next_id(counter: &mut u32, what: &str) -> u32 {
+pub(crate) fn next_id(counter: &mut u32, what: &str) -> u32 {
     let id = *counter;
     *counter = id
         .checked_add(1)
@@ -334,6 +402,39 @@ mod tests {
             p.new_device(DeviceKind::TestGain { gain: 1.0 }).id,
             device.id
         );
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let midi = || ClipContent::Midi(clip::MidiClip::default());
+        let clip = p.new_clip("", range, midi());
+        assert_ne!(p.new_clip("", range, midi()).id, clip.id);
+    }
+
+    #[test]
+    fn tracks_hold_clips_of_their_kind() {
+        let mut p = Project::new();
+        let audio = ClipContent::Audio(clip::AudioClip::new("take.wav"));
+        let midi = ClipContent::Midi(clip::MidiClip::default());
+        let holds = |p: &mut Project, kind| {
+            let id = p.add_track("", kind);
+            let track = p.track(id).unwrap();
+            (track.holds(&audio), track.holds(&midi))
+        };
+        assert_eq!(holds(&mut p, TrackKind::Audio), (true, false));
+        assert_eq!(holds(&mut p, TrackKind::Midi), (false, true));
+        assert_eq!(holds(&mut p, TrackKind::Return), (false, false));
+        assert_eq!(holds(&mut p, TrackKind::Group), (false, false));
+    }
+
+    #[test]
+    fn a_tracks_notes_go_to_its_first_instrument() {
+        let mut p = Project::new();
+        let id = p.add_track("Keys", TrackKind::Midi);
+        let gain = p.new_device(DeviceKind::TestGain { gain: 0.5 });
+        let first = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let second = p.new_device(DeviceKind::TestInstrument { level: 0.25 });
+        let track = p.track_mut(id).unwrap();
+        assert!(track.instrument().is_none());
+        track.devices = vec![gain, first.clone(), second];
+        assert_eq!(track.instrument(), Some(&first));
     }
 
     #[test]

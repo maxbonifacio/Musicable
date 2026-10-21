@@ -28,7 +28,7 @@ impl Rig {
     /// would.
     fn new(project: Project) -> Self {
         let (engine, handle) = Engine::new(CONFIG);
-        let mut session = Session::new(project, Keymap::default_keymap(), handle);
+        let mut session = Session::new(project, None, Keymap::default_keymap(), handle);
         session.wait_for_graph();
         Self { engine, session }
     }
@@ -89,7 +89,7 @@ fn opening_a_project_stops_at_its_start() {
     rig.render(10_000);
     assert!(rig.session.is_modified());
 
-    rig.session.open(demo_project());
+    rig.session.open(demo_project(), None);
     rig.session.wait_for_graph();
     rig.render(100);
     let stats = rig.session.stats();

@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{ClipType, DeviceKind, Project, TestTone, Track, TrackId, TrackKind};
@@ -27,6 +28,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("tempo-changes", tempo_changes()),
         ("awkward-values", awkward_values()),
         ("mixer", mixer()),
+        ("clips", clips()),
     ]
 }
 
@@ -239,6 +241,67 @@ fn mixer() -> Project {
     project.master.pan = -0.0;
     project.master.clip_type = ClipType::Soft;
     project.next_device_id += 2;
+    project
+}
+
+/// Clips, from version 3: audio takes that crossfade, one from a second
+/// into its file and one at an absolute path, MIDI clips of notes with every
+/// kind of expression, notes alike, a test instrument, a clip starting into
+/// its notes, and ids with gaps where clips and notes were deleted.
+fn clips() -> Project {
+    let mut project = Project::new();
+    project.tempo.set_tempo(96.0);
+    let drums = project.add_track("Drums", TrackKind::Audio);
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+
+    let deleted = ClipContent::Audio(AudioClip::new("gone.wav"));
+    project.new_clip("Deleted", beats(0, 1), deleted);
+    let mut first = AudioClip::new("Audio/Drums take 1.wav");
+    first.fade_out = Beats::new(1);
+    let first = project.new_clip("Take 1", beats(0, 8), ClipContent::Audio(first));
+    let mut second = AudioClip::new("Audio/Drums take 2.flac");
+    second.offset = 48_000;
+    second.gain = 0.5;
+    second.fade_in = Beats::new(1);
+    second.fade_out = Beats::from_ratio(1, 3);
+    let second = project.new_clip("Take 2", beats(7, 16), ClipContent::Audio(second));
+    let hit = ClipContent::Audio(AudioClip::new("C:/Samples/Hit.aiff"));
+    let hit = project.new_clip("Hit", beats(16, 17), hit);
+    project.track_mut(drums).unwrap().clips = vec![first, second, hit];
+
+    let mut chords = MidiClip {
+        offset: Beats::from_ratio(-1, 2),
+        ..MidiClip::default()
+    };
+    for (i, key) in [60, 64, 67].into_iter().enumerate() {
+        let note = chords.add_note(Beats::ZERO, Beats::new(4), key, 0.5 + i as f32 / 8.0);
+        note.release_velocity = 0.25;
+    }
+    let lead = chords.add_note(Beats::new(4), Beats::new(2), 72, 1.0);
+    // Bent up a tone, then all the way down; pressed harder on the same
+    // tick, which wins; and slid after the note ends, where it doesn't play.
+    lead.expression.pitch_bend = vec![
+        Point::new(Beats::ZERO, 0.0),
+        Point::new(Beats::from_ratio(1, 2), 2.0),
+        Point::new(Beats::new(1), -120.0),
+    ];
+    lead.expression.pressure = vec![
+        Point::new(Beats::from_ratio(1, 4), 0.3),
+        Point::new(Beats::from_ratio(1, 4), 0.9),
+    ];
+    lead.expression.timbre = vec![Point::new(Beats::new(3), 1.0)];
+    chords.add_note(Beats::new(6), Beats::new(1), 0, 0.0);
+    chords.add_note(Beats::new(6), Beats::new(1), 0, 0.0);
+    let gone = chords.add_note(Beats::new(7), Beats::new(1), 127, 1.0).id;
+    chords.notes.retain(|note| note.id != gone);
+    let chords = project.new_clip("Chords", beats(0, 8), ClipContent::Midi(chords));
+    let empty = project.new_clip("", beats(8, 9), ClipContent::Midi(MidiClip::default()));
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.25 });
+    let track = project.track_mut(keys).unwrap();
+    track.clips = vec![empty, chords];
+    track.devices = vec![instrument];
+    project.next_clip_id += 1;
     project
 }
 
