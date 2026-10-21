@@ -2,7 +2,7 @@
 
 use musicable_model::time::TempoMap;
 
-use crate::{Inputs, NodeEvent, PreparedGraph, ProcessContext, TransportState};
+use crate::{Inputs, NodeEvent, PreparedGraph, ProcessContext, TransportState, rt};
 
 /// One block, as a renderer sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,6 +38,9 @@ pub trait Renderer: Send {
     /// Processes every node of `graph` once, each after all of its inputs.
     /// The engine has already put each node's events for the block into
     /// `graph`.
+    ///
+    /// Nodes run with denormals flushed to zero
+    /// ([`rt::flush_denormals`]), whichever thread runs them.
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>);
 }
 
@@ -50,27 +53,31 @@ pub struct ReferenceRenderer;
 
 impl Renderer for ReferenceRenderer {
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
-        let PreparedGraph {
-            config,
-            nodes,
-            inputs,
-            order,
-            buffers,
-            events,
-            event_ranges,
-            ..
-        } = graph;
-        for &node in order.iter() {
-            // Take the node's buffer out so its inputs can be read alongside
-            // it. No node feeds itself, and taking leaves an empty buffer, so
-            // nothing is allocated or freed.
-            let mut output = std::mem::take(&mut buffers[node.0]);
-            let (start, end) = event_ranges[node.0];
-            let ctx = block.context(config.sample_rate, &events[start as usize..end as usize]);
-            let inputs = Inputs::graph(buffers, &inputs[node.0], block.frames);
-            nodes[node.0].process(&ctx, inputs, &mut output.view_mut(block.frames));
-            buffers[node.0] = output;
-        }
+        rt::flush_denormals(|| render_in_order(graph, block));
+    }
+}
+
+fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
+    let PreparedGraph {
+        config,
+        nodes,
+        inputs,
+        order,
+        buffers,
+        events,
+        event_ranges,
+        ..
+    } = graph;
+    for &node in order.iter() {
+        // Take the node's buffer out so its inputs can be read alongside it.
+        // No node feeds itself, and taking leaves an empty buffer, so nothing
+        // is allocated or freed.
+        let mut output = std::mem::take(&mut buffers[node.0]);
+        let (start, end) = event_ranges[node.0];
+        let ctx = block.context(config.sample_rate, &events[start as usize..end as usize]);
+        let inputs = Inputs::graph(buffers, &inputs[node.0], block.frames);
+        nodes[node.0].process(&ctx, inputs, &mut output.view_mut(block.frames));
+        buffers[node.0] = output;
     }
 }
 

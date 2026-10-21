@@ -1,4 +1,5 @@
-//! Real-time safety checks.
+//! Real-time safety checks, and the floating-point mode real-time code runs
+//! in.
 //!
 //! Code on the audio thread must not allocate or free memory, lock, block or
 //! do I/O. [`scope`] marks the calling thread as real-time while it runs a
@@ -18,6 +19,11 @@
 //! Locks can't be caught this way: an uncontended Rust lock never leaves user
 //! space, so there is nothing to intercept. Clippy bans lock types, sleeping
 //! and printing in this crate instead (`crates/engine/clippy.toml`).
+//!
+//! Nodes run with denormal floats flushed to zero ([`flush_denormals`]), as
+//! in every DAW: arithmetic on numbers that small is many times slower on
+//! most CPUs, and a decaying filter or reverb tail produces them for as long
+//! as it rings.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::backtrace::{Backtrace, BacktraceStatus};
@@ -138,6 +144,117 @@ fn check(call: Call) {
     RECORDING.set(false);
 }
 
+/// Runs `f` with denormal floats flushed to zero on the calling thread, and
+/// puts the thread's floating-point mode back afterwards, even if `f`
+/// panics.
+///
+/// Denormals (subnormals) are the floats closer to zero than
+/// `f32::MIN_POSITIVE`. In this mode, results that small become zero, and
+/// so do inputs that small. On x86-64 this sets MXCSR's flush-to-zero and
+/// denormals-are-zero bits, and on AArch64 FPCR's flush-to-zero bit. On other
+/// targets, and under Miri, it just runs `f`.
+///
+/// The renderers run every node this way, on the audio thread and on the
+/// parallel renderer's workers alike, so they keep matching sample for
+/// sample. Rust assumes the default floating-point mode, so a constant the
+/// compiler works out ahead of time keeps a denormal that the same sum at run
+/// time would flush. That's the same for every thread, so it can't make the
+/// renderers differ, but node code shouldn't rely on denormals either way.
+pub fn flush_denormals<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(fp::Mode);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            fp::set(self.0);
+        }
+    }
+    let mode = fp::get();
+    fp::set(mode | fp::FLUSH);
+    let _restore = Restore(mode);
+    f()
+}
+
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+mod fp {
+    use std::arch::asm;
+
+    pub(super) type Mode = u32;
+
+    /// MXCSR's flush-to-zero (FTZ, bit 15) and denormals-are-zero (DAZ, bit
+    /// 6) bits.
+    pub(super) const FLUSH: Mode = 1 << 15 | 1 << 6;
+
+    pub(super) fn get() -> Mode {
+        let mut csr: Mode = 0;
+        // SAFETY: `stmxcsr` stores the 4-byte MXCSR at the address given,
+        // which is `csr`'s.
+        unsafe {
+            asm!(
+                "stmxcsr dword ptr [{}]",
+                in(reg) &raw mut csr,
+                options(nostack, preserves_flags),
+            );
+        }
+        csr
+    }
+
+    pub(super) fn set(csr: Mode) {
+        // SAFETY: `ldmxcsr` loads MXCSR from the 4 bytes at the address
+        // given, which are `csr`'s. Callers only change the FTZ and DAZ bits,
+        // which change how denormals round and nothing else.
+        unsafe {
+            asm!(
+                "ldmxcsr dword ptr [{}]",
+                in(reg) &raw const csr,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+mod fp {
+    use std::arch::asm;
+
+    pub(super) type Mode = u64;
+
+    /// FPCR's flush-to-zero bit (FZ, bit 24), which flushes denormal inputs
+    /// and results alike.
+    pub(super) const FLUSH: Mode = 1 << 24;
+
+    pub(super) fn get() -> Mode {
+        let fpcr: Mode;
+        // SAFETY: reading FPCR has no side effects.
+        unsafe {
+            asm!("mrs {}, fpcr", out(reg) fpcr, options(nomem, nostack, preserves_flags));
+        }
+        fpcr
+    }
+
+    pub(super) fn set(fpcr: Mode) {
+        // SAFETY: callers only change the FZ bit, which changes how denormals
+        // round and nothing else.
+        unsafe {
+            asm!("msr fpcr, {}", in(reg) fpcr, options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+#[cfg(not(any(
+    all(target_arch = "x86_64", not(miri)),
+    all(target_arch = "aarch64", not(miri))
+)))]
+mod fp {
+    pub(super) type Mode = u32;
+
+    pub(super) const FLUSH: Mode = 0;
+
+    pub(super) fn get() -> Mode {
+        0
+    }
+
+    pub(super) fn set(_: Mode) {}
+}
+
 // SAFETY: every call is forwarded unchanged to the system allocator.
 unsafe impl GlobalAlloc for CheckedAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -203,5 +320,46 @@ mod tests {
         assert!(message.contains("4 heap allocator call(s)"), "{message}");
         // A clean scope afterwards starts from zero.
         scope(|| ());
+    }
+
+    /// Whether this target flushes denormals in [`flush_denormals`].
+    const FLUSHES: bool = cfg!(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(miri)
+    ));
+
+    fn halve(x: f32) -> f32 {
+        std::hint::black_box(x) * std::hint::black_box(0.5)
+    }
+
+    #[test]
+    fn denormals_flush_to_zero_inside_and_not_outside() {
+        let tiny = f32::MIN_POSITIVE;
+        assert!(halve(tiny) > 0.0, "the default mode keeps denormals");
+        let inside = flush_denormals(|| halve(tiny));
+        if FLUSHES {
+            assert_eq!(inside, 0.0);
+            // Denormal inputs count as zero too.
+            let denormal = std::hint::black_box(tiny / 4.0);
+            assert_eq!(
+                flush_denormals(|| denormal * std::hint::black_box(2.0)),
+                0.0
+            );
+        } else {
+            assert_eq!(inside, tiny / 2.0);
+        }
+        assert!(halve(tiny) > 0.0, "the mode comes back afterwards");
+        // Nested, the outer mode stays until the outer call ends.
+        flush_denormals(|| {
+            flush_denormals(|| ());
+            assert_eq!(halve(tiny) == 0.0, FLUSHES);
+        });
+    }
+
+    #[test]
+    fn a_panic_puts_the_mode_back() {
+        let result = std::panic::catch_unwind(|| flush_denormals(|| panic!("in a node")));
+        assert!(result.is_err());
+        assert!(halve(f32::MIN_POSITIVE) > 0.0);
     }
 }

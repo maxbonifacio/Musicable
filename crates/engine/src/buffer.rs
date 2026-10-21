@@ -243,6 +243,29 @@ impl<'a> AudioRef<'a> {
             }
         }
     }
+
+    /// Adds the frames to `out`, interleaved for a device with `channels`
+    /// channels, the way [`write_interleaved`](Self::write_interleaved)
+    /// writes them.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly `frames * channels` samples long.
+    pub fn add_interleaved(&self, out: &mut [f32], channels: usize) {
+        assert_eq!(
+            out.len(),
+            self.frames * channels,
+            "interleaved buffer length"
+        );
+        for c in 0..channels {
+            if let Some(source) = source_channel(self.channels, c) {
+                let samples = out[c..].iter_mut().step_by(channels);
+                for (o, s) in samples.zip(self.channel(source)) {
+                    *o += *s;
+                }
+            }
+        }
+    }
 }
 
 /// A writable view of planar audio: `channels` channels of `frames` frames.

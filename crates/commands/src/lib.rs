@@ -5,8 +5,8 @@
 //! scripting and agent control all go through this registry, so remapping a
 //! hotkey is just editing a [`Keymap`]. The user's changes to the default
 //! keymap live in a [`KeymapFile`]. Commands change the project only through
-//! transactions on its [`Document`]. `docs/commands.md` describes all of it
-//! and lists the commands.
+//! transactions on its [`Document`], which keeps the undo history.
+//! `docs/commands.md` describes all of it and lists the commands.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -15,7 +15,9 @@ use std::fmt;
 use musicable_model::time::Beats;
 
 mod document;
+pub mod edit;
 pub mod file;
+mod history;
 mod key;
 mod keymap;
 pub mod transport;

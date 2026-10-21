@@ -60,6 +60,7 @@ pub struct Graph {
     /// `outputs[n]` lists the nodes that node `n` feeds.
     outputs: Vec<Vec<NodeId>>,
     output: Option<NodeId>,
+    cue: Option<NodeId>,
 }
 
 impl Graph {
@@ -109,6 +110,16 @@ impl Graph {
         Ok(())
     }
 
+    /// Sets the cue output: a node the engine plays alongside the output,
+    /// not through it, such as the metronome. The engine adds it to the
+    /// device's buffer after the output, so it's in what you hear but not
+    /// in the mix.
+    pub fn set_cue(&mut self, node: NodeId) -> Result<(), GraphError> {
+        self.check(node)?;
+        self.cue = Some(node);
+        Ok(())
+    }
+
     /// Orders the nodes, calls [`Node::prepare`] on each and allocates their
     /// buffers.
     ///
@@ -145,6 +156,7 @@ impl Graph {
             inputs: self.inputs,
             order,
             output,
+            cue: self.cue,
             buffers,
             by_key,
             events: Vec::with_capacity(EVENT_CAPACITY),
@@ -207,6 +219,7 @@ pub struct PreparedGraph {
     /// Every node comes after all of its inputs.
     pub(crate) order: Vec<NodeId>,
     pub(crate) output: NodeId,
+    pub(crate) cue: Option<NodeId>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -247,6 +260,12 @@ impl PreparedGraph {
     /// The output node's most recent `frames` frames.
     pub fn output(&self, frames: usize) -> AudioRef<'_> {
         self.buffers[self.output.0].view(frames)
+    }
+
+    /// The cue node's most recent `frames` frames, if the graph has one (see
+    /// [`Graph::set_cue`]).
+    pub fn cue(&self, frames: usize) -> Option<AudioRef<'_>> {
+        self.cue.map(|cue| self.buffers[cue.0].view(frames))
     }
 
     pub(crate) fn find(&self, key: NodeKey) -> Option<NodeId> {
@@ -305,6 +324,7 @@ impl fmt::Debug for PreparedGraph {
             .field("config", &self.config)
             .field("nodes", &self.nodes.len())
             .field("output", &self.output)
+            .field("cue", &self.cue)
             .finish_non_exhaustive()
     }
 }

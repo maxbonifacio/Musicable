@@ -13,7 +13,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | Crate | Depends on | Holds |
 |---|---|---|
 | `model` | nothing | The project as plain data: tracks, the tempo map, the loop, musical time |
-| `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project |
+| `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
 | `plugins` | `engine` | Nothing yet: CLAP and VST3 hosting in Tier 1, ARA in Tier 2 |
@@ -30,18 +30,22 @@ compiler, a node and the UI, in that order.
 
 | Thread | What it runs | Priority |
 |---|---|---|
-| Main | The window and the `Session`: key presses, commands, transactions, compiling graphs, sending the engine what changed | Normal |
+| Main | The window and the `Session`: key presses, commands, transactions, sending the engine what changed | Normal |
+| Compiler (`musicable-compiler`) | Building and preparing the graphs the session asks for: `compile()`, then `Graph::prepare` | Normal |
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 
 There is one worker per physical core, minus one for the audio thread,
 which works too. While audio plays, the main thread meets the audio thread
 and the workers only at lock-free queues and atomics, and nothing on those
-threads locks, allocates, frees or does I/O.
+threads locks, allocates, frees or does I/O. The audio thread and the
+workers run nodes with denormals flushed to zero, all of them alike
+([engine.md](engine.md#denormals)).
 
-The engine crate also has a `Compiler` that compiles model snapshots on a
-thread of its own. The app doesn't use it yet: it compiles on the main
-thread, which is quick for Tier 0 projects.
+The session never builds a graph itself. It hands the project to the
+engine crate's `Compiler`, which builds and prepares the graph on its own
+thread, so a node that's slow to prepare, as a plugin loading can be, never
+holds up the window. `Session::tick` sends the graph on when it's ready.
 
 ## From a key press to sound
 
@@ -64,8 +68,10 @@ Pressing Space with the demo open:
 4. After the command, `Session::sync` turns what the committed transactions
    changed into messages for the engine: a tempo map, a loop, a parameter
    value. A change to what the graph holds, such as a new track, means a new
-   graph: `compile()`, then `Graph::prepare` for the engine's sample rate
-   and block size, then `EngineHandle::swap_graph`.
+   graph: the compiler's thread runs `compile()`, then `Graph::prepare` for
+   the engine's sample rate and block size, and once it's done, the session
+   sends it with `EngineHandle::swap_graph`. The old graph plays on until
+   then.
 5. The messages reach the audio thread through a lock-free queue.
    `Engine::process_interleaved` takes them at the start of the next device
    callback. It installs a new graph between blocks, where each node takes
@@ -76,7 +82,8 @@ Pressing Space with the demo open:
    `ParallelRenderer` runs each node as soon as its inputs are done, on the
    workers and the audio thread, or on the audio thread alone when a block
    has too little work to share. The master bus's output goes into the
-   device's buffer.
+   device's buffer, and the cue bus, which the metronome feeds, is added on
+   top.
 
 On the way back, the engine keeps its counters in atomics (`Stats`: the
 playhead, whether it plays, late and dropped events), and so does the stream
@@ -92,8 +99,9 @@ Tier 1 has to keep these. The tests check most of them.
 
 - **Every change to the project is a command and a transaction.**
   `Document` hands out `&Project` only. That's what makes every action
-  remappable, and gives undo and ARA's change notifications one place to
-  start from ([commands.md](commands.md#transactions)).
+  remappable and every change undoable, and gives ARA's change
+  notifications one place to start from
+  ([commands.md](commands.md#transactions)).
 - **Nothing on the audio thread or the workers allocates, frees, locks,
   blocks or does I/O.** Allocate in `Node::prepare`, and in `Node::adopt`
   swap resources with the old node instead of dropping them. Debug builds
@@ -104,12 +112,18 @@ Tier 1 has to keep these. The tests check most of them.
   no state shared between nodes outside the graph's connections. Buses sum
   their inputs in connection order. The equivalence tests check thousands
   of random graphs on every CI run, and `musicable null-test` checks any
-  project on any machine ([app.md](app.md#the-null-test)).
+  project on any machine ([app.md](app.md#the-null-test)). Every thread
+  that runs nodes flushes denormals to zero, so they all do the same
+  arithmetic.
 - **Time comes from the song position, not from counting blocks.** A node
   that depends on time, such as the test tone's phase or the metronome's
   clicks, works it out from the block's song position and the tempo map. So
   loops, locates and any block size give the same samples. Clip players and
   automation should work the same way.
+- **What would click when it jumps ramps instead**, with
+  `nodes::Smoothed`, as gain stages do. A ramp counts frames from its
+  event, never blocks, so it lands on the same samples however the blocks
+  fall ([engine.md](engine.md#parameter-smoothing)).
 - **Node keys come from model ids** (`compile::keys`), so a node keeps its
   state when the project is recompiled. A new kind of node gets its own role
   in the key.
@@ -121,7 +135,8 @@ Tier 1 has to keep these. The tests check most of them.
   ([project-format.md](project-format.md#changing-the-format)).
 - **`Edit` isn't `#[non_exhaustive]`, on purpose.** A new kind of edit stops
   the app compiling until `Session::sync` says what the engine should do
-  about it.
+  about it, and the commands crate until undo knows how to take it back
+  ([commands.md](commands.md#undo-and-redo)).
 
 ## Where Tier 1 starts
 
@@ -141,12 +156,13 @@ built yet, except where it says so.
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it, where the
   comment in `compile()` marks the place. Each device needs an id in the
   model for its node key. CLAP and VST3 instances live in `crates/plugins`
-  as `Node`s: created and activated off the audio thread in `prepare`, and
-  handed from the old graph to the new one in `adopt`. A plugin's own
-  parameter changes come back to the model as transactions, so undo covers
-  them. Scanning should run in a separate process, so a plugin that crashes
-  doesn't take the app with it. [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html)
-  can check plugin code for what our allocation checker can't see.
+  as `Node`s: created and activated in `prepare`, which runs on the
+  compiler's thread, and handed from the old graph to the new one in
+  `adopt`. A plugin's own parameter changes come back to the model as
+  transactions, so undo covers them. Scanning should run in a separate
+  process, so a plugin that crashes doesn't take the app with it.
+  [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
+  plugin code for what our allocation checker can't see.
 - **Plugin delay compensation.** Nodes need to report their
   latency (a `Node::latency` method), and `Graph::prepare` needs a pass that
   delays the faster paths wherever paths of different latency meet, and
@@ -156,24 +172,32 @@ built yet, except where it says so.
   sends every track straight to the master. Groups become buses with strips
   of their own, sends become gain stages feeding a return's bus, and every
   bus sums through `compile::Summing`, so console mode can model it later.
-  Pan and solo are new stages or parameters. Meters need a way back from
-  the engine: a peak and RMS level per track in atomics, read like `Stats`.
+  Pan and solo are new stages or parameters, and pan and send levels ramp
+  with `nodes::Smoothed`. For an edit that changes the graph's shape,
+  `Session::sync` calls `EngineLink::recompile`, which compiles the new
+  graph in the background while the old one plays on. Meters need a way
+  back from the engine: a peak and RMS level per track in atomics, read
+  like `Stats`.
 - **Automation.** Parameter events are already sample-accurate, but a lane
   belongs in the graph, not in the message queue, which holds 1,024
   messages. Compile each lane into its node, or into an automation node, and
   read it at the song position, so it loops and locates like everything
-  else. Parameters jump to new values today, so automation needs smoothing.
+  else. A lane can give its node a value per frame, which needs no
+  smoothing; values that arrive as events ramp over 10 ms
+  (`nodes::Smoothed`).
 - **Recording.** The audio backend only has outputs. Recording needs capture
   streams and their latency, input nodes in the graph, and a recorder that
   passes buffers to a disk-writing thread through a lock-free queue. The
   input and output latency place recorded audio where it was played. System
   loopback on Windows is another capture stream, resampled when its device
   runs on another clock.
-- **Undo and redo.** `Document::take_committed` already hands over every
-  committed transaction, with the old and new value of each edit. Undo keeps
-  them in a history and applies the old values as a transaction of its own.
-  Playing, stopping and locating aren't transactions, so undo leaves them
-  alone.
+- **Undo and redo.** Built: every committed transaction is a step in the
+  document's history, and undo applies its edits' old values as a
+  transaction of its own, which `Session::sync` sends to the engine like any
+  other. A new kind of edit is undoable once it has its inverse
+  ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's,
+  should be a gesture (`Action::BeginGesture` and `EndGesture`), as the
+  tempo field's is, so it's one step.
 - **Export.** Rendering faster than real time is the engine without a
   device. `null_test::Player` already plays a project offline, block by
   block, with either renderer; export does the same on a background thread
@@ -189,11 +213,6 @@ built yet, except where it says so.
 
 ## Known gaps
 
-- The app compiles graphs on the main thread. Once plugins make preparing a
-  graph slow, move it to the `Compiler` so the window stays responsive.
-- Parameters change instantly, with no smoothing.
-- Nothing sets flush-to-zero on the audio thread. Whatever does has to set
-  the workers the same way, or the renderers stop matching.
 - Workers get real-time priority on Windows only. On macOS they should join
   the audio device's workgroup.
 - Windows gives a process 32 real-time (MMCSS) threads, since Windows 10,
@@ -203,9 +222,10 @@ built yet, except where it says so.
   shared block can wait on one of them. The app stops an old engine's
   workers before a new engine's start for the same reason. Capping the
   workers on such machines is for Tier 1.
-- The metronome feeds the master; it belongs on a cue output.
 - The engine plays in stereo. A device with more channels gets silence on
-  the rest.
+  the rest, and the cue output, with the metronome, plays through the same
+  two channels as the master. Routing it to outputs of its own, such as
+  headphones, comes with more channels.
 
 ## Testing
 

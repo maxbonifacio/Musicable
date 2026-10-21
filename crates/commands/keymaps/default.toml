@@ -21,6 +21,10 @@ version = 1
 "transport.tempo_up" = ["Ctrl+Shift+Up"]
 "transport.tempo_down" = ["Ctrl+Shift+Down"]
 
+# Live's keys for undo and redo, and the other common one for redo.
+"edit.undo" = ["Ctrl+Z"]
+"edit.redo" = ["Ctrl+Y", "Ctrl+Shift+Z"]
+
 # Live's keys for its own files.
 "file.new" = ["Ctrl+N"]
 "file.open" = ["Ctrl+O"]
