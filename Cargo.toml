@@ -12,6 +12,7 @@ rust-version = "1.86"
 musicable-model = { path = "crates/model" }
 musicable-commands = { path = "crates/commands" }
 musicable-engine = { path = "crates/engine" }
+musicable-audio = { path = "crates/audio" }
 musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-ui = { path = "crates/ui" }
