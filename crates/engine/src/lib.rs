@@ -22,22 +22,27 @@ use std::any::Any;
 use musicable_model::time::TempoMap;
 
 pub mod buffer;
+pub mod clips;
 pub mod compile;
 mod engine;
 pub mod event;
 pub mod graph;
+pub mod media;
 pub mod meter;
 pub mod nodes;
 mod parallel;
 mod render;
+mod resample;
 pub mod rt;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
-pub use compile::{Compiled, Compiler, compile, compile_metered};
+pub use compile::{Compiled, Compiler, compile, compile_metered, compile_with_media};
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
-pub use event::{Event, NodeEvent, NodeEventKind, ParamId, TransportCommand, TransportState};
-pub use graph::{Graph, GraphError, NodeId, NodeKey, PreparedGraph};
+pub use event::{
+    Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
+};
+pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
@@ -86,6 +91,17 @@ pub trait Node: Any + Send {
     /// Renders one block into `output`, applying `ctx.events` at their
     /// offsets.
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>);
+
+    /// Sends the notes the node plays in the block about to render, for a
+    /// node whose notes go somewhere ([`Graph::send_notes`]), such as a MIDI
+    /// clip player. The engine calls it on the audio thread before any node
+    /// renders the block, so it must be real-time safe too.
+    ///
+    /// `ctx.events` holds the notes sent to the node for the block, in order
+    /// of offset, from the nodes whose notes come to it and from the engine,
+    /// so a MIDI effect can play them on, changed. They come here instead of
+    /// with [`process`](Node::process), which gets the node's other events.
+    fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
 }
 
 impl dyn Node {

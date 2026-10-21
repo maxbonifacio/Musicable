@@ -17,6 +17,8 @@ musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-ui = { path = "crates/ui" }
 rtrb = "0.4"
+# Decodes FLAC frames; finding them is ours (io::audio).
+claxon = "0.4"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip reads every float back exactly as it was written.
 serde_json = { version = "1", features = ["float_roundtrip"] }

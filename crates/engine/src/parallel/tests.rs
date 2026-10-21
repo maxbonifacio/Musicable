@@ -61,8 +61,9 @@ impl Node for Mix {
         let mut events = ctx.events.iter().peekable();
         for frame in 0..ctx.frames {
             while let Some(event) = events.next_if(|e| e.offset == frame) {
-                let NodeEventKind::Param { param, value } = event.kind;
-                self.state += (param.0 as f32 + 1.0) * value as f32;
+                if let NodeEventKind::Param { param, value } = event.kind {
+                    self.state += (param.0 as f32 + 1.0) * value as f32;
+                }
             }
             for c in 0..self.channels {
                 let mut acc = self.state + block;
@@ -232,7 +233,7 @@ fn render(
     let transport = TransportState {
         playing: block.playing,
         position: time / 2,
-        looping: None,
+        ..TransportState::default()
     };
     let block = Block {
         frames: block.frames,

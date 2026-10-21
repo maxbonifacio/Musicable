@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::graph::Routed;
 use crate::transport::Transport;
 use crate::{
     AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, NodeEvent, NodeEventKind, NodeKey,
@@ -20,7 +19,8 @@ const QUEUE_CAPACITY: usize = 1024;
 /// Old graphs and tempo maps the engine can hand back before it holds off
 /// further swaps.
 const GARBAGE_CAPACITY: usize = 16;
-/// Events the engine holds until they are due, and the most one block takes.
+/// Events the engine holds until they are due, and the most one block takes,
+/// besides the notes the graph's own nodes play.
 pub(crate) const EVENT_CAPACITY: usize = 1024;
 
 enum Message {
@@ -76,9 +76,10 @@ pub struct Stats {
     /// Events applied later than the time they were sent for.
     pub events_late: u64,
     /// Events dropped because the engine was already holding as many as it
-    /// can.
+    /// can, and notes a node played beyond the most a block takes (see
+    /// [`Notes::CAPACITY`](crate::Notes::CAPACITY)).
     pub events_dropped: u64,
-    /// Parameter events whose node key wasn't in the running graph.
+    /// Parameter and note events whose node key wasn't in the running graph.
     pub events_unmatched: u64,
     /// Device underruns and overruns, as reported by the audio backend.
     pub xruns: u64,
@@ -132,8 +133,6 @@ pub struct Engine {
     garbage: Producer<Garbage>,
     /// Events not yet due, by time and then in arrival order.
     pending: Vec<Pending>,
-    /// Scratch for the node events of one block.
-    routed: Vec<Routed>,
     /// What plays before the first graph arrives.
     silence: AudioBuffer,
     counters: Arc<Counters>,
@@ -170,7 +169,6 @@ impl Engine {
             messages: message_rx,
             garbage: garbage_tx,
             pending: Vec::with_capacity(EVENT_CAPACITY),
-            routed: Vec::with_capacity(EVENT_CAPACITY),
             silence: AudioBuffer::new(1, config.max_block),
             counters: counters.clone(),
         };
@@ -337,26 +335,34 @@ impl Engine {
         }
 
         let due = self.pending.partition_point(|p| p.time < end);
-        let graph = self.graph.as_deref_mut();
+        let mut graph = self.graph.as_deref_mut();
         let mut unmatched = 0;
         for p in self.pending.drain(..due) {
             if p.time < start {
                 self.counters.events_late.fetch_add(1, Relaxed);
             }
-            // Transport changes due now were applied above, and later ones
-            // ended the block.
-            if let Event::Param { node, param, value } = p.event {
-                match graph.as_ref().and_then(|g| g.find(node)) {
-                    Some(node) => self.routed.push(Routed {
-                        node,
-                        order: self.routed.len() as u32,
-                        event: NodeEvent {
-                            offset: (p.time.max(start) - start) as usize,
-                            kind: NodeEventKind::Param { param, value },
-                        },
-                    }),
-                    None => unmatched += 1,
+            let (node, kind) = match p.event {
+                Event::Param { node, param, value } => {
+                    (node, NodeEventKind::Param { param, value })
                 }
+                Event::Note { node, note } => (node, NodeEventKind::Note(note)),
+                // Transport changes due now were applied above, and later
+                // ones ended the block.
+                Event::Transport(_) => continue,
+            };
+            let event = NodeEvent {
+                offset: (p.time.max(start) - start) as usize,
+                kind,
+            };
+            match graph.as_deref_mut() {
+                Some(graph) => match graph.find(node) {
+                    Some(node) => {
+                        let routed = graph.route(node, event);
+                        debug_assert!(routed, "a graph has room for the events the engine holds");
+                    }
+                    None => unmatched += 1,
+                },
+                None => unmatched += 1,
             }
         }
         if unmatched > 0 {
@@ -365,17 +371,20 @@ impl Engine {
 
         let frames = (end - start) as usize;
         if let Some(graph) = graph {
-            graph.load_events(&mut self.routed);
             let block = Block {
                 frames,
                 time: start,
                 transport: self.transport.state(),
                 tempo: self.transport.tempo(),
             };
+            let dropped = graph.play_notes(&block);
+            if dropped > 0 {
+                self.counters.events_dropped.fetch_add(dropped, Relaxed);
+            }
+            graph.load_routed();
             self.renderer.render(graph, &block);
-            graph.clear_events(&self.routed);
+            graph.clear_routed();
         }
-        self.routed.clear();
         self.time = end;
         self.transport.advance(frames as u64);
         frames
@@ -612,8 +621,9 @@ mod tests {
             let mut events = ctx.events.iter().peekable();
             for (frame, sample) in output.channel_mut(0).iter_mut().enumerate() {
                 while let Some(event) = events.next_if(|e| e.offset == frame) {
-                    let NodeEventKind::Param { param, value } = event.kind;
-                    if param == Self::GAIN {
+                    if let NodeEventKind::Param { param, value } = event.kind
+                        && param == Self::GAIN
+                    {
                         self.0 = value as f32;
                     }
                 }

@@ -5,12 +5,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use musicable_model::ClipType;
+use musicable_model::clip::Dimension;
 use musicable_model::mixer::pan_gains;
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::meter::Meter;
 use crate::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, ParamId, ProcessContext,
+    AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId,
+    ProcessContext,
 };
 
 /// Sums its inputs. Used for buses and the master.
@@ -341,14 +343,16 @@ impl Node for Gain {
 }
 
 /// Sums its inputs and clips them as its [`ClipType`] says: a channel's
-/// clip stage.
+/// clip stage. (Clipping, not clips: those are what
+/// [`AudioClips`](crate::clips::AudioClips) and
+/// [`MidiClips`](crate::clips::MidiClips) play.)
 #[derive(Debug, Clone)]
-pub struct Clip {
+pub struct Clipper {
     clip_type: ClipType,
     channels: usize,
 }
 
-impl Clip {
+impl Clipper {
     /// Stereo.
     pub fn new(clip_type: ClipType) -> Self {
         Self {
@@ -382,7 +386,7 @@ impl Clip {
     }
 }
 
-impl Node for Clip {
+impl Node for Clipper {
     fn channels(&self) -> usize {
         self.channels
     }
@@ -722,6 +726,219 @@ impl Node for Metronome {
     }
 }
 
+/// Plays the notes sent to it with a plain tone of its own, added to what
+/// comes into it: a test instrument, standing in for instruments until
+/// there are plugins.
+///
+/// Each note is a sine at the note's pitch, bent by its pitch bend, with
+/// its second harmonic blended in by its timbre, and louder with velocity
+/// and pressure: at full velocity and no pressure it peaks at the
+/// instrument's level, and pressure can double that. A note rises over
+/// 2 ms and rings out over 30 ms once let go, transport or not. It plays
+/// [`VOICES`](Self::VOICES) notes at once, and a note beyond them takes the
+/// place of the one that started longest ago.
+#[derive(Debug, Clone)]
+pub struct TestInstrument {
+    level: Smoothed,
+    voices: [Voice; TestInstrument::VOICES],
+    /// Notes started so far, to tell which voice is oldest.
+    started: u64,
+    channels: usize,
+    sample_rate: f64,
+    /// How far a voice's envelope moves in a frame, rising and ringing out.
+    attack: f32,
+    release: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Voice {
+    active: bool,
+    released: bool,
+    note: NoteId,
+    /// Which note it was, counting from the first.
+    started: u64,
+    key: u8,
+    velocity: f32,
+    bend: f32,
+    pressure: f32,
+    timbre: f32,
+    /// In cycles, from 0 to 1.
+    phase: f64,
+    /// Cycles per frame.
+    increment: f64,
+    envelope: f32,
+}
+
+impl TestInstrument {
+    /// Linear amplitude of a note at full velocity. Changes ramp
+    /// ([`Smoothed`]).
+    pub const LEVEL: ParamId = ParamId(0);
+    /// Notes it plays at once.
+    pub const VOICES: usize = 32;
+
+    const ATTACK_SECONDS: f64 = 0.002;
+    const RELEASE_SECONDS: f64 = 0.03;
+
+    /// Stereo, the same signal in both channels.
+    pub fn new(level: f32) -> Self {
+        Self {
+            level: Smoothed::new(level),
+            voices: [Voice::default(); Self::VOICES],
+            started: 0,
+            channels: 2,
+            sample_rate: 48_000.0,
+            attack: 1.0,
+            release: 1.0,
+        }
+    }
+
+    pub fn with_channels(mut self, channels: usize) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    /// The notes sounding or ringing out.
+    pub fn sounding(&self) -> usize {
+        self.voices.iter().filter(|v| v.active).count()
+    }
+
+    fn apply(&mut self, event: &NodeEvent) {
+        match event.kind {
+            NodeEventKind::Param {
+                param: Self::LEVEL,
+                value,
+            } => self.level.set(value as f32),
+            NodeEventKind::Note(NoteEvent::On {
+                note,
+                key,
+                velocity,
+            }) => {
+                let voice = match self.voices.iter().position(|v| !v.active) {
+                    Some(free) => free,
+                    None => (0..Self::VOICES)
+                        .min_by_key(|&v| self.voices[v].started)
+                        .expect("an instrument has voices"),
+                };
+                self.started += 1;
+                self.voices[voice] = Voice {
+                    active: true,
+                    released: false,
+                    note,
+                    started: self.started,
+                    key,
+                    velocity,
+                    ..Voice::default()
+                };
+                self.tune(voice);
+            }
+            NodeEventKind::Note(NoteEvent::Expression {
+                note,
+                dimension,
+                value,
+            }) => {
+                for v in 0..Self::VOICES {
+                    let voice = &mut self.voices[v];
+                    if !voice.active || voice.note != note {
+                        continue;
+                    }
+                    match dimension {
+                        Dimension::PitchBend => {
+                            voice.bend = value;
+                            self.tune(v);
+                        }
+                        Dimension::Pressure => voice.pressure = value,
+                        Dimension::Timbre => voice.timbre = value,
+                    }
+                }
+            }
+            NodeEventKind::Note(NoteEvent::Off { note, .. }) => {
+                for voice in &mut self.voices {
+                    if voice.active && voice.note == note {
+                        voice.released = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Sets a voice's frequency from its key and pitch bend.
+    fn tune(&mut self, voice: usize) {
+        let voice = &mut self.voices[voice];
+        let semitones = f64::from(voice.key) + f64::from(voice.bend) - 69.0;
+        voice.increment = 440.0 * (semitones / 12.0).exp2() / self.sample_rate;
+    }
+
+    fn render(&mut self, output: &mut AudioMut<'_>, frames: Range<usize>) {
+        let len = frames.len();
+        if !self.voices.iter().any(|v| v.active) {
+            self.level.skip(len);
+            return;
+        }
+        for voice in self.voices.iter_mut().filter(|v| v.active) {
+            // Each voice ramps through the same levels.
+            let mut level = self.level;
+            for i in frames.clone() {
+                let level = level.next_value();
+                if voice.released {
+                    voice.envelope -= self.release;
+                    if voice.envelope <= 0.0 {
+                        voice.active = false;
+                        break;
+                    }
+                } else if voice.envelope < 1.0 {
+                    voice.envelope = (voice.envelope + self.attack).min(1.0);
+                }
+                let phase = voice.phase * TAU;
+                let timbre = f64::from(voice.timbre);
+                let tone = phase.sin() * (1.0 - 0.5 * timbre) + (2.0 * phase).sin() * 0.5 * timbre;
+                let loudness = voice.velocity * (1.0 + voice.pressure) * voice.envelope * level;
+                let sample = tone as f32 * loudness;
+                voice.phase = (voice.phase + voice.increment).fract();
+                for channel in output.channels_mut() {
+                    channel[i] += sample;
+                }
+            }
+        }
+        self.level.skip(len);
+    }
+}
+
+impl Node for TestInstrument {
+    fn channels(&self) -> usize {
+        self.channels
+    }
+
+    fn prepare(&mut self, config: &EngineConfig) {
+        self.sample_rate = f64::from(config.sample_rate);
+        self.level.prepare(config.sample_rate);
+        self.attack = (1.0 / (Self::ATTACK_SECONDS * self.sample_rate)) as f32;
+        self.release = (1.0 / (Self::RELEASE_SECONDS * self.sample_rate)) as f32;
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<TestInstrument>() {
+            self.level.take_over(&previous.level);
+            self.voices = previous.voices;
+            self.started = previous.started;
+        }
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+        let mut start = 0;
+        for event in ctx.events {
+            self.render(output, start..event.offset);
+            self.apply(event);
+            start = event.offset;
+        }
+        self.render(output, start..ctx.frames);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use musicable_model::time::{TempoMap, TimeSignature};
@@ -1018,12 +1235,12 @@ mod tests {
     #[test]
     fn clip_types_shape_samples() {
         let samples = [0.0, 0.25, 0.5, 0.75, 1.0, 2.0, 1e30, -0.75, -4.0];
-        let hard = stereo(&mut Clip::new(ClipType::Hard), &samples, &samples, &[]);
+        let hard = stereo(&mut Clipper::new(ClipType::Hard), &samples, &samples, &[]);
         assert_eq!(
             hard[..samples.len()],
             [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, -0.75, -1.0]
         );
-        let soft = stereo(&mut Clip::new(ClipType::Soft), &samples, &samples, &[]);
+        let soft = stereo(&mut Clipper::new(ClipType::Soft), &samples, &samples, &[]);
         let expected = [
             0.0,
             0.25,
@@ -1036,12 +1253,12 @@ mod tests {
             -0.9375,
         ];
         assert_eq!(soft[..samples.len()], expected);
-        let off = stereo(&mut Clip::new(ClipType::Off), &samples, &samples, &[]);
+        let off = stereo(&mut Clipper::new(ClipType::Off), &samples, &samples, &[]);
         assert_eq!(off[..samples.len()], samples);
         // Soft clipping stays below full scale for any sample a mix is
         // likely to hold, and never boosts.
         for sample in [0.6_f32, 0.9, 10.0, 1e6] {
-            let clipped = Clip::clip(ClipType::Soft, sample);
+            let clipped = Clipper::clip(ClipType::Soft, sample);
             assert!(clipped < 1.0 && clipped <= sample, "{sample}");
         }
     }
@@ -1092,7 +1309,7 @@ mod tests {
                 transport: TransportState {
                     playing,
                     position: from + out.len() as u64,
-                    looping: None,
+                    ..TransportState::default()
                 },
                 ..context(n, &[], playing, tempo)
             };
@@ -1168,5 +1385,189 @@ mod tests {
         second.adopt(&mut first);
         out.extend(clicks(&mut second, &tempo, true, 1000, 1000, 100));
         assert!(out == whole);
+    }
+
+    fn note(offset: usize, note: NoteEvent) -> NodeEvent {
+        NodeEvent {
+            offset,
+            kind: NodeEventKind::Note(note),
+        }
+    }
+
+    fn on(offset: usize, id: u64, key: u8, velocity: f32) -> NodeEvent {
+        let note_id = NoteId(id);
+        note(
+            offset,
+            NoteEvent::On {
+                note: note_id,
+                key,
+                velocity,
+            },
+        )
+    }
+
+    fn off(offset: usize, id: u64) -> NodeEvent {
+        note(
+            offset,
+            NoteEvent::Off {
+                note: NoteId(id),
+                velocity: 0.5,
+            },
+        )
+    }
+
+    fn expression(offset: usize, id: u64, dimension: Dimension, value: f32) -> NodeEvent {
+        note(
+            offset,
+            NoteEvent::Expression {
+                note: NoteId(id),
+                dimension,
+                value,
+            },
+        )
+    }
+
+    /// Renders `frames` mono frames of `instrument`, in blocks of `block`,
+    /// with `events` at their offsets from the first frame.
+    fn play(
+        instrument: &mut TestInstrument,
+        frames: usize,
+        block: usize,
+        events: &[NodeEvent],
+    ) -> Vec<f32> {
+        let tempo = TempoMap::default();
+        let mut buffer = AudioBuffer::new(1, block);
+        let mut out = Vec::new();
+        while out.len() < frames {
+            let (start, n) = (out.len(), block.min(frames - out.len()));
+            let events: Vec<NodeEvent> = events
+                .iter()
+                .filter(|e| (start..start + n).contains(&e.offset))
+                .map(|&e| NodeEvent {
+                    offset: e.offset - start,
+                    ..e
+                })
+                .collect();
+            let ctx = context(n, &events, true, &tempo);
+            instrument.process(&ctx, Inputs::NONE, &mut buffer.view_mut(n));
+            out.extend_from_slice(buffer.view(n).channel(0));
+        }
+        out
+    }
+
+    fn instrument() -> TestInstrument {
+        let mut instrument = TestInstrument::new(0.5).with_channels(1);
+        instrument.prepare(&EngineConfig {
+            sample_rate: 48_000,
+            max_block: 4800,
+        });
+        instrument
+    }
+
+    /// Times the signal crosses zero going up.
+    fn cycles(signal: &[f32]) -> usize {
+        signal
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count()
+    }
+
+    fn peak(signal: &[f32]) -> f32 {
+        signal.iter().fold(0.0, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn the_test_instrument_plays_notes_at_their_pitch_and_velocity() {
+        let mut keys = instrument();
+        // The A at 440 Hz, and an octave above it, a tenth of a second each.
+        let a = play(&mut keys, 4800, 4800, &[on(0, 1, 69, 1.0)]);
+        // 44 cycles, the first starting on the first frame.
+        assert_eq!(cycles(&a), 43);
+        assert!((peak(&a) - 0.5).abs() < 1e-3, "{}", peak(&a));
+        let mut keys = instrument();
+        let high = play(&mut keys, 4800, 4800, &[on(0, 1, 81, 0.5)]);
+        assert_eq!(cycles(&high), 87);
+        assert!((peak(&high) - 0.25).abs() < 1e-3);
+        // It rises from silence.
+        assert_eq!(a[0], 0.0);
+    }
+
+    #[test]
+    fn notes_ring_out_once_let_go() {
+        let mut keys = instrument();
+        let out = play(&mut keys, 4800, 64, &[on(0, 1, 60, 1.0), off(1000, 1)]);
+        // 30 ms at 48 kHz.
+        assert!(out[1000..2439].iter().any(|&s| s != 0.0));
+        assert!(out[2440..].iter().all(|&s| s == 0.0));
+        assert_eq!(keys.sounding(), 0);
+        // A note it doesn't know changes nothing.
+        let mut keys = instrument();
+        let out = play(&mut keys, 1000, 64, &[on(0, 1, 60, 1.0), off(10, 2)]);
+        assert!(out[900..].iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn expression_bends_swells_and_brightens_a_note() {
+        let mut keys = instrument();
+        let events = [
+            on(0, 7, 69, 1.0),
+            expression(0, 7, Dimension::PitchBend, 12.0),
+        ];
+        assert_eq!(cycles(&play(&mut keys, 4800, 4800, &events)), 87);
+        let mut keys = instrument();
+        let events = [
+            on(0, 7, 69, 1.0),
+            expression(0, 7, Dimension::Pressure, 1.0),
+        ];
+        assert!((peak(&play(&mut keys, 4800, 4800, &events)) - 1.0).abs() < 1e-3);
+        // Timbre blends in the second harmonic, and leaves the other notes
+        // alone.
+        let mut keys = instrument();
+        let plain = play(&mut keys, 4800, 4800, &[on(0, 1, 69, 1.0)]);
+        let mut keys = instrument();
+        let events = [
+            on(0, 1, 69, 1.0),
+            on(0, 2, 40, 0.0),
+            expression(0, 2, Dimension::Timbre, 1.0),
+        ];
+        assert_eq!(play(&mut keys, 4800, 4800, &events), plain);
+        let mut keys = instrument();
+        let events = [on(0, 1, 69, 1.0), expression(0, 1, Dimension::Timbre, 1.0)];
+        assert_ne!(play(&mut keys, 4800, 4800, &events), plain);
+    }
+
+    #[test]
+    fn notes_play_the_same_however_the_blocks_fall() {
+        let events = [
+            on(0, 1, 60, 0.8),
+            expression(100, 1, Dimension::PitchBend, -0.5),
+            on(200, 2, 64, 0.6),
+            off(3000, 1),
+        ];
+        let whole = play(&mut instrument(), 6000, 4800, &events);
+        let mut keys = instrument();
+        let mut parts = play(&mut keys, 300, 300, &events);
+        // The rest, from a new instrument taking over.
+        let mut next = instrument();
+        next.adopt(&mut keys);
+        let rest = [off(2700, 1)];
+        parts.extend(play(&mut next, 5700, 64, &rest));
+        assert!(parts == whole);
+    }
+
+    #[test]
+    fn a_note_beyond_the_voices_takes_the_oldest_ones_place() {
+        let mut keys = instrument();
+        let events: Vec<NodeEvent> = (0..=TestInstrument::VOICES as u64)
+            .map(|id| on(id as usize, id, 60, 1.0))
+            .collect();
+        play(&mut keys, 100, 100, &events);
+        assert_eq!(keys.sounding(), TestInstrument::VOICES);
+        // The first note's voice went to the last, so letting it go does
+        // nothing.
+        play(&mut keys, 2000, 100, &[off(0, 0)]);
+        assert_eq!(keys.sounding(), TestInstrument::VOICES);
+        play(&mut keys, 2000, 100, &[off(0, 1)]);
+        assert_eq!(keys.sounding(), TestInstrument::VOICES - 1);
     }
 }

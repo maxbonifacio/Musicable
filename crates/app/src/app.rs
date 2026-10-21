@@ -105,7 +105,7 @@ impl App {
         };
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
         Self {
-            session: Session::new(project, keymap, handle),
+            session: Session::new(project, folder.as_deref(), keymap, handle),
             output,
             shell: Shell::new(),
             keys: KeyPresses::new(),
@@ -221,7 +221,8 @@ impl App {
     }
 
     fn open_project(&mut self, project: Project, path: Option<PathBuf>) {
-        self.session.open(project);
+        self.session
+            .open(project, path.as_deref().and_then(Path::parent));
         self.set_path(path);
     }
 
@@ -371,6 +372,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.session.tick();
+        self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         let close = ctx.input(|i| i.viewport().close_requested());
         if close && !self.closing && self.session.is_modified() {

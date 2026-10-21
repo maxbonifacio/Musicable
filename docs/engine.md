@@ -16,6 +16,9 @@ of Musicable, and where Tier 1 work plugs in.
  EngineHandle ── message queue: events, swaps, tempo maps ──► Engine
               ◄── garbage queue: old graphs and tempo maps ──
               ◄── atomics: Stats ────────────────────────────
+
+ disk thread ── chunks of audio files, ahead of each clip ──► clip players
+             ◄── hints: where each clip reads next ──────────
 ```
 
 - The **control thread** (the app's main thread) owns the model, a
@@ -29,6 +32,8 @@ of Musicable, and where Tier 1 work plugs in.
   `Engine::process_interleaved` once per device callback.
 - With the `ParallelRenderer`, **worker threads** help the audio thread
   render each block (see [Parallel rendering](#parallel-rendering)).
+- The **disk thread** (`musicable-disk`) reads the audio files that stream
+  ahead of the clips that play them (see [Clips](#clips)).
 
 Both queues are lock-free single-producer, single-consumer ring buffers
 ([rtrb](https://docs.rs/rtrb)). Nothing on the audio thread locks, allocates
@@ -68,6 +73,9 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   `Stats::events_unmatched`.
 - A node gets its events for a block in `ProcessContext::events`, in order,
   each with an `offset` into the block. It applies each from that frame on.
+- `Event::Note` plays a note on a node from outside the graph, as live MIDI
+  input will. Notes aren't sent again after a swap, as parameter values are
+  (see [Notes](#notes)).
 - Transport commands are `Play`, `Stop`, `Locate` and `Loop`. Since a block
   ends where the transport changes and where the loop jumps back,
   `ProcessContext::transport` holds for every frame of the block, and while
@@ -220,9 +228,10 @@ modelling in Tier 2.
 source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → output stage → bus
 ```
 
-- **Sources.** An audio or MIDI track's source is its test tone, for now. A
-  group or return track's source is its bus, where what feeds it sums, along
-  with its own test tone if it has one.
+- **Sources.** An audio or MIDI track's source is its clip player, with the
+  track's test tone feeding it if it has one (see [Clips](#clips)). A group
+  or return track's source is its bus, where what feeds it sums, along with
+  its own test tone if it has one.
 - **The fader** (`compile::keys::track_gain`, and `keys::master_gain` for the
   master's) is a `Gain` with the channel's gain and pan. Pan is a balance
   control (`musicable_model::mixer::pan_gains`): the channel on the side it
@@ -248,15 +257,16 @@ source → [before device 0] → device 0 → … → [pre-fader] → fader → 
   what breaks the rules, so even a hand-edited file compiles.
 - **Devices** (`Track::devices`, `Master::devices`) sit between the source
   and the pre-fader slot, in order, each keyed by its `DeviceId`
-  (`keys::device`), so a device keeps its state when it moves. The only kind
-  is `DeviceKind::TestGain`, for tests, until plugin hosting.
+  (`keys::device`), so a device keeps its state when it moves. Until plugin
+  hosting, there are two kinds, for tests: `DeviceKind::TestGain`, and
+  `DeviceKind::TestInstrument` (see [Clips](#clips)).
 
 **Slots.** The slots (`compile::Slot`) belong to the channel, not to its
 device list: one in front of each device, then pre-fader, post-fader and bus
 feed.
 
 - `native_stage()` in `compile.rs` says what sits in each. So far that's
-  the channel's clip stage (`nodes::Clip`), in its post-fader slot, when
+  the channel's clip stage (`nodes::Clipper`), in its post-fader slot, when
   its clip type (`Track::clip_type`, `Master::clip_type`) is `Hard` or
   `Soft`. Hard cuts the signal off at full scale. Soft leaves everything up
   to half scale (-6 dB) alone and bends smoothly towards full scale above
@@ -311,6 +321,102 @@ until `Meter::clear_highest`.
 - The app's `Session` keeps the `Meters` and compiles with them, and the
   mixer reads them every frame (see [app.md](app.md#the-mixer)).
 
+## Clips
+
+An audio or MIDI track's source is its clip player, `clips::AudioClips` or
+`clips::MidiClips` (`keys::track_clips`), at the head of its strip, with the
+track's test tone feeding it if it has one. Both play from the song
+position, like everything else: what a clip plays on a frame depends on
+where the frame is in the song, never on how the playhead got there or how
+the blocks fall. So clips loop, locate and render the same, bit for bit, in
+both renderers.
+
+**Audio clips.** `AudioClips` plays each clip's file from the clip's
+`offset` in it, at the file's own speed, for the clip's length.
+
+- Mono files play in both channels, and files with more than two channels
+  play their first two.
+- A clip that runs past the end of its file is silent from there. So is a
+  clip whose file the graph doesn't have, such as one that's missing.
+- Fades are quarter sines, worked out for each frame from the clip's edges.
+  Where one clip fades out over the same frames as another fades in, they
+  crossfade at constant power. Clips that overlap sum.
+- A file at another sample rate is resampled (`resample.rs`): a
+  Kaiser-windowed sinc, 32 zero crossings each side, about 90 dB down by
+  Nyquist, passing up to about 41% of the lower rate (18 kHz from 44.1 kHz).
+  Every output frame's weights come from where it falls in the file alone.
+- Tier 1 doesn't warp: a clip plays at its file's speed whatever the tempo.
+
+**Audio files** reach the graph as `media::Source`s, one for each clip, in a
+`media::Media`: `compile_with_media(project, meters, media)`. The engine
+doesn't read files itself. The app opens them with `musicable-io`'s decoders
+and gives the engine an `AudioReader` for each (see
+[app.md](app.md#audio-files)).
+
+- `Source::Whole` is a file in memory (`AudioData`), a channel at a time.
+  The app loads a file whole when it's up to 2²¹ frames long, about 44 s at
+  48 kHz, as the graph builds on the compiler thread.
+- `Source::Stream` is a file streaming from disk (`Stream`). A `Streamer`
+  runs the disk thread. Each stream keeps two sets of chunks of 8,192
+  frames in memory: about a second of the file from where its clip reads
+  next, and 0.4 s from where it reads after the loop jumps back. Every
+  block, playing or not, the player says where that is (`Stream::hint`), and
+  the disk thread loads the most urgent chunks of every stream first.
+- Reading a stream copies from chunks that are loaded, taking each with a
+  compare-and-swap: no locks, no allocation, no I/O. A chunk that isn't
+  loaded yet plays silence and counts in `Stream::missed`.
+- With `Streamer::spawn(true)`, reads wait for the disk instead, for
+  rendering offline, as the null test does and exporting will: a render is
+  then the same however fast the disk is.
+- A file that fails to read plays silence where it failed, and
+  `Stream::failed` says so.
+- A stream follows one clip, so two clips of the same long file get one
+  each. A rebuilt graph gets the same sources (the app keeps them), so a
+  stream carries on across swaps.
+
+## Notes
+
+Notes are `NoteEvent`s, at sample offsets like other events:
+`NodeEventKind::Note`, or `Event::Note` from outside the graph. `On` has
+the key and velocity, `Expression` changes one dimension of the note's
+expression (pitch bend in semitones, pressure and timbre from 0 to 1), and
+`Off` has the release velocity. Each names its note by `NoteId`, so notes on
+the same key can sound at once, each with its own expression, as MPE, VST3
+and CLAP allow.
+
+- `Graph::send_notes(from, to)` sends a node's notes to another, with or
+  without an audio connection between them. Before a block renders, each
+  node whose notes go somewhere plays them for the block
+  (`Node::play_notes`), after the nodes whose notes it gets. It gets those,
+  and any from outside the graph, in `ctx.events`, so a MIDI effect between
+  a clip player and an instrument can play them on, changed. A route that
+  would make a loop is refused.
+- A node whose notes go nowhere, such as an instrument, gets the notes sent
+  to it with its other events, in `process`.
+- A node can send `Notes::CAPACITY` (512) note events in a block. The rest
+  are dropped, and counted in `Stats::events_dropped`.
+
+**MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
+their expression, to the track's first instrument (`Track::instrument`).
+
+- A clip plays the notes from its `offset` in its own time, for its length.
+  A note still sounding when the clip ends stops there.
+- A note plays from its start. One the playhead lands in the middle of,
+  after a locate or at the loop, doesn't play: notes aren't chased, as in
+  Live. When the playhead jumps or the transport stops, the notes sounding
+  are let go.
+- A note's id is its clip's id and its own (`clips::note_id`). When a
+  rebuilt player takes over, it lets go of the notes it doesn't have
+  sounding as they are: a note deleted, moved, transposed, or shortened to
+  end before the playhead. A note made longer plays on.
+
+**The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
+stands in for instruments until plugin hosting. It plays each note with a
+sine at its pitch, bent by its pitch bend, with its second harmonic blended
+in by its timbre, and louder with velocity and pressure. A note rises over
+2 ms and rings out over 30 ms once let go. It adds what it plays to what
+comes into it.
+
 ## Parallel rendering
 
 `ParallelRenderer` runs each block's nodes on a pool of worker threads and
@@ -335,10 +441,14 @@ ones (see Threads, below).
 **Threads.** By default there is one worker per physical core, minus one for
 the audio thread, which works too. On Windows, workers join the MMCSS "Pro
 Audio" class at critical priority, as the WASAPI stream's audio thread does
-(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS,
-since Windows 10, so on a machine with more than about 28 cores the last
-workers to start stay at normal priority; joining fails quietly. Elsewhere
-they don't raise their priority yet: Linux needs real-time scheduling
+(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS
+and turns away any more with `ERROR_TOO_MANY_THREADS`. (The ignored test
+`mmcss_places` in `parallel/priority.rs` counts them: 32 on Windows 11
+25H2.) A thread turned away stays at normal priority, where a shared block
+can wait on it, and joining fails quietly. So by default there are no more
+than 24 workers on Windows, which leaves places for the audio thread and a
+few for audio drivers and plugins. Elsewhere
+workers don't raise their priority yet: Linux needs real-time scheduling
 rights, and on macOS they should join the audio device's workgroup, which
 needs the audio backend.
 
@@ -412,9 +522,9 @@ block needs them and put down when one does.
 
 ## Real-time rules
 
-`Node::process` and `Node::adopt` run on the audio thread, or on one of the
-parallel renderer's workers, which are real-time threads too, and so does
-everything they call. They must not:
+`Node::process`, `Node::adopt` and `Node::play_notes` run on the audio
+thread, or on one of the parallel renderer's workers, which are real-time
+threads too, and so does everything they call. They must not:
 
 - allocate or free memory, including growing a `Vec`, cloning a `String` or
   dropping a `Box`;
@@ -474,6 +584,9 @@ thread, but node code shouldn't rely on denormals either way.
 | Pending events | 1024 events | New events are dropped and counted in `Stats::events_dropped` |
 | Old graphs and tempo maps waiting | 16 | The engine holds swaps and tempo maps until `collect_garbage` runs |
 | Nodes in a graph the parallel renderer shares | `ParallelOptions::max_nodes`, 16,384 by default | The audio thread renders the graph alone |
+| Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped` |
+| Notes sounding in a MIDI clip player | 1,024 | It doesn't start more |
+| Notes the test instrument plays at once | `TestInstrument::VOICES`, 32 | A new note takes the place of the one that started longest ago |
 
 A swap takes one queue slot, plus one for each remembered parameter of the new
 graph. The handle remembers every parameter it has sent until
@@ -503,6 +616,6 @@ with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
 
 **Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
-where clips, plugins, delay compensation, automation and recording go in the
-engine, and what's missing for them. The mixer is built (see
-[The mixer](#the-mixer)).
+where plugins, delay compensation, automation and recording go in the
+engine, and what's missing for them. The mixer and clips are built (see
+[The mixer](#the-mixer) and [Clips](#clips)).

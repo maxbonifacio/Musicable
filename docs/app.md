@@ -77,6 +77,12 @@ it plays, the sample rate and the buffer size: 20 seconds at 48 kHz in
 128-frame buffers by default. A debug build checks the renders for
 allocations too, as the tests do.
 
+Audio clips play their files from the project file's folder, as in the app
+(see [Audio files](#audio-files)). Clips that stream wait for the disk here
+instead of missing what it hasn't read yet, so every run plays them the
+same however fast it renders. Files that can't be read are listed before
+the results, and their clips are silent in every run.
+
 On a 4-core cloud VM:
 
 ```text
@@ -279,6 +285,49 @@ The file commands are real commands (`file.new` and so on, see
 show a dialog, so it pushes a `Request` into its `Context`, and the app
 carries it out after the command has run.
 
+## Audio files
+
+An audio clip plays a file by its path: relative to the folder the project
+file is in, or absolute ([project-format.md](project-format.md#track)).
+The app reads WAV, AIFF and FLAC files (`musicable_io::audio` lists the
+sample formats), and resamples a file at another rate than the device's.
+
+Each time the session builds a graph, on the compiler's thread, it finds
+the files the project's audio clips play (`crates/app/src/media.rs`):
+
+- A file up to 2²¹ frames long, about 44 seconds at 48 kHz, loads whole.
+- A longer one streams: the disk thread reads it ahead of each clip that
+  plays it, and from where the clip plays after the loop jumps back
+  ([engine.md](engine.md#clips)).
+- A graph rebuilt for an edit gets the files and streams the old one has,
+  so nothing is read again and the clips that stream play on. Opening a
+  project reads its files again, so it plays them as they are now.
+
+A file that can't be read, because it's missing or isn't one the app
+reads, leaves its clips silent, and the status bar says so, once for each
+file until another project is opened. So does a file that fails while it
+streams. A project that hasn't been saved has no folder, so relative paths
+lead nowhere.
+
+The app can't add clips yet: they come with the arrangement view and
+recording. Save Project As doesn't copy the files or change the clips'
+paths either, so a project saved in another folder, away from its files,
+plays its clips silent when it's opened again.
+
+To hear clips now, the `clips_demo` example writes a project and the files
+it plays, here into `target`, which Git ignores:
+
+```sh
+cargo run --release -p musicable-app --example clips_demo -- target/clips-demo
+cargo run --release -p musicable-app -- "target/clips-demo/Clips demo.musicable"
+```
+
+It's sixteen bars at 100 BPM that loop: drums from a WAV file, a bass line
+from an AIFF file at 44.1 kHz, a pad from a file long enough to stream,
+fading in and out, and chords on the test instrument that swell with
+pressure and bend at the end of each bar. The null test plays it too:
+`musicable null-test "target/clips-demo/Clips demo.musicable"`.
+
 ## Settings and your keymap
 
 The app keeps its settings and your keymap in its config folder:
@@ -402,6 +451,11 @@ says what the stream got.
   graph.
 - `musicable_app::null_test` plays projects offline for the null test and
   for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
+- [`crates/app/tests/clips.rs`](../crates/app/tests/clips.rs) saves a
+  project whose audio clips play WAV, AIFF and FLAC files from its folder,
+  one of them streaming, and whose MIDI clip plays the test instrument. It
+  checks that every renderer plays it the same, and that a missing file is
+  reported.
 
 To see the window without Windows, a Linux build runs under Xvfb, and the
 Windows build runs under Wine with `WGPU_BACKEND=vulkan` (Wine's Direct3D 12

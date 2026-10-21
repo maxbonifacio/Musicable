@@ -51,6 +51,8 @@ cargo run --release -p musicable-app -- null-test       # the parallel scheduler
 cargo run --release -p musicable-audio --example tone   # a test tone on the default output
 ```
 
+On Windows, install the Visual Studio Build Tools and use Rust's MSVC
+toolchain first ([CONTRIBUTING.md](CONTRIBUTING.md#toolchain) has the steps).
 On Linux, install the ALSA development files first (`libasound2-dev` on
 Debian and Ubuntu).
 

@@ -2,35 +2,43 @@
 //!
 //! Each track becomes a channel strip: its source, its devices, its fader
 //! and its output stage, with built-in slots for native stages along the way
-//! (see [`Slot`]). Group and return tracks are buses with strips of their
-//! own: what feeds them sums at the head of their strip. Tracks feed the
-//! master or a group, sends feed return tracks, and the master's strip feeds
-//! the audio device. Empty slots add no nodes. The metronome feeds the cue
-//! bus, which the engine plays alongside the master, not through it. Node
-//! keys come from model ids and slots (see [`keys`]), so a channel's nodes
-//! keep their identity when the project is recompiled.
+//! (see [`Slot`]). An audio or MIDI track's source is its clip player
+//! ([`AudioClips`], [`MidiClips`]), with the track's test tone feeding it. A
+//! MIDI track's notes go to its first instrument. Group and return tracks
+//! are buses with strips of their own: what feeds them sums at the head of
+//! their strip. Tracks feed the master or a group, sends feed return tracks,
+//! and the master's strip feeds the audio device. Empty slots add no nodes.
+//! The metronome feeds the cue bus, which the engine plays alongside the
+//! master, not through it. Node keys come from model ids and slots (see
+//! [`keys`]), so a channel's nodes keep their identity when the project is
+//! recompiled.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
-use musicable_model::{ClipType, ConsoleSettings, Device, DeviceKind, Master, Project, Track};
+use musicable_model::{
+    ClipType, ConsoleSettings, Device, DeviceKind, Master, Project, Track, TrackKind,
+};
 
+use crate::clips::{AudioClips, MidiClips};
+use crate::media::Media;
 use crate::meter::Meters;
-use crate::nodes::{Clip, Gain, Metronome, Sine, Sum};
+use crate::nodes::{Clipper, Gain, Metronome, Sine, Sum, TestInstrument};
 use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
 ///
 /// A track's nodes have its id in the low 32 bits of the key and their role
 /// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 6 for
-/// the built-in slots, 7 for the output stage and 8 for a group's or a
-/// return's bus. The slot in front of a device also has the device's
-/// position in the top 16 bits. The master's strip has the keys of a track
-/// whose id is `u32::MAX`, which no track has. Sends and devices have their
-/// own ids in the low 32 bits, with role 9 for sends and 10 for devices.
-/// Keys with role 0 belong to no channel.
+/// the built-in slots, 7 for the output stage, 8 for a group's or a
+/// return's bus and 11 for an audio or MIDI track's clip player. The slot in
+/// front of a device also has the device's position in the top 16 bits. The
+/// master's strip has the keys of a track whose id is `u32::MAX`, which no
+/// track has. Sends and devices have their own ids in the low 32 bits, with
+/// role 9 for sends and 10 for devices. Keys with role 0 belong to no
+/// channel.
 pub mod keys {
     use musicable_model::{DeviceId, SendId, TrackId};
 
@@ -82,6 +90,13 @@ pub mod keys {
     /// The bus of a group or return track, where what feeds it sums.
     pub fn track_bus(track: TrackId) -> NodeKey {
         track_key(8, track)
+    }
+
+    /// An audio or MIDI track's clip player, an
+    /// [`AudioClips`](crate::clips::AudioClips) or a
+    /// [`MidiClips`](crate::clips::MidiClips), at the head of its strip.
+    pub fn track_clips(track: TrackId) -> NodeKey {
+        track_key(11, track)
     }
 
     /// A send, a [`Gain`](crate::nodes::Gain) at the send's level that feeds
@@ -208,24 +223,32 @@ impl Summing {
     }
 }
 
-/// Builds the graph for `project`, with meters nobody reads. See
-/// [`compile_metered`].
+/// Builds the graph for `project`, with meters nobody reads and no audio
+/// files. See [`compile_with_media`].
 pub fn compile(project: &Project) -> Graph {
     compile_metered(project, &Meters::new())
 }
 
-/// Builds the graph for `project`. Each channel's output stage measures
-/// into its meter in `meters`: call [`Meters::follow`] first, or channels
-/// without a meter there get one nobody reads.
+/// Builds the graph for `project`, without audio files: its audio clips are
+/// silent. See [`compile_with_media`].
 pub fn compile_metered(project: &Project, meters: &Meters) -> Graph {
-    compile_with(project, meters, native_stage)
+    compile_with_media(project, meters, &Media::new())
 }
 
-/// Like [`compile_metered`], with `stages` choosing the native stage for
+/// Builds the graph for `project`. Each channel's output stage measures
+/// into its meter in `meters`: call [`Meters::follow`] first, or channels
+/// without a meter there get one nobody reads. Audio clips play their audio
+/// from `media`, and clips it doesn't have are silent.
+pub fn compile_with_media(project: &Project, meters: &Meters, media: &Media) -> Graph {
+    compile_with(project, meters, media, native_stage)
+}
+
+/// Like [`compile_with_media`], with `stages` choosing the native stage for
 /// each slot of each channel. `None` leaves the slot empty.
 pub(crate) fn compile_with(
     project: &Project,
     meters: &Meters,
+    media: &Media,
     mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -252,18 +275,29 @@ pub(crate) fn compile_with(
 
     let silenced = project.silenced();
     for track in &project.tracks {
-        let head = match buses.get(&track.id) {
-            Some(&bus) => Some(bus),
-            None => track.tone.map(|tone| {
+        let player = clip_player(track, media).map(|player| {
+            let player = graph.add_boxed(keys::track_clips(track.id), player);
+            if let Some(tone) = track.tone {
                 let sine = Sine::new(tone.frequency, tone.level);
-                graph.add(keys::track_tone(track.id), sine)
-            }),
-        };
+                let sine = graph.add(keys::track_tone(track.id), sine);
+                connect(&mut graph, sine, player);
+            }
+            player
+        });
+        let head = buses.get(&track.id).copied().or(player);
         let mut strip = Strip {
             graph: &mut graph,
             tail: head,
         };
         let taps = strip.channel(Channel::Track(track), &mut stages);
+        if track.kind == TrackKind::Midi
+            && let (Some(player), Some(instrument)) = (player, taps.instrument)
+        {
+            strip
+                .graph
+                .send_notes(player, instrument)
+                .expect("both nodes were just added");
+        }
         // Mute and solo cut the output here, after the sends take their
         // signal, so they can cut each path on its own.
         let meter = meters.track(track.id).cloned().unwrap_or_default();
@@ -310,8 +344,34 @@ pub(crate) fn compile_with(
 fn native_stage(channel: Channel<'_>, slot: Slot) -> Option<Box<dyn Node>> {
     match (channel.clip_type(), slot) {
         (ClipType::Off, _) => None,
-        (clip_type, Slot::PostFader) => Some(Box::new(Clip::new(clip_type))),
+        (clip_type, Slot::PostFader) => Some(Box::new(Clipper::new(clip_type))),
         _ => None,
+    }
+}
+
+/// The clip player at the head of an audio or MIDI track's strip. Buses
+/// have none.
+fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
+    // In order of start, so the clips sum in the same order however the
+    // project lists them.
+    let mut clips: Vec<_> = track.clips.iter().collect();
+    clips.sort_by_key(|c| (c.start, c.id));
+    match track.kind {
+        TrackKind::Audio => {
+            let mut player = AudioClips::new();
+            for clip in clips {
+                player.add(clip, media.get(clip.id).cloned());
+            }
+            Some(Box::new(player))
+        }
+        TrackKind::Midi => {
+            let mut player = MidiClips::new();
+            for clip in clips {
+                player.add(clip);
+            }
+            Some(Box::new(player))
+        }
+        TrackKind::Return | TrackKind::Group => None,
     }
 }
 
@@ -319,6 +379,7 @@ fn native_stage(channel: Channel<'_>, slot: Slot) -> Option<Box<dyn Node>> {
 fn device_node(device: &Device) -> Box<dyn Node> {
     match device.kind {
         DeviceKind::TestGain { gain } => Box::new(Gain::new(gain)),
+        DeviceKind::TestInstrument { level } => Box::new(TestInstrument::new(level)),
     }
 }
 
@@ -331,19 +392,22 @@ struct Strip<'a> {
 
 /// Where a channel's sends take its signal: the last node before the
 /// fader, and the last one after the post-fader slot. `None` where the
-/// channel has no node yet.
+/// channel has no node yet. And the channel's first instrument, if it has
+/// one.
 struct Taps {
     pre_fader: Option<NodeId>,
     post_fader: Option<NodeId>,
+    instrument: Option<NodeId>,
 }
 
 impl Strip<'_> {
-    fn push(&mut self, key: NodeKey, node: Box<dyn Node>) {
+    fn push(&mut self, key: NodeKey, node: Box<dyn Node>) -> NodeId {
         let id = self.graph.add_boxed(key, node);
         if let Some(tail) = self.tail {
             connect(self.graph, tail, id);
         }
         self.tail = Some(id);
+        id
     }
 
     /// Adds `channel`'s devices, its fader and the stages `stages` puts in
@@ -358,12 +422,16 @@ impl Strip<'_> {
                 strip.push(channel.slot_key(at), stage);
             }
         };
+        let mut instrument = None;
         for (position, device) in channel.devices().iter().enumerate() {
             // A key has room for 65,536 slots in front of devices.
             if let Ok(position) = u16::try_from(position) {
                 slot(self, Slot::BeforeDevice(position));
             }
-            self.push(keys::device(device.id), device_node(device));
+            let node = self.push(keys::device(device.id), device_node(device));
+            if device.kind.is_instrument() {
+                instrument = instrument.or(Some(node));
+            }
         }
         slot(self, Slot::PreFader);
         let pre_fader = self.tail;
@@ -374,6 +442,7 @@ impl Strip<'_> {
         Taps {
             pre_fader,
             post_fader,
+            instrument,
         }
     }
 
@@ -678,9 +747,10 @@ mod tests {
         let p = project();
         let graph = compile(&p).prepare(&CONFIG).unwrap();
         // The master bus, the cue bus, the metronome, the reverb's bus, a
-        // fader and an output stage for each track, two tones, and the
-        // master's fader and output stage.
-        assert_eq!(graph.len(), 14);
+        // fader and an output stage for each track, clip players and tones
+        // for the drums and the bass, and the master's fader and output
+        // stage.
+        assert_eq!(graph.len(), 16);
         for key in [
             keys::MASTER,
             keys::CUE,
@@ -700,6 +770,10 @@ mod tests {
             assert_eq!(
                 graph.contains(keys::track_bus(track.id)),
                 track.kind.is_bus()
+            );
+            assert_eq!(
+                graph.contains(keys::track_clips(track.id)),
+                !track.kind.is_bus()
             );
         }
         assert_eq!(shape(&graph).1, keys::master_output());
@@ -733,6 +807,7 @@ mod tests {
                 keys::track_tone(track),
                 keys::track_output(track),
                 keys::track_bus(track),
+                keys::track_clips(track),
             ];
             let others = [keys::send(SendId(id)), keys::device(DeviceId(id))];
             for key in strip.into_iter().chain(roles).chain(others) {
@@ -785,7 +860,7 @@ mod tests {
         let p = project();
         let shape_with = |stages| {
             shape(
-                &compile_with(&p, &Meters::new(), stages)
+                &compile_with(&p, &Meters::new(), &Media::new(), stages)
                     .prepare(&CONFIG)
                     .unwrap(),
             )
@@ -799,12 +874,12 @@ mod tests {
         let p = project();
         let meters = Meters::new();
         let off = || {
-            compile_with(&p, &meters, no_stages)
+            compile_with(&p, &meters, &Media::new(), no_stages)
                 .prepare(&CONFIG)
                 .unwrap()
         };
         let on = || {
-            compile_with(&p, &meters, half_drums)
+            compile_with(&p, &meters, &Media::new(), half_drums)
                 .prepare(&CONFIG)
                 .unwrap()
         };
@@ -845,7 +920,7 @@ mod tests {
         };
         let meters = Meters::new();
         let graph = |at: Slot| {
-            compile_with(&p, &meters, ramp_in(at))
+            compile_with(&p, &meters, &Media::new(), ramp_in(at))
                 .prepare(&CONFIG)
                 .unwrap()
         };
@@ -895,9 +970,9 @@ mod tests {
                 break compiled.graph.unwrap();
             }
         };
-        // Five nodes for the master, the cue and the metronome, and two per
-        // track.
-        assert_eq!(last.len(), 15);
+        // Five nodes for the master, the cue and the metronome, and three
+        // per track: a clip player, a fader and an output stage.
+        assert_eq!(last.len(), 20);
         assert!(jobs.is_sorted());
         assert!(compiler.try_recv().is_none());
     }

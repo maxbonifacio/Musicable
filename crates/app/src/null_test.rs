@@ -3,6 +3,7 @@
 //! `musicable null-test` runs it on a project file, and
 //! `tests/tier0_demo.rs` on the Tier 0 demo. `docs/app.md` describes it.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use musicable_commands::{Keymap, transport};
@@ -41,9 +42,16 @@ pub struct Player {
 }
 
 impl Player {
-    /// Opens `project` on an engine for `config` that renders with `render`,
-    /// then presses Play: the engine gets what the app would send it.
-    pub fn new(project: Project, render: &Render, config: EngineConfig) -> Self {
+    /// Opens `project`, whose file is in `folder`, on an engine for `config`
+    /// that renders with `render`, then presses Play: the engine gets what
+    /// the app would send it. Audio clips that stream wait for the disk, so
+    /// every run plays them the same however fast it renders.
+    pub fn new(
+        project: Project,
+        folder: Option<&Path>,
+        render: &Render,
+        config: EngineConfig,
+    ) -> Self {
         let (engine, handle, monitor) = match render {
             Render::Reference => {
                 let (engine, handle) = Engine::new(config);
@@ -60,7 +68,7 @@ impl Player {
                 (engine, handle, Some(monitor))
             }
         };
-        let mut session = Session::new(project, Keymap::default_keymap(), handle);
+        let mut session = Session::offline(project, folder, Keymap::default_keymap(), handle);
         session
             .run(&transport::PLAY)
             .expect("the app has a play command");
@@ -116,6 +124,12 @@ impl Player {
     /// What the parallel scheduler did, if it plays.
     pub fn parallel(&self) -> Option<ParallelStats> {
         self.monitor.as_ref().map(ParallelMonitor::stats)
+    }
+
+    /// What went wrong reading the project's audio files since the last
+    /// call, such as a file that's missing, whose clips are silent.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        self.session.take_problems()
     }
 }
 

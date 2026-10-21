@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer];
+const STEPS: [Step; VERSION as usize - 1] = [mixer, clips];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -67,6 +67,19 @@ fn mixer(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         add(track, &path, "output", Value::Null)?;
         add(track, &path, "sends", json!([]))?;
         add(track, &path, "devices", json!([]))?;
+    }
+    Ok(())
+}
+
+/// Version 3 added clips, audio and MIDI, and the test instrument. Version 2
+/// files have no clips.
+fn clips(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "next_clip_id", json!(0))?;
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        if let Some(track) = track.as_object_mut() {
+            add(track, &format!("tracks[{i}]"), "clips", json!([]))?;
+        }
     }
     Ok(())
 }
@@ -156,7 +169,7 @@ mod tests {
             "version": 1,
             "tracks": [{"kind": "audio"}, {"kind": "return"}, "not a track"],
         });
-        upgrade(&mut file, 1).unwrap();
+        run(&STEPS[..1], &mut file, 1).unwrap();
         let track = |solo_safe| {
             json!({
                 "pan": 0.0,
@@ -176,6 +189,24 @@ mod tests {
         assert_eq!(file["master"]["gain"], json!(1.0));
         assert_eq!(file["next_send_id"], json!(0));
         assert_eq!(file["version"], json!(2));
+    }
+
+    #[test]
+    fn version_2_files_have_no_clips() {
+        let mut file = json!({"version": 2, "tracks": [{"kind": "midi"}, "not a track"]});
+        run(&STEPS[..2], &mut file, 2).unwrap();
+        assert_eq!(
+            file["tracks"],
+            json!([{"kind": "midi", "clips": []}, "not a track"])
+        );
+        assert_eq!(file["next_clip_id"], json!(0));
+        assert_eq!(file["version"], json!(3));
+        let mut file = json!({"version": 2, "tracks": [{"clips": [{}]}]});
+        assert_eq!(
+            run(&STEPS[..2], &mut file, 2).unwrap_err().path,
+            "tracks[0].clips",
+            "clips in a version 2 file"
+        );
     }
 
     #[test]

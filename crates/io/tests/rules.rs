@@ -2,6 +2,7 @@
 //! is, what it accepts, and what saving refuses.
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::{DeviceKind, Project, TestTone, TrackId, TrackKind};
@@ -42,6 +43,59 @@ fn mix() -> Project {
     let device = project.new_device(DeviceKind::TestGain { gain: 2.0 });
     project.master.devices.push(device);
     project
+}
+
+/// Clips: an audio track with a clip of a file, a MIDI track with a clip of
+/// two notes, the second with expression, played by a test instrument, and
+/// a group track. The tracks' ids are their places in the list, and the
+/// clips' ids are their tracks'.
+fn clips() -> Project {
+    let mut project = Project::new();
+    let audio = project.add_track("Audio", TrackKind::Audio);
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    project.add_track("Group", TrackKind::Group);
+    let mut take = AudioClip::new("Takes/Take 1.wav");
+    take.fade_in = Beats::new(1);
+    take.fade_out = Beats::new(1);
+    let range = BeatRange::new(Beats::new(4), Beats::new(8));
+    let clip = project.new_clip("Take 1", range, ClipContent::Audio(take));
+    project.track_mut(audio).unwrap().clips.push(clip);
+    let mut notes = MidiClip::default();
+    notes.add_note(Beats::ZERO, Beats::new(1), 60, 0.5);
+    let bent = notes.add_note(Beats::new(1), Beats::new(2), 64, 1.0);
+    bent.expression.pitch_bend = vec![
+        Point::new(Beats::ZERO, 0.0),
+        Point::new(Beats::from_ratio(1, 2), 2.0),
+    ];
+    bent.expression.pressure = vec![Point::new(Beats::ZERO, 0.25)];
+    let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+    let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
+    let track = project.track_mut(midi).unwrap();
+    track.clips.push(clip);
+    track.devices.push(instrument);
+    project
+}
+
+/// Where the audio clip's fields are in [`clips`]'s file.
+const AUDIO: &str = "tracks[0].clips[0].content.audio";
+
+/// Where the MIDI clip's fields are in [`clips`]'s file.
+const MIDI: &str = "tracks[1].clips[0].content.midi";
+
+/// [`clips`]'s file, changed by `edit`, which gets the audio clip's
+/// content.
+fn edited_audio(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&clips(), |f| {
+        edit(&mut f["tracks"][0]["clips"][0]["content"]["audio"])
+    })
+}
+
+/// [`clips`]'s file, changed by `edit`, which gets the MIDI clip's notes.
+fn edited_notes(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&clips(), |f| {
+        edit(&mut f["tracks"][1]["clips"][0]["content"]["midi"]["notes"]);
+    })
 }
 
 /// The sample's file, changed by `edit`.
@@ -88,6 +142,7 @@ fn refused_saving(project: &Project, path: &str, message: &str) {
 fn the_samples_load() {
     assert_eq!(load(&edited(|_| {})).unwrap(), sample());
     assert_eq!(load(&edited_from(&mix(), |_| {})).unwrap(), mix());
+    assert_eq!(load(&edited_from(&clips(), |_| {})).unwrap(), clips());
 }
 
 #[test]
@@ -577,6 +632,354 @@ fn only_audio_and_midi_tracks_record() {
 }
 
 #[test]
+fn clips_and_notes_have_every_field_and_no_others() {
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][0]["clips"][0]["warp"] = json!(true)
+        }),
+        "tracks[0].clips[0].warp",
+        "unknown field",
+    );
+    refused(
+        &edited_audio(|a| a["loop"] = json!(true)),
+        &format!("{AUDIO}.loop"),
+        "unknown field",
+    );
+    refused(
+        &edited_notes(|n| n[0]["channel"] = json!(1)),
+        &format!("{MIDI}.notes[0].channel"),
+        "unknown field",
+    );
+    refused(
+        &edited_notes(|n| n[1]["expression"]["brightness"] = json!([])),
+        &format!("{MIDI}.notes[1].expression.brightness"),
+        "unknown field",
+    );
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][1]["clips"][0]["content"]["midi"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_note_id");
+        }),
+        MIDI,
+        "missing field `next_note_id`",
+    );
+    refused(
+        &edited_notes(|n| {
+            n[0].as_object_mut().unwrap().remove("release_velocity");
+        }),
+        &format!("{MIDI}.notes[0]"),
+        "missing field `release_velocity`",
+    );
+    // Even curves without points.
+    refused(
+        &edited_notes(|n| {
+            n[0]["expression"].as_object_mut().unwrap().remove("timbre");
+        }),
+        &format!("{MIDI}.notes[0].expression"),
+        "missing field `timbre`",
+    );
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][1]["devices"][0]["kind"]["test_instrument"] = json!({});
+        }),
+        "tracks[1].devices[0].kind.test_instrument",
+        "missing field `level`",
+    );
+}
+
+#[test]
+fn clip_values_must_have_the_right_type() {
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][0]["clips"][0]["content"] = json!({"video": {}});
+        }),
+        "tracks[0].clips[0].content",
+        "unknown variant `video`",
+    );
+    refused(
+        &edited_audio(|a| a["offset"] = json!(-1)),
+        &format!("{AUDIO}.offset"),
+        "expected u64",
+    );
+    refused(
+        &edited_notes(|n| n[0]["key"] = json!(256)),
+        &format!("{MIDI}.notes[0].key"),
+        "expected u8",
+    );
+    refused(
+        &edited_notes(|n| n[1]["expression"]["pitch_bend"][1] = json!({"at": 0, "value": 1.0})),
+        &format!("{MIDI}.notes[1].expression.pitch_bend[1]"),
+        "expected a tuple of size 2",
+    );
+    refused(
+        &edited_notes(|n| n[1]["expression"]["pitch_bend"][1] = json!([0])),
+        &format!("{MIDI}.notes[1].expression.pitch_bend[1]"),
+        "expected a tuple of size 2",
+    );
+    refused(
+        &edited_notes(|n| n[1]["expression"]["pressure"][0][0] = json!(0.5)),
+        &format!("{MIDI}.notes[1].expression.pressure[0][0]"),
+        "expected i64",
+    );
+}
+
+#[test]
+fn clip_ids_are_unique_across_tracks_and_below_the_next_id() {
+    refused(
+        &edited_from(&clips(), |f| f["tracks"][1]["clips"][0]["id"] = json!(0)),
+        "tracks[1].clips[0].id",
+        "tracks[0].clips[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&clips(), |f| f["next_clip_id"] = json!(1)),
+        "next_clip_id",
+        "a clip has id 1",
+    );
+    // Gaps and any order are fine.
+    let file = edited_from(&clips(), |f| {
+        f["tracks"][0]["clips"][0]["id"] = json!(7);
+        f["next_clip_id"] = json!(9);
+    });
+    let project = load(&file).unwrap();
+    assert_eq!(project.tracks[0].clips[0].id, ClipId(7));
+    assert_eq!(project.next_clip_id, 9);
+}
+
+#[test]
+fn note_ids_are_unique_in_their_clip_and_below_its_next_note_id() {
+    refused(
+        &edited_notes(|n| n[1]["id"] = json!(0)),
+        &format!("{MIDI}.notes[1].id"),
+        &format!("{MIDI}.notes[0] has id 0 too"),
+    );
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][1]["clips"][0]["content"]["midi"]["next_note_id"] = json!(1);
+        }),
+        &format!("{MIDI}.next_note_id"),
+        "a note has id 1",
+    );
+    // Notes in different clips can have the same ids.
+    let mut project = clips();
+    let mut copy = project.tracks[1].clips[0].clone();
+    copy.id = ClipId(project.next_clip_id);
+    project.next_clip_id += 1;
+    project.tracks[1].clips.push(copy);
+    assert_eq!(load(&edited_from(&project, |_| {})).unwrap(), project);
+    let file = edited_notes(|n| {
+        n[0]["id"] = json!(1);
+        n[1]["id"] = json!(0);
+    });
+    let notes = &load(&file).unwrap().tracks[1].clips[0];
+    let ClipContent::Midi(midi) = &notes.content else {
+        panic!("a MIDI clip");
+    };
+    assert_eq!(midi.notes[0].id, NoteId(1));
+    assert_eq!(midi.note(NoteId(0)).unwrap().key, 64);
+}
+
+#[test]
+fn clips_go_on_tracks_of_their_kind() {
+    let file = edited_from(&clips(), |_| {});
+    let audio = file["tracks"][0]["clips"][0]["content"].clone();
+    let midi = file["tracks"][1]["clips"][0]["content"].clone();
+    refused(
+        &edited_from(&clips(), |f| f["tracks"][1]["clips"][0]["content"] = audio),
+        "tracks[1].clips[0].content",
+        "must be a MIDI clip: MIDI tracks hold MIDI clips",
+    );
+    refused(
+        &edited_from(&clips(), |f| f["tracks"][0]["clips"][0]["content"] = midi),
+        "tracks[0].clips[0].content",
+        "must be an audio clip: audio tracks hold audio clips",
+    );
+    for kind in ["group", "return"] {
+        let file = edited_from(&clips(), |f| {
+            f["tracks"][1]["kind"] = json!(kind);
+        });
+        refused(
+            &file,
+            "tracks[1].clips",
+            "must be empty: only audio and MIDI tracks hold clips",
+        );
+    }
+}
+
+#[test]
+fn clips_start_in_the_song_and_end_within_reach() {
+    let clip = |f: &mut Value, field: &str, ticks: i64| {
+        f["tracks"][1]["clips"][0][field] = json!(ticks);
+    };
+    let cases = [
+        ("start", -1, "must be 0 or more: clips start in the song"),
+        ("start", MAX_TICKS + 1, "within"),
+        ("length", 0, "must be more than 0"),
+        ("length", -Beats::new(4).ticks(), "must be more than 0"),
+        ("length", MAX_TICKS + 1, "must end within"),
+    ];
+    for (field, ticks, message) in cases {
+        let file = edited_from(&clips(), |f| clip(f, field, ticks));
+        refused(&file, &format!("tracks[1].clips[0].{field}"), message);
+    }
+    // The clip is four beats long.
+    let length = Beats::new(4).ticks();
+    let file = edited_from(&clips(), |f| clip(f, "start", MAX_TICKS - length + 1));
+    refused(&file, "tracks[1].clips[0].length", "must end within");
+    let file = edited_from(&clips(), |f| clip(f, "start", MAX_TICKS - length));
+    assert_eq!(
+        load(&file).unwrap().tracks[1].clips[0].end(),
+        Beats::from_ticks(MAX_TICKS)
+    );
+}
+
+#[test]
+fn audio_clips_name_a_file_and_their_fades_fit() {
+    refused(
+        &edited_audio(|a| a["file"] = json!("")),
+        &format!("{AUDIO}.file"),
+        "must name a file",
+    );
+    refused(
+        &edited_audio(|a| a["offset"] = json!(MAX_TICKS + 1)),
+        &format!("{AUDIO}.offset"),
+        "or less",
+    );
+    // The clip is four beats long.
+    let length = Beats::new(4).ticks();
+    for (field, ticks) in [("fade_in", -1), ("fade_out", length + 1)] {
+        refused(
+            &edited_audio(|a| a[field] = json!(ticks)),
+            &format!("{AUDIO}.{field}"),
+            "must be from 0 to the clip's length",
+        );
+    }
+    refused(
+        &edited_audio(|a| {
+            a["fade_in"] = json!(length / 2 + 1);
+            a["fade_out"] = json!(length / 2);
+        }),
+        &format!("{AUDIO}.fade_out"),
+        "must fit in the clip's length with fade_in",
+    );
+    let file = edited_audio(|a| {
+        a["fade_in"] = json!(length / 2);
+        a["fade_out"] = json!(length / 2);
+        a["offset"] = json!(MAX_TICKS);
+        a["file"] = json!("C:/Samples/Take.wav");
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    assert_eq!(audio.fade_in + audio.fade_out, Beats::from_ticks(length));
+    assert_eq!(audio.offset, MAX_TICKS as u64);
+    assert_eq!(audio.file, "C:/Samples/Take.wav");
+}
+
+#[test]
+fn notes_have_keys_velocities_and_lengths() {
+    let cases = [
+        ("key", json!(128), "must be from 0 to 127"),
+        ("velocity", json!(1.01), "must be from 0 to 1"),
+        ("velocity", json!(-0.5), "must be from 0 to 1"),
+        ("release_velocity", json!(2.0), "must be from 0 to 1"),
+        ("length", json!(0), "must be more than 0"),
+        ("start", json!(-MAX_TICKS - 1), "within"),
+        ("length", json!(MAX_TICKS), "must end within"),
+    ];
+    for (field, value, message) in cases {
+        refused(
+            &edited_notes(|n| n[1][field] = value),
+            &format!("{MIDI}.notes[1].{field}"),
+            message,
+        );
+    }
+    // Notes before the clip's offset don't play, but they're kept.
+    let file = edited_notes(|n| {
+        n[0]["start"] = json!(-MAX_TICKS);
+        n[0]["key"] = json!(0);
+        n[0]["velocity"] = json!(0.0);
+        n[1]["key"] = json!(127);
+        n[1]["release_velocity"] = json!(1.0);
+    });
+    let project = load(&file).unwrap();
+    let ClipContent::Midi(midi) = &project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    assert_eq!(midi.notes[0].start, Beats::from_ticks(-MAX_TICKS));
+    assert_eq!((midi.notes[0].key, midi.notes[1].key), (0, 127));
+}
+
+#[test]
+fn expression_points_go_in_order_within_range() {
+    let curve = |n: &mut Value, name: &str, points: Value| {
+        n[1]["expression"][name] = points;
+    };
+    let cases = [
+        (
+            "pitch_bend",
+            json!([[-1, 0.0]]),
+            "pitch_bend[0][0]",
+            "must be 0 or more: points start from the note's start",
+        ),
+        (
+            "pitch_bend",
+            json!([[10, 0.0], [5, 1.0]]),
+            "pitch_bend[1][0]",
+            "must be at or after the point before it",
+        ),
+        (
+            "pitch_bend",
+            json!([[0, 0.0], [10, 120.5]]),
+            "pitch_bend[1][1]",
+            "must be from -120 to 120",
+        ),
+        (
+            "pressure",
+            json!([[0, 1.5]]),
+            "pressure[0][1]",
+            "must be from 0 to 1",
+        ),
+        (
+            "timbre",
+            json!([[0, -0.25]]),
+            "timbre[0][1]",
+            "must be from 0 to 1",
+        ),
+        (
+            "timbre",
+            json!([[MAX_TICKS + 1, 0.0]]),
+            "timbre[0][0]",
+            "within",
+        ),
+    ];
+    for (name, points, path, message) in cases {
+        refused(
+            &edited_notes(|n| curve(n, name, points)),
+            &format!("{MIDI}.notes[1].expression.{path}"),
+            message,
+        );
+    }
+    // Points at the same time are fine: the later one wins. So are points
+    // after the note's end, which don't play.
+    let file = edited_notes(|n| {
+        curve(
+            n,
+            "pitch_bend",
+            json!([[0, -120.0], [0, 120.0], [MAX_TICKS, 0.0]]),
+        );
+    });
+    let project = load(&file).unwrap();
+    let ClipContent::Midi(midi) = &project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    let bend = &midi.notes[1].expression.pitch_bend;
+    assert_eq!(bend.len(), 3);
+    assert_eq!(bend[1], Point::new(Beats::ZERO, 120.0));
+}
+
+#[test]
 fn saving_refuses_what_loading_would() {
     let mut project = sample();
     project.tracks[1].gain = f32::NAN;
@@ -643,6 +1046,69 @@ fn saving_refuses_what_loading_would() {
         "tracks[0].sends[0].to",
         "there's no track with id 4",
     );
+
+    let mut project = clips();
+    project.tracks[1].devices[0].kind = DeviceKind::TestInstrument {
+        level: f32::INFINITY,
+    };
+    refused_saving(
+        &project,
+        "tracks[1].devices[0].kind.test_instrument.level",
+        "must be a finite number",
+    );
+
+    let mut project = clips();
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    audio.gain = f32::NAN;
+    refused_saving(
+        &project,
+        &format!("{AUDIO}.gain"),
+        "must be a finite number",
+    );
+
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.notes[1].velocity = f32::NAN;
+    refused_saving(
+        &project,
+        &format!("{MIDI}.notes[1].velocity"),
+        "must be from 0 to 1",
+    );
+
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.notes[1].expression.pressure[0].value = f32::NAN;
+    refused_saving(
+        &project,
+        &format!("{MIDI}.notes[1].expression.pressure[0][1]"),
+        "must be from 0 to 1",
+    );
+
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.next_note_id = 0;
+    refused_saving(&project, &format!("{MIDI}.next_note_id"), "a note has id 1");
+
+    let mut project = clips();
+    project.tracks[0].clips[0].length = Beats::ZERO;
+    refused_saving(&project, "tracks[0].clips[0].length", "must be more than 0");
+
+    let mut project = clips();
+    let clip = project.tracks[1].clips.remove(0);
+    project.tracks[2].clips.push(clip);
+    refused_saving(&project, "tracks[2].clips", "only audio and MIDI tracks");
+
+    let mut project = clips();
+    project.next_clip_id = 0;
+    refused_saving(&project, "next_clip_id", "a clip has id 1");
 }
 
 #[test]

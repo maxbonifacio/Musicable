@@ -73,7 +73,7 @@ fn the_demo_plays_the_same_with_the_parallel_scheduler() {
     let renders = [Render::Reference, Render::App, shared()];
     let mut players: Vec<Player> = renders
         .iter()
-        .map(|render| Player::new(project.clone(), render, CONFIG))
+        .map(|render| Player::new(project.clone(), None, render, CONFIG))
         .collect();
     let differences = null_test::compare(&mut players, frames);
     assert_eq!(differences, [None, None, None]);
@@ -102,8 +102,8 @@ fn saved_and_opened_again_the_demo_plays_the_same() {
     assert_eq!(reopened, project);
 
     let mut players = [
-        Player::new(project, &Render::Reference, CONFIG),
-        Player::new(reopened, &Render::App, CONFIG),
+        Player::new(project, None, &Render::Reference, CONFIG),
+        Player::new(reopened, None, &Render::App, CONFIG),
     ];
     let differences = null_test::compare(&mut players, 2 * CONFIG.sample_rate as u64);
     assert_eq!(differences, [None, None]);
@@ -118,8 +118,8 @@ fn the_null_test_finds_the_smallest_difference() {
     let gain = &mut louder.tracks[0].gain;
     *gain = f32::from_bits(gain.to_bits() + 1);
     let mut players = [
-        Player::new(project, &Render::Reference, CONFIG),
-        Player::new(louder, &shared(), CONFIG),
+        Player::new(project, None, &Render::Reference, CONFIG),
+        Player::new(louder, None, &shared(), CONFIG),
     ];
     let differences = null_test::compare(&mut players, CONFIG.sample_rate.into());
     let difference = differences[1].expect("a difference");

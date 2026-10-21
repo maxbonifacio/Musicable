@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{self, Beats};
 use musicable_model::{self as model, DeviceId, SendId, TrackId};
@@ -31,6 +32,7 @@ pub(super) struct File {
     next_track_id: u32,
     next_send_id: u32,
     next_device_id: u32,
+    next_clip_id: u32,
     tracks: Vec<Track>,
     master: Master,
 }
@@ -88,6 +90,7 @@ struct Track {
     sends: Vec<Send>,
     #[serde(deserialize_with = "Option::deserialize")]
     tone: Option<TestTone>,
+    clips: Vec<Clip>,
     devices: Vec<Device>,
     clip_type: ClipType,
     console: ConsoleSettings,
@@ -119,6 +122,66 @@ struct TestTone {
     level: f32,
 }
 
+/// Positions and lengths in ticks.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Clip {
+    id: u32,
+    name: String,
+    start: i64,
+    length: i64,
+    content: ClipContent,
+}
+
+/// Externally tagged, `{"audio": {..}}`, for the reason [`DeviceKind`] is.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClipContent {
+    Audio(AudioClip),
+    Midi(MidiClip),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioClip {
+    file: String,
+    /// In frames of the file.
+    offset: u64,
+    gain: f32,
+    fade_in: i64,
+    fade_out: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MidiClip {
+    offset: i64,
+    next_note_id: u32,
+    notes: Vec<Note>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Note {
+    id: u32,
+    start: i64,
+    length: i64,
+    key: u8,
+    velocity: f32,
+    release_velocity: f32,
+    expression: Expression,
+}
+
+/// Each curve's points as `[at, value]` pairs, `at` in ticks from the
+/// note's start.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Expression {
+    pitch_bend: Vec<(i64, f32)>,
+    pressure: Vec<(i64, f32)>,
+    timbre: Vec<(i64, f32)>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Device {
@@ -133,6 +196,7 @@ struct Device {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum DeviceKind {
     TestGain { gain: f32 },
+    TestInstrument { level: f32 },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -169,6 +233,7 @@ impl From<&model::Project> for File {
             next_track_id,
             next_send_id,
             next_device_id,
+            next_clip_id,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -181,6 +246,7 @@ impl From<&model::Project> for File {
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
+            next_clip_id: *next_clip_id,
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
         }
@@ -202,6 +268,7 @@ impl File {
             next_track_id,
             next_send_id,
             next_device_id,
+            next_clip_id,
             tracks,
             master,
         } = self;
@@ -214,12 +281,16 @@ impl File {
         let mut ids = Ids::new("track", "next_track_id", *next_track_id);
         let mut send_ids = Ids::new("send", "next_send_id", *next_send_id);
         let mut device_ids = Ids::new("device", "next_device_id", *next_device_id);
+        let mut clip_ids = Ids::new("clip", "next_clip_id", *next_clip_id);
         let mut model_tracks = Vec::with_capacity(tracks.len());
         for (i, track) in tracks.iter().enumerate() {
             let path = format!("tracks[{i}]");
             ids.add(track.id, &path)?;
             for (j, send) in track.sends.iter().enumerate() {
                 send_ids.add(send.id, &format!("{path}.sends[{j}]"))?;
+            }
+            for (j, clip) in track.clips.iter().enumerate() {
+                clip_ids.add(clip.id, &format!("{path}.clips[{j}]"))?;
             }
             for (j, device) in track.devices.iter().enumerate() {
                 device_ids.add(device.id, &format!("{path}.devices[{j}]"))?;
@@ -228,6 +299,7 @@ impl File {
         }
         ids.check_next()?;
         send_ids.check_next()?;
+        clip_ids.check_next()?;
         let kinds: HashMap<u32, TrackKind> = tracks.iter().map(|t| (t.id, t.kind)).collect();
         for (i, track) in tracks.iter().enumerate() {
             track.check_routing(&format!("tracks[{i}]"), &kinds)?;
@@ -246,6 +318,7 @@ impl File {
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
+            next_clip_id: *next_clip_id,
         };
         check_loops(&project)?;
         Ok(project)
@@ -256,17 +329,17 @@ impl File {
 /// counter that must stay above them all.
 struct Ids {
     what: &'static str,
-    next_field: &'static str,
+    next_field: String,
     next: u32,
     paths: Vec<String>,
     seen: HashMap<u32, usize>,
 }
 
 impl Ids {
-    fn new(what: &'static str, next_field: &'static str, next: u32) -> Self {
+    fn new(what: &'static str, next_field: impl Into<String>, next: u32) -> Self {
         Self {
             what,
-            next_field,
+            next_field: next_field.into(),
             next,
             paths: Vec::new(),
             seen: HashMap::new(),
@@ -292,7 +365,7 @@ impl Ids {
                 let what = self.what;
                 let message =
                     format!("must be above every {what}'s id, and a {what} has id {highest}");
-                Err(Invalid::new(self.next_field, message))
+                Err(Invalid::new(self.next_field.clone(), message))
             }
             None => Ok(()),
         }
@@ -458,6 +531,7 @@ impl From<&model::Track> for Track {
             output,
             sends,
             tone,
+            clips,
             devices,
             clip_type,
             console,
@@ -484,6 +558,7 @@ impl From<&model::Track> for Track {
             },
             sends: sends.iter().map(Send::from).collect(),
             tone: tone.map(|model::TestTone { frequency, level }| TestTone { frequency, level }),
+            clips: clips.iter().map(Clip::from).collect(),
             devices: devices.iter().map(Device::from).collect(),
             clip_type: ClipType::from(*clip_type),
             console: ConsoleSettings {},
@@ -506,6 +581,7 @@ impl Track {
             output,
             sends,
             tone,
+            clips,
             devices,
             clip_type,
             console,
@@ -533,6 +609,15 @@ impl Track {
             .enumerate()
             .map(|(j, send)| send.to_model(&format!("{path}.sends[{j}]")))
             .collect::<Result<_, _>>()?;
+        if kind.is_bus() && !clips.is_empty() {
+            let message = "must be empty: only audio and MIDI tracks hold clips";
+            return Err(Invalid::new(format!("{path}.clips"), message));
+        }
+        let clips = clips
+            .iter()
+            .enumerate()
+            .map(|(j, clip)| clip.to_model(&format!("{path}.clips[{j}]"), kind))
+            .collect::<Result<_, _>>()?;
         Ok(model::Track {
             id: TrackId(*id),
             name: name.clone(),
@@ -549,6 +634,7 @@ impl Track {
             },
             sends,
             tone,
+            clips,
             devices: devices_to_model(devices, &format!("{path}.devices"))?,
             clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
@@ -597,6 +683,295 @@ impl Track {
     }
 }
 
+impl From<&clip::Clip> for Clip {
+    fn from(clip: &clip::Clip) -> Self {
+        let clip::Clip {
+            id,
+            name,
+            start,
+            length,
+            content,
+        } = clip;
+        Self {
+            id: id.0,
+            name: name.clone(),
+            start: start.ticks(),
+            length: length.ticks(),
+            content: match content {
+                clip::ClipContent::Audio(audio) => ClipContent::Audio(AudioClip::from(audio)),
+                clip::ClipContent::Midi(midi) => ClipContent::Midi(MidiClip::from(midi)),
+            },
+        }
+    }
+}
+
+impl Clip {
+    /// The clip, on a track of `kind`.
+    fn to_model(&self, path: &str, kind: model::TrackKind) -> Result<clip::Clip, Invalid> {
+        let Self {
+            id,
+            name,
+            start,
+            length,
+            content,
+        } = self;
+        if *start < 0 {
+            let message = "must be 0 or more: clips start in the song";
+            return Err(Invalid::new(format!("{path}.start"), message));
+        }
+        let start = position(*start, || format!("{path}.start"))?;
+        let length = length_from(start, *length, || format!("{path}.length"))?;
+        let content = match (content, kind) {
+            (ClipContent::Audio(audio), model::TrackKind::Audio) => {
+                clip::ClipContent::Audio(audio.to_model(&format!("{path}.content.audio"), length)?)
+            }
+            (ClipContent::Midi(midi), model::TrackKind::Midi) => {
+                clip::ClipContent::Midi(midi.to_model(&format!("{path}.content.midi"))?)
+            }
+            (ClipContent::Audio(_), _) => {
+                let message = "must be a MIDI clip: MIDI tracks hold MIDI clips";
+                return Err(Invalid::new(format!("{path}.content"), message));
+            }
+            (ClipContent::Midi(_), _) => {
+                let message = "must be an audio clip: audio tracks hold audio clips";
+                return Err(Invalid::new(format!("{path}.content"), message));
+            }
+        };
+        Ok(clip::Clip {
+            id: ClipId(*id),
+            name: name.clone(),
+            start,
+            length,
+            content,
+        })
+    }
+}
+
+impl From<&clip::AudioClip> for AudioClip {
+    fn from(audio: &clip::AudioClip) -> Self {
+        let clip::AudioClip {
+            file,
+            offset,
+            gain,
+            fade_in,
+            fade_out,
+        } = audio;
+        Self {
+            file: file.clone(),
+            offset: *offset,
+            gain: *gain,
+            fade_in: fade_in.ticks(),
+            fade_out: fade_out.ticks(),
+        }
+    }
+}
+
+impl AudioClip {
+    /// The clip's audio, for a clip `length` long.
+    fn to_model(&self, path: &str, length: Beats) -> Result<clip::AudioClip, Invalid> {
+        let Self {
+            file,
+            offset,
+            gain,
+            fade_in,
+            fade_out,
+        } = self;
+        if file.is_empty() {
+            return Err(Invalid::new(format!("{path}.file"), "must name a file"));
+        }
+        if *offset > MAX_TICKS.unsigned_abs() {
+            let message = format!("must be {MAX_TICKS} or less");
+            return Err(Invalid::new(format!("{path}.offset"), message));
+        }
+        for (fade, name) in [(*fade_in, "fade_in"), (*fade_out, "fade_out")] {
+            if !(0..=length.ticks()).contains(&fade) {
+                let message = "must be from 0 to the clip's length";
+                return Err(Invalid::new(format!("{path}.{name}"), message));
+            }
+        }
+        if fade_in + fade_out > length.ticks() {
+            let message = "must fit in the clip's length with fade_in";
+            return Err(Invalid::new(format!("{path}.fade_out"), message));
+        }
+        Ok(clip::AudioClip {
+            file: file.clone(),
+            offset: *offset,
+            gain: finite(*gain, || format!("{path}.gain"))?,
+            fade_in: Beats::from_ticks(*fade_in),
+            fade_out: Beats::from_ticks(*fade_out),
+        })
+    }
+}
+
+impl From<&clip::MidiClip> for MidiClip {
+    fn from(midi: &clip::MidiClip) -> Self {
+        let clip::MidiClip {
+            offset,
+            next_note_id,
+            notes,
+        } = midi;
+        Self {
+            offset: offset.ticks(),
+            next_note_id: *next_note_id,
+            notes: notes.iter().map(Note::from).collect(),
+        }
+    }
+}
+
+impl MidiClip {
+    fn to_model(&self, path: &str) -> Result<clip::MidiClip, Invalid> {
+        let Self {
+            offset,
+            next_note_id,
+            notes,
+        } = self;
+        let mut ids = Ids::new("note", format!("{path}.next_note_id"), *next_note_id);
+        let mut model_notes = Vec::with_capacity(notes.len());
+        for (k, note) in notes.iter().enumerate() {
+            let path = format!("{path}.notes[{k}]");
+            ids.add(note.id, &path)?;
+            model_notes.push(note.to_model(&path)?);
+        }
+        ids.check_next()?;
+        Ok(clip::MidiClip {
+            offset: position(*offset, || format!("{path}.offset"))?,
+            next_note_id: *next_note_id,
+            notes: model_notes,
+        })
+    }
+}
+
+impl From<&clip::Note> for Note {
+    fn from(note: &clip::Note) -> Self {
+        let clip::Note {
+            id,
+            start,
+            length,
+            key,
+            velocity,
+            release_velocity,
+            expression,
+        } = note;
+        let clip::Expression {
+            pitch_bend,
+            pressure,
+            timbre,
+        } = expression;
+        let points =
+            |curve: &[clip::Point]| curve.iter().map(|p| (p.at.ticks(), p.value)).collect();
+        Self {
+            id: id.0,
+            start: start.ticks(),
+            length: length.ticks(),
+            key: *key,
+            velocity: *velocity,
+            release_velocity: *release_velocity,
+            expression: Expression {
+                pitch_bend: points(pitch_bend),
+                pressure: points(pressure),
+                timbre: points(timbre),
+            },
+        }
+    }
+}
+
+impl Note {
+    fn to_model(&self, path: &str) -> Result<clip::Note, Invalid> {
+        let Self {
+            id,
+            start,
+            length,
+            key,
+            velocity,
+            release_velocity,
+            expression,
+        } = self;
+        let start = position(*start, || format!("{path}.start"))?;
+        let length = length_from(start, *length, || format!("{path}.length"))?;
+        if *key > clip::Note::MAX_KEY {
+            let message = format!("must be from 0 to {}", clip::Note::MAX_KEY);
+            return Err(Invalid::new(format!("{path}.key"), message));
+        }
+        let unit = |value: f32, name: &str| {
+            if (0.0..=1.0).contains(&value) {
+                Ok(value)
+            } else {
+                Err(Invalid::new(
+                    format!("{path}.{name}"),
+                    "must be from 0 to 1",
+                ))
+            }
+        };
+        let Expression {
+            pitch_bend,
+            pressure,
+            timbre,
+        } = expression;
+        let path = format!("{path}.expression");
+        Ok(clip::Note {
+            id: NoteId(*id),
+            start,
+            length,
+            key: *key,
+            velocity: unit(*velocity, "velocity")?,
+            release_velocity: unit(*release_velocity, "release_velocity")?,
+            expression: clip::Expression {
+                pitch_bend: curve(
+                    pitch_bend,
+                    Dimension::PitchBend,
+                    &format!("{path}.pitch_bend"),
+                )?,
+                pressure: curve(pressure, Dimension::Pressure, &format!("{path}.pressure"))?,
+                timbre: curve(timbre, Dimension::Timbre, &format!("{path}.timbre"))?,
+            },
+        })
+    }
+}
+
+/// An expression curve: points in order, from the note's start on, with
+/// values `dimension` takes.
+fn curve(
+    points: &[(i64, f32)],
+    dimension: Dimension,
+    path: &str,
+) -> Result<Vec<clip::Point>, Invalid> {
+    let (low, high) = dimension.range();
+    let mut curve = Vec::with_capacity(points.len());
+    for (k, &(at, value)) in points.iter().enumerate() {
+        let path = format!("{path}[{k}]");
+        if at < 0 {
+            let message = "must be 0 or more: points start from the note's start";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        if k > 0 && at < points[k - 1].0 {
+            let message = "must be at or after the point before it";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        let at = position(at, || format!("{path}[0]"))?;
+        if !(low..=high).contains(&value) {
+            let message = format!("must be from {low} to {high}");
+            return Err(Invalid::new(format!("{path}[1]"), message));
+        }
+        curve.push(clip::Point::new(at, value));
+    }
+    Ok(curve)
+}
+
+/// A length in ticks, if it's more than zero and what has it, starting at
+/// `start`, ends within [`MAX_TICKS`] of the song's start.
+fn length_from(start: Beats, ticks: i64, path: impl FnOnce() -> String) -> Result<Beats, Invalid> {
+    if ticks <= 0 {
+        return Err(Invalid::new(path(), "must be more than 0"));
+    }
+    match start.ticks().checked_add(ticks) {
+        Some(end) if end <= MAX_TICKS => Ok(Beats::from_ticks(ticks)),
+        _ => {
+            let message = format!("must end within {MAX_TICKS} ticks of the start of the song");
+            Err(Invalid::new(path(), message))
+        }
+    }
+}
+
 fn no_track(id: u32) -> String {
     format!("there's no track with id {id}")
 }
@@ -642,6 +1017,7 @@ impl From<&model::Device> for Device {
             id: id.0,
             kind: match *kind {
                 model::DeviceKind::TestGain { gain } => DeviceKind::TestGain { gain },
+                model::DeviceKind::TestInstrument { level } => DeviceKind::TestInstrument { level },
             },
         }
     }
@@ -657,6 +1033,9 @@ fn devices_to_model(devices: &[Device], path: &str) -> Result<Vec<model::Device>
             kind: match *kind {
                 DeviceKind::TestGain { gain } => model::DeviceKind::TestGain {
                     gain: finite(gain, || format!("{path}.test_gain.gain"))?,
+                },
+                DeviceKind::TestInstrument { level } => model::DeviceKind::TestInstrument {
+                    level: finite(level, || format!("{path}.test_instrument.level"))?,
                 },
             },
         })
