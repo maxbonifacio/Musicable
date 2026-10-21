@@ -134,7 +134,8 @@ the delay's medians jump back and forth by a period and the buffer can read
 low. None of that comes with a late wake-up or loses audio. Before either
 sign needed one, an hour on the RME counted 134 dropouts in bursts around
 the catch-ups, without a single late wake-up, and music played through the
-card during the first burst had no clicks.
+card during the first burst had no clicks. Needing one, half an hour on the
+RME crossed a catch-up, nine and a half minutes in, and counted none.
 
 A dropout takes a few wake-ups to recover from while the buffer refills, so
 signs in the 10 wake-ups after one count towards the same dropout.
@@ -155,7 +156,9 @@ latency stepped up by a period three times, each time at a late wake-up, from
 11 to 19 ms, and stayed there for the rest of the run. Exclusive mode, with
 no audio engine in between, held steady over the same hour. A later hour on
 the same output counted one system dropout, at a late wake-up, which moved
-the latency from 8.6 to 11.3 ms.
+the latency from 8.6 to 11.3 ms. Half an hour on it, at the same time as the
+RME's above, counted three, each at a late wake-up, and each moved the
+latency up a period, from 8.6 to 16.6 ms in all.
 
 On macOS and Linux, a dropout is whatever cpal reports as an xrun: ALSA
 underruns and CoreAudio overloads. cpal doesn't say how much audio they lost.
