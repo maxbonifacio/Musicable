@@ -59,10 +59,11 @@ impl Transport {
     /// Call at the start of each block, after applying the transport changes
     /// due: a playing playhead at the loop end jumps back to the loop start.
     pub fn wrap(&mut self) {
-        if let Some((start, end)) = self.loop_frames {
-            if self.state.playing && self.state.position == end {
-                self.state.position = start;
-            }
+        if let Some((start, end)) = self.loop_frames
+            && self.state.playing
+            && self.state.position == end
+        {
+            self.state.position = start;
         }
     }
 

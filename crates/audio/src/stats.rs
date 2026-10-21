@@ -23,6 +23,10 @@ pub struct StreamStats {
     pub max_interval: Duration,
     /// The longest a wake-up took, rendering included.
     pub max_busy: Duration,
+    /// The time all wake-ups took, rendering included. Over a stretch of
+    /// time, the share of it the audio thread was busy is its load: what a
+    /// CPU meter shows. Near 100%, wake-ups start running late.
+    pub busy: Duration,
     /// Frames queued ahead of the device's play position at the last
     /// wake-up, before it wrote: the output latency as the device's clock
     /// sees it.
@@ -38,6 +42,7 @@ pub(crate) struct Counters {
     late_wakeups: AtomicU64,
     max_interval_ns: AtomicU64,
     max_busy_ns: AtomicU64,
+    busy_ns: AtomicU64,
     queued: AtomicU64,
     ended: AtomicBool,
 }
@@ -72,7 +77,9 @@ impl Counters {
     }
 
     pub fn busy(&self, busy: Duration) {
-        self.max_busy_ns.fetch_max(nanos(busy), Relaxed);
+        let busy = nanos(busy);
+        self.max_busy_ns.fetch_max(busy, Relaxed);
+        self.busy_ns.fetch_add(busy, Relaxed);
     }
 
     pub fn queued(&self, frames: u64) {
@@ -96,6 +103,7 @@ impl Counters {
             late_wakeups: self.late_wakeups.load(Relaxed),
             max_interval: Duration::from_nanos(self.max_interval_ns.load(Relaxed)),
             max_busy: Duration::from_nanos(self.max_busy_ns.load(Relaxed)),
+            busy: Duration::from_nanos(self.busy_ns.load(Relaxed)),
             queued: self.queued.load(Relaxed),
         }
     }

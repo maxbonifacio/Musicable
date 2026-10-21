@@ -15,11 +15,13 @@ use std::fmt;
 use musicable_model::time::Beats;
 
 mod document;
+pub mod file;
 mod key;
 mod keymap;
 pub mod transport;
 
 pub use document::{Committed, Document, Edit, Transaction};
+pub use file::Request;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
 pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
 
@@ -69,6 +71,9 @@ pub struct Context<'a> {
     /// [`Document::transact`].
     pub document: &'a mut Document,
     pub transport: &'a mut dyn Transport,
+    /// What the command asks the app to do once it has run, such as showing
+    /// a file dialog, which commands can't do themselves.
+    pub requests: &'a mut Vec<Request>,
 }
 
 /// The engine's transport, as commands see it. The app implements it on top

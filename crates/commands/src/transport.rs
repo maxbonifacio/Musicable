@@ -6,7 +6,7 @@
 
 use musicable_model::time::Beats;
 
-use crate::{CommandId, Context, Registry};
+use crate::{CommandId, Context, Document, Registry};
 
 /// Plays from the playhead when stopped, and stops when playing.
 pub const PLAY_STOP: CommandId = CommandId::new("transport.play_stop");
@@ -82,13 +82,37 @@ fn change_tempo(ctx: &mut Context<'_>, name: &str, bpm: f64) {
     });
 }
 
+/// Sets the tempo at `at` to `bpm`, and moves every other tempo in the song
+/// by as much, as Tempo Up and Down do. Each stays within the tempo map's
+/// limits. This is the transaction behind a tempo field: commands don't take
+/// values yet, so it isn't a command.
+///
+/// # Panics
+///
+/// If `bpm` is NaN.
+pub fn set_tempo(document: &mut Document, at: Beats, bpm: f64) {
+    document.transact("Set Tempo", |tx| {
+        let changes = tx.project().tempo.tempos();
+        // The change that sets the tempo at `at`. It gets exactly `bpm`, and
+        // the others move by the difference.
+        let current = changes.partition_point(|c| c.at <= at).saturating_sub(1);
+        let by = bpm - changes[current].bpm;
+        let mut tempo = tx.project().tempo.clone();
+        for (i, change) in changes.iter().enumerate() {
+            let bpm = if i == current { bpm } else { change.bpm + by };
+            tempo.insert_tempo(change.at, bpm);
+        }
+        tx.set_tempo(tempo);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use musicable_model::Project;
     use musicable_model::time::TempoMap;
 
     use super::*;
-    use crate::{Document, Edit, Key, KeyChord, Keymap, Modifiers, Transport};
+    use crate::{Edit, Key, KeyChord, Keymap, Modifiers, Transport};
 
     /// Records what commands ask of the transport.
     #[derive(Debug, Default)]
@@ -135,11 +159,14 @@ mod tests {
         }
 
         fn run(&mut self, id: &CommandId) {
+            let mut requests = Vec::new();
             let mut ctx = Context {
                 document: &mut self.document,
                 transport: &mut self.transport,
+                requests: &mut requests,
             };
             self.registry.run(id, &mut ctx).unwrap();
+            assert_eq!(requests, [], "transport commands ask nothing of the app");
         }
     }
 
@@ -148,6 +175,7 @@ mod tests {
         let mut registry = Registry::new();
         register(&mut registry);
         assert_eq!(registry.iter().count(), COMMANDS.len());
+        crate::file::register(&mut registry);
 
         let keymap = Keymap::default_keymap();
         for (id, title, _) in COMMANDS {
@@ -227,5 +255,32 @@ mod tests {
         let mut setup = Setup::new(project);
         setup.run(&TEMPO_DOWN);
         assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn a_tempo_field_sets_the_tempo_where_the_playhead_is() {
+        let mut document = Document::new(Project::new());
+        set_tempo(&mut document, Beats::new(3), 97.3);
+        assert_eq!(document.project().tempo.bpm_at(Beats::ZERO), 97.3);
+        let committed = document.take_committed();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].name, "Set Tempo");
+
+        // The tempo at the playhead gets the value, and the others move with
+        // it, within the limits.
+        let mut project = Project::new();
+        project.tempo.insert_tempo(Beats::new(16), 100.0);
+        project.tempo.insert_tempo(Beats::new(32), 30.0);
+        let mut document = Document::new(project);
+        set_tempo(&mut document, Beats::new(20), 85.5);
+        let tempo = &document.project().tempo;
+        assert_eq!(tempo.bpm_at(Beats::ZERO), 105.5);
+        assert_eq!(tempo.bpm_at(Beats::new(16)), 85.5);
+        assert_eq!(tempo.bpm_at(Beats::new(32)), TempoMap::MIN_BPM);
+
+        // The same tempo again changes nothing.
+        document.take_committed();
+        set_tempo(&mut document, Beats::new(20), 85.5);
+        assert_eq!(document.take_committed(), []);
     }
 }

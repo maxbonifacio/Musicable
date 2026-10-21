@@ -5,7 +5,8 @@ Ableton Live's arrangement view. The first goal is a studio DAW for writing,
 recording, editing and mixing. Live performance (Session View) comes later.
 
 > Status: pre-alpha. Nothing usable yet. This repository is the Tier 0
-> skeleton.
+> skeleton: the app plays, loops and saves a demo project of test tones,
+> with no editing. See [docs/app.md](docs/app.md).
 
 ## Goals
 
@@ -31,8 +32,8 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/audio` | Audio device output: our own WASAPI backend on Windows, cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP, VST3 and ARA hosting. |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
-| `crates/ui` | User interface. Talks to the model through commands. |
-| `crates/app` | The `musicable` binary, and the session that runs commands and keeps the engine in step with the project. |
+| `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
+| `crates/app` | The `musicable` app: its window, the audio output, and the session that runs commands and keeps the engine in step with the project. |
 
 The engine never depends on the UI, and the UI never drives the engine
 directly. Cargo dependencies enforce this.
@@ -42,7 +43,7 @@ directly. Cargo dependencies enforce this.
 ```sh
 cargo build
 cargo test --workspace
-cargo run -p musicable-app
+cargo run --release -p musicable-app                    # the app; File > New Demo Project plays the demo
 cargo run --release -p musicable-audio --example tone   # a test tone on the default output
 ```
 
