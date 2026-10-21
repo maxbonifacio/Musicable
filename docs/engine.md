@@ -224,10 +224,12 @@ callback, such as at a loop end. Spinning through the gap between callbacks
 would save the wake-ups, but it keeps every core busy (see the benchmarks
 below).
 
-**Small blocks.** Waking workers costs more than it saves when there's little
-to do. A block runs on the audio thread alone when the block before it took
-less than `ParallelOptions::inline_below` of work (100 µs by default), or
-when nothing in the graph can run alongside anything else. A new graph's
+**Small blocks.** A block runs on the audio thread alone when the block
+before it took less than `ParallelOptions::inline_below` of work (100 µs by
+default), or when nothing in the graph can run alongside anything else.
+Sharing pays from much less work than that on a desktop CPU, about 30 µs on
+a Ryzen 9 3900X, but a block under 100 µs takes less than 8% of a 64-frame
+period at 48 kHz on its own, and the workers can stay asleep. A new graph's
 first block is always shared, to find out. A graph with more than
 `ParallelOptions::max_nodes` nodes (16,384 by default) runs on the audio
 thread alone too.
@@ -249,10 +251,12 @@ channel strip slots, on 1, 2, 4, … threads up to one per physical core.
 `--bench realtime` renders at a device's pace and prints tables: a 64-track
 project scheduled per node against one thread per signal path (how Ableton's
 documentation says Live does it), block times and worker CPU for different
-spin settings, and small graphs alone against shared. On a 4-core cloud VM,
-a 64-track project whose tracks all send to two return tracks rendered 2.3×
-faster per node than per signal path, using 3.5 cores instead of 1. The
-defaults above come from that VM, so check them on real hardware.
+spin settings, and small graphs alone against shared. On a Ryzen 9 3900X
+(12 cores), a 64-track project whose tracks all send to two return tracks
+rendered a 64-frame block in 118 µs per node, on 8.8 cores, and in 671 µs
+per signal path, on 1: 5.7 times faster. Graphs with plenty to share ran 6.7
+to 8.1 times faster on 12 threads than on one, and spinning longer than
+20 µs between blocks didn't make blocks any faster.
 
 **Hybrid buffering (Tier 2).** Tracks that aren't monitored live can render
 ahead in larger blocks. The compiler would split their part of the graph

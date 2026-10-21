@@ -234,10 +234,14 @@ fn small_graphs() {
             slots: false,
         };
         let alone = paced(&mut ReferenceRenderer, &mut project.per_node(), 2000);
-        let mut renderer = renderer(cores());
-        let mut graph = project.per_node();
-        paced(&mut renderer, &mut graph, 200);
-        let shared = paced(&mut renderer, &mut graph, 2000);
+        // Its workers stop before the next renderer's start: Windows gives a
+        // process 32 threads in MMCSS.
+        let shared = {
+            let mut renderer = renderer(cores());
+            let mut graph = project.per_node();
+            paced(&mut renderer, &mut graph, 200);
+            paced(&mut renderer, &mut graph, 2000)
+        };
         // Deciding block by block.
         let mut renderer = ParallelRenderer::new(ParallelOptions {
             threads: cores() - 1,
