@@ -1,11 +1,11 @@
 # The app
 
-`musicable` opens a window with the app shell from the Tier 0 plan: just
-enough to run the Tier 0 demo. It plays a project through the audio device
-with the parallel scheduler, runs the transport, edit and file commands
-from keys and menus, and opens and saves project files. There's no editing
-yet beyond the transport, the loop and the tempo, which undo and redo
-cover.
+`musicable` opens a window with the app shell from the Tier 0 plan and the
+mixer from Tier 1. It plays a project through the audio device with the
+parallel scheduler, runs the transport, edit, track and file commands from
+keys and menus, mixes the tracks, and opens and saves project files. Undo
+and redo cover every change to the project: the loop, the tempo, the
+tracks and the mix.
 
 ## Running it
 
@@ -110,8 +110,8 @@ That's what `ParallelOptions::inline_below` is for
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
   Tempo" transaction, and a whole drag is one step in the undo history.
-- **The track list** shows each track's kind, test tone, gain and whether
-  it's muted.
+- **The mixer** fills the rest of the window, with a strip for each track
+  and the master's on the right (see [The mixer](#the-mixer)).
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
   measures it (click it for the audio settings), and the project's name,
@@ -119,6 +119,48 @@ That's what `ParallelOptions::inline_below` is for
   with a `*`.
 - **Options > Keyboard Shortcuts** lists every command and its keys, says
   where your keymap file goes, and creates or reloads it.
+
+## The mixer
+
+Each track has a channel strip, in the project's order, and the master's
+strip is on the right. Tracks scroll sideways when they don't fit. From the
+top, a strip has:
+
+- **The name.** Hovering it shows the track's kind and test tone.
+  Right-clicking it has **Solo-Safe** and **Delete Track**.
+- **The output**: the master, or a group track the track can feed. Return
+  tracks always feed the master.
+- **A send to each return track**, from silence to 0 dB, with **Pre** to
+  take the signal before the fader instead of after it. Dragging a send that
+  isn't there yet adds it, and right-clicking one has **Remove Send**.
+- **The pan**, from 50L to 50R. It's a balance control: panning turns the
+  other side down and never boosts.
+- **The fader**, from silence to +6 dB, beside the meter and its scale.
+- **The gain** in dB, to drag or type into, and **the highest peak** since
+  the peaks were cleared, red once the channel has gone over full scale.
+  Clicking a peak clears every channel's.
+- **M, S and the arm button**: mute, solo, and arm for recording, which
+  audio and MIDI tracks have. Clicking S solos that track alone, as in Live;
+  Ctrl-click (Cmd-click on a Mac) solos it along with the others.
+- **The clip stage**: Off, Hard or Soft.
+
+Drag a fader, a send or the pan to move it, with Ctrl (Cmd on a Mac) held
+to move it finely. Double-click a fader for 0 dB, a send to silence it, or
+the pan to centre it. A whole drag is one step in the undo history. The
+faders, sends, pans, buttons, menus and meters are named for screen readers,
+such as "Lead Volume", which is how the tests drive them.
+
+**Meters.** Each strip's meter shows its channel's output, after mute and
+solo, left and right: the peak in a light shade, and the RMS level, averaged
+over about 0.3 s, solid. They're green up to -6 dB, yellow to 0 dB and red
+over. The peak falls back at 20 dB a second once the signal drops. The
+meters read the engine's `Meters` every frame, and the window redraws at
+60 frames a second while any of them shows a signal, so they fall all the
+way back after you stop.
+
+The **Track** menu adds tracks (see [commands.md](commands.md#track)). The
+mixer's controls aren't commands: they hand back `Action::Mixer` with a
+`mixer::Change`, which the app makes with `Session::change_mixer`.
 
 ## Keys
 
@@ -264,6 +306,9 @@ says what the stream got.
   what the shell asks of the session: file requests, opening projects, the
   tempo field and undoing a drag of it, and a new engine taking over. The
   demo project there must equal the fixture.
+  [`crates/app/tests/mixer.rs`](../crates/app/tests/mixer.rs) checks that the
+  mixer's changes reach the engine and the meters move, and that a mix with
+  groups, returns and sends plays the same with both renderers.
 - Graphs compile on their own thread
   ([commands.md](commands.md#running-commands-in-the-app)). While one
   compiles, the window looks for it every 5 ms, to send it to the engine
@@ -281,7 +326,7 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
-- Editing tracks.
+- Renaming, reordering and selecting tracks, and devices in the mixer.
 - Changing keys from the app. For now, edit the keymap file and reload it.
 - The command palette.
 - A macOS default keymap with Cmd.

@@ -2,9 +2,13 @@
 
 use std::f64::consts::TAU;
 use std::ops::Range;
+use std::sync::Arc;
 
+use musicable_model::ClipType;
+use musicable_model::mixer::pan_gains;
 use musicable_model::time::{BeatRange, Beats};
 
+use crate::meter::Meter;
 use crate::{
     AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, ParamId, ProcessContext,
 };
@@ -172,16 +176,20 @@ impl Smoothed {
     }
 }
 
-/// Sums its inputs and applies a gain: a track's gain stage.
+/// Sums its inputs and applies a gain and a balance: a fader, a send, or a
+/// channel's output stage. It can measure its output into a [`Meter`].
 ///
-/// Gain and mute changes ramp ([`Smoothed`]), so they don't click.
+/// Gain, mute and balance changes ramp ([`Smoothed`]), so they don't click.
 #[derive(Debug, Clone)]
 pub struct Gain {
     gain: f32,
     muted: bool,
     /// What the output is multiplied by: `gain`, or 0 while muted.
     level: Smoothed,
+    /// The balance, from -1.0 to 1.0.
+    pan: Smoothed,
     channels: usize,
+    meter: Option<Arc<Meter>>,
 }
 
 impl Gain {
@@ -189,6 +197,10 @@ impl Gain {
     pub const GAIN: ParamId = ParamId(0);
     /// 1.0 mutes, 0.0 unmutes.
     pub const MUTE: ParamId = ParamId(1);
+    /// Balance, from -1.0 (left) to 1.0 (right), by
+    /// [`pan_gains`](musicable_model::mixer::pan_gains). Only stereo gain
+    /// stages have it. At 0.0, the default, it changes nothing.
+    pub const PAN: ParamId = ParamId(2);
 
     /// A stereo gain stage.
     pub fn new(gain: f32) -> Self {
@@ -196,8 +208,15 @@ impl Gain {
             gain,
             muted: false,
             level: Smoothed::new(gain),
+            pan: Smoothed::new(0.0),
             channels: 2,
+            meter: None,
         }
+    }
+
+    pub fn with_pan(mut self, pan: f32) -> Self {
+        self.pan = Smoothed::new(pan);
+        self
     }
 
     pub fn with_muted(mut self, muted: bool) -> Self {
@@ -208,6 +227,12 @@ impl Gain {
 
     pub fn with_channels(mut self, channels: usize) -> Self {
         self.channels = channels;
+        self
+    }
+
+    /// Measures each block of output, after the gain, into `meter`.
+    pub fn with_meter(mut self, meter: Arc<Meter>) -> Self {
+        self.meter = Some(meter);
         self
     }
 
@@ -225,6 +250,13 @@ impl Gain {
                 param: Self::MUTE,
                 value,
             } => self.muted = value >= 0.5,
+            NodeEventKind::Param {
+                param: Self::PAN,
+                value,
+            } => {
+                self.pan.set(value as f32);
+                return;
+            }
             _ => return,
         }
         self.level.set(self.level_target());
@@ -233,28 +265,43 @@ impl Gain {
     fn scale(&mut self, output: &mut AudioMut<'_>, frames: Range<usize>) {
         let len = frames.len();
         let mut part = output.range_mut(frames);
-        if self.level.is_settled() {
+        // Mono stages have no balance.
+        let stereo = self.channels == 2;
+        if self.level.is_settled() && (self.pan.is_settled() || !stereo) {
             let level = self.level.value();
+            let balance = if stereo {
+                pan_gains(self.pan.value())
+            } else {
+                [1.0, 1.0]
+            };
             self.level.skip(len);
-            if level == 0.0 {
-                part.clear();
-            } else if level != 1.0 {
-                for channel in part.channels_mut() {
+            self.pan.skip(len);
+            for (c, channel) in part.channels_mut().enumerate() {
+                // Exactly the level at the centre, so centred channels sound
+                // as they did before there was a balance control.
+                let gain = level * balance.get(c).copied().unwrap_or(1.0);
+                if gain == 0.0 {
+                    channel.fill(0.0);
+                } else if gain != 1.0 {
                     for sample in channel {
-                        *sample *= level;
+                        *sample *= gain;
                     }
                 }
             }
             return;
         }
         // Each channel ramps through the same values.
-        for channel in part.channels_mut() {
-            let mut level = self.level;
+        for (c, channel) in part.channels_mut().enumerate() {
+            let (mut level, mut pan) = (self.level, self.pan);
             for sample in channel {
-                *sample *= level.next_value();
+                let level = level.next_value();
+                let pan = pan.next_value();
+                let balance = if stereo { pan_gains(pan)[c] } else { 1.0 };
+                *sample *= level * balance;
             }
         }
         self.level.skip(len);
+        self.pan.skip(len);
     }
 }
 
@@ -265,11 +312,13 @@ impl Node for Gain {
 
     fn prepare(&mut self, config: &EngineConfig) {
         self.level.prepare(config.sample_rate);
+        self.pan.prepare(config.sample_rate);
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Gain>() {
             self.level.take_over(&previous.level);
+            self.pan.take_over(&previous.pan);
         }
     }
 
@@ -285,6 +334,77 @@ impl Node for Gain {
             start = event.offset;
         }
         self.scale(output, start..ctx.frames);
+        if let Some(meter) = &self.meter {
+            meter.measure(output.view(), ctx.sample_rate);
+        }
+    }
+}
+
+/// Sums its inputs and clips them as its [`ClipType`] says: a channel's
+/// clip stage.
+#[derive(Debug, Clone)]
+pub struct Clip {
+    clip_type: ClipType,
+    channels: usize,
+}
+
+impl Clip {
+    /// Stereo.
+    pub fn new(clip_type: ClipType) -> Self {
+        Self {
+            clip_type,
+            channels: 2,
+        }
+    }
+
+    pub fn with_channels(mut self, channels: usize) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    /// One sample through the clip type's curve. Soft clipping leaves
+    /// everything up to half scale alone, then bends smoothly towards full
+    /// scale: `1 - 0.25 / |x|`, which meets the straight line at 0.5 at the
+    /// same slope.
+    fn clip(clip_type: ClipType, sample: f32) -> f32 {
+        match clip_type {
+            ClipType::Off => sample,
+            ClipType::Hard => sample.clamp(-1.0, 1.0),
+            ClipType::Soft => {
+                let magnitude = sample.abs();
+                if magnitude <= 0.5 {
+                    sample
+                } else {
+                    (1.0 - 0.25 / magnitude).copysign(sample)
+                }
+            }
+        }
+    }
+}
+
+impl Node for Clip {
+    fn channels(&self) -> usize {
+        self.channels
+    }
+
+    fn process(
+        &mut self,
+        _ctx: &ProcessContext<'_>,
+        inputs: Inputs<'_>,
+        output: &mut AudioMut<'_>,
+    ) {
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+        if self.clip_type == ClipType::Off {
+            return;
+        }
+        for channel in output.channels_mut() {
+            for sample in channel {
+                *sample = Self::clip(self.clip_type, *sample);
+            }
+        }
     }
 }
 
@@ -809,6 +929,121 @@ mod tests {
         play(&mut sine, &[param(0, Sine::LEVEL, 0.5)], false);
         let after = play(&mut sine, &[], true);
         assert!((after[1] - 0.5).abs() < 1e-6, "{after:?}");
+    }
+
+    /// Runs `node` over one block of a stereo input, `left` and `right`.
+    fn stereo(node: &mut dyn Node, left: &[f32], right: &[f32], events: &[NodeEvent]) -> Vec<f32> {
+        let frames = left.len();
+        let input = [left, right].concat();
+        let inputs = [AudioRef::from_planar(&input, 2)];
+        let mut out = AudioBuffer::new(2, frames);
+        node.process(
+            &context(frames, events, false, &TempoMap::default()),
+            Inputs::from_views(&inputs),
+            &mut out.view_mut(frames),
+        );
+        let view = out.view(frames);
+        [view.channel(0), view.channel(1)].concat()
+    }
+
+    #[test]
+    fn the_balance_turns_one_channel_down() {
+        let ones = [1.0; 4];
+        let events = [param(1, Gain::PAN, -0.5), param(2, Gain::PAN, 1.0)];
+        let out = stereo(&mut Gain::new(0.5).with_pan(0.25), &ones, &ones, &events);
+        assert_eq!(out, [0.375, 0.5, 0.0, 0.0, 0.5, 0.25, 0.5, 0.5]);
+        // Mono stages have no balance.
+        let mono = [1.0; 2];
+        let inputs = [AudioRef::from_planar(&mono, 1)];
+        let mut out = AudioBuffer::new(1, 2);
+        Gain::new(0.5).with_pan(1.0).with_channels(1).process(
+            &context(2, &[], false, &TempoMap::default()),
+            Inputs::from_views(&inputs),
+            &mut out.view_mut(2),
+        );
+        assert_eq!(out.view(2).channel(0), [0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_centred_gain_stage_only_multiplies_by_the_gain() {
+        let left = [0.1, -0.3, f32::MIN_POSITIVE, 1e30];
+        let right = [0.7, 0.0, -1.0, f32::from_bits(1)];
+        let gain = 0.8;
+        let out = stereo(&mut Gain::new(gain), &left, &right, &[]);
+        let expected: Vec<f32> = left.iter().chain(&right).map(|s| s * gain).collect();
+        assert!(out == expected);
+    }
+
+    #[test]
+    fn the_balance_ramps_too() {
+        let mut gain = Gain::new(1.0);
+        gain.prepare(&SLOW);
+        let ones = [1.0; 12];
+        stereo(&mut gain, &ones[..1], &ones[..1], &[]);
+        let out = stereo(&mut gain, &ones, &ones, &[param(0, Gain::PAN, 1.0)]);
+        let (left, right) = out.split_at(12);
+        let ramp = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0, 0.0, 0.0];
+        assert_close(left, &ramp);
+        assert_eq!(right, [1.0; 12]);
+        // A new stage carries on from where the old one's balance was.
+        let mut old = Gain::new(1.0);
+        old.prepare(&SLOW);
+        stereo(
+            &mut old,
+            &ones[..1],
+            &ones[..1],
+            &[param(0, Gain::PAN, -1.0)],
+        );
+        stereo(
+            &mut old,
+            &ones[..4],
+            &ones[..4],
+            &[param(0, Gain::PAN, 0.0)],
+        );
+        let mut new = Gain::new(1.0);
+        new.prepare(&SLOW);
+        new.adopt(&mut old);
+        let out = stereo(&mut new, &ones[..2], &ones[..2], &[]);
+        assert_close(&out, &[1.0, 1.0, 0.5, 0.6]);
+    }
+
+    #[test]
+    fn a_gain_stage_meters_what_it_outputs() {
+        let meter = Arc::new(Meter::new());
+        let mut gain = Gain::new(0.5).with_meter(Arc::clone(&meter));
+        stereo(&mut gain, &[1.0, -0.5], &[0.25, 0.0], &[]);
+        assert_eq!(meter.level().peak, [0.5, 0.125]);
+    }
+
+    #[test]
+    fn clip_types_shape_samples() {
+        let samples = [0.0, 0.25, 0.5, 0.75, 1.0, 2.0, 1e30, -0.75, -4.0];
+        let hard = stereo(&mut Clip::new(ClipType::Hard), &samples, &samples, &[]);
+        assert_eq!(
+            hard[..samples.len()],
+            [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, -0.75, -1.0]
+        );
+        let soft = stereo(&mut Clip::new(ClipType::Soft), &samples, &samples, &[]);
+        let expected = [
+            0.0,
+            0.25,
+            0.5,
+            1.0 - 0.25 / 0.75,
+            0.75,
+            0.875,
+            1.0,
+            -(1.0 - 0.25 / 0.75),
+            -0.9375,
+        ];
+        assert_eq!(soft[..samples.len()], expected);
+        let off = stereo(&mut Clip::new(ClipType::Off), &samples, &samples, &[]);
+        assert_eq!(off[..samples.len()], samples);
+        // Soft clipping stays below full scale for any sample a mix is
+        // likely to hold, and never boosts.
+        for sample in [0.6_f32, 0.9, 10.0, 1e6] {
+            let clipped = Clip::clip(ClipType::Soft, sample);
+            assert!(clipped < 1.0 && clipped <= sample, "{sample}");
+        }
     }
 
     #[test]

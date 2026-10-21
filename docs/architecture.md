@@ -12,7 +12,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 
 | Crate | Depends on | Holds |
 |---|---|---|
-| `model` | nothing | The project as plain data: tracks, the tempo map, the loop, musical time |
+| `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
@@ -88,8 +88,9 @@ Pressing Space with the demo open:
 On the way back, the engine keeps its counters in atomics (`Stats`: the
 playhead, whether it plays, late and dropped events), and so does the stream
 (`StreamStats`: dropouts, time busy) and the parallel renderer
-(`ParallelStats`). The window reads them every frame for the transport bar
-and the meters. Old graphs and tempo maps come back through a second queue,
+(`ParallelStats`). Each channel's meter keeps its levels in atomics too
+(`Meters`). The window reads them every frame for the transport bar, the
+CPU meter and the mixer. Old graphs and tempo maps come back through a second queue,
 to be dropped on the main thread when `Session::tick` runs, once per UI
 frame.
 
@@ -152,11 +153,11 @@ built yet, except where it says so.
   fills lock-free buffers ahead of the playhead and at the loop start, or a
   short file loads whole when the graph is prepared. Instruments need a new
   `NodeEventKind` for notes, at sample offsets like parameter events.
-- **Devices and plugins.** A track's devices go between its source and its
-  pre-fader slot, each with a `Slot::BeforeDevice` in front of it, where the
-  comment in `compile()` marks the place. Each device needs an id in the
-  model for its node key. CLAP and VST3 instances live in `crates/plugins`
-  as `Node`s: created and activated in `prepare`, which runs on the
+- **Devices and plugins.** Devices are in the model, with ids for their
+  node keys, and `compile()` puts them between a channel's source and its
+  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. The only
+  kind so far is a test gain. CLAP and VST3 instances live in
+  `crates/plugins` as `Node`s: created and activated in `prepare`, which runs on the
   compiler's thread, and handed from the old graph to the new one in
   `adopt`. A plugin's own parameter changes come back to the model as
   transactions, so undo covers them. Scanning should run in a separate
@@ -168,16 +169,12 @@ built yet, except where it says so.
   delays the faster paths wherever paths of different latency meet, and
   reports the graph's total. Oversampled native stages report their latency
   the same way.
-- **The mixer.** The model has return and group tracks, but `compile()`
-  sends every track straight to the master. Groups become buses with strips
-  of their own, sends become gain stages feeding a return's bus, and every
-  bus sums through `compile::Summing`, so console mode can model it later.
-  Pan and solo are new stages or parameters, and pan and send levels ramp
-  with `nodes::Smoothed`. For an edit that changes the graph's shape,
-  `Session::sync` calls `EngineLink::recompile`, which compiles the new
-  graph in the background while the old one plays on. Meters need a way
-  back from the engine: a peak and RMS level per track in atomics, read
-  like `Stats`.
+- **The mixer.** Built: group and return tracks are buses with strips of
+  their own, summing through `compile::Summing`; sends before or after the
+  fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
+  peak and RMS meters in atomics, shown in the app's mixer
+  ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)). Arm
+  does nothing until recording.
 - **Automation.** Parameter events are already sample-accurate, but a lane
   belongs in the graph, not in the message queue, which holds 1,024
   messages. Compile each lane into its node, or into an automation node, and
@@ -195,16 +192,15 @@ built yet, except where it says so.
   document's history, and undo applies its edits' old values as a
   transaction of its own, which `Session::sync` sends to the engine like any
   other. A new kind of edit is undoable once it has its inverse
-  ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's,
-  should be a gesture (`Action::BeginGesture` and `EndGesture`), as the
-  tempo field's is, so it's one step.
+  ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's, is
+  a gesture (`Action::BeginGesture` and `EndGesture`), so it's one step.
 - **Export.** Rendering faster than real time is the engine without a
   device. `null_test::Player` already plays a project offline, block by
   block, with either renderer; export does the same on a background thread
   and writes the samples to a file.
-- **The clip stage.** `Track::clip_type` and the channel strip's slots are
-  in place. Hard and Soft are new `ClipType` values, which is a format
-  version, and `native_stage()` in `compile.rs` puts their node in a slot.
+- **The clip stage.** Built: Hard and Soft clip types, in format version 2,
+  and `native_stage()` in `compile.rs` puts their node in the post-fader
+  slot. Tier 2's modelled stages go in the slots the same way.
 - **Keys.** Remapping in the app, showing conflicts and the command palette
   build on `Keymap`, `KeymapFile` and the registry; commands.md has
   [notes](commands.md#notes-for-remapping-keys-in-the-app).

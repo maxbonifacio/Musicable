@@ -7,12 +7,13 @@ tools can read and write projects too. `crates/io` implements it, in
 
 ## Example
 
-A project with one track, looping the first four bars:
+A project with a bass track sending to a reverb on a return track, looping
+the first four bars, with the master's soft clip stage on:
 
 ```json
 {
   "format": "musicable-project",
-  "version": 1,
+  "version": 2,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -35,22 +36,62 @@ A project with one track, looping the first four bars:
   },
   "looping": true,
   "metronome": true,
-  "next_track_id": 1,
+  "next_track_id": 2,
+  "next_send_id": 1,
+  "next_device_id": 0,
   "tracks": [
     {
       "id": 0,
       "name": "Bass",
       "kind": "audio",
       "gain": 0.8,
+      "pan": -0.25,
       "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "output": null,
+      "sends": [
+        {
+          "id": 0,
+          "to": 1,
+          "level": 0.5,
+          "pre_fader": false
+        }
+      ],
       "tone": {
         "frequency": 55.0,
         "level": 0.5
       },
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Reverb",
+      "kind": "return",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "devices": [],
       "clip_type": "off",
       "console": {}
     }
-  ]
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "soft",
+    "console": {}
+  }
 }
 ```
 
@@ -95,14 +136,17 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 1 for this page. |
+| `version` | whole number | The format version: 2 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
 | `looping` | boolean | Whether playback loops. |
 | `metronome` | boolean | Whether the metronome clicks while the transport plays. |
 | `next_track_id` | whole number | The id the next new track gets. It's above every track's id, and ids of deleted tracks aren't used again, so it can be higher still. |
+| `next_send_id` | whole number | The same for sends. |
+| `next_device_id` | whole number | The same for devices, on tracks and on the master. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
+| `master` | master | The master channel. |
 
 ### Tempo map
 
@@ -146,11 +190,18 @@ change starts at must start within the position limit.
 |---|---|---|
 | `id` | whole number | Below `next_track_id`, and no other track has it. It stays with the track. |
 | `name` | string | Any text, empty included. |
-| `kind` | string | `"audio"`, `"midi"`, `"return"` or `"group"`. |
-| `gain` | float | Linear: 1.0 is unity and 0.5 about −6 dB. Negative gains invert the signal. |
+| `kind` | string | `"audio"`, `"midi"`, `"return"` or `"group"`. Return and group tracks are buses: see Routing. |
+| `gain` | float | The fader, linear: 1.0 is unity and 0.5 about −6 dB. Negative gains invert the signal. |
+| `pan` | float | Balance, from −1.0 (left) to 1.0 (right). At 0.0 both channels pass unchanged. Turned to one side, the other channel falls in a straight line to silence at the end. |
 | `muted` | boolean | Whether the track is muted. |
-| `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. |
-| `clip_type` | string | How the track's clip stage clips. Only `"off"` so far: clean floating point, which never clips. |
+| `solo` | boolean | Whether the track is soloed. |
+| `solo_safe` | boolean | Whether the track keeps playing while other tracks are soloed. |
+| `armed` | boolean | Whether the track is armed for recording. Only audio and MIDI tracks can be. |
+| `output` | whole number or `null` | The id of the group track the track feeds, or `null` for the master. |
+| `sends` | array of sends | The track's sends to return tracks. |
+| `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. On a group or return track it plays along with what feeds the track. |
+| `devices` | array of devices | The track's devices, in signal order. |
+| `clip_type` | string | How the track's clip stage clips: `"off"`, clean floating point that never clips; `"hard"`, which cuts everything beyond full scale; or `"soft"`, which rounds off peaks above half scale so they get ever closer to full scale without reaching it. |
 | `console` | object | Console modelling settings. It's empty until console mode arrives, and has no fields yet. |
 
 A **test tone** is a sine wave that sounds while the transport plays:
@@ -160,11 +211,63 @@ A **test tone** is a sine wave that sounds while the transport plays:
 | `frequency` | float | In Hz. |
 | `level` | float | Linear amplitude: 1.0 is full scale. |
 
+A **send** feeds some of the track's signal to a return track:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_send_id`, and no other send in the project has it. |
+| `to` | whole number | The id of the return track it feeds. |
+| `level` | float | Linear, like `gain`. |
+| `pre_fader` | boolean | Whether it takes the signal before the track's fader and pan, rather than after them. |
+
+A **device** processes the signal on its way through the channel:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_device_id`, and no other device in the project has it, on a track or on the master. |
+| `kind` | object | What the device is, as an object with one field: the kind's name, holding the kind's settings. |
+
+There's one kind of device so far, a test device that real ones will join:
+
+| Kind | Settings | Meaning |
+|---|---|---|
+| `test_gain` | `gain`: float | Multiplies the signal by `gain`, linear like the fader. |
+
+So a test device that halves the signal is
+`{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`.
+
+### Master
+
+The master channel: every track that doesn't feed a group feeds the
+master, and the master feeds the audio device.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `gain` | float | The fader, as for a track. |
+| `pan` | float | Balance, as for a track. |
+| `devices` | array of devices | In signal order. |
+| `clip_type` | string | As for a track. |
+| `console` | object | As for a track. |
+
+### Routing
+
+Signal flows from tracks to buses without loops:
+
+- A track's `output` feeds the master or a group track. Return tracks
+  always feed the master, so theirs is `null`.
+- Groups can feed other groups, but not themselves, through any number of
+  other groups.
+- Sends feed return tracks only, at most one from each track to each
+  return track. Return tracks have no sends.
+- Any track, group tracks included, can feed a group or send to a return
+  track, wherever it is in the list.
+
 ## Versions
 
 | Version | Date | Changes |
 |---|---|---|
 | 1 | 2026-10-21 | The first version: tempo map, loop, metronome and tracks with test tones, clip types and console settings. |
+| 2 | 2026-10-21 | The mixer: each track's pan, solo, solo-safe, arm, output and sends, devices on tracks and on the master, the master channel, and the `"hard"` and `"soft"` clip types. Version 1 tracks open centred, feeding the master with no sends or devices, return tracks solo-safe, and the master at unity. |
 
 ## Changing the format
 

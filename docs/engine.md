@@ -194,8 +194,8 @@ belong to another project, whose nodes have values of their own.
 
 A parameter that would click when it jumps ramps to each new value instead:
 `nodes::Smoothed` moves to it in a straight line over 10 ms, starting on
-the frame of the event. `Gain`'s gain and mute, and the `Sine` test tone's
-level, ramp this way.
+the frame of the event. `Gain`'s gain, pan and mute, and the `Sine` test
+tone's level, ramp this way.
 
 - A ramp counts frames, never blocks, so a change on a given frame makes
   the same samples however the blocks fall and whichever thread runs the
@@ -210,30 +210,106 @@ level, ramp this way.
   (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
   of a fade doesn't jump.
 
-## Channel strips
+## The mixer
 
-`compile()` builds every track as a channel strip, with built-in slots where
-native stages will sit: clip types in Tier 1 and console modelling in Tier 2.
+`compile()` builds every track as a channel strip, and the master too, with
+built-in slots where native stages sit: the clip stage now, console
+modelling in Tier 2.
 
 ```text
-source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → bus
+source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → output stage → bus
 ```
 
-- The slots (`compile::Slot`) belong to the channel, not to its device list.
-  Tracks have no devices yet, so only the pre-fader, post-fader and bus feed
-  slots occur.
-- An empty slot adds no node, so a strip with every slot empty is exactly the
-  graph it was before slots existed. Every slot is empty in Tier 0. Filling
-  one, such as turning a clip type on, is an ordinary recompile and swap.
-- A stage's key comes from its track id and slot (`compile::keys::track_slot`),
-  so it keeps its state across swaps like any other node. Moved to another
-  slot, it starts fresh.
-- Every bus, including the master, sums through the `compile::Summing` kind
-  the compiler picks. Tier 0 only has `Summing::Plain`. Console mode can add a
-  modelled one.
-- The model has the fields from the start, so project files carry them from
-  format version 1: `Track::clip_type` (only `Off` so far) and
-  `Track::console`, a placeholder.
+- **Sources.** An audio or MIDI track's source is its test tone, for now. A
+  group or return track's source is its bus, where what feeds it sums, along
+  with its own test tone if it has one.
+- **The fader** (`compile::keys::track_gain`, and `keys::master_gain` for the
+  master's) is a `Gain` with the channel's gain and pan. Pan is a balance
+  control (`musicable_model::mixer::pan_gains`): the channel on the side it
+  turns towards stays at unity, and the other falls in a straight line to
+  silence. A centred channel passes unchanged, exactly, and panning never
+  boosts.
+- **The output stage** (`keys::track_output`) is a `Gain` at unity, after the
+  fader and the slots. Mute and solo cut the track's output there, and the
+  track's meter measures it. The master's output stage
+  (`keys::master_output`) is the graph's output.
+- **Buses.** A track feeds the master or a group track
+  (`Project::output_of`). Every bus sums through the `compile::Summing` kind
+  the compiler picks, so console mode can add a modelled one; there's only
+  `Summing::Plain` so far.
+- **Sends** (`keys::send`) are `Gain`s at the send's level, feeding a return
+  track's bus. A pre-fader send takes the signal after the pre-fader slot,
+  unpanned. A post-fader send takes it after the post-fader slot, so it
+  follows the fader, the pan and the clip stage.
+- **No loops.** The model only allows routing that can't loop:
+  `Project::can_feed` and `can_send`. Groups can feed groups, but not ones
+  that feed them; return tracks feed the master and have no sends; sends go
+  to return tracks, one per return. `output_of` and `sends_of` leave out
+  what breaks the rules, so even a hand-edited file compiles.
+- **Devices** (`Track::devices`, `Master::devices`) sit between the source
+  and the pre-fader slot, in order, each keyed by its `DeviceId`
+  (`keys::device`), so a device keeps its state when it moves. The only kind
+  is `DeviceKind::TestGain`, for tests, until plugin hosting.
+
+**Slots.** The slots (`compile::Slot`) belong to the channel, not to its
+device list: one in front of each device, then pre-fader, post-fader and bus
+feed.
+
+- `native_stage()` in `compile.rs` says what sits in each. So far that's
+  the channel's clip stage (`nodes::Clip`), in its post-fader slot, when
+  its clip type (`Track::clip_type`, `Master::clip_type`) is `Hard` or
+  `Soft`. Hard cuts the signal off at full scale. Soft leaves everything up
+  to half scale (-6 dB) alone and bends smoothly towards full scale above
+  it, never quite reaching it. Console mode (Tier 2) fills slots from
+  `Track::console` the same way.
+- An empty slot adds no node, so a strip with every slot empty is exactly
+  the graph it was before slots existed. Filling one, such as changing a
+  clip type, is an ordinary recompile and swap.
+- A stage's key comes from its track id and slot (`keys::track_slot`), so it
+  keeps its state across swaps like any other node. Moved to another slot,
+  it starts fresh.
+
+**Mute and solo.** `Project::silenced` works out which track outputs and
+sends are cut, and `compile()` builds that into each output stage and send
+as its `Gain::MUTE`. A muted track's output and all its sends are cut. While
+any track is soloed, only the signal paths through a soloed track are
+heard, as in Live:
+
+- A soloed group solos the tracks that feed it.
+- A soloed track passes, and so does everything downstream of it: its group,
+  the returns it sends to, and theirs.
+- Soloing a return plays what the sends put into it, without the tracks'
+  own outputs: the wet signal alone.
+- A solo-safe track, as return tracks start out, passes as if it were
+  soloed, without starting a solo itself.
+
+Cutting outputs and sends rather than whole tracks is what lets one path go
+quiet while another plays on. A change to mute or solo needs no new graph:
+the app sends `Gain::MUTE` to each output stage and send that changes.
+
+**Parameters.** The fader's and the send's `Gain::GAIN` and `Gain::PAN`, and
+the output stage's and the send's `Gain::MUTE`, all ramp
+([Parameter smoothing](#parameter-smoothing)). Everything else in the mixer,
+such as where a track's output goes or its clip type, changes the graph's
+shape and recompiles.
+
+**Meters.** Each channel's output stage measures what it passes into a
+`meter::Meter`: the peak and RMS level of each channel, and the highest
+sample since the meter was last cleared. The readings live in atomics, so
+the UI reads them without waiting on the audio thread, and the audio thread
+never waits on the UI. The peak falls back at 20 dB a second once the signal
+drops, the RMS averages over about 0.3 s, and the highest sample holds
+until `Meter::clear_highest`.
+
+- `Meters` keeps a meter for each track and one for the master.
+  `compile_metered(project, meters)` puts them in the graph's output stages;
+  call `Meters::follow` first, so new tracks get one. `compile()` is the
+  same with meters nobody reads.
+- A meter carries on across swaps: the new graph's output stage gets the
+  same `Arc<Meter>`. One node measures into each meter, so its readings
+  aren't raced.
+- The app's `Session` keeps the `Meters` and compiles with them, and the
+  mixer reads them every frame (see [app.md](app.md#the-mixer)).
 
 ## Parallel rendering
 
@@ -431,5 +507,6 @@ with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
 
 **Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
-where clips, devices and plugins, delay compensation, the mixer, automation
-and recording go in the engine, and what's missing for them.
+where clips, plugins, delay compensation, automation and recording go in the
+engine, and what's missing for them. The mixer is built (see
+[The mixer](#the-mixer)).

@@ -26,6 +26,7 @@ pub mod compile;
 mod engine;
 pub mod event;
 pub mod graph;
+pub mod meter;
 pub mod nodes;
 mod parallel;
 mod render;
@@ -33,10 +34,11 @@ pub mod rt;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
-pub use compile::{Compiled, Compiler, compile};
+pub use compile::{Compiled, Compiler, compile, compile_metered};
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{Event, NodeEvent, NodeEventKind, ParamId, TransportCommand, TransportState};
 pub use graph::{Graph, GraphError, NodeId, NodeKey, PreparedGraph};
+pub use meter::{Level, Meter, Meters};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
 
