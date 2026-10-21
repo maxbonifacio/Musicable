@@ -11,9 +11,9 @@ what, how time and events work, and the rules for code on the audio thread.
  Project ── snapshot ──► Compiler (own thread)
                              │ PreparedGraph
                              ▼
- EngineHandle ── message queue: events, swaps ──► Engine
-              ◄── garbage queue: old graphs ─────
-              ◄── atomics: Stats ────────────────
+ EngineHandle ── message queue: events, swaps, tempo maps ──► Engine
+              ◄── garbage queue: old graphs and tempo maps ──
+              ◄── atomics: Stats ────────────────────────────
 ```
 
 - The **control thread** (the app's main thread) owns the model, a
@@ -30,11 +30,13 @@ or frees.
 
 ## One device callback
 
-1. The engine takes everything waiting in the message queue. Graph swaps are
-   installed (see below) and events go into a store sorted by time.
+1. The engine takes everything waiting in the message queue. Graph swaps and
+   tempo maps are installed (see below) and events go into a store sorted by
+   time.
 2. It renders the frames the device asked for, in blocks of at most
    `EngineConfig::max_block` frames. A callback can be any length: longer ones
-   are split, and a block also ends early wherever the transport changes.
+   are split, and a block also ends early wherever the transport changes or
+   the loop jumps back.
 3. For each block it applies the transport changes that are due, gives each
    node its parameter events with their offsets into the block, runs the
    renderer and copies the output to the device buffer.
@@ -44,7 +46,9 @@ or frees.
 **Engine time** counts the frames rendered since the engine started. It never
 stops or jumps. `Stats::time` is the engine time at the end of the last
 callback. The **song position** (`TransportState::position`) is separate: it
-advances only while the transport plays, and `Locate` sets it.
+counts samples from the start of the song, advances only while the transport
+plays, and jumps on `Locate` and at the loop end. `Stats::position` and
+`Stats::playing` report it to the control thread.
 
 - `EngineHandle::send` applies an event as soon as possible: at the start of
   the engine's next `process` call.
@@ -57,9 +61,63 @@ advances only while the transport plays, and `Locate` sets it.
   `Stats::events_unmatched`.
 - A node gets its events for a block in `ProcessContext::events`, in order,
   each with an `offset` into the block. It applies each from that frame on.
-- Transport commands are `Play`, `Stop` and `Locate`. Since a block ends where
-  the transport changes, `ProcessContext::transport` holds for every frame of
-  the block, and while playing, frame `i` is at song position `position + i`.
+- Transport commands are `Play`, `Stop`, `Locate` and `Loop`. Since a block
+  ends where the transport changes and where the loop jumps back,
+  `ProcessContext::transport` holds for every frame of the block, and while
+  playing, frame `i` is at song position `position + i`.
+
+## Musical time
+
+Musical positions are `Beats` from `musicable_model::time`: quarter notes,
+stored exactly as whole ticks, 322,560 to the beat. That divides by every
+tuplet up to 10 and by 1024, and a tick is shorter than a sample at any tempo
+and sample rate we support.
+
+The engine keeps the song position in samples, and a `TempoMap` (tempo and
+time signature changes) says where musical positions fall in it:
+
+- A musical position plays on the frame nearest to its exact time:
+  `TempoMap::frame_at`, where halfway rounds up. It's worked out from the
+  absolute position each time, never by adding up block lengths, so it lands
+  on the same frame however the blocks fall. The `Sine` test tone takes its
+  phase from the song position for the same reason. That's what lets tests
+  compare renders bit for bit.
+- `Locate` and `Loop` take musical positions, placed with the tempo map when
+  they apply. A locate before the start of the song goes to the start.
+- `EngineHandle::set_tempo_map` replaces the map at the start of the next
+  `process` call. The playhead keeps its musical position, so a tempo change
+  during playback doesn't jump, and the loop keeps its place in bars and
+  beats. The old map goes back through the garbage queue, like an old graph.
+- Nodes get the map in `ProcessContext::tempo`. Place musical events with it,
+  as the metronome does: find the beats near the block with
+  `TempoMap::beats_in`, then keep the ones whose `frame_at` falls in the
+  block. Blocks don't end at tempo changes.
+- Tempo changes are steps for now. Ramps (tempo automation, Tier 2) are a new
+  kind of change inside `TempoMap`; nothing else needs to change for them.
+
+**Looping.** With a loop region set, the playhead jumps back to the loop start
+when it reaches the loop end: the block ends at the loop end's frame and the
+next one starts at the loop start's. A playhead before the region plays into
+it, and one already past the end plays on. A region shorter than a frame
+doesn't loop.
+
+**Metronome.** `compile()` adds a `nodes::Metronome` with key
+`compile::keys::METRONOME`, feeding the master for now (it belongs on a cue
+output, once there is one). It clicks on every beat of the time signature
+while the transport plays, accenting each bar's first beat, and a click rings
+for 30 ms even if the playhead jumps or stops. `Project::metronome` sets
+whether it starts on; switch it with the `Metronome::ENABLED` parameter, like
+any other parameter.
+
+**Setting up from a project.** The graph carries the metronome setting. The
+tempo map and the loop are transport state, so send them when a project
+opens and whenever they change:
+
+```rust
+handle.set_tempo_map(project.tempo.clone())?;
+let region = project.looping.then_some(project.loop_region);
+handle.send(Event::Transport(TransportCommand::Loop(region)))?;
+```
 
 ## Graph swaps
 
@@ -147,9 +205,9 @@ later, on the control thread.
 
 | What | Capacity | When it's full |
 |---|---|---|
-| Message queue | 1024 messages | `send` hands the event back in `QueueFull`, `swap_graph` the graph in `SwapError::QueueFull` |
+| Message queue | 1024 messages | `send` hands the event back in `QueueFull`, `swap_graph` the graph in `SwapError::QueueFull`, `set_tempo_map` the map in `QueueFull` |
 | Pending events | 1024 events | New events are dropped and counted in `Stats::events_dropped` |
-| Old graphs waiting | 16 graphs | The engine holds swaps until `collect_garbage` runs |
+| Old graphs and tempo maps waiting | 16 | The engine holds swaps and tempo maps until `collect_garbage` runs |
 
 A swap takes one queue slot, plus one for each remembered parameter of the new
 graph. Parameter changes are instant, with no smoothing yet, and the handle
@@ -166,26 +224,18 @@ system gets reworked with plugin hosting.
 - Count every underrun and overrun with `Engine::record_xrun`. It shows up in
   `Stats::xruns`. Don't hide them.
 - A new sample rate or block size means a new engine: create one, compile for
-  its config, and swap.
+  its config, and swap. Its transport starts at the top of the song, so send
+  it the tempo map and loop, and locate it to where the old engine was
+  (`TempoMap::beats_at` of the old `Stats::position`).
 - Drop the `Engine` off the audio thread, since that frees its graph. For
   example, hand it back to the control thread when the stream stops.
-
-**Transport and musical time (M3).**
-
-- `TransportState` and `TransportCommand` are a minimal start: play, stop and
-  locate, in samples. Tempo, musical position, the loop range and the
-  metronome go there.
-- Keep one transport state per block. A loop wrapping around has to end the
-  block, as `Locate` does.
-- The `Sine` test tone takes its phase from the song position, so a position
-  renders the same samples however the blocks fall. That's what lets tests
-  compare renders bit for bit.
 
 **Parallel scheduler (M4).**
 
 - Implement `Renderer` and pass it to `Engine::with_renderer`. The contract:
   process every node once per block, each after all of its inputs, with the
-  same `ProcessContext` and events as `ReferenceRenderer`.
+  same `ProcessContext` and events as `ReferenceRenderer`. `Block::tempo` goes
+  into every node's context, like `Block::transport`.
 - `PreparedGraph`'s fields are visible inside the crate. Build per-graph
   scheduling data in `Graph::prepare`, so it's done off the audio thread.
 - Worker threads are real-time too: run each block's work inside `rt::scope`.
@@ -194,3 +244,11 @@ system gets reworked with plugin hosting.
   that way.
 - Benchmark graphs with filled channel strip slots too: they give the
   scheduler more, smaller nodes per channel.
+
+**App shell (M7).**
+
+- Send the tempo map and loop when a project opens and when they change (see
+  Musical time above). Tempo up and down edit `Project::tempo` and send the
+  new map.
+- Show the playhead from `Stats::position`, in bars and beats with
+  `TempoMap::beats_at` and `TempoMap::bar_at`.

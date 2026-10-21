@@ -1,14 +1,17 @@
 //! Renderers run every node of a graph once per block.
 
+use musicable_model::time::TempoMap;
+
 use crate::{Inputs, PreparedGraph, ProcessContext, TransportState};
 
 /// One block, as a renderer sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Block {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Block<'a> {
     pub frames: usize,
     /// Engine time of the first frame.
     pub time: u64,
     pub transport: TransportState,
+    pub tempo: &'a TempoMap,
 }
 
 /// Runs a graph for one block, on the audio thread.
@@ -19,7 +22,7 @@ pub trait Renderer: Send {
     /// Processes every node of `graph` once, each after all of its inputs.
     /// The engine has already put each node's events for the block into
     /// `graph`.
-    fn render(&mut self, graph: &mut PreparedGraph, block: &Block);
+    fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>);
 }
 
 /// Processes one node at a time in topological order, on the calling thread.
@@ -30,7 +33,7 @@ pub trait Renderer: Send {
 pub struct ReferenceRenderer;
 
 impl Renderer for ReferenceRenderer {
-    fn render(&mut self, graph: &mut PreparedGraph, block: &Block) {
+    fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
         let PreparedGraph {
             config,
             nodes,
@@ -52,6 +55,7 @@ impl Renderer for ReferenceRenderer {
                 sample_rate: config.sample_rate,
                 time: block.time,
                 transport: block.transport,
+                tempo: block.tempo,
                 events: &events[start as usize..end as usize],
             };
             let inputs = Inputs::graph(buffers, &inputs[node.0], block.frames);
@@ -77,6 +81,7 @@ mod tests {
             frames,
             time: 0,
             transport: TransportState::default(),
+            tempo: &TempoMap::default(),
         };
         ReferenceRenderer.render(&mut prepared, &block);
         prepared
