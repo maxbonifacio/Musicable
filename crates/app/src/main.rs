@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use musicable_commands::{Keymap, KeymapFile, Registry, transport};
+use musicable_commands::{Keymap, KeymapFile, Registry};
 use musicable_model::Project;
 
 // Debug builds catch heap use on the audio thread (see docs/engine.md).
@@ -10,8 +10,7 @@ use musicable_model::Project;
 static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
 
 fn main() -> ExitCode {
-    let mut commands = Registry::new();
-    transport::register(&mut commands);
+    let commands = musicable_app::commands();
 
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {

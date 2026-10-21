@@ -252,8 +252,8 @@ These still hold for anything else that drives the engine.
 
 - Open and save projects with `musicable_io::project::load` and `save`. Their
   errors say what's wrong in words a user can act on.
-- Send the tempo map and loop when a project opens and when they change (see
-  Musical time above). Tempo up and down edit `Project::tempo` and send the
-  new map.
+- `musicable_app::Session` sends the tempo map and loop when a project opens
+  and whenever a transaction changes them (see Musical time above, and
+  [commands.md](commands.md)).
 - Show the playhead from `Stats::position`, in bars and beats with
   `TempoMap::beats_at` and `TempoMap::bar_at`.
