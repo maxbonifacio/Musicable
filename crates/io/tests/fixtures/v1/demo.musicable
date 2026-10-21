@@ -1,0 +1,185 @@
+{
+  "format": "musicable-project",
+  "version": 1,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 124.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": true,
+  "metronome": true,
+  "next_track_id": 12,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "A1",
+      "kind": "audio",
+      "gain": 1.0,
+      "muted": false,
+      "tone": {
+        "frequency": 55.0,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "A2",
+      "kind": "audio",
+      "gain": 0.8,
+      "muted": false,
+      "tone": {
+        "frequency": 110.0,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "E3",
+      "kind": "midi",
+      "gain": 0.5,
+      "muted": false,
+      "tone": {
+        "frequency": 164.81,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 3,
+      "name": "A3",
+      "kind": "audio",
+      "gain": 1.0,
+      "muted": false,
+      "tone": {
+        "frequency": 220.0,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 4,
+      "name": "C4",
+      "kind": "audio",
+      "gain": 0.8,
+      "muted": false,
+      "tone": {
+        "frequency": 261.63,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 5,
+      "name": "E4",
+      "kind": "midi",
+      "gain": 0.5,
+      "muted": true,
+      "tone": {
+        "frequency": 329.63,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 6,
+      "name": "A4",
+      "kind": "audio",
+      "gain": 1.0,
+      "muted": false,
+      "tone": {
+        "frequency": 440.0,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 7,
+      "name": "C5",
+      "kind": "audio",
+      "gain": 0.8,
+      "muted": false,
+      "tone": {
+        "frequency": 523.25,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 8,
+      "name": "E5",
+      "kind": "midi",
+      "gain": 0.5,
+      "muted": false,
+      "tone": {
+        "frequency": 659.26,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 9,
+      "name": "A5",
+      "kind": "audio",
+      "gain": 1.0,
+      "muted": false,
+      "tone": {
+        "frequency": 880.0,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 10,
+      "name": "C6",
+      "kind": "audio",
+      "gain": 0.8,
+      "muted": false,
+      "tone": {
+        "frequency": 1046.5,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 11,
+      "name": "E6",
+      "kind": "midi",
+      "gain": 0.5,
+      "muted": false,
+      "tone": {
+        "frequency": 1318.51,
+        "level": 0.08
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# Project files are compared byte for byte in tests, so keep them LF everywhere.
+*.musicable text eol=lf
