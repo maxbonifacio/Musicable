@@ -2,8 +2,9 @@
 //! is, what it accepts, and what saving refuses.
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
+use musicable_model::mixer::Bus;
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::{Project, TestTone, TrackId, TrackKind};
+use musicable_model::{DeviceKind, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
 
 /// A small project with two tempos, two time signatures and two tracks.
@@ -22,9 +23,35 @@ fn sample() -> Project {
     project
 }
 
+/// A mix: an audio track feeding a group inside another group and sending
+/// to a return track, a MIDI track, and test devices on the audio track and
+/// the master. The tracks' ids are their places in the list.
+fn mix() -> Project {
+    let mut project = Project::new();
+    let audio = project.add_track("Audio", TrackKind::Audio);
+    project.add_track("MIDI", TrackKind::Midi);
+    let inner = project.add_track("Inner", TrackKind::Group);
+    let outer = project.add_track("Outer", TrackKind::Group);
+    let reverb = project.add_track("Reverb", TrackKind::Return);
+    project.track_mut(audio).unwrap().output = Bus::Group(inner);
+    project.track_mut(inner).unwrap().output = Bus::Group(outer);
+    let send = project.new_send(reverb);
+    project.track_mut(audio).unwrap().sends.push(send);
+    let device = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+    project.track_mut(audio).unwrap().devices.push(device);
+    let device = project.new_device(DeviceKind::TestGain { gain: 2.0 });
+    project.master.devices.push(device);
+    project
+}
+
 /// The sample's file, changed by `edit`.
 fn edited(edit: impl FnOnce(&mut Value)) -> Value {
-    let mut file = serde_json::from_str(&project::to_string(&sample()).unwrap()).unwrap();
+    edited_from(&sample(), edit)
+}
+
+/// `project`'s file, changed by `edit`.
+fn edited_from(project: &Project, edit: impl FnOnce(&mut Value)) -> Value {
+    let mut file = serde_json::from_str(&project::to_string(project).unwrap()).unwrap();
     edit(&mut file);
     file
 }
@@ -58,8 +85,9 @@ fn refused_saving(project: &Project, path: &str, message: &str) {
 }
 
 #[test]
-fn the_sample_loads() {
+fn the_samples_load() {
     assert_eq!(load(&edited(|_| {})).unwrap(), sample());
+    assert_eq!(load(&edited_from(&mix(), |_| {})).unwrap(), mix());
 }
 
 #[test]
@@ -125,8 +153,25 @@ fn every_field_is_needed_and_no_others_are_allowed() {
         "unknown field",
     );
     refused(
-        &edited(|f| f["tracks"][1]["solo"] = json!(true)),
-        "tracks[1].solo",
+        &edited(|f| f["tracks"][1]["volume"] = json!(1.0)),
+        "tracks[1].volume",
+        "unknown field",
+    );
+    refused(
+        &edited(|f| f["master"]["width"] = json!(1.0)),
+        "master.width",
+        "unknown field",
+    );
+    refused(
+        &edited_from(&mix(), |f| f["tracks"][0]["sends"][0]["post"] = json!(true)),
+        "tracks[0].sends[0].post",
+        "unknown field",
+    );
+    refused(
+        &edited_from(&mix(), |f| {
+            f["tracks"][0]["devices"][0]["kind"]["test_gain"]["drive"] = json!(1.0);
+        }),
+        "tracks[0].devices[0].kind.test_gain.drive",
         "unknown field",
     );
     refused(
@@ -148,14 +193,16 @@ fn every_field_is_needed_and_no_others_are_allowed() {
         "tracks[0]",
         "missing field `gain`",
     );
-    // Even one that can be null.
-    refused(
-        &edited(|f| {
-            f["tracks"][1].as_object_mut().unwrap().remove("tone");
-        }),
-        "tracks[1]",
-        "missing field `tone`",
-    );
+    // Even ones that can be null.
+    for field in ["tone", "output"] {
+        refused(
+            &edited(|f| {
+                f["tracks"][1].as_object_mut().unwrap().remove(field);
+            }),
+            "tracks[1]",
+            &format!("missing field `{field}`"),
+        );
+    }
     let file = edited(|f| f["tracks"][0]["tone"] = Value::Null);
     assert_eq!(load(&file).unwrap().tracks[0].tone, None);
 }
@@ -169,9 +216,11 @@ fn values_must_have_the_right_type() {
             "tracks",
             1,
             "clip_type",
-            json!("hard"),
-            "unknown variant `hard`",
+            json!("tape"),
+            "unknown variant `tape`",
         ),
+        ("tracks", 1, "output", json!("master"), "expected u32"),
+        ("tracks", 1, "solo", json!(null), "expected a boolean"),
         ("tracks", 1, "muted", json!(1), "expected a boolean"),
         ("tracks", 0, "gain", json!(1e39), "out of range"),
         ("tracks", 0, "id", json!(-1), "expected u32"),
@@ -194,6 +243,20 @@ fn values_must_have_the_right_type() {
         &edited(|f| f["tracks"] = json!({})),
         "tracks",
         "expected a sequence",
+    );
+    refused(
+        &edited_from(&mix(), |f| {
+            f["tracks"][0]["devices"][0]["kind"] = json!({"plugin": {}});
+        }),
+        "tracks[0].devices[0].kind",
+        "unknown variant `plugin`",
+    );
+    refused(
+        &edited_from(&mix(), |f| {
+            f["master"]["devices"][0]["kind"]["test_gain"]["gain"] = json!("loud");
+        }),
+        "master.devices[0].kind.test_gain.gain",
+        "expected f32",
     );
 }
 
@@ -375,6 +438,145 @@ fn track_ids_are_unique_and_below_the_next_id() {
 }
 
 #[test]
+fn pan_is_from_minus_one_to_one() {
+    for pan in [1.0001, -1.5, 1e30] {
+        refused(
+            &edited(|f| f["tracks"][1]["pan"] = json!(pan)),
+            "tracks[1].pan",
+            "must be from -1 to 1",
+        );
+        refused(
+            &edited(|f| f["master"]["pan"] = json!(pan)),
+            "master.pan",
+            "must be from -1 to 1",
+        );
+    }
+    let edges = edited(|f| {
+        f["tracks"][0]["pan"] = json!(-1.0);
+        f["tracks"][1]["pan"] = json!(1.0);
+    });
+    let project = load(&edges).unwrap();
+    assert_eq!((project.tracks[0].pan, project.tracks[1].pan), (-1.0, 1.0));
+}
+
+#[test]
+fn outputs_feed_group_tracks_without_loops() {
+    let cases = [
+        (0, json!(99), "there's no track with id 99"),
+        (0, json!(1), "track 1 isn't a group track"),
+        (0, json!(4), "track 4 isn't a group track"),
+        (2, json!(2), "can't be the track's own id"),
+        (4, json!(2), "must be null: return tracks feed the master"),
+    ];
+    for (track, output, message) in cases {
+        let file = edited_from(&mix(), |f| f["tracks"][track]["output"] = output);
+        refused(&file, &format!("tracks[{track}].output"), message);
+    }
+    // The outer group back into the inner one.
+    refused(
+        &edited_from(&mix(), |f| f["tracks"][3]["output"] = json!(2)),
+        "tracks[2].output",
+        "makes a loop: group track 3 feeds this track",
+    );
+    // Any track can feed a group, even one further up the list.
+    let file = edited_from(&mix(), |f| f["tracks"][1]["output"] = json!(2));
+    assert_eq!(
+        load(&file).unwrap().tracks[1].output,
+        Bus::Group(TrackId(2))
+    );
+}
+
+#[test]
+fn sends_feed_return_tracks_once_each() {
+    let send = |f: &mut Value, track: usize, id: u32, to: u32| {
+        let send = json!({"id": id, "to": to, "level": 1.0, "pre_fader": true});
+        f["tracks"][track]["sends"]
+            .as_array_mut()
+            .unwrap()
+            .push(send);
+        f["next_send_id"] = json!(9);
+    };
+    let cases: [(usize, u32, &str, &str); 3] = [
+        (
+            2,
+            99,
+            "tracks[2].sends[0].to",
+            "there's no track with id 99",
+        ),
+        (
+            2,
+            3,
+            "tracks[2].sends[0].to",
+            "track 3 isn't a return track",
+        ),
+        (
+            0,
+            4,
+            "tracks[0].sends[1].to",
+            "sends[0] goes to track 4 too",
+        ),
+    ];
+    for (track, to, path, message) in cases {
+        refused(
+            &edited_from(&mix(), |f| send(f, track, 5, to)),
+            path,
+            message,
+        );
+    }
+    refused(
+        &edited_from(&mix(), |f| send(f, 4, 5, 4)),
+        "tracks[4].sends",
+        "must be empty: return tracks have no sends",
+    );
+    refused(
+        &edited_from(&mix(), |f| send(f, 3, 0, 4)),
+        "tracks[3].sends[0].id",
+        "tracks[0].sends[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&mix(), |f| f["next_send_id"] = json!(0)),
+        "next_send_id",
+        "a send has id 0",
+    );
+    // Groups and MIDI tracks send too.
+    let file = edited_from(&mix(), |f| {
+        send(f, 1, 5, 4);
+        send(f, 3, 6, 4);
+    });
+    let project = load(&file).unwrap();
+    assert_eq!(project.tracks[3].sends[0].to, TrackId(4));
+}
+
+#[test]
+fn device_ids_are_unique_across_tracks_and_the_master() {
+    refused(
+        &edited_from(&mix(), |f| f["master"]["devices"][0]["id"] = json!(0)),
+        "master.devices[0].id",
+        "tracks[0].devices[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&mix(), |f| f["next_device_id"] = json!(1)),
+        "next_device_id",
+        "a device has id 1",
+    );
+}
+
+#[test]
+fn only_audio_and_midi_tracks_record() {
+    let mut project = mix();
+    project.tracks[0].armed = true;
+    project.tracks[1].armed = true;
+    assert_eq!(load(&edited_from(&project, |_| {})).unwrap(), project);
+    for track in [2, 4] {
+        refused(
+            &edited_from(&mix(), |f| f["tracks"][track]["armed"] = json!(true)),
+            &format!("tracks[{track}].armed"),
+            "must be false: only audio and MIDI tracks record",
+        );
+    }
+}
+
+#[test]
 fn saving_refuses_what_loading_would() {
     let mut project = sample();
     project.tracks[1].gain = f32::NAN;
@@ -409,6 +611,38 @@ fn saving_refuses_what_loading_would() {
         .tempo
         .insert_tempo(Beats::from_ticks(MAX_TICKS + 1), 120.0);
     refused_saving(&project, "tempo.tempos[2].at", "within");
+
+    let mut project = mix();
+    project.tracks[0].pan = f32::NAN;
+    refused_saving(&project, "tracks[0].pan", "must be from -1 to 1");
+
+    let mut project = mix();
+    project.tracks[0].sends[0].level = f32::INFINITY;
+    refused_saving(
+        &project,
+        "tracks[0].sends[0].level",
+        "must be a finite number",
+    );
+
+    let mut project = mix();
+    project.master.devices[0].kind = DeviceKind::TestGain { gain: f32::NAN };
+    refused_saving(
+        &project,
+        "master.devices[0].kind.test_gain.gain",
+        "must be a finite number",
+    );
+
+    let mut project = mix();
+    project.tracks[3].output = Bus::Group(TrackId(2));
+    refused_saving(&project, "tracks[2].output", "makes a loop");
+
+    let mut project = mix();
+    project.tracks.remove(4);
+    refused_saving(
+        &project,
+        "tracks[0].sends[0].to",
+        "there's no track with id 4",
+    );
 }
 
 #[test]

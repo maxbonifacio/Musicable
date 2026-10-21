@@ -177,6 +177,7 @@ mod tests {
         assert_eq!(registry.iter().count(), COMMANDS.len());
         crate::file::register(&mut registry);
         crate::edit::register(&mut registry);
+        crate::track::register(&mut registry);
 
         let keymap = Keymap::default_keymap();
         for (id, title, _) in COMMANDS {

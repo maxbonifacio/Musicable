@@ -135,9 +135,10 @@ impl History {
 }
 
 /// Folds each edit into the one before it where both change the same
-/// thing, and drops the ones that end up changing nothing. Only neighbours
-/// merge: an edit in between, such as removing a track, could change what
-/// the other two mean.
+/// thing, and drops the ones that end up changing nothing, or that the next
+/// edit takes back, such as adding a track and removing it again. Only
+/// neighbours merge: an edit in between, such as removing a track, could
+/// change what the other two mean.
 fn compact(edits: &mut Vec<Edit>) {
     let mut compacted: Vec<Edit> = Vec::with_capacity(edits.len());
     for edit in edits.drain(..) {
@@ -145,7 +146,9 @@ fn compact(edits: &mut Vec<Edit>) {
             compacted.push(edit);
             continue;
         };
-        if !last.absorb(&edit) {
+        if *last == edit.inverse() {
+            compacted.pop();
+        } else if !last.absorb(&edit) {
             compacted.push(edit);
         } else if last.is_noop() {
             compacted.pop();
@@ -156,18 +159,41 @@ fn compact(edits: &mut Vec<Edit>) {
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::Project;
+    use musicable_model::mixer::Bus;
     use musicable_model::time::{BeatRange, Beats, TempoMap};
+    use musicable_model::{ClipType, Project, Send, SendId, TrackId, TrackKind};
     use proptest::prelude::*;
 
     use super::*;
     use crate::{Committed, Document, Transaction};
 
-    /// One edit of each kind, each changing the empty project.
+    /// The project the edits in `one_of_each` change: a track of each kind,
+    /// two with a send, and a spare one that nothing refers to.
+    fn base() -> Project {
+        let mut project = Project::new();
+        project.add_track("Audio", TrackKind::Audio);
+        let midi = project.add_track("MIDI", TrackKind::Midi);
+        let group = project.add_track("Group", TrackKind::Group);
+        let reverb = project.add_track("Reverb", TrackKind::Return);
+        project.add_track("Spare", TrackKind::Audio);
+        for track in [midi, group] {
+            let send = project.new_send(reverb);
+            project.track_mut(track).unwrap().sends.push(send);
+        }
+        project
+    }
+
+    /// One edit of each kind, each changing the [`base`] project.
     fn one_of_each() -> Vec<Edit> {
-        let project = Project::new();
+        let mut project = base();
         let mut tempo = project.tempo.clone();
         tempo.insert_tempo(Beats::new(8), 140.0);
+        let [audio, midi, group, reverb, spare] = [0, 1, 2, 3, 4].map(TrackId);
+        let new = project.new_track("New", TrackKind::Midi);
+        let send = Send {
+            level: 0.5,
+            ..project.new_send(reverb)
+        };
         let edits = vec![
             Edit::Tempo {
                 from: project.tempo.clone(),
@@ -185,6 +211,90 @@ mod tests {
                 from: project.metronome,
                 to: !project.metronome,
             },
+            Edit::AddTrack {
+                index: 5,
+                track: new,
+            },
+            Edit::RemoveTrack {
+                index: 4,
+                track: project.track(spare).unwrap().clone(),
+            },
+            Edit::TrackName {
+                track: audio,
+                from: "Audio".into(),
+                to: "Lead".into(),
+            },
+            Edit::TrackGain {
+                track: audio,
+                from: 1.0,
+                to: 0.5,
+            },
+            Edit::TrackPan {
+                track: audio,
+                from: 0.0,
+                to: -0.5,
+            },
+            Edit::TrackMuted {
+                track: audio,
+                from: false,
+                to: true,
+            },
+            Edit::TrackSolo {
+                track: audio,
+                from: false,
+                to: true,
+            },
+            Edit::TrackSoloSafe {
+                track: audio,
+                from: false,
+                to: true,
+            },
+            Edit::TrackArmed {
+                track: audio,
+                from: false,
+                to: true,
+            },
+            Edit::TrackOutput {
+                track: audio,
+                from: Bus::Master,
+                to: Bus::Group(group),
+            },
+            Edit::TrackClipType {
+                track: audio,
+                from: ClipType::Off,
+                to: ClipType::Soft,
+            },
+            Edit::AddSend {
+                track: audio,
+                index: 0,
+                send,
+            },
+            Edit::RemoveSend {
+                track: group,
+                index: 0,
+                send: project.track(group).unwrap().sends[0],
+            },
+            Edit::SendLevel {
+                track: midi,
+                send: SendId(0),
+                from: 0.0,
+                to: 0.5,
+            },
+            Edit::SendPreFader {
+                track: midi,
+                send: SendId(0),
+                from: false,
+                to: true,
+            },
+            Edit::MasterGain { from: 1.0, to: 0.5 },
+            Edit::MasterPan {
+                from: 0.0,
+                to: 0.25,
+            },
+            Edit::MasterClipType {
+                from: ClipType::Off,
+                to: ClipType::Hard,
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -193,7 +303,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 4;
+    const KINDS: usize = 22;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -203,6 +313,24 @@ mod tests {
             Edit::LoopRegion { .. } => 1,
             Edit::Looping { .. } => 2,
             Edit::Metronome { .. } => 3,
+            Edit::AddTrack { .. } => 4,
+            Edit::RemoveTrack { .. } => 5,
+            Edit::TrackName { .. } => 6,
+            Edit::TrackGain { .. } => 7,
+            Edit::TrackPan { .. } => 8,
+            Edit::TrackMuted { .. } => 9,
+            Edit::TrackSolo { .. } => 10,
+            Edit::TrackSoloSafe { .. } => 11,
+            Edit::TrackArmed { .. } => 12,
+            Edit::TrackOutput { .. } => 13,
+            Edit::TrackClipType { .. } => 14,
+            Edit::AddSend { .. } => 15,
+            Edit::RemoveSend { .. } => 16,
+            Edit::SendLevel { .. } => 17,
+            Edit::SendPreFader { .. } => 18,
+            Edit::MasterGain { .. } => 19,
+            Edit::MasterPan { .. } => 20,
+            Edit::MasterClipType { .. } => 21,
         }
     }
 
@@ -213,7 +341,7 @@ mod tests {
     #[test]
     fn undo_and_redo_take_back_and_make_again_every_kind_of_edit() {
         for edit in one_of_each() {
-            let before = Project::new();
+            let before = base();
             let mut doc = Document::new(before.clone());
             apply(&mut doc, "Change", &edit);
             assert_eq!(
@@ -257,7 +385,7 @@ mod tests {
 
     #[test]
     fn undo_takes_a_transaction_back_whole() {
-        let mut doc = Document::new(Project::new());
+        let mut doc = Document::new(base());
         let edits = one_of_each();
         doc.transact("Everything", |tx| {
             for edit in &edits {
@@ -268,7 +396,7 @@ mod tests {
         doc.take_committed();
 
         assert!(doc.undo());
-        assert_eq!(doc.project(), &Project::new());
+        assert_eq!(doc.project(), &base());
         // Backwards, so each edit finds the project as it left it.
         let inverses: Vec<_> = edits.iter().rev().map(Edit::inverse).collect();
         assert_eq!(doc.take_committed()[0].edits, inverses);
@@ -493,7 +621,7 @@ mod tests {
     impl Model {
         fn new() -> Self {
             Self {
-                projects: vec![(Project::new(), String::new(), None, 0)],
+                projects: vec![(base(), String::new(), None, 0)],
                 done: 0,
                 gesture: None,
                 last_id: 0,
@@ -545,11 +673,11 @@ mod tests {
             ops in prop::collection::vec(op(), 1..60),
         ) {
             let edits = one_of_each();
-            let mut doc = Document::new(Project::new());
+            let mut doc = Document::new(base());
             let mut model = Model::new();
-            let mut saved = Project::new();
+            let mut saved = base();
             // Follows the committed transactions, as the engine does.
-            let mut mirror = Document::new(Project::new());
+            let mut mirror = Document::new(base());
             for op in ops {
                 match op {
                     Op::Edit { kind, inverse } => {
@@ -622,7 +750,7 @@ mod tests {
             // Undoing everything gets back to the start, and redoing it all
             // gets to the newest step.
             while doc.undo() {}
-            prop_assert_eq!(doc.project(), &Project::new());
+            prop_assert_eq!(doc.project(), &base());
             while doc.redo() {}
             prop_assert_eq!(doc.project(), &model.projects.last().unwrap().0);
         }

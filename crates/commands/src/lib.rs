@@ -20,6 +20,8 @@ pub mod file;
 mod history;
 mod key;
 mod keymap;
+pub mod mixer;
+pub mod track;
 pub mod transport;
 
 pub use document::{Committed, Document, Edit, Transaction};
