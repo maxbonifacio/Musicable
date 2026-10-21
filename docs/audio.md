@@ -75,15 +75,21 @@ let Stopped { engine, error } = stream.stop();
   wake-up: the period it really delivers.
 - `StreamInfo::buffer` is the device buffer: in shared mode the most the
   stream can queue, in exclusive mode each of the two halves.
-- `StreamInfo::latency` is the output latency estimated from the buffer sizes:
-  how far ahead of the play position a punctual wake-up starts writing, plus
-  the delay the system reports beyond that (`GetStreamLatency` in shared
-  mode). In exclusive mode that's one buffer; in shared mode, what's left of
-  the two queued periods plus the audio engine's delay. It leaves out
-  converter delay.
-- `StreamStats::queued` measures the same thing while the stream runs: the
-  frames written but not yet played, by the device's clock, at the last
-  wake-up before it wrote.
+- `StreamInfo::latency` is the output latency estimated from the buffer sizes
+  as the stream opens: how far ahead of the play position a punctual wake-up
+  starts writing, plus the delay the system reports beyond that
+  (`GetStreamLatency` in shared mode). It leaves out converter delay. In
+  exclusive mode that's one buffer, and the device's clock agrees. In shared
+  mode it's what's left of the two queued periods plus the audio engine's
+  delay as the system reports it, and that can be a few periods short: the
+  audio engine and the driver hold more than the system says. On onboard
+  audio at 128 frames the system reported no delay at all, so the estimate
+  said 2.7 ms where the device's clock measured 8 to 11 ms.
+- `StreamStats::queued` measures the latency while the stream runs: the
+  frames written but not yet played, by the device's clock, as the stream
+  writes. It's the median of each block of 16 wake-ups, so a late wake-up
+  doesn't show. Once the stream runs, use it rather than the estimate, as
+  the app does.
 - There are no input streams yet, so no input latency either. They come with
   recording.
 
@@ -91,7 +97,7 @@ let Stopped { engine, error } = stream.stop();
 
 A dropout is the device running out of audio. The Windows backend reads the
 device clock (`IAudioClock::GetPosition`, with the QPC time of the reading) at
-each wake-up, before writing, and looks for two signs:
+each wake-up, before writing, and looks for three signs:
 
 - **The device clock fell behind the wall clock** by more than half a period
   since the last wake-up. A device with nothing of ours to play stops counting
@@ -103,6 +109,15 @@ each wake-up, before writing, and looks for two signs:
 - **The device played past what was written.** Most exclusive-mode drivers
   keep counting while they replay whatever the buffer held, so their clock
   never falls behind.
+- **The device fell behind the audio engine for good**, in shared mode. The
+  audio engine takes our audio from the buffer a period at a time, and the
+  device plays it a steady delay later: the frames taken from the buffer
+  minus those played hold steady while all is well. When Windows' audio
+  engine or the driver runs late, the device plays something else for a
+  moment while our buffer still holds audio, and plays ours that much later
+  from then on. The clock gap that leaves looks like the jitter above, so
+  the shift is what counts: the medians of two blocks of 16 wake-ups in a row
+  more than half a period from where the delay held.
 
 A dropout takes a few wake-ups to recover from while the buffer refills, so
 signs in the 10 wake-ups after one count towards the same dropout.
@@ -115,6 +130,13 @@ close the stream came: wake-ups more than one and a half periods apart eat into
 the queued audio, but aren't dropouts unless it runs out. `busy` adds up the
 time all wake-ups took, so its growth over a stretch of time, as a share of
 it, is the load a CPU meter shows.
+
+The dropouts downstream, in the system, also count in
+`StreamStats::system_dropouts`, and each one moves the output latency by the
+audio it lost. In an hour of shared mode on onboard audio at 128 frames, the
+latency stepped up by a period three times, each time at a late wake-up, from
+11 to 19 ms, and stayed there for the rest of the run. Exclusive mode, with
+no audio engine in between, held steady over the same hour.
 
 On macOS and Linux, a dropout is whatever cpal reports as an xrun: ALSA
 underruns and CoreAudio overloads. cpal doesn't say how much audio they lost.
@@ -161,10 +183,11 @@ cargo run --release -p musicable-audio --example tone -- --period 128 --seconds 
 cargo run --release -p musicable-audio --example tone -- --exclusive --period 128 --seconds 3600
 ```
 
-It exits with an error if there was a dropout. `--stall-every 5` holds up the
-audio thread for five periods every five seconds, to see that each one is
-counted. `--device` takes an id or part of a device name, and `--help` lists
-the rest. When the device goes away mid-run, it keeps trying to open it again.
+It exits with an error if there was a dropout, and says how many of them
+were in the system. `--stall-every 5` holds up the audio thread for five
+periods every five seconds, to see that each one is counted. `--device` takes
+an id or part of a device name, and `--help` lists the rest. When the device
+goes away mid-run, it keeps trying to open it again.
 
 The tests in `crates/audio/tests/device.rs` that play need an output device,
 so they're ignored by default:

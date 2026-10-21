@@ -13,6 +13,11 @@ pub struct StreamStats {
     /// Dropouts: times the device ran out of audio. Each one is also counted
     /// in the engine's `Stats::xruns`.
     pub underruns: u64,
+    /// The dropouts that happened downstream, in the system's audio engine
+    /// or driver, while the stream still had audio queued. They're counted
+    /// in `underruns` too. Each one moves the output latency (`queued`) by
+    /// the audio it lost. Windows shared mode only.
+    pub system_dropouts: u64,
     /// The audio the dropouts lost, in frames, as the device clock measures
     /// it.
     pub lost_frames: u64,
@@ -27,9 +32,10 @@ pub struct StreamStats {
     /// time, the share of it the audio thread was busy is its load: what a
     /// CPU meter shows. Near 100%, wake-ups start running late.
     pub busy: Duration,
-    /// Frames queued ahead of the device's play position at the last
-    /// wake-up, before it wrote: the output latency as the device's clock
-    /// sees it.
+    /// Frames queued ahead of the device's play position as the stream
+    /// writes: the output latency as the device's clock sees it, 0 until
+    /// measured. On Windows it's the median of each block of 16 wake-ups, so
+    /// a late one doesn't show; with cpal, from the last one.
     pub queued: u64,
 }
 
@@ -38,6 +44,7 @@ pub(crate) struct Counters {
     wakeups: AtomicU64,
     frames: AtomicU64,
     underruns: AtomicU64,
+    system_dropouts: AtomicU64,
     lost_frames: AtomicU64,
     late_wakeups: AtomicU64,
     max_interval_ns: AtomicU64,
@@ -58,6 +65,11 @@ impl Counters {
 
     pub fn underrun(&self) {
         self.underruns.fetch_add(1, Relaxed);
+    }
+
+    #[cfg(windows)]
+    pub fn system_dropout(&self) {
+        self.system_dropouts.fetch_add(1, Relaxed);
     }
 
     // cpal doesn't say how much audio an xrun lost.
@@ -99,6 +111,7 @@ impl Counters {
             wakeups: self.wakeups.load(Relaxed),
             frames: self.frames.load(Relaxed),
             underruns: self.underruns.load(Relaxed),
+            system_dropouts: self.system_dropouts.load(Relaxed),
             lost_frames: self.lost_frames.load(Relaxed),
             late_wakeups: self.late_wakeups.load(Relaxed),
             max_interval: Duration::from_nanos(self.max_interval_ns.load(Relaxed)),

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use musicable_audio::{
     self as audio, Api, OpenStream, SampleFormat, StartError, Stream, StreamInfo, StreamRequest,
+    StreamStats,
 };
 use musicable_engine::{Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelStats};
 
@@ -176,13 +177,16 @@ impl Output {
     /// The stream in a few words, such as "48 kHz · 128 samples · 5.3 ms",
     /// or why there is none.
     pub fn summary(&self) -> String {
-        match self.info() {
-            Some(info) => format!(
-                "{} · {} samples · {}",
-                kilohertz(info.sample_rate),
-                info.period,
-                millis(info.latency_duration())
-            ),
+        match &self.stream {
+            Some(stream) => {
+                let info = stream.info();
+                format!(
+                    "{} · {} samples · {}",
+                    kilohertz(info.sample_rate),
+                    info.period,
+                    millis(latency(info, &stream.stats()))
+                )
+            }
             None => "No audio device".to_owned(),
         }
     }
@@ -197,7 +201,7 @@ impl Output {
         };
         let info = stream.info();
         let stats = stream.stats();
-        let mut text = describe(info);
+        let mut text = describe(info, latency(info, &stats));
         if let Some(load) = self.meter.load {
             let _ = write!(
                 text,
@@ -218,11 +222,18 @@ impl Output {
         let lost = audio_duration(stats.lost_frames, info.sample_rate);
         let _ = write!(
             text,
-            "\n\nDropouts since the device started: {} ({} of audio lost). Late wake-ups: {}.",
+            "\n\nDropouts since the device started: {} ({} of audio lost)",
             stats.underruns,
             millis(lost),
-            stats.late_wakeups
         );
+        if stats.system_dropouts > 0 {
+            let _ = write!(
+                text,
+                ", {} of them in the system's audio engine or driver",
+                stats.system_dropouts
+            );
+        }
+        let _ = write!(text, ". Late wake-ups: {}.", stats.late_wakeups);
         text
     }
 
@@ -301,8 +312,18 @@ impl Drop for Output {
     }
 }
 
-/// The stream as the device set it up, in a few lines.
-fn describe(info: &StreamInfo) -> String {
+/// The output latency: measured by the device's clock once the stream has
+/// run for a moment, and estimated from the buffer sizes until then. In
+/// Windows shared mode the estimate can be a few periods short.
+fn latency(info: &StreamInfo, stats: &StreamStats) -> Duration {
+    match stats.queued {
+        0 => info.latency_duration(),
+        queued => audio_duration(queued, info.sample_rate),
+    }
+}
+
+/// The stream as the device set it up, in a few lines, with its `latency`.
+fn describe(info: &StreamInfo, latency: Duration) -> String {
     let format = match info.format {
         SampleFormat::F32 => "32-bit float",
         SampleFormat::I32 => "32-bit",
@@ -327,7 +348,7 @@ fn describe(info: &StreamInfo) -> String {
         info.channels,
         info.period,
         millis(info.period_duration()),
-        millis(info.latency_duration()),
+        millis(latency),
     )
 }
 
@@ -393,6 +414,29 @@ mod tests {
         assert_eq!(kilohertz(192_000), "192 kHz");
         assert_eq!(millis(Duration::from_micros(2667)), "2.7 ms");
         assert_eq!(audio_duration(480, 48_000), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn the_latency_is_measured_once_the_stream_runs() {
+        let info = StreamInfo {
+            device: audio::Device {
+                id: "speakers".to_owned(),
+                name: "Speakers".to_owned(),
+                is_default: true,
+            },
+            api: Api::WasapiLowLatency,
+            sample_rate: 48_000,
+            channels: 2,
+            format: SampleFormat::F32,
+            period: 128,
+            buffer: 280,
+            latency: 128,
+            realtime: true,
+        };
+        let mut stats = StreamStats::default();
+        assert_eq!(millis(latency(&info, &stats)), "2.7 ms");
+        stats.queued = 542;
+        assert_eq!(millis(latency(&info, &stats)), "11.3 ms");
     }
 
     #[test]

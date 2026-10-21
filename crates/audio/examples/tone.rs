@@ -420,10 +420,10 @@ impl Run {
             None => "not playing".to_owned(),
         };
         format!(
-            "{}  dropouts {} ({} lost), late wake-ups {}, longest gap {}, longest wake-up {}, {queued}",
+            "{}  dropouts {} {}, late wake-ups {}, longest gap {}, longest wake-up {}, {queued}",
             elapsed(started),
             totals.underruns,
-            ms_of(totals.lost),
+            totals.breakdown(),
             totals.late_wakeups,
             ms_of(totals.max_interval),
             ms_of(totals.max_busy),
@@ -438,7 +438,7 @@ impl Run {
         let totals = self.ended;
         let xruns = self.earlier_xruns + self.handle.stats().xruns;
         println!(
-            "\nPlayed for {} through {} stream{}: {} wake-ups, {} dropouts ({} lost), \
+            "\nPlayed for {} through {} stream{}: {} wake-ups, {} dropouts {}, \
              {} late wake-ups, longest gap {}, longest wake-up {}. The engine counted {xruns} \
              xruns.",
             elapsed(started).trim_start(),
@@ -446,11 +446,19 @@ impl Run {
             if self.streams == 1 { "" } else { "s" },
             totals.wakeups,
             totals.underruns,
-            ms_of(totals.lost),
+            totals.breakdown(),
             totals.late_wakeups,
             ms_of(totals.max_interval),
             ms_of(totals.max_busy),
         );
+        if totals.system > 0 {
+            println!(
+                "{} of the dropouts happened in the system's audio engine or driver, with the \
+                 stream's audio still queued. Each one moved the output latency by the audio it \
+                 lost.",
+                totals.system
+            );
+        }
         if self.stalls > 0 {
             println!(
                 "Stalled the audio thread {} times, so {} dropouts were expected.",
@@ -472,6 +480,8 @@ impl Run {
 struct Totals {
     wakeups: u64,
     underruns: u64,
+    /// The dropouts in the system's audio engine or driver.
+    system: u64,
     lost: Duration,
     late_wakeups: u64,
     max_interval: Duration,
@@ -482,10 +492,21 @@ impl Totals {
     fn add(&mut self, stats: &StreamStats, rate: u32) {
         self.wakeups += stats.wakeups;
         self.underruns += stats.underruns;
+        self.system += stats.system_dropouts;
         self.lost += Duration::from_secs_f64(stats.lost_frames as f64 / f64::from(rate));
         self.late_wakeups += stats.late_wakeups;
         self.max_interval = self.max_interval.max(stats.max_interval);
         self.max_busy = self.max_busy.max(stats.max_busy);
+    }
+
+    /// What the dropouts lost, and how many were in the system, in
+    /// brackets.
+    fn breakdown(&self) -> String {
+        if self.system > 0 {
+            format!("({} in the system, {} lost)", self.system, ms_of(self.lost))
+        } else {
+            format!("({} lost)", ms_of(self.lost))
+        }
     }
 }
 

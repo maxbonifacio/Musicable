@@ -2,8 +2,8 @@
 //!
 //! A dropout is the device running out of audio. At each wake-up, before
 //! writing, the backend reads the stream's position from the device clock
-//! (`IAudioClock`, with the QPC time of the reading) and looks for one of two
-//! signs:
+//! (`IAudioClock`, with the QPC time of the reading) and looks for one of
+//! three signs:
 //!
 //! - **The device clock fell behind the wall clock.** Between two wake-ups
 //!   the position should advance as much as QPC time does. While the audio
@@ -18,6 +18,16 @@
 //!   drivers keep counting while the device replays whatever its buffer held,
 //!   so their clock never falls behind. Their position overtakes the frames
 //!   written instead.
+//! - **The device fell behind the audio engine for good.** In shared mode
+//!   the audio engine takes our audio from the buffer a period at a time,
+//!   and the device plays it a steady delay later. When the audio engine or
+//!   the driver runs late, the device plays something else for a moment
+//!   while our buffer still holds audio, and plays ours that much later from
+//!   then on. The gap that leaves in the clock looks like jitter, so the
+//!   shift in the delay is what counts: the medians of two blocks of
+//!   [`BLOCK`] readings in a row more than half a period from where the
+//!   delay held. These dropouts happen downstream, in the system, and the
+//!   stream counts them on their own as well.
 //!
 //! A dropout takes a few wake-ups to recover from while the buffer refills,
 //! and the clock readings can lag by a wake-up. Signs in the
@@ -27,6 +37,11 @@ use crate::period::{frames_to_hns, hns_to_frames};
 
 /// How long a dropout's recovery can last, in wake-ups.
 pub(crate) const RECOVERY_WAKEUPS: u32 = 10;
+
+/// Readings per block, where the backend takes medians: a few late
+/// wake-ups, or readings that raced the audio engine, don't move a block's
+/// median.
+pub(crate) const BLOCK: usize = 16;
 
 /// What the backend saw at one wake-up, before writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +60,9 @@ pub(crate) struct Reading {
 pub(crate) struct Outcome {
     /// A new dropout began.
     pub underrun: bool,
+    /// The new dropout happened downstream, in the system's audio engine or
+    /// driver, while the buffer still held audio.
+    pub system: bool,
     /// Frames lost, new dropout or not.
     pub lost: u64,
 }
@@ -70,6 +88,8 @@ pub(crate) struct Detector {
     /// seen.
     floor: i64,
     peak: i64,
+    /// Shared mode: how far behind the audio engine the device plays.
+    downstream: Downstream,
 }
 
 impl Detector {
@@ -84,6 +104,7 @@ impl Detector {
             offset: None,
             floor: 0,
             peak: 0,
+            downstream: Downstream::new(),
         }
     }
 
@@ -119,6 +140,7 @@ impl Detector {
         };
         if now.played < last.played || now.qpc < last.qpc {
             // A driver bug or a reset clock: start again from here.
+            self.downstream.restart();
             return Outcome::default();
         }
 
@@ -166,6 +188,7 @@ impl Detector {
             }
             Outcome {
                 underrun: false,
+                system: false,
                 lost,
             }
         } else if (behind && (self.exclusive || self.low > 0)) || overtook {
@@ -173,15 +196,37 @@ impl Detector {
             self.low = 0;
             self.floor = i64::MAX;
             self.peak = overrun;
+            // Whatever the dropout did to the delay downstream is the new
+            // normal, not another dropout.
+            self.downstream.restart();
             Outcome {
                 underrun: true,
+                system: false,
                 lost: gap.max(overrun).max(0) as u64,
+            }
+        } else if let Some(lost) = self.downstream_shift(now) {
+            Outcome {
+                underrun: true,
+                system: true,
+                lost,
             }
         } else {
             Outcome::default()
         };
         self.low = self.low.saturating_sub(1);
         outcome
+    }
+
+    /// Shared mode: takes the delay between the audio engine taking our
+    /// audio and the device playing it, and returns how far it moved if it
+    /// moved for good.
+    fn downstream_shift(&mut self, now: Reading) -> Option<u64> {
+        if self.exclusive {
+            return None;
+        }
+        // Frames the audio engine took from the buffer, less those played.
+        let delay = now.written as i64 - now.padding as i64 - now.played as i64;
+        self.downstream.observe(delay, self.period as i64)
     }
 
     /// At the end of a recovery in exclusive mode: a device that skipped
@@ -194,6 +239,86 @@ impl Detector {
         {
             *offset += self.floor + period;
         }
+    }
+}
+
+/// Shared mode: how far behind the audio engine the device plays, in frames.
+/// It holds steady while all is well, and shifts for good when the audio
+/// engine or the driver runs late.
+#[derive(Debug, Default)]
+struct Downstream {
+    medians: Medians,
+    /// Blocks to let pass before taking the delay again: after the start,
+    /// and after a dropout.
+    settling: u32,
+    /// Where the delay held at the last steady block.
+    usual: Option<i64>,
+    /// A block's median far from `usual`, for the next block to confirm.
+    moved: Option<i64>,
+}
+
+impl Downstream {
+    fn new() -> Self {
+        Self {
+            settling: 1,
+            ..Self::default()
+        }
+    }
+
+    fn restart(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Takes the delay at a reading, and returns how far it moved if two
+    /// blocks in a row say it moved for good.
+    fn observe(&mut self, delay: i64, period: i64) -> Option<u64> {
+        let median = self.medians.push(delay)?;
+        if self.settling > 0 {
+            self.settling -= 1;
+            return None;
+        }
+        let Some(usual) = self.usual else {
+            self.usual = Some(median);
+            return None;
+        };
+        let shift = median - usual;
+        if shift.abs() * 2 <= period {
+            // Steady, give or take a slow drift.
+            self.usual = Some(median);
+            self.moved = None;
+            return None;
+        }
+        match self.moved.replace(median) {
+            Some(before) if (before - usual).signum() == shift.signum() => {
+                self.usual = Some(median);
+                self.moved = None;
+                Some(shift.unsigned_abs())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Readings gathered into blocks of [`BLOCK`], for each block's median.
+/// Real-time safe.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Medians {
+    readings: [i64; BLOCK],
+    len: usize,
+}
+
+impl Medians {
+    /// Adds a reading, and returns its block's median if it completed one.
+    pub fn push(&mut self, reading: i64) -> Option<i64> {
+        self.readings[self.len] = reading;
+        self.len += 1;
+        if self.len < BLOCK {
+            return None;
+        }
+        self.len = 0;
+        // In place: no heap.
+        self.readings.sort_unstable();
+        Some(self.readings[BLOCK / 2])
     }
 }
 
@@ -221,7 +346,12 @@ mod tests {
         /// Frames played in earlier passes, and taken at the latest.
         played: u64,
         taken: u64,
+        /// Passes during which the device plays something else, as when the
+        /// audio engine runs late, and plays our audio a period later from
+        /// then on.
+        glitches: Vec<u64>,
         underruns: u64,
+        system: u64,
         lost: u64,
     }
 
@@ -234,7 +364,9 @@ mod tests {
                 written: 0,
                 played: 0,
                 taken: 0,
+                glitches: Vec::new(),
                 underruns: 0,
+                system: 0,
                 lost: 0,
             }
         }
@@ -251,18 +383,28 @@ mod tests {
             self.run_until(now);
             let in_pass = now - (self.passes - 1) * PERIOD;
             let outcome = self.detector.observe(Reading {
-                played: self.played + self.taken.min(in_pass),
+                played: self.played + self.taken.min(in_pass) - self.behind(now),
                 qpc: qpc(now),
                 written: self.written,
                 padding: self.queued,
             });
             self.underruns += u64::from(outcome.underrun);
+            self.system += u64::from(outcome.system);
             self.lost += outcome.lost;
             let frames = (2 * PERIOD).saturating_sub(self.queued);
             self.run_until(now + render);
             self.detector.landed(self.queued);
             self.queued += frames;
             self.written += frames;
+        }
+
+        /// How far the device has fallen behind the audio engine by frame
+        /// `time`. While it plays something else, our position stands still.
+        fn behind(&self, time: u64) -> u64 {
+            self.glitches
+                .iter()
+                .map(|&pass| time.saturating_sub(pass * PERIOD).min(PERIOD))
+                .sum()
         }
 
         /// Runs the engine passes due by frame `time`.
@@ -288,7 +430,7 @@ mod tests {
     #[test]
     fn late_but_covered_by_the_buffer_is_not_a_dropout() {
         let mut stream = Shared::new();
-        for pass in 0..100 {
+        for pass in 0..1000 {
             // Almost a full period late every tenth wake-up.
             stream.wake(pass, if pass % 10 == 5 { 120 } else { 2 });
         }
@@ -306,7 +448,7 @@ mod tests {
         for pass in 55..200 {
             stream.wake(pass, 2);
         }
-        assert_eq!(stream.underruns, 1);
+        assert_eq!((stream.underruns, stream.system), (1, 0));
         assert!(
             (3 * PERIOD - 8..=3 * PERIOD + 8).contains(&stream.lost),
             "lost {}",
@@ -328,7 +470,7 @@ mod tests {
         for pass in 56..200 {
             stream.wake(pass, 2);
         }
-        assert_eq!(stream.underruns, 1);
+        assert_eq!((stream.underruns, stream.system), (1, 0));
         assert!(
             (4 * PERIOD - 8..=4 * PERIOD + 8).contains(&stream.lost),
             "lost {}",
@@ -365,12 +507,100 @@ mod tests {
                 pass += 1;
             }
         }
-        assert_eq!(stream.underruns, 5);
+        assert_eq!((stream.underruns, stream.system), (5, 0));
         assert!(
             (10 * PERIOD - 20..=10 * PERIOD + 20).contains(&stream.lost),
             "lost {}",
             stream.lost
         );
+    }
+
+    #[test]
+    fn a_glitch_downstream_is_one_system_dropout() {
+        let mut stream = Shared::new();
+        // During pass 100 the device plays something else, and the late
+        // audio engine wakes the stream late too.
+        stream.glitches.push(100);
+        for pass in 0..400 {
+            stream.wake(pass, if pass == 100 { 100 } else { 2 });
+        }
+        assert_eq!((stream.underruns, stream.system), (1, 1));
+        assert!(
+            (PERIOD - 8..=PERIOD + 8).contains(&stream.lost),
+            "lost {}",
+            stream.lost
+        );
+    }
+
+    #[test]
+    fn glitches_downstream_far_apart_count_separately() {
+        let mut stream = Shared::new();
+        // Two periods in a row are one dropout.
+        stream.glitches.extend([100, 300, 301]);
+        for pass in 0..600 {
+            stream.wake(pass, 2);
+        }
+        assert_eq!((stream.underruns, stream.system), (2, 2));
+        assert!(
+            (3 * PERIOD - 8..=3 * PERIOD + 8).contains(&stream.lost),
+            "lost {}",
+            stream.lost
+        );
+    }
+
+    /// Feeds a shared-mode detector punctual readings, with the audio engine
+    /// `delay(n)` frames ahead of the device at wake-up `n`. Returns the
+    /// dropouts, the system ones among them, and the frames lost.
+    fn downstream(wakeups: u64, delay: impl Fn(u64) -> u64) -> (u64, u64, u64) {
+        let mut detector = Detector::new(false, PERIOD as u32, RATE);
+        let mut totals = (0, 0, 0);
+        for n in 1..=wakeups {
+            let played = n * PERIOD;
+            let outcome = detector.observe(Reading {
+                played,
+                qpc: qpc(played),
+                written: played + PERIOD + delay(n),
+                padding: PERIOD,
+            });
+            totals.0 += u64::from(outcome.underrun);
+            totals.1 += u64::from(outcome.system);
+            totals.2 += outcome.lost;
+        }
+        totals
+    }
+
+    #[test]
+    fn a_shift_downstream_either_way_is_a_dropout() {
+        let later = downstream(400, |n| if n < 200 { 300 } else { 300 + PERIOD });
+        assert_eq!(later, (1, 1, PERIOD));
+        let sooner = downstream(400, |n| if n < 200 { 300 + 2 * PERIOD } else { 300 });
+        assert_eq!(sooner, (1, 1, 2 * PERIOD));
+    }
+
+    #[test]
+    fn readings_that_race_the_audio_engine_are_not_a_dropout() {
+        // A third of the readings miss a pass the audio engine took between
+        // reading the buffer and reading the clock.
+        let racing = downstream(2000, |n| if n % 3 == 0 { 300 - PERIOD } else { 300 });
+        assert_eq!(racing, (0, 0, 0));
+    }
+
+    #[test]
+    fn a_shift_downstream_that_does_not_hold_is_not_a_dropout() {
+        let back = downstream(400, |n| {
+            if (200..210).contains(&n) {
+                300 + PERIOD
+            } else {
+                300
+            }
+        });
+        assert_eq!(back, (0, 0, 0));
+    }
+
+    #[test]
+    fn a_slow_drift_downstream_is_not_a_dropout() {
+        // Two periods over 4,000 wake-ups.
+        assert_eq!(downstream(4000, |n| 300 + n / 16), (0, 0, 0));
     }
 
     #[test]
