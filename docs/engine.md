@@ -2,6 +2,8 @@
 
 How `crates/engine` turns the project model into sound: which thread does
 what, how time and events work, and the rules for code on the audio thread.
+[architecture.md](architecture.md) shows how the engine fits with the rest
+of Musicable, and where Tier 1 work plugs in.
 
 ## Threads
 
@@ -335,3 +337,7 @@ These still hold for anything else that drives the engine.
 [app.md](app.md). `musicable_app::engine` builds every engine the app plays
 with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
+
+**Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
+where clips, devices and plugins, delay compensation, the mixer, automation
+and recording go in the engine, and what's missing for them.

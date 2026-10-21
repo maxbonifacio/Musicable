@@ -1,0 +1,71 @@
+name: Benchmarks
+
+# The scheduler benchmarks on Windows, the first-class platform, whenever the
+# engine changes. Each run's numbers are in its summary, and its raw data in
+# its artifact for 90 days. Hosted runners are small shared virtual machines
+# (two cores for a private repository), so the numbers are rough and say
+# little about scaling: they catch big slowdowns and keep the benchmarks
+# working. Tune the scheduler on real hardware (see CONTRIBUTING.md).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/engine/**"
+      - "crates/model/**"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  pull_request:
+    paths:
+      - "crates/engine/**"
+      - "crates/model/**"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Benchmarks (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Describe the runner
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $line = "Runner: $($cpu.Name), $($cpu.NumberOfCores) cores, " +
+            "$($cpu.NumberOfLogicalProcessors) logical processors."
+          Write-Output $line
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "$line`n"
+      - name: Block times, from one thread to one per physical core
+        shell: bash
+        run: |
+          cargo bench -p musicable-engine --bench scheduler -- --noplot --output-format bencher | tee scheduler.txt
+          {
+            echo "# Block times"
+            echo
+            echo '```'
+            grep '^test ' scheduler.txt
+            echo '```'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Tables at a device's pace
+        shell: bash
+        run: |
+          cargo bench -p musicable-engine --bench realtime | tee realtime.md
+          cat realtime.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmarks
+          path: |
+            scheduler.txt
+            realtime.md
+            target/criterion
+          retention-days: 90

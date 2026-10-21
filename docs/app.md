@@ -19,7 +19,9 @@ console, and are much slower: the engine checks every allocation, and egui
 runs unoptimised.
 
 `musicable keymap [FILE]` still prints the keys, as
-[commands.md](commands.md#trying-it-out) describes.
+[commands.md](commands.md#trying-it-out) describes, and
+`musicable null-test [PROJECT]` checks the parallel scheduler against the
+reference renderer (see [The null test](#the-null-test)).
 
 ## The Tier 0 demo
 
@@ -34,6 +36,62 @@ runs unoptimised.
    counts dropouts.
 4. **File > Save Project As**, then **File > Open Project**: the project comes
    back as it was. Saving the demo writes the same bytes as the fixture.
+5. `musicable null-test` checks what you can't hear: that the parallel
+   scheduler plays the demo exactly as the reference renderer does, before
+   and after saving.
+
+[`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs) runs
+the same demo offline in every CI run, on Windows, macOS and Linux: it opens
+the saved demo, plays it past the end of the loop with both renderers, and
+saves it and opens it again.
+
+## The null test
+
+`musicable null-test` plays a project offline from the start of the song
+with the reference renderer and with the parallel scheduler side by side,
+and checks that they play it the same, sample for sample:
+
+```sh
+cargo run --release -p musicable-app -- null-test                  # the demo
+cargo run --release -p musicable-app -- null-test song.musicable --seconds 60 --buffer 64
+```
+
+Each player opens the project in a session and presses Play, as the app
+does, then renders one buffer at a time:
+
+| Line | What plays |
+|---|---|
+| Reference renderer | The oracle: one node at a time, in order, on one thread |
+| Parallel, as the app plays | The parallel scheduler with the app's options, which keep blocks with little work on the audio thread |
+| Parallel, every block shared | The parallel scheduler sharing every block between all its workers |
+| Saved and opened again | The project written as a project file and read back, played as the app plays it |
+
+A line says `identical` or where the output first differed, how fast it
+rendered, how many blocks the scheduler shared and with how many workers,
+and how many threads ran nodes at once, on average, while blocks were
+shared. The test fails if any output differed, or if the project came back
+different after saving. `--seconds`, `--rate` and `--buffer` set how long
+it plays, the sample rate and the buffer size: 20 seconds at 48 kHz in
+128-frame buffers by default. A debug build checks the renders for
+allocations too, as the tests do.
+
+On a 4-core cloud VM:
+
+```text
+Null test of the demo: 12 tracks, 20 s at 48000 Hz in 128-frame buffers
+
+Reference renderer             peak -2.7 dBFS, 0.23 s, 87x real time
+Parallel, as the app plays     identical, 0.23 s, 89x real time; 14 of 7502 blocks shared, 3 workers, 0.8 threads busy
+Parallel, every block shared   identical, 0.32 s, 63x real time; 7502 of 7502 blocks shared, 3 workers, 1.1 threads busy
+Saved and opened again         identical, 0.24 s, 84x real time; 23 of 7502 blocks shared, 3 workers, 0.8 threads busy
+
+Passed: the parallel scheduler played it exactly as the reference renderer did, before and after saving.
+```
+
+The demo's nodes are tiny, so the app's options render most blocks on the
+audio thread alone, and sharing every block is slower than not sharing.
+That's what `ParallelOptions::inline_below` is for
+([engine.md](engine.md#parallel-rendering)).
 
 ## The window
 
@@ -201,6 +259,8 @@ says what the stream got.
   what the shell asks of the session: file requests, opening projects, the
   tempo field, and a new engine taking over. The demo project there must equal
   the fixture.
+- `musicable_app::null_test` plays projects offline for the null test and
+  for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
 
 To see the window without Windows, a Linux build runs under Xvfb, and the
 Windows build runs under Wine with `WGPU_BACKEND=vulkan` (Wine's Direct3D 12

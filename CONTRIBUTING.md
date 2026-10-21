@@ -75,6 +75,11 @@ PROPTEST_CASES=100000 cargo test -p musicable-engine --lib random_graphs
 `cargo +nightly miri test -p musicable-engine --lib parallel` checks the
 small parallel tests for data races and undefined behaviour.
 
+`musicable null-test [PROJECT]` plays a project, or the demo, with both
+renderers on the machine at hand and checks they match sample for sample
+([docs/app.md](docs/app.md#the-null-test)). It's worth running on a machine
+with more cores than CI has.
+
 Benchmarks run in release builds:
 
 ```sh
@@ -83,4 +88,6 @@ cargo bench -p musicable-engine --bench realtime   # tables at a device's pace
 ```
 
 Run them on a quiet machine, plugged in, and say which CPU when you report
-numbers.
+numbers. CI runs both on Windows when the engine changes, and puts the
+numbers in the run's summary, but hosted runners are small shared machines:
+treat their numbers as rough.

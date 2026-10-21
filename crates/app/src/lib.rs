@@ -4,6 +4,7 @@
 
 mod app;
 mod audio_window;
+pub mod null_test;
 mod output;
 mod session;
 mod settings;
