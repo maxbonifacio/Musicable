@@ -103,9 +103,12 @@ each wake-up, before writing, and looks for three signs:
   since the last wake-up. A device with nothing of ours to play stops counting
   our position, and so do some exclusive-mode drivers. In shared mode the gap
   only counts if the buffer had run low (less than a period queued) since the
-  wake-up before last, at a wake-up or as a write landed. That's where a
-  render that took too long shows, and with audio still queued the gap is
-  jitter in the clock readings.
+  wake-up before last, at a wake-up or as a write landed, and a wake-up in
+  that time came late. A write landing low is where a render that took too
+  long shows, and with audio still queued the gap is jitter in the clock
+  readings. The audio engine wakes the stream at every pass, and the stream
+  keeps two periods queued, so the buffer only runs dry when a wake-up comes
+  late, or a render takes so long that the next one does.
 - **The device played past what was written.** Most exclusive-mode drivers
   keep counting while they replay whatever the buffer held, so their clock
   never falls behind.
@@ -117,7 +120,21 @@ each wake-up, before writing, and looks for three signs:
   moment while our buffer still holds audio, and plays ours that much later
   from then on. The clock gap that leaves looks like the jitter above, so
   the shift is what counts: the medians of two blocks of 16 wake-ups in a row
-  more than half a period from where the delay held.
+  more than half a period from where the delay held, with a late wake-up in
+  the 48 before. The audio engine wakes the stream at each pass, so when it
+  runs late, the stream wakes late too.
+
+The late wake-ups are there for devices whose clocks drift against the
+audio engine. Through the RME HDSPe AIO's WDM driver at 10 ms, the card
+played about 8 parts per million faster than the audio engine took our
+audio, so the delay crept down by 22 frames a minute, and every 22 minutes
+the audio engine took an extra period to catch up. For a few minutes around
+each catch-up, as readings land either side of the audio engine's passes,
+the delay's medians jump back and forth by a period and the buffer can read
+low. None of that comes with a late wake-up or loses audio. Before either
+sign needed one, an hour on the RME counted 134 dropouts in bursts around
+the catch-ups, without a single late wake-up, and music played through the
+card during the first burst had no clicks.
 
 A dropout takes a few wake-ups to recover from while the buffer refills, so
 signs in the 10 wake-ups after one count towards the same dropout.
@@ -136,7 +153,9 @@ The dropouts downstream, in the system, also count in
 audio it lost. In an hour of shared mode on onboard audio at 128 frames, the
 latency stepped up by a period three times, each time at a late wake-up, from
 11 to 19 ms, and stayed there for the rest of the run. Exclusive mode, with
-no audio engine in between, held steady over the same hour.
+no audio engine in between, held steady over the same hour. A later hour on
+the same output counted one system dropout, at a late wake-up, which moved
+the latency from 8.6 to 11.3 ms.
 
 On macOS and Linux, a dropout is whatever cpal reports as an xrun: ALSA
 underruns and CoreAudio overloads. cpal doesn't say how much audio they lost.
@@ -205,4 +224,8 @@ Debian and Ubuntu).
   allows.
 - Input streams, and the input latency that comes with them.
 - Following the default output when it changes.
+- Counting glitches downstream that don't hold up the audio engine, such as
+  a late driver on a device whose clock drifts against it. Without a late
+  wake-up they look just like the audio engine catching up, so they go
+  uncounted.
 - Tuning on macOS and Linux.
