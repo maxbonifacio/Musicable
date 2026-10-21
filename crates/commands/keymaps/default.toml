@@ -25,6 +25,12 @@ version = 1
 "edit.undo" = ["Ctrl+Z"]
 "edit.redo" = ["Ctrl+Y", "Ctrl+Shift+Z"]
 
+# Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
+# groups the selected tracks, which needs a selection.
+"track.new_audio_track" = ["Ctrl+T"]
+"track.new_midi_track" = ["Ctrl+Shift+T"]
+"track.new_return_track" = ["Ctrl+Alt+T"]
+
 # Live's keys for its own files.
 "file.new" = ["Ctrl+N"]
 "file.open" = ["Ctrl+O"]

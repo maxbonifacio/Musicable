@@ -65,6 +65,46 @@ New, New Demo, Open and Quit ask about unsaved changes first.
 The Edit menu names the change, as in "Undo Tempo Up". Ctrl+Shift+Z is
 the other common key for redo.
 
+### Track
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `track.new_audio_track` | New Audio Track | Adds an audio track | Ctrl+T | Ctrl+T |
+| `track.new_midi_track` | New MIDI Track | Adds a MIDI track | Ctrl+Shift+T | Ctrl+Shift+T |
+| `track.new_return_track` | New Return Track | Adds a return track | Ctrl+Alt+T | Ctrl+Alt+T |
+| `track.new_group_track` | New Group Track | Adds an empty group track | none | none |
+
+A new track is named after its kind and how many of that kind there are,
+such as "Audio 3". Return tracks go at the end of the list, and other tracks
+before the first return track, so the returns stay together, as in Live.
+Return tracks start solo-safe. Live's Ctrl+G groups the selected tracks,
+which needs a selection, so New Group Track has no key yet.
+
+### The mixer's controls
+
+The mixer's faders, pan, sends, buttons and menus set values, and commands
+don't take values yet. So, like the tempo field, each control hands back a
+`mixer::Change`, and `mixer::change` makes it as one transaction, named for
+the Edit menu:
+
+| Change | What it does | Named |
+|---|---|---|
+| `Gain`, `MasterGain` | Sets a fader | Volume |
+| `Pan`, `MasterPan` | Sets a balance | Pan |
+| `Muted` | Mutes or unmutes a track | Mute, Unmute |
+| `Solo` | Solos or unsolos a track; `exclusive` unsolos the others | Solo, Unsolo |
+| `SoloSafe` | Leaves a track playing while others are soloed | Solo-Safe |
+| `Armed` | Arms a track for recording | Arm, Disarm |
+| `Output` | Sends a track's output to the master or a group it can feed | Output |
+| `ClipType`, `MasterClipType` | Sets a channel's clip stage | Clip Type |
+| `SendLevel` | Sets a send's level, adding the send if there isn't one | Send Level |
+| `SendPreFader` | Takes a send before or after the fader | Pre/Post |
+| `RemoveSend` | Removes a send | Remove Send |
+| `Delete` | Deletes a track; what fed it feeds the master, and sends to it go | Delete Track |
+
+A change the routing rules don't allow, such as an output that would make a
+loop, does nothing.
+
 ### Options and View
 
 The app's windows are commands too, so their keys can be changed like any
@@ -92,7 +132,9 @@ ctx.document.transact("Toggle Metronome", |tx| {
 ```
 
 A `Transaction` has a setter for each part of the project that commands
-change: so far the tempo map, the loop region, looping and the metronome.
+change: the tempo map, the loop region, looping and the metronome; adding
+and removing tracks and sends; each mixer setting of a track, a send and the
+master.
 Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
 recorded leaves no trace. Any other is committed under its name, which the
@@ -160,12 +202,19 @@ stops the transport at the start of the song. Then:
   | Tempo map | `EngineHandle::set_tempo_map`, with the last new map |
   | Loop region, looping | `TransportCommand::Loop`, with the loop as it is now |
   | Metronome | The metronome's `Metronome::ENABLED` parameter |
+  | Track or master gain and pan, send level | The fader's or the send's `Gain::GAIN` or `Gain::PAN` parameter |
+  | Mute, solo, solo-safe | `Gain::MUTE` for each output stage and send whose mute changed |
+  | Adding or removing a track or a send, an output, pre/post, a clip type | A new graph, which the compiler's thread builds |
+  | Track name, arm | Nothing yet |
 
   Play, stop and go to start send their `TransportCommand` as they run.
 - `Session::take_requests` hands over what the commands asked of the app,
   oldest first.
 - `Session::set_tempo` is for a tempo field: it sets the tempo at the
   playhead, as one transaction, with `transport::set_tempo`.
+- `Session::change_mixer` makes a change from the mixer's controls, and
+  `Session::meters` has the meters the engine measures into, for the mixer
+  to read.
 - `Session::begin_gesture` and `end_gesture` make a drag one step in the
   undo history, and `undo_name` and `redo_name` are for the Edit menu.
 - `Session::tick` belongs in every UI frame. While the engine's queue is
@@ -190,7 +239,9 @@ stops the transport at the start of the song. Then:
 drives an engine this way from key presses, undo and redo included,
 rendering offline,
 [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
-what the app shell asks of the session, and
+what the app shell asks of the session,
+[`crates/app/tests/mixer.rs`](../crates/app/tests/mixer.rs) checks that the
+mixer's changes reach the engine and the meters move, and
 [`crates/app/tests/slow_graphs.rs`](../crates/app/tests/slow_graphs.rs)
 checks that a node that's slow to prepare doesn't hold up the session.
 

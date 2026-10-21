@@ -1,16 +1,18 @@
-//! The app shell: the menu bar, the transport bar, the tracks and a status
+//! The app shell: the menu bar, the transport bar, the mixer and a status
 //! bar, with the keyboard shortcuts window and the command palette.
 
 use std::path::Path;
 
-use egui::{Align, Button, Color32, DragValue, Grid, Layout, RichText, ScrollArea, Ui};
+use egui::{Align, Button, Color32, DragValue, Layout, RichText, Ui};
+use musicable_commands::mixer::Change;
 use musicable_commands::{
     Command, CommandId, KeyChord, Keymap, Problem, Registry, edit, options, transport,
 };
+use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::{Project, TrackKind};
 
 use crate::menus::menus;
+use crate::mixer::{self, Levels};
 use crate::palette::Palette;
 use crate::shortcuts::Shortcuts;
 use crate::widgets::{Icon, clock, icon_button, meter, position};
@@ -33,6 +35,8 @@ pub struct View<'a> {
     /// The name of the change Redo would make again.
     pub redo: Option<&'a str>,
     pub playback: Playback,
+    /// The meters' readings, as the engine last measured them.
+    pub levels: &'a Levels,
     pub audio: Audio<'a>,
     /// The user's keymap file.
     pub keymap_file: KeymapStatus<'a>,
@@ -93,6 +97,10 @@ pub enum Action {
     BeginGesture,
     /// The user let go of the control.
     EndGesture,
+    /// Make a change from the mixer, such as moving a fader.
+    Mixer(Change),
+    /// Clear the highest peak of every channel's meter.
+    ClearPeaks,
     /// Use this keymap from now on, and save how it differs from the default
     /// keymap: the user changed keys in the keyboard shortcuts window.
     SetKeymap(Keymap),
@@ -147,7 +155,9 @@ impl Shell {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
         });
-        egui::CentralPanel::default().show(ui, |ui| tracks(ui, view.project));
+        egui::CentralPanel::default().show(ui, |ui| {
+            mixer::show(ui, view.project, view.levels, &mut actions);
+        });
         // The palette goes first, so the keys it takes while it's open, such
         // as Escape, don't reach the window under it.
         self.palette.show(ui.ctx(), view, &mut actions);
@@ -377,52 +387,6 @@ fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
     });
 }
 
-fn tracks(ui: &mut Ui, project: &Project) {
-    if project.tracks.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.label(
-                RichText::new("No tracks yet. File > New Demo Project has a dozen test tones.")
-                    .weak(),
-            );
-        });
-        return;
-    }
-    ScrollArea::vertical().show(ui, |ui| {
-        Grid::new("tracks")
-            .num_columns(5)
-            .striped(true)
-            .spacing([28.0, 6.0])
-            .show(ui, |ui| {
-                for heading in ["Track", "Kind", "Test tone", "Gain", ""] {
-                    ui.label(RichText::new(heading).strong());
-                }
-                ui.end_row();
-                for track in &project.tracks {
-                    ui.label(&track.name);
-                    ui.label(match track.kind {
-                        TrackKind::Audio => "Audio",
-                        TrackKind::Midi => "MIDI",
-                        TrackKind::Return => "Return",
-                        TrackKind::Group => "Group",
-                    });
-                    ui.label(match track.tone {
-                        Some(tone) => {
-                            format!("{:.2} Hz at {}", tone.frequency, decibels(tone.level))
-                        }
-                        None => "None".to_owned(),
-                    });
-                    ui.label(decibels(track.gain));
-                    if track.muted {
-                        ui.label(RichText::new("Muted").color(ui.visuals().warn_fg_color));
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
-            });
-    });
-}
-
 /// Asks whether to save the changes to the project called `name` before
 /// they're lost. Call it each frame until it returns a choice.
 pub fn ask_to_save(ctx: &egui::Context, name: &str) -> Option<SaveChoice> {
@@ -477,21 +441,12 @@ pub(crate) fn with_keys<'a>(button: Button<'a>, keymap: &Keymap, id: &CommandId)
     }
 }
 
-/// A linear gain in decibels: "-6.0 dB".
-fn decibels(gain: f32) -> String {
-    if gain > 0.0 {
-        let db = 20.0 * gain.log10();
-        // No "-0.0 dB" for gains a hair under unity.
-        format!("{:.1} dB", if db.abs() < 0.05 { 0.0 } else { db })
-    } else {
-        "-inf dB".to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use egui::accesskit::Role;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::{file, view};
+    use musicable_commands::{file, track, view};
+    use musicable_model::{TrackId, TrackKind};
 
     use super::*;
     use crate::testing::harness;
@@ -615,24 +570,30 @@ mod tests {
     }
 
     #[test]
-    fn the_tracks_are_listed() {
+    fn the_window_shows_the_mixer() {
         let mut project = Project::new();
-        let id = project.add_track("A4", TrackKind::Audio);
-        project.track_mut(id).unwrap().gain = 0.5;
-        let harness = harness(project);
+        project.add_track("A4", TrackKind::Audio);
+        let mut harness = harness(project);
         harness.get_by_label("A4");
-        harness.get_by_label("-6.0 dB");
-        assert!(harness.query_by_label_contains("No tracks yet").is_none());
-        let empty = self::harness(Project::new());
-        empty.get_by_label_contains("No tracks yet");
+        harness.get_by_role_and_label(Role::Slider, "A4 Volume");
+        harness.get_by_role_and_label(Role::Slider, "Master Volume");
+        // Its changes come back as actions.
+        harness.get_by_label("Mute A4").click();
+        harness.run();
+        let mute = Change::Muted(TrackId(0), true);
+        assert_eq!(harness.state().actions, [Action::Mixer(mute)]);
     }
 
     #[test]
-    fn gains_read_in_decibels() {
-        assert_eq!(decibels(1.0), "0.0 dB");
-        assert_eq!(decibels(0.5), "-6.0 dB");
-        assert_eq!(decibels(0.08), "-21.9 dB");
-        assert_eq!(decibels(2.0), "6.0 dB");
-        assert_eq!(decibels(0.0), "-inf dB");
+    fn the_track_commands_have_a_menu() {
+        let mut harness = harness(Project::new());
+        harness.get_by_label("Track").click();
+        harness.run();
+        harness.get_by_label("New Audio Track Ctrl+T").click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [Action::Run(track::NEW_AUDIO_TRACK)]
+        );
     }
 }

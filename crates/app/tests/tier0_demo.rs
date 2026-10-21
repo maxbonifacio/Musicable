@@ -13,11 +13,19 @@ use musicable_model::Project;
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
 
-/// The demo, as File > New Demo Project makes it and saves it.
+/// The demo, as File > New Demo Project made it and saved it in Tier 0, in
+/// version 1 of the project format.
 const DEMO: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../io/tests/fixtures/v1/demo.musicable"
 );
+
+/// The demo as this version of Musicable saves it.
+fn saved_demo() -> PathBuf {
+    let version = musicable_io::project::VERSION;
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../io/tests/fixtures/v{version}/demo.musicable"))
+}
 
 /// A low buffer size, as the demo plays on Windows.
 const CONFIG: EngineConfig = EngineConfig {
@@ -89,7 +97,7 @@ fn saved_and_opened_again_the_demo_plays_the_same() {
     let project = demo();
     let path = scratch("saved_and_opened_again").join("demo.musicable");
     musicable_io::project::save(&path, &project).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), fs::read(DEMO).unwrap());
+    assert_eq!(fs::read(&path).unwrap(), fs::read(saved_demo()).unwrap());
     let reopened = musicable_io::project::load(&path).unwrap();
     assert_eq!(reopened, project);
 

@@ -15,7 +15,7 @@ pub use output::Output;
 pub use session::Session;
 pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
 
-use musicable_commands::{Registry, edit, file, options, transport, view};
+use musicable_commands::{Registry, edit, file, options, track, transport, view};
 use musicable_engine::{
     Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelOptions, ParallelRenderer,
 };
@@ -27,6 +27,7 @@ pub fn commands() -> Registry {
     file::register(&mut registry);
     edit::register(&mut registry);
     transport::register(&mut registry);
+    track::register(&mut registry);
     options::register(&mut registry);
     view::register(&mut registry);
     registry
@@ -44,7 +45,8 @@ pub fn engine(config: EngineConfig) -> (Engine, EngineHandle, ParallelMonitor) {
 
 /// The Tier 0 demo: a dozen test tones through their gain stages, looping
 /// the first four bars at 124 BPM with the metronome on. One track is muted.
-/// `crates/io/tests/fixtures/v1/demo.musicable` is this project, saved.
+/// `crates/io/tests/fixtures/v*/demo.musicable` is this project, saved in
+/// each version of the format.
 pub fn demo_project() -> Project {
     let mut project = Project::new();
     project.tempo.set_tempo(124.0);

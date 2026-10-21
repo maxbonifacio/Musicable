@@ -4,9 +4,10 @@ An open-source digital audio workstation in Rust, with a workflow modelled on
 Ableton Live's arrangement view. The first goal is a studio DAW for writing,
 recording, editing and mixing. Live performance (Session View) comes later.
 
-> Status: pre-alpha. Nothing usable yet. This repository is Tier 0, the
-> foundation: the app plays, loops and saves a demo project of test tones,
-> with no editing. See [docs/app.md](docs/app.md), and
+> Status: pre-alpha. Nothing usable yet. Tier 0, the foundation, is done:
+> the app plays, loops and saves projects of test tones. Tier 1 is under
+> way, with undo, a mixer and changing keys in the app so far. See
+> [docs/app.md](docs/app.md), and
 > [docs/architecture.md](docs/architecture.md) for how it fits together.
 
 ## Goals

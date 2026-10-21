@@ -5,7 +5,7 @@
 //! from any version goes through every step from its version to the current
 //! one, and then reads like a file of the current version.
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{Invalid, VERSION};
 
@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [];
+const STEPS: [Step; VERSION as usize - 1] = [mixer];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -33,6 +33,61 @@ fn run(steps: &[Step], document: &mut Value, from: u32) -> Result<(), Invalid> {
         step(file)?;
         file.insert("version".to_owned(), to.into());
     }
+    Ok(())
+}
+
+/// Version 2 added the mixer: pan, solo, solo-safe, arm, routing and sends
+/// on each track, device lists, the master channel, and the hard and soft
+/// clip types. Version 1 files get what a new project has: tracks centred,
+/// feeding the master with no sends or devices, return tracks solo-safe,
+/// and the master at unity.
+fn mixer(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "next_send_id", json!(0))?;
+    add(file, "", "next_device_id", json!(0))?;
+    let master = json!({
+        "gain": 1.0,
+        "pan": 0.0,
+        "devices": [],
+        "clip_type": "off",
+        "console": {},
+    });
+    add(file, "", "master", master)?;
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let Some(track) = track.as_object_mut() else {
+            // Reading the upgraded file says what's wrong with it.
+            continue;
+        };
+        let path = format!("tracks[{i}]");
+        let is_return = track.get("kind").and_then(Value::as_str) == Some("return");
+        add(track, &path, "pan", json!(0.0))?;
+        add(track, &path, "solo", json!(false))?;
+        add(track, &path, "solo_safe", json!(is_return))?;
+        add(track, &path, "armed", json!(false))?;
+        add(track, &path, "output", Value::Null)?;
+        add(track, &path, "sends", json!([]))?;
+        add(track, &path, "devices", json!([]))?;
+    }
+    Ok(())
+}
+
+/// Adds a field the file's version didn't have to `object`, at `path`.
+/// Refuses one that's there already, rather than lose its value.
+fn add(
+    object: &mut Map<String, Value>,
+    path: &str,
+    key: &str,
+    value: Value,
+) -> Result<(), Invalid> {
+    if object.contains_key(key) {
+        let path = if path.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{path}.{key}")
+        };
+        return Err(Invalid::new(path, "unknown field for the file's version"));
+    }
+    object.insert(key.to_owned(), value);
     Ok(())
 }
 
@@ -92,6 +147,52 @@ mod tests {
         assert_eq!(
             run(&MADE_UP, &mut broken, 1),
             Err(Invalid::new("metronome", "is missing"))
+        );
+    }
+
+    #[test]
+    fn version_1_files_get_a_new_projects_mixer() {
+        let mut file = json!({
+            "version": 1,
+            "tracks": [{"kind": "audio"}, {"kind": "return"}, "not a track"],
+        });
+        upgrade(&mut file, 1).unwrap();
+        let track = |solo_safe| {
+            json!({
+                "pan": 0.0,
+                "solo": false,
+                "solo_safe": solo_safe,
+                "armed": false,
+                "output": null,
+                "sends": [],
+                "devices": [],
+            })
+        };
+        let mut audio = track(false);
+        audio["kind"] = "audio".into();
+        let mut reverb = track(true);
+        reverb["kind"] = "return".into();
+        assert_eq!(file["tracks"], json!([audio, reverb, "not a track"]));
+        assert_eq!(file["master"]["gain"], json!(1.0));
+        assert_eq!(file["next_send_id"], json!(0));
+        assert_eq!(file["version"], json!(2));
+    }
+
+    #[test]
+    fn version_1_files_cant_have_the_new_fields() {
+        let mut file = json!({"version": 1, "tracks": [{"kind": "midi", "solo": true}]});
+        assert_eq!(
+            upgrade(&mut file, 1),
+            Err(Invalid::new(
+                "tracks[0].solo",
+                "unknown field for the file's version"
+            ))
+        );
+        let mut file = json!({"version": 1, "master": {}, "tracks": []});
+        assert_eq!(
+            upgrade(&mut file, 1).unwrap_err().path,
+            "master",
+            "the master"
         );
     }
 

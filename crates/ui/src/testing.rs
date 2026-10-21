@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use egui_kittest::Harness;
-use musicable_commands::{Keymap, Problem, Registry, edit, file, options, transport, view};
+use musicable_commands::{Keymap, Problem, Registry, edit, file, options, track, transport, view};
 use musicable_model::Project;
 use musicable_model::time::Beats;
 
-use crate::{Action, Audio, KeymapStatus, Playback, Shell, View};
+use crate::{Action, Audio, KeymapStatus, Levels, Playback, Shell, View};
 
 /// What the shell shows in the tests, and what it hands back.
 pub(crate) struct State {
@@ -23,6 +23,8 @@ pub(crate) struct State {
     /// What the Edit menu's Undo and Redo would change.
     pub undo: Option<&'static str>,
     pub redo: Option<&'static str>,
+    /// What the meters read.
+    pub levels: Levels,
     pub actions: Vec<Action>,
 }
 
@@ -32,6 +34,7 @@ pub(crate) fn commands() -> Registry {
     file::register(&mut commands);
     edit::register(&mut commands);
     transport::register(&mut commands);
+    track::register(&mut commands);
     options::register(&mut commands);
     view::register(&mut commands);
     commands
@@ -50,6 +53,7 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
         keymap_problems: Vec::new(),
         undo: None,
         redo: None,
+        levels: Levels::default(),
         actions: Vec::new(),
     };
     Harness::builder()
@@ -70,6 +74,7 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
                         playhead: Beats::ZERO,
                         seconds: 0.0,
                     },
+                    levels: &state.levels,
                     audio: Audio {
                         summary: "48 kHz · 128 samples · 5.3 ms",
                         running: true,

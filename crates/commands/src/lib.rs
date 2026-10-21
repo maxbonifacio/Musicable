@@ -20,7 +20,9 @@ pub mod file;
 mod history;
 mod key;
 mod keymap;
+pub mod mixer;
 pub mod options;
+pub mod track;
 pub mod transport;
 pub mod view;
 
