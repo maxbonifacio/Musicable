@@ -524,6 +524,47 @@ fn nodes_run_on_several_threads_at_once() {
     assert_eq!(missed.load(Relaxed), 0);
 }
 
+/// Waits like a [`Rendezvous`], so each thread runs one, then outputs a
+/// number too small for a normal float.
+struct Denormal(Rendezvous);
+
+impl Node for Denormal {
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        self.0.process(ctx, inputs, output);
+        let tiny = std::hint::black_box(f32::MIN_POSITIVE);
+        output.fill(tiny * std::hint::black_box(0.25));
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn every_thread_flushes_denormals_to_zero() {
+    // Like the audio thread in the reference renderer, so a node gives the
+    // same samples on any thread.
+    let flushes = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
+    let threads = 3;
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let missed = Arc::new(AtomicUsize::new(0));
+    let mut graph = fan_in(threads + 1, |_| {
+        Box::new(Denormal(Rendezvous {
+            count: threads + 1,
+            arrived: arrived.clone(),
+            missed: missed.clone(),
+            blocks: 0,
+        }))
+    });
+    let tempo = TempoMap::default();
+    let mut renderer = ParallelRenderer::new(options(threads, Duration::ZERO));
+    for _ in 0..5 {
+        renderer.render(&mut graph, &block(16, &tempo));
+        for buffer in &graph.buffers {
+            let zero = buffer.view(16).iter().flatten().all(|&s| s == 0.0);
+            assert_eq!(zero, flushes);
+        }
+    }
+    assert_eq!(missed.load(Relaxed), 0, "each thread ran one");
+}
+
 /// Panics in its first block.
 #[derive(Default)]
 struct PanicsOnce {

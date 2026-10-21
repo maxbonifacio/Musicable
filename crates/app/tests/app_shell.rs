@@ -24,9 +24,12 @@ struct Rig {
 }
 
 impl Rig {
+    /// Opens `project`, and waits for its graph, as the app's first frames
+    /// would.
     fn new(project: Project) -> Self {
         let (engine, handle) = Engine::new(CONFIG);
-        let session = Session::new(project, Keymap::default_keymap(), handle);
+        let mut session = Session::new(project, Keymap::default_keymap(), handle);
+        session.wait_for_graph();
         Self { engine, session }
     }
 
@@ -87,6 +90,7 @@ fn opening_a_project_stops_at_its_start() {
     assert!(rig.session.is_modified());
 
     rig.session.open(demo_project());
+    rig.session.wait_for_graph();
     rig.render(100);
     let stats = rig.session.stats();
     assert!(!stats.playing);
@@ -146,6 +150,7 @@ fn a_new_engine_takes_over_where_the_old_one_was() {
     let old = rig.session.replace_engine(handle);
     let old_engine = std::mem::replace(&mut rig.engine, engine);
     drop((old_engine, old));
+    rig.session.wait_for_graph();
     assert_eq!(rig.session.engine_config(), config);
 
     // At 44.1 kHz a beat is 26,460 frames. The new engine plays from the
@@ -159,4 +164,24 @@ fn a_new_engine_takes_over_where_the_old_one_was() {
     assert!(clicks(&out[13_130..]));
     assert_eq!(rig.session.stats().events_late, 0);
     assert!(!rig.session.is_modified());
+}
+
+#[test]
+fn a_tempo_drag_is_one_step_in_the_undo_history() {
+    let mut rig = Rig::new(Project::new());
+    rig.session.begin_gesture();
+    for bpm in [121.0, 125.0, 130.5] {
+        rig.session.set_tempo(bpm);
+        rig.render(100);
+    }
+    rig.session.end_gesture();
+    assert_eq!(rig.session.undo_name(), Some("Set Tempo"));
+    assert!(rig.press("Ctrl+Z"));
+    rig.render(100);
+    assert_eq!(rig.session.project().tempo.bpm_at(Beats::ZERO), 120.0);
+    assert_eq!(rig.session.undo_name(), None);
+    assert_eq!(rig.session.redo_name(), Some("Set Tempo"));
+    assert!(!rig.session.is_modified());
+    assert!(rig.press("Ctrl+Y"));
+    assert_eq!(rig.session.project().tempo.bpm_at(Beats::ZERO), 130.5);
 }
