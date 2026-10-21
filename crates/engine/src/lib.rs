@@ -17,6 +17,8 @@
 
 use std::any::Any;
 
+use musicable_model::time::TempoMap;
+
 pub mod buffer;
 pub mod compile;
 mod engine;
@@ -25,6 +27,7 @@ pub mod graph;
 pub mod nodes;
 mod render;
 pub mod rt;
+mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{Compiler, compile};
@@ -94,6 +97,9 @@ pub struct ProcessContext<'a> {
     /// started. Unlike the transport position, it never stops or jumps.
     pub time: u64,
     pub transport: TransportState,
+    /// Where beats and bars fall in song positions. A musical position plays
+    /// on the frame [`TempoMap::frame_at`] gives.
+    pub tempo: &'a TempoMap,
     /// This node's events for the block, in order, each with an offset below
     /// `frames`.
     pub events: &'a [NodeEvent],

@@ -2,7 +2,11 @@
 //!
 //! Nothing in this crate touches audio devices, threads or the UI. The engine
 //! compiles a [`Project`] into a processing graph; the UI edits it through
-//! commands.
+//! commands. [`time`] has musical time: beats, bars and the tempo map.
+
+pub mod time;
+
+use time::{BeatRange, Beats, TempoMap};
 
 /// Stable identifier for a track within a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -55,28 +59,32 @@ pub struct Track {
     pub console: ConsoleSettings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Tempo {
-    pub bpm: f64,
-    pub numerator: u8,
-    pub denominator: u8,
-}
-
-impl Default for Tempo {
-    fn default() -> Self {
-        Self {
-            bpm: 120.0,
-            numerator: 4,
-            denominator: 4,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Project {
-    pub tempo: Tempo,
+    /// Tempo and time signature.
+    pub tempo: TempoMap,
+    /// The region playback loops over. Kept while looping is off.
+    pub loop_region: BeatRange,
+    pub looping: bool,
+    /// Whether the metronome clicks while the transport plays.
+    pub metronome: bool,
     pub tracks: Vec<Track>,
     next_track_id: u32,
+}
+
+impl Default for Project {
+    /// 120 BPM in 4/4, with the loop region on the first four bars.
+    fn default() -> Self {
+        let tempo = TempoMap::default();
+        Self {
+            loop_region: BeatRange::new(Beats::ZERO, tempo.bar_start(4)),
+            tempo,
+            looping: false,
+            metronome: false,
+            tracks: Vec::new(),
+            next_track_id: 0,
+        }
+    }
 }
 
 impl Project {

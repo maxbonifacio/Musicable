@@ -2,16 +2,17 @@
 //!
 //! Each track becomes a channel strip feeding the master bus: its test tone,
 //! if it has one, then its gain stage, with built-in slots for native stages
-//! along the way (see [`Slot`]). Empty slots add no nodes. Node keys come
-//! from track ids and slots (see [`keys`]), so a track's nodes keep their
-//! identity when the project is recompiled.
+//! along the way (see [`Slot`]). Empty slots add no nodes. The metronome
+//! feeds the master too. Node keys come from track ids and slots (see
+//! [`keys`]), so a track's nodes keep their identity when the project is
+//! recompiled.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::{ClipType, Project, Track};
 
-use crate::nodes::{Gain, Sine, Sum};
+use crate::nodes::{Gain, Metronome, Sine, Sum};
 use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
@@ -28,6 +29,9 @@ pub mod keys {
 
     /// The master bus.
     pub const MASTER: NodeKey = NodeKey(0);
+
+    /// The [`Metronome`](crate::nodes::Metronome).
+    pub const METRONOME: NodeKey = NodeKey(1);
 
     /// A track's gain stage, a [`Gain`](crate::nodes::Gain).
     pub fn track_gain(track: TrackId) -> NodeKey {
@@ -104,6 +108,11 @@ pub(crate) fn compile_with(
 ) -> Graph {
     let mut graph = Graph::new();
     let master = graph.add_boxed(keys::MASTER, Summing::Plain.node());
+    // Straight into the master for now. It belongs on a cue output, once
+    // there is one.
+    let metronome = Metronome::new().with_enabled(project.metronome);
+    let metronome = graph.add(keys::METRONOME, metronome);
+    connect(&mut graph, metronome, master);
     for track in &project.tracks {
         let mut strip = Strip {
             graph: &mut graph,
@@ -347,9 +356,10 @@ mod tests {
     fn tracks_get_stable_keys() {
         let p = project();
         let graph = compile(&p).prepare(&CONFIG).unwrap();
-        // Master, three gain stages and two tones.
-        assert_eq!(graph.len(), 6);
+        // Master, metronome, three gain stages and two tones.
+        assert_eq!(graph.len(), 7);
         assert!(graph.contains(keys::MASTER));
+        assert!(graph.contains(keys::METRONOME));
         for track in &p.tracks {
             assert!(graph.contains(keys::track_gain(track.id)));
             assert_eq!(
@@ -369,7 +379,7 @@ mod tests {
             Slot::PostFader,
             Slot::BusFeed,
         ];
-        let mut seen = BTreeSet::from([keys::MASTER]);
+        let mut seen = BTreeSet::from([keys::MASTER, keys::METRONOME]);
         for track in [TrackId(0), TrackId(1), TrackId(u32::MAX)] {
             let strip = slots.map(|slot| keys::track_slot(track, slot));
             for key in strip
@@ -387,9 +397,11 @@ mod tests {
         p.tracks[0].gain = 0.8;
         p.tracks[1].muted = true;
         // What compile() built before channel strips: each track's tone feeds
-        // its gain stage, which feeds the master.
+        // its gain stage, which feeds the master, after the metronome.
         let mut before = Graph::new();
         let master = before.add(keys::MASTER, Sum::default());
+        let metronome = before.add(keys::METRONOME, Metronome::new().with_enabled(false));
+        before.connect(metronome, master).unwrap();
         for track in &p.tracks {
             let gain = Gain::new(track.gain).with_muted(track.muted);
             let gain = before.add(keys::track_gain(track.id), gain);
@@ -485,10 +497,40 @@ mod tests {
         }
         // Snapshots that queued up while it was busy are skipped.
         let mut last = None;
-        while last.as_ref().is_none_or(|g: &PreparedGraph| g.len() < 6) {
+        while last.as_ref().is_none_or(|g: &PreparedGraph| g.len() < 7) {
             last = Some(compiler.recv().unwrap().unwrap());
         }
-        assert_eq!(last.unwrap().len(), 6);
+        assert_eq!(last.unwrap().len(), 7);
         assert!(compiler.try_recv().is_none());
+    }
+
+    #[test]
+    fn the_metronome_follows_the_project() {
+        let mut p = project();
+        p.tracks.iter_mut().for_each(|t| t.muted = true);
+        let clicks = |p: &Project| render(compile(p).prepare(&CONFIG).unwrap(), 1000);
+        assert!(clicks(&p).iter().all(|&s| s == 0.0));
+        p.metronome = true;
+        // The downbeat, at the first frame, at the metronome's level.
+        assert_eq!(clicks(&p)[..2], [0.5, 0.5]);
+
+        // Switched off and on again while playing.
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle
+            .swap_graph(compile(&p).prepare(&CONFIG).unwrap())
+            .unwrap();
+        let enabled = |value| Event::Param {
+            node: keys::METRONOME,
+            param: Metronome::ENABLED,
+            value,
+        };
+        handle.send(enabled(0.0)).unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        assert!(play(&mut engine, 24_000).iter().all(|&s| s == 0.0));
+        handle.send(enabled(1.0)).unwrap();
+        // The second beat.
+        assert_eq!(play(&mut engine, 1)[..2], [0.25, 0.25]);
     }
 }

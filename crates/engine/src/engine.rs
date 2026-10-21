@@ -3,19 +3,22 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
+use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::graph::Routed;
+use crate::transport::Transport;
 use crate::{
     AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, NodeEvent, NodeEventKind, NodeKey,
-    ParamId, PreparedGraph, ReferenceRenderer, Renderer, TransportState, rt,
+    ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
 /// Messages the control thread can have in flight.
 const QUEUE_CAPACITY: usize = 1024;
-/// Old graphs the engine can hand back before it holds off further swaps.
+/// Old graphs and tempo maps the engine can hand back before it holds off
+/// further swaps.
 const GARBAGE_CAPACITY: usize = 16;
 /// Events the engine holds until they are due, and the most one block takes.
 pub(crate) const EVENT_CAPACITY: usize = 1024;
@@ -33,6 +36,13 @@ enum Message {
         event: Event,
     },
     Swap(Box<PreparedGraph>),
+    Tempo(Box<TempoMap>),
+}
+
+/// What the engine hands back to be dropped off the audio thread.
+enum Garbage {
+    Graph(Box<PreparedGraph>),
+    Tempo(Box<TempoMap>),
 }
 
 struct Pending {
@@ -43,6 +53,8 @@ struct Pending {
 #[derive(Default)]
 struct Counters {
     time: AtomicU64,
+    position: AtomicU64,
+    playing: AtomicBool,
     swaps: AtomicU64,
     events_late: AtomicU64,
     events_dropped: AtomicU64,
@@ -56,6 +68,9 @@ pub struct Stats {
     /// Frames rendered since the engine started. This is the clock
     /// [`EngineHandle::send_at`] times refer to.
     pub time: u64,
+    /// The song position, in samples: where the next frame plays from.
+    pub position: u64,
+    pub playing: bool,
     /// Graphs installed.
     pub swaps: u64,
     /// Events applied later than the time they were sent for.
@@ -73,6 +88,8 @@ impl Counters {
     fn snapshot(&self) -> Stats {
         Stats {
             time: self.time.load(Relaxed),
+            position: self.position.load(Relaxed),
+            playing: self.playing.load(Relaxed),
             swaps: self.swaps.load(Relaxed),
             events_late: self.events_late.load(Relaxed),
             events_dropped: self.events_dropped.load(Relaxed),
@@ -98,21 +115,21 @@ pub enum SwapError {
 /// Renders the running graph on the audio thread.
 ///
 /// The engine applies what the control thread sends through its
-/// [`EngineHandle`]: graph swaps between blocks, parameter changes and
-/// transport commands at the exact frame they are due. It renders whatever
-/// number of frames the device asks for, in blocks of at most
+/// [`EngineHandle`]: graph swaps and tempo maps between blocks, parameter
+/// changes and transport commands at the exact frame they are due. It renders
+/// whatever number of frames the device asks for, in blocks of at most
 /// [`EngineConfig::max_block`], ending a block early wherever the transport
-/// changes.
+/// changes or a loop jumps back.
 ///
 /// Drop the engine off the audio thread, since that frees its graph.
 pub struct Engine {
     config: EngineConfig,
     renderer: Box<dyn Renderer>,
     graph: Option<Box<PreparedGraph>>,
-    transport: TransportState,
+    transport: Transport,
     time: u64,
     messages: Consumer<Message>,
-    garbage: Producer<Box<PreparedGraph>>,
+    garbage: Producer<Garbage>,
     /// Events not yet due, by time and then in arrival order.
     pending: Vec<Pending>,
     /// Scratch for the node events of one block.
@@ -124,7 +141,8 @@ pub struct Engine {
 
 impl Engine {
     /// An engine with the [`ReferenceRenderer`], and its handle. The engine
-    /// plays silence until a graph is swapped in.
+    /// plays silence until a graph is swapped in. Its transport is stopped at
+    /// the start of the song, at 120 BPM in 4/4.
     pub fn new(config: EngineConfig) -> (Engine, EngineHandle) {
         Self::with_renderer(config, Box::new(ReferenceRenderer))
     }
@@ -147,7 +165,7 @@ impl Engine {
             config,
             renderer,
             graph: None,
-            transport: TransportState::default(),
+            transport: Transport::new(config.sample_rate),
             time: 0,
             messages: message_rx,
             garbage: garbage_tx,
@@ -222,20 +240,30 @@ impl Engine {
             }
             done += block;
         }
+        let transport = self.transport.state();
         self.counters.time.store(self.time, Relaxed);
+        self.counters.position.store(transport.position, Relaxed);
+        self.counters.playing.store(transport.playing, Relaxed);
     }
 
     /// Takes everything the control thread has sent.
     fn receive(&mut self) {
         loop {
             match self.messages.peek() {
-                // Hold the swap until there is room to hand back the old graph.
+                // Hold a swap until there is room to hand back what it replaces.
                 Ok(Message::Swap(_)) if self.graph.is_some() && self.garbage.is_full() => break,
+                Ok(Message::Tempo(_)) if self.garbage.is_full() => break,
                 Ok(_) => {}
                 Err(_) => break,
             }
             match self.messages.pop() {
                 Ok(Message::Swap(graph)) => self.install(graph),
+                Ok(Message::Tempo(tempo)) => {
+                    let old = self.transport.set_tempo(tempo);
+                    // `receive` checked there is room.
+                    let returned = self.garbage.push(Garbage::Tempo(old));
+                    debug_assert!(returned.is_ok(), "the garbage queue has room");
+                }
                 Ok(Message::Event { time, event }) => {
                     self.schedule(time.unwrap_or(self.time), event)
                 }
@@ -253,7 +281,7 @@ impl Engine {
         }
         if let Some(old) = self.graph.replace(graph) {
             // `receive` checked there is room.
-            let returned = self.garbage.push(old);
+            let returned = self.garbage.push(Garbage::Graph(old));
             debug_assert!(returned.is_ok(), "the garbage queue has room");
         }
         self.counters.swaps.fetch_add(1, Relaxed);
@@ -272,14 +300,25 @@ impl Engine {
     /// length.
     fn render(&mut self, max: usize) -> usize {
         let start = self.time;
+        // Transport changes due by now apply before the block. The block ends
+        // at the next change, and where the loop jumps back, so each block has
+        // one transport state.
+        let due_now = self.pending.partition_point(|p| p.time <= start);
+        for i in 0..due_now {
+            if let Event::Transport(command) = self.pending[i].event {
+                self.transport.apply(command);
+            }
+        }
+        self.transport.wrap();
         let mut end = start + max.min(self.config.max_block) as u64;
-        // A transport change ends the block, so each block has one transport
-        // state.
-        for p in &self.pending {
+        if let Some(frames) = self.transport.frames_to_loop_end() {
+            end = end.min(start + frames);
+        }
+        for p in &self.pending[due_now..] {
             if p.time >= end {
                 break;
             }
-            if p.time > start && matches!(p.event, Event::Transport(_)) {
+            if matches!(p.event, Event::Transport(_)) {
                 end = p.time;
                 break;
             }
@@ -292,21 +331,19 @@ impl Engine {
             if p.time < start {
                 self.counters.events_late.fetch_add(1, Relaxed);
             }
-            match p.event {
-                // Only changes due at `start` get here; later ones ended the block.
-                Event::Transport(command) => self.transport.apply(command),
-                Event::Param { node, param, value } => {
-                    match graph.as_ref().and_then(|g| g.find(node)) {
-                        Some(node) => self.routed.push(Routed {
-                            node,
-                            order: self.routed.len() as u32,
-                            event: NodeEvent {
-                                offset: (p.time.max(start) - start) as usize,
-                                kind: NodeEventKind::Param { param, value },
-                            },
-                        }),
-                        None => unmatched += 1,
-                    }
+            // Transport changes due now were applied above, and later ones
+            // ended the block.
+            if let Event::Param { node, param, value } = p.event {
+                match graph.as_ref().and_then(|g| g.find(node)) {
+                    Some(node) => self.routed.push(Routed {
+                        node,
+                        order: self.routed.len() as u32,
+                        event: NodeEvent {
+                            offset: (p.time.max(start) - start) as usize,
+                            kind: NodeEventKind::Param { param, value },
+                        },
+                    }),
+                    None => unmatched += 1,
                 }
             }
         }
@@ -320,16 +357,15 @@ impl Engine {
             let block = Block {
                 frames,
                 time: start,
-                transport: self.transport,
+                transport: self.transport.state(),
+                tempo: self.transport.tempo(),
             };
             self.renderer.render(graph, &block);
             graph.clear_events(&self.routed);
         }
         self.routed.clear();
         self.time = end;
-        if self.transport.playing {
-            self.transport.position += frames as u64;
-        }
+        self.transport.advance(frames as u64);
         frames
     }
 }
@@ -339,7 +375,7 @@ impl Engine {
 pub struct EngineHandle {
     config: EngineConfig,
     messages: Producer<Message>,
-    garbage: Consumer<Box<PreparedGraph>>,
+    garbage: Consumer<Garbage>,
     counters: Arc<Counters>,
     /// For each parameter, the value that applies last of those sent. Sent
     /// again after each swap, since a node that is new in the graph missed
@@ -435,13 +471,29 @@ impl EngineHandle {
         Ok(())
     }
 
-    /// Drops the graphs the engine has replaced, and returns how many there
-    /// were. Call it regularly, for example once per UI frame: the engine
-    /// holds off swaps while too many old graphs are waiting.
+    /// Replaces the engine's tempo map at the start of its next `process`
+    /// call. The playhead keeps its musical position, so changing the tempo
+    /// during playback doesn't jump, and the loop region keeps its place in
+    /// bars and beats.
+    pub fn set_tempo_map(&mut self, tempo: TempoMap) -> Result<(), QueueFull<TempoMap>> {
+        if self.messages.is_full() {
+            return Err(QueueFull(tempo));
+        }
+        let sent = self.messages.push(Message::Tempo(Box::new(tempo)));
+        debug_assert!(sent.is_ok(), "the queue had room");
+        Ok(())
+    }
+
+    /// Drops the graphs and tempo maps the engine has replaced, and returns
+    /// how many there were. Call it regularly, for example once per UI frame:
+    /// the engine holds off swaps while too many are waiting.
     pub fn collect_garbage(&mut self) -> usize {
         let mut dropped = 0;
-        while let Ok(graph) = self.garbage.pop() {
-            drop(graph);
+        while let Ok(garbage) = self.garbage.pop() {
+            match garbage {
+                Garbage::Graph(graph) => drop(graph),
+                Garbage::Tempo(tempo) => drop(tempo),
+            }
             dropped += 1;
         }
         dropped
@@ -452,6 +504,8 @@ impl EngineHandle {
 mod tests {
     use std::sync::mpsc;
     use std::thread::{self, ThreadId};
+
+    use musicable_model::time::{BeatRange, Beats, TimeSignature};
 
     use super::*;
     use crate::nodes::{Constant, Gain};
@@ -659,7 +713,8 @@ mod tests {
             handle.swap_graph(single(0, Playhead)).unwrap();
             for (time, command) in [
                 (10, TransportCommand::Play),
-                (20, TransportCommand::Locate(1000)),
+                // Frame 1000, at 120 BPM and 48 kHz.
+                (20, TransportCommand::Locate(Beats::from_ratio(1, 24))),
                 (30, TransportCommand::Stop),
                 (35, TransportCommand::Play),
             ] {
@@ -677,6 +732,126 @@ mod tests {
                 .collect();
             assert_eq!(out, expected, "{sizes:?}");
         }
+    }
+
+    fn play() -> Event {
+        Event::Transport(TransportCommand::Play)
+    }
+
+    fn looping(start: Beats, end: Beats) -> Event {
+        Event::Transport(TransportCommand::Loop(Some(BeatRange::new(start, end))))
+    }
+
+    #[test]
+    fn loops_jump_back_on_their_frame() {
+        for sizes in [&[1][..], &[7, 64, 1000], &[5000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(single(0, Playhead)).unwrap();
+            // Frames 12,000 to 24,000.
+            handle
+                .send(looping(Beats::from_ratio(1, 2), Beats::new(1)))
+                .unwrap();
+            handle.send(play()).unwrap();
+            let out = render(&mut engine, 40_000, sizes);
+            let expected: Vec<f32> = (0..40_000)
+                .map(|i| match i {
+                    0..24_000 => i,
+                    _ => 12_000 + (i - 24_000) % 12_000,
+                } as f32)
+                .collect();
+            assert_eq!(out, expected, "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn looping_starts_and_stops_on_its_frame() {
+        for sizes in [&[1][..], &[7], &[64, 3000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(single(0, Playhead)).unwrap();
+            handle.send(play()).unwrap();
+            // Frames 0 to 2000, while the playhead is inside.
+            let region = looping(Beats::ZERO, Beats::from_ratio(1, 12));
+            handle.send_at(1000, region).unwrap();
+            let off = Event::Transport(TransportCommand::Loop(None));
+            handle.send_at(5000, off).unwrap();
+            let out = render(&mut engine, 8000, sizes);
+            let expected: Vec<f32> = (0..8000)
+                .map(|i| match i {
+                    0..2000 => i,
+                    2000..4000 => i - 2000,
+                    _ => i - 4000,
+                } as f32)
+                .collect();
+            assert_eq!(out, expected, "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn a_playhead_past_the_loop_end_plays_on() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(single(0, Playhead)).unwrap();
+        let locate = TransportCommand::Locate(Beats::new(2));
+        handle.send(Event::Transport(locate)).unwrap();
+        handle.send(looping(Beats::ZERO, Beats::new(1))).unwrap();
+        handle.send(play()).unwrap();
+        let out = render(&mut engine, 100, &[64]);
+        let expected: Vec<f32> = (48_000..48_100).map(|i| i as f32).collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_new_tempo_keeps_the_musical_position() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(single(0, Playhead)).unwrap();
+        handle.send(play()).unwrap();
+        // A beat and a half at 120 BPM.
+        render(&mut engine, 36_000, &[1000]);
+        handle
+            .set_tempo_map(TempoMap::new(60.0, TimeSignature::FOUR_FOUR))
+            .unwrap();
+        // At 60 BPM a beat and a half is twice as many frames.
+        let out = render(&mut engine, 10, &[10]);
+        let expected: Vec<f32> = (72_000..72_010).map(|i| i as f32).collect();
+        assert_eq!(out, expected);
+        assert_eq!(handle.stats().position, 72_010);
+        assert_eq!(handle.collect_garbage(), 1, "the old map comes back");
+    }
+
+    #[test]
+    fn tempo_maps_wait_for_garbage_to_be_collected() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let slow = || TempoMap::new(60.0, TimeSignature::FOUR_FOUR);
+        for _ in 0..GARBAGE_CAPACITY {
+            handle.set_tempo_map(slow()).unwrap();
+            render(&mut engine, 1, &[1]);
+        }
+        // The garbage queue is full, so this map waits, with the locate
+        // behind it.
+        handle
+            .set_tempo_map(TempoMap::new(90.0, TimeSignature::FOUR_FOUR))
+            .unwrap();
+        let locate = TransportCommand::Locate(Beats::new(1));
+        handle.send(Event::Transport(locate)).unwrap();
+        render(&mut engine, 1, &[1]);
+        assert_eq!(handle.stats().position, 0);
+
+        assert_eq!(handle.collect_garbage(), GARBAGE_CAPACITY);
+        render(&mut engine, 1, &[1]);
+        assert_eq!(handle.stats().position, 32_000);
+    }
+
+    #[test]
+    fn stats_report_the_transport() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let locate = TransportCommand::Locate(Beats::new(1));
+        handle.send(Event::Transport(locate)).unwrap();
+        render(&mut engine, 10, &[10]);
+        let stats = handle.stats();
+        assert_eq!((stats.position, stats.playing), (24_000, false));
+        handle.send(play()).unwrap();
+        render(&mut engine, 10, &[10]);
+        let stats = handle.stats();
+        assert_eq!((stats.position, stats.playing), (24_010, true));
     }
 
     #[test]
@@ -760,6 +935,8 @@ mod tests {
             handle.swap_graph(gain_stage()),
             Err(SwapError::QueueFull(_))
         ));
+        let tempo = TempoMap::default();
+        assert_eq!(handle.set_tempo_map(tempo.clone()), Err(QueueFull(tempo)));
     }
 
     #[test]
