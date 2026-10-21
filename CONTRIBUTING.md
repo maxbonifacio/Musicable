@@ -33,6 +33,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## Project files
+
+Changing what a project file holds changes the file format, so it needs a
+new format version and a migration step.
+[docs/project-format.md](docs/project-format.md#changing-the-format) has the
+steps.
+
 ## Real-time code
 
 Code that runs on the audio thread (`Node::process`, `Node::adopt` and

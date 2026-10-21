@@ -93,7 +93,9 @@ time signature changes) says where musical positions fall in it:
   `TempoMap::beats_in`, then keep the ones whose `frame_at` falls in the
   block. Blocks don't end at tempo changes.
 - Tempo changes are steps for now. Ramps (tempo automation, Tier 2) are a new
-  kind of change inside `TempoMap`; nothing else needs to change for them.
+  kind of change inside `TempoMap`; nothing else in the engine needs to
+  change for them. Project files need a new format version for them (see
+  [project-format.md](project-format.md)).
 
 **Looping.** With a loop region set, the playhead jumps back to the loop start
 when it reaches the loop end: the block ends at the loop end's frame and the
@@ -216,7 +218,8 @@ system gets reworked with plugin hosting.
 
 ## Notes for the next milestones
 
-**Audio backend (M2).**
+**Audio backend (M2).** Done in `crates/audio`: see [audio.md](audio.md).
+These still hold for anything else that drives the engine.
 
 - Render exactly the frames each callback asks for. Drivers don't always
   deliver the period that was requested, so set `max_block` from what the
@@ -247,6 +250,8 @@ system gets reworked with plugin hosting.
 
 **App shell (M7).**
 
+- Open and save projects with `musicable_io::project::load` and `save`. Their
+  errors say what's wrong in words a user can act on.
 - `musicable_app::Session` sends the tempo map and loop when a project opens
   and whenever a transaction changes them (see Musical time above, and
   [commands.md](commands.md)).

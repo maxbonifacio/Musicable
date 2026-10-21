@@ -12,11 +12,15 @@ rust-version = "1.86"
 musicable-model = { path = "crates/model" }
 musicable-commands = { path = "crates/commands" }
 musicable-engine = { path = "crates/engine" }
+musicable-audio = { path = "crates/audio" }
 musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-ui = { path = "crates/ui" }
 rtrb = "0.4"
 serde = { version = "1", features = ["derive"] }
+# float_roundtrip reads every float back exactly as it was written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_path_to_error = "0.1"
 toml = "1"
 
 [workspace.lints.rust]
