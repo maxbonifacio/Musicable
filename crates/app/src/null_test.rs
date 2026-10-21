@@ -64,6 +64,10 @@ impl Player {
         session
             .run(&transport::PLAY)
             .expect("the app has a play command");
+        // Everything waits for the graph, which compiles on its own thread.
+        // Offline, there's no hurry: wait, so playing starts with the first
+        // frame.
+        session.wait_for_graph();
         Self {
             engine,
             session,

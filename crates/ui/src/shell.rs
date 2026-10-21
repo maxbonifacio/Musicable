@@ -5,7 +5,7 @@ use std::path::Path;
 
 use egui::{Align, Button, Color32, DragValue, Grid, Layout, RichText, ScrollArea, Ui};
 use musicable_commands::{
-    Command, CommandId, KeyChord, Keymap, Problem, Registry, options, transport,
+    Command, CommandId, KeyChord, Keymap, Problem, Registry, edit, options, transport,
 };
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::{Project, TrackKind};
@@ -27,6 +27,11 @@ pub struct View<'a> {
     /// The keymap Musicable starts from, which the user's keymap file
     /// changes.
     pub default_keymap: &'a Keymap,
+    /// The name of the change Undo would take back, such as "Set Tempo", for
+    /// the Edit menu. `None` when there's nothing to undo.
+    pub undo: Option<&'a str>,
+    /// The name of the change Redo would make again.
+    pub redo: Option<&'a str>,
     pub playback: Playback,
     pub audio: Audio<'a>,
     /// The user's keymap file.
@@ -82,6 +87,12 @@ pub enum Action {
     Run(CommandId),
     /// Set the tempo at the playhead, from the tempo field.
     SetTempo(f64),
+    /// The user started dragging a control, such as the tempo field. Until
+    /// [`EndGesture`](Action::EndGesture), its changes are one step in the
+    /// undo history.
+    BeginGesture,
+    /// The user let go of the control.
+    EndGesture,
     /// Use this keymap from now on, and save how it differs from the default
     /// keymap: the user changed keys in the keyboard shortcuts window.
     SetKeymap(Keymap),
@@ -196,14 +207,21 @@ fn menu_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
     });
 }
 
-/// A menu entry for a command, showing its keys.
+/// A menu entry for a command, showing its keys. Undo and Redo say what
+/// they'd change, and are greyed out when there's nothing to change.
 fn command_button(ui: &mut Ui, view: &View<'_>, command: &Command, actions: &mut Vec<Action>) {
-    let button = with_keys(
-        Button::new(command.title.as_str()),
-        view.keymap,
-        &command.id,
-    );
-    if ui.add(button).clicked() {
+    let step = match &command.id {
+        id if *id == edit::UNDO => Some(view.undo),
+        id if *id == edit::REDO => Some(view.redo),
+        _ => None,
+    };
+    let (title, enabled) = match step {
+        Some(Some(name)) => (format!("{} {name}", command.title), true),
+        Some(None) => (command.title.clone(), false),
+        None => (command.title.clone(), true),
+    };
+    let button = with_keys(Button::new(title), view.keymap, &command.id);
+    if ui.add_enabled(enabled, button).clicked() {
         actions.push(Action::Run(command.id.clone()));
     }
 }
@@ -256,8 +274,15 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                     .update_while_editing(false),
             )
             .on_hover_text("Drag, or click and type, to set the tempo");
+        // One drag is one step in the undo history.
+        if field.drag_started() {
+            actions.push(Action::BeginGesture);
+        }
         if field.changed() {
             actions.push(Action::SetTempo(bpm));
+        }
+        if field.drag_stopped() {
+            actions.push(Action::EndGesture);
         }
         run(ui.small_button("\u{2212}"), transport::TEMPO_DOWN, actions);
         run(ui.small_button("+"), transport::TEMPO_UP, actions);
@@ -512,11 +537,11 @@ mod tests {
     #[test]
     fn the_windows_open_from_commands() {
         let mut harness = harness(Project::new());
-        let menu_bar: Vec<_> = ["File", "Transport", "View", "Options"]
+        let menu_bar: Vec<_> = ["File", "Edit", "Transport", "View", "Options"]
             .into_iter()
             .map(|title| harness.query_by_label(title).is_some())
             .collect();
-        assert_eq!(menu_bar, [true; 4]);
+        assert_eq!(menu_bar, [true; 5]);
         harness.get_by_label("Options").click();
         harness.run();
         harness.get_by_label("Keyboard Shortcuts... Ctrl+K").click();
@@ -540,6 +565,53 @@ mod tests {
                 Action::Run(options::AUDIO_SETTINGS),
             ]
         );
+    }
+
+    #[test]
+    fn the_edit_menu_says_what_undo_and_redo_change() {
+        let mut harness = harness(Project::new());
+        harness.state_mut().undo = Some("Set Tempo");
+        harness.get_by_label("Edit").click();
+        harness.run();
+        harness.get_by_label("Undo Set Tempo Ctrl+Z").click();
+        harness.run();
+        assert_eq!(harness.state().actions, [Action::Run(edit::UNDO)]);
+
+        // Nothing to redo, so Redo is greyed out.
+        harness.get_by_label("Edit").click();
+        harness.run();
+        let redo = harness.get_by_label("Redo Ctrl+Y, Ctrl+Shift+Z");
+        assert!(redo.accesskit_node().is_disabled());
+        redo.click();
+        harness.run();
+        assert_eq!(harness.state().actions, [Action::Run(edit::UNDO)]);
+    }
+
+    #[test]
+    fn dragging_the_tempo_is_one_gesture() {
+        let mut harness = harness(Project::new());
+        let at = harness.get_by_value("120.00 BPM").rect().center();
+        harness.hover_at(at);
+        harness.run();
+        harness.drag_at(at);
+        harness.run();
+        for x in 1..=3 {
+            harness.hover_at(at + egui::vec2(20.0 * x as f32, 0.0));
+            harness.run();
+        }
+        harness.drop_at(at + egui::vec2(60.0, 0.0));
+        harness.run();
+        let actions = &harness.state().actions;
+        assert_eq!(actions.first(), Some(&Action::BeginGesture));
+        assert_eq!(actions.last(), Some(&Action::EndGesture));
+        let tempos: Vec<_> = actions[1..actions.len() - 1]
+            .iter()
+            .map(|action| match action {
+                Action::SetTempo(bpm) => *bpm,
+                other => panic!("{other:?} in the middle of a drag"),
+            })
+            .collect();
+        assert!(!tempos.is_empty() && tempos.is_sorted(), "{tempos:?}");
     }
 
     #[test]

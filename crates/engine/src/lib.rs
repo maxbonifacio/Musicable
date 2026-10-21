@@ -33,7 +33,7 @@ pub mod rt;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
-pub use compile::{Compiler, compile};
+pub use compile::{Compiled, Compiler, compile};
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{Event, NodeEvent, NodeEventKind, ParamId, TransportCommand, TransportState};
 pub use graph::{Graph, GraphError, NodeId, NodeKey, PreparedGraph};

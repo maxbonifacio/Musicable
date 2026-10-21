@@ -15,7 +15,7 @@ pub use output::Output;
 pub use session::Session;
 pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
 
-use musicable_commands::{Registry, file, options, transport, view};
+use musicable_commands::{Registry, edit, file, options, transport, view};
 use musicable_engine::{
     Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelOptions, ParallelRenderer,
 };
@@ -25,6 +25,7 @@ use musicable_model::{Project, TestTone, TrackKind};
 pub fn commands() -> Registry {
     let mut registry = Registry::new();
     file::register(&mut registry);
+    edit::register(&mut registry);
     transport::register(&mut registry);
     options::register(&mut registry);
     view::register(&mut registry);

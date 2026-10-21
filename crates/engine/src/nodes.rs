@@ -46,11 +46,141 @@ impl Node for Sum {
     }
 }
 
+/// A parameter that ramps to each new value instead of jumping to it, so
+/// changing a gain doesn't click.
+///
+/// A ramp is linear and takes [`RAMP_SECONDS`](Self::RAMP_SECONDS). It
+/// counts frames, so a change on a given frame ramps the same way however
+/// the blocks fall, and on whichever thread the node runs. A node calls
+/// [`next_value`](Self::next_value) once per frame, or [`skip`](Self::skip)
+/// while [settled](Self::is_settled).
+///
+/// Until [`prepare`](Self::prepare) gives it a sample rate, and until its
+/// node has rendered a frame, new values apply at once: a node that hasn't
+/// made a sound yet has nothing to click.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Smoothed {
+    /// Where the ramp started.
+    from: f32,
+    target: f32,
+    /// Frames into the ramp.
+    frame: u32,
+    /// Frames a ramp takes. 0 jumps.
+    frames: u32,
+    /// `1 / frames`.
+    step: f32,
+    /// Whether its node has rendered a frame.
+    started: bool,
+}
+
+impl Smoothed {
+    /// How long a ramp takes: 10 ms, which is short enough to feel instant
+    /// and long enough not to click.
+    pub const RAMP_SECONDS: f64 = 0.01;
+
+    /// Settled at `value`, jumping to new values until prepared.
+    pub fn new(value: f32) -> Self {
+        Self {
+            from: value,
+            target: value,
+            frame: 0,
+            frames: 0,
+            step: 0.0,
+            started: false,
+        }
+    }
+
+    /// Sets how many frames a ramp takes at `sample_rate`. Call it from the
+    /// node's [`Node::prepare`].
+    pub fn prepare(&mut self, sample_rate: u32) {
+        self.frames = (Self::RAMP_SECONDS * f64::from(sample_rate)).round() as u32;
+        self.step = 1.0 / self.frames.max(1) as f32;
+        self.settle();
+    }
+
+    /// Ramps from the value now to `target`. Setting the target it already
+    /// has changes nothing, even mid-ramp.
+    pub fn set(&mut self, target: f32) {
+        if target == self.target {
+            return;
+        }
+        self.from = self.value();
+        self.target = target;
+        self.frame = 0;
+        if !self.started || self.from == target {
+            self.settle();
+        }
+    }
+
+    /// The value on the frame last rendered.
+    pub fn value(&self) -> f32 {
+        if self.frame >= self.frames {
+            self.target
+        } else {
+            self.from + (self.target - self.from) * (self.frame as f32 * self.step)
+        }
+    }
+
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
+    /// Whether it's at its target, not ramping.
+    pub fn is_settled(&self) -> bool {
+        self.frame >= self.frames
+    }
+
+    /// The value for the next frame. A ramp reaches its target on its last
+    /// frame.
+    #[inline]
+    pub fn next_value(&mut self) -> f32 {
+        self.started = true;
+        if self.frame < self.frames {
+            self.frame += 1;
+        }
+        self.value()
+    }
+
+    /// Moves `frames` frames on, as if [`next_value`](Self::next_value) were
+    /// called that many times.
+    pub fn skip(&mut self, frames: usize) {
+        if frames > 0 {
+            self.started = true;
+            let frame = (self.frame as usize).saturating_add(frames);
+            self.frame = frame.min(self.frames as usize) as u32;
+        }
+    }
+
+    /// Jumps to the target.
+    pub fn settle(&mut self) {
+        self.from = self.target;
+        self.frame = self.frames;
+    }
+
+    /// Carries on from where `previous`, the same parameter in the node this
+    /// one replaces, has got to: from its value, ramping on to this one's
+    /// target. Call it from [`Node::adopt`].
+    pub fn take_over(&mut self, previous: &Smoothed) {
+        let target = self.target;
+        *self = Smoothed {
+            frame: previous.frame.min(self.frames),
+            frames: self.frames,
+            step: self.step,
+            ..*previous
+        };
+        self.set(target);
+    }
+}
+
 /// Sums its inputs and applies a gain: a track's gain stage.
+///
+/// Gain and mute changes ramp ([`Smoothed`]), so they don't click.
 #[derive(Debug, Clone)]
 pub struct Gain {
     gain: f32,
     muted: bool,
+    /// What the output is multiplied by: `gain`, or 0 while muted.
+    level: Smoothed,
     channels: usize,
 }
 
@@ -65,18 +195,24 @@ impl Gain {
         Self {
             gain,
             muted: false,
+            level: Smoothed::new(gain),
             channels: 2,
         }
     }
 
     pub fn with_muted(mut self, muted: bool) -> Self {
         self.muted = muted;
+        self.level = Smoothed::new(self.level_target());
         self
     }
 
     pub fn with_channels(mut self, channels: usize) -> Self {
         self.channels = channels;
         self
+    }
+
+    fn level_target(&self) -> f32 {
+        if self.muted { 0.0 } else { self.gain }
     }
 
     fn apply(&mut self, event: &NodeEvent) {
@@ -89,27 +225,52 @@ impl Gain {
                 param: Self::MUTE,
                 value,
             } => self.muted = value >= 0.5,
-            _ => {}
+            _ => return,
         }
+        self.level.set(self.level_target());
     }
 
-    fn scale(&self, output: &mut AudioMut<'_>, frames: Range<usize>) {
+    fn scale(&mut self, output: &mut AudioMut<'_>, frames: Range<usize>) {
+        let len = frames.len();
         let mut part = output.range_mut(frames);
-        if self.muted {
-            part.clear();
-        } else {
-            for channel in part.channels_mut() {
-                for sample in channel {
-                    *sample *= self.gain;
+        if self.level.is_settled() {
+            let level = self.level.value();
+            self.level.skip(len);
+            if level == 0.0 {
+                part.clear();
+            } else if level != 1.0 {
+                for channel in part.channels_mut() {
+                    for sample in channel {
+                        *sample *= level;
+                    }
                 }
             }
+            return;
         }
+        // Each channel ramps through the same values.
+        for channel in part.channels_mut() {
+            let mut level = self.level;
+            for sample in channel {
+                *sample *= level.next_value();
+            }
+        }
+        self.level.skip(len);
     }
 }
 
 impl Node for Gain {
     fn channels(&self) -> usize {
         self.channels
+    }
+
+    fn prepare(&mut self, config: &EngineConfig) {
+        self.level.prepare(config.sample_rate);
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<Gain>() {
+            self.level.take_over(&previous.level);
+        }
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
@@ -169,7 +330,7 @@ impl Node for Constant {
 #[derive(Debug, Clone)]
 pub struct Sine {
     frequency: f64,
-    level: f32,
+    level: Smoothed,
     channels: usize,
     sample_rate: f64,
 }
@@ -177,14 +338,14 @@ pub struct Sine {
 impl Sine {
     /// Frequency in Hz. The phase jumps when it changes during playback.
     pub const FREQUENCY: ParamId = ParamId(0);
-    /// Linear amplitude.
+    /// Linear amplitude. Changes ramp ([`Smoothed`]).
     pub const LEVEL: ParamId = ParamId(1);
 
     /// Stereo, the same signal in both channels.
     pub fn new(frequency: f64, level: f32) -> Self {
         Self {
             frequency,
-            level,
+            level: Smoothed::new(level),
             channels: 2,
             sample_rate: 48_000.0,
         }
@@ -204,13 +365,20 @@ impl Sine {
             NodeEventKind::Param {
                 param: Self::LEVEL,
                 value,
-            } => self.level = value as f32,
+            } => self.level.set(value as f32),
             _ => {}
         }
     }
 
-    fn render(&self, ctx: &ProcessContext<'_>, output: &mut AudioMut<'_>, frames: Range<usize>) {
+    fn render(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        output: &mut AudioMut<'_>,
+        frames: Range<usize>,
+    ) {
         if !ctx.transport.playing {
+            // Silent, so a new level can apply at once.
+            self.level.settle();
             output.range_mut(frames).clear();
             return;
         }
@@ -218,7 +386,7 @@ impl Sine {
         for i in frames {
             let position = ctx.transport.position + i as u64;
             let phase = (position as f64 * cycles_per_frame).fract();
-            let sample = (phase * TAU).sin() as f32 * self.level;
+            let sample = (phase * TAU).sin() as f32 * self.level.next_value();
             for channel in output.channels_mut() {
                 channel[i] = sample;
             }
@@ -233,6 +401,13 @@ impl Node for Sine {
 
     fn prepare(&mut self, config: &EngineConfig) {
         self.sample_rate = f64::from(config.sample_rate);
+        self.level.prepare(config.sample_rate);
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<Sine>() {
+            self.level.take_over(&previous.level);
+        }
     }
 
     fn process(
@@ -476,6 +651,164 @@ mod tests {
             &mut out.view_mut(6),
         );
         assert_eq!(out.view(6).channel(0), [2.0, 2.0, 0.5, 0.5, 0.0, 0.5]);
+    }
+
+    /// 10 frames to a ramp.
+    const SLOW: EngineConfig = EngineConfig {
+        sample_rate: 1000,
+        max_block: 64,
+    };
+
+    /// Runs a mono gain stage over ones, `frames` at a time, with `events`
+    /// in the first block.
+    fn gain_out(gain: &mut Gain, frames: usize, events: &[NodeEvent]) -> Vec<f32> {
+        let ones = vec![1.0; frames];
+        let inputs = [AudioRef::from_planar(&ones, 1)];
+        let mut out = AudioBuffer::new(1, frames);
+        gain.process(
+            &context(frames, events, false, &TempoMap::default()),
+            Inputs::from_views(&inputs),
+            &mut out.view_mut(frames),
+        );
+        out.view(frames).channel(0).to_vec()
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-6,
+                "frame {i}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gain_ramps_to_new_values() {
+        let mut gain = Gain::new(1.0).with_channels(1);
+        gain.prepare(&SLOW);
+        assert_eq!(gain_out(&mut gain, 4, &[]), [1.0; 4]);
+        let out = gain_out(&mut gain, 14, &[param(2, Gain::GAIN, 0.0)]);
+        let ramp = [
+            1.0, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0, 0.0, 0.0,
+        ];
+        assert_close(&out, &ramp);
+        // It lands exactly, and stays there.
+        assert_eq!(out[11..], [0.0; 3]);
+
+        // Muting ramps down, and unmuting back up to the gain.
+        let mut gain = Gain::new(0.5).with_channels(1);
+        gain.prepare(&SLOW);
+        gain_out(&mut gain, 1, &[]);
+        let out = gain_out(&mut gain, 10, &[param(0, Gain::MUTE, 1.0)]);
+        assert_close(&out[..2], &[0.45, 0.4]);
+        assert_eq!(out[9], 0.0);
+        let out = gain_out(&mut gain, 10, &[param(0, Gain::MUTE, 0.0)]);
+        assert_close(&out[..2], &[0.05, 0.1]);
+        assert_eq!(out[9], 0.5);
+    }
+
+    #[test]
+    fn gain_ramps_the_same_however_the_blocks_fall() {
+        let ramp = |sizes: &[usize]| {
+            let mut gain = Gain::new(1.0).with_channels(1);
+            gain.prepare(&SLOW);
+            gain_out(&mut gain, 3, &[]);
+            let mut out = Vec::new();
+            for (i, &size) in sizes.iter().enumerate() {
+                let events = if i == 0 {
+                    vec![param(1, Gain::GAIN, 0.25), param(4, Gain::GAIN, 2.0)]
+                } else {
+                    vec![]
+                };
+                out.extend(gain_out(&mut gain, size, &events));
+            }
+            out
+        };
+        let whole = ramp(&[30]);
+        assert_eq!(ramp(&[5, 1, 1, 7, 16]), whole);
+        assert_eq!(ramp(&[5, 25]), whole);
+        assert_eq!(whole[29], 2.0);
+    }
+
+    #[test]
+    fn a_gain_jumps_until_it_has_made_a_sound() {
+        let mut gain = Gain::new(1.0).with_channels(1);
+        gain.prepare(&SLOW);
+        let out = gain_out(&mut gain, 4, &[param(0, Gain::GAIN, 0.5)]);
+        assert_eq!(out, [0.5; 4]);
+    }
+
+    #[test]
+    fn a_new_gain_carries_on_where_the_old_one_was() {
+        let mut old = Gain::new(1.0).with_channels(1);
+        old.prepare(&SLOW);
+        gain_out(&mut old, 1, &[]);
+        let start = gain_out(&mut old, 4, &[param(0, Gain::GAIN, 0.0)]);
+        assert_close(&start, &[0.9, 0.8, 0.7, 0.6]);
+
+        // Compiled with the new value: the ramp carries on.
+        let mut new = Gain::new(0.0).with_channels(1);
+        new.prepare(&SLOW);
+        new.adopt(&mut old);
+        assert_close(&gain_out(&mut new, 2, &[]), &[0.5, 0.4]);
+
+        // Compiled before the change: it ramps back from where the old one
+        // was, until the new value comes again.
+        let mut stale = Gain::new(1.0).with_channels(1);
+        stale.prepare(&SLOW);
+        stale.adopt(&mut new);
+        let out = gain_out(&mut stale, 1, &[]);
+        assert!(out[0] > 0.4 && out[0] < 1.0, "{out:?}");
+    }
+
+    #[test]
+    fn smoothed_values_keep_their_ramp_for_the_same_target() {
+        let mut level = Smoothed::new(0.0);
+        level.prepare(1000);
+        level.next_value();
+        level.set(1.0);
+        assert!(!level.is_settled());
+        assert!((level.next_value() - 0.1).abs() < 1e-6);
+        level.set(1.0);
+        assert!((level.next_value() - 0.2).abs() < 1e-6);
+        level.skip(100);
+        assert!(level.is_settled());
+        assert_eq!(level.value(), 1.0);
+        level.set(0.5);
+        level.settle();
+        assert_eq!((level.value(), level.next_value()), (0.5, 0.5));
+        // Unprepared, it jumps.
+        let mut instant = Smoothed::new(1.0);
+        instant.next_value();
+        instant.set(0.0);
+        assert!(instant.is_settled());
+        assert_eq!(instant.next_value(), 0.0);
+    }
+
+    #[test]
+    fn sine_levels_ramp_while_playing() {
+        let tempo = TempoMap::default();
+        let mut sine = Sine::new(250.0, 1.0).with_channels(1);
+        sine.prepare(&SLOW);
+        let mut out = AudioBuffer::new(1, 8);
+        // 250 Hz at 1 kHz: 0, 1, 0, -1, ...
+        let mut play = |sine: &mut Sine, events: &[NodeEvent], playing: bool| {
+            sine.process(
+                &context(8, events, playing, &tempo),
+                Inputs::NONE,
+                &mut out.view_mut(8),
+            );
+            out.view(8).channel(0).to_vec()
+        };
+        let first = play(&mut sine, &[], true);
+        assert!((first[1] - 1.0).abs() < 1e-6);
+        let ramped = play(&mut sine, &[param(0, Sine::LEVEL, 0.0)], true);
+        assert!((ramped[1] - 0.8).abs() < 1e-6, "{ramped:?}");
+        // While stopped, a new level applies at once.
+        play(&mut sine, &[param(0, Sine::LEVEL, 0.5)], false);
+        let after = play(&mut sine, &[], true);
+        assert!((after[1] - 0.5).abs() < 1e-6, "{after:?}");
     }
 
     #[test]

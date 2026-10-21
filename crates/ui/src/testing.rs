@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use egui_kittest::Harness;
-use musicable_commands::{Keymap, Problem, Registry, file, options, transport, view};
+use musicable_commands::{Keymap, Problem, Registry, edit, file, options, transport, view};
 use musicable_model::Project;
 use musicable_model::time::Beats;
 
@@ -20,6 +20,9 @@ pub(crate) struct State {
     pub default_keymap: Keymap,
     pub keymap_path: Option<PathBuf>,
     pub keymap_problems: Vec<Problem>,
+    /// What the Edit menu's Undo and Redo would change.
+    pub undo: Option<&'static str>,
+    pub redo: Option<&'static str>,
     pub actions: Vec<Action>,
 }
 
@@ -27,6 +30,7 @@ pub(crate) struct State {
 pub(crate) fn commands() -> Registry {
     let mut commands = Registry::new();
     file::register(&mut commands);
+    edit::register(&mut commands);
     transport::register(&mut commands);
     options::register(&mut commands);
     view::register(&mut commands);
@@ -44,6 +48,8 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
         default_keymap: Keymap::default_keymap(),
         keymap_path: None,
         keymap_problems: Vec::new(),
+        undo: None,
+        redo: None,
         actions: Vec::new(),
     };
     Harness::builder()
@@ -57,6 +63,8 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
                     commands: &state.commands,
                     keymap: &state.keymap,
                     default_keymap: &state.default_keymap,
+                    undo: state.undo,
+                    redo: state.redo,
                     playback: Playback {
                         playing: false,
                         playhead: Beats::ZERO,

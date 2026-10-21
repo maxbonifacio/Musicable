@@ -20,6 +20,9 @@ use crate::{Output, Session, capital};
 /// playhead, and while it doesn't, to update the meters.
 const PLAYING_FRAME: Duration = Duration::from_millis(16);
 const STOPPED_FRAME: Duration = Duration::from_millis(250);
+/// How often the app looks for a graph while one compiles, to send it to the
+/// engine soon after it's ready.
+const COMPILING_FRAME: Duration = Duration::from_millis(5);
 
 /// The app's window, and everything it drives.
 pub struct App {
@@ -132,6 +135,8 @@ impl App {
                 let _ = self.session.run(&id);
             }
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
+            Action::BeginGesture => self.session.begin_gesture(),
+            Action::EndGesture => self.session.end_gesture(),
             Action::SetKeymap(keymap) => {
                 self.keymap_file.save(&keymap);
                 self.session.set_keymap(keymap);
@@ -367,7 +372,9 @@ impl eframe::App for App {
         }
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
-        let frame = if self.session.stats().playing {
+        let frame = if self.session.compiling() {
+            COMPILING_FRAME
+        } else if self.session.stats().playing {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
@@ -392,6 +399,8 @@ impl eframe::App for App {
             commands: self.session.commands(),
             keymap: self.session.keymap(),
             default_keymap: self.keymap_file.defaults(),
+            undo: self.session.undo_name(),
+            redo: self.session.redo_name(),
             playback: Playback {
                 playing: stats.playing,
                 playhead: self.session.playhead(),

@@ -3,11 +3,11 @@
 //! Each track becomes a channel strip feeding the master bus: its test tone,
 //! if it has one, then its gain stage, with built-in slots for native stages
 //! along the way (see [`Slot`]). Empty slots add no nodes. The metronome
-//! feeds the master too. Node keys come from track ids and slots (see
-//! [`keys`]), so a track's nodes keep their identity when the project is
-//! recompiled.
+//! feeds the cue bus, which the engine plays alongside the master, not
+//! through it. Node keys come from track ids and slots (see [`keys`]), so a
+//! track's nodes keep their identity when the project is recompiled.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::{ClipType, Project, Track};
@@ -32,6 +32,10 @@ pub mod keys {
 
     /// The [`Metronome`](crate::nodes::Metronome).
     pub const METRONOME: NodeKey = NodeKey(1);
+
+    /// The cue bus: the graph's [cue output](crate::Graph::set_cue), which
+    /// the metronome feeds.
+    pub const CUE: NodeKey = NodeKey(2);
 
     /// A track's gain stage, a [`Gain`](crate::nodes::Gain).
     pub fn track_gain(track: TrackId) -> NodeKey {
@@ -108,11 +112,12 @@ pub(crate) fn compile_with(
 ) -> Graph {
     let mut graph = Graph::new();
     let master = graph.add_boxed(keys::MASTER, Summing::Plain.node());
-    // Straight into the master for now. It belongs on a cue output, once
-    // there is one.
+    // The cue bus isn't part of the mix, so it sums plainly whatever the
+    // summing.
+    let cue = graph.add(keys::CUE, Sum::default());
     let metronome = Metronome::new().with_enabled(project.metronome);
     let metronome = graph.add(keys::METRONOME, metronome);
-    connect(&mut graph, metronome, master);
+    connect(&mut graph, metronome, cue);
     for track in &project.tracks {
         let mut strip = Strip {
             graph: &mut graph,
@@ -136,6 +141,7 @@ pub(crate) fn compile_with(
         strip.feed(master);
     }
     graph.set_output(master).expect("the master was just added");
+    graph.set_cue(cue).expect("the cue bus was just added");
     graph
 }
 
@@ -178,28 +184,62 @@ fn connect(graph: &mut Graph, from: NodeId, to: NodeId) {
         .expect("a new node can't form a loop");
 }
 
-/// Compiles and prepares projects on a background thread.
+/// Builds and prepares graphs on a thread of its own, so a node that's slow
+/// to [prepare](Node::prepare), such as a plugin loading, never holds up the
+/// thread that asked for it.
 ///
-/// Send it snapshots of the model as it changes. When several are waiting it
-/// compiles only the newest, so results can lag edits but never pile up.
+/// Each job is a closure that builds a graph, usually [`compile`] on a
+/// snapshot of the project, and the [`EngineConfig`] to prepare it for. When
+/// several jobs are waiting, the compiler runs only the newest, so results
+/// can lag edits but never pile up.
 pub struct Compiler {
-    jobs: Option<Sender<Project>>,
-    results: Receiver<Result<PreparedGraph, GraphError>>,
+    jobs: Option<Sender<Job>>,
+    results: Receiver<Compiled>,
     thread: Option<JoinHandle<()>>,
+    /// The number of the last job queued.
+    last_job: u64,
+    /// The number of the last job done.
+    last_done: u64,
+}
+
+struct Job {
+    number: u64,
+    config: EngineConfig,
+    build: Box<dyn FnOnce() -> Graph + Send>,
+}
+
+/// A job the [`Compiler`] has done.
+#[derive(Debug)]
+pub struct Compiled {
+    /// The job's number, from [`Compiler::compile`]. The jobs before it that
+    /// it overtook have no results.
+    pub job: u64,
+    /// The graph, prepared for the job's config.
+    pub graph: Result<PreparedGraph, GraphError>,
 }
 
 impl Compiler {
-    pub fn spawn(config: EngineConfig) -> Self {
-        let (jobs, job_rx) = mpsc::channel::<Project>();
+    /// Starts the compiler's thread, `musicable-compiler`.
+    ///
+    /// # Panics
+    ///
+    /// If the operating system can't start a thread.
+    pub fn spawn() -> Self {
+        let (jobs, job_rx) = mpsc::channel::<Job>();
         let (result_tx, results) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("musicable-compiler".into())
             .spawn(move || {
-                while let Ok(mut project) = job_rx.recv() {
+                while let Ok(mut job) = job_rx.recv() {
                     while let Ok(newer) = job_rx.try_recv() {
-                        project = newer;
+                        job = newer;
                     }
-                    if result_tx.send(compile(&project).prepare(&config)).is_err() {
+                    let graph = (job.build)().prepare(&job.config);
+                    let compiled = Compiled {
+                        job: job.number,
+                        graph,
+                    };
+                    if result_tx.send(compiled).is_err() {
                         break;
                     }
                 }
@@ -209,26 +249,81 @@ impl Compiler {
             jobs: Some(jobs),
             results,
             thread: Some(thread),
+            last_job: 0,
+            last_done: 0,
         }
     }
 
-    /// Queues a snapshot of the model to compile.
-    pub fn compile(&self, project: Project) {
+    /// Queues a job: `build` runs on the compiler's thread, and the graph it
+    /// builds is prepared for `config`. Returns the job's number. Jobs are
+    /// numbered from 1, in the order they're queued.
+    pub fn compile(
+        &mut self,
+        config: EngineConfig,
+        build: impl FnOnce() -> Graph + Send + 'static,
+    ) -> u64 {
+        self.last_job += 1;
+        let job = Job {
+            number: self.last_job,
+            config,
+            build: Box::new(build),
+        };
         if let Some(jobs) = &self.jobs {
-            // Only fails if the thread is gone, which `recv` reports.
-            let _ = jobs.send(project);
+            // Only fails if the thread is gone, which `try_recv` and `recv`
+            // report.
+            let _ = jobs.send(job);
+        }
+        self.last_job
+    }
+
+    /// Queues a job to compile `project`, as it is now, for `config`.
+    pub fn compile_project(&mut self, config: EngineConfig, project: &Project) -> u64 {
+        let project = project.clone();
+        self.compile(config, move || compile(&project))
+    }
+
+    /// The next job done, if there is one.
+    ///
+    /// # Panics
+    ///
+    /// If a job panicked on the compiler's thread, with that panic.
+    pub fn try_recv(&mut self) -> Option<Compiled> {
+        match self.results.try_recv() {
+            Ok(compiled) => Some(self.done(compiled)),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => self.failed(),
         }
     }
 
-    /// The next finished graph, if there is one.
-    pub fn try_recv(&self) -> Option<Result<PreparedGraph, GraphError>> {
-        self.results.try_recv().ok()
+    /// Waits for the next job to be done.
+    ///
+    /// # Panics
+    ///
+    /// If a job panicked on the compiler's thread, with that panic, or if
+    /// there's no job to wait for.
+    pub fn recv(&mut self) -> Compiled {
+        // The newest job always runs, so once it's done, nothing more comes.
+        assert!(self.last_done < self.last_job, "there's no job to wait for");
+        match self.results.recv() {
+            Ok(compiled) => self.done(compiled),
+            Err(_) => self.failed(),
+        }
     }
 
-    /// Waits for the next finished graph. `None` if the compiler thread has
-    /// stopped.
-    pub fn recv(&self) -> Option<Result<PreparedGraph, GraphError>> {
-        self.results.recv().ok()
+    fn done(&mut self, compiled: Compiled) -> Compiled {
+        self.last_done = compiled.job;
+        compiled
+    }
+
+    /// Hands on the panic that stopped the compiler's thread.
+    #[cold]
+    fn failed(&mut self) -> ! {
+        if let Some(thread) = self.thread.take()
+            && let Err(panic) = thread.join()
+        {
+            std::panic::resume_unwind(panic);
+        }
+        panic!("the compiler's thread has stopped");
     }
 }
 
@@ -236,8 +331,17 @@ impl Drop for Compiler {
     fn drop(&mut self) {
         self.jobs = None;
         if let Some(thread) = self.thread.take() {
+            // A panic in a job nobody waited for goes with it.
             let _ = thread.join();
         }
+    }
+}
+
+impl std::fmt::Debug for Compiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Compiler")
+            .field("last_job", &self.last_job)
+            .finish_non_exhaustive()
     }
 }
 
@@ -249,7 +353,10 @@ mod tests {
     use musicable_model::{TestTone, TrackId, TrackKind};
 
     use super::*;
-    use crate::{AudioMut, Engine, Event, Inputs, ProcessContext, TransportCommand};
+    use crate::{
+        AudioMut, Block, Engine, Event, Inputs, ProcessContext, ReferenceRenderer, Renderer,
+        TransportCommand, TransportState,
+    };
 
     const CONFIG: EngineConfig = EngineConfig {
         sample_rate: 48_000,
@@ -299,8 +406,15 @@ mod tests {
     }
 
     /// Each node's key, type and input keys, in key order, and the output
-    /// node's key.
-    fn shape(graph: &PreparedGraph) -> (Vec<(NodeKey, TypeId, Vec<NodeKey>)>, NodeKey) {
+    /// and cue nodes' keys.
+    #[allow(clippy::type_complexity)]
+    fn shape(
+        graph: &PreparedGraph,
+    ) -> (
+        Vec<(NodeKey, TypeId, Vec<NodeKey>)>,
+        NodeKey,
+        Option<NodeKey>,
+    ) {
         let key = |id: NodeId| graph.by_key.iter().find(|&&(_, n)| n == id).unwrap().0;
         let nodes = graph
             .by_key
@@ -312,7 +426,7 @@ mod tests {
                 (k, node.type_id(), inputs)
             })
             .collect();
-        (nodes, key(graph.output))
+        (nodes, key(graph.output), graph.cue.map(key))
     }
 
     fn no_stages(_: &Track, _: Slot) -> Option<Box<dyn Node>> {
@@ -356,9 +470,10 @@ mod tests {
     fn tracks_get_stable_keys() {
         let p = project();
         let graph = compile(&p).prepare(&CONFIG).unwrap();
-        // Master, metronome, three gain stages and two tones.
-        assert_eq!(graph.len(), 7);
+        // Master, cue, metronome, three gain stages and two tones.
+        assert_eq!(graph.len(), 8);
         assert!(graph.contains(keys::MASTER));
+        assert!(graph.contains(keys::CUE));
         assert!(graph.contains(keys::METRONOME));
         for track in &p.tracks {
             assert!(graph.contains(keys::track_gain(track.id)));
@@ -379,7 +494,7 @@ mod tests {
             Slot::PostFader,
             Slot::BusFeed,
         ];
-        let mut seen = BTreeSet::from([keys::MASTER, keys::METRONOME]);
+        let mut seen = BTreeSet::from([keys::MASTER, keys::METRONOME, keys::CUE]);
         for track in [TrackId(0), TrackId(1), TrackId(u32::MAX)] {
             let strip = slots.map(|slot| keys::track_slot(track, slot));
             for key in strip
@@ -397,11 +512,14 @@ mod tests {
         p.tracks[0].gain = 0.8;
         p.tracks[1].muted = true;
         // What compile() built before channel strips: each track's tone feeds
-        // its gain stage, which feeds the master, after the metronome.
+        // its gain stage, which feeds the master, and the metronome feeds the
+        // cue bus.
         let mut before = Graph::new();
         let master = before.add(keys::MASTER, Sum::default());
+        let cue = before.add(keys::CUE, Sum::default());
         let metronome = before.add(keys::METRONOME, Metronome::new().with_enabled(false));
-        before.connect(metronome, master).unwrap();
+        before.connect(metronome, cue).unwrap();
+        before.set_cue(cue).unwrap();
         for track in &p.tracks {
             let gain = Gain::new(track.gain).with_muted(track.muted);
             let gain = before.add(keys::track_gain(track.id), gain);
@@ -489,19 +607,84 @@ mod tests {
 
     #[test]
     fn the_compiler_returns_the_newest_project() {
-        let compiler = Compiler::spawn(CONFIG);
+        let mut compiler = Compiler::spawn();
         let mut p = Project::new();
         for i in 0..5 {
             p.add_track(format!("Track {i}"), TrackKind::Audio);
-            compiler.compile(p.clone());
+            assert_eq!(compiler.compile_project(CONFIG, &p), i + 1);
         }
         // Snapshots that queued up while it was busy are skipped.
-        let mut last = None;
-        while last.as_ref().is_none_or(|g: &PreparedGraph| g.len() < 7) {
-            last = Some(compiler.recv().unwrap().unwrap());
-        }
-        assert_eq!(last.unwrap().len(), 7);
+        let mut jobs = Vec::new();
+        let last = loop {
+            let compiled = compiler.recv();
+            jobs.push(compiled.job);
+            if compiled.job == 5 {
+                break compiled.graph.unwrap();
+            }
+        };
+        // The master, the cue, the metronome and five gain stages.
+        assert_eq!(last.len(), 8);
+        assert!(jobs.is_sorted());
         assert!(compiler.try_recv().is_none());
+    }
+
+    #[test]
+    #[should_panic = "there's no job to wait for"]
+    fn waiting_when_every_job_is_done_panics_instead_of_hanging() {
+        let mut compiler = Compiler::spawn();
+        compiler.compile_project(CONFIG, &Project::new());
+        compiler.recv();
+        compiler.recv();
+    }
+
+    #[test]
+    fn each_job_has_its_own_config() {
+        let mut compiler = Compiler::spawn();
+        let other = EngineConfig {
+            sample_rate: 44_100,
+            max_block: 32,
+        };
+        let p = project();
+        compiler.compile_project(CONFIG, &p);
+        let first = compiler.recv();
+        compiler.compile_project(other, &p);
+        let second = compiler.recv();
+        assert_eq!((first.job, second.job), (1, 2));
+        assert_eq!(first.graph.unwrap().config(), CONFIG);
+        assert_eq!(second.graph.unwrap().config(), other);
+    }
+
+    #[test]
+    fn a_job_that_panics_panics_where_its_result_is_taken() {
+        let mut compiler = Compiler::spawn();
+        compiler.compile(CONFIG, || panic!("a plugin failed to load"));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compiler.recv()));
+        let payload = caught.expect_err("the job panicked");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"a plugin failed to load")
+        );
+    }
+
+    #[test]
+    fn the_metronome_plays_alongside_the_master_not_through_it() {
+        let mut p = project();
+        p.metronome = true;
+        p.tracks.iter_mut().for_each(|t| t.muted = true);
+        let mut graph = compile(&p).prepare(&CONFIG).unwrap();
+        let block = Block {
+            frames: 64,
+            time: 0,
+            transport: TransportState {
+                playing: true,
+                ..TransportState::default()
+            },
+            tempo: &p.tempo,
+        };
+        ReferenceRenderer.render(&mut graph, &block);
+        // The downbeat's click is on the cue output, and not in the mix.
+        assert_eq!(graph.cue(64).unwrap().channel(0)[0], 0.5);
+        assert!(graph.output(64).iter().flatten().all(|&s| s == 0.0));
     }
 
     #[test]

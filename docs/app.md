@@ -2,10 +2,10 @@
 
 `musicable` opens a window with the app shell from the Tier 0 plan: just
 enough to run the Tier 0 demo. It plays a project through the audio device
-with the parallel scheduler, runs the transport and file commands from keys,
-menus and the command palette, and opens and saves project files. Every
-command's keys can be changed in the app. There's no editing yet beyond the
-transport, the loop and the tempo.
+with the parallel scheduler, runs the transport, edit and file commands
+from keys, menus and the command palette, and opens and saves project files.
+Every command's keys can be changed in the app. There's no editing yet
+beyond the transport, the loop and the tempo, which undo and redo cover.
 
 ## Running it
 
@@ -96,10 +96,12 @@ That's what `ParallelOptions::inline_below` is for
 
 ## The window
 
-- **The menu bar** lists the commands with their keys, under File,
-  Transport, View and Options. A command in an area with no menu yet gets a
-  menu named after its area, before View, so every command can be reached.
-  On the right are the CPU meter and the dropout counter.
+- **The menu bar** lists the commands with their keys, under File, Edit,
+  Transport, View and Options. Undo and Redo name the change they would
+  make, as in "Undo Set Tempo", and are greyed out when there's nothing to
+  undo or redo. A command in an area with no menu yet gets a menu named
+  after its area, before View, so every command can be reached. On the
+  right are the CPU meter and the dropout counter.
 - **The transport bar** has go to start, play, stop, loop, the metronome, the
   tempo, the time signature, and the playhead in bars, beats and sixteenths
   and in minutes and seconds. Hovering a button shows its command and keys,
@@ -107,7 +109,7 @@ That's what `ParallelOptions::inline_below` is for
 - **The tempo field** sets the tempo where the playhead is, and moves any
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
-  Tempo" transaction.
+  Tempo" transaction, and a whole drag is one step in the undo history.
 - **The track list** shows each track's kind, test tone, gain and whether
   it's muted.
 - **The status bar** shows errors and notices until they're dismissed, the
@@ -342,8 +344,16 @@ says what the stream got.
   with them, and starts the app again to check they were saved.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
-  tempo field, and a new engine taking over. The demo project there must equal
-  the fixture.
+  tempo field and undoing a drag of it, and a new engine taking over. The
+  demo project there must equal the fixture.
+- Graphs compile on their own thread
+  ([commands.md](commands.md#running-commands-in-the-app)). While one
+  compiles, the window looks for it every 5 ms, to send it to the engine
+  soon after it's ready.
+  [`crates/app/tests/slow_graphs.rs`](../crates/app/tests/slow_graphs.rs)
+  checks that a node that's slow to prepare doesn't hold up the
+  session, and that what you do meanwhile reaches the engine with the
+  graph.
 - `musicable_app::null_test` plays projects offline for the null test and
   for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
 
@@ -353,7 +363,7 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
-- Undo and redo, and editing tracks.
+- Editing tracks.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.

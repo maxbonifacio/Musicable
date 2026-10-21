@@ -176,6 +176,7 @@ mod tests {
         register(&mut registry);
         assert_eq!(registry.iter().count(), COMMANDS.len());
         crate::file::register(&mut registry);
+        crate::edit::register(&mut registry);
         crate::options::register(&mut registry);
         crate::view::register(&mut registry);
 

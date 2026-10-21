@@ -1,7 +1,7 @@
 //! The menus that list the commands, and how commands are named in them and
 //! in the command palette.
 
-use musicable_commands::{Command, CommandId, Registry, file, options, transport, view};
+use musicable_commands::{Command, CommandId, Registry, edit, file, options, transport, view};
 
 /// A menu's title, the area of commands it lists, and its commands in order.
 /// `None` is a separator.
@@ -10,7 +10,7 @@ type MenuSpec = (&'static str, &'static str, &'static [Option<CommandId>]);
 /// The menus that come first, before those for other areas. A command missing
 /// from its area's menu goes at the end of it, and an area of commands
 /// without a menu gets one after these, so every command can be reached.
-const MENUS: [MenuSpec; 2] = [
+const MENUS: [MenuSpec; 3] = [
     (
         "File",
         "file",
@@ -25,6 +25,7 @@ const MENUS: [MenuSpec; 2] = [
             Some(file::QUIT),
         ],
     ),
+    ("Edit", "edit", &[Some(edit::UNDO), Some(edit::REDO)]),
     (
         "Transport",
         "transport",
@@ -144,18 +145,18 @@ mod tests {
     fn every_command_is_in_a_menu() {
         let mut commands = Registry::new();
         file::register(&mut commands);
+        edit::register(&mut commands);
         transport::register(&mut commands);
         options::register(&mut commands);
         view::register(&mut commands);
         commands.register("transport.later", "Later", |_| {});
-        commands.register("edit.undo", "Undo", |_| {});
-        commands.register("edit.redo", "Redo", |_| {});
+        commands.register("clip.split", "Split", |_| {});
 
         let menus = menus(&commands);
         // Areas without a menu of their own come before View and Options.
         assert_eq!(
             titles(&menus),
-            ["File", "Transport", "Edit", "View", "Options"]
+            ["File", "Edit", "Transport", "Clip", "View", "Options"]
         );
         let listed: Vec<_> = menus
             .iter()
@@ -167,7 +168,7 @@ mod tests {
             assert!(listed.contains(&command.id), "{}", command.id);
         }
         // A command missing from its menu goes at its end.
-        let transport = &menus[1].items;
+        let transport = &menus[2].items;
         assert_eq!(transport[transport.len() - 2], None);
         assert_eq!(
             transport.last().unwrap().unwrap().id,
@@ -186,7 +187,7 @@ mod tests {
             title: "Play".into(),
         };
         assert_eq!(label(&command), "Transport: Play");
-        assert_eq!(area_of(&"edit.undo".into()), "edit");
+        assert_eq!(area_of(&edit::UNDO), "edit");
         assert_eq!(capitalized("transport"), "Transport");
         assert_eq!(capitalized(""), "");
     }
