@@ -216,7 +216,8 @@ system gets reworked with plugin hosting.
 
 ## Notes for the next milestones
 
-**Audio backend (M2).**
+**Audio backend (M2).** Done in `crates/audio`: see [audio.md](audio.md).
+These still hold for anything else that drives the engine.
 
 - Render exactly the frames each callback asks for. Drivers don't always
   deliver the period that was requested, so set `max_block` from what the

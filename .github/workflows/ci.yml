@@ -23,6 +23,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # cpal's ALSA backend needs the ALSA headers.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # A debug build, so the engine's allocation checker is on.
       - run: cargo test --workspace

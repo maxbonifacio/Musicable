@@ -28,6 +28,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/model` | Pure-data project model. No audio, no UI. |
 | `crates/commands` | Command registry and keymaps. See [docs/commands.md](docs/commands.md). |
 | `crates/engine` | Real-time audio engine: graph, reference renderer, and later the parallel scheduler. See [docs/engine.md](docs/engine.md). |
+| `crates/audio` | Audio device output: our own WASAPI backend on Windows, cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP, VST3 and ARA hosting. |
 | `crates/io` | Project files and audio/MIDI import and export. |
 | `crates/ui` | User interface. Talks to the model through commands. |
@@ -42,7 +43,11 @@ directly. Cargo dependencies enforce this.
 cargo build
 cargo test --workspace
 cargo run -p musicable-app
+cargo run --release -p musicable-audio --example tone   # a test tone on the default output
 ```
+
+On Linux, install the ALSA development files first (`libasound2-dev` on
+Debian and Ubuntu).
 
 ## License
 
