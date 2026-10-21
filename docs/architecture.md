@@ -35,9 +35,10 @@ compiler, a node and the UI, in that order.
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 
 There is one worker per physical core, minus one for the audio thread,
-which works too. While audio plays, the main thread meets the audio thread
-and the workers only at lock-free queues and atomics, and nothing on those
-threads locks, allocates, frees or does I/O.
+which works too, and no more than 24 on Windows. While audio plays, the
+main thread meets the audio thread and the workers only at lock-free queues
+and atomics, and nothing on those threads locks, allocates, frees or does
+I/O.
 
 The engine crate also has a `Compiler` that compiles model snapshots on a
 thread of its own. The app doesn't use it yet: it compiles on the main
@@ -196,13 +197,12 @@ built yet, except where it says so.
   the workers the same way, or the renderers stop matching.
 - Workers get real-time priority on Windows only. On macOS they should join
   the audio device's workgroup.
-- Windows gives a process 32 real-time (MMCSS) threads, since Windows 10,
-  and other code in the process can take a few of them. The audio thread
-  and the workers take one per physical core, so on a machine with more than
-  about 28 cores the last workers to start run at normal priority, and a
-  shared block can wait on one of them. The app stops an old engine's
-  workers before a new engine's start for the same reason. Capping the
-  workers on such machines is for Tier 1.
+- Windows gives a process 32 real-time (MMCSS) threads and turns away any
+  more, which then run at normal priority, where a shared block can wait on
+  them. So the workers stop at 24 by default, leaving places for the audio
+  thread, audio drivers and plugins, and the app stops an old engine's
+  workers before a new engine's start. Plugins that take many places could
+  still leave a worker out, and workers don't check for that yet.
 - The metronome feeds the master; it belongs on a cue output.
 - The engine plays in stereo. A device with more channels gets silence on
   the rest.

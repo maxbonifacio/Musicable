@@ -25,6 +25,34 @@ Don't contribute code, assets or text taken from Ableton Live or any other
 proprietary DAW, including decompiled or disassembled code. Work from public
 specifications and observed behaviour only.
 
+## Toolchain
+
+Musicable builds with stable Rust, 1.95 or newer; `rust-toolchain.toml` picks
+the stable channel. On Windows, use the MSVC toolchain, as CI does:
+
+1. Install the Visual Studio Build Tools with the MSVC compiler and the
+   Windows 11 SDK, about 9 GB. Windows asks an administrator to allow it,
+   and the prompt may wait on the taskbar:
+
+   ```powershell
+   winget install --id Microsoft.VisualStudio.BuildTools --exact --override "--passive --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
+   ```
+
+   If it asks for a restart, it is updating the Visual C++ runtime under
+   programs that use it. The tools work straight away, and the restart can
+   wait. Visual Studio Community with the "Desktop development with C++"
+   workload has the same tools.
+2. Make MSVC rustup's default, so `rust-toolchain.toml` picks it too:
+
+   ```sh
+   rustup set default-host x86_64-pc-windows-msvc
+   rustup default stable
+   ```
+
+Plugins and their SDKs are built with MSVC, the ASIO build will need it, and
+Windows debuggers read its debug information. The GNU toolchain
+(`x86_64-pc-windows-gnu`) builds Musicable too, but nothing tests it.
+
 ## Before opening a pull request
 
 ```sh

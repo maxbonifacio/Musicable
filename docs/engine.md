@@ -196,10 +196,14 @@ ones (see Threads, below).
 **Threads.** By default there is one worker per physical core, minus one for
 the audio thread, which works too. On Windows, workers join the MMCSS "Pro
 Audio" class at critical priority, as the WASAPI stream's audio thread does
-(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS,
-since Windows 10, so on a machine with more than about 28 cores the last
-workers to start stay at normal priority; joining fails quietly. Elsewhere
-they don't raise their priority yet: Linux needs real-time scheduling
+(see [audio.md](audio.md)). Windows gives a process 32 threads in MMCSS
+and turns away any more with `ERROR_TOO_MANY_THREADS`. (The ignored test
+`mmcss_places` in `parallel/priority.rs` counts them: 32 on Windows 11
+25H2.) A thread turned away stays at normal priority, where a shared block
+can wait on it, and joining fails quietly. So by default there are no more
+than 24 workers on Windows, which leaves places for the audio thread and a
+few for audio drivers and plugins. Elsewhere
+workers don't raise their priority yet: Linux needs real-time scheduling
 rights, and on macOS they should join the audio device's workgroup, which
 needs the audio backend.
 
