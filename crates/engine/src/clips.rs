@@ -721,12 +721,11 @@ mod tests {
         /// The notes recorded since last asked.
         fn notes(&mut self) -> Vec<(u64, NoteEvent)> {
             let node = self.graph.nodes[self.recorder.0].as_mut();
-            // Drained, so the recorder keeps its room.
-            node.downcast_mut::<Recorder>()
-                .unwrap()
-                .0
-                .drain(..)
-                .collect()
+            let recorded = &mut node.downcast_mut::<Recorder>().unwrap().0;
+            // With as much room again, so the recorder doesn't allocate
+            // while it records.
+            let room = recorded.capacity();
+            std::mem::replace(recorded, Vec::with_capacity(room))
         }
 
         /// Swaps in a player for `clips`, as a recompile would.
