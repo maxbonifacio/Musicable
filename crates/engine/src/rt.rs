@@ -129,10 +129,10 @@ fn check(call: Call) {
     RECORDING.set(true);
     COUNT.set(COUNT.get() + 1);
     let _ = FIRST.try_with(|first| {
-        if let Ok(mut first) = first.try_borrow_mut() {
-            if first.is_none() {
-                *first = Some((call, Backtrace::capture()));
-            }
+        if let Ok(mut first) = first.try_borrow_mut()
+            && first.is_none()
+        {
+            *first = Some((call, Backtrace::capture()));
         }
     });
     RECORDING.set(false);

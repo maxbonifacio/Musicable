@@ -382,10 +382,10 @@ struct Lane {
 
 impl Lane {
     fn wake(&self) {
-        if self.sleeping.swap(false, SeqCst) {
-            if let Some(thread) = self.thread.get() {
-                thread.unpark();
-            }
+        if self.sleeping.swap(false, SeqCst)
+            && let Some(thread) = self.thread.get()
+        {
+            thread.unpark();
         }
     }
 }
@@ -444,7 +444,7 @@ impl Shared {
                 return Some(epoch);
             }
             spins = spins.wrapping_add(1);
-            if spins % 64 == 0 {
+            if spins.is_multiple_of(64) {
                 if started.elapsed() >= self.spin {
                     break;
                 }

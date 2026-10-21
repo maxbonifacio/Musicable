@@ -395,7 +395,7 @@ fn source_channel(source_channels: usize, channel: usize) -> Option<usize> {
 
 fn planar_frames(len: usize, channels: usize) -> usize {
     assert!(
-        channels > 0 && len % channels == 0,
+        channels > 0 && len.is_multiple_of(channels),
         "{len} samples don't split into {channels} channels"
     );
     len / channels

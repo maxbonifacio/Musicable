@@ -215,7 +215,7 @@ impl Engine {
     /// If `output.len()` isn't a multiple of `channels`.
     pub fn process_interleaved(&mut self, output: &mut [f32], channels: usize) {
         assert!(
-            channels > 0 && output.len() % channels == 0,
+            channels > 0 && output.len().is_multiple_of(channels),
             "{} samples don't split into {channels} channels",
             output.len()
         );

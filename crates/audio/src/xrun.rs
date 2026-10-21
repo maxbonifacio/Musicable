@@ -189,10 +189,10 @@ impl Detector {
     /// so take where it stands as the new normal.
     fn rebase(&mut self) {
         let period = self.period as i64;
-        if let Some(offset) = &mut self.offset {
-            if self.floor > -period + period / 8 {
-                *offset += self.floor + period;
-            }
+        if let Some(offset) = &mut self.offset
+            && self.floor > -period + period / 8
+        {
+            *offset += self.floor + period;
         }
     }
 }
