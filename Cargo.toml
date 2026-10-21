@@ -16,6 +16,8 @@ musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-ui = { path = "crates/ui" }
 rtrb = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
