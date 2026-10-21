@@ -31,9 +31,12 @@ impl Rig {
         Self::with_keymap(project, Keymap::default_keymap())
     }
 
+    /// Opens `project`, and waits for its graph, as the app's first frames
+    /// would.
     fn with_keymap(project: Project, keymap: Keymap) -> Self {
         let (engine, handle) = Engine::new(CONFIG);
-        let session = Session::new(project, keymap, handle);
+        let mut session = Session::new(project, keymap, handle);
+        session.wait_for_graph();
         Self { engine, session }
     }
 
@@ -186,5 +189,51 @@ fn nothing_is_lost_while_the_engine_falls_behind() {
     }
     assert!(rig.press("Space"));
     assert!(clicks(&rig.render(100)));
+    rig.assert_clean();
+}
+
+#[test]
+fn undo_and_redo_reach_the_engine() {
+    let mut rig = Rig::new(Project::new());
+
+    // The metronome on, then undone: Space plays without clicks. Redone, it
+    // clicks.
+    assert!(rig.press("O"));
+    assert!(rig.press("Ctrl+Z"));
+    assert!(!rig.session.project().metronome);
+    assert!(rig.press("Space"));
+    assert!(!clicks(&rig.render(BEAT + 100)));
+    assert!(rig.press("Ctrl+Y"));
+    assert!(clicks(&rig.render(BEAT)));
+
+    // Tempo Up, undone: the playhead keeps its place in beats at 121 BPM,
+    // and back at 120.
+    assert!(rig.press("Space"));
+    rig.render(100);
+    let position = rig.stats().position;
+    assert!(rig.press("Ctrl+Shift+Up"));
+    rig.render(100);
+    assert_ne!(rig.stats().position, position);
+    assert!(rig.press("Ctrl+Z"));
+    rig.render(100);
+    assert_eq!(rig.session.project().tempo.bpm_at(Beats::ZERO), 120.0);
+    assert_eq!(rig.stats().position, position);
+
+    // Looping on, undone, and redone with the other redo key.
+    assert!(rig.press("Ctrl+L"));
+    assert!(rig.press("Ctrl+Z"));
+    assert!(!rig.session.project().looping);
+    assert!(rig.press("Ctrl+Shift+Z"));
+    assert!(rig.session.project().looping);
+
+    // Undo leaves the transport alone: still stopped, where it was.
+    while rig.session.undo_name().is_some() {
+        assert!(rig.press("Ctrl+Z"));
+    }
+    rig.render(100);
+    assert!(!rig.stats().playing);
+    assert_eq!(rig.stats().position, position);
+    assert_eq!(rig.session.project(), &Project::new());
+    assert!(!rig.session.is_modified());
     rig.assert_clean();
 }

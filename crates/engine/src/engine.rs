@@ -197,12 +197,17 @@ impl Engine {
         self.counters.xruns.fetch_add(1, Relaxed);
     }
 
-    /// Renders `output.frames()` frames into `output`. Real-time safe.
+    /// Renders `output.frames()` frames into `output`: the graph's output,
+    /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)).
+    /// Real-time safe.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
         rt::scope(|| {
-            self.run(output.frames(), |start, block| {
+            self.run(output.frames(), |start, block, cue| {
                 let mut part = output.range_mut(start..start + block.frames());
                 part.copy_from(block);
+                if let Some(cue) = cue {
+                    part.add_from(cue);
+                }
             });
         });
     }
@@ -220,23 +225,30 @@ impl Engine {
             output.len()
         );
         rt::scope(|| {
-            self.run(output.len() / channels, |start, block| {
+            self.run(output.len() / channels, |start, block, cue| {
                 let part = &mut output[start * channels..(start + block.frames()) * channels];
                 block.write_interleaved(part, channels);
+                if let Some(cue) = cue {
+                    cue.add_interleaved(part, channels);
+                }
             });
         });
     }
 
-    /// Renders `frames` frames block by block, handing each block's output
-    /// and its offset to `write`.
-    fn run(&mut self, frames: usize, mut write: impl FnMut(usize, AudioRef<'_>)) {
+    /// Renders `frames` frames block by block, handing each block's offset,
+    /// output and cue output to `write`.
+    fn run(
+        &mut self,
+        frames: usize,
+        mut write: impl FnMut(usize, AudioRef<'_>, Option<AudioRef<'_>>),
+    ) {
         self.receive();
         let mut done = 0;
         while done < frames {
             let block = self.render(frames - done);
             match &self.graph {
-                Some(graph) => write(done, graph.output(block)),
-                None => write(done, self.silence.view(block)),
+                Some(graph) => write(done, graph.output(block), graph.cue(block)),
+                None => write(done, self.silence.view(block), None),
             }
             done += block;
         }
@@ -471,6 +483,13 @@ impl EngineHandle {
         Ok(())
     }
 
+    /// Forgets the parameter values sent so far, so swaps stop sending them
+    /// again: for when the graphs to come belong to another project, whose
+    /// nodes have their own values.
+    pub fn forget_params(&mut self) {
+        self.params.clear();
+    }
+
     /// Replaces the engine's tempo map at the start of its next `process`
     /// call. The playhead keeps its musical position, so changing the tempo
     /// during playback doesn't jump, and the loop region keeps its place in
@@ -508,8 +527,8 @@ mod tests {
     use musicable_model::time::{BeatRange, Beats, TimeSignature};
 
     use super::*;
-    use crate::nodes::{Constant, Gain};
-    use crate::{Graph, Inputs, Node, ProcessContext, TransportCommand};
+    use crate::nodes::Constant;
+    use crate::{Graph, Inputs, Node, NodeEventKind, ParamId, ProcessContext, TransportCommand};
 
     const CONFIG: EngineConfig = EngineConfig {
         sample_rate: 48_000,
@@ -566,6 +585,43 @@ mod tests {
         }
     }
 
+    /// Multiplies its input by a gain that jumps to each new value on the
+    /// frame it's sent for: when events land, without the ramp a real gain
+    /// stage makes.
+    struct Level(f32);
+
+    impl Level {
+        const GAIN: ParamId = ParamId(0);
+    }
+
+    impl Node for Level {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            output.clear();
+            for input in inputs.iter() {
+                output.add_from(input);
+            }
+            let mut events = ctx.events.iter().peekable();
+            for (frame, sample) in output.channel_mut(0).iter_mut().enumerate() {
+                while let Some(event) = events.next_if(|e| e.offset == frame) {
+                    let NodeEventKind::Param { param, value } = event.kind;
+                    if param == Self::GAIN {
+                        self.0 = value as f32;
+                    }
+                }
+                *sample *= self.0;
+            }
+        }
+    }
+
     /// Reports the thread it is dropped on.
     struct DropProbe(mpsc::Sender<ThreadId>);
 
@@ -593,11 +649,11 @@ mod tests {
         g.prepare(&CONFIG).unwrap()
     }
 
-    /// A constant 1.0 through a gain stage with key 1.
+    /// A constant 1.0 through a [`Level`] with key 1.
     fn gain_stage() -> PreparedGraph {
         let mut g = Graph::new();
         let one = g.add(NodeKey(0), Constant::new(1.0).with_channels(1));
-        let gain = g.add(NodeKey(1), Gain::new(1.0).with_channels(1));
+        let gain = g.add(NodeKey(1), Level(1.0));
         g.connect(one, gain).unwrap();
         g.set_output(gain).unwrap();
         g.prepare(&CONFIG).unwrap()
@@ -606,7 +662,7 @@ mod tests {
     fn gain(value: f64) -> Event {
         Event::Param {
             node: NodeKey(1),
-            param: Gain::GAIN,
+            param: Level::GAIN,
             value,
         }
     }
@@ -661,21 +717,30 @@ mod tests {
     }
 
     #[test]
+    fn the_cue_output_plays_on_top_of_the_output() {
+        let mut g = Graph::new();
+        let output = g.add(NodeKey(0), Counter(0.0));
+        let cue = g.add(NodeKey(1), Constant::new(0.5));
+        g.set_output(output).unwrap();
+        g.set_cue(cue).unwrap();
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+        let out = render(&mut engine, 300, &[7, 200]);
+        assert!(out.iter().enumerate().all(|(i, &s)| s == i as f32 + 0.5));
+        let mut out = vec![0.0; 2 * 100];
+        engine.process_interleaved(&mut out, 2);
+        for (frame, samples) in out.chunks(2).enumerate() {
+            assert_eq!(samples, [(300 + frame) as f32 + 0.5; 2]);
+        }
+    }
+
+    #[test]
     fn parameter_events_land_on_their_frame() {
         for sizes in [&[1][..], &[37], &[64, 13, 200]] {
             let (mut engine, mut handle) = Engine::new(CONFIG);
             handle.swap_graph(gain_stage()).unwrap();
             handle.send_at(100, gain(0.5)).unwrap();
-            handle
-                .send_at(
-                    150,
-                    Event::Param {
-                        node: NodeKey(1),
-                        param: Gain::MUTE,
-                        value: 1.0,
-                    },
-                )
-                .unwrap();
+            handle.send_at(150, gain(0.0)).unwrap();
             let out = render(&mut engine, 300, sizes);
             assert_eq!(out[..100], [1.0; 100], "{sizes:?}");
             assert_eq!(out[100..150], [0.5; 50], "{sizes:?}");
@@ -986,6 +1051,18 @@ mod tests {
         handle.swap_graph(gain_stage()).unwrap();
         assert_eq!(render(&mut engine, 4, &[4]), [0.5; 4]);
         assert_eq!(handle.stats().events_late, 0);
+    }
+
+    #[test]
+    fn forgotten_values_are_not_sent_again() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(gain_stage()).unwrap();
+        handle.send(gain(0.5)).unwrap();
+        render(&mut engine, 4, &[4]);
+        // Another project's graph, with its own value.
+        handle.forget_params();
+        handle.swap_graph(gain_stage()).unwrap();
+        assert_eq!(render(&mut engine, 4, &[4]), [1.0; 4]);
     }
 
     #[test]

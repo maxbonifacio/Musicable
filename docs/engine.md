@@ -20,9 +20,11 @@ of Musicable, and where Tier 1 work plugs in.
 
 - The **control thread** (the app's main thread) owns the model, a
   `Compiler` and the `EngineHandle`.
-- The **compiler thread** turns model snapshots into `PreparedGraph`s:
-  `compile()` builds a `Graph` and `Graph::prepare` orders it and allocates
-  its buffers. When several snapshots are waiting it compiles only the newest.
+- The **compiler thread** (`musicable-compiler`) turns model snapshots into
+  `PreparedGraph`s: `compile()` builds a `Graph`, and `Graph::prepare`
+  orders it, calls each node's `prepare` and allocates its buffers. When
+  several snapshots are waiting it compiles only the newest. A node that
+  takes its time to prepare, as a plugin can, holds up this thread only.
 - The **audio thread** owns the `Engine` and calls `Engine::process` or
   `Engine::process_interleaved` once per device callback.
 - With the `ParallelRenderer`, **worker threads** help the audio thread
@@ -43,7 +45,8 @@ or frees.
    the loop jumps back.
 3. For each block it applies the transport changes that are due, gives each
    node its parameter events with their offsets into the block, runs the
-   renderer and copies the output to the device buffer.
+   renderer and copies the output to the device buffer, then adds the cue
+   output (see below) on top.
 
 ## Time and events
 
@@ -108,12 +111,19 @@ it, and one already past the end plays on. A region shorter than a frame
 doesn't loop.
 
 **Metronome.** `compile()` adds a `nodes::Metronome` with key
-`compile::keys::METRONOME`, feeding the master for now (it belongs on a cue
-output, once there is one). It clicks on every beat of the time signature
-while the transport plays, accenting each bar's first beat, and a click rings
-for 30 ms even if the playhead jumps or stops. `Project::metronome` sets
-whether it starts on; switch it with the `Metronome::ENABLED` parameter, like
-any other parameter.
+`compile::keys::METRONOME`, feeding the cue bus, not the master. It clicks
+on every beat of the time signature while the transport plays, accenting
+each bar's first beat, and a click rings for 30 ms even if the playhead
+jumps or stops. `Project::metronome` sets whether it starts on; switch it
+with the `Metronome::ENABLED` parameter, like any other parameter.
+
+**The cue output.** A graph can have a cue output as well as its output:
+`Graph::set_cue`. The engine adds it to the device's buffer after the
+output, so you hear it, but it's not in the mix, and nothing that records or
+exports the master will have it. `compile()` sums the metronome into a cue
+bus, `compile::keys::CUE`. It plays through the same two channels as the
+master until the engine has more (see
+[architecture.md](architecture.md#known-gaps)).
 
 **Setting up from a project.** The graph carries the metronome setting. The
 tempo map and the loop are transport state, so send them when a project
@@ -124,6 +134,37 @@ handle.set_tempo_map(project.tempo.clone())?;
 let region = project.looping.then_some(project.loop_region);
 handle.send(Event::Transport(TransportCommand::Loop(region)))?;
 ```
+
+## Compiling graphs
+
+`Compiler::spawn` starts the compiler thread. Each job is a closure that
+builds a graph and the `EngineConfig` to prepare it for:
+
+```rust
+let mut compiler = Compiler::spawn();
+let job = compiler.compile_project(handle.config(), &project);
+// Later, such as once per UI frame:
+while let Some(compiled) = compiler.try_recv() {
+    if compiled.job >= job {
+        handle.swap_graph(compiled.graph?)?;
+    }
+}
+```
+
+- Jobs are numbered from 1, and `Compiler::compile` and `compile_project`
+  return the number. Each `Compiled` result carries its job's number, so
+  the control thread can tell a graph for a project it has since closed, or
+  for an engine it has replaced, from the one it's waiting for.
+- When several jobs are waiting, only the newest runs. The jobs it overtook
+  have no results.
+- A job that panics, such as a plugin that fails to load, stops the thread,
+  and `try_recv` or `recv` raises the panic again on the control thread.
+  `recv` waits for the next result, and panics if every job is done, rather
+  than waiting forever.
+
+The app's `Session` holds back what it sends the engine for a newly opened
+project until its graph comes, so nothing plays before the graph
+([commands.md](commands.md#running-commands-in-the-app)).
 
 ## Graph swaps
 
@@ -146,6 +187,28 @@ value. So the handle remembers, for each parameter, the value sent for it
 that applies last, and sends it again after each swap. **Every parameter
 change goes through `send` or `send_at`**, even when it's also written to the
 model. Values sent again are never counted as late.
+`EngineHandle::forget_params` forgets them, for when the graphs to come
+belong to another project, whose nodes have values of their own.
+
+## Parameter smoothing
+
+A parameter that would click when it jumps ramps to each new value instead:
+`nodes::Smoothed` moves to it in a straight line over 10 ms, starting on
+the frame of the event. `Gain`'s gain and mute, and the `Sine` test tone's
+level, ramp this way.
+
+- A ramp counts frames, never blocks, so a change on a given frame makes
+  the same samples however the blocks fall and whichever thread runs the
+  node. The renderers stay bit-identical.
+- A node calls `Smoothed::prepare` from `Node::prepare`, for the sample
+  rate, `set` for each event on its frame, and `next_value` once per frame.
+  While it's settled, it can `skip` the block and use one value for it, as
+  `Gain` does to copy, scale or clear its input as cheaply as before.
+- A node that hasn't made a sound yet takes new values at once, so a new
+  track starts at its gain, not with a fade from silence.
+- A new node carries on the ramp of the node it replaces in a swap
+  (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
+  of a fade doesn't jump.
 
 ## Channel strips
 
@@ -207,11 +270,9 @@ workers don't raise their priority yet: Linux needs real-time scheduling
 rights, and on macOS they should join the audio device's workgroup, which
 needs the audio backend.
 
-Workers run with the default floating-point environment. Nothing sets
-flush-to-zero or denormals-are-zero on the audio thread yet. Anything that
-does must set the workers the same way, or a node's output would depend on
-which thread ran it and stop matching the reference renderer; that needs an
-option in `ParallelOptions`.
+Workers run nodes with denormals flushed to zero, as the audio thread
+does (see [Denormals](#denormals)), so a node's output doesn't depend on
+which thread ran it.
 
 **A block.** `Graph::prepare` works out which nodes each node feeds and the
 longest path from each node to the end of the graph, so the audio thread
@@ -316,6 +377,23 @@ block, though never on two at once, so keep no state in thread-locals.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html), which catches
   those (but not uncontended Rust locks).
 
+### Denormals
+
+Nodes run with denormal floats flushed to zero, as in every DAW. Denormals
+are the floats closer to zero than `f32::MIN_POSITIVE`, and arithmetic on
+them is many times slower on most CPUs. A decaying filter or reverb tail
+produces them for as long as it rings, so without this a quiet track could
+cost more CPU than a loud one.
+
+The renderers run every node inside `rt::flush_denormals`: the reference
+renderer on the audio thread, and the parallel renderer on the audio thread
+and on every worker, so all of them do the same arithmetic and keep
+matching. It sets MXCSR's flush-to-zero and denormals-are-zero bits on
+x86-64 and FPCR's flush-to-zero bit on ARM64, and puts the old mode back
+afterwards. A constant the compiler works out ahead of time can keep a
+denormal that the same sum at run time would flush; that's the same on every
+thread, but node code shouldn't rely on denormals either way.
+
 ## Limits
 
 | What | Capacity | When it's full |
@@ -326,9 +404,9 @@ block, though never on two at once, so keep no state in thread-locals.
 | Nodes in a graph the parallel renderer shares | `ParallelOptions::max_nodes`, 16,384 by default | The audio thread renders the graph alone |
 
 A swap takes one queue slot, plus one for each remembered parameter of the new
-graph. Parameter changes are instant, with no smoothing yet, and the handle
-never forgets a parameter it has sent. All fine for Tier 0; the parameter
-system gets reworked with plugin hosting.
+graph. The handle remembers every parameter it has sent until
+`forget_params`, which the app calls when it opens a project. All fine so
+far; the parameter system gets reworked with plugin hosting.
 
 ## Notes for the next milestones
 

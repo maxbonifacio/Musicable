@@ -1,6 +1,7 @@
 //! The open project, wired to the engine.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use musicable_commands::{
     CommandId, Context, Document, Edit, KeyChord, Keymap, Registry, Request, Transport,
@@ -9,19 +10,23 @@ use musicable_commands::{
 use musicable_engine::compile::keys;
 use musicable_engine::nodes::Metronome;
 use musicable_engine::{
-    EngineConfig, EngineHandle, Event, PreparedGraph, QueueFull, Stats, SwapError,
-    TransportCommand, compile,
+    Compiled, Compiler, EngineConfig, EngineHandle, Event, Graph, PreparedGraph, QueueFull, Stats,
+    SwapError, TransportCommand, compile,
 };
 use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
+
+/// Builds the graph for a project, on the compiler's thread.
+type Build = Arc<dyn Fn(&Project) -> Graph + Send + Sync>;
 
 /// The open project, the commands that change it, and the engine that plays
 /// it.
 ///
 /// Key presses and menus run commands. Commands change the project through
 /// transactions, and after each command the session sends the engine what
-/// changed, so the engine plays the project as it is. `docs/commands.md`
-/// describes the flow.
+/// changed, so the engine plays the project as it is. Graphs compile on a
+/// thread of their own, so a slow one never holds up the window.
+/// `docs/commands.md` describes the flow.
 pub struct Session {
     document: Document,
     commands: Registry,
@@ -32,13 +37,34 @@ pub struct Session {
 }
 
 impl Session {
-    /// Opens `project` on the engine `handle` drives: swaps in the project's
+    /// Opens `project` on the engine `handle` drives: compiles the project's
     /// graph and sends its tempo map and loop. Key presses go through
     /// `keymap`.
+    ///
+    /// It returns before the graph is ready. Until the graph reaches the
+    /// engine, what's sent to the engine waits for it: the engine plays
+    /// silence, and doesn't start playing.
     pub fn new(project: Project, keymap: Keymap, handle: EngineHandle) -> Self {
+        Self::with_compiler(project, keymap, handle, compile)
+    }
+
+    /// Like [`new`](Self::new), with `build` building the project's graphs
+    /// in place of [`compile`]: for tests, such as one with a node that's
+    /// slow to prepare.
+    pub fn with_compiler(
+        project: Project,
+        keymap: Keymap,
+        handle: EngineHandle,
+        build: impl Fn(&Project) -> Graph + Send + Sync + 'static,
+    ) -> Self {
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             handle,
+            compiler: Compiler::spawn(),
+            build: Arc::new(build),
+            asked: 0,
+            received: 0,
+            floor: 0,
             outbox: VecDeque::new(),
         };
         engine.set_up(&project);
@@ -53,8 +79,13 @@ impl Session {
     }
 
     /// Opens `project` in place of the open one. The transport stops, and the
-    /// playhead goes to the start of the song.
+    /// playhead goes to the start of the song. What was waiting for the
+    /// engine for the old project is dropped, and the undo history starts
+    /// again.
     pub fn open(&mut self, project: Project) {
+        self.engine.outbox.clear();
+        // The new project's nodes have its values, not the old one's.
+        self.engine.handle.forget_params();
         self.engine.stop();
         self.engine.locate(Beats::ZERO);
         self.engine.set_up(&project);
@@ -67,8 +98,9 @@ impl Session {
     /// old engine's handle.
     ///
     /// The new engine takes over where the old one was: its playhead goes to
-    /// the same place in bars and beats, and it plays if the old one did.
-    /// What the old engine hadn't received yet, it never will.
+    /// the same place in bars and beats, and it plays if the old one did,
+    /// once the project's graph for it is ready. What the old engine hadn't
+    /// received yet, it never will.
     pub fn replace_engine(&mut self, handle: EngineHandle) -> EngineHandle {
         let at = self.playhead();
         let playing = self.engine.playing;
@@ -96,6 +128,27 @@ impl Session {
     /// Call once the project is saved.
     pub fn mark_saved(&mut self) {
         self.document.mark_saved();
+    }
+
+    /// The name of the change Undo would take back, for the Edit menu.
+    pub fn undo_name(&self) -> Option<&str> {
+        self.document.undo_name()
+    }
+
+    /// The name of the change Redo would make again.
+    pub fn redo_name(&self) -> Option<&str> {
+        self.document.redo_name()
+    }
+
+    /// Starts a gesture, such as dragging the tempo field: until
+    /// [`end_gesture`](Self::end_gesture), its changes are one step in the
+    /// undo history. See [`Document::begin_gesture`].
+    pub fn begin_gesture(&mut self) {
+        self.document.begin_gesture();
+    }
+
+    pub fn end_gesture(&mut self) {
+        self.document.end_gesture();
     }
 
     pub fn commands(&self) -> &Registry {
@@ -166,20 +219,45 @@ impl Session {
         self.sync();
     }
 
-    /// Call regularly, such as once per UI frame. Sends what the engine had no
-    /// room for earlier, and drops the graphs and tempo maps it has replaced.
+    /// Call regularly, such as once per UI frame. Sends the graphs the
+    /// compiler has finished and what the engine had no room for earlier,
+    /// and drops the graphs and tempo maps the engine has replaced.
     pub fn tick(&mut self) {
         self.engine.handle.collect_garbage();
         self.engine.flush();
     }
 
+    /// Whether a graph the session asked for is still compiling. While one
+    /// is, call [`tick`](Self::tick) often, to send it on as soon as it's
+    /// ready.
+    pub fn compiling(&self) -> bool {
+        self.engine.received < self.engine.asked
+    }
+
+    /// Waits for the graphs the session asked for, and sends them on, with
+    /// what waited for them. For offline playing, such as tests and the null
+    /// test, where nothing should start before the graph.
+    ///
+    /// # Panics
+    ///
+    /// If building or preparing a graph panicked, with that panic.
+    pub fn wait_for_graph(&mut self) {
+        while self.compiling() {
+            let compiled = self.engine.compiler.recv();
+            self.engine.receive(compiled);
+        }
+        self.engine.flush();
+    }
+
     /// Sends the engine what the committed transactions changed.
     fn sync(&mut self) {
+        let mut tempo = None;
         let mut loop_changed = false;
         for committed in self.document.take_committed() {
             for edit in committed.edits {
                 match edit {
-                    Edit::Tempo { to, .. } => self.engine.push(Message::Tempo(to)),
+                    // Only the last map counts.
+                    Edit::Tempo { to, .. } => tempo = Some(to),
                     Edit::LoopRegion { .. } | Edit::Looping { .. } => loop_changed = true,
                     Edit::Metronome { to, .. } => self.engine.push(Message::Event(Event::Param {
                         node: keys::METRONOME,
@@ -188,6 +266,9 @@ impl Session {
                     })),
                 }
             }
+        }
+        if let Some(tempo) = tempo {
+            self.engine.push(Message::Tempo(tempo));
         }
         // One message, with the loop as it ends up, covers every change to it.
         // It can go after the tempo maps: the engine keeps the loop in beats.
@@ -205,9 +286,18 @@ fn loop_event(project: &Project) -> Event {
     Event::Transport(TransportCommand::Loop(region))
 }
 
-/// The engine, as commands see it.
+/// The engine, as commands see it, and the compiler that builds its graphs.
 struct EngineLink {
     handle: EngineHandle,
+    compiler: Compiler,
+    build: Build,
+    /// The newest compiler job asked for.
+    asked: u64,
+    /// The newest job whose graph has come back.
+    received: u64,
+    /// The first job whose graph is for this project and this engine. Older
+    /// ones are dropped when they come back.
+    floor: u64,
     /// What the engine's queue had no room for yet, oldest first.
     outbox: VecDeque<Message>,
     /// Whether the transport plays, counting what hasn't reached the engine
@@ -220,6 +310,9 @@ enum Message {
     Event(Event),
     Tempo(TempoMap),
     Graph(Box<PreparedGraph>),
+    /// Holds back everything after it until the graph of this job, or of a
+    /// newer one, comes back from the compiler, and becomes that graph.
+    WaitForGraph(u64),
 }
 
 impl EngineLink {
@@ -227,20 +320,62 @@ impl EngineLink {
         self.outbox.push_back(message);
     }
 
+    /// Compiles `project` on the compiler's thread, for the engine, and
+    /// sends the graph on when it's ready. The running graph plays on until
+    /// then, and parameter values sent meanwhile reach the new graph too
+    /// (see [`EngineHandle::swap_graph`]). Returns the compiler's job.
+    fn recompile(&mut self, project: &Project) -> u64 {
+        let build = self.build.clone();
+        let project = project.clone();
+        self.asked = self
+            .compiler
+            .compile(self.handle.config(), move || build(&project));
+        self.asked
+    }
+
     /// Sends what the engine needs to play `project`: its graph, its tempo
-    /// map and its loop.
+    /// map and its loop. All of it, and whatever comes after, waits for the
+    /// graph.
     fn set_up(&mut self, project: &Project) {
-        let graph = compile(project)
-            .prepare(&self.handle.config())
-            .expect("compiled graphs are valid");
-        self.push(Message::Graph(Box::new(graph)));
+        let job = self.recompile(project);
+        // Graphs still to come from before were for another project or
+        // another engine.
+        self.floor = job;
+        self.push(Message::WaitForGraph(job));
         self.push(Message::Tempo(project.tempo.clone()));
         self.push(Message::Event(loop_event(project)));
     }
 
-    /// Sends what's waiting, oldest first, until the engine's queue is full.
+    /// Takes a graph back from the compiler: in the place that waits for it,
+    /// if there is one, or after everything else.
+    fn receive(&mut self, compiled: Compiled) {
+        if compiled.job < self.floor {
+            return;
+        }
+        self.received = self.received.max(compiled.job);
+        let graph = Box::new(compiled.graph.expect("compiled graphs are valid"));
+        let waiting = self
+            .outbox
+            .iter_mut()
+            .find(|message| matches!(message, Message::WaitForGraph(_)));
+        match waiting {
+            Some(waiting) => *waiting = Message::Graph(graph),
+            None => self.push(Message::Graph(graph)),
+        }
+    }
+
+    /// Takes the graphs the compiler has finished, then sends what's
+    /// waiting, oldest first, until the engine's queue is full or the next
+    /// message waits for a graph.
     fn flush(&mut self) {
+        while let Some(compiled) = self.compiler.try_recv() {
+            self.receive(compiled);
+        }
         while let Some(message) = self.outbox.pop_front() {
+            if matches!(message, Message::WaitForGraph(_)) {
+                self.outbox.push_front(message);
+                break;
+            }
             if let Err(message) = self.send(message) {
                 self.outbox.push_front(message);
                 break;
@@ -265,6 +400,7 @@ impl EngineLink {
                     unreachable!("graphs are prepared for the engine's config")
                 }
             }),
+            Message::WaitForGraph(job) => Err(Message::WaitForGraph(job)),
         }
     }
 }

@@ -63,11 +63,9 @@ struct Live {
 /// thread and swaps it in mid-playback.
 fn swap_while_playing(before: &Project, after: &Project) -> Live {
     let (mut engine, mut handle) = Engine::new(CONFIG);
-    let compiler = Compiler::spawn(CONFIG);
-    compiler.compile(before.clone());
-    handle
-        .swap_graph(compiler.recv().unwrap().unwrap())
-        .unwrap();
+    let mut compiler = Compiler::spawn();
+    compiler.compile_project(CONFIG, before);
+    handle.swap_graph(compiler.recv().graph.unwrap()).unwrap();
     handle
         .send(Event::Transport(TransportCommand::Play))
         .unwrap();
@@ -102,10 +100,8 @@ fn swap_while_playing(before: &Project, after: &Project) -> Live {
     while handle.stats().time == 0 {
         thread::yield_now();
     }
-    compiler.compile(after.clone());
-    handle
-        .swap_graph(compiler.recv().unwrap().unwrap())
-        .unwrap();
+    compiler.compile_project(CONFIG, after);
+    handle.swap_graph(compiler.recv().graph.unwrap()).unwrap();
     let live = audio.join().expect("the audio thread failed");
     assert_eq!(handle.stats().swaps, 2);
     assert_eq!(

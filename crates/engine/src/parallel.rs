@@ -154,7 +154,9 @@ impl ParallelRenderer {
                 let realtime = options.realtime;
                 thread::Builder::new()
                     .name(format!("musicable-worker-{lane}"))
-                    .spawn(move || shared.worker(lane, realtime))
+                    // Like the audio thread while it renders, so the nodes
+                    // a worker runs give the same samples there.
+                    .spawn(move || rt::flush_denormals(|| shared.worker(lane, realtime)))
                     .expect("failed to start a worker thread")
             })
             .collect();
@@ -264,11 +266,14 @@ impl Default for ParallelRenderer {
 
 impl Renderer for ParallelRenderer {
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
-        if self.share(graph) {
-            self.render_shared(graph, block);
-        } else {
-            self.render_inline(graph, block);
-        }
+        // The workers flush denormals for as long as they run.
+        rt::flush_denormals(|| {
+            if self.share(graph) {
+                self.render_shared(graph, block);
+            } else {
+                self.render_inline(graph, block);
+            }
+        });
     }
 }
 
