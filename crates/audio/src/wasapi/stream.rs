@@ -16,7 +16,7 @@ use super::com::{Call, Com, Event, Failed, Mmcss, Qpc, device_gone, os};
 use super::device;
 use crate::period::frames_to_hns;
 use crate::stats::Counters;
-use crate::xrun::{Detector, Reading};
+use crate::xrun::{Detector, Medians, Reading};
 use crate::{Error, SampleFormat, StartError, Stopped, StreamInfo, StreamRequest, StreamStats};
 
 /// How long the audio thread waits for a wake-up before checking that the
@@ -143,6 +143,8 @@ struct Runner<'a> {
     client: &'a Client,
     counters: &'a Counters,
     detector: Detector,
+    /// The frames queued ahead of the play position, for their median.
+    latency: Medians,
     qpc: Qpc,
     /// Where the engine renders when it can't write to the device buffer
     /// directly: for integer formats, or an unaligned buffer.
@@ -161,6 +163,7 @@ impl<'a> Runner<'a> {
             client,
             counters,
             detector: Detector::new(client.exclusive(), client.period, format.rate),
+            latency: Medians::default(),
             qpc: Qpc::new(),
             scratch: vec![0.0; client.buffer as usize * usize::from(format.channels)],
             written: 0,
@@ -263,9 +266,14 @@ impl<'a> Runner<'a> {
                 if outcome.underrun {
                     engine.record_xrun();
                     self.counters.underrun();
+                    if outcome.system {
+                        self.counters.system_dropout();
+                    }
                 }
                 self.counters.lost(outcome.lost);
-                self.counters.queued(self.written.saturating_sub(played));
+                if let Some(queued) = self.latency.push(self.written as i64 - played as i64) {
+                    self.counters.queued(queued.max(0) as u64);
+                }
                 Ok(())
             }
             Err(error) if device_gone(error.code()) => Err(Failed {

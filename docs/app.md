@@ -110,9 +110,10 @@ That's what `ParallelOptions::inline_below` is for
 - **The track list** shows each track's kind, test tone, gain and whether
   it's muted.
 - **The status bar** shows errors and notices until they're dismissed, the
-  audio device's sample rate, buffer and latency (click it for the audio
-  settings), and the project's name, with "(not saved)" while it has
-  changes. The window's title marks them with a `*`.
+  audio device's sample rate, buffer, and latency as the device's clock
+  measures it (click it for the audio settings), and the project's name,
+  with "(not saved)" while it has changes. The window's title marks them
+  with a `*`.
 - **Options > Keyboard Shortcuts** lists every command and its keys, says
   where your keymap file goes, and creates or reloads it.
 
@@ -243,7 +244,8 @@ says what the stream got.
   `StreamStats::busy`. The tooltip adds the longest wake-up, and how many
   threads the parallel scheduler kept busy at once while it shared blocks.
 - **Dropouts**: `StreamStats::underruns` since the stream started. Click to
-  count from zero again. The tooltip has the audio lost and the late
+  count from zero again. The tooltip has the audio lost, how many of the
+  dropouts were in the system's audio engine or driver, and the late
   wake-ups.
 
 ## How it's built

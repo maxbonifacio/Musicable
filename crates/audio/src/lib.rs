@@ -174,11 +174,13 @@ pub struct StreamInfo {
     /// queue; in exclusive mode each of the two halves the device alternates
     /// between.
     pub buffer: u32,
-    /// Output latency in frames, estimated from the buffer sizes: how far
-    /// ahead of the device's play position a punctual wake-up starts
-    /// writing, plus the delay the system reports beyond that. It leaves out
-    /// converter delay. [`StreamStats::queued`] measures it while the stream
-    /// runs, as the device's clock sees it.
+    /// Output latency in frames, estimated from the buffer sizes as the
+    /// stream opens: how far ahead of the device's play position a punctual
+    /// wake-up starts writing, plus the delay the system reports beyond
+    /// that. It leaves out converter delay, and in Windows shared mode it
+    /// can be a few periods short: the system can report less than its audio
+    /// engine and driver hold, or nothing. [`StreamStats::queued`] measures
+    /// the latency while the stream runs, as the device's clock sees it.
     pub latency: u32,
     /// Whether the audio thread runs at real-time priority: MMCSS "Pro
     /// Audio" on Windows.
