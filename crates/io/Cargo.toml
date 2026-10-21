@@ -1,0 +1,13 @@
+[package]
+name = "musicable-io"
+description = "Project files and audio/MIDI import and export."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+musicable-model.workspace = true
+
+[lints]
+workspace = true

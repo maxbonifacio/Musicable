@@ -1,0 +1,12 @@
+[package]
+name = "musicable-model"
+description = "Pure-data project model: tracks, clips, tempo. No audio, no UI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
