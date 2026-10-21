@@ -205,6 +205,8 @@ fn null_test(args: impl Iterator<Item = OsString>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Audio clips' files are in the project's folder.
+    let folder = test.project.as_deref().and_then(Path::parent);
     let (project, name) = match &test.project {
         Some(path) => match musicable_io::project::load(path) {
             Ok(project) => (project, path.display().to_string()),
@@ -255,9 +257,17 @@ fn null_test(args: impl Iterator<Item = OsString>) -> ExitCode {
     let names = runs.each_ref().map(|run| run.0);
     let mut players: Vec<Player> = runs
         .into_iter()
-        .map(|(_, project, render)| Player::new(project, &render, config))
+        .map(|(_, project, render)| Player::new(project, folder, &render, config))
         .collect();
     let differences = null_test::compare(&mut players, frames);
+    // Every player reads the same files.
+    let problems = players[0].take_problems();
+    for problem in &problems {
+        println!("{problem}");
+    }
+    if !problems.is_empty() {
+        println!();
+    }
 
     let speed = |player: &Player| {
         let took = player.took().as_secs_f64();

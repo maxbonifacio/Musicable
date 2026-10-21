@@ -30,7 +30,7 @@ impl Rig {
     /// would.
     fn new(project: Project) -> Self {
         let (engine, handle) = Engine::new(CONFIG);
-        let mut session = Session::new(project, Keymap::default_keymap(), handle);
+        let mut session = Session::new(project, None, Keymap::default_keymap(), handle);
         session.wait_for_graph();
         Self { engine, session }
     }
@@ -202,7 +202,7 @@ fn another_project_starts_afresh() {
     // A track with the same id, at unity and unmuted.
     let mut second = Project::new();
     assert_eq!(tone_track(&mut second, "Other", 330.0), id);
-    rig.session.open(second);
+    rig.session.open(second, None);
     rig.session.wait_for_graph();
     assert!(rig.press("Space"));
     near(rig.peaks(), [0.5, 0.5]);
@@ -229,7 +229,7 @@ fn a_mix_plays_the_same_with_the_parallel_scheduler() {
         let renders = [Render::Reference, Render::App, shared];
         let mut players: Vec<Player> = renders
             .iter()
-            .map(|render| Player::new(project.clone(), render, CONFIG))
+            .map(|render| Player::new(project.clone(), None, render, CONFIG))
             .collect();
         let differences = null_test::compare(&mut players, u64::from(CONFIG.sample_rate));
         assert_eq!(differences, [None, None, None]);

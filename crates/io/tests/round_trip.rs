@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
+use musicable_model::clip::{AudioClip, Clip, ClipContent, Dimension, MidiClip, Point};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
@@ -108,6 +109,84 @@ impl Random {
         if self.one_in(2) { -ticks } else { ticks }
     }
 
+    /// A length for something starting at `start`, that ends within
+    /// `MAX_TICKS`: usually a few beats.
+    fn length(&mut self, start: i64) -> i64 {
+        let room = MAX_TICKS - start;
+        match self.below(3) {
+            0 => 1 + self.below(room as u64) as i64,
+            _ => 1 + self.below(Beats::new(16).ticks().min(room) as u64) as i64,
+        }
+    }
+
+    /// An f32 from `low` to `high`: often an end, and otherwise any f32 in
+    /// between, every bit pattern as likely.
+    fn within(&mut self, low: f32, high: f32) -> f32 {
+        match self.below(4) {
+            0 => self.pick(&[low, high]),
+            _ => loop {
+                let value = self.f32();
+                if (low..=high).contains(&value) {
+                    return value;
+                }
+            },
+        }
+    }
+
+    /// A clip for a track of `kind`, as long as the file allows.
+    fn clip(&mut self, project: &mut Project, kind: TrackKind) -> Clip {
+        let start = self.ticks().min(MAX_TICKS - 1);
+        let length = self.length(start);
+        let content = match kind {
+            TrackKind::Audio => {
+                let mut file = self.name();
+                if file.is_empty() {
+                    file.push_str("take 1.wav");
+                }
+                let fade_in = self.below(length as u64 + 1) as i64;
+                let fade_out = self.below((length - fade_in) as u64 + 1) as i64;
+                ClipContent::Audio(AudioClip {
+                    file,
+                    offset: self.below(MAX_TICKS as u64 + 1),
+                    gain: self.gain(),
+                    fade_in: Beats::from_ticks(fade_in),
+                    fade_out: Beats::from_ticks(fade_out),
+                })
+            }
+            _ => {
+                let mut midi = MidiClip {
+                    offset: Beats::from_ticks(self.signed_ticks()),
+                    ..MidiClip::default()
+                };
+                for _ in 0..self.below(5) {
+                    let start = self.signed_ticks().min(MAX_TICKS - 1);
+                    let length = Beats::from_ticks(self.length(start));
+                    let key = self.below(128) as u8;
+                    let velocity = self.within(0.0, 1.0);
+                    let release = self.within(0.0, 1.0);
+                    let note = midi.add_note(Beats::from_ticks(start), length, key, velocity);
+                    note.release_velocity = release;
+                    for dimension in Dimension::ALL {
+                        let (low, high) = dimension.range();
+                        let mut at = 0;
+                        for _ in 0..self.below(4) {
+                            at = (at + self.below(Beats::new(2).ticks() as u64) as i64)
+                                .min(MAX_TICKS);
+                            let point = Point::new(Beats::from_ticks(at), self.within(low, high));
+                            note.expression.curve_mut(dimension).push(point);
+                        }
+                    }
+                }
+                // Some deleted, leaving gaps in the ids.
+                midi.notes.retain(|_| !self.one_in(4));
+                midi.next_note_id += self.below(3) as u32;
+                ClipContent::Midi(midi)
+            }
+        };
+        let range = BeatRange::new(Beats::from_ticks(start), Beats::from_ticks(start + length));
+        project.new_clip(self.name(), range, content)
+    }
+
     fn name(&mut self) -> String {
         let length = self.below(12);
         (0..length)
@@ -192,15 +271,30 @@ fn random_project(random: &mut Random) -> Project {
                 sends.push(send);
             }
         }
+        let kind = project.track(id).unwrap().kind;
         let devices = (0..random.below(3))
             .map(|_| {
-                let gain = random.gain();
-                project.new_device(DeviceKind::TestGain { gain })
+                let kind = match random.one_in(3) {
+                    true => DeviceKind::TestInstrument {
+                        level: random.gain(),
+                    },
+                    false => DeviceKind::TestGain {
+                        gain: random.gain(),
+                    },
+                };
+                project.new_device(kind)
             })
             .collect();
+        let clips = match kind.is_bus() {
+            true => Vec::new(),
+            false => (0..random.below(4))
+                .map(|_| random.clip(&mut project, kind))
+                .collect(),
+        };
         let track = project.track_mut(id).unwrap();
         track.output = output;
         track.sends = sends;
+        track.clips = clips;
         track.devices = devices;
         track.pan = random.pan();
         track.solo = random.one_in(4);
@@ -218,6 +312,7 @@ fn random_project(random: &mut Random) -> Project {
     project.master.clip_type = random.clip_type();
     project.next_send_id += random.below(3) as u32;
     project.next_device_id += random.below(3) as u32;
+    project.next_clip_id += random.below(3) as u32;
     project
 }
 
@@ -268,9 +363,58 @@ fn floats_load_bit_for_bit() {
         assert_eq!(level(loaded), level(saved));
         let gain = |track: &musicable_model::Track| match track.devices[0].kind {
             DeviceKind::TestGain { gain } => gain.to_bits(),
+            DeviceKind::TestInstrument { .. } => unreachable!("only test gains"),
         };
         assert_eq!(gain(loaded), gain(saved));
     }
+}
+
+#[test]
+fn notes_and_clips_load_bit_for_bit() {
+    let mut random = Random(6);
+    let mut project = Project::new();
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    let audio = project.add_track("Audio", TrackKind::Audio);
+    let mut notes = MidiClip::default();
+    for i in 0..10_000 {
+        let (velocity, release) = (random.within(0.0, 1.0), random.within(0.0, 1.0));
+        let note = notes.add_note(Beats::new(i), Beats::new(1), 60, velocity);
+        note.release_velocity = release;
+        for dimension in Dimension::ALL {
+            let (low, high) = dimension.range();
+            let point = Point::new(Beats::ZERO, random.within(low, high));
+            note.expression.curve_mut(dimension).push(point);
+        }
+    }
+    let range = BeatRange::new(Beats::ZERO, Beats::new(10_000));
+    let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
+    project.track_mut(midi).unwrap().clips.push(clip);
+    for _ in 0..10_000 {
+        let mut audio_clip = AudioClip::new("take.wav");
+        audio_clip.gain = random.f32();
+        let clip = project.new_clip("", range, ClipContent::Audio(audio_clip));
+        project.track_mut(audio).unwrap().clips.push(clip);
+    }
+    let loaded = project::from_str(&project::to_string(&project).unwrap()).unwrap();
+    let bits = |project: &Project| {
+        let mut bits = Vec::new();
+        for clip in project.tracks.iter().flat_map(|t| &t.clips) {
+            match &clip.content {
+                ClipContent::Audio(audio) => bits.push(audio.gain.to_bits()),
+                ClipContent::Midi(midi) => {
+                    for note in &midi.notes {
+                        bits.extend([note.velocity.to_bits(), note.release_velocity.to_bits()]);
+                        for dimension in Dimension::ALL {
+                            let curve = note.expression.curve(dimension);
+                            bits.extend(curve.iter().map(|p| p.value.to_bits()));
+                        }
+                    }
+                }
+            }
+        }
+        bits
+    };
+    assert_eq!(bits(&loaded), bits(&project));
 }
 
 /// An empty folder for one test, in Cargo's scratch folder for tests.

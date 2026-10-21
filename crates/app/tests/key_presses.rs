@@ -35,7 +35,7 @@ impl Rig {
     /// would.
     fn with_keymap(project: Project, keymap: Keymap) -> Self {
         let (engine, handle) = Engine::new(CONFIG);
-        let mut session = Session::new(project, keymap, handle);
+        let mut session = Session::new(project, None, keymap, handle);
         session.wait_for_graph();
         Self { engine, session }
     }

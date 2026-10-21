@@ -14,10 +14,10 @@ reference renderer bit for bit. This page is the map. The detail is in
 |---|---|---|
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
-| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, the real-time checker |
+| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
 | `plugins` | `engine` | Nothing yet: CLAP and VST3 hosting in Tier 1, ARA in Tier 2 |
-| `io` | `model` | Project files; audio and MIDI files later |
+| `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
 | `ui` | `model`, `commands` | What the window shows, drawn with egui: a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
 
@@ -34,6 +34,7 @@ compiler, a node and the UI, in that order.
 | Compiler (`musicable-compiler`) | Building and preparing the graphs the session asks for: `compile()`, then `Graph::prepare` | Normal |
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
+| Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
 
 There is one worker per physical core, minus one for the audio thread,
 which works too. While audio plays, the main thread meets the audio thread
@@ -144,19 +145,22 @@ Tier 1 has to keep these. The tests check most of them.
 Tier 1 of the feature list, and where each part should go. None of this is
 built yet, except where it says so.
 
-- **Clips and the arrangement.** Clips go on `Track` in the model, in a new
-  format version, with per-note expression (MPE) in MIDI notes from the
-  start. In `compile()`, a clip player takes the test tone's place at the
-  head of the channel strip. Like the tone, it renders from the song
-  position: the block's position and the tempo map say which part of which
-  clip plays. The audio thread can't read files, so a streaming thread
-  fills lock-free buffers ahead of the playhead and at the loop start, or a
-  short file loads whole when the graph is prepared. Instruments need a new
-  `NodeEventKind` for notes, at sample offsets like parameter events.
+- **Clips.** Built: audio clips of WAV, AIFF and FLAC files, and MIDI
+  clips of notes with per-note expression (MPE), on `Track` in format
+  version 3. A clip player heads each audio and MIDI track's strip and
+  renders from the song position. Short files load whole as the graph
+  builds, and longer ones stream from the disk thread through lock-free
+  chunks, ahead of the playhead and at the loop start. Files at other
+  sample rates are resampled, and clips fade and crossfade. Notes are
+  `NodeEventKind::Note`s at sample offsets, and can pass through a chain of
+  nodes, such as a MIDI effect, on their way to an instrument
+  ([engine.md](engine.md#clips), [app.md](app.md#audio-files)). The
+  arrangement view, where clips are made and edited, is next; edits to
+  clips and notes come with it as new kinds of `Edit`.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
-  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. The only
-  kind so far is a test gain. CLAP and VST3 instances live in
+  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. So far
+  there are a test gain and a test instrument. CLAP and VST3 instances live in
   `crates/plugins` as `Node`s: created and activated in `prepare`, which runs on the
   compiler's thread, and handed from the old graph to the new one in
   `adopt`. A plugin's own parameter changes come back to the model as
@@ -196,8 +200,8 @@ built yet, except where it says so.
   a gesture (`Action::BeginGesture` and `EndGesture`), so it's one step.
 - **Export.** Rendering faster than real time is the engine without a
   device. `null_test::Player` already plays a project offline, block by
-  block, with either renderer; export does the same on a background thread
-  and writes the samples to a file.
+  block, with either renderer, its streams waiting for the disk; export
+  does the same on a background thread and writes the samples to a file.
 - **The clip stage.** Built: Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.

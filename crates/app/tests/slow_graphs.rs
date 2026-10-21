@@ -142,7 +142,7 @@ fn a_slow_graph_never_holds_up_the_window() {
 fn a_project_opened_while_the_last_one_compiles_replaces_it() {
     let gate = Arc::new(Gate::default());
     let (mut engine, mut session) = slow_session(Project::new(), &gate);
-    session.open(demo_project());
+    session.open(demo_project(), None);
     render(&mut engine, &mut session, 256);
     gate.open();
     session.wait_for_graph();

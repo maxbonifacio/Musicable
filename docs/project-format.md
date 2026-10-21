@@ -7,13 +7,15 @@ tools can read and write projects too. `crates/io` implements it, in
 
 ## Example
 
-A project with a bass track sending to a reverb on a return track, looping
-the first four bars, with the master's soft clip stage on:
+A project with a bass track playing a recording and sending to a reverb on
+a return track, and a keys track playing a note through the test
+instrument, bending it up a tone. It loops the first four bars, with the
+master's soft clip stage on:
 
 ```json
 {
   "format": "musicable-project",
-  "version": 2,
+  "version": 3,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -36,9 +38,10 @@ the first four bars, with the master's soft clip stage on:
   },
   "looping": true,
   "metronome": true,
-  "next_track_id": 2,
+  "next_track_id": 3,
   "next_send_id": 1,
-  "next_device_id": 0,
+  "next_device_id": 1,
+  "next_clip_id": 2,
   "tracks": [
     {
       "id": 0,
@@ -59,10 +62,24 @@ the first four bars, with the master's soft clip stage on:
           "pre_fader": false
         }
       ],
-      "tone": {
-        "frequency": 55.0,
-        "level": 0.5
-      },
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Bass",
+          "start": 0,
+          "length": 5160960,
+          "content": {
+            "audio": {
+              "file": "Audio/Bass.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 80640
+            }
+          }
+        }
+      ],
       "devices": [],
       "clip_type": "off",
       "console": {}
@@ -80,7 +97,66 @@ the first four bars, with the master's soft clip stage on:
       "output": null,
       "sends": [],
       "tone": null,
+      "clips": [],
       "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Keys",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 1,
+          "name": "Chord",
+          "start": 1290240,
+          "length": 1290240,
+          "content": {
+            "midi": {
+              "offset": 0,
+              "next_note_id": 1,
+              "notes": [
+                {
+                  "id": 0,
+                  "start": 0,
+                  "length": 645120,
+                  "key": 60,
+                  "velocity": 0.8,
+                  "release_velocity": 0.5,
+                  "expression": {
+                    "pitch_bend": [
+                      [0, 0.0],
+                      [322560, 2.0]
+                    ],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "devices": [
+        {
+          "id": 0,
+          "kind": {
+            "test_instrument": {
+              "level": 0.5
+            }
+          }
+        }
+      ],
       "clip_type": "off",
       "console": {}
     }
@@ -124,9 +200,10 @@ format.
   finite, since JSON has no NaN or infinity.
 
 **Same project, same bytes.** Musicable writes the fields in the order the
-tables list them, indents with two spaces, ends every line with `\n`, and
-writes each float in the shortest form that reads back as exactly the same
-number. So saving an unchanged project gives the same bytes, and a project
+tables list them, a field or an item to a line, indents with two spaces,
+ends every line with `\n`, and writes each float in the shortest form that
+reads back as exactly the same number. Arrays in arrays, such as the points
+of an expression curve, take a line each. So saving an unchanged project gives the same bytes, and a project
 in version control shows only what really changed.
 
 ## Fields
@@ -136,7 +213,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 2 for this page. |
+| `version` | whole number | The format version: 3 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -145,6 +222,7 @@ in version control shows only what really changed.
 | `next_track_id` | whole number | The id the next new track gets. It's above every track's id, and ids of deleted tracks aren't used again, so it can be higher still. |
 | `next_send_id` | whole number | The same for sends. |
 | `next_device_id` | whole number | The same for devices, on tracks and on the master. |
+| `next_clip_id` | whole number | The same for clips. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
 
@@ -199,7 +277,8 @@ change starts at must start within the position limit.
 | `armed` | boolean | Whether the track is armed for recording. Only audio and MIDI tracks can be. |
 | `output` | whole number or `null` | The id of the group track the track feeds, or `null` for the master. |
 | `sends` | array of sends | The track's sends to return tracks. |
-| `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. On a group or return track it plays along with what feeds the track. |
+| `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. It plays along with the track's clips, and on a group or return track with what feeds the track. |
+| `clips` | array of clips | What the track plays: audio clips on an audio track, MIDI clips on a MIDI track, in any order. Return and group tracks have none. |
 | `devices` | array of devices | The track's devices, in signal order. |
 | `clip_type` | string | How the track's clip stage clips: `"off"`, clean floating point that never clips; `"hard"`, which cuts everything beyond full scale; or `"soft"`, which rounds off peaks above half scale so they get ever closer to full scale without reaching it. |
 | `console` | object | Console modelling settings. It's empty until console mode arrives, and has no fields yet. |
@@ -210,6 +289,68 @@ A **test tone** is a sine wave that sounds while the transport plays:
 |---|---|---|
 | `frequency` | float | In Hz. |
 | `level` | float | Linear amplitude: 1.0 is full scale. |
+
+A **clip** plays on its track from `start` for `length`. Clips can
+overlap: overlapping clips play together, and where audio clips' fades
+overlap, they crossfade.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_clip_id`, and no other clip in the project has it. It stays with the clip. |
+| `name` | string | Any text, empty included. |
+| `start` | position | Where the clip starts in the song: 0 or after. |
+| `length` | whole number | How long it plays, in ticks: more than 0, and it ends within the position limit. |
+| `content` | object | What the clip plays, as an object with one field: `audio`, holding an audio clip, or `midi`, holding a MIDI clip. |
+
+An **audio clip** plays part of an audio file, WAV, AIFF or FLAC, at the
+file's own speed whatever the tempo, since there's no warping yet. A file
+at another sample rate than the audio device's is resampled.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `file` | string | The file's path: relative to the folder the project file is in, with `/` between names, or absolute. Not empty. |
+| `offset` | whole number | The frame of the file the clip starts playing from, up to 2⁵³ − 1. Where the clip runs on past the end of the file, it's silent. |
+| `gain` | float | Linear, like a track's `gain`. |
+| `fade_in` | whole number | How long the clip fades in from silence, from its start, in ticks: from 0 to the clip's length. |
+| `fade_out` | whole number | How long it fades out to silence, up to its end. Together with `fade_in`, at most the clip's length. |
+
+Fades are equal-power quarter sines, so two clips whose fades overlap by
+the same length crossfade at constant power.
+
+A **MIDI clip** plays notes:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `offset` | position | Where in the clip's own time it starts playing: a note at `offset` plays at the clip's start. Notes that start before it, or at or after `offset` plus the clip's length, don't play, and a note still sounding when the clip ends stops there. |
+| `next_note_id` | whole number | The id the next new note in the clip gets, above every note's id in the clip, like `next_track_id`. |
+| `notes` | array of notes | In any order. Notes on the same key can overlap: they sound as two notes. |
+
+A **note**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below the clip's `next_note_id`, and no other note in the clip has it. It stays with the note however the notes around it change. |
+| `start` | position | Where the note starts, in the clip's own time. |
+| `length` | whole number | In ticks: more than 0, and it ends within the position limit. |
+| `key` | whole number | The MIDI note number, from 0 to 127: 60 is middle C, and 69 the A at 440 Hz. |
+| `velocity` | float | How hard the note starts, from 0 to 1. |
+| `release_velocity` | float | How quickly it's let go, from 0 to 1. Keyboards that don't measure it give 0.5. |
+| `expression` | expression | How the note changes while it sounds. |
+
+A note's **expression** is the three per-note dimensions that MPE
+controllers send and that VST3 and CLAP note expression carry. Each is a
+curve: an array of points `[at, value]`, where `at` is in ticks from the
+note's start, 0 or after, and the points are in order of `at`. A point's
+value holds until the next point's, and of two points on the same tick the
+later one wins. Points at or after the note's end don't play, but they're
+kept, so a note shortened and lengthened again keeps them. A curve with no
+points leaves the instrument to start the dimension at rest.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `pitch_bend` | −120 to 120 | Semitones from the note's key. |
+| `pressure` | 0 to 1 | Pressure on the key after it went down (aftertouch). |
+| `timbre` | 0 to 1 | MPE's third dimension, usually moving a finger up and down the key (CC 74, "slide"). |
 
 A **send** feeds some of the track's signal to a return track:
 
@@ -227,11 +368,13 @@ A **device** processes the signal on its way through the channel:
 | `id` | whole number | Below `next_device_id`, and no other device in the project has it, on a track or on the master. |
 | `kind` | object | What the device is, as an object with one field: the kind's name, holding the kind's settings. |
 
-There's one kind of device so far, a test device that real ones will join:
+There are two kinds of device so far, test devices that real ones will
+join:
 
 | Kind | Settings | Meaning |
 |---|---|---|
 | `test_gain` | `gain`: float | Multiplies the signal by `gain`, linear like the fader. |
+| `test_instrument` | `level`: float | Plays the notes of the track's MIDI clips with a plain tone, added to the signal coming in: a sine at each note's pitch, bent by its pitch bend, brighter with its timbre, and louder with velocity and pressure, peaking at `level` at full velocity. On a MIDI track, the first instrument gets the notes. |
 
 So a test device that halves the signal is
 `{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`.
@@ -268,6 +411,7 @@ Signal flows from tracks to buses without loops:
 |---|---|---|
 | 1 | 2026-10-21 | The first version: tempo map, loop, metronome and tracks with test tones, clip types and console settings. |
 | 2 | 2026-10-21 | The mixer: each track's pan, solo, solo-safe, arm, output and sends, devices on tracks and on the master, the master channel, and the `"hard"` and `"soft"` clip types. Version 1 tracks open centred, feeding the master with no sends or devices, return tracks solo-safe, and the master at unity. |
+| 3 | 2026-10-21 | Clips: audio clips that play files, MIDI clips of notes with per-note expression, and the test instrument. Version 2 tracks have no clips. |
 
 ## Changing the format
 
@@ -293,8 +437,6 @@ renamed one, a new value for a field, or a new rule. To make one:
 
 ## Coming later
 
-- Clips and notes, with per-note expression (MPE) in the note from its first
-  version, so editing expression later doesn't change the format again.
 - A variation seed for each channel in `console`, so a mix with console mode
   on sounds the same every time it opens.
 - DAWproject and Ableton `.als` import and export are separate formats in

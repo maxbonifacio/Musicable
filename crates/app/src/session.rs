@@ -1,6 +1,7 @@
 //! The open project, wired to the engine.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use musicable_commands::{
@@ -8,16 +9,20 @@ use musicable_commands::{
     UnknownCommand, mixer, transport,
 };
 use musicable_engine::compile::keys;
+use musicable_engine::media::Media;
 use musicable_engine::nodes::{Gain, Metronome};
 use musicable_engine::{
     Compiled, Compiler, EngineConfig, EngineHandle, Event, Graph, Meters, NodeKey, ParamId,
-    PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_metered,
+    PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_with_media,
 };
 use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
 
-/// Builds the graph for a project, with its meters, on the compiler's thread.
-type Build = Arc<dyn Fn(&Project, &Meters) -> Graph + Send + Sync>;
+use crate::media::MediaPool;
+
+/// Builds the graph for a project, with its meters and its audio files, on
+/// the compiler's thread.
+type Build = Arc<dyn Fn(&Project, &Meters, &Media) -> Graph + Send + Sync>;
 
 /// The open project, the commands that change it, and the engine that plays
 /// it.
@@ -27,6 +32,10 @@ type Build = Arc<dyn Fn(&Project, &Meters) -> Graph + Send + Sync>;
 /// changed, so the engine plays the project as it is. Graphs compile on a
 /// thread of their own, so a slow one never holds up the window.
 /// `docs/commands.md` describes the flow.
+///
+/// Audio clips play files from the folder the project's file is in, which
+/// the session is told when it opens a project. They load as graphs build:
+/// short files whole, and longer ones streaming from disk.
 pub struct Session {
     document: Document,
     commands: Registry,
@@ -37,36 +46,82 @@ pub struct Session {
 }
 
 impl Session {
-    /// Opens `project` on the engine `handle` drives: compiles the project's
-    /// graph and sends its tempo map and loop. Key presses go through
-    /// `keymap`.
+    /// Opens `project`, whose file is in `folder`, on the engine `handle`
+    /// drives: compiles the project's graph and sends its tempo map and
+    /// loop. Key presses go through `keymap`. A project that isn't saved has
+    /// no folder.
     ///
     /// It returns before the graph is ready. Until the graph reaches the
     /// engine, what's sent to the engine waits for it: the engine plays
     /// silence, and doesn't start playing.
-    pub fn new(project: Project, keymap: Keymap, handle: EngineHandle) -> Self {
-        Self::building(project, keymap, handle, Arc::new(compile_metered))
+    pub fn new(
+        project: Project,
+        folder: Option<&Path>,
+        keymap: Keymap,
+        handle: EngineHandle,
+    ) -> Self {
+        let media = MediaPool::new(false);
+        Self::building(
+            project,
+            folder,
+            keymap,
+            handle,
+            media,
+            Arc::new(compile_with_media),
+        )
     }
 
-    /// Like [`new`](Self::new), with `build` building the project's graphs
-    /// in place of [`compile_metered`]: for tests, such as one with a node
-    /// that's slow to prepare. The session's meters read nothing.
+    /// Like [`new`](Self::new), for an engine that renders offline, faster
+    /// or slower than real time, such as the null test's: audio clips that
+    /// stream wait for the disk, where a session playing on a device would
+    /// play silence until it caught up.
+    pub fn offline(
+        project: Project,
+        folder: Option<&Path>,
+        keymap: Keymap,
+        handle: EngineHandle,
+    ) -> Self {
+        let media = MediaPool::new(true);
+        Self::building(
+            project,
+            folder,
+            keymap,
+            handle,
+            media,
+            Arc::new(compile_with_media),
+        )
+    }
+
+    /// Like [`new`](Self::new), for a project without a folder, with `build`
+    /// building the project's graphs in place of [`compile_with_media`]: for
+    /// tests, such as one with a node that's slow to prepare. The session's
+    /// meters read nothing, and audio clips are silent.
     pub fn with_compiler(
         project: Project,
         keymap: Keymap,
         handle: EngineHandle,
         build: impl Fn(&Project) -> Graph + Send + Sync + 'static,
     ) -> Self {
-        let build = move |project: &Project, _: &Meters| build(project);
-        Self::building(project, keymap, handle, Arc::new(build))
+        let build = move |project: &Project, _: &Meters, _: &Media| build(project);
+        let media = MediaPool::new(false);
+        Self::building(project, None, keymap, handle, media, Arc::new(build))
     }
 
-    fn building(project: Project, keymap: Keymap, handle: EngineHandle, build: Build) -> Self {
+    fn building(
+        project: Project,
+        folder: Option<&Path>,
+        keymap: Keymap,
+        handle: EngineHandle,
+        media: MediaPool,
+        build: Build,
+    ) -> Self {
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             handle,
             compiler: Compiler::spawn(),
             build,
+            media: Arc::new(media),
+            folder: folder.map(Path::to_owned),
             asked: 0,
             received: 0,
             floor: 0,
@@ -85,11 +140,11 @@ impl Session {
         }
     }
 
-    /// Opens `project` in place of the open one. The transport stops, and the
-    /// playhead goes to the start of the song. What was waiting for the
-    /// engine for the old project is dropped, and the undo history starts
-    /// again.
-    pub fn open(&mut self, project: Project) {
+    /// Opens `project`, whose file is in `folder`, in place of the open one.
+    /// The transport stops, and the playhead goes to the start of the song.
+    /// What was waiting for the engine for the old project is dropped, and
+    /// the undo history starts again.
+    pub fn open(&mut self, project: Project, folder: Option<&Path>) {
         // What's waiting is for the old project, and so are the values the
         // engine would send again: the new project's nodes can have the same
         // keys.
@@ -97,6 +152,8 @@ impl Session {
         self.engine.handle.forget_params();
         self.engine.gates.clear();
         self.engine.meters = Meters::new();
+        self.engine.folder = folder.map(Path::to_owned);
+        self.engine.media.forget();
         self.engine.stop();
         self.engine.locate(Beats::ZERO);
         self.engine.set_up(&project);
@@ -244,6 +301,13 @@ impl Session {
         &self.engine.meters
     }
 
+    /// What went wrong reading the project's audio files since the last
+    /// call, such as a file that's missing, for the app to show. Each file's
+    /// problem comes once.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        self.engine.media.take_problems()
+    }
+
     /// Call regularly, such as once per UI frame. Sends the graphs the
     /// compiler has finished and what the engine had no room for earlier,
     /// and drops the graphs and tempo maps the engine has replaced.
@@ -356,6 +420,11 @@ struct EngineLink {
     handle: EngineHandle,
     compiler: Compiler,
     build: Build,
+    /// The audio files the graphs play.
+    media: Arc<MediaPool>,
+    /// The folder of the project's file, which audio clips' relative paths
+    /// start from.
+    folder: Option<PathBuf>,
     /// The newest compiler job asked for.
     asked: u64,
     /// The newest job whose graph has come back.
@@ -402,10 +471,14 @@ impl EngineLink {
         self.set_gates(project, true);
         let build = self.build.clone();
         let meters = self.meters.clone();
+        let media = self.media.clone();
+        let folder = self.folder.clone();
         let project = project.clone();
-        self.asked = self
-            .compiler
-            .compile(self.handle.config(), move || build(&project, &meters));
+        self.asked = self.compiler.compile(self.handle.config(), move || {
+            // Files load here, on the compiler's thread, with the graph.
+            let media = media.media(&project, folder.as_deref());
+            build(&project, &meters, &media)
+        });
         self.asked
     }
 

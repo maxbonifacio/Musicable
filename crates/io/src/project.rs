@@ -23,7 +23,9 @@ use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use musicable_model::Project;
+use serde::Serialize;
 use serde_json::Value;
+use serde_json::ser::{Formatter, PrettyFormatter};
 
 /// The file extension for project files, without the dot.
 pub const EXTENSION: &str = "musicable";
@@ -33,7 +35,7 @@ pub const FORMAT: &str = "musicable-project";
 
 /// The format version this build writes. It reads every version up to this
 /// one.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// How far from the start of the song a position in a file can be, either
 /// way, in ticks. It's the largest whole number a double holds exactly, so a
@@ -84,9 +86,126 @@ pub fn to_string(project: &Project) -> Result<String, SaveError> {
     // Checked as loading will check it, so saving never writes a file that
     // won't load.
     file.to_project().map_err(SaveError::Invalid)?;
-    let mut text = serde_json::to_string_pretty(&file).expect("a checked file always serializes");
+    let mut text = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut text, Layout::default());
+    file.serialize(&mut serializer)
+        .expect("a checked file always serializes");
+    let mut text = String::from_utf8(text).expect("JSON is UTF-8");
     text.push('\n');
     Ok(text)
+}
+
+/// Lays files out as `serde_json`'s pretty printer does, a field or an item
+/// to a line, two spaces to a level, but for arrays in arrays, such as an
+/// expression curve's points, which take a line each.
+struct Layout {
+    pretty: PrettyFormatter<'static>,
+    /// For each array and object open, whether it's an array, and whether
+    /// it's all on one line.
+    open: Vec<(bool, bool)>,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            pretty: PrettyFormatter::with_indent(b"  "),
+            open: Vec::new(),
+        }
+    }
+}
+
+impl Layout {
+    fn inline(&self) -> bool {
+        self.open.last().is_some_and(|&(_, inline)| inline)
+    }
+
+    fn begin(&mut self, array: bool) -> bool {
+        let inline = self
+            .open
+            .last()
+            .is_some_and(|&(parent, inline)| inline || (array && parent));
+        self.open.push((array, inline));
+        inline
+    }
+
+    fn end(&mut self) -> bool {
+        self.open.pop().expect("an array or object open").1
+    }
+}
+
+impl Formatter for Layout {
+    fn begin_array<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.begin(true) {
+            true => writer.write_all(b"["),
+            false => self.pretty.begin_array(writer),
+        }
+    }
+
+    fn end_array<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.end() {
+            true => writer.write_all(b"]"),
+            false => self.pretty.end_array(writer),
+        }
+    }
+
+    fn begin_array_value<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        match self.inline() {
+            true if first => Ok(()),
+            true => writer.write_all(b", "),
+            false => self.pretty.begin_array_value(writer, first),
+        }
+    }
+
+    fn end_array_value<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.inline() {
+            true => Ok(()),
+            false => self.pretty.end_array_value(writer),
+        }
+    }
+
+    fn begin_object<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.begin(false) {
+            true => writer.write_all(b"{"),
+            false => self.pretty.begin_object(writer),
+        }
+    }
+
+    fn end_object<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.end() {
+            true => writer.write_all(b"}"),
+            false => self.pretty.end_object(writer),
+        }
+    }
+
+    fn begin_object_key<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        match self.inline() {
+            true if first => Ok(()),
+            true => writer.write_all(b", "),
+            false => self.pretty.begin_object_key(writer, first),
+        }
+    }
+
+    fn begin_object_value<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.inline() {
+            true => writer.write_all(b": "),
+            false => self.pretty.begin_object_value(writer),
+        }
+    }
+
+    fn end_object_value<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        match self.inline() {
+            true => Ok(()),
+            false => self.pretty.end_object_value(writer),
+        }
+    }
 }
 
 /// Reads a file that has been upgraded from an older version.

@@ -37,7 +37,10 @@ impl Transport {
         match command {
             TransportCommand::Play => self.state.playing = true,
             TransportCommand::Stop => self.state.playing = false,
-            TransportCommand::Locate(at) => self.state.position = self.frame_at(at),
+            TransportCommand::Locate(at) => {
+                self.state.position = self.frame_at(at);
+                self.state.jumps += 1;
+            }
             TransportCommand::Loop(region) => {
                 self.state.looping = region;
                 self.place_loop();
@@ -64,6 +67,7 @@ impl Transport {
             && self.state.position == end
         {
             self.state.position = start;
+            self.state.jumps += 1;
         }
     }
 
@@ -126,6 +130,17 @@ mod tests {
         t.advance(24_000);
         t.wrap();
         assert_eq!(t.state().position, 24_000);
+        assert_eq!(t.state().jumps, 2);
+    }
+
+    #[test]
+    fn locates_count_as_jumps_and_tempo_changes_dont() {
+        let mut t = transport();
+        t.apply(TransportCommand::Locate(Beats::new(2)));
+        assert_eq!(t.state().jumps, 1);
+        t.set_tempo(Box::new(TempoMap::new(60.0, TimeSignature::FOUR_FOUR)));
+        assert_eq!(t.state().position, 96_000);
+        assert_eq!(t.state().jumps, 1);
     }
 
     #[test]
