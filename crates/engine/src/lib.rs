@@ -1,56 +1,100 @@
-//! Audio graph engine.
+//! Real-time audio graph engine.
 //!
-//! The project is compiled into a directed acyclic graph of [`Node`]s. This
-//! crate starts with the single-threaded [`ReferenceRenderer`]: the parallel
-//! scheduler that comes next must produce sample-identical output to it, and
-//! the tests here are the harness for that.
+//! The project model is compiled into a [`Graph`] of [`Node`]s off the audio
+//! thread ([`compile()`], [`Compiler`]), prepared for the device's sample rate
+//! and block size ([`Graph::prepare`]), and handed to the running [`Engine`]
+//! through its [`EngineHandle`]. The engine swaps graphs between blocks. Each
+//! node in the new graph takes over the state of the old node with the same
+//! [`NodeKey`] ([`Node::adopt`]), and old graphs go back to the control thread
+//! to be dropped.
+//!
+//! Graphs are run by a [`Renderer`]. The [`ReferenceRenderer`] processes one
+//! node at a time in topological order: it is the oracle the parallel
+//! scheduler must match sample for sample.
+//!
+//! `docs/engine.md` describes the threads, the message flow and the real-time
+//! rules.
 
+use std::any::Any;
+
+pub mod buffer;
+pub mod compile;
+mod engine;
+pub mod event;
 pub mod graph;
-pub mod reference;
+pub mod nodes;
+mod render;
+pub mod rt;
 
-pub use graph::{Graph, GraphError, NodeId};
-pub use reference::ReferenceRenderer;
+pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
+pub use compile::{Compiler, compile};
+pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
+pub use event::{Event, NodeEvent, NodeEventKind, ParamId, TransportCommand, TransportState};
+pub use graph::{Graph, GraphError, NodeId, NodeKey, PreparedGraph};
+pub use render::{Block, ReferenceRenderer, Renderer};
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
+
+/// What a graph is prepared for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineConfig {
+    pub sample_rate: u32,
+    /// The most frames the engine renders in one block. Device callbacks can
+    /// be any length; longer ones are rendered in several blocks.
+    pub max_block: usize,
+}
 
 /// One processing unit: an instrument, an effect, a track's gain stage, a mix
-/// bus. Implementations must be real-time safe in `process`: no allocation,
-/// locking or I/O.
-pub trait Node: Send {
-    /// Mixes or transforms `inputs` into `output`. Every slice is one block
-    /// long. Buffers are mono for now; multichannel comes with the bus model.
-    fn process(&mut self, inputs: &[&[f32]], output: &mut [f32]);
+/// bus.
+///
+/// [`process`](Node::process) and [`adopt`](Node::adopt) run on the audio
+/// thread, so they must be real-time safe: no allocating or freeing memory, no
+/// locks, no blocking and no I/O. Debug builds check for allocation (see
+/// [`rt`]).
+pub trait Node: Any + Send {
+    /// How many channels the node outputs, fixed once it is in a graph.
+    fn channels(&self) -> usize {
+        2
+    }
+
+    /// Called off the audio thread when the graph is prepared, before the node
+    /// renders. Allocate here.
+    fn prepare(&mut self, _config: &EngineConfig) {}
+
+    /// Called on the audio thread when a new graph replaces the running one,
+    /// and this node replaces `previous`, the old node with the same key.
+    ///
+    /// Take over whatever keeps the output continuous, such as oscillator
+    /// phase, filter memory or a plugin instance. Swap resources with
+    /// `previous` rather than dropping them: `previous` is dropped later, on
+    /// the control thread.
+    fn adopt(&mut self, _previous: &mut dyn Node) {}
+
+    /// Renders one block into `output`, applying `ctx.events` at their
+    /// offsets.
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>);
 }
 
-/// Sums its inputs. Used for buses and the master.
-pub struct Sum;
-
-impl Node for Sum {
-    fn process(&mut self, inputs: &[&[f32]], output: &mut [f32]) {
-        output.fill(0.0);
-        for input in inputs {
-            for (o, i) in output.iter_mut().zip(input.iter()) {
-                *o += *i;
-            }
-        }
+impl dyn Node {
+    /// The node as a `T`, if it is one. Meant for [`Node::adopt`].
+    pub fn downcast_mut<T: Node>(&mut self) -> Option<&mut T> {
+        (self as &mut dyn Any).downcast_mut()
     }
 }
 
-/// Sums its inputs and applies a linear gain.
-pub struct Gain(pub f32);
-
-impl Node for Gain {
-    fn process(&mut self, inputs: &[&[f32]], output: &mut [f32]) {
-        Sum.process(inputs, output);
-        for o in output.iter_mut() {
-            *o *= self.0;
-        }
-    }
-}
-
-/// Outputs a constant value. Mostly useful in tests.
-pub struct Constant(pub f32);
-
-impl Node for Constant {
-    fn process(&mut self, _inputs: &[&[f32]], output: &mut [f32]) {
-        output.fill(self.0);
-    }
+/// What a node knows about the block it is rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessContext<'a> {
+    /// The block's length. Every buffer the node sees is this long.
+    pub frames: usize,
+    pub sample_rate: u32,
+    /// Engine time of the first frame: frames rendered since the engine
+    /// started. Unlike the transport position, it never stops or jumps.
+    pub time: u64,
+    pub transport: TransportState,
+    /// This node's events for the block, in order, each with an offset below
+    /// `frames`.
+    pub events: &'a [NodeEvent],
 }

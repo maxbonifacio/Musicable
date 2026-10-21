@@ -27,7 +27,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 |---|---|
 | `crates/model` | Pure-data project model. No audio, no UI. |
 | `crates/commands` | Command registry and keymaps. |
-| `crates/engine` | Audio graph, reference renderer, and later the parallel scheduler. |
+| `crates/engine` | Real-time audio engine: graph, reference renderer, and later the parallel scheduler. See [docs/engine.md](docs/engine.md). |
 | `crates/plugins` | CLAP, VST3 and ARA hosting. |
 | `crates/io` | Project files and audio/MIDI import and export. |
 | `crates/ui` | User interface. Talks to the model through commands. |

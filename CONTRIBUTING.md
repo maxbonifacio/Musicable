@@ -35,5 +35,23 @@ cargo test --workspace
 
 ## Real-time code
 
-Code that runs on the audio thread (`Node::process` and anything it calls)
-must not allocate, lock, block or do I/O.
+Code that runs on the audio thread (`Node::process`, `Node::adopt` and
+anything they call) must not allocate or free memory, lock, block or do I/O.
+Allocate when the node is built or in `Node::prepare`. In `adopt`, swap
+resources with the old node rather than dropping them.
+
+Debug builds check for allocations. Every binary and test crate that runs the
+engine installs the checking allocator:
+
+```rust
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
+```
+
+A render that allocates then panics, naming the first allocation. Run the
+test with `RUST_BACKTRACE=1` to see where it happened. Clippy bans locks,
+sleeping and printing in the engine crate (`crates/engine/clippy.toml`).
+
+[docs/engine.md](docs/engine.md) explains the engine's threads, timing and
+rules in full.
