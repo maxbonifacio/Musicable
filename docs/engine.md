@@ -252,7 +252,8 @@ threads were running nodes, on average, during shared blocks.
 
 **Benchmarks.** `cargo bench -p musicable-engine --bench scheduler` times
 blocks of wide, deep and project-shaped graphs, with and without filled
-channel strip slots, on 1, 2, 4, … threads up to one per physical core.
+channel strip slots, on 1, 2, 4, … threads up to one per physical core, or
+up to the number in the `MUSICABLE_BENCH_THREADS` environment variable.
 `--bench realtime` renders at a device's pace and prints tables: a 64-track
 project scheduled per node against one thread per signal path (how Ableton's
 documentation says Live does it), block times and worker CPU for different

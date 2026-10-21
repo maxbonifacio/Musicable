@@ -88,6 +88,8 @@ cargo bench -p musicable-engine --bench realtime   # tables at a device's pace
 ```
 
 Run them on a quiet machine, plugged in, and say which CPU when you report
-numbers. CI runs both on Windows when the engine changes, and puts the
+numbers. They measure up to one thread per physical core, or as many as the
+`MUSICABLE_BENCH_THREADS` environment variable says. CI runs both on Windows
+when the engine changes, with one thread per logical processor, and puts the
 numbers in the run's summary, but hosted runners are small shared machines:
 treat their numbers as rough.
