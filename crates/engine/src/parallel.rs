@@ -57,7 +57,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParallelOptions {
     /// Worker threads, besides the audio thread, which works too. The default
-    /// is one per physical core, minus one for the audio thread.
+    /// is one per physical core, minus one for the audio thread, and no more
+    /// than 24 on Windows ([`ParallelRenderer::default_threads`]).
     pub threads: usize,
     /// How long a worker with nothing to do keeps checking for the next block
     /// before it goes to sleep. Spinning burns a core; waking a sleeping
@@ -114,9 +115,12 @@ pub struct ParallelRenderer {
 }
 
 impl ParallelRenderer {
-    /// One worker per physical core, minus one for the audio thread.
+    /// One worker per physical core, minus one for the audio thread. On
+    /// Windows, no more than 24: Windows gives a process 32 real-time (MMCSS)
+    /// threads, and the audio thread, audio drivers and plugins need some of
+    /// them.
     pub fn default_threads() -> usize {
-        num_cpus::get_physical().saturating_sub(1)
+        priority::cap(num_cpus::get_physical().saturating_sub(1))
     }
 
     /// Starts the worker threads.
