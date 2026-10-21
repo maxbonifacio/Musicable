@@ -77,6 +77,80 @@ impl AudioBuffer {
             frames,
         }
     }
+
+    /// Where the samples are, for a renderer that lets several threads view
+    /// buffers at once. A buffer's samples never move, so this stays valid as
+    /// long as the buffer lives.
+    pub(crate) fn raw(&mut self) -> RawBuffer {
+        RawBuffer {
+            data: self.data.as_mut_ptr(),
+            channels: self.channels,
+            capacity: self.capacity,
+        }
+    }
+}
+
+/// An [`AudioBuffer`]'s samples, by address. The parallel renderer gives each
+/// thread views of the buffers it may use: one node's output to write, and its
+/// inputs to read. Who may use which buffer when is up to the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawBuffer {
+    data: *mut f32,
+    channels: usize,
+    capacity: usize,
+}
+
+// SAFETY: a `RawBuffer` is an address. Creating views from it is unsafe, and
+// the renderer that does so ensures no buffer is written while it is read.
+unsafe impl Send for RawBuffer {}
+// SAFETY: as above.
+unsafe impl Sync for RawBuffer {}
+
+impl RawBuffer {
+    /// Points nowhere. Not to be viewed.
+    pub(crate) const NULL: RawBuffer = RawBuffer {
+        data: std::ptr::null_mut(),
+        channels: 0,
+        capacity: 0,
+    };
+
+    /// The first `frames` frames of every channel.
+    ///
+    /// # Safety
+    ///
+    /// The buffer is alive and nothing writes to it while the view lives.
+    /// `frames` is at most its capacity.
+    pub(crate) unsafe fn view<'a>(self, frames: usize) -> AudioRef<'a> {
+        debug_assert!(frames <= self.capacity);
+        AudioRef {
+            // SAFETY: `data` points to `channels * capacity` samples, which
+            // the caller ensures are alive and not being written.
+            data: unsafe { std::slice::from_raw_parts(self.data, self.channels * self.capacity) },
+            stride: self.capacity,
+            channels: self.channels,
+            frames,
+        }
+    }
+
+    /// The first `frames` frames of every channel, writable.
+    ///
+    /// # Safety
+    ///
+    /// The buffer is alive and nothing else reads or writes it while the view
+    /// lives. `frames` is at most its capacity.
+    pub(crate) unsafe fn view_mut<'a>(self, frames: usize) -> AudioMut<'a> {
+        debug_assert!(frames <= self.capacity);
+        AudioMut {
+            // SAFETY: as in `view`, and the caller ensures this is the only
+            // access.
+            data: unsafe {
+                std::slice::from_raw_parts_mut(self.data, self.channels * self.capacity)
+            },
+            stride: self.capacity,
+            channels: self.channels,
+            frames,
+        }
+    }
 }
 
 /// A read-only view of planar audio: `channels` channels of `frames` frames.
@@ -338,6 +412,11 @@ enum InputsRepr<'a> {
         ids: &'a [NodeId],
         frames: usize,
     },
+    Shared {
+        buffers: &'a [RawBuffer],
+        ids: &'a [NodeId],
+        frames: usize,
+    },
     Views(&'a [AudioRef<'a>]),
 }
 
@@ -359,9 +438,27 @@ impl<'a> Inputs<'a> {
         })
     }
 
+    /// The outputs of nodes `ids`, in buffers other threads are using too.
+    ///
+    /// # Safety
+    ///
+    /// While the inputs live, the buffers of `ids` stay alive and nothing
+    /// writes to them. `frames` is at most their capacity.
+    pub(crate) unsafe fn shared(
+        buffers: &'a [RawBuffer],
+        ids: &'a [NodeId],
+        frames: usize,
+    ) -> Self {
+        Self(InputsRepr::Shared {
+            buffers,
+            ids,
+            frames,
+        })
+    }
+
     pub fn len(&self) -> usize {
         match self.0 {
-            InputsRepr::Graph { ids, .. } => ids.len(),
+            InputsRepr::Graph { ids, .. } | InputsRepr::Shared { ids, .. } => ids.len(),
             InputsRepr::Views(views) => views.len(),
         }
     }
@@ -377,6 +474,15 @@ impl<'a> Inputs<'a> {
                 ids,
                 frames,
             } => ids.get(index).map(|id| buffers[id.0].view(frames)),
+            InputsRepr::Shared {
+                buffers,
+                ids,
+                frames,
+            } => ids.get(index).map(|id| {
+                // SAFETY: `Inputs::shared` requires the buffers to stay
+                // alive and unwritten while these inputs live.
+                unsafe { buffers[id.0].view(frames) }
+            }),
             InputsRepr::Views(views) => views.get(index).copied(),
         }
     }

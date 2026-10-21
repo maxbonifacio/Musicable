@@ -62,3 +62,25 @@ sleeping and printing in the engine crate (`crates/engine/clippy.toml`).
 
 [docs/engine.md](docs/engine.md) explains the engine's threads, timing and
 rules in full.
+
+## Testing and measuring the scheduler
+
+The parallel renderer is tested against the reference renderer on a few
+thousand random graphs every run. To try more:
+
+```sh
+PROPTEST_CASES=100000 cargo test -p musicable-engine --lib random_graphs
+```
+
+`cargo +nightly miri test -p musicable-engine --lib parallel` checks the
+small parallel tests for data races and undefined behaviour.
+
+Benchmarks run in release builds:
+
+```sh
+cargo bench -p musicable-engine --bench scheduler  # block times, 1 to N threads
+cargo bench -p musicable-engine --bench realtime   # tables at a device's pace
+```
+
+Run them on a quiet machine, plugged in, and say which CPU when you report
+numbers.

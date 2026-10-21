@@ -22,6 +22,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 toml = "1"
+num_cpus = "1.17"
+# Dev-only: property tests and benchmarks.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

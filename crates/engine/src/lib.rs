@@ -9,8 +9,10 @@
 //! to be dropped.
 //!
 //! Graphs are run by a [`Renderer`]. The [`ReferenceRenderer`] processes one
-//! node at a time in topological order: it is the oracle the parallel
-//! scheduler must match sample for sample.
+//! node at a time in topological order: it is the oracle the
+//! [`ParallelRenderer`] must match sample for sample. The parallel renderer
+//! runs each node as soon as its inputs are done, on a pool of worker threads
+//! and the audio thread.
 //!
 //! `docs/engine.md` describes the threads, the message flow and the real-time
 //! rules.
@@ -25,6 +27,7 @@ mod engine;
 pub mod event;
 pub mod graph;
 pub mod nodes;
+mod parallel;
 mod render;
 pub mod rt;
 mod transport;
@@ -34,6 +37,7 @@ pub use compile::{Compiler, compile};
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{Event, NodeEvent, NodeEventKind, ParamId, TransportCommand, TransportState};
 pub use graph::{Graph, GraphError, NodeId, NodeKey, PreparedGraph};
+pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
 
 #[cfg(test)]
@@ -53,9 +57,11 @@ pub struct EngineConfig {
 /// bus.
 ///
 /// [`process`](Node::process) and [`adopt`](Node::adopt) run on the audio
-/// thread, so they must be real-time safe: no allocating or freeing memory, no
-/// locks, no blocking and no I/O. Debug builds check for allocation (see
-/// [`rt`]).
+/// thread, or on one of the [`ParallelRenderer`]'s real-time workers, so they
+/// must be real-time safe: no allocating or freeing memory, no locks, no
+/// blocking and no I/O. Debug builds check for allocation (see [`rt`]). A
+/// node can run on a different thread each block, though never on two at
+/// once.
 pub trait Node: Any + Send {
     /// How many channels the node outputs, fixed once it is in a graph.
     fn channels(&self) -> usize {

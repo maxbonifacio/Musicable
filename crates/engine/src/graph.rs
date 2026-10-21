@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::buffer::{AudioBuffer, AudioRef};
 use crate::engine::EVENT_CAPACITY;
+use crate::parallel::Schedule;
 use crate::{EngineConfig, Node, NodeEvent};
 
 /// A node's identity across graph rebuilds, chosen by whoever builds the
@@ -136,6 +137,7 @@ impl Graph {
             buffers.push(AudioBuffer::new(channels, config.max_block));
         }
         let order = self.topological_order();
+        let schedule = Schedule::new(&self.inputs, &self.outputs, &order);
         Ok(PreparedGraph {
             config: *config,
             event_ranges: vec![(0, 0); self.nodes.len()],
@@ -146,6 +148,7 @@ impl Graph {
             buffers,
             by_key,
             events: Vec::with_capacity(EVENT_CAPACITY),
+            schedule,
         })
     }
 
@@ -212,6 +215,8 @@ pub struct PreparedGraph {
     pub(crate) events: Vec<NodeEvent>,
     /// Where each node's events are in `events`.
     pub(crate) event_ranges: Vec<(u32, u32)>,
+    /// How the parallel renderer runs the graph.
+    pub(crate) schedule: Schedule,
 }
 
 /// A node event on its way into a graph, with its arrival order.

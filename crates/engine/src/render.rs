@@ -2,7 +2,7 @@
 
 use musicable_model::time::TempoMap;
 
-use crate::{Inputs, PreparedGraph, ProcessContext, TransportState};
+use crate::{Inputs, NodeEvent, PreparedGraph, ProcessContext, TransportState};
 
 /// One block, as a renderer sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,10 +14,26 @@ pub struct Block<'a> {
     pub tempo: &'a TempoMap,
 }
 
+impl<'a> Block<'a> {
+    /// What a node with `events` knows about this block. Every renderer
+    /// builds node contexts here, so they all give nodes the same ones.
+    pub(crate) fn context(&self, sample_rate: u32, events: &'a [NodeEvent]) -> ProcessContext<'a> {
+        ProcessContext {
+            frames: self.frames,
+            sample_rate,
+            time: self.time,
+            transport: self.transport,
+            tempo: self.tempo,
+            events,
+        }
+    }
+}
+
 /// Runs a graph for one block, on the audio thread.
 ///
-/// The engine owns one renderer. [`ReferenceRenderer`] is the default; the
-/// parallel scheduler will be another, and must match it sample for sample.
+/// The engine owns one renderer. [`ReferenceRenderer`] is the default and the
+/// oracle; [`ParallelRenderer`](crate::ParallelRenderer) runs nodes on several
+/// threads and matches it sample for sample.
 pub trait Renderer: Send {
     /// Processes every node of `graph` once, each after all of its inputs.
     /// The engine has already put each node's events for the block into
@@ -50,14 +66,7 @@ impl Renderer for ReferenceRenderer {
             // nothing is allocated or freed.
             let mut output = std::mem::take(&mut buffers[node.0]);
             let (start, end) = event_ranges[node.0];
-            let ctx = ProcessContext {
-                frames: block.frames,
-                sample_rate: config.sample_rate,
-                time: block.time,
-                transport: block.transport,
-                tempo: block.tempo,
-                events: &events[start as usize..end as usize],
-            };
+            let ctx = block.context(config.sample_rate, &events[start as usize..end as usize]);
             let inputs = Inputs::graph(buffers, &inputs[node.0], block.frames);
             nodes[node.0].process(&ctx, inputs, &mut output.view_mut(block.frames));
             buffers[node.0] = output;

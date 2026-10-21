@@ -1,6 +1,6 @@
 [package]
 name = "musicable-engine"
-description = "Real-time audio graph engine and single-threaded reference renderer."
+description = "Real-time audio graph engine, with a reference renderer and a parallel one."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,19 @@ rust-version.workspace = true
 [dependencies]
 musicable-model.workspace = true
 rtrb.workspace = true
+num_cpus.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "scheduler"
+harness = false
+
+[[bench]]
+name = "realtime"
+harness = false
