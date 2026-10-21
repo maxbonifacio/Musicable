@@ -37,11 +37,11 @@ compiler, a node and the UI, in that order.
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
 
 There is one worker per physical core, minus one for the audio thread,
-which works too. While audio plays, the main thread meets the audio thread
-and the workers only at lock-free queues and atomics, and nothing on those
-threads locks, allocates, frees or does I/O. The audio thread and the
-workers run nodes with denormals flushed to zero, all of them alike
-([engine.md](engine.md#denormals)).
+which works too, and no more than 24 on Windows. While audio plays, the
+main thread meets the audio thread and the workers only at lock-free queues
+and atomics, and nothing on those threads locks, allocates, frees or does
+I/O. The audio thread and the workers run nodes with denormals flushed to
+zero, all of them alike ([engine.md](engine.md#denormals)).
 
 The session never builds a graph itself. It hands the project to the
 engine crate's `Compiler`, which builds and prepares the graph on its own
@@ -215,13 +215,12 @@ built yet, except where it says so.
 
 - Workers get real-time priority on Windows only. On macOS they should join
   the audio device's workgroup.
-- Windows gives a process 32 real-time (MMCSS) threads, since Windows 10,
-  and other code in the process can take a few of them. The audio thread
-  and the workers take one per physical core, so on a machine with more than
-  about 28 cores the last workers to start run at normal priority, and a
-  shared block can wait on one of them. The app stops an old engine's
-  workers before a new engine's start for the same reason. Capping the
-  workers on such machines is for Tier 1.
+- Windows gives a process 32 real-time (MMCSS) threads and turns away any
+  more, which then run at normal priority, where a shared block can wait on
+  them. So the workers stop at 24 by default, leaving places for the audio
+  thread, audio drivers and plugins, and the app stops an old engine's
+  workers before a new engine's start. Plugins that take many places could
+  still leave a worker out, and workers don't check for that yet.
 - The engine plays in stereo. A device with more channels gets silence on
   the rest, and the cue output, with the metronome, plays through the same
   two channels as the master. Routing it to outputs of its own, such as
