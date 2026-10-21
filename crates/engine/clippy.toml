@@ -1,0 +1,19 @@
+# The engine runs on the audio thread, so it must not lock, sleep or print.
+# Rust's locks can't be caught at run time the way allocations are (see
+# src/rt.rs), so they're banned from the crate outright.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "no locks in the engine: use atomics or rtrb queues" },
+    { path = "std::sync::RwLock", reason = "no locks in the engine: use atomics or rtrb queues" },
+    { path = "std::sync::Condvar", reason = "no blocking in the engine" },
+    { path = "std::sync::Barrier", reason = "no blocking in the engine" },
+]
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "no blocking in the engine" },
+]
+disallowed-macros = [
+    { path = "std::print", reason = "no I/O in the engine: report through Stats" },
+    { path = "std::println", reason = "no I/O in the engine: report through Stats" },
+    { path = "std::eprint", reason = "no I/O in the engine: report through Stats" },
+    { path = "std::eprintln", reason = "no I/O in the engine: report through Stats" },
+    { path = "std::dbg", reason = "no I/O in the engine" },
+]

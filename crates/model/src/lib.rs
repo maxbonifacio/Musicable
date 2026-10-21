@@ -16,6 +16,16 @@ pub enum TrackKind {
     Group,
 }
 
+/// A test oscillator: Tier 0's only sound source, standing in for clips and
+/// instruments.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TestTone {
+    /// In Hz.
+    pub frequency: f64,
+    /// Linear amplitude, 1.0 = full scale.
+    pub level: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub id: TrackId,
@@ -24,6 +34,7 @@ pub struct Track {
     /// Linear gain, 1.0 = unity.
     pub gain: f32,
     pub muted: bool,
+    pub tone: Option<TestTone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,6 +75,7 @@ impl Project {
             kind,
             gain: 1.0,
             muted: false,
+            tone: None,
         });
         id
     }
