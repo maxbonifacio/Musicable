@@ -14,8 +14,9 @@ recording, editing and mixing. Live performance (Session View) comes later.
 - **Efficient multithreading.** The engine schedules work per plugin node, not
   per track, and runs tracks that aren't monitored live ahead of time with
   larger buffers.
-- **Remappable hotkeys.** Every action is a named command, and keymaps are
-  plain data you can edit, share and swap.
+- **Remappable hotkeys.** Every action is a named command, and its keys can
+  be changed in the app. Keymaps are plain data you can edit, share and
+  swap.
 - **ARA 2 plugin support** for tools like Melodyne.
 - CLAP and VST3 hosting, and plugin sandboxing later.
 - A familiar layout and default shortcuts for Ableton users. This is a

@@ -18,10 +18,11 @@ mod document;
 pub mod file;
 mod key;
 mod keymap;
+pub mod options;
 pub mod transport;
+pub mod view;
 
 pub use document::{Committed, Document, Edit, Transaction};
-pub use file::Request;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
 pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
 
@@ -63,6 +64,24 @@ pub struct Command {
     pub id: CommandId,
     /// Human-readable title shown in menus and the command palette.
     pub title: String,
+}
+
+/// Something only the app can do, which a command asks for: commands can't
+/// show a dialog or a window, or close one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    New,
+    NewDemo,
+    Open,
+    Save,
+    SaveAs,
+    Quit,
+    /// Show the command palette.
+    CommandPalette,
+    /// Show the audio settings.
+    AudioSettings,
+    /// Show the keyboard shortcuts, where keys are changed.
+    KeyboardShortcuts,
 }
 
 /// What a running command can reach.
@@ -147,6 +166,16 @@ impl Registry {
 impl fmt::Debug for Registry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// Registers commands that each ask the app for something.
+fn register_requests(registry: &mut Registry, commands: &[(CommandId, &str, Request)]) {
+    for (id, title, request) in commands {
+        let request = *request;
+        registry.register(id.clone(), *title, move |ctx: &mut Context<'_>| {
+            ctx.requests.push(request);
+        });
     }
 }
 

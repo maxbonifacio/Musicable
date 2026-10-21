@@ -92,6 +92,24 @@ impl Output {
         (output, handle)
     }
 
+    /// An output that never opens a device, for the app's tests: the engine
+    /// waits for one.
+    #[cfg(test)]
+    pub(crate) fn none() -> (Self, EngineHandle) {
+        let (engine, handle, monitor) = crate::engine(NO_DEVICE);
+        let output = Self {
+            request: StreamRequest::default(),
+            stream: None,
+            idle: Some(engine),
+            monitor,
+            problem: Some("the tests play through no device".to_owned()),
+            retry_at: None,
+            meter: LoadMeter::default(),
+            dropouts_from: 0,
+        };
+        (output, handle)
+    }
+
     /// Call once per frame. Notices a stream that ended by itself, tries the
     /// device again when it's time, and updates the CPU meter. `notices`
     /// says what happened.

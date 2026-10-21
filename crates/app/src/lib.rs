@@ -4,6 +4,7 @@
 
 mod app;
 mod audio_window;
+mod keymap_file;
 pub mod null_test;
 mod output;
 mod session;
@@ -14,7 +15,7 @@ pub use output::Output;
 pub use session::Session;
 pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
 
-use musicable_commands::{Registry, file, transport};
+use musicable_commands::{Registry, file, options, transport, view};
 use musicable_engine::{
     Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelOptions, ParallelRenderer,
 };
@@ -25,6 +26,8 @@ pub fn commands() -> Registry {
     let mut registry = Registry::new();
     file::register(&mut registry);
     transport::register(&mut registry);
+    options::register(&mut registry);
+    view::register(&mut registry);
     registry
 }
 
@@ -76,4 +79,14 @@ pub fn demo_project() -> Project {
     }
     project.tracks[5].muted = true;
     project
+}
+
+/// `text` starting with a capital letter, for errors written to follow a
+/// colon.
+fn capital(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }

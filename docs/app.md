@@ -2,9 +2,10 @@
 
 `musicable` opens a window with the app shell from the Tier 0 plan: just
 enough to run the Tier 0 demo. It plays a project through the audio device
-with the parallel scheduler, runs the transport and file commands from keys
-and menus, and opens and saves project files. There's no editing yet beyond
-the transport, the loop and the tempo.
+with the parallel scheduler, runs the transport and file commands from keys,
+menus and the command palette, and opens and saves project files. Every
+command's keys can be changed in the app. There's no editing yet beyond the
+transport, the loop and the tempo.
 
 ## Running it
 
@@ -95,10 +96,10 @@ That's what `ParallelOptions::inline_below` is for
 
 ## The window
 
-- **The menu bar** lists the commands with their keys, under File and
-  Transport, and Options. A command in an area with no menu yet gets a menu
-  named after its area, so every command can be reached. On the right are
-  the CPU meter and the dropout counter.
+- **The menu bar** lists the commands with their keys, under File,
+  Transport, View and Options. A command in an area with no menu yet gets a
+  menu named after its area, before View, so every command can be reached.
+  On the right are the CPU meter and the dropout counter.
 - **The transport bar** has go to start, play, stop, loop, the metronome, the
   tempo, the time signature, and the playhead in bars, beats and sixteenths
   and in minutes and seconds. Hovering a button shows its command and keys,
@@ -114,8 +115,64 @@ That's what `ParallelOptions::inline_below` is for
   measures it (click it for the audio settings), and the project's name,
   with "(not saved)" while it has changes. The window's title marks them
   with a `*`.
-- **Options > Keyboard Shortcuts** lists every command and its keys, says
-  where your keymap file goes, and creates or reloads it.
+- **View > Command Palette** (Ctrl+Shift+P) finds any command by name or
+  keys and runs it ([below](#the-command-palette)).
+- **Options > Keyboard Shortcuts** (Ctrl+K) lists every command with its
+  keys, and changes them ([below](#changing-keys)).
+
+## The command palette
+
+The command palette lists every command as "Area: Title", with its keys.
+Typing narrows the list:
+
+- Every word typed has to match. A word matches best at the start of a word
+  of the name ("tog", "loop"), then inside one, or as the initials of its
+  words ("tl" is Toggle Loop), then in the command's id.
+- Keys find their command: "ctrl+l" lists Toggle Loop first, and "ctrl+shift"
+  lists every command with a Ctrl+Shift chord while you type the rest.
+- The commands run from the palette lately come first among those that
+  match as well.
+
+Up and Down choose a command, and Enter or a click runs it and closes the
+palette. Escape or a click outside closes it. While it's open, keys type
+into it and run no commands.
+
+## Changing keys
+
+Options > Keyboard Shortcuts lists the commands by menu, each with its keys.
+The search field at the top finds commands the way the command palette
+does, by name or by keys.
+
+- **Click a key** to change it, or **+** to add one. The window waits for
+  the keys, and any keys can be pressed, Escape, Enter and Tab included;
+  they run nothing while it waits. Then it says what the keys do now:
+  - "isn't used yet": **Assign** (or Enter) gives them to the command.
+  - "runs *another command* now": **Reassign** (or Enter) takes them from
+    that command.
+  - "runs *this command* already": there's nothing to do.
+
+  **Try Other Keys** waits for keys again. **Cancel**, Escape, or a click
+  anywhere else stops without changing anything.
+- **×** next to a key removes it.
+- **Reset** shows on a command whose keys aren't the default ones, and gives
+  it its default keys back. If another command has one of them now, the
+  tooltip says so, and Reset takes it.
+
+Every change is saved to your keymap file at once
+([below](#settings-and-your-keymap)), as the changes to the default keymap.
+Under the list:
+
+- **Mistakes in your keymap file**, as [commands.md](commands.md#mistakes)
+  describes. A chord that two lines claim runs none of their commands, and
+  gets a button for each to give it to. Keys for commands this version
+  doesn't have can be removed.
+- **Import...** uses the keys in another keymap file in place of yours. What
+  it gets wrong is left out, and listed.
+- **Export...** saves your keys to a keymap file, to share or keep.
+- **Reset All** gives every command its default keys again.
+- **Reload** reads your keymap file again after you edit it, and **Create
+  It** creates it when there's none yet, to edit.
+- Escape closes the window, once it isn't waiting for keys.
 
 ## Keys
 
@@ -131,6 +188,10 @@ engine any other way.
 - Holding a key down runs its command once. The repeats the system sends are
   swallowed.
 - While the app asks whether to save changes, keys go to that question.
+- While the command palette is open, keys go to it, and run no commands.
+- While the keyboard shortcuts window waits for the keys to give a command,
+  every key press goes to it, Escape and Enter too, and nothing else sees
+  it. `KeyPresses::capture` takes it there instead of `KeyPresses::take`.
 
 ### Keyboard layouts
 
@@ -189,8 +250,24 @@ is handy for testing.
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
 describes. The app reads it at startup and when you click Reload in
 Options > Keyboard Shortcuts, which shows any mistakes in it. A file that
-can't be used leaves the default keymap, and says why. Create It writes a
+can't be used leaves the default keymap, and says why. The app saves every
+change of keys made in the window to the file at once. Create It writes a
 file with no changes in it yet, just the comment that explains it.
+
+Before writing over your keymap file, the app copies it to
+`keymap.backup.toml` in the same folder when the write would lose something:
+
+- When the file has mistakes, or can't be read at all, the first change made
+  in the window writes a new file, and the old one becomes the backup. The
+  window says so.
+- Reset All and Import replace all your changes at once, so the file with
+  your keys from before becomes the backup. Importing the backup brings them
+  back.
+
+Single changes to a file without mistakes make no backup: there's nothing to
+lose. Without a config folder, changes last until the app closes. If the
+backup or the file can't be written, the window says so, and the keys you
+set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
 ones:
@@ -255,8 +332,14 @@ says what the stream got.
   carries out the `Action`s it hands back. Its tests drive the shell with
   `egui_kittest`.
 - `crates/app` has the eframe app (`App`), which holds the `Session`, the
-  `Output` and the audio settings window, and the binary. Debug builds
-  install the engine's allocation checker, as the tests do.
+  `Output`, the audio settings window and the user's keymap file
+  (`UserKeymap`), and the binary. Debug builds install the engine's
+  allocation checker, as the tests do.
+- [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
+  drives the whole window with `egui_kittest`, handing it key presses as
+  eframe does, without an audio device. It gives every command new keys in
+  the keyboard shortcuts window, finds every command in the command palette
+  with them, and starts the app again to check they were saved.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
   tempo field, and a new engine taking over. The demo project there must equal
@@ -271,8 +354,8 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 ## Not done yet
 
 - Undo and redo, and editing tracks.
-- Changing keys from the app. For now, edit the keymap file and reload it.
-- The command palette.
+- Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
+  be a keymap file to import.
 - A macOS default keymap with Cmd.
 - Following the default output when it changes.
 - An icon, and opening `.musicable` files from the file manager.
