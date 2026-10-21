@@ -83,6 +83,31 @@ that applies last, and sends it again after each swap. **Every parameter
 change goes through `send` or `send_at`**, even when it's also written to the
 model. Values sent again are never counted as late.
 
+## Channel strips
+
+`compile()` builds every track as a channel strip, with built-in slots where
+native stages will sit: clip types in Tier 1 and console modelling in Tier 2.
+
+```text
+source → [before device 0] → device 0 → … → [pre-fader] → fader → [post-fader] → [bus feed] → bus
+```
+
+- The slots (`compile::Slot`) belong to the channel, not to its device list.
+  Tracks have no devices yet, so only the pre-fader, post-fader and bus feed
+  slots occur.
+- An empty slot adds no node, so a strip with every slot empty is exactly the
+  graph it was before slots existed. Every slot is empty in Tier 0. Filling
+  one, such as turning a clip type on, is an ordinary recompile and swap.
+- A stage's key comes from its track id and slot (`compile::keys::track_slot`),
+  so it keeps its state across swaps like any other node. Moved to another
+  slot, it starts fresh.
+- Every bus, including the master, sums through the `compile::Summing` kind
+  the compiler picks. Tier 0 only has `Summing::Plain`. Console mode can add a
+  modelled one.
+- The model has the fields from the start, so project files carry them from
+  format version 1: `Track::clip_type` (only `Off` so far) and
+  `Track::console`, a placeholder.
+
 ## Real-time rules
 
 `Node::process` and `Node::adopt` run on the audio thread, and so does
@@ -167,3 +192,5 @@ system gets reworked with plugin hosting.
 - Nodes sum their inputs in connection order, whatever the schedule, so the
   parallel renderer should match `ReferenceRenderer` bit for bit. Test it
   that way.
+- Benchmark graphs with filled channel strip slots too: they give the
+  scheduler more, smaller nodes per channel.
