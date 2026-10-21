@@ -1,15 +1,20 @@
-//! The app shell: the menu bar, the transport bar, the mixer, a status bar
-//! and the keyboard shortcuts window.
+//! The app shell: the menu bar, the transport bar, the mixer and a status
+//! bar, with the keyboard shortcuts window and the command palette.
 
 use std::path::Path;
 
-use egui::{Align, Button, Color32, DragValue, Grid, Layout, RichText, ScrollArea, Ui};
+use egui::{Align, Button, Color32, DragValue, Layout, RichText, Ui};
 use musicable_commands::mixer::Change;
-use musicable_commands::{CommandId, Keymap, Registry, edit, file, transport};
+use musicable_commands::{
+    Command, CommandId, KeyChord, Keymap, Problem, Registry, edit, options, transport,
+};
 use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
 
+use crate::menus::menus;
 use crate::mixer::{self, Levels};
+use crate::palette::Palette;
+use crate::shortcuts::Shortcuts;
 use crate::widgets::{Icon, clock, icon_button, meter, position};
 
 /// What the shell shows. The app fills one in for each frame.
@@ -21,6 +26,9 @@ pub struct View<'a> {
     pub modified: bool,
     pub commands: &'a Registry,
     pub keymap: &'a Keymap,
+    /// The keymap Musicable starts from, which the user's keymap file
+    /// changes.
+    pub default_keymap: &'a Keymap,
     /// The name of the change Undo would take back, such as "Set Tempo", for
     /// the Edit menu. `None` when there's nothing to undo.
     pub undo: Option<&'a str>,
@@ -30,10 +38,8 @@ pub struct View<'a> {
     /// The meters' readings, as the engine last measured them.
     pub levels: &'a Levels,
     pub audio: Audio<'a>,
-    /// Where the user's keymap file goes, if Musicable found a place for it.
-    pub keymap_file: Option<&'a Path>,
-    /// What was wrong with the keymap file when it was last read.
-    pub keymap_problems: &'a [String],
+    /// The user's keymap file.
+    pub keymap_file: KeymapStatus<'a>,
     /// Errors and notices for the user, oldest first.
     pub messages: &'a [String],
 }
@@ -65,6 +71,19 @@ pub struct Audio<'a> {
     pub details: &'a str,
 }
 
+/// The user's keymap file, as the keyboard shortcuts window shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct KeymapStatus<'a> {
+    /// Where the file goes, if Musicable found a place for it.
+    pub path: Option<&'a Path>,
+    /// What was wrong with its lines when it was last read.
+    pub problems: &'a [Problem],
+    /// Why it couldn't be used at all, if it couldn't.
+    pub error: Option<&'a str>,
+    /// How the last change to the keys went, or the last import or export.
+    pub notice: Option<&'a str>,
+}
+
 /// Something the user asked for, for the app to carry out.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -82,8 +101,15 @@ pub enum Action {
     Mixer(Change),
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
-    /// Show the audio settings.
-    AudioSettings,
+    /// Use this keymap from now on, and save how it differs from the default
+    /// keymap: the user changed keys in the keyboard shortcuts window.
+    SetKeymap(Keymap),
+    /// Give every command its default keys again.
+    ResetKeymap,
+    /// Ask for a keymap file, and use its keys in place of the user's.
+    ImportKeymap,
+    /// Ask where to save a copy of the user's keymap file, and save it there.
+    ExportKeymap,
     /// Read the keymap file again.
     ReloadKeymap,
     /// Create the keymap file, with no changes in it yet.
@@ -102,47 +128,11 @@ pub enum SaveChoice {
     Cancel,
 }
 
-/// The menus that list commands, with their commands in order. `None` is a
-/// separator. Commands missing from a menu go at its end, and an area of
-/// commands without a menu gets one, so every command can be reached.
-const MENUS: [(&str, &str, &[Option<CommandId>]); 3] = [
-    (
-        "File",
-        "file",
-        &[
-            Some(file::NEW),
-            Some(file::NEW_DEMO),
-            Some(file::OPEN),
-            None,
-            Some(file::SAVE),
-            Some(file::SAVE_AS),
-            None,
-            Some(file::QUIT),
-        ],
-    ),
-    ("Edit", "edit", &[Some(edit::UNDO), Some(edit::REDO)]),
-    (
-        "Transport",
-        "transport",
-        &[
-            Some(transport::PLAY_STOP),
-            Some(transport::PLAY),
-            Some(transport::STOP),
-            Some(transport::GO_TO_START),
-            None,
-            Some(transport::TOGGLE_LOOP),
-            Some(transport::TOGGLE_METRONOME),
-            None,
-            Some(transport::TEMPO_UP),
-            Some(transport::TEMPO_DOWN),
-        ],
-    ),
-];
-
-/// The shell's own state: which of its windows are open.
+/// The shell's own state: its windows and what they show.
 #[derive(Debug, Default)]
 pub struct Shell {
-    shortcuts_open: bool,
+    shortcuts: Shortcuts,
+    palette: Palette,
 }
 
 impl Shell {
@@ -155,7 +145,7 @@ impl Shell {
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            self.menu_bar(ui, view, &mut actions);
+            menu_bar(ui, view, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
             ui.add_space(4.0);
@@ -168,138 +158,69 @@ impl Shell {
         egui::CentralPanel::default().show(ui, |ui| {
             mixer::show(ui, view.project, view.levels, &mut actions);
         });
-        self.shortcuts_window(ui.ctx(), view, &mut actions);
+        // The palette goes first, so the keys it takes while it's open, such
+        // as Escape, don't reach the window under it.
+        self.palette.show(ui.ctx(), view, &mut actions);
+        self.shortcuts.show(ui.ctx(), view, &mut actions);
         actions
     }
 
-    fn menu_bar(&mut self, ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            for (title, area, items) in MENUS {
-                ui.menu_button(title, |ui| {
-                    for item in items {
-                        match item {
-                            Some(id) => command_button(ui, view, id, actions),
-                            None => {
-                                ui.separator();
-                            }
-                        }
-                    }
-                    let rest: Vec<_> = view
-                        .commands
-                        .iter()
-                        .filter(|c| area_of(&c.id) == area && !items.contains(&Some(c.id.clone())))
-                        .collect();
-                    if !rest.is_empty() {
-                        ui.separator();
-                        for command in rest {
-                            command_button(ui, view, &command.id, actions);
-                        }
-                    }
-                });
-            }
-            let mut others: Vec<&str> = view
-                .commands
-                .iter()
-                .map(|c| area_of(&c.id))
-                .filter(|area| MENUS.iter().all(|(_, a, _)| a != area))
-                .collect();
-            others.dedup();
-            for area in others {
-                ui.menu_button(capitalized(area), |ui| {
-                    for command in view.commands.iter().filter(|c| area_of(&c.id) == area) {
-                        command_button(ui, view, &command.id, actions);
-                    }
-                });
-            }
-            ui.menu_button("Options", |ui| {
-                if ui.button("Audio Settings...").clicked() {
-                    actions.push(Action::AudioSettings);
-                }
-                if ui.button("Keyboard Shortcuts...").clicked() {
-                    self.shortcuts_open = true;
-                }
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                meters(ui, &view.audio, actions);
-            });
-        });
+    /// Shows the command palette, which finds any command and runs it.
+    pub fn open_palette(&mut self) {
+        self.shortcuts.cancel();
+        self.palette.open();
     }
 
-    fn shortcuts_window(
-        &mut self,
-        ctx: &egui::Context,
-        view: &View<'_>,
-        actions: &mut Vec<Action>,
-    ) {
-        egui::Window::new("Keyboard Shortcuts")
-            .open(&mut self.shortcuts_open)
-            .default_width(480.0)
-            .show(ctx, |ui| {
-                ui.label(
-                    "Every shortcut runs a command. To change one, edit your keymap file, then \
-                     reload it here.",
-                );
-                ui.add_space(6.0);
-                ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    Grid::new("shortcuts")
-                        .num_columns(3)
-                        .striped(true)
-                        .spacing([18.0, 4.0])
-                        .show(ui, |ui| {
-                            for command in view.commands.iter() {
-                                ui.label(&command.title);
-                                ui.label(
-                                    RichText::new(chords(view.keymap, &command.id)).monospace(),
-                                );
-                                ui.label(RichText::new(command.id.as_str()).weak().small());
-                                ui.end_row();
-                            }
-                        });
-                });
-                ui.separator();
-                match view.keymap_file {
-                    Some(path) => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Your keymap file:");
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(path.display().to_string()).monospace(),
-                                )
-                                .selectable(true),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            if path.exists() {
-                                if ui.button("Reload").clicked() {
-                                    actions.push(Action::ReloadKeymap);
-                                }
-                            } else if ui
-                                .button("Create It")
-                                .on_hover_text("Creates the file with no changes in it yet")
-                                .clicked()
-                            {
-                                actions.push(Action::CreateKeymap);
-                            }
-                        });
+    /// Shows the keyboard shortcuts window, where keys are changed.
+    pub fn open_shortcuts(&mut self) {
+        self.shortcuts.open();
+    }
+
+    /// Whether the keyboard shortcuts window waits for the keys to give a
+    /// command. The next chord pressed goes to [`captured`](Self::captured)
+    /// then, not to the keymap: [`KeyPresses::capture`](crate::KeyPresses::capture)
+    /// takes it.
+    pub fn capturing(&self) -> bool {
+        self.shortcuts.capturing()
+    }
+
+    /// The chord pressed while the keyboard shortcuts window waited for one.
+    pub fn captured(&mut self, chord: KeyChord) {
+        self.shortcuts.captured(chord);
+    }
+
+    /// Whether the shell asks something that keys answer, or has the command
+    /// palette open. Keys don't run commands while it does.
+    pub fn asking(&self) -> bool {
+        self.palette.is_open() || self.shortcuts.asking()
+    }
+}
+
+/// The menus, with every command and its keys, and the meters on the right.
+fn menu_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+    egui::MenuBar::new().ui(ui, |ui| {
+        for menu in menus(view.commands) {
+            ui.menu_button(menu.title.as_str(), |ui| {
+                for item in &menu.items {
+                    match item {
+                        Some(command) => command_button(ui, view, command, actions),
+                        None => {
+                            ui.separator();
+                        }
                     }
-                    None => {
-                        ui.label("Musicable found no folder for your keymap file.");
-                    }
-                }
-                for problem in view.keymap_problems {
-                    ui.label(RichText::new(problem).color(ui.visuals().warn_fg_color));
                 }
             });
-    }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            meters(ui, &view.audio, actions);
+        });
+    });
 }
 
 /// A menu entry for a command, showing its keys. Undo and Redo say what
 /// they'd change, and are greyed out when there's nothing to change.
-fn command_button(ui: &mut Ui, view: &View<'_>, id: &CommandId, actions: &mut Vec<Action>) {
-    let Some(command) = view.commands.get(id) else {
-        return;
-    };
-    let step = match id {
+fn command_button(ui: &mut Ui, view: &View<'_>, command: &Command, actions: &mut Vec<Action>) {
+    let step = match &command.id {
         id if *id == edit::UNDO => Some(view.undo),
         id if *id == edit::REDO => Some(view.redo),
         _ => None,
@@ -309,9 +230,9 @@ fn command_button(ui: &mut Ui, view: &View<'_>, id: &CommandId, actions: &mut Ve
         Some(None) => (command.title.clone(), false),
         None => (command.title.clone(), true),
     };
-    let button = Button::new(title).shortcut_text(chords(view.keymap, id));
+    let button = with_keys(Button::new(title), view.keymap, &command.id);
     if ui.add_enabled(enabled, button).clicked() {
-        actions.push(Action::Run(id.clone()));
+        actions.push(Action::Run(command.id.clone()));
     }
 }
 
@@ -460,7 +381,7 @@ fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                 .add(Button::new(summary).frame(false))
                 .on_hover_text("Audio settings");
             if device.clicked() {
-                actions.push(Action::AudioSettings);
+                actions.push(Action::Run(options::AUDIO_SETTINGS));
             }
         });
     });
@@ -507,102 +428,28 @@ fn hint(view: &View<'_>, id: &CommandId) -> String {
 }
 
 /// The chords that run `id`, as keymap files write them.
-fn chords(keymap: &Keymap, id: &CommandId) -> String {
+pub(crate) fn chords(keymap: &Keymap, id: &CommandId) -> String {
     let chords: Vec<_> = keymap.chords_for(id).map(|c| c.to_string()).collect();
     chords.join(", ")
 }
 
-/// The area a command belongs to: `transport` for `transport.play`.
-fn area_of(id: &CommandId) -> &str {
-    id.as_str().split('.').next().unwrap_or_default()
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+/// `button` with the chords that run `id` at its right, if any do.
+pub(crate) fn with_keys<'a>(button: Button<'a>, keymap: &Keymap, id: &CommandId) -> Button<'a> {
+    match chords(keymap, id) {
+        keys if keys.is_empty() => button,
+        keys => button.shortcut_text(keys),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use egui::accesskit::Role;
-    use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::track;
+    use musicable_commands::{file, track, view};
     use musicable_model::{TrackId, TrackKind};
 
     use super::*;
-
-    /// What the shell shows in the tests, and what it hands back.
-    struct State {
-        shell: Shell,
-        project: Project,
-        commands: Registry,
-        keymap: Keymap,
-        undo: Option<&'static str>,
-        redo: Option<&'static str>,
-        levels: Levels,
-        actions: Vec<Action>,
-    }
-
-    fn harness(project: Project) -> Harness<'static, State> {
-        harness_with(project, |_| ())
-    }
-
-    fn harness_with(project: Project, set_up: impl FnOnce(&mut State)) -> Harness<'static, State> {
-        let mut commands = Registry::new();
-        file::register(&mut commands);
-        edit::register(&mut commands);
-        transport::register(&mut commands);
-        track::register(&mut commands);
-        let mut state = State {
-            shell: Shell::new(),
-            project,
-            commands,
-            keymap: Keymap::default_keymap(),
-            undo: None,
-            redo: None,
-            levels: Levels::default(),
-            actions: Vec::new(),
-        };
-        set_up(&mut state);
-        Harness::builder()
-            .with_size([1100.0, 640.0])
-            .build_ui_state(
-                |ui, state: &mut State| {
-                    let view = View {
-                        project: &state.project,
-                        name: "Untitled",
-                        modified: false,
-                        commands: &state.commands,
-                        keymap: &state.keymap,
-                        undo: state.undo,
-                        redo: state.redo,
-                        playback: Playback {
-                            playing: false,
-                            playhead: Beats::ZERO,
-                            seconds: 0.0,
-                        },
-                        levels: &state.levels,
-                        audio: Audio {
-                            summary: "48 kHz · 128 samples · 5.3 ms",
-                            running: true,
-                            load: Some(0.25),
-                            dropouts: 0,
-                            details: "",
-                        },
-                        keymap_file: None,
-                        keymap_problems: &[],
-                        messages: &[],
-                    };
-                    let actions = state.shell.show(ui, &view);
-                    state.actions.extend(actions);
-                },
-                state,
-            )
-    }
+    use crate::testing::harness;
 
     #[test]
     fn the_transport_bar_runs_commands() {
@@ -643,8 +490,42 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_open_from_commands() {
+        let mut harness = harness(Project::new());
+        let menu_bar: Vec<_> = ["File", "Edit", "Transport", "View", "Options"]
+            .into_iter()
+            .map(|title| harness.query_by_label(title).is_some())
+            .collect();
+        assert_eq!(menu_bar, [true; 5]);
+        harness.get_by_label("Options").click();
+        harness.run();
+        harness.get_by_label("Keyboard Shortcuts... Ctrl+K").click();
+        harness.run();
+        harness.get_by_label("View").click();
+        harness.run();
+        harness
+            .get_by_label("Command Palette... Ctrl+Shift+P")
+            .click();
+        harness.run();
+        // The device in the status bar opens the audio settings.
+        harness
+            .get_by_label("48 kHz · 128 samples · 5.3 ms")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [
+                Action::Run(options::KEYBOARD_SHORTCUTS),
+                Action::Run(view::COMMAND_PALETTE),
+                Action::Run(options::AUDIO_SETTINGS),
+            ]
+        );
+    }
+
+    #[test]
     fn the_edit_menu_says_what_undo_and_redo_change() {
-        let mut harness = harness_with(Project::new(), |state| state.undo = Some("Set Tempo"));
+        let mut harness = harness(Project::new());
+        harness.state_mut().undo = Some("Set Tempo");
         harness.get_by_label("Edit").click();
         harness.run();
         harness.get_by_label("Undo Set Tempo Ctrl+Z").click();
@@ -714,12 +595,5 @@ mod tests {
             harness.state().actions,
             [Action::Run(track::NEW_AUDIO_TRACK)]
         );
-    }
-
-    #[test]
-    fn areas_get_menus() {
-        assert_eq!(area_of(&transport::PLAY), "transport");
-        assert_eq!(capitalized("transport"), "Transport");
-        assert_eq!(capitalized(""), "");
     }
 }

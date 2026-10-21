@@ -1,20 +1,22 @@
 //! The window: the UI crate's shell, wired to the session, the audio device
 //! and the project's file.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use musicable_commands::{Keymap, KeymapFile, KeymapFileError, Request};
-use musicable_engine::{Meter, Meters};
+use musicable_commands::Request;
+use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_model::Project;
-use musicable_ui::{Action, Audio, KeyPresses, Level, Levels, Playback, SaveChoice, Shell, View};
+use musicable_ui::{
+    Action, Audio, KeyPresses, KeymapStatus, Level, Levels, Playback, SaveChoice, Shell, View,
+};
 
 use crate::audio_window::AudioWindow;
+use crate::keymap_file::UserKeymap;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
-use crate::{Output, Session};
+use crate::{Output, Session, capital};
 
 /// How often the window redraws while the transport plays or the mixer's
 /// meters move, and while neither does, to update the CPU meter.
@@ -43,8 +45,8 @@ pub struct App {
     /// Where the settings and the user's keymap live.
     config_dir: Option<PathBuf>,
     settings: Settings,
-    /// What was wrong with the keymap file when it was last read.
-    keymap_problems: Vec<String>,
+    /// The user's keymap file, which every change of keys is saved to.
+    keymap_file: UserKeymap,
     /// What waits for the user to say whether to save their changes first.
     pending: Option<Request>,
     /// Set once the user has said what to do with their changes, so the
@@ -69,14 +71,28 @@ impl App {
             }),
             None => Settings::default(),
         };
-        let keymap_path = config_dir.as_ref().map(|dir| dir.join(KEYMAP_FILE));
-        let (keymap, keymap_problems) = read_keymap(keymap_path.as_deref());
-        if !keymap_problems.is_empty() {
+        let (output, handle) = Output::open(settings.audio.request(), &mut messages);
+        Self::with_output(path, config_dir, settings, output, handle, messages)
+    }
+
+    /// Opens the project at `path`, or a new project, playing through
+    /// `output`, whose engine `handle` drives. The settings and the user's
+    /// keymap live in `config_dir`.
+    fn with_output(
+        path: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
+        settings: Settings,
+        output: Output,
+        handle: EngineHandle,
+        mut messages: Vec<String>,
+    ) -> Self {
+        let (keymap_file, keymap) =
+            UserKeymap::read(config_dir.as_ref().map(|dir| dir.join(KEYMAP_FILE)));
+        if !keymap_file.problems().is_empty() || keymap_file.error().is_some() {
             messages.push(
                 "Your keymap file has problems: see Options > Keyboard Shortcuts.".to_owned(),
             );
         }
-        let (output, handle) = Output::open(settings.audio.request(), &mut messages);
         let (project, path) = match path {
             Some(path) => match project::load(&path) {
                 Ok(project) => (project, Some(path)),
@@ -100,7 +116,7 @@ impl App {
             levels: Levels::default(),
             config_dir,
             settings,
-            keymap_problems,
+            keymap_file,
             pending: None,
             closing: false,
             title: String::new(),
@@ -117,10 +133,6 @@ impl App {
             })
     }
 
-    fn keymap_path(&self) -> Option<PathBuf> {
-        Some(self.config_dir.as_ref()?.join(KEYMAP_FILE))
-    }
-
     fn act(&mut self, action: Action, ctx: &egui::Context, frame: &eframe::Frame) {
         match action {
             // The shell offers the session's own commands.
@@ -132,9 +144,27 @@ impl App {
             Action::EndGesture => self.session.end_gesture(),
             Action::Mixer(change) => self.session.change_mixer(change),
             Action::ClearPeaks => self.session.meters().clear_highest(),
-            Action::AudioSettings => self.audio_window.open(&self.output),
-            Action::ReloadKeymap => self.reload_keymap(),
-            Action::CreateKeymap => self.create_keymap(),
+            Action::SetKeymap(keymap) => {
+                self.keymap_file.save(&keymap);
+                self.session.set_keymap(keymap);
+            }
+            Action::ResetKeymap => self.session.set_keymap(self.keymap_file.reset()),
+            Action::ImportKeymap => {
+                let picked = self.keymap_dialog(frame).pick_file();
+                if let Some(keymap) = picked.and_then(|path| self.keymap_file.import(&path)) {
+                    self.session.set_keymap(keymap);
+                }
+            }
+            Action::ExportKeymap => {
+                let dialog = self.keymap_dialog(frame).set_file_name(KEYMAP_FILE);
+                if let Some(path) = dialog.save_file() {
+                    self.keymap_file.export(self.session.keymap(), &path);
+                }
+            }
+            Action::ReloadKeymap => self.session.set_keymap(self.keymap_file.reload()),
+            // The file starts with the keys in use: the default ones, as the
+            // file doesn't exist yet.
+            Action::CreateKeymap => self.keymap_file.save(self.session.keymap()),
             Action::ResetDropouts => self.output.reset_dropouts(),
             Action::DismissMessages => self.messages.clear(),
         }
@@ -184,6 +214,9 @@ impl App {
                 self.closing = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Request::CommandPalette => self.shell.open_palette(),
+            Request::AudioSettings => self.audio_window.open(&self.output),
+            Request::KeyboardShortcuts => self.shell.open_shortcuts(),
         }
     }
 
@@ -240,27 +273,15 @@ impl App {
         }
     }
 
-    fn reload_keymap(&mut self) {
-        let (keymap, problems) = read_keymap(self.keymap_path().as_deref());
-        self.session.set_keymap(keymap);
-        self.keymap_problems = problems;
-    }
-
-    /// Creates the user's keymap file, with no changes in it yet: just the
-    /// comment that explains it.
-    fn create_keymap(&mut self) {
-        let Some(path) = self.keymap_path() else {
-            return;
-        };
-        let created = path
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| KeymapFile::default().write(&path));
-        match created {
-            Ok(()) => self.reload_keymap(),
-            Err(error) => self
-                .messages
-                .push(format!("Couldn't create {}: {error}", path.display())),
+    /// A dialog for picking a keymap file. It starts in the folder of the
+    /// user's keymap file, where its backup is.
+    fn keymap_dialog(&self, frame: &eframe::Frame) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .add_filter("Musicable keymap", &["toml"]);
+        match &self.config_dir {
+            Some(dir) => dialog.set_directory(dir),
+            None => dialog,
         }
     }
 
@@ -325,10 +346,19 @@ impl App {
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
+    /// While the keyboard shortcuts window waits for the keys to give a
+    /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if self.pending.is_none() && self.shell.capturing() {
+            if let Some(chord) = self.keys.capture(input) {
+                self.shell.captured(chord);
+            }
+            return;
+        }
         let session = &mut self.session;
-        // While the app asks something, keys answer it.
-        let asking = self.pending.is_some();
+        // While the app asks something, keys answer it, and none run
+        // commands while the command palette is open either.
+        let asking = self.pending.is_some() || self.shell.asking();
         self.keys.take(ctx, input, |chord, repeat| {
             if asking || session.keymap().lookup(chord).is_none() {
                 return false;
@@ -375,13 +405,13 @@ impl eframe::App for App {
         let summary = self.output.summary();
         let details = self.output.details();
         let name = self.name();
-        let keymap_path = self.keymap_path();
         let view = View {
             project: self.session.project(),
             name: &name,
             modified: self.session.is_modified(),
             commands: self.session.commands(),
             keymap: self.session.keymap(),
+            default_keymap: self.keymap_file.defaults(),
             undo: self.session.undo_name(),
             redo: self.session.redo_name(),
             playback: Playback {
@@ -397,8 +427,12 @@ impl eframe::App for App {
                 dropouts: self.output.dropouts(),
                 details: &details,
             },
-            keymap_file: keymap_path.as_deref(),
-            keymap_problems: &self.keymap_problems,
+            keymap_file: KeymapStatus {
+                path: self.keymap_file.path(),
+                problems: self.keymap_file.problems(),
+                error: self.keymap_file.error(),
+                notice: self.keymap_file.notice(),
+            },
             messages: &self.messages,
         };
         let actions = self.shell.show(ui, &view);
@@ -410,32 +444,6 @@ impl eframe::App for App {
         }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
-    }
-}
-
-/// The default keymap, with the changes in the keymap file at `path`, and
-/// what was wrong with the file. A missing file changes nothing; one that
-/// can't be read leaves the default keymap.
-fn read_keymap(path: Option<&Path>) -> (Keymap, Vec<String>) {
-    let mut keymap = Keymap::default_keymap();
-    let Some(path) = path else {
-        return (keymap, Vec::new());
-    };
-    match KeymapFile::read(path) {
-        Ok((changes, problems)) => {
-            changes.apply_to(&mut keymap);
-            (keymap, problems.iter().map(ToString::to_string).collect())
-        }
-        Err(KeymapFileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            (keymap, Vec::new())
-        }
-        Err(error) => {
-            let problem = format!(
-                "{}. Musicable uses the default keys.",
-                capital(error.to_string().trim_end())
-            );
-            (keymap, vec![problem])
-        }
     }
 }
 
@@ -472,15 +480,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
     }
 }
 
-/// `text` starting with a capital letter, for errors written to follow a
-/// colon.
-fn capital(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
+#[cfg(test)]
+mod remapping;
 
 #[cfg(test)]
 mod tests {
@@ -492,39 +493,5 @@ mod tests {
         assert_eq!(saved("song"), PathBuf::from("song.musicable"));
         assert_eq!(saved("song.musicable"), PathBuf::from("song.musicable"));
         assert_eq!(saved("song.v2"), PathBuf::from("song.v2.musicable"));
-    }
-
-    #[test]
-    fn keymap_files_change_the_default_keys() {
-        let dir = std::env::temp_dir().join(format!("musicable-keymap-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(KEYMAP_FILE);
-
-        // No file: the default keys, and no problems.
-        let (keymap, problems) = read_keymap(Some(&path));
-        assert_eq!(keymap, Keymap::default_keymap());
-        assert_eq!(problems, Vec::<String>::new());
-
-        // A file with a change and a bad entry: the change, and a problem.
-        let text = "[bindings]\n\"transport.play\" = [\"P\"]\n\"transport.stop\" = [\"Nope\"]\n";
-        fs::write(&path, text).unwrap();
-        let (keymap, problems) = read_keymap(Some(&path));
-        let chords: Vec<_> = keymap
-            .chords_for(&musicable_commands::transport::PLAY)
-            .collect();
-        assert_eq!(chords, ["P".parse().unwrap()]);
-        assert_eq!(problems.len(), 1, "{problems:?}");
-
-        // A file that isn't a keymap: the default keys, and why.
-        fs::write(&path, "format = \"something-else\"\n").unwrap();
-        let (keymap, problems) = read_keymap(Some(&path));
-        assert_eq!(keymap, Keymap::default_keymap());
-        assert_eq!(problems.len(), 1);
-        assert!(
-            problems[0].starts_with("This is a \"something-else\" file"),
-            "{problems:?}"
-        );
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

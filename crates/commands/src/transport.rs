@@ -178,6 +178,8 @@ mod tests {
         crate::file::register(&mut registry);
         crate::edit::register(&mut registry);
         crate::track::register(&mut registry);
+        crate::options::register(&mut registry);
+        crate::view::register(&mut registry);
 
         let keymap = Keymap::default_keymap();
         for (id, title, _) in COMMANDS {

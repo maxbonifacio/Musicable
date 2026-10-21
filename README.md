@@ -6,7 +6,8 @@ recording, editing and mixing. Live performance (Session View) comes later.
 
 > Status: pre-alpha. Nothing usable yet. Tier 0, the foundation, is done:
 > the app plays, loops and saves projects of test tones. Tier 1 is under
-> way, with undo and a mixer so far. See [docs/app.md](docs/app.md), and
+> way, with undo, a mixer and changing keys in the app so far. See
+> [docs/app.md](docs/app.md), and
 > [docs/architecture.md](docs/architecture.md) for how it fits together.
 
 ## Goals
@@ -14,8 +15,9 @@ recording, editing and mixing. Live performance (Session View) comes later.
 - **Efficient multithreading.** The engine schedules work per plugin node, not
   per track, and runs tracks that aren't monitored live ahead of time with
   larger buffers.
-- **Remappable hotkeys.** Every action is a named command, and keymaps are
-  plain data you can edit, share and swap.
+- **Remappable hotkeys.** Every action is a named command, and its keys can
+  be changed in the app. Keymaps are plain data you can edit, share and
+  swap.
 - **ARA 2 plugin support** for tools like Melodyne.
 - CLAP and VST3 hosting, and plugin sandboxing later.
 - A familiar layout and default shortcuts for Ableton users. This is a

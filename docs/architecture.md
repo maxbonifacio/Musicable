@@ -205,9 +205,11 @@ built yet, except where it says so.
 - **The clip stage.** Built: Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.
-- **Keys.** Remapping in the app, showing conflicts and the command palette
-  build on `Keymap`, `KeymapFile` and the registry; commands.md has
-  [notes](commands.md#notes-for-remapping-keys-in-the-app).
+- **Keys** are done: the keyboard shortcuts window changes any command's
+  keys, shows conflicts and saves them to the keymap file, and the command
+  palette runs any command ([app.md](app.md#changing-keys),
+  [commands.md](commands.md#changing-keys-in-the-app)). Keymaps in the style
+  of other DAWs would be keymap files to import.
 - **ASIO**, as an opt-in GPL build feature, moved to Tier 1. It's another
   backend behind `musicable_audio::open`.
 

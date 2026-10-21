@@ -1,12 +1,12 @@
 # Commands and keymaps
 
 Every user action in Musicable is a named command, and key presses reach
-commands only through a keymap. Menus, the command palette, scripts and
-agents will run the same commands, so remapping a shortcut is just editing
-the keymap. This page covers the commands so far, the transactions they
-change the project through, undo and redo, how the app runs them, key
+commands only through a keymap. Menus and the command palette run the same
+commands, and scripts and agents will, so remapping a shortcut is just
+editing the keymap. This page covers the commands so far, the transactions
+they change the project through, undo and redo, how the app runs them, key
 chords and the keymap file. How the app's window hands key presses to the
-keymap is in [app.md](app.md#keys).
+keymap, and how keys are changed there, is in [app.md](app.md#keys).
 
 ## Commands
 
@@ -104,6 +104,20 @@ the Edit menu:
 
 A change the routing rules don't allow, such as an output that would make a
 loop, does nothing.
+
+### Options and View
+
+The app's windows are commands too, so their keys can be changed like any
+other. They push a `Request`, as the file commands do.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `options.audio_settings` | Audio Settings... | Shows the audio settings | Ctrl+Comma | Ctrl+Comma (Preferences) |
+| `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the keys, where they're changed | Ctrl+K | Ctrl+K (Key Map Mode) |
+| `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
+
+Live has no command palette. Ctrl+Shift+P is the usual key for one in other
+apps.
 
 ## Transactions
 
@@ -301,7 +315,8 @@ A line with a mistake in it, such as a misspelt key, is skipped and the
 command keeps its default chords. A chord that two lines claim runs neither
 command. Musicable reports both and loads the rest of the file. A binding for
 a command that doesn't exist is kept, in case a later version or a plugin
-adds it, and reported too.
+adds it, and reported too. Options > Keyboard Shortcuts lists them all, with
+a button to give a chord two lines claim to one of them.
 
 A file that isn't valid TOML, has an unknown field or comes from a newer
 version is ignored as a whole: Musicable uses the default keymap and shows
@@ -310,8 +325,9 @@ the error.
 ### Trying it out
 
 The app reads your keymap file from its config folder at startup
-([app.md](app.md#settings-and-your-keymap)), and Options > Keyboard
-Shortcuts shows the keys and any mistakes. Without opening the window, this
+([app.md](app.md#settings-and-your-keymap)). Options > Keyboard Shortcuts
+shows the keys and any mistakes, and saves every change you make there to
+the file ([app.md](app.md#changing-keys)). Without opening the window, this
 prints the bindings a keymap file gives, along with any mistakes in it:
 
 ```sh
@@ -320,13 +336,25 @@ cargo run -p musicable-app -- keymap path/to/keymap.toml
 
 Leave out the path to see the default keymap.
 
-## Notes for remapping keys in the app
+## Changing keys in the app
 
-The app doesn't change keys yet: for now you edit the keymap file and reload
-it. When it does:
+The keyboard shortcuts window ([app.md](app.md#changing-keys)) builds on
+these:
 
-- Save a remap with
-  `KeymapFile::diff(&Keymap::default_keymap(), &keymap).write(path)`, then
-  hand the keymap to `Session::set_keymap`.
-- `Keymap::bind` returns the command a chord had, for an "already used by"
-  warning.
+- `Keymap::bind` returns the command a chord had, which the window warns
+  about before it takes the chord. `Keymap::reset_command` gives a command
+  its default chords back, taking them from whichever commands have them
+  now.
+- `KeymapFile::diff(&defaults, &keymap)` is what the app saves: only the
+  commands whose chords differ from the default. The app keeps the user's
+  file with `UserKeymap` (`crates/app/src/keymap_file.rs`), which also makes
+  the backup copy.
+- `musicable_ui::KeyPresses::capture` takes the next chord pressed, any key
+  at all, while the window waits for one.
+- `Keymap::dangling` lists the chords bound to commands this version doesn't
+  have, which the window shows with a Remove button.
+
+[`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
+drives the whole window as eframe would: it gives every command new keys in
+the keyboard shortcuts window, finds every command in the command palette
+with its keys, and starts the app again to see they're kept.

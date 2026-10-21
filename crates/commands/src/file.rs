@@ -1,11 +1,11 @@
 //! The file commands: new, open, save and quit.
 //!
 //! Commands can't show a file dialog or close a window, so these ask the app
-//! to, with a [`Request`] in [`Context::requests`]. The app carries it out
-//! once the command has run, asking about unsaved changes first where they
-//! would be lost.
+//! to, with a [`Request`] in [`Context::requests`](crate::Context::requests).
+//! The app carries it out once the command has run, asking about unsaved
+//! changes first where they would be lost.
 
-use crate::{CommandId, Context, Registry};
+use crate::{CommandId, Registry, Request};
 
 /// Starts a new, empty project.
 pub const NEW: CommandId = CommandId::new("file.new");
@@ -21,17 +21,6 @@ pub const SAVE_AS: CommandId = CommandId::new("file.save_as");
 /// Closes Musicable.
 pub const QUIT: CommandId = CommandId::new("file.quit");
 
-/// Something only the app can do, which a command asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
-    New,
-    NewDemo,
-    Open,
-    Save,
-    SaveAs,
-    Quit,
-}
-
 /// Every file command, with its title and what it asks for.
 const COMMANDS: [(CommandId, &str, Request); 6] = [
     (NEW, "New Project", Request::New),
@@ -44,11 +33,7 @@ const COMMANDS: [(CommandId, &str, Request); 6] = [
 
 /// Registers the file commands.
 pub fn register(registry: &mut Registry) {
-    for (id, title, request) in COMMANDS {
-        registry.register(id, title, move |ctx: &mut Context<'_>| {
-            ctx.requests.push(request);
-        });
-    }
+    crate::register_requests(registry, &COMMANDS);
 }
 
 #[cfg(test)]
@@ -57,7 +42,7 @@ mod tests {
     use musicable_model::time::Beats;
 
     use super::*;
-    use crate::{Document, Keymap, Transport};
+    use crate::{Context, Document, Keymap, Transport};
 
     struct Stopped;
 

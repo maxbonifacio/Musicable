@@ -157,12 +157,16 @@ fn named(key: egui::Key) -> Option<Key> {
 /// press the keymap binds runs its command and never reaches egui, so a
 /// focused button can't act on Space as well. While a text field has focus,
 /// every key press goes to the text field instead: typing a space in a name
-/// types a space.
+/// types a space. While the keyboard shortcuts window waits for the keys to
+/// give a command, [`capture`](Self::capture) takes the next chord instead.
 #[derive(Debug, Default)]
 pub struct KeyPresses {
     /// Keys held down, by egui's name for them, to tell a key's first press
     /// from the repeats the system sends while it's held.
     held: HashSet<egui::Key>,
+    /// Keys held down whose first press the keymap or a capture took. Their
+    /// repeats go nowhere, so egui never sees a key it didn't see pressed.
+    taken: HashSet<egui::Key>,
 }
 
 impl KeyPresses {
@@ -173,7 +177,8 @@ impl KeyPresses {
     /// Goes through the key presses in `input`. Unless a text field has focus,
     /// it asks `keymap` about each one, with the chord and whether the press
     /// repeats one held down. `keymap` returns whether a command is bound to
-    /// the chord, and the press is taken out of `input` if one is.
+    /// the chord, and the press is taken out of `input` if one is. So are the
+    /// repeats of a key taken, without asking again.
     ///
     /// The app turns off eframe's own clipboard shortcuts, so that Ctrl+C,
     /// Ctrl+X and Ctrl+V reach the keymap like any other chord. In a text
@@ -194,6 +199,9 @@ impl KeyPresses {
                 ..
             } => {
                 let repeat = !self.held.insert(key);
+                if repeat && self.taken.contains(&key) {
+                    return false;
+                }
                 if text_field {
                     match clipboard(key, modifiers) {
                         Some(Clipboard::Cut) => *event = Event::Cut,
@@ -208,26 +216,78 @@ impl KeyPresses {
                     }
                     return true;
                 }
-                match chord(key, physical_key, modifiers) {
-                    Some(chord) => !keymap(chord, repeat),
-                    None => true,
+                let Some(chord) = chord(key, physical_key, modifiers) else {
+                    return true;
+                };
+                let taken = keymap(chord, repeat);
+                if taken {
+                    self.taken.insert(key);
                 }
+                !taken
             }
             Event::Key {
                 key,
                 pressed: false,
                 ..
             } => {
-                self.held.remove(&key);
+                self.let_go(key);
                 true
             }
             // Keys let go of while the window is in the background never say so.
             Event::WindowFocused(false) => {
                 self.held.clear();
+                self.taken.clear();
                 true
             }
             _ => true,
         });
+    }
+
+    /// Takes every key press out of `input`, for the keyboard shortcuts
+    /// window while it waits for the keys to give a command, and returns the
+    /// first chord pressed. Any key can be part of it, Escape, Enter and Tab
+    /// too. Repeats, a modifier pressed on its own and keys keymaps have no
+    /// name for are skipped. Text goes nowhere either, so a text field with
+    /// focus doesn't type the keys.
+    pub fn capture(&mut self, input: &mut RawInput) -> Option<KeyChord> {
+        let mut captured = None;
+        input.events.retain(|event| match *event {
+            Event::Key {
+                key,
+                physical_key,
+                pressed: true,
+                modifiers,
+                ..
+            } => {
+                let repeat = !self.held.insert(key);
+                if !repeat && captured.is_none() {
+                    captured = chord(key, physical_key, modifiers);
+                }
+                self.taken.insert(key);
+                false
+            }
+            Event::Key {
+                key,
+                pressed: false,
+                ..
+            } => {
+                self.let_go(key);
+                true
+            }
+            Event::Text(_) => false,
+            Event::WindowFocused(false) => {
+                self.held.clear();
+                self.taken.clear();
+                true
+            }
+            _ => true,
+        });
+        captured
+    }
+
+    fn let_go(&mut self, key: egui::Key) {
+        self.held.remove(&key);
+        self.taken.remove(&key);
     }
 }
 
@@ -392,15 +452,11 @@ mod tests {
             asked.push((chord.to_string(), repeat));
             chord == Key::Space.into()
         });
-        // The keymap hears of the repeat, but Space isn't held any more once
-        // it's let go.
+        // Space's repeat goes nowhere, and Space isn't held any more once it's
+        // let go.
         assert_eq!(
             asked,
-            [
-                ("Space".to_owned(), false),
-                ("Space".to_owned(), true),
-                ("Q".to_owned(), false),
-            ]
+            [("Space".to_owned(), false), ("Q".to_owned(), false)]
         );
         assert_eq!(input.events, [space(false), q]);
 
@@ -414,6 +470,43 @@ mod tests {
             true
         });
         assert_eq!(repeats, [false]);
+    }
+
+    #[test]
+    fn a_capture_takes_the_next_chord_and_every_key_press() {
+        use egui::Key as E;
+        let mut keys = KeyPresses::new();
+        let ctrl = egui::Modifiers::CTRL;
+        let mut input = input(vec![
+            key(E::ShiftLeft, true, egui::Modifiers::SHIFT),
+            key(E::Escape, true, egui::Modifiers::SHIFT),
+            Event::Text("l".to_owned()),
+            key(E::L, true, ctrl),
+            key(E::Escape, false, NONE),
+            Event::PointerGone,
+        ]);
+        // A modifier on its own isn't a chord, and only the first chord counts.
+        assert_eq!(keys.capture(&mut input), named("Shift+Escape"));
+        assert_eq!(
+            input.events,
+            [key(E::Escape, false, NONE), Event::PointerGone]
+        );
+
+        // L is still held, so its repeats go nowhere, captured or not.
+        let mut input = self::input(vec![key(E::L, true, ctrl)]);
+        assert_eq!(keys.capture(&mut input), None);
+        assert_eq!(input.events, []);
+        let ctx = egui::Context::default();
+        let mut input = self::input(vec![key(E::L, true, ctrl)]);
+        keys.take(&ctx, &mut input, |chord, _| {
+            panic!("{chord} went to the keymap")
+        });
+        assert_eq!(input.events, []);
+
+        // Once it's let go, it's a chord again.
+        let mut input = self::input(vec![key(E::L, false, ctrl), key(E::L, true, ctrl)]);
+        assert_eq!(keys.capture(&mut input), named("Ctrl+L"));
+        assert_eq!(input.events, [key(E::L, false, ctrl)]);
     }
 
     #[test]

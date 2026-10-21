@@ -23,6 +23,9 @@ rfd.workspace = true
 serde.workspace = true
 toml.workspace = true
 
+[dev-dependencies]
+egui_kittest = { workspace = true, features = ["eframe"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Console"] }
 

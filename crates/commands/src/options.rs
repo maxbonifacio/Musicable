@@ -1,0 +1,82 @@
+//! The options commands: the windows that change Musicable's settings.
+//!
+//! Commands can't show a window, so these ask the app to, with a [`Request`].
+
+use crate::{CommandId, Registry, Request};
+
+/// Shows the audio settings: the device, its mode and the buffer size.
+pub const AUDIO_SETTINGS: CommandId = CommandId::new("options.audio_settings");
+/// Shows the keyboard shortcuts, where every command's keys can be changed.
+pub const KEYBOARD_SHORTCUTS: CommandId = CommandId::new("options.keyboard_shortcuts");
+
+/// Every options command, with its title and what it asks for.
+const COMMANDS: [(CommandId, &str, Request); 2] = [
+    (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
+    (
+        KEYBOARD_SHORTCUTS,
+        "Keyboard Shortcuts...",
+        Request::KeyboardShortcuts,
+    ),
+];
+
+/// Registers the options commands.
+pub fn register(registry: &mut Registry) {
+    crate::register_requests(registry, &COMMANDS);
+}
+
+#[cfg(test)]
+mod tests {
+    use musicable_model::Project;
+
+    use super::*;
+    use crate::{Context, Document, Keymap, view};
+
+    struct Stopped;
+
+    impl crate::Transport for Stopped {
+        fn is_playing(&self) -> bool {
+            false
+        }
+
+        fn play(&mut self) {}
+
+        fn stop(&mut self) {}
+
+        fn locate(&mut self, _: musicable_model::time::Beats) {}
+    }
+
+    #[test]
+    fn the_windows_are_commands_with_keys() {
+        let mut registry = Registry::new();
+        register(&mut registry);
+        view::register(&mut registry);
+        let mut document = Document::new(Project::new());
+        let mut requests = Vec::new();
+        for id in [AUDIO_SETTINGS, KEYBOARD_SHORTCUTS, view::COMMAND_PALETTE] {
+            let mut ctx = Context {
+                document: &mut document,
+                transport: &mut Stopped,
+                requests: &mut requests,
+            };
+            registry.run(&id, &mut ctx).unwrap();
+        }
+        assert_eq!(
+            requests,
+            [
+                Request::AudioSettings,
+                Request::KeyboardShortcuts,
+                Request::CommandPalette
+            ]
+        );
+        assert_eq!(document.take_committed(), []);
+
+        // Live's keys for its settings and its key map mode, and the usual
+        // key for a command palette, which Live doesn't have.
+        let keymap = Keymap::default_keymap();
+        let chords =
+            |id| -> Vec<String> { keymap.chords_for(&id).map(|c| c.to_string()).collect() };
+        assert_eq!(chords(AUDIO_SETTINGS), ["Ctrl+Comma"]);
+        assert_eq!(chords(KEYBOARD_SHORTCUTS), ["Ctrl+K"]);
+        assert_eq!(chords(view::COMMAND_PALETTE), ["Ctrl+Shift+P"]);
+    }
+}

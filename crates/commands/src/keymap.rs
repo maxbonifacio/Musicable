@@ -2,8 +2,11 @@
 //! which change them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::io::Write;
 use std::path::Path;
-use std::{fmt, fs, io};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::{fmt, fs, io, process};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +56,21 @@ impl Keymap {
     /// Removes all of `command`'s chords.
     pub fn unbind_command(&mut self, command: &CommandId) {
         self.bindings.retain(|_, c| c != command);
+    }
+
+    /// Gives `command` the chords it has in `defaults`, in place of the ones
+    /// it has now. A chord that another command has now is taken from it.
+    /// Returns the chords taken, with the commands that had them.
+    pub fn reset_command(
+        &mut self,
+        command: &CommandId,
+        defaults: &Keymap,
+    ) -> Vec<(KeyChord, CommandId)> {
+        self.unbind_command(command);
+        defaults
+            .chords_for(command)
+            .filter_map(|chord| Some((chord, self.bind(chord, command.clone())?)))
+            .collect()
     }
 
     pub fn lookup(&self, chord: KeyChord) -> Option<&CommandId> {
@@ -227,9 +245,17 @@ impl KeymapFile {
         format!("{HEADER}\n{body}")
     }
 
-    /// Writes the file to `path`.
+    /// Writes the file to `path`, replacing any file there.
+    ///
+    /// It writes a temporary file next to `path` and then renames it over the
+    /// old one, so a crash or a full disk never leaves a half-written keymap.
     pub fn write(&self, path: &Path) -> io::Result<()> {
-        fs::write(path, self.to_toml())
+        write_replacing(path, self.to_toml().as_bytes())
+    }
+
+    /// How many commands the file changes.
+    pub fn len(&self) -> usize {
+        self.bindings.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -248,6 +274,34 @@ impl KeymapFile {
         claims.retain(|_, commands| commands.len() > 1);
         claims
     }
+}
+
+/// Writes `bytes` to a new file next to `path`, then renames it over `path`,
+/// as project files are saved.
+fn write_replacing(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static WRITES: AtomicU32 = AtomicU32::new(0);
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the path doesn't name a file",
+        ));
+    };
+    let mut temporary = OsString::from(".");
+    temporary.push(name);
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    temporary.push(format!(".{}-{write}.tmp", process::id()));
+    let temporary = path.with_file_name(temporary);
+    let written = fs::File::create(&temporary)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        // The error that matters is the one being returned.
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Collects the entries of a `[bindings]` table. Command ids are dotted, so
@@ -428,6 +482,36 @@ mod tests {
             Some("transport.play".into())
         );
         assert_eq!(map.lookup(space), Some(&"transport.stop".into()));
+    }
+
+    #[test]
+    fn resetting_a_command_takes_its_default_chords_back() {
+        let loop_ = command("transport.toggle_loop");
+        let metronome = command("transport.toggle_metronome");
+        let mut map = base();
+        map.bind(chord("Ctrl+L"), metronome.clone());
+        map.bind(chord("M"), metronome.clone());
+        map.bind(chord("L"), loop_.clone());
+
+        // The loop gets Ctrl+L back from the metronome, and loses L.
+        let taken = map.reset_command(&loop_, &base());
+        assert_eq!(taken, [(chord("Ctrl+L"), metronome.clone())]);
+        assert_eq!(
+            map.chords_for(&loop_).collect::<Vec<_>>(),
+            [chord("Ctrl+L")]
+        );
+        assert_eq!(map.lookup(chord("L")), None);
+        let chords: Vec<_> = map.chords_for(&metronome).collect();
+        assert_eq!(chords, [chord("M"), chord("O")]);
+
+        assert_eq!(map.reset_command(&metronome, &base()), []);
+        assert_eq!(map, base());
+
+        // A command with no default chords ends up with none.
+        let play = command("transport.play");
+        map.bind(chord("P"), play.clone());
+        map.reset_command(&play, &Keymap::new());
+        assert_eq!(map.chords_for(&play).count(), 0);
     }
 
     #[test]
