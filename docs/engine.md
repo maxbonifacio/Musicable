@@ -190,10 +190,11 @@ Create and drop the renderer off the audio thread, since that starts and
 stops its workers.
 
 **Threads.** By default there is one worker per physical core, minus one for
-the audio thread, which works too. Workers join the MMCSS "Pro Audio" class
-on Windows. Elsewhere they don't raise their priority yet: Linux needs
-real-time scheduling rights, and on macOS they should join the audio device's
-workgroup, which needs the audio backend.
+the audio thread, which works too. On Windows, workers join the MMCSS "Pro
+Audio" class at critical priority, as the WASAPI stream's audio thread does
+(see [audio.md](audio.md)). Elsewhere they don't raise their priority yet:
+Linux needs real-time scheduling rights, and on macOS they should join the
+audio device's workgroup, which needs the audio backend.
 
 Workers run with the default floating-point environment. Nothing sets
 flush-to-zero or denormals-are-zero on the audio thread yet. Anything that
