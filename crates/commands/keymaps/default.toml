@@ -1,0 +1,22 @@
+# The default keymap. It follows Ableton Live's shortcuts where Live has one,
+# so the keys feel familiar to Live users.
+#
+# To change your own shortcuts, don't edit this file: put the changes in your
+# keymap file, which Musicable reads on top of this one. docs/commands.md has
+# the format and every command.
+
+format = "musicable-keymap"
+version = 1
+
+[bindings]
+"transport.play_stop" = ["Space"]
+"transport.play" = ["Shift+Space"]
+"transport.go_to_start" = ["Home"]
+"transport.toggle_loop" = ["Ctrl+L"]
+"transport.toggle_metronome" = ["O"]
+
+# Live has no keys for these. None of the chords does anything in Live outside
+# its MIDI note editor.
+"transport.stop" = ["Ctrl+Period"]
+"transport.tempo_up" = ["Ctrl+Shift+Up"]
+"transport.tempo_down" = ["Ctrl+Shift+Down"]

@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 # float_roundtrip reads every float back exactly as it was written.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
+toml = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
