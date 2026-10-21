@@ -247,8 +247,8 @@ system gets reworked with plugin hosting.
 
 **App shell (M7).**
 
-- Send the tempo map and loop when a project opens and when they change (see
-  Musical time above). Tempo up and down edit `Project::tempo` and send the
-  new map.
+- `musicable_app::Session` sends the tempo map and loop when a project opens
+  and whenever a transaction changes them (see Musical time above, and
+  [commands.md](commands.md)).
 - Show the playhead from `Stats::position`, in bars and beats with
   `TempoMap::beats_at` and `TempoMap::bar_at`.

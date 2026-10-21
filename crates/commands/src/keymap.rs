@@ -433,8 +433,8 @@ mod tests {
     #[test]
     fn dangling_bindings_are_found() {
         let mut reg = Registry::new();
-        assert!(reg.register("transport.play", "Play"));
-        assert!(!reg.register("transport.play", "Play again"));
+        assert!(reg.register("transport.play", "Play", |_| {}));
+        assert!(!reg.register("transport.play", "Play again", |_| {}));
         let mut map = Keymap::new();
         map.bind(Key::Space.into(), "transport.play");
         map.bind(Key::X.into(), "does.not.exist");

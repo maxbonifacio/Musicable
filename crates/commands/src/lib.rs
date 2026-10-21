@@ -1,19 +1,25 @@
-//! Named command registry and remappable keymaps.
+//! Named command registry, remappable keymaps, and the transactions commands
+//! change the project through.
 //!
 //! Every user action is a named command. Menus, hotkeys, the command palette,
 //! scripting and agent control all go through this registry, so remapping a
 //! hotkey is just editing a [`Keymap`]. The user's changes to the default
-//! keymap live in a [`KeymapFile`]. `docs/commands.md` describes the file and
-//! lists the commands.
+//! keymap live in a [`KeymapFile`]. Commands change the project only through
+//! transactions on its [`Document`]. `docs/commands.md` describes all of it
+//! and lists the commands.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use musicable_model::time::Beats;
+
+mod document;
 mod key;
 mod keymap;
 pub mod transport;
 
+pub use document::{Committed, Document, Edit, Transaction};
 pub use key::{ChordError, Key, KeyChord, Modifiers};
 pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
 
@@ -57,9 +63,36 @@ pub struct Command {
     pub title: String,
 }
 
-#[derive(Debug, Default)]
+/// What a running command can reach.
+pub struct Context<'a> {
+    /// The open project. Commands change it through
+    /// [`Document::transact`].
+    pub document: &'a mut Document,
+    pub transport: &'a mut dyn Transport,
+}
+
+/// The engine's transport, as commands see it. The app implements it on top
+/// of the engine.
+///
+/// The loop, the tempo and the metronome belong to the project, so commands
+/// change them through transactions, and the app passes the changes on to
+/// the engine.
+pub trait Transport {
+    /// Whether playback is running, counting what was asked for but hasn't
+    /// reached the engine yet.
+    fn is_playing(&self) -> bool;
+    fn play(&mut self);
+    /// Stops, leaving the playhead where it is.
+    fn stop(&mut self);
+    /// Moves the playhead to a musical position.
+    fn locate(&mut self, at: Beats);
+}
+
+type Run = Box<dyn Fn(&mut Context<'_>)>;
+
+#[derive(Default)]
 pub struct Registry {
-    commands: BTreeMap<CommandId, Command>,
+    commands: BTreeMap<CommandId, (Command, Run)>,
 }
 
 impl Registry {
@@ -67,27 +100,59 @@ impl Registry {
         Self::default()
     }
 
-    /// Registers a command. Returns `false` if the id was already taken.
-    pub fn register(&mut self, id: impl Into<CommandId>, title: impl Into<String>) -> bool {
+    /// Registers a command that runs `run`. Returns `false` if the id was
+    /// already taken.
+    pub fn register(
+        &mut self,
+        id: impl Into<CommandId>,
+        title: impl Into<String>,
+        run: impl Fn(&mut Context<'_>) + 'static,
+    ) -> bool {
         let id = id.into();
         if self.commands.contains_key(&id) {
             return false;
         }
-        self.commands.insert(
-            id.clone(),
-            Command {
-                id,
-                title: title.into(),
-            },
-        );
+        let command = Command {
+            id: id.clone(),
+            title: title.into(),
+        };
+        self.commands.insert(id, (command, Box::new(run)));
         true
     }
 
     pub fn get(&self, id: &CommandId) -> Option<&Command> {
-        self.commands.get(id)
+        self.commands.get(id).map(|(command, _)| command)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Command> {
-        self.commands.values()
+        self.commands.values().map(|(command, _)| command)
+    }
+
+    /// Runs the command `id`.
+    pub fn run(&self, id: &CommandId, context: &mut Context<'_>) -> Result<(), UnknownCommand> {
+        let (_, run) = self
+            .commands
+            .get(id)
+            .ok_or_else(|| UnknownCommand(id.clone()))?;
+        run(context);
+        Ok(())
     }
 }
+
+impl fmt::Debug for Registry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// No command has this id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCommand(pub CommandId);
+
+impl fmt::Display for UnknownCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "there's no command called {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownCommand {}
