@@ -14,5 +14,3 @@ pub use instance::{Instance, ParentWindow};
 pub use node::{ClapNode, NodeSource};
 
 pub(crate) use library::Library;
-#[cfg(test)]
-pub(crate) use library::canonical;

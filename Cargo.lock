@@ -1970,6 +1970,7 @@ name = "musicable-test-plugins"
 version = "0.1.0"
 dependencies = [
  "clap-sys",
+ "libloading 0.9.0",
 ]
 
 [[package]]
