@@ -15,7 +15,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{self, Beats};
-use musicable_model::{self as model, DeviceId, LocatorId, SendId, TrackId};
+use musicable_model::{self as model, DeviceId, LocatorId, SendId, TakeId, TrackId};
 use serde::{Deserialize, Serialize};
 
 use super::{FORMAT, Invalid, MAX_TICKS, VERSION};
@@ -31,11 +31,14 @@ pub(super) struct File {
     loop_region: BeatRange,
     looping: bool,
     metronome: bool,
+    punch_in: bool,
+    punch_out: bool,
     next_track_id: u32,
     next_send_id: u32,
     next_device_id: u32,
     next_clip_id: u32,
     next_locator_id: u32,
+    next_take_id: u32,
     tracks: Vec<Track>,
     master: Master,
     locators: Vec<Locator>,
@@ -96,6 +99,9 @@ struct Track {
     solo: bool,
     solo_safe: bool,
     armed: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    input: Option<Input>,
+    monitor: Monitor,
     /// The group track the output feeds, or `None` for the master.
     // Required like every other field: serde would read a missing `Option`
     // as `None`, but not through `deserialize_with`.
@@ -105,6 +111,7 @@ struct Track {
     #[serde(deserialize_with = "Option::deserialize")]
     tone: Option<TestTone>,
     clips: Vec<Clip>,
+    takes: Vec<Take>,
     devices: Vec<Device>,
     clip_type: ClipType,
     console: ConsoleSettings,
@@ -127,6 +134,49 @@ struct Send {
     to: u32,
     level: f32,
     pre_fader: bool,
+}
+
+/// Externally tagged, `{"audio": {..}}`, like [`ClipContent`].
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Input {
+    Audio(AudioInput),
+    Midi(MidiInput),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioInput {
+    device: String,
+    name: String,
+    channel: u16,
+    stereo: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MidiInput {
+    device: String,
+    name: String,
+    /// From 0 to 15, or `None` for every channel.
+    #[serde(deserialize_with = "Option::deserialize")]
+    channel: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Monitor {
+    In,
+    Auto,
+    Off,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Take {
+    id: u32,
+    name: String,
+    clips: Vec<Clip>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -264,6 +314,8 @@ impl From<&model::Project> for File {
             loop_region,
             looping,
             metronome,
+            punch_in,
+            punch_out,
             master,
             tracks,
             locators,
@@ -272,6 +324,7 @@ impl From<&model::Project> for File {
             next_device_id,
             next_clip_id,
             next_locator_id,
+            next_take_id,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -281,11 +334,14 @@ impl From<&model::Project> for File {
             loop_region: BeatRange::from(*loop_region),
             looping: *looping,
             metronome: *metronome,
+            punch_in: *punch_in,
+            punch_out: *punch_out,
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
             next_clip_id: *next_clip_id,
             next_locator_id: *next_locator_id,
+            next_take_id: *next_take_id,
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
@@ -305,11 +361,14 @@ impl File {
             loop_region,
             looping,
             metronome,
+            punch_in,
+            punch_out,
             next_track_id,
             next_send_id,
             next_device_id,
             next_clip_id,
             next_locator_id,
+            next_take_id,
             tracks,
             master,
             locators,
@@ -324,6 +383,7 @@ impl File {
         let mut send_ids = Ids::new("send", "next_send_id", *next_send_id);
         let mut device_ids = Ids::new("device", "next_device_id", *next_device_id);
         let mut clip_ids = Ids::new("clip", "next_clip_id", *next_clip_id);
+        let mut take_ids = Ids::new("take", "next_take_id", *next_take_id);
         let mut model_tracks = Vec::with_capacity(tracks.len());
         for (i, track) in tracks.iter().enumerate() {
             let path = format!("tracks[{i}]");
@@ -334,6 +394,13 @@ impl File {
             for (j, clip) in track.clips.iter().enumerate() {
                 clip_ids.add(clip.id, &format!("{path}.clips[{j}]"))?;
             }
+            for (j, take) in track.takes.iter().enumerate() {
+                let path = format!("{path}.takes[{j}]");
+                take_ids.add(take.id, &path)?;
+                for (k, clip) in take.clips.iter().enumerate() {
+                    clip_ids.add(clip.id, &format!("{path}.clips[{k}]"))?;
+                }
+            }
             for (j, device) in track.devices.iter().enumerate() {
                 device_ids.add(device.id, &format!("{path}.devices[{j}]"))?;
             }
@@ -342,6 +409,7 @@ impl File {
         ids.check_next()?;
         send_ids.check_next()?;
         clip_ids.check_next()?;
+        take_ids.check_next()?;
         let kinds: HashMap<u32, TrackKind> = tracks.iter().map(|t| (t.id, t.kind)).collect();
         for (i, track) in tracks.iter().enumerate() {
             track.check_routing(&format!("tracks[{i}]"), &kinds)?;
@@ -363,6 +431,8 @@ impl File {
             loop_region,
             looping: *looping,
             metronome: *metronome,
+            punch_in: *punch_in,
+            punch_out: *punch_out,
             master: master.to_model()?,
             tracks: model_tracks,
             locators: model_locators,
@@ -371,6 +441,7 @@ impl File {
             next_device_id: *next_device_id,
             next_clip_id: *next_clip_id,
             next_locator_id: *next_locator_id,
+            next_take_id: *next_take_id,
         };
         check_loops(&project)?;
         Ok(project)
@@ -580,10 +651,13 @@ impl From<&model::Track> for Track {
             solo,
             solo_safe,
             armed,
+            input,
+            monitor,
             output,
             sends,
             tone,
             clips,
+            takes,
             devices,
             clip_type,
             console,
@@ -604,6 +678,12 @@ impl From<&model::Track> for Track {
             solo: *solo,
             solo_safe: *solo_safe,
             armed: *armed,
+            input: input.as_ref().map(Input::from),
+            monitor: match monitor {
+                model::Monitor::In => Monitor::In,
+                model::Monitor::Auto => Monitor::Auto,
+                model::Monitor::Off => Monitor::Off,
+            },
             output: match output {
                 Bus::Master => None,
                 Bus::Group(group) => Some(group.0),
@@ -611,6 +691,7 @@ impl From<&model::Track> for Track {
             sends: sends.iter().map(Send::from).collect(),
             tone: tone.map(|model::TestTone { frequency, level }| TestTone { frequency, level }),
             clips: clips.iter().map(Clip::from).collect(),
+            takes: takes.iter().map(Take::from).collect(),
             devices: devices.iter().map(Device::from).collect(),
             clip_type: ClipType::from(*clip_type),
             console: ConsoleSettings {},
@@ -630,10 +711,13 @@ impl Track {
             solo,
             solo_safe,
             armed,
+            input,
+            monitor,
             output,
             sends,
             tone,
             clips,
+            takes,
             devices,
             clip_type,
             console,
@@ -670,6 +754,19 @@ impl Track {
             .enumerate()
             .map(|(j, clip)| clip.to_model(&format!("{path}.clips[{j}]"), kind))
             .collect::<Result<_, _>>()?;
+        if kind.is_bus() && !takes.is_empty() {
+            let message = "must be empty: only audio and MIDI tracks record";
+            return Err(Invalid::new(format!("{path}.takes"), message));
+        }
+        let takes = takes
+            .iter()
+            .enumerate()
+            .map(|(j, take)| take.to_model(&format!("{path}.takes[{j}]"), kind))
+            .collect::<Result<_, _>>()?;
+        let input = match input {
+            Some(input) => Some(input.to_model(&format!("{path}.input"), kind)?),
+            None => None,
+        };
         Ok(model::Track {
             id: TrackId(*id),
             name: name.clone(),
@@ -680,6 +777,12 @@ impl Track {
             solo: *solo,
             solo_safe: *solo_safe,
             armed: *armed,
+            input,
+            monitor: match monitor {
+                Monitor::In => model::Monitor::In,
+                Monitor::Auto => model::Monitor::Auto,
+                Monitor::Off => model::Monitor::Off,
+            },
             output: match output {
                 None => Bus::Master,
                 Some(group) => Bus::Group(TrackId(*group)),
@@ -687,6 +790,7 @@ impl Track {
             sends,
             tone,
             clips,
+            takes,
             devices: devices_to_model(devices, &format!("{path}.devices"))?,
             clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
@@ -732,6 +836,115 @@ impl Track {
             }
         }
         Ok(())
+    }
+}
+
+impl From<&model::Input> for Input {
+    fn from(input: &model::Input) -> Self {
+        match input {
+            model::Input::Audio(model::AudioInput {
+                device,
+                name,
+                channel,
+                stereo,
+            }) => Input::Audio(AudioInput {
+                device: device.clone(),
+                name: name.clone(),
+                channel: *channel,
+                stereo: *stereo,
+            }),
+            model::Input::Midi(model::MidiInput {
+                device,
+                name,
+                channel,
+            }) => Input::Midi(MidiInput {
+                device: device.clone(),
+                name: name.clone(),
+                channel: *channel,
+            }),
+        }
+    }
+}
+
+impl Input {
+    /// The input, for a track of `kind`.
+    fn to_model(&self, path: &str, kind: model::TrackKind) -> Result<model::Input, Invalid> {
+        match (self, kind) {
+            (_, model::TrackKind::Return | model::TrackKind::Group) => {
+                Err(Invalid::new(path, "must be null: buses record nothing"))
+            }
+            (Self::Audio(audio), model::TrackKind::Audio) => {
+                let AudioInput {
+                    device,
+                    name,
+                    channel,
+                    stereo,
+                } = audio;
+                if *stereo && *channel == u16::MAX {
+                    let message = "must be below 65535 for a stereo input, which takes the \
+                                   channel after it too";
+                    return Err(Invalid::new(format!("{path}.audio.channel"), message));
+                }
+                Ok(model::Input::Audio(model::AudioInput {
+                    device: device.clone(),
+                    name: name.clone(),
+                    channel: *channel,
+                    stereo: *stereo,
+                }))
+            }
+            (Self::Midi(midi), model::TrackKind::Midi) => {
+                let MidiInput {
+                    device,
+                    name,
+                    channel,
+                } = midi;
+                if channel.is_some_and(|channel| channel > 15) {
+                    let message = "must be from 0 to 15, or null for every channel";
+                    return Err(Invalid::new(format!("{path}.midi.channel"), message));
+                }
+                Ok(model::Input::Midi(model::MidiInput {
+                    device: device.clone(),
+                    name: name.clone(),
+                    channel: *channel,
+                }))
+            }
+            (Self::Audio(_), _) => Err(Invalid::new(
+                path,
+                "must be a MIDI input: MIDI tracks record MIDI",
+            )),
+            (Self::Midi(_), _) => Err(Invalid::new(
+                path,
+                "must be an audio input: audio tracks record audio",
+            )),
+        }
+    }
+}
+
+impl From<&model::Take> for Take {
+    fn from(take: &model::Take) -> Self {
+        let model::Take { id, name, clips } = take;
+        Self {
+            id: id.0,
+            name: name.clone(),
+            clips: clips.iter().map(Clip::from).collect(),
+        }
+    }
+}
+
+impl Take {
+    /// The take, under a track of `kind`.
+    fn to_model(&self, path: &str, kind: model::TrackKind) -> Result<model::Take, Invalid> {
+        let Self { id, name, clips } = self;
+        let clips = clips
+            .iter()
+            .enumerate()
+            .map(|(k, clip)| clip.to_model(&format!("{path}.clips[{k}]"), kind))
+            .collect::<Result<_, _>>()?;
+        Ok(model::Take {
+            id: TakeId(*id),
+            name: name.clone(),
+            clips,
+        })
     }
 }
 

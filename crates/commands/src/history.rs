@@ -164,8 +164,8 @@ mod tests {
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
     use musicable_model::{
-        Chain, ClipType, DeviceId, DeviceKind, LocatorId, PluginFormat, Project, Send, SendId,
-        TrackId, TrackKind,
+        AudioInput, Chain, ClipType, DeviceId, DeviceKind, Input, LocatorId, Monitor, PluginFormat,
+        Project, Send, SendId, TakeId, TrackId, TrackKind,
     };
     use proptest::prelude::*;
 
@@ -188,8 +188,9 @@ mod tests {
 
     /// The project the edits in `one_of_each` change: a track of each kind,
     /// two with a send, and a spare one that nothing refers to; two audio
-    /// clips, one with fades, and a MIDI clip; two locators; and a plugin
-    /// on the audio track and a test device on the master.
+    /// clips, one with fades, and a MIDI clip; two takes of an audio clip on
+    /// the audio track; two locators; and a plugin on the audio track and a
+    /// test device on the master.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -224,6 +225,13 @@ mod tests {
             let clip = project.new_clip(name, range, content);
             project.track_mut(track).unwrap().clips.push(clip);
         }
+        for name in ["Take 1", "Take 2"] {
+            let mut take = project.new_take(name);
+            let recorded = ClipContent::Audio(AudioClip::new("Recordings/Audio 1.wav"));
+            take.clips
+                .push(project.new_clip("Audio", range(0, 4), recorded));
+            project.track_mut(audio).unwrap().takes.push(take);
+        }
         for (name, at) in [("Verse", 0), ("Chorus", 16)] {
             let locator = project.new_locator(name, Beats::new(at));
             project.locators.push(locator);
@@ -250,6 +258,9 @@ mod tests {
         let range = BeatRange::new(Beats::new(8), Beats::new(12));
         let new_clip = project.new_clip("New", range, ClipContent::Midi(MidiClip::default()));
         let new_locator = project.new_locator("Bridge", Beats::new(32));
+        let mut new_take = project.new_take("Take 1");
+        let played = ClipContent::Midi(MidiClip::default());
+        new_take.clips.push(project.new_clip("MIDI", range, played));
         let bass_timing = project.find_clip(bass).unwrap().1.timing();
         let synth = project.new_device(plugin(true));
         let effect = DeviceId(0);
@@ -277,6 +288,14 @@ mod tests {
             Edit::Metronome {
                 from: project.metronome,
                 to: !project.metronome,
+            },
+            Edit::PunchIn {
+                from: false,
+                to: true,
+            },
+            Edit::PunchOut {
+                from: false,
+                to: true,
             },
             Edit::AddTrack {
                 index: 5,
@@ -320,6 +339,21 @@ mod tests {
                 track: audio,
                 from: false,
                 to: true,
+            },
+            Edit::TrackInput {
+                track: audio,
+                from: Some(Input::Audio(AudioInput::default())),
+                to: Some(Input::Audio(AudioInput {
+                    device: "mic".into(),
+                    name: "Microphone".into(),
+                    channel: 2,
+                    stereo: false,
+                })),
+            },
+            Edit::TrackMonitor {
+                track: audio,
+                from: Monitor::Auto,
+                to: Monitor::In,
             },
             Edit::TrackOutput {
                 track: audio,
@@ -400,6 +434,22 @@ mod tests {
                 from: "Bass".into(),
                 to: "Lead".into(),
             },
+            Edit::AddTake {
+                track: midi,
+                index: 0,
+                take: new_take,
+            },
+            Edit::TakeName {
+                track: audio,
+                take: TakeId(1),
+                from: "Take 2".into(),
+                to: "Best".into(),
+            },
+            Edit::RemoveTake {
+                track: audio,
+                index: 0,
+                take: project.track(audio).unwrap().takes[0].clone(),
+            },
             Edit::AddLocator {
                 index: 2,
                 locator: new_locator,
@@ -450,7 +500,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 35;
+    const KINDS: usize = 42;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -491,6 +541,13 @@ mod tests {
             Edit::RemoveDevice { .. } => 32,
             Edit::PluginSettings { .. } => 33,
             Edit::PluginParam { .. } => 34,
+            Edit::PunchIn { .. } => 35,
+            Edit::PunchOut { .. } => 36,
+            Edit::TrackInput { .. } => 37,
+            Edit::TrackMonitor { .. } => 38,
+            Edit::AddTake { .. } => 39,
+            Edit::RemoveTake { .. } => 40,
+            Edit::TakeName { .. } => 41,
         }
     }
 

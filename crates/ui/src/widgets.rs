@@ -34,6 +34,7 @@ pub(crate) enum Icon {
     ToStart,
     Play,
     Stop,
+    Record,
 }
 
 impl Icon {
@@ -43,6 +44,7 @@ impl Icon {
             Self::ToStart => "Go to Start",
             Self::Play => "Play",
             Self::Stop => "Stop",
+            Self::Record => "Record",
         }
     }
 }
@@ -62,10 +64,10 @@ pub(crate) fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, theme: &Theme
             visuals.bg_stroke,
             StrokeKind::Inside,
         );
-        let color = if selected {
-            ui.visuals().selection.stroke.color
-        } else {
-            visuals.fg_stroke.color
+        let color = match (icon, selected) {
+            (Icon::Record, true) => theme.arm,
+            (_, true) => ui.visuals().selection.stroke.color,
+            (_, false) => visuals.fg_stroke.color,
         };
         let c = rect.center();
         let r = theme.icon;
@@ -91,6 +93,9 @@ pub(crate) fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, theme: &Theme
             Icon::Stop => {
                 let square = Rect::from_center_size(c, Vec2::splat(2.0 * r * 0.85));
                 painter.rect_filled(square, 1.0, color);
+            }
+            Icon::Record => {
+                painter.circle_filled(c, r * 0.9, color);
             }
         }
     }

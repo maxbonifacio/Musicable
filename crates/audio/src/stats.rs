@@ -38,6 +38,15 @@ pub struct StreamStats {
     /// a late one doesn't show; with cpal, from the last one. With ASIO, the
     /// output latency the driver reports.
     pub queued: u64,
+    /// How far behind the output the engine gets its device inputs, in
+    /// frames: the delay monitoring an input adds, beyond the input's and
+    /// the output's own latency. 0 until an input starts. It grows if an
+    /// input falls further behind, and never shrinks.
+    pub input_delay: u64,
+    /// Frames of input that the engine got as silence, because an input
+    /// hadn't captured them in time: what monitoring dropped as the delay
+    /// grew. Recordings don't lose them.
+    pub input_late: u64,
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +61,8 @@ pub(crate) struct Counters {
     max_busy_ns: AtomicU64,
     busy_ns: AtomicU64,
     queued: AtomicU64,
+    input_delay: AtomicU64,
+    input_late: AtomicU64,
     ended: AtomicBool,
 }
 
@@ -99,6 +110,13 @@ impl Counters {
         self.queued.store(frames, Relaxed);
     }
 
+    /// The input bus's delay and late frames so far.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn inputs(&self, delay: u64, late: u64) {
+        self.input_delay.store(delay, Relaxed);
+        self.input_late.store(late, Relaxed);
+    }
+
     pub fn end(&self) {
         self.ended.store(true, Relaxed);
     }
@@ -119,6 +137,8 @@ impl Counters {
             max_busy: Duration::from_nanos(self.max_busy_ns.load(Relaxed)),
             busy: Duration::from_nanos(self.busy_ns.load(Relaxed)),
             queued: self.queued.load(Relaxed),
+            input_delay: self.input_delay.load(Relaxed),
+            input_late: self.input_late.load(Relaxed),
         }
     }
 }

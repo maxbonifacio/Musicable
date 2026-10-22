@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use common::{Project, Routing, cost, deep, lane_counts, renderer, wide};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use musicable_engine::{Block, PreparedGraph, ReferenceRenderer, Renderer, TransportState};
+use musicable_engine::{
+    AudioRef, Block, PreparedGraph, ReferenceRenderer, Renderer, TransportState,
+};
 use musicable_model::time::TempoMap;
 
 /// Builds a graph to measure.
@@ -66,6 +68,7 @@ fn scheduler(c: &mut Criterion) {
             time: 0,
             transport: TransportState::default(),
             tempo: &tempo,
+            input: AudioRef::empty(frames),
         };
         let mut group = c.benchmark_group(format!("{frames} frames"));
         group

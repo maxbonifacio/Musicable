@@ -1,10 +1,11 @@
-//! The transport commands: play, stop, the start marker, loop, metronome and
-//! tempo.
+//! The transport commands: play, stop, record, the start marker, loop,
+//! punch in and out, metronome and tempo.
 //!
-//! Play, stop and locating drive the engine's transport. The loop, the
-//! metronome and the tempo are part of the project, so those commands change
-//! it through transactions, and the app passes the changes on to the engine.
-//! The start marker is the arrangement's, in the [`Editor`](crate::Editor).
+//! Play, stop, record and locating drive the engine's transport. The loop,
+//! punching in and out, the metronome and the tempo are part of the project,
+//! so those commands change it through transactions, and the app passes the
+//! changes on to the engine. The start marker is the arrangement's, in the
+//! [`Editor`](crate::Editor).
 
 use musicable_model::time::{BeatRange, Beats};
 
@@ -19,6 +20,10 @@ pub const PLAY_STOP: CommandId = CommandId::new("transport.play_stop");
 pub const PLAY: CommandId = CommandId::new("transport.play");
 /// Stops, leaving the playhead where it is.
 pub const STOP: CommandId = CommandId::new("transport.stop");
+/// Records the armed tracks, playing from the start marker as
+/// [`PLAY_STOP`] does, or while playing, turns recording on or off: a punch
+/// in or out by hand.
+pub const RECORD: CommandId = CommandId::new("transport.record");
 /// Moves the start marker and the playhead to the start of the song.
 pub const GO_TO_START: CommandId = CommandId::new("transport.go_to_start");
 /// Loops the selection, or else turns looping over the loop region on or
@@ -26,6 +31,10 @@ pub const GO_TO_START: CommandId = CommandId::new("transport.go_to_start");
 pub const TOGGLE_LOOP: CommandId = CommandId::new("transport.toggle_loop");
 /// Turns the metronome on or off.
 pub const TOGGLE_METRONOME: CommandId = CommandId::new("transport.toggle_metronome");
+/// Turns punching in at the loop region's start on or off.
+pub const TOGGLE_PUNCH_IN: CommandId = CommandId::new("transport.toggle_punch_in");
+/// Turns punching out at the loop region's end on or off.
+pub const TOGGLE_PUNCH_OUT: CommandId = CommandId::new("transport.toggle_punch_out");
 /// Raises every tempo in the song by 1 BPM.
 pub const TEMPO_UP: CommandId = CommandId::new("transport.tempo_up");
 /// Lowers every tempo in the song by 1 BPM.
@@ -44,10 +53,11 @@ type Handler = fn(&mut Context<'_>);
 
 /// The transport commands that take no arguments, with their titles and
 /// what they run.
-const COMMANDS: [(CommandId, &str, Handler); 8] = [
+const COMMANDS: [(CommandId, &str, Handler); 9] = [
     (PLAY_STOP, "Play/Stop", play_stop),
     (PLAY, "Play", |ctx| ctx.transport.play()),
     (STOP, "Stop", |ctx| ctx.transport.stop()),
+    (RECORD, "Record", record),
     (GO_TO_START, "Go to Start", |ctx| jump(ctx, Beats::ZERO)),
     (TOGGLE_LOOP, "Toggle Loop", toggle_loop),
     (TOGGLE_METRONOME, "Toggle Metronome", toggle_metronome),
@@ -59,9 +69,23 @@ const COMMANDS: [(CommandId, &str, Handler); 8] = [
     }),
 ];
 
+/// The transport bar's punch buttons, which have no keys by default.
+const PUNCH: [(CommandId, &str, Handler); 2] = [
+    (TOGGLE_PUNCH_IN, "Toggle Punch In", |ctx| {
+        ctx.document.transact("Toggle Punch In", |tx| {
+            tx.set_punch_in(!tx.project().punch_in);
+        });
+    }),
+    (TOGGLE_PUNCH_OUT, "Toggle Punch Out", |ctx| {
+        ctx.document.transact("Toggle Punch Out", |tx| {
+            tx.set_punch_out(!tx.project().punch_out);
+        });
+    }),
+];
+
 /// Registers the transport commands.
 pub fn register(registry: &mut Registry) {
-    for (id, title, run) in COMMANDS {
+    for (id, title, run) in COMMANDS.into_iter().chain(PUNCH) {
         registry.register(id, title, run);
     }
     const AT: Param = Param::required("at", Type::Beats, "The position.");
@@ -139,11 +163,30 @@ fn play_stop(ctx: &mut Context<'_>) {
         ctx.transport.stop();
         return;
     }
+    play(ctx);
+}
+
+/// Plays from the start marker, or from the playhead if the behaviour
+/// settings say so.
+fn play(ctx: &mut Context<'_>) {
     let editor = ctx.document.editor();
     if editor.behaviour.play_from == PlayFrom::StartMarker {
         ctx.transport.locate(editor.start_marker);
     }
     ctx.transport.play();
+}
+
+/// Starts recording and playing, as Live's arrangement record button does
+/// with "Start Playback with Record" on, or while playing, turns recording
+/// on or off.
+fn record(ctx: &mut Context<'_>) {
+    if ctx.transport.is_playing() {
+        let on = !ctx.transport.is_recording();
+        ctx.transport.set_recording(on);
+        return;
+    }
+    ctx.transport.set_recording(true);
+    play(ctx);
 }
 
 /// Loops the selection and turns looping on, as Live's Ctrl+L does, or
@@ -224,7 +267,12 @@ mod tests {
             assert_eq!(registry.get(&id).unwrap().title, title);
             assert!(keymap.chords_for(&id).next().is_some(), "{id} has no chord");
         }
-        // The others are for the mouse, the tempo field and scripts.
+        // The punch buttons are for the mouse, and the rest for the mouse,
+        // the tempo field and scripts.
+        for (id, title, _) in PUNCH {
+            assert_eq!(registry.get(&id).unwrap().title, title);
+            assert_eq!(keymap.chords_for(&id).next(), None, "{id}");
+        }
         for id in [LOCATE, SET_START_MARKER, SET_LOOP, SET_TEMPO] {
             assert!(registry.get(&id).unwrap().needs_arguments(), "{id}");
         }
@@ -260,6 +308,50 @@ mod tests {
         setup.document.editor_mut().behaviour.play_from = PlayFrom::Playhead;
         setup.run(&PLAY_STOP);
         assert_eq!(setup.transport.calls, ["play"]);
+    }
+
+    #[test]
+    fn f9_records_from_the_start_marker_and_punches_while_playing() {
+        let keymap = Keymap::default_keymap();
+        assert_eq!(keymap.lookup(Key::F9.into()), Some(&RECORD));
+
+        let mut setup = Setup::new(Project::new());
+        setup.document.editor_mut().start_marker = Beats::new(4);
+        setup.run(&RECORD);
+        assert!(setup.transport.playing && setup.transport.recording);
+        // Punched out and in again by hand, and stopping stops recording.
+        setup.run(&RECORD);
+        setup.run(&RECORD);
+        setup.run(&STOP);
+        assert!(!setup.transport.recording);
+        assert_eq!(
+            setup.transport.calls,
+            [
+                "record true",
+                "locate 4",
+                "play",
+                "record false",
+                "record true",
+                "stop"
+            ]
+        );
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn punching_in_and_out_toggle_through_transactions() {
+        let mut setup = Setup::new(Project::new());
+        setup.run(&TOGGLE_PUNCH_IN);
+        setup.run(&TOGGLE_PUNCH_OUT);
+        setup.run(&TOGGLE_PUNCH_IN);
+        let project = setup.document.project();
+        assert!(!project.punch_in && project.punch_out);
+        assert_eq!(
+            setup.committed_names(),
+            ["Toggle Punch In", "Toggle Punch Out", "Toggle Punch In"]
+        );
+        assert!(setup.document.undo());
+        assert!(setup.document.project().punch_in);
     }
 
     #[test]

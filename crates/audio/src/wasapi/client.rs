@@ -62,7 +62,7 @@ impl Format {
     ///
     /// `wave` points to a valid `WAVEFORMATEX`, followed by the rest of a
     /// `WAVEFORMATEXTENSIBLE` if its tag says so.
-    unsafe fn read(wave: *const WAVEFORMATEX) -> Option<Format> {
+    pub unsafe fn read(wave: *const WAVEFORMATEX) -> Option<Format> {
         // SAFETY: as the caller promises. The structs are packed.
         let base = unsafe { wave.read_unaligned() };
         let (tag, channels, rate, bits) = (
@@ -215,6 +215,7 @@ impl Client {
             buffer: self.buffer,
             latency,
             realtime,
+            inputs: Vec::new(),
         }
     }
 
@@ -287,12 +288,12 @@ pub(super) fn open(device: &IMMDevice, request: &StreamRequest) -> Result<Client
     }
 }
 
-fn activate<T: Interface>(device: &IMMDevice) -> Result<T, Error> {
+pub(super) fn activate<T: Interface>(device: &IMMDevice) -> Result<T, Error> {
     // SAFETY: on an MTA thread, like every WASAPI call in this backend.
     unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|e| os("IMMDevice::Activate", e))
 }
 
-fn mix_format(audio: &IAudioClient) -> Result<TaskMem<WAVEFORMATEX>, Error> {
+pub(super) fn mix_format(audio: &IAudioClient) -> Result<TaskMem<WAVEFORMATEX>, Error> {
     // SAFETY: an activated client. The format is ours to free.
     unsafe { audio.GetMixFormat() }
         .map(TaskMem)
@@ -563,6 +564,15 @@ fn finish(audio: IAudioClient, api: Api, format: Format, period: u32) -> Result<
             stream_latency: hns_to_frames(latency.max(0) as u64, format.rate) as u32,
         })
     }
+}
+
+/// How many channels an endpoint's shared-mode format has.
+pub(super) fn channels(device: &IMMDevice) -> Result<u16, Error> {
+    let audio: IAudioClient = activate(device)?;
+    let mix = mix_format(&audio)?;
+    // SAFETY: WASAPI's own format.
+    let (_, channels, _) = unsafe { basics(mix.0) };
+    Ok(channels)
 }
 
 pub(super) fn capabilities(device: &IMMDevice) -> Result<Capabilities, Error> {

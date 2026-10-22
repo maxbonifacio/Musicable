@@ -6,7 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use musicable_engine::nodes::Constant;
-use musicable_engine::{Engine, EngineHandle, Graph, NodeKey, rt};
+use musicable_engine::{
+    AudioMut, Engine, EngineHandle, Graph, Inputs, Node, NodeKey, ProcessContext, rt,
+};
 
 use super::context::CALLBACKS;
 use super::detector::{SETTLING, STARTUP};
@@ -14,6 +16,7 @@ use super::fake::{Fake, Settings};
 use super::stream::{self, OpenStream, Stream};
 use super::sys::{self, Long, message, sample_type};
 use crate::format::to_int;
+use crate::input::{InputClock, InputInfo, StreamInput};
 use crate::{
     Api, AsioCapabilities, Capabilities, Device, DriverType, Error, SampleFormat, StreamInfo,
     StreamRequest,
@@ -38,7 +41,7 @@ fn device() -> Device {
 }
 
 fn open(fake: &Arc<Fake>, request: &StreamRequest) -> Result<(StreamInfo, OpenStream), Error> {
-    stream::open(request, device(), fake.loader())
+    stream::open(request, device(), fake.loader()).map(|(info, _, open)| (info, open))
 }
 
 /// An engine for `info` that renders `value` in every channel.
@@ -449,7 +452,7 @@ fn gives_up_on_a_driver_that_stops_calling_back() {
     let _turn = turn();
     let fake = Fake::new(Settings::default());
     let give_up = Duration::from_millis(100);
-    let (info, open) =
+    let (info, _, open) =
         stream::open_with(&StreamRequest::default(), device(), fake.loader(), give_up).unwrap();
     let (engine, _handle) = engine(&info, 0.0);
     let stream = open.start(engine).unwrap();
@@ -500,6 +503,7 @@ fn capabilities_come_from_the_driver() {
     let _turn = turn();
     let fake = Fake::new(Settings {
         outputs: 1,
+        inputs: 70,
         sizes: [32, 1024, 128, -1],
         reports_overloads: true,
         ..Settings::default()
@@ -517,6 +521,7 @@ fn capabilities_come_from_the_driver() {
                 sample_rates: vec![44_100, 48_000, 96_000],
                 buffer_sizes: vec![32, 64, 128, 256, 512, 1024],
                 reports_dropouts: true,
+                inputs: 64,
             }),
         }
     );
@@ -660,4 +665,156 @@ fn tells_the_driver_what_it_supports() {
     assert_eq!(ask(message::ENGINE_VERSION), 2);
     assert_eq!(ask(message::SUPPORTS_TIME_INFO), 1);
     assert_eq!(ask(time_code), 0);
+}
+
+/// Plays device input channel `.0`, or silence if there's no such channel.
+struct Echo(usize);
+
+impl Node for Echo {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn process(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        _inputs: Inputs<'_>,
+        output: &mut AudioMut<'_>,
+    ) {
+        match ctx.input.channels() > self.0 {
+            true => output
+                .channel_mut(0)
+                .copy_from_slice(ctx.input.channel(self.0)),
+            false => output.clear(),
+        }
+    }
+}
+
+/// Opens the fake recording from `inputs`, and starts it playing device
+/// input channel `echo`.
+fn record(
+    fake: &Arc<Fake>,
+    inputs: &[&str],
+    echo: usize,
+) -> (StreamInfo, Vec<StreamInput>, Stream, EngineHandle) {
+    let request = StreamRequest {
+        inputs: inputs.iter().map(|&id| id.to_owned()).collect(),
+        ..StreamRequest::default()
+    };
+    let (info, inputs, open) = stream::open(&request, device(), fake.loader()).unwrap();
+    let config = info.engine_config();
+    let (engine, mut handle) = Engine::new(config);
+    let mut graph = Graph::new();
+    let node = graph.add(NodeKey(1), Echo(echo));
+    graph.set_output(node).unwrap();
+    handle.swap_graph(graph.prepare(&config).unwrap()).unwrap();
+    let stream = open.start(engine).unwrap();
+    (info, inputs, stream, handle)
+}
+
+/// A sample that counts: frame `n` as a 32-bit integer the engine reads as
+/// `n / 32768` exactly.
+fn counting(n: u64) -> i32 {
+    (n as i32) << 16
+}
+
+#[test]
+fn records_the_drivers_inputs_where_they_were_played() {
+    let _turn = turn();
+    let fake = Fake::new(Settings::default());
+    let (info, inputs, stream, _handle) = record(&fake, &[ID], 1);
+    assert_eq!(
+        info.inputs,
+        [InputInfo {
+            id: ID.into(),
+            name: "Fake".into(),
+            channels: 2,
+            first_channel: 0,
+            sample_rate: 48_000,
+            clock: InputClock::Output,
+            error: None,
+        }]
+    );
+    // Channel 0 is noise, channel 1 counts the frames the driver captured.
+    let period = 256;
+    let halves = 16;
+    for k in 0..halves {
+        let index = fake.record().next_index;
+        let noise: Vec<u8> = (0..period).flat_map(|_| 12_345_i32.to_le_bytes()).collect();
+        let count: Vec<u8> = (0..period)
+            .flat_map(|i| counting(k * period + i).to_le_bytes())
+            .collect();
+        fake.capture(0, index as usize, &noise);
+        fake.capture(1, index as usize, &count);
+        switch(&fake, 1);
+        // An input half's first frame was captured the input latency before
+        // its buffer switch, and the half rendered then plays the output
+        // latency after: 290 + 300 frames of round trip, so engine frame
+        // `n` plays what was captured as frame `n` was heard, 590 frames
+        // later.
+        let played = ints(&fake.output(0, index as usize));
+        for (i, &sample) in played.iter().enumerate() {
+            let frame = k * period + i as u64;
+            let expected = if frame >= 590 { counting(frame) } else { 0 };
+            assert_eq!(sample, expected, "frame {frame}");
+        }
+    }
+    // The recording has what was captured as each engine frame was heard.
+    let buffer = inputs[0].buffer.clone().unwrap();
+    let frames = buffer.frames();
+    assert_eq!(frames, 0..halves * period - 590);
+    let mut recorded = vec![0.0; frames.end as usize];
+    buffer.read_channel(0, 1, &mut recorded).unwrap();
+    for (frame, &sample) in recorded.iter().enumerate() {
+        assert_eq!(sample, (frame + 590) as f32 / 32_768.0, "frame {frame}");
+    }
+    buffer.read_channel(0, 0, &mut recorded).unwrap();
+    assert!(recorded.iter().all(|&s| s == 12_345.0 / 2_147_483_648.0));
+
+    let stats = stream.stats();
+    assert_eq!((stats.input_delay, stats.input_late), (590, 0));
+    let input = inputs[0].counters.snapshot();
+    assert_eq!(input.captured, halves * period);
+    assert_eq!((input.lost, input.slips, input.error), (0, 0, None));
+    assert!(input.aligned);
+    assert_eq!(input.clock, InputClock::Output);
+}
+
+#[test]
+fn a_driver_that_cannot_record_still_plays() {
+    let _turn = turn();
+    let fake = Fake::new(Settings {
+        refuses_inputs: true,
+        ..Settings::default()
+    });
+    let (info, inputs, stream, _handle) = record(&fake, &[ID], 0);
+    assert_eq!(info.inputs[0].channels, 0);
+    assert!(info.inputs[0].error.is_some(), "{:?}", info.inputs);
+    assert!(inputs[0].buffer.is_none());
+    assert!(inputs[0].counters.snapshot().error.is_some());
+    switch(&fake, 4);
+    assert_eq!(fake.record().inputs.len(), 0, "made buffers without inputs");
+    assert!(ints(&fake.output(0, 0)).iter().all(|&s| s == 0));
+    assert!(!stream.has_ended());
+}
+
+#[test]
+fn inputs_it_cannot_open_are_silent_and_say_why() {
+    let _turn = turn();
+    let fake = Fake::new(Settings::default());
+    let other = "asio:{00000000-0000-0000-0000-000000000002}";
+    let system = "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000003}";
+    let (info, inputs, _stream, _handle) = record(&fake, &[other, ID, system], 2);
+    let opened: Vec<(u16, usize, bool)> = info
+        .inputs
+        .iter()
+        .map(|input| (input.channels, input.first_channel, input.error.is_none()))
+        .collect();
+    assert_eq!(opened, [(0, 0, false), (2, 0, true), (0, 2, false)]);
+    let error = info.inputs[0].error.as_deref().unwrap();
+    assert!(error.contains("one driver at a time"), "{error}");
+    assert_eq!(inputs[1].counters.snapshot().error, None);
+    switch(&fake, 4);
+    // The engine sees the driver's two channels, and only those.
+    assert!(ints(&fake.output(0, 1)).iter().all(|&s| s == 0));
 }

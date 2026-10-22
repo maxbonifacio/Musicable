@@ -17,7 +17,7 @@ use super::sys::{
 };
 
 /// How the fake behaves. The defaults make a well-behaved driver with eight
-/// outputs of 32-bit integers, at 48 kHz.
+/// outputs and two inputs of 32-bit integers, at 48 kHz.
 #[derive(Debug, Clone)]
 pub(super) struct Settings {
     /// Whether `init` succeeds.
@@ -27,6 +27,9 @@ pub(super) struct Settings {
     pub outputs: Long,
     /// The outputs' sample types: outputs past the list have its last.
     pub sample_types: Vec<Long>,
+    pub inputs: Long,
+    /// The inputs' sample types, as for the outputs.
+    pub input_types: Vec<Long>,
     pub rate: f64,
     /// The rates the driver can switch to.
     pub rates: Vec<u32>,
@@ -34,7 +37,11 @@ pub(super) struct Settings {
     pub sizes: [Long; 4],
     /// Whether creating buffers fails at any size but the preferred one.
     pub only_preferred: bool,
+    /// Whether creating buffers fails when any are inputs.
+    pub refuses_inputs: bool,
+    /// The output latency.
     pub latency: Long,
+    pub input_latency: Long,
     pub reports_overloads: bool,
     pub takes_output_ready: bool,
     /// What `start` returns.
@@ -51,11 +58,15 @@ impl Default for Settings {
             error: "",
             outputs: 8,
             sample_types: vec![sample_type::INT32_LSB],
+            inputs: 2,
+            input_types: vec![sample_type::INT32_LSB],
             rate: 48_000.0,
             rates: vec![44_100, 48_000, 96_000],
             sizes: [64, 2048, 256, -1],
             only_preferred: false,
+            refuses_inputs: false,
             latency: 300,
+            input_latency: 290,
             reports_overloads: false,
             takes_output_ready: true,
             start: sys::OK,
@@ -76,6 +87,8 @@ pub(super) struct Record {
     pub size: Long,
     /// The buffers, while they exist: each output's two halves.
     pub buffers: Vec<[Box<[u8]>; 2]>,
+    /// Each input's two halves, while they exist.
+    pub inputs: Vec<[Box<[u8]>; 2]>,
     /// What the host handed over to be called.
     pub callbacks: Option<&'static Callbacks>,
     pub running: bool,
@@ -235,6 +248,12 @@ impl Fake {
         self.record().buffers[output][half].to_vec()
     }
 
+    /// As the driver: puts `bytes` in half `half` of input `input`, as if it
+    /// had captured them, before it hands the half over.
+    pub fn capture(&self, input: usize, half: usize, bytes: &[u8]) {
+        self.record().inputs[input][half].copy_from_slice(bytes);
+    }
+
     /// How often the callbacks asked for the sample position.
     pub fn positions_asked(&self) -> u64 {
         self.positions_asked.load(Ordering::Relaxed)
@@ -383,10 +402,11 @@ unsafe extern "C" fn stop(this: *mut Object) -> Code {
 unsafe extern "C" fn channels(this: *mut Object, inputs: *mut Long, outputs: *mut Long) -> Code {
     let fake = unsafe { fake(this) };
     fake.call("channels");
+    let settings = fake.settings();
     // SAFETY: the caller's longs.
     unsafe {
-        *inputs = 2;
-        *outputs = fake.settings().outputs;
+        *inputs = settings.inputs;
+        *outputs = settings.outputs;
     }
     sys::OK
 }
@@ -394,11 +414,11 @@ unsafe extern "C" fn channels(this: *mut Object, inputs: *mut Long, outputs: *mu
 unsafe extern "C" fn latencies(this: *mut Object, input: *mut Long, output: *mut Long) -> Code {
     let fake = unsafe { fake(this) };
     fake.call("latencies");
-    let latency = fake.settings().latency;
+    let settings = fake.settings();
     // SAFETY: the caller's longs.
     unsafe {
-        *input = latency;
-        *output = latency;
+        *input = settings.input_latency;
+        *output = settings.latency;
     }
     sys::OK
 }
@@ -498,10 +518,11 @@ unsafe extern "C" fn channel_info(this: *mut Object, info: *mut ChannelInfo) -> 
     let settings = fake.settings();
     // SAFETY: the caller's structure.
     let info = unsafe { &mut *info };
-    if !(0..settings.outputs).contains(&info.channel) {
+    let input = info.is_input != 0;
+    if !settings.has(input, info.channel) {
         return sys::INVALID_PARAMETER;
     }
-    info.sample_type = settings.sample_type(info.channel);
+    info.sample_type = settings.sample_type(input, info.channel);
     info.is_active = 0;
     info.group = 0;
     info.name = [0; 32];
@@ -509,8 +530,18 @@ unsafe extern "C" fn channel_info(this: *mut Object, info: *mut ChannelInfo) -> 
 }
 
 impl Settings {
-    fn sample_type(&self, channel: Long) -> Long {
-        let types = &self.sample_types;
+    /// Whether the driver has input or output `channel`.
+    fn has(&self, input: bool, channel: Long) -> bool {
+        let count = if input { self.inputs } else { self.outputs };
+        (0..count).contains(&channel)
+    }
+
+    fn sample_type(&self, input: bool, channel: Long) -> Long {
+        let types = if input {
+            &self.input_types
+        } else {
+            &self.sample_types
+        };
         types[usize::try_from(channel).unwrap_or(0).min(types.len() - 1)]
     }
 }
@@ -531,21 +562,27 @@ unsafe extern "C" fn create_buffers(
     }
     // SAFETY: the caller's structures, `count` of them.
     let infos = unsafe { std::slice::from_raw_parts_mut(infos, count as usize) };
-    let mut buffers = Vec::new();
+    let (mut buffers, mut inputs) = (Vec::new(), Vec::new());
     for info in infos {
-        if info.is_input != 0 || !(0..settings.outputs).contains(&info.channel) {
+        let input = info.is_input != 0;
+        if !settings.has(input, info.channel) || (input && settings.refuses_inputs) {
             return sys::INVALID_PARAMETER;
         }
-        let bytes =
-            Encoding::from_type(settings.sample_type(info.channel)).map_or(1, Encoding::bytes);
-        // Whatever the memory held before: the host clears it.
+        let bytes = Encoding::from_type(settings.sample_type(input, info.channel))
+            .map_or(1, Encoding::bytes);
+        // Whatever the memory held before: the host clears the outputs.
         let mut halves = [0, 1].map(|_| vec![0xAA_u8; size as usize * bytes].into_boxed_slice());
         info.buffers = [0, 1].map(|half| halves[half].as_mut_ptr().cast::<c_void>());
-        buffers.push(halves);
+        if input {
+            inputs.push(halves);
+        } else {
+            buffers.push(halves);
+        }
     }
     let mut record = fake.record();
     record.size = size;
     record.buffers = buffers;
+    record.inputs = inputs;
     // SAFETY: the host's callbacks, which it keeps until the buffers go.
     record.callbacks = Some(unsafe { &*callbacks });
     sys::OK
@@ -554,7 +591,9 @@ unsafe extern "C" fn create_buffers(
 unsafe extern "C" fn dispose_buffers(this: *mut Object) -> Code {
     let fake = unsafe { fake(this) };
     fake.call("dispose_buffers");
-    fake.record().buffers.clear();
+    let mut record = fake.record();
+    record.buffers.clear();
+    record.inputs.clear();
     sys::OK
 }
 

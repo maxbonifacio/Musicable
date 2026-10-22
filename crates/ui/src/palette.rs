@@ -215,21 +215,21 @@ mod tests {
     #[test]
     fn the_arrows_choose_a_command() {
         let mut harness = palette();
-        // "Toggle Loop", then "Toggle Metronome".
-        type_text(&mut harness, "transport toggle");
+        // "Toggle Punch In", then "Toggle Punch Out".
+        type_text(&mut harness, "transport toggle punch");
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowUp);
         press(&mut harness, Key::Enter);
-        assert_eq!(ran(&harness), [Action::Run(transport::TOGGLE_LOOP)]);
+        assert_eq!(ran(&harness), [Action::Run(transport::TOGGLE_PUNCH_IN)]);
 
         let mut harness = palette();
-        type_text(&mut harness, "transport toggle");
+        type_text(&mut harness, "transport toggle punch");
         press(&mut harness, Key::ArrowUp);
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::Enter);
-        assert_eq!(ran(&harness), [Action::Run(transport::TOGGLE_METRONOME)]);
+        assert_eq!(ran(&harness), [Action::Run(transport::TOGGLE_PUNCH_OUT)]);
     }
 
     #[test]

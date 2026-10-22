@@ -1,5 +1,6 @@
-//! The transport as the engine runs it: whether it plays, the song position,
-//! the loop, and the tempo map that places musical positions in samples.
+//! The transport as the engine runs it: whether it plays and records, the
+//! song position, the loop, the punch range, and the tempo map that places
+//! musical positions in samples.
 
 use musicable_model::time::{Beats, TempoMap};
 
@@ -12,6 +13,10 @@ pub(crate) struct Transport {
     /// The loop region in song positions, while looping over at least one
     /// frame.
     loop_frames: Option<(u64, u64)>,
+    /// Where recording punches in and out, as asked.
+    punch: (Option<Beats>, Option<Beats>),
+    /// The same in song positions.
+    punch_frames: (Option<u64>, Option<u64>),
 }
 
 impl Transport {
@@ -22,6 +27,8 @@ impl Transport {
             tempo: Box::default(),
             sample_rate,
             loop_frames: None,
+            punch: (None, None),
+            punch_frames: (None, None),
         }
     }
 
@@ -36,7 +43,10 @@ impl Transport {
     pub fn apply(&mut self, command: TransportCommand) {
         match command {
             TransportCommand::Play => self.state.playing = true,
-            TransportCommand::Stop => self.state.playing = false,
+            TransportCommand::Stop => {
+                self.state.playing = false;
+                self.state.record = false;
+            }
             TransportCommand::Locate(at) => {
                 self.state.position = self.frame_at(at);
                 self.state.jumps += 1;
@@ -44,6 +54,11 @@ impl Transport {
             TransportCommand::Loop(region) => {
                 self.state.looping = region;
                 self.place_loop();
+            }
+            TransportCommand::Record(on) => self.state.record = on,
+            TransportCommand::Punch { start, end } => {
+                self.punch = (start, end);
+                self.place_punch();
             }
         }
     }
@@ -56,11 +71,13 @@ impl Transport {
         std::mem::swap(&mut self.tempo, &mut tempo);
         self.state.position = self.frame_at(at);
         self.place_loop();
+        self.place_punch();
         tempo
     }
 
     /// Call at the start of each block, after applying the transport changes
-    /// due: a playing playhead at the loop end jumps back to the loop start.
+    /// due: a playing playhead at the loop end jumps back to the loop start,
+    /// and recording follows the punch range.
     pub fn wrap(&mut self) {
         if let Some((start, end)) = self.loop_frames
             && self.state.playing
@@ -69,6 +86,12 @@ impl Transport {
             self.state.position = start;
             self.state.jumps += 1;
         }
+        let position = self.state.position;
+        let (punch_in, punch_out) = self.punch_frames;
+        self.state.recording = self.state.playing
+            && self.state.record
+            && punch_in.is_none_or(|start| position >= start)
+            && punch_out.is_none_or(|end| position < end);
     }
 
     /// How many frames the playhead plays before it reaches the loop end, if
@@ -80,6 +103,22 @@ impl Transport {
             }
             _ => None,
         }
+    }
+
+    /// How many frames the playhead plays before recording punches in or
+    /// out, if it's going to. The block must end there.
+    pub fn frames_to_punch(&self) -> Option<u64> {
+        if !(self.state.playing && self.state.record) {
+            return None;
+        }
+        let position = self.state.position;
+        let (punch_in, punch_out) = self.punch_frames;
+        [punch_in, punch_out]
+            .into_iter()
+            .flatten()
+            .filter(|&at| at > position)
+            .map(|at| at - position)
+            .min()
     }
 
     /// Moves the playhead past a block of `frames`.
@@ -99,6 +138,14 @@ impl Transport {
             let (start, end) = (self.frame_at(region.start), self.frame_at(region.end));
             (start < end).then_some((start, end))
         });
+    }
+
+    fn place_punch(&mut self) {
+        let (start, end) = self.punch;
+        self.punch_frames = (
+            start.map(|at| self.frame_at(at)),
+            end.map(|at| self.frame_at(at)),
+        );
     }
 }
 
@@ -181,6 +228,60 @@ mod tests {
         assert_eq!(t.state().position, 0);
         t.apply(TransportCommand::Loop(None));
         assert_eq!(t.state().looping, None);
+    }
+
+    fn punch(start: Option<i64>, end: Option<i64>) -> TransportCommand {
+        TransportCommand::Punch {
+            start: start.map(Beats::new),
+            end: end.map(Beats::new),
+        }
+    }
+
+    #[test]
+    fn it_records_while_playing_with_recording_on_inside_the_punch_range() {
+        let mut t = transport();
+        t.apply(TransportCommand::Record(true));
+        t.wrap();
+        assert!(t.state().record && !t.state().recording);
+        t.apply(TransportCommand::Play);
+        t.wrap();
+        assert!(t.state().recording);
+        assert_eq!(t.frames_to_punch(), None);
+        // Punching in at beat 1 and out at beat 3.
+        t.apply(punch(Some(1), Some(3)));
+        t.wrap();
+        assert!(!t.state().recording);
+        assert_eq!(t.frames_to_punch(), Some(24_000));
+        t.advance(24_000);
+        t.wrap();
+        assert!(t.state().recording);
+        assert_eq!(t.frames_to_punch(), Some(48_000));
+        t.advance(48_000);
+        t.wrap();
+        assert!(!t.state().recording);
+        assert_eq!(t.frames_to_punch(), None);
+        // Stopping turns recording off.
+        t.apply(TransportCommand::Locate(Beats::new(2)));
+        t.apply(TransportCommand::Stop);
+        t.wrap();
+        assert!(!t.state().record && !t.state().recording);
+        t.apply(TransportCommand::Play);
+        t.wrap();
+        assert!(!t.state().recording);
+        assert_eq!(t.frames_to_punch(), None);
+    }
+
+    #[test]
+    fn the_punch_range_keeps_its_musical_place() {
+        let mut t = transport();
+        t.apply(punch(None, Some(2)));
+        t.apply(TransportCommand::Record(true));
+        t.apply(TransportCommand::Play);
+        t.wrap();
+        assert!(t.state().recording);
+        assert_eq!(t.frames_to_punch(), Some(48_000));
+        t.set_tempo(Box::new(TempoMap::new(60.0, TimeSignature::FOUR_FOUR)));
+        assert_eq!(t.frames_to_punch(), Some(96_000));
     }
 
     #[test]

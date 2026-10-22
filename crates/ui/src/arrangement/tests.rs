@@ -14,7 +14,7 @@ use musicable_commands::{
 };
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{LocatorId, Project, TrackId, TrackKind};
+use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
@@ -24,6 +24,7 @@ use crate::{Levels, Plugins, Waveforms};
 #[derive(Debug, Default)]
 struct Player {
     playing: bool,
+    recording: bool,
     playhead: Beats,
 }
 
@@ -38,6 +39,7 @@ impl Transport for Player {
 
     fn stop(&mut self) {
         self.playing = false;
+        self.recording = false;
     }
 
     fn locate(&mut self, at: Beats) {
@@ -46,6 +48,14 @@ impl Transport for Player {
 
     fn playhead(&self) -> Beats {
         self.playhead
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    fn set_recording(&mut self, on: bool) {
+        self.recording = on;
     }
 }
 
@@ -86,7 +96,7 @@ impl State {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
             Action::RunWith(id, args) => self.commands.run_with(id, args, &mut ctx),
             Action::Mixer(change) => {
-                musicable_commands::mixer::change(&mut self.document, *change);
+                musicable_commands::mixer::change(&mut self.document, change.clone());
                 Ok(musicable_commands::Value::None)
             }
             _ => Ok(musicable_commands::Value::None),
@@ -201,10 +211,13 @@ fn harness(project: Project) -> Harness<'static, State> {
                         redo: None,
                         playback: Playback {
                             playing: state.player.playing,
+                            record: state.player.recording,
                             playhead: state.player.playhead,
                             seconds: 0.0,
                         },
+                        recordings: &[],
                         levels: &state.levels,
+                        inputs: &[],
                         audio: Audio {
                             summary: "",
                             running: true,
@@ -794,4 +807,117 @@ fn files_dropped_on_an_audio_track_go_there() {
         at: Some(Beats::new(40)),
     };
     assert!(harness.state().actions.contains(&drop));
+}
+
+/// Bass, with two takes of its two bars: Take 1, which plays bass.wav from
+/// its start and which the Line clip is the comp of, as recording leaves
+/// it, and Take 2, which plays it from a second in.
+fn with_takes() -> (Project, Ids, [TakeId; 2]) {
+    let (mut project, ids) = project();
+    let range = BeatRange::new(Beats::new(16), Beats::new(24));
+    let mut takes = Vec::new();
+    for (name, offset) in [("Take 1", 0), ("Take 2", 48_000)] {
+        let mut audio = AudioClip::new("bass.wav");
+        audio.offset = offset;
+        let clip = project.new_clip("Bass", range, ClipContent::Audio(audio));
+        let mut take = project.new_take(name);
+        take.clips.push(clip);
+        takes.push(take);
+    }
+    let ids_of = [takes[0].id, takes[1].id];
+    project.track_mut(ids.bass).unwrap().takes = takes;
+    (project, ids, ids_of)
+}
+
+/// Somewhere in the lane of the take called `name`, at `at`.
+fn in_take(harness: &Harness<'_, State>, name: &str, at: f64) -> Pos2 {
+    let row = harness.get_by_label(name).rect();
+    pos2(x_of(harness, at), row.center().y)
+}
+
+/// The track's clips, as where they are and where in their files they
+/// start.
+fn played(harness: &Harness<'_, State>, track: TrackId) -> Vec<(BeatRange, u64)> {
+    let track = harness.state().project().track(track).unwrap();
+    let mut clips: Vec<_> = track
+        .clips
+        .iter()
+        .map(|clip| match &clip.content {
+            ClipContent::Audio(audio) => (clip.range(), audio.offset),
+            ClipContent::Midi(_) => (clip.range(), 0),
+        })
+        .collect();
+    clips.sort_by_key(|(range, _)| range.start);
+    clips
+}
+
+#[test]
+fn takes_show_in_lanes_and_dragging_or_clicking_comps_them() {
+    let (project, ids, [first, second]) = with_takes();
+    let mut harness = harness(project);
+    // Hidden until the track shows them.
+    assert!(harness.query_by_label("Take 1 of Bass").is_none());
+    harness.get_by_label("Track Bass").click_secondary();
+    harness.run();
+    harness
+        .get_by_label("Show/Hide Take Lanes Ctrl+Alt+U")
+        .click();
+    harness.run();
+    let bass = harness.get_by_label("Track Bass").rect();
+    let (one, two) = (
+        harness.get_by_label("Take 1 of Bass").rect(),
+        harness.get_by_label("Take 2 of Bass").rect(),
+    );
+    let reverb = harness.get_by_label("Track Reverb").rect();
+    assert_eq!((one.top(), one.height()), (bass.bottom(), 36.0));
+    assert_eq!((two.top(), reverb.top()), (one.bottom(), two.bottom()));
+    let bars = |a, b| BeatRange::new(Beats::new(a), Beats::new(b));
+    assert_eq!(played(&harness, ids.bass), [(bars(16, 24), 0)]);
+
+    // A drag across Take 2 copies what's under it, on the grid, to the
+    // track.
+    let from = in_take(&harness, "Take 2 of Bass", 18.1);
+    let to = in_take(&harness, "Take 2 of Bass", 19.9);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let comped = [
+        (bars(16, 18), 0),
+        // Two beats into Take 2 at 120 BPM: a second past its start.
+        (bars(18, 20), 96_000),
+        (bars(20, 24), 96_000),
+    ];
+    assert_eq!(played(&harness, ids.bass), comped);
+    assert_eq!(harness.state().document.undo_name(), Some("Comp"));
+
+    // A click takes a take's whole clip.
+    let at = in_take(&harness, "Take 1 of Bass", 21.0);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(played(&harness, ids.bass), [(bars(16, 24), 0)]);
+
+    // A double click on a take's name renames it, and its menu deletes it.
+    // Long enough after the last click that it isn't a triple click.
+    for _ in 0..40 {
+        harness.step();
+    }
+    let header = harness.get_by_label("Take 2 of Bass").rect().center();
+    harness.hover_at(header);
+    harness.run();
+    for pressed in [true, false, true, false] {
+        harness.event(Event::PointerButton {
+            pos: header,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    let rename = Request::Rename(Named::Take(second));
+    assert_eq!(harness.state().requests, [rename]);
+    harness.get_by_label("Take 1 of Bass").click_secondary();
+    harness.run();
+    harness.get_by_label("Delete Take").click();
+    harness.run();
+    assert!(harness.state().project().find_take(first).is_none());
+    assert!(harness.query_by_label("Take 1 of Bass").is_none());
+    assert!(harness.query_by_label("Take 2 of Bass").is_some());
+    assert!(harness.state().errors.is_empty());
 }

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::timeline::{Segment, Timeline, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
     AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, NodeEvent, NodeEventKind, NodeKey,
@@ -126,7 +127,8 @@ pub enum SwapError {
 /// changes and transport commands at the exact frame they are due. It renders
 /// whatever number of frames the device asks for, in blocks of at most
 /// [`EngineConfig::max_block`], ending a block early wherever the transport
-/// changes or a loop jumps back.
+/// changes, a loop jumps back or recording punches in or out. It publishes
+/// the transport's course on a [`Timeline`], for recording.
 ///
 /// Drop the engine off the audio thread, since that frees its graph.
 pub struct Engine {
@@ -142,6 +144,7 @@ pub struct Engine {
     /// What plays before the first graph arrives.
     silence: AudioBuffer,
     counters: Arc<Counters>,
+    timeline: TimelineWriter,
 }
 
 impl Engine {
@@ -166,6 +169,7 @@ impl Engine {
         let (message_tx, message_rx) = RingBuffer::new(QUEUE_CAPACITY);
         let (garbage_tx, garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
         let counters = Arc::new(Counters::default());
+        let (timeline, timeline_reader) = crate::timeline::timeline();
         let engine = Engine {
             config,
             renderer,
@@ -177,6 +181,7 @@ impl Engine {
             pending: Vec::with_capacity(EVENT_CAPACITY),
             silence: AudioBuffer::new(1, config.max_block),
             counters: counters.clone(),
+            timeline,
         };
         let handle = EngineHandle {
             config,
@@ -184,6 +189,7 @@ impl Engine {
             garbage: garbage_rx,
             counters,
             params: BTreeMap::new(),
+            timeline: Some(timeline_reader),
         };
         (engine, handle)
     }
@@ -201,12 +207,31 @@ impl Engine {
         self.counters.xruns.fetch_add(1, Relaxed);
     }
 
+    /// Frames rendered since the engine started: the engine time of the next
+    /// frame it renders. An audio backend lines its device inputs up with it.
+    pub fn time(&self) -> u64 {
+        self.time
+    }
+
     /// Renders `output.frames()` frames into `output`: the graph's output,
     /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)).
     /// Real-time safe.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
+        let frames = output.frames();
+        self.process_with_input(AudioRef::empty(frames), output);
+    }
+
+    /// [`process`](Self::process), with `input` holding the audio devices'
+    /// inputs for the same frames, which nodes find in
+    /// [`ProcessContext::input`](crate::ProcessContext::input). Real-time
+    /// safe.
+    ///
+    /// # Panics
+    ///
+    /// If `input` isn't as long as `output`.
+    pub fn process_with_input(&mut self, input: AudioRef<'_>, output: &mut AudioMut<'_>) {
         rt::scope(|| {
-            self.run(output.frames(), |start, block, cue| {
+            self.run(input, output.frames(), |start, block, cue| {
                 let mut part = output.range_mut(start..start + block.frames());
                 part.copy_from(block);
                 if let Some(cue) = cue {
@@ -223,13 +248,31 @@ impl Engine {
     ///
     /// If `output.len()` isn't a multiple of `channels`.
     pub fn process_interleaved(&mut self, output: &mut [f32], channels: usize) {
+        let frames = output.len() / channels.max(1);
+        self.process_interleaved_with_input(AudioRef::empty(frames), output, channels);
+    }
+
+    /// [`process_interleaved`](Self::process_interleaved), with `input`
+    /// holding the audio devices' inputs for the same frames. Real-time
+    /// safe.
+    ///
+    /// # Panics
+    ///
+    /// If `output.len()` isn't a multiple of `channels`, or `input` isn't
+    /// as many frames long as `output`.
+    pub fn process_interleaved_with_input(
+        &mut self,
+        input: AudioRef<'_>,
+        output: &mut [f32],
+        channels: usize,
+    ) {
         assert!(
             channels > 0 && output.len().is_multiple_of(channels),
             "{} samples don't split into {channels} channels",
             output.len()
         );
         rt::scope(|| {
-            self.run(output.len() / channels, |start, block, cue| {
+            self.run(input, output.len() / channels, |start, block, cue| {
                 let part = &mut output[start * channels..(start + block.frames()) * channels];
                 block.write_interleaved(part, channels);
                 if let Some(cue) = cue {
@@ -239,17 +282,25 @@ impl Engine {
         });
     }
 
-    /// Renders `frames` frames block by block, handing each block's offset,
-    /// output and cue output to `write`.
+    /// Renders `frames` frames block by block, with `input` holding the
+    /// device inputs for them, handing each block's offset, output and cue
+    /// output to `write`.
     fn run(
         &mut self,
+        input: AudioRef<'_>,
         frames: usize,
         mut write: impl FnMut(usize, AudioRef<'_>, Option<AudioRef<'_>>),
     ) {
+        assert_eq!(
+            input.frames(),
+            frames,
+            "the device inputs are {} frames long, the output {frames}",
+            input.frames()
+        );
         self.receive();
         let mut done = 0;
         while done < frames {
-            let block = self.render(frames - done);
+            let block = self.render(input, done, frames - done);
             match &self.graph {
                 Some(graph) => write(done, graph.output(block), graph.cue(block)),
                 None => write(done, self.silence.view(block), None),
@@ -260,6 +311,7 @@ impl Engine {
         self.counters.time.store(self.time, Relaxed);
         self.counters.position.store(transport.position, Relaxed);
         self.counters.playing.store(transport.playing, Relaxed);
+        self.timeline.until(self.time);
     }
 
     /// Takes everything the control thread has sent.
@@ -315,12 +367,12 @@ impl Engine {
     }
 
     /// Renders the next block, of at most `max` frames, and returns its
-    /// length.
-    fn render(&mut self, max: usize) -> usize {
+    /// length. Its device inputs start at frame `offset` of `input`.
+    fn render(&mut self, input: AudioRef<'_>, offset: usize, max: usize) -> usize {
         let start = self.time;
         // Transport changes due by now apply before the block. The block ends
-        // at the next change, and where the loop jumps back, so each block has
-        // one transport state.
+        // at the next change, where the loop jumps back and where recording
+        // punches in or out, so each block has one transport state.
         let due_now = self.pending.partition_point(|p| p.time <= start);
         for i in 0..due_now {
             if let Event::Transport(command) = self.pending[i].event {
@@ -328,8 +380,26 @@ impl Engine {
             }
         }
         self.transport.wrap();
+        let state = self.transport.state();
+        self.timeline.block(Segment {
+            time: start,
+            position: state.position,
+            playing: state.playing,
+            record: state.record,
+            recording: state.recording,
+            latency: self
+                .graph
+                .as_ref()
+                .map_or(0, |graph| graph.latency() as u64),
+        });
         let mut end = start + max.min(self.config.max_block) as u64;
-        if let Some(frames) = self.transport.frames_to_loop_end() {
+        for frames in [
+            self.transport.frames_to_loop_end(),
+            self.transport.frames_to_punch(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             end = end.min(start + frames);
         }
         for p in &self.pending[due_now..] {
@@ -384,6 +454,7 @@ impl Engine {
                 time: start,
                 transport: self.transport.state(),
                 tempo: self.transport.tempo(),
+                input: input.range(offset..offset + frames),
             };
             let dropped = graph.play_notes(&block);
             if dropped > 0 {
@@ -410,6 +481,7 @@ pub struct EngineHandle {
     /// again after each swap, since a node that is new in the graph missed
     /// anything sent while the graph was being compiled.
     params: BTreeMap<(NodeKey, ParamId), LastValue>,
+    timeline: Option<Timeline>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -428,6 +500,14 @@ impl EngineHandle {
 
     pub fn stats(&self) -> Stats {
         self.counters.snapshot()
+    }
+
+    /// The engine's [`Timeline`], for a recorder: where in the song each
+    /// frame it renders plays, and whether it records. There's one, and the
+    /// first call takes it. Read it every so often, or the engine drops
+    /// what it publishes.
+    pub fn take_timeline(&mut self) -> Option<Timeline> {
+        self.timeline.take()
     }
 
     /// Sends an event to apply at the start of the engine's next `process`
@@ -602,6 +682,25 @@ mod tests {
         }
     }
 
+    /// Outputs 1 while the transport records, and 0 otherwise.
+    struct Recording;
+
+    impl Node for Recording {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            _inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            let recording = if ctx.transport.recording { 1.0 } else { 0.0 };
+            output.channel_mut(0).fill(recording);
+        }
+    }
+
     /// Multiplies its input by a gain that jumps to each new value on the
     /// frame it's sent for: when events land, without the ramp a real gain
     /// stage makes.
@@ -636,6 +735,30 @@ mod tests {
                     }
                 }
                 *sample *= self.0;
+            }
+        }
+    }
+
+    /// Outputs the device inputs' channel `0`, or silence without one.
+    struct Echo(usize);
+
+    impl Node for Echo {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            _inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            assert_eq!(ctx.input.frames(), ctx.frames);
+            match ctx.input.channels() > self.0 {
+                true => output
+                    .channel_mut(0)
+                    .copy_from_slice(ctx.input.channel(self.0)),
+                false => output.clear(),
             }
         }
     }
@@ -720,6 +843,74 @@ mod tests {
                 "{sizes:?}"
             );
         }
+    }
+
+    #[test]
+    fn nodes_get_each_frame_of_the_device_inputs_with_its_own_frame() {
+        for sizes in [&[1][..], &[7, 64, 65, 200, 3], &[1000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(single(0, Echo(1))).unwrap();
+            // A loop splits blocks where it jumps back, at frames 12,000 and
+            // 24,000, wherever the callbacks fall.
+            handle
+                .send(looping(Beats::from_ratio(1, 2), Beats::new(1)))
+                .unwrap();
+            handle.send(play()).unwrap();
+            let frames = 40_000;
+            // Channel 1 counts frames, channel 0 is noise.
+            let mut input = vec![0.5; 2 * frames];
+            for (i, sample) in input[frames..].iter_mut().enumerate() {
+                *sample = i as f32;
+            }
+            let mut out = vec![0.0; frames];
+            let mut done = 0;
+            for &size in sizes.iter().cycle() {
+                let size = size.min(frames - done);
+                let planar: Vec<f32> = (0..2)
+                    .flat_map(|c| input[c * frames + done..][..size].iter().copied())
+                    .collect();
+                assert_eq!(engine.time(), done as u64);
+                engine.process_with_input(
+                    AudioRef::from_planar(&planar, 2),
+                    &mut AudioMut::from_planar(&mut out[done..done + size], 1),
+                );
+                done += size;
+                if done == frames {
+                    break;
+                }
+            }
+            assert!(
+                out.iter().enumerate().all(|(i, &s)| s == i as f32),
+                "{sizes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn interleaved_output_takes_device_inputs_too() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(single(0, Echo(0))).unwrap();
+        let input: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut out = vec![0.0; 2 * 100];
+        engine.process_interleaved_with_input(AudioRef::from_planar(&input, 1), &mut out, 2);
+        for (frame, samples) in out.chunks(2).enumerate() {
+            assert_eq!(samples, [frame as f32; 2]);
+        }
+        // Without inputs, nodes see none.
+        engine.process_interleaved(&mut out, 2);
+        assert!(out.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "the device inputs are 10 frames long, the output 20")]
+    fn device_inputs_cover_the_output_exactly() {
+        let (mut engine, _handle) = Engine::new(CONFIG);
+        let input = [0.0; 10];
+        let mut out = [0.0; 20];
+        engine.process_with_input(
+            AudioRef::from_planar(&input, 1),
+            &mut AudioMut::from_planar(&mut out, 1),
+        );
     }
 
     #[test]
@@ -866,6 +1057,71 @@ mod tests {
                 } as f32)
                 .collect();
             assert_eq!(out, expected, "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn recording_punches_in_and_out_on_its_frames_and_the_timeline_follows() {
+        for sizes in [&[1][..], &[7, 64, 1000], &[5000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            let mut timeline = handle.take_timeline().unwrap();
+            assert!(handle.take_timeline().is_none());
+            handle.swap_graph(single(0, Recording)).unwrap();
+            // Looping over frames 0 to 18,000, recording from 6,000 to 12,000.
+            let quarter = |n| Some(Beats::from_ratio(n, 4));
+            let punch = TransportCommand::Punch {
+                start: quarter(1),
+                end: quarter(2),
+            };
+            handle.send(Event::Transport(punch)).unwrap();
+            handle
+                .send(looping(Beats::ZERO, Beats::from_ratio(3, 4)))
+                .unwrap();
+            let record = Event::Transport(TransportCommand::Record(true));
+            handle.send(record).unwrap();
+            handle.send(play()).unwrap();
+            let out = render(&mut engine, 40_000, sizes);
+            let expected: Vec<f32> = (0..40_000)
+                .map(|i| match i % 18_000 {
+                    6_000..12_000 => 1.0,
+                    _ => 0.0,
+                })
+                .collect();
+            assert_eq!(out, expected, "{sizes:?}");
+
+            let mut segments = Vec::new();
+            let read = timeline.read(&mut segments);
+            assert_eq!((read.until, read.lost), (40_000, false));
+            let course: Vec<(u64, u64, bool)> = segments
+                .iter()
+                .map(|s| {
+                    assert!(s.playing && s.record && s.latency == 0);
+                    (s.time, s.position, s.recording)
+                })
+                .collect();
+            assert_eq!(
+                course,
+                [
+                    (0, 0, false),
+                    (6_000, 6_000, true),
+                    (12_000, 12_000, false),
+                    (18_000, 0, false),
+                    (24_000, 6_000, true),
+                    (30_000, 12_000, false),
+                    (36_000, 0, false),
+                ],
+                "{sizes:?}"
+            );
+
+            // Stopping stops recording.
+            handle
+                .send(Event::Transport(TransportCommand::Stop))
+                .unwrap();
+            render(&mut engine, 10, sizes);
+            segments.clear();
+            timeline.read(&mut segments);
+            assert_eq!(segments.len(), 1);
+            assert!(!segments[0].playing && !segments[0].record);
         }
     }
 

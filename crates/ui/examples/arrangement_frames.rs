@@ -222,10 +222,13 @@ impl Bench {
                 redo: None,
                 playback: Playback {
                     playing: self.playing,
+                    record: false,
                     playhead: self.playhead,
                     seconds: 0.0,
                 },
+                recordings: &[],
                 levels: &self.levels,
+                inputs: &[],
                 audio: Audio {
                     summary: "48 kHz · 128 samples · 5.3 ms",
                     running: true,

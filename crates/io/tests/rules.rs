@@ -6,7 +6,10 @@ use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Po
 use musicable_model::mixer::Bus;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{
+    AudioInput, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId, TestTone,
+    TrackId, TrackKind,
+};
 use serde_json::{Value, json};
 
 /// A small project with two tempos, two time signatures and two tracks.
@@ -291,7 +294,7 @@ fn every_field_is_needed_and_no_others_are_allowed() {
         "missing field `gain`",
     );
     // Even ones that can be null.
-    for field in ["tone", "output"] {
+    for field in ["tone", "output", "input"] {
         refused(
             &edited(|f| {
                 f["tracks"][1].as_object_mut().unwrap().remove(field);
@@ -865,6 +868,144 @@ fn clip_ids_are_unique_across_tracks_and_below_the_next_id() {
     let project = load(&file).unwrap();
     assert_eq!(project.tracks[0].clips[0].id, ClipId(7));
     assert_eq!(project.next_clip_id, 9);
+}
+
+/// Recording: an audio track with a take of a clip, a MIDI track with a take
+/// of a clip, and a return track. The tracks' ids are their places in the
+/// list, and the takes' ids their tracks'.
+fn recorded() -> Project {
+    let mut project = Project::new();
+    let audio = project.add_track("Audio", TrackKind::Audio);
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    project.add_track("Reverb", TrackKind::Return);
+    let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+    for (track, content) in [
+        (
+            audio,
+            ClipContent::Audio(AudioClip::new("Recordings/Audio 1.wav")),
+        ),
+        (midi, ClipContent::Midi(MidiClip::default())),
+    ] {
+        let mut take = project.new_take("Take 1");
+        take.clips.push(project.new_clip("Take 1", range, content));
+        project.track_mut(track).unwrap().takes.push(take);
+    }
+    project
+}
+
+#[test]
+fn inputs_are_of_their_tracks_kind_and_buses_have_none() {
+    let mut project = recorded();
+    project.tracks[0].input = Some(Input::Audio(AudioInput {
+        device: "loopback:{0.0.0.00000000}.{speakers}".into(),
+        name: "Speakers (loopback)".into(),
+        channel: 65534,
+        stereo: true,
+    }));
+    project.tracks[1].input = None;
+    project.tracks[1].monitor = Monitor::Off;
+    project.tracks[2].monitor = Monitor::In;
+    assert_eq!(load(&edited_from(&project, |_| {})).unwrap(), project);
+
+    let audio = json!({"audio": {"device": "", "name": "", "channel": 0, "stereo": false}});
+    let midi = json!({"midi": {"device": "", "name": "", "channel": 9}});
+    refused(
+        &edited_from(&recorded(), |f| f["tracks"][1]["input"] = audio.clone()),
+        "tracks[1].input",
+        "must be a MIDI input: MIDI tracks record MIDI",
+    );
+    refused(
+        &edited_from(&recorded(), |f| f["tracks"][0]["input"] = midi.clone()),
+        "tracks[0].input",
+        "must be an audio input: audio tracks record audio",
+    );
+    refused(
+        &edited_from(&recorded(), |f| f["tracks"][2]["input"] = audio.clone()),
+        "tracks[2].input",
+        "must be null: buses record nothing",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            f["tracks"][0]["input"]["audio"]["channel"] = json!(65535);
+        }),
+        "tracks[0].input.audio.channel",
+        "must be below 65535 for a stereo input",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            f["tracks"][1]["input"]["midi"]["channel"] = json!(16);
+        }),
+        "tracks[1].input.midi.channel",
+        "must be from 0 to 15, or null for every channel",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            f["tracks"][1]["input"]["midi"]["port"] = json!(1);
+        }),
+        "tracks[1].input.midi.port",
+        "unknown field",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            f["tracks"][0]["monitor"] = json!("sometimes")
+        }),
+        "tracks[0].monitor",
+        "unknown variant",
+    );
+}
+
+#[test]
+fn takes_hold_clips_of_their_tracks_kind_with_unique_ids() {
+    refused(
+        &edited_from(&recorded(), |f| f["tracks"][1]["takes"][0]["id"] = json!(0)),
+        "tracks[1].takes[0].id",
+        "tracks[0].takes[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&recorded(), |f| f["next_take_id"] = json!(1)),
+        "next_take_id",
+        "a take has id 1",
+    );
+    // A take's clips' ids are clip ids like any other's.
+    refused(
+        &edited_from(&recorded(), |f| {
+            f["tracks"][1]["takes"][0]["clips"][0]["id"] = json!(0);
+        }),
+        "tracks[1].takes[0].clips[0].id",
+        "tracks[0].takes[0].clips[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&recorded(), |f| f["next_clip_id"] = json!(1)),
+        "next_clip_id",
+        "a clip has id 1",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            let mut take = f["tracks"][0]["takes"][0].clone();
+            take["id"] = json!(2);
+            take["clips"] = json!([]);
+            f["tracks"][2]["takes"] = json!([take]);
+            f["next_take_id"] = json!(3);
+        }),
+        "tracks[2].takes",
+        "must be empty: only audio and MIDI tracks record",
+    );
+    refused(
+        &edited_from(&recorded(), |f| {
+            let clip = f["tracks"][1]["takes"][0]["clips"][0]["content"].clone();
+            f["tracks"][0]["takes"][0]["clips"][0]["content"] = clip;
+        }),
+        "tracks[0].takes[0].clips[0].content",
+        "must be an audio clip: audio tracks hold audio clips",
+    );
+    // Gaps and any order are fine.
+    let file = edited_from(&recorded(), |f| {
+        f["tracks"][0]["takes"][0]["id"] = json!(5);
+        f["next_take_id"] = json!(9);
+    });
+    let project = load(&file).unwrap();
+    assert_eq!(project.tracks[0].takes[0].id, TakeId(5));
+    assert_eq!(project.next_take_id, 9);
 }
 
 /// The sample with two locators, the second at the furthest place a file

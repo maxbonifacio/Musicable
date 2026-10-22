@@ -64,13 +64,13 @@ impl Driver {
         text.to_string_lossy().trim().to_owned()
     }
 
-    /// The number of output channels.
-    pub fn outputs(&self) -> Result<u32, Error> {
+    /// The number of input and output channels.
+    pub fn channels(&self) -> Result<(u32, u32), Error> {
         let (mut inputs, mut outputs) = (0, 0);
         // SAFETY: an initialized driver, writing two longs.
         let code = unsafe { (self.vtable().channels)(self.this(), &mut inputs, &mut outputs) };
         self.check(code, "ASIOGetChannels")?;
-        Ok(outputs.max(0) as u32)
+        Ok((inputs.max(0) as u32, outputs.max(0) as u32))
     }
 
     pub fn buffer_sizes(&self) -> Result<BufferSizes, Error> {
@@ -118,9 +118,18 @@ impl Driver {
 
     /// The sample type of output channel `channel`.
     pub fn output_type(&self, channel: u32) -> Result<sys::Long, Error> {
+        self.channel_type(channel, false)
+    }
+
+    /// The sample type of input channel `channel`.
+    pub fn input_type(&self, channel: u32) -> Result<sys::Long, Error> {
+        self.channel_type(channel, true)
+    }
+
+    fn channel_type(&self, channel: u32, input: bool) -> Result<sys::Long, Error> {
         let mut info = ChannelInfo {
             channel: channel as sys::Long,
-            is_input: 0,
+            is_input: sys::Bool::from(input),
             is_active: 0,
             group: 0,
             sample_type: -1,
@@ -175,14 +184,15 @@ impl Driver {
         self.check(code, "ASIOStop")
     }
 
-    /// The output latency in frames: from a buffer switch until the half the
-    /// host fills plays.
-    pub fn output_latency(&self) -> Result<u32, Error> {
+    /// The input and output latencies in frames: how old the first frame of
+    /// an input half is at the buffer switch that hands it over, and how
+    /// long after a buffer switch the half the host fills then plays.
+    pub fn latencies(&self) -> Result<(u32, u32), Error> {
         let (mut input, mut output) = (0, 0);
         // SAFETY: an initialized driver, writing two longs.
         let code = unsafe { (self.vtable().latencies)(self.this(), &mut input, &mut output) };
         self.check(code, "ASIOGetLatencies")?;
-        Ok(output.max(0) as u32)
+        Ok((input.max(0) as u32, output.max(0) as u32))
     }
 
     /// Whether the driver reports every dropout itself.

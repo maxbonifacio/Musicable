@@ -112,10 +112,12 @@ That's what `ParallelOptions::inline_below` is for
   gets a menu named after its area, before View, so every command can be
   reached; commands that need arguments are left out, as menus can't give
   them. On the right are the CPU meter and the dropout counter.
-- **The transport bar** has go to start, play, stop, loop, the metronome, the
-  tempo, the time signature, and the playhead in bars, beats and sixteenths
-  and in minutes and seconds. Hovering a button shows its command and keys,
-  and hovering Loop shows the loop region.
+- **The transport bar** has go to start, play, stop, record, loop, punch in
+  and punch out, the metronome, the tempo, the time signature, and the
+  playhead in bars, beats and sixteenths and in minutes and seconds.
+  Hovering a button shows its command and keys, hovering Loop shows the
+  loop region, and Punch In and Punch Out where they punch
+  ([Recording](#recording)).
 - **The tempo field** sets the tempo where the playhead is, and moves any
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
@@ -162,6 +164,15 @@ undo history and the engine rebuilds its graph once.
 - **Track headers** have the track's name, M, S and the arm button, and a
   meter. A selected track's header and lane are lighter. The corner over
   the headers says what the grid is, such as "Grid 1/16".
+- **Takes** show in lanes under their track, each named in its header,
+  after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
+  track header's menu. A take's clips are grey where the track doesn't play
+  them, and in the track's colour where it does. Dragging across a take
+  copies that stretch of it to the track, replacing what the track has
+  there, and clicking one of its clips copies all of the clip: that's
+  comping ([commands.md](commands.md#take)).
+- **What tracks are recording** shows in red over their lanes, growing as
+  they record, until each pass becomes a take ([Recording](#recording)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
@@ -186,14 +197,16 @@ The mouse does what it does in Live:
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
 | A track's header | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it |
 | A track's bottom edge | Drag | Makes the track taller or shorter |
+| A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
+| A take's name, in its header | Double-click | Renames the take |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
 Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
-header, Locate and Toggle Loop on the ruler, and Rename and Delete Locator
-on a locator. Each shows its keys, and takes its arguments from where the
+header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
+locator, and Comp, Rename, Delete Take and Show/Hide Take Lanes on a take. Each shows its keys, and takes its arguments from where the
 menu was opened: the clip, the track, or the position. Rename, from a menu,
 a key or a double-click, opens a box for the new name.
 
@@ -311,6 +324,9 @@ the strips in sight are drawn. From the top, a strip has:
 
 - **The name.** Hovering it shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
+- **The input**, on audio tracks: what the track records from
+  ([Recording](#recording)).
+- **Monitoring**, on audio tracks: **In**, **Auto** or **Off**.
 - **The output**: the master, or a group track the track can feed. Return
   tracks always feed the master.
 - **A send to each return track**, from silence to 0 dB, with **Pre** to
@@ -346,6 +362,104 @@ The **Track** menu adds tracks (see [commands.md](commands.md#track)). The
 mixer's controls hand back `Action::Mixer` with a `mixer::Change`, which the
 app runs as its command with `Session::change_mixer`
 ([commands.md](commands.md#the-mixers-controls)).
+
+## Recording
+
+Arm a track with its arm button, in its header or its strip, choose its
+input in the strip's input menu, and press **Record** (F9) in the transport
+bar. Playing starts from the start marker, as Space does, and every armed
+audio track records its input while the transport plays. Record while
+playing turns recording on or off there. Stop ends the recording, and each
+pass of the playhead over the song becomes a take on its track
+([commands.md](commands.md#take)): one take for a recording straight
+through, and one for each time round the loop while looping, the last of
+them on the track. One undo takes the whole recording back.
+
+**Punch In** and **Punch Out**, beside Loop in the transport bar, record
+only from the loop region's start on, and only up to its end. With both on
+and looping on, each time round the loop records the region and nothing
+else.
+
+**Inputs.** An audio track records from one of the inputs the audio
+settings' device or another input device has, or on Windows from the
+loopback of an output device: everything the system plays there, listed as
+"Loopback:" and the output's name. A new audio track takes the default
+input in stereo, "Default 1/2": the system's default recording device, or
+with an ASIO driver, the driver's own first inputs. The input menu offers
+each input's pairs of channels and each channel on its own, and lists the
+inputs again when it opens, for a device plugged in since. An input that
+isn't plugged in keeps its name, in red. The stream opens the inputs that
+armed tracks and tracks monitoring In take, and keeps them open until the
+device changes. Opening one restarts the stream, so it waits while
+recording. A track whose input didn't open records nothing, and the status
+bar says so.
+
+**Monitoring.** In plays the track's input instead of its clips. Auto, a new
+track's, plays it while the track is armed and the transport is stopped or
+recording, so you hear yourself as you record and the takes as you play
+them back. Off never does, for an interface that monitors itself. The input
+plays through the track's devices, the stream's monitoring latency late
+([audio.md](audio.md#inputs)).
+
+**Where it lands.** A track records what its input captured as each song
+position was heard, so it lands where it was played: the audio backend
+lines the inputs' buffers up with the output, frame for frame, and the
+engine's timeline says which song position each frame played, and how late
+the plugins' latency made it ([engine.md](engine.md#recording)). A delay in
+an interface's converters that its driver doesn't report isn't made up for
+yet.
+
+**Files.** Recordings are 32-bit float WAV files at the engine's sample
+rate, in a `Recordings` folder in the project's folder, named after the
+track and numbered, as in `Lead 1.wav`. A project that has never been saved
+records into `Music/Musicable/Unsaved Recordings` in your home folder, and
+its clips name those files by their whole paths. A file's header says how
+long it is as of the last second, so a crash loses a second at most. A
+loop recording is a file for each track, its passes one after another, and
+a file that reaches the 4 GB a WAV file can hold goes on in another, in
+the same take.
+
+**The recorder** (`musicable-recorder`, a thread of its own) reads the
+engine's timeline and the inputs' buffers every 10 ms, and writes what the
+armed tracks record. The audio thread never waits for it. The inputs'
+buffers hold 8 seconds at least: if the recorder falls further behind than
+that, or an input stops capturing for two seconds, the recording has
+silence there, and the status bar says how much. A recording that the
+engine's replacement cuts short, for new audio settings, ends where it got
+to. One that finishes after its project was closed doesn't go into the
+project open then, and the status bar names its files.
+
+`Session::set_inputs` hands the session a stream's input layout and
+buffers, `Session::wanted_inputs` says which inputs the tracks want open,
+and `Session::recordings` what the tracks have recorded so far, for the
+arrangement. `crates/app/tests/recording.rs` records a second of a ramp
+through the session, checks it landed on the frame, and undoes it;
+`crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
+waiting for and giving up on inputs, and stopping.
+
+The record round trip example records on real devices as the app does,
+through its own `Output`, `Session` and recorder. One track plays clicks
+out while an armed track records them back in, from an output's loopback or
+through a cable from an output to an input. It says where each click
+landed, to a fraction of a frame, then comps the take and undoes that and
+the recording. With `--minutes`, it records for that long and checks that
+nothing was lost. Through a loopback, a click lands on the frame it played;
+through a cable, late by the converters' latency that the drivers don't
+report, the same every time.
+
+```sh
+cargo run --release -p musicable-app --example record_round_trip -- --loopback
+cargo run --release -p musicable-app --example record_round_trip -- --output RME --input RME
+cargo run --release -p musicable-app --features asio --example record_round_trip -- --asio
+cargo run --release -p musicable-app --example record_round_trip -- --loopback --minutes 60
+```
+
+Under Wine, its clicks wander by up to 10 ms, as the audio crate's round
+trip's do there ([audio.md](audio.md#trying-it)). That says nothing of
+Windows.
+
+After a new project's first save, it records into the Unsaved Recordings
+folder until it's opened again. MIDI recording isn't done yet.
 
 ## Plugins
 

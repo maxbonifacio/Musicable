@@ -4,15 +4,15 @@ use std::f64::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
 
-use musicable_model::ClipType;
 use musicable_model::clip::Dimension;
 use musicable_model::mixer::pan_gains;
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::{ClipType, Monitor};
 
 use crate::meter::Meter;
 use crate::{
     AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId,
-    ProcessContext,
+    ProcessContext, TransportState,
 };
 
 /// Sums its inputs. Used for buses and the master.
@@ -505,6 +505,150 @@ impl Node for Gain {
         if let Some(meter) = &self.meter {
             meter.measure(output.view(), ctx.sample_rate);
         }
+    }
+}
+
+/// Plays what comes into an audio track's input in place of its clips,
+/// while the track monitors its input: always with [`Monitor::In`], with
+/// [`Monitor::Auto`] while the track is armed and the transport is stopped
+/// or recording, and never with [`Monitor::Off`]. It goes over from one to
+/// the other in 10 ms ([`Smoothed`]), so switching doesn't click.
+///
+/// The input is one or two of the engine's device inputs
+/// ([`ProcessContext::input`]). A mono input plays in both channels. A
+/// track whose input isn't open monitors silence.
+#[derive(Debug, Clone)]
+pub struct InputMonitor {
+    monitor: Monitor,
+    armed: bool,
+    /// The device input channels the track's input takes: the first, and
+    /// how many.
+    input: Option<(usize, usize)>,
+    /// How much of the input plays: 0.0 the clips, 1.0 the input.
+    mix: Smoothed,
+}
+
+impl InputMonitor {
+    /// 1.0 arms the track, 0.0 disarms it.
+    pub const ARMED: ParamId = ParamId(0);
+    /// The track's monitoring, as [`monitor_value`](Self::monitor_value)
+    /// gives it.
+    pub const MONITOR: ParamId = ParamId(1);
+
+    /// A track's monitor, without an input.
+    pub fn new(monitor: Monitor, armed: bool) -> Self {
+        Self {
+            monitor,
+            armed,
+            input: None,
+            mix: Smoothed::new(0.0),
+        }
+    }
+
+    /// Takes `channels` device input channels from channel `first`: one
+    /// or two.
+    pub fn with_input(mut self, first: usize, channels: usize) -> Self {
+        self.input = Some((first, channels.clamp(1, 2)));
+        self
+    }
+
+    /// [`MONITOR`](Self::MONITOR)'s value for `monitor`.
+    pub fn monitor_value(monitor: Monitor) -> f64 {
+        match monitor {
+            Monitor::In => 0.0,
+            Monitor::Auto => 1.0,
+            Monitor::Off => 2.0,
+        }
+    }
+
+    fn monitors(&self, transport: &TransportState) -> bool {
+        match self.monitor {
+            Monitor::In => true,
+            Monitor::Auto => self.armed && (!transport.playing || transport.recording),
+            Monitor::Off => false,
+        }
+    }
+
+    fn apply(&mut self, event: &NodeEvent) {
+        match event.kind {
+            NodeEventKind::Param {
+                param: Self::ARMED,
+                value,
+            } => self.armed = value >= 0.5,
+            NodeEventKind::Param {
+                param: Self::MONITOR,
+                value,
+            } => {
+                self.monitor = match value.round() as i64 {
+                    0 => Monitor::In,
+                    2 => Monitor::Off,
+                    _ => Monitor::Auto,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Plays the input over `output`'s `frames` as far as the monitoring
+    /// says.
+    fn mix(&mut self, ctx: &ProcessContext<'_>, output: &mut AudioMut<'_>, frames: Range<usize>) {
+        let monitors = self.monitors(&ctx.transport);
+        self.mix.set(if monitors { 1.0 } else { 0.0 });
+        let len = frames.len();
+        if self.mix.is_settled() && self.mix.value() == 0.0 {
+            self.mix.skip(len);
+            return;
+        }
+        // An input the stream didn't open is silent.
+        let input = self
+            .input
+            .filter(|&(first, channels)| first + channels <= ctx.input.channels());
+        let settled = self.mix.is_settled();
+        let mut part = output.range_mut(frames.clone());
+        for (c, channel) in part.channels_mut().enumerate() {
+            let source = input.map(|(first, channels)| {
+                &ctx.input.channel(first + c.min(channels - 1))[frames.clone()]
+            });
+            match source {
+                Some(source) if settled => channel.copy_from_slice(source),
+                None if settled => channel.fill(0.0),
+                _ => {
+                    let mut mix = self.mix;
+                    for (i, sample) in channel.iter_mut().enumerate() {
+                        let m = mix.next_value();
+                        let x = source.map_or(0.0, |source| source[i]);
+                        *sample = *sample * (1.0 - m) + x * m;
+                    }
+                }
+            }
+        }
+        self.mix.skip(len);
+    }
+}
+
+impl Node for InputMonitor {
+    fn prepare(&mut self, config: &EngineConfig) {
+        self.mix.prepare(config.sample_rate);
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<InputMonitor>() {
+            self.mix.take_over(&previous.mix);
+        }
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+        let mut start = 0;
+        for event in ctx.events {
+            self.mix(ctx, output, start..event.offset);
+            self.apply(event);
+            start = event.offset;
+        }
+        self.mix(ctx, output, start..ctx.frames);
     }
 }
 
@@ -1112,6 +1256,11 @@ mod tests {
     use super::*;
     use crate::{AudioBuffer, AudioRef, TransportState, rt};
 
+    const CONFIG: EngineConfig = EngineConfig {
+        sample_rate: 48_000,
+        max_block: 1024,
+    };
+
     fn context<'a>(
         frames: usize,
         events: &'a [NodeEvent],
@@ -1128,7 +1277,36 @@ mod tests {
             },
             tempo,
             events,
+            input: AudioRef::empty(frames),
         }
+    }
+
+    /// Runs `monitor` over a block of `frames`, with the transport
+    /// `transport`, on clips playing 0.5, with device inputs of 0.1, 0.2
+    /// and 0.3.
+    fn monitored(
+        monitor: &mut InputMonitor,
+        frames: usize,
+        transport: TransportState,
+        events: &[NodeEvent],
+    ) -> [Vec<f32>; 2] {
+        let input: Vec<f32> = [0.1, 0.2, 0.3]
+            .into_iter()
+            .flat_map(|level| std::iter::repeat_n(level, frames))
+            .collect();
+        let clips = vec![0.5; 2 * frames];
+        let tempo = TempoMap::default();
+        let ctx = ProcessContext {
+            transport,
+            input: AudioRef::from_planar(&input, 3),
+            ..context(frames, events, transport.playing, &tempo)
+        };
+        let views = [AudioRef::from_planar(&clips, 2)];
+        let mut out = vec![0.0; 2 * frames];
+        let mut output = AudioMut::from_planar(&mut out, 2);
+        monitor.process(&ctx, Inputs::from_views(&views), &mut output);
+        let (left, right) = out.split_at(frames);
+        [left.to_vec(), right.to_vec()]
     }
 
     fn param(offset: usize, param: ParamId, value: f64) -> NodeEvent {
@@ -1169,6 +1347,76 @@ mod tests {
             _ => 0.0,
         };
         (from..from + frames).map(sample).collect()
+    }
+
+    #[test]
+    fn input_monitors_play_the_input_as_the_tracks_monitoring_says() {
+        let stopped = TransportState::default();
+        let playing = TransportState {
+            playing: true,
+            ..stopped
+        };
+        let recording = TransportState {
+            record: true,
+            recording: true,
+            ..playing
+        };
+        let cases = [
+            (Monitor::In, false, playing, true),
+            (Monitor::Auto, true, stopped, true),
+            (Monitor::Auto, true, playing, false),
+            (Monitor::Auto, true, recording, true),
+            (Monitor::Auto, false, stopped, false),
+            (Monitor::Off, true, recording, false),
+        ];
+        for (monitor, armed, transport, monitors) in cases {
+            let mut node = InputMonitor::new(monitor, armed).with_input(1, 2);
+            node.prepare(&CONFIG);
+            let [left, right] = monitored(&mut node, 64, transport, &[]);
+            let (l, r) = if monitors { (0.2, 0.3) } else { (0.5, 0.5) };
+            assert!(
+                left.iter().all(|&s| s == l) && right.iter().all(|&s| s == r),
+                "{monitor:?}, armed {armed}, {transport:?}"
+            );
+        }
+        // A mono input plays in both channels, and one the stream didn't
+        // open is silent, as is a track without an input.
+        let mut mono = InputMonitor::new(Monitor::In, false).with_input(2, 1);
+        assert_eq!(
+            monitored(&mut mono, 4, stopped, &[]),
+            [vec![0.3; 4], vec![0.3; 4]]
+        );
+        for mut silent in [
+            InputMonitor::new(Monitor::In, false).with_input(2, 2),
+            InputMonitor::new(Monitor::In, false),
+        ] {
+            assert_eq!(
+                monitored(&mut silent, 4, stopped, &[]),
+                [vec![0.0; 4], vec![0.0; 4]]
+            );
+        }
+    }
+
+    #[test]
+    fn input_monitors_switch_over_without_a_click() {
+        let mut node = InputMonitor::new(Monitor::Auto, true).with_input(0, 1);
+        node.prepare(&CONFIG);
+        let stopped = TransportState::default();
+        // Monitoring from the first frame: nothing to ramp from.
+        let [left, _] = monitored(&mut node, 16, stopped, &[]);
+        assert_eq!(left, [0.1; 16]);
+        // Disarmed 8 frames in: 10 ms back to the clips.
+        let disarm = [param(8, InputMonitor::ARMED, 0.0)];
+        let [left, _] = monitored(&mut node, 1000, stopped, &disarm);
+        assert_eq!(left[..8], [0.1; 8]);
+        assert!(left[8..488].windows(2).all(|w| w[0] < w[1]));
+        assert!(left[487..].iter().all(|&s| s == 0.5));
+        // Monitoring always, from the next block.
+        let value = InputMonitor::monitor_value(Monitor::In);
+        let always = [param(0, InputMonitor::MONITOR, value)];
+        let [left, _] = monitored(&mut node, 1000, stopped, &always);
+        assert!(left[..480].windows(2).all(|w| w[0] > w[1]));
+        assert!(left[479..].iter().all(|&s| s == 0.1));
     }
 
     #[test]

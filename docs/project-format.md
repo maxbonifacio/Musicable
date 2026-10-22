@@ -15,7 +15,7 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
 ```json
 {
   "format": "musicable-project",
-  "version": 5,
+  "version": 6,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -38,11 +38,14 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
   },
   "looping": true,
   "metronome": true,
+  "punch_in": false,
+  "punch_out": false,
   "next_track_id": 3,
   "next_send_id": 1,
   "next_device_id": 1,
   "next_clip_id": 2,
   "next_locator_id": 1,
+  "next_take_id": 0,
   "tracks": [
     {
       "id": 0,
@@ -54,6 +57,15 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
       "solo": false,
       "solo_safe": false,
       "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
       "output": null,
       "sends": [
         {
@@ -81,6 +93,7 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
           }
         }
       ],
+      "takes": [],
       "devices": [],
       "clip_type": "off",
       "console": {}
@@ -95,10 +108,13 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
       "solo": false,
       "solo_safe": true,
       "armed": false,
+      "input": null,
+      "monitor": "auto",
       "output": null,
       "sends": [],
       "tone": null,
       "clips": [],
+      "takes": [],
       "devices": [],
       "clip_type": "off",
       "console": {}
@@ -113,6 +129,14 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
       "solo": false,
       "solo_safe": false,
       "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
       "output": null,
       "sends": [],
       "tone": null,
@@ -148,6 +172,7 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
           }
         }
       ],
+      "takes": [],
       "devices": [
         {
           "id": 0,
@@ -221,17 +246,20 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 5 for this page. |
+| `version` | whole number | The format version: 6 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
 | `looping` | boolean | Whether playback loops. |
 | `metronome` | boolean | Whether the metronome clicks while the transport plays. |
+| `punch_in` | boolean | Whether recording waits for the start of `loop_region`: it punches in there. |
+| `punch_out` | boolean | Whether recording stops at the end of `loop_region`: it punches out there. |
 | `next_track_id` | whole number | The id the next new track gets. It's above every track's id, and ids of deleted tracks aren't used again, so it can be higher still. |
 | `next_send_id` | whole number | The same for sends. |
 | `next_device_id` | whole number | The same for devices, on tracks and on the master. |
 | `next_clip_id` | whole number | The same for clips. |
 | `next_locator_id` | whole number | The same for locators. |
+| `next_take_id` | whole number | The same for takes. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
 | `locators` | array of locators | Named places in the song, in any order. |
@@ -285,10 +313,13 @@ change starts at must start within the position limit.
 | `solo` | boolean | Whether the track is soloed. |
 | `solo_safe` | boolean | Whether the track keeps playing while other tracks are soloed. |
 | `armed` | boolean | Whether the track is armed for recording. Only audio and MIDI tracks can be. |
+| `input` | input or `null` | What the track records from: an audio input on an audio track, a MIDI input on a MIDI track, or `null` for nothing. Return and group tracks record nothing, so theirs is `null`. |
+| `monitor` | string | When the track plays what comes into its input instead of its clips: `"in"`, always; `"auto"`, while it's armed and the transport is stopped or recording it; or `"off"`, never. |
 | `output` | whole number or `null` | The id of the group track the track feeds, or `null` for the master. |
 | `sends` | array of sends | The track's sends to return tracks. |
 | `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. It plays along with the track's clips, and on a group or return track with what feeds the track. |
 | `clips` | array of clips | What the track plays: audio clips on an audio track, MIDI clips on a MIDI track, in any order. Return and group tracks have none. |
+| `takes` | array of takes | What the track recorded, top to bottom. Return and group tracks have none. |
 | `devices` | array of devices | The track's devices, in signal order. |
 | `clip_type` | string | How the track's clip stage clips: `"off"`, clean floating point that never clips; `"hard"`, which cuts everything beyond full scale; or `"soft"`, which rounds off peaks above half scale so they get ever closer to full scale without reaching it. |
 | `console` | object | Console modelling settings. It's empty until console mode arrives, and has no fields yet. |
@@ -299,6 +330,35 @@ A **test tone** is a sine wave that sounds while the transport plays:
 |---|---|---|
 | `frequency` | float | In Hz. |
 | `level` | float | Linear amplitude: 1.0 is full scale. |
+
+An **input** is an object with one field: `audio`, holding an audio
+input, or `midi`, holding a MIDI input. An **audio input** is some channels
+of an audio device's input:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `device` | string | The input, as Musicable's audio backend names it on the computer that chose it, or empty for the default input: the system's, or the ASIO driver's while one plays. A loopback input, which records what an output device plays, is `"loopback:"` and the output's id. |
+| `name` | string | The input's name when it was chosen, to show while it isn't there. Empty for the default input. |
+| `channel` | whole number | The first channel it takes, counting from 0. |
+| `stereo` | boolean | Whether it takes the channel after `channel` too, for a stereo recording, rather than one channel, which plays in the middle of the track's two. A stereo input's `channel` is below 65535. |
+
+A **MIDI input**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `device` | string | The input, as Musicable's MIDI backend names it, or empty for every MIDI input. |
+| `name` | string | The input's name when it was chosen, to show while it isn't there. |
+| `channel` | whole number or `null` | The one MIDI channel it takes, from 0 to 15, or `null` for every channel, as MPE controllers need. |
+
+A **take** is what a track recorded in one pass of a recording, kept in a
+lane under the track's own clips. Takes don't play: comping copies the best
+parts of them to the track's clips.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_take_id`, and no other take in the project has it. |
+| `name` | string | Any text, empty included. |
+| `clips` | array of clips | What the take recorded: clips of the track's kind, in any order. Their ids are clip ids like any other's: no two clips in the project, on tracks or in takes, have the same one. |
 
 A **clip** plays on its track from `start` for `length`. Clips can
 overlap: overlapping clips play together, and where audio clips' fades
@@ -455,6 +515,7 @@ Signal flows from tracks to buses without loops:
 | 3 | 2026-10-21 | Clips: audio clips that play files, MIDI clips of notes with per-note expression, and the test instrument. Version 2 tracks have no clips. |
 | 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
 | 5 | 2026-10-22 | Plugin devices, with their state and parameters. Version 4 files have none. |
+| 6 | 2026-10-22 | Recording: each track's input and monitoring, takes, and punching in and out. Version 5 audio tracks record from the default input's first two channels, MIDI tracks from every MIDI input, all with `"auto"` monitoring and no takes, and punching in and out is off. |
 
 ## Changing the format
 

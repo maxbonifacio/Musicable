@@ -1,14 +1,18 @@
 //! The audio device the engine plays through: opened from the settings,
-//! opened again when it comes back, and switched when the settings change.
+//! opened again when it comes back, and switched when the settings change,
+//! with the audio inputs the project's tracks record and monitor.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use musicable_audio::{
-    self as audio, Api, DriverType, OpenStream, SampleFormat, StartError, Stream, StreamInfo,
-    StreamRequest, StreamStats,
+    self as audio, Api, DriverType, InputBuffer, InputKind, InputStats, OpenStream, SampleFormat,
+    StartError, Stream, StreamInfo, StreamRequest, StreamStats,
 };
-use musicable_engine::{Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelStats};
+use musicable_engine::{
+    Engine, EngineConfig, EngineHandle, InputLayout, ParallelMonitor, ParallelStats,
+};
 
 use crate::Session;
 
@@ -35,9 +39,21 @@ const METER_WINDOW: Duration = Duration::from_millis(250);
 /// When the device fails or goes away, the engine waits, and the output tries
 /// the device again every two seconds. An ASIO driver that asks to be reset,
 /// after a change in its own settings, opens again at once.
+///
+/// The stream opens the audio inputs it's asked to
+/// ([`want_inputs`](Self::want_inputs)) as well as the output, and keeps
+/// them open until the device changes, so arming tracks one after another
+/// opens the stream again only for an input it hasn't open yet.
 pub struct Output {
-    /// The stream to keep open.
+    /// The stream to keep open, without its inputs.
     request: StreamRequest,
+    /// The inputs to open with it.
+    inputs: Vec<String>,
+    /// The input among them that tracks taking the default input take,
+    /// once one wants it: `Some(None)` if there's none.
+    default_input: Option<Option<String>>,
+    /// Counts the streams that have started.
+    started: u64,
     /// The stream playing the engine, if any.
     stream: Option<Stream>,
     /// The engine, while no stream plays it.
@@ -91,6 +107,9 @@ impl Output {
         let (engine, handle, monitor) = crate::engine(config);
         let mut output = Self {
             request,
+            inputs: Vec::new(),
+            default_input: None,
+            started: 0,
             stream: None,
             idle: Some(engine),
             monitor,
@@ -114,6 +133,9 @@ impl Output {
         let (engine, handle, monitor) = crate::engine(NO_DEVICE);
         let output = Self {
             request: StreamRequest::default(),
+            inputs: Vec::new(),
+            default_input: None,
+            started: 0,
             stream: None,
             idle: Some(engine),
             monitor,
@@ -177,12 +199,19 @@ impl Output {
     /// Plays through the stream `request` asks for from now on. If it doesn't
     /// open, the output goes back to the stream it had, and says why the new
     /// one failed.
+    ///
+    /// The inputs open go with the device: the app asks for the ones it
+    /// wants again.
     pub fn apply(
         &mut self,
         request: StreamRequest,
         session: &mut Session,
     ) -> Result<(), audio::Error> {
+        let inputs = std::mem::take(&mut self.inputs);
+        let default_input = self.default_input.take();
         if let Err(error) = self.start(&request, session) {
+            self.inputs = inputs;
+            self.default_input = default_input;
             let previous = self.request.clone();
             if let Err(error) = self.start(&previous, session) {
                 self.failed(&error);
@@ -193,9 +222,92 @@ impl Output {
         Ok(())
     }
 
-    /// The stream to keep open.
+    /// The stream to keep open, without its inputs.
     pub fn request(&self) -> &StreamRequest {
         &self.request
+    }
+
+    /// Opens the audio inputs `wanted` with the stream, by their ids, with
+    /// `""` for the default input: the ASIO driver's own while one plays,
+    /// or else the system's. The inputs open already stay open. If that
+    /// takes opening the stream again and it doesn't open, the output tries
+    /// again later, as when the device fails.
+    pub fn want_inputs(&mut self, wanted: &BTreeSet<String>, session: &mut Session) {
+        if wanted.contains("") && self.default_input.is_none() {
+            self.default_input = Some(self.find_default_input());
+        }
+        let mut inputs = self.inputs.clone();
+        for id in wanted {
+            let id = match id.as_str() {
+                "" => self.default_input.clone().flatten(),
+                id => Some(id.to_owned()),
+            };
+            if let Some(id) = id
+                && !inputs.contains(&id)
+            {
+                inputs.push(id);
+            }
+        }
+        if inputs == self.inputs {
+            return;
+        }
+        self.inputs = inputs;
+        let request = self.request.clone();
+        if let Err(error) = self.start(&request, session) {
+            self.failed(&error);
+        }
+    }
+
+    /// The input tracks taking the default input record from.
+    fn find_default_input(&self) -> Option<String> {
+        if let Some(device) = &self.request.device
+            && DriverType::of(device) == DriverType::Asio
+        {
+            return Some(device.clone());
+        }
+        let devices = audio::input_devices().ok()?;
+        let default = devices
+            .into_iter()
+            .find(|device| device.is_default && device.kind == InputKind::Device)?;
+        Some(default.id)
+    }
+
+    /// Counts the streams that have started: each has inputs of its own,
+    /// for the [`Session`].
+    pub fn started(&self) -> u64 {
+        self.started
+    }
+
+    /// Where the playing stream's inputs are among the engine's device
+    /// inputs, by their ids, and which takes the default input's place.
+    pub fn input_layout(&self) -> InputLayout {
+        let mut layout = InputLayout::new();
+        for input in self.info().map_or(&[][..], |info| &info.inputs) {
+            layout.add(
+                input.id.clone(),
+                input.first_channel,
+                usize::from(input.channels),
+            );
+        }
+        if let Some(Some(default)) = &self.default_input {
+            layout.set_default(default.clone());
+        }
+        layout
+    }
+
+    /// The buffers the playing stream's inputs capture into, in the
+    /// layout's order.
+    pub fn input_buffers(&self) -> Vec<Option<InputBuffer>> {
+        self.stream
+            .as_ref()
+            .map_or_else(Vec::new, Stream::input_buffers)
+    }
+
+    /// The counters of the playing stream's inputs, in the layout's order.
+    pub fn input_stats(&self) -> Vec<InputStats> {
+        self.stream
+            .as_ref()
+            .map_or_else(Vec::new, Stream::input_stats)
     }
 
     /// The playing stream, as the device set it up.
@@ -326,7 +438,11 @@ impl Output {
         session: &mut Session,
     ) -> Result<(), audio::Error> {
         self.stop();
-        let open = audio::open(request)?;
+        let request = StreamRequest {
+            inputs: self.inputs.clone(),
+            ..request.clone()
+        };
+        let open = audio::open(&request)?;
         let config = open.info().engine_config();
         if self.engine().config() != config {
             // The old engine's workers stop before the new engine's start.
@@ -348,6 +464,7 @@ impl Output {
         match open.start(engine) {
             Ok(stream) => {
                 self.stream = Some(stream);
+                self.started += 1;
                 self.problem = None;
                 self.retry_at = None;
                 self.meter = LoadMeter::default();
@@ -511,6 +628,7 @@ mod tests {
             buffer: 280,
             latency: 128,
             realtime: true,
+            inputs: Vec::new(),
         };
         let mut stats = StreamStats::default();
         assert_eq!(millis(latency(&info, &stats)), "2.7 ms");

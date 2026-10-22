@@ -1,8 +1,10 @@
 //! The callbacks' half of a stream: at each buffer switch, count any
-//! dropout, then render the half the driver asked for and write it in each
-//! channel's sample type. All of it real-time safe.
+//! dropout, take what the inputs captured, then render the half the driver
+//! asked for and write it in each channel's sample type. All of it
+//! real-time safe.
 
 use std::slice;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use musicable_engine::{AudioMut, Engine};
@@ -11,13 +13,73 @@ use super::context::Shared;
 use super::convert::Encoding;
 use super::detector::{self, Callback, Detector};
 use super::driver::Handle;
+use super::platform;
 use super::sys::Long;
 use crate::frames_to_duration;
+use crate::input::{Bus, InputCounters, InputWriter, Playback};
 
-/// An output channel: its two buffer halves, and how it stores samples.
+/// A channel: its two buffer halves, and how it stores samples.
 pub(super) struct Output {
     pub halves: [*mut u8; 2],
     pub encoding: Encoding,
+}
+
+/// The driver's inputs, as one input of the stream: each half they hand
+/// over goes into its buffer, lined up with the output.
+pub(super) struct Inputs {
+    pub channels: Vec<Output>,
+    pub writer: InputWriter,
+    pub counters: Arc<InputCounters>,
+    /// A half, interleaved.
+    pub frames: Vec<f32>,
+    /// One channel of a half.
+    pub channel: Vec<f32>,
+}
+
+impl Inputs {
+    /// Takes half `half` of each input, which the driver handed over as the
+    /// output's engine frame `time` started rendering, `latency` frames
+    /// after its first frame was heard: the input latency and the output
+    /// latency.
+    fn take(&mut self, half: usize, time: u64, latency: u64, period: usize) {
+        let count = self.channels.len();
+        for (c, channel) in self.channels.iter().enumerate() {
+            let bytes = period * channel.encoding.bytes();
+            // SAFETY: the driver's input half, `period` samples in the
+            // channel's encoding, which it filled before this buffer switch.
+            let samples =
+                unsafe { slice::from_raw_parts(channel.halves[half].cast_const(), bytes) };
+            let decoded = &mut self.channel[..period];
+            channel.encoding.read(samples, decoded);
+            for (frame, &sample) in self.frames.chunks_exact_mut(count).zip(decoded.iter()) {
+                frame[c] = sample;
+            }
+        }
+        self.counters.captured(period as u64);
+        // Frames from before the engine's first are dropped.
+        let first = time as i64 - latency as i64;
+        let mut skip = (-first).max(0) as usize;
+        if skip >= period {
+            return;
+        }
+        let first = (first + skip as i64) as u64;
+        let writer = &mut self.writer;
+        if !writer.has_begun() {
+            writer.begin(first);
+            self.counters.set_aligned(true);
+        }
+        let end = writer.end();
+        if first > end {
+            // The latency shrank: a gap.
+            writer.append_silence(first - end);
+        } else {
+            // The latency grew: frames already written.
+            skip += (end - first).min(period as u64) as usize;
+        }
+        if skip < period {
+            writer.append(&self.frames[skip * count..period * count]);
+        }
+    }
 }
 
 pub(super) struct Render {
@@ -37,6 +99,13 @@ pub(super) struct Render {
     last_callback: Option<Instant>,
     /// Whether the last callback took longer than a buffer.
     overran: bool,
+    /// The driver's inputs, if the stream records from them.
+    inputs: Option<Inputs>,
+    /// Every input, for the engine.
+    bus: Bus,
+    /// Where inputs that capture on threads of their own learn when each
+    /// engine frame plays, if there are any.
+    playback: Option<Arc<Playback>>,
 }
 
 // SAFETY: the driver's buffers are for whichever thread has the render lock,
@@ -66,7 +135,25 @@ impl Render {
             callbacks: 0,
             last_callback: None,
             overran: false,
+            inputs: None,
+            bus: Bus::new(Vec::new(), period as usize, 0),
+            playback: None,
         }
+    }
+
+    /// Records from the driver's `inputs`, if any, and gives the engine
+    /// what the `bus` holds: those and any others. `playback` is for
+    /// inputs on threads of their own.
+    pub fn with_inputs(
+        mut self,
+        inputs: Option<Inputs>,
+        bus: Bus,
+        playback: Option<Arc<Playback>>,
+    ) -> Self {
+        self.inputs = inputs;
+        self.bus = bus;
+        self.playback = playback;
+        self
     }
 
     /// One buffer switch: the driver asks for half `index`, which starts at
@@ -111,7 +198,32 @@ impl Render {
 
         let channels = self.outputs.len();
         match &mut self.engine {
-            Some(engine) => engine.process(&mut AudioMut::from_planar(&mut self.scratch, channels)),
+            Some(engine) => {
+                let time = engine.time();
+                let output_latency = u64::from(shared.latency());
+                if let Some(inputs) = &mut self.inputs {
+                    // What a late callback missed, the inputs lost too.
+                    inputs.counters.lost(outcome.lost);
+                    let latency = u64::from(shared.input_latency()) + output_latency;
+                    inputs.take(half, time, latency, self.period);
+                }
+                if let Some(playback) = &self.playback {
+                    // The half rendered now plays the output latency after
+                    // the buffer switch.
+                    let ahead = frames_to_duration(output_latency, self.rate);
+                    playback.publish(
+                        time,
+                        platform::now_ns() + ahead.as_nanos() as u64,
+                        self.rate,
+                    );
+                }
+                let input = self.bus.fill(time, self.period);
+                engine.process_with_input(
+                    input,
+                    &mut AudioMut::from_planar(&mut self.scratch, channels),
+                );
+                counters.inputs(self.bus.delay(), self.bus.late());
+            }
             None => self.scratch.fill(0.0),
         }
         for (output, samples) in self

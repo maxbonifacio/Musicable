@@ -37,6 +37,8 @@ compiler, a node and the UI, in that order.
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
+| Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
+| Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
 
 There is one worker per physical core, minus one for the audio thread,
 which works too, and no more than 24 on Windows. While audio plays, the
@@ -199,8 +201,7 @@ built yet, except where it says so.
   their own, summing through `compile::Summing`; sends before or after the
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
   peak and RMS meters in atomics, shown in the app's mixer
-  ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)). Arm
-  does nothing until recording.
+  ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)).
 - **Automation.** Parameter events are already sample-accurate, but a lane
   belongs in the graph, not in the message queue, which holds 1,024
   messages. Compile each lane into its node, or into an automation node, and
@@ -208,12 +209,13 @@ built yet, except where it says so.
   else. A lane can give its node a value per frame, which needs no
   smoothing; values that arrive as events ramp over 10 ms
   (`nodes::Smoothed`).
-- **Recording.** The audio backend only has outputs. Recording needs capture
-  streams and their latency, input nodes in the graph, and a recorder that
-  passes buffers to a disk-writing thread through a lock-free queue. The
-  input and output latency place recorded audio where it was played. System
-  loopback on Windows is another capture stream, resampled when its device
-  runs on another clock.
+- **Recording.** Built for audio: the backend captures inputs, system
+  loopback on Windows among them, lined up with the output frame for frame
+  ([audio.md](audio.md#inputs)); each audio track monitors its input
+  through an `InputMonitor` node; and the app's recorder thread reads the
+  inputs' lock-free buffers and the engine's timeline, and writes takes
+  ([engine.md](engine.md#recording), [app.md](app.md#recording)). MIDI
+  recording is next.
 - **Undo and redo.** Built: every committed transaction is a step in the
   document's history, and undo applies its edits' old values as a
   transaction of its own, which `Session::sync` sends to the engine like any

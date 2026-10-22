@@ -14,6 +14,7 @@ version = 1
 "transport.go_to_start" = ["Home"]
 "transport.toggle_loop" = ["Ctrl+L"]
 "transport.toggle_metronome" = ["O"]
+"transport.record" = ["F9"]
 
 # Live has no keys for these. None of the chords does anything in Live outside
 # its MIDI note editor.
@@ -37,8 +38,8 @@ version = 1
 "clip.insert_midi_clip" = ["Ctrl+Shift+M"]
 
 # Live's keys for the arrangement's zoom, the grid and Follow, for showing
-# the mixer and the devices (Live's Detail View) under the arrangement, and
-# for showing the browser.
+# take lanes, for showing the mixer and the devices (Live's Detail View)
+# under the arrangement, and for showing the browser.
 "view.zoom_in" = ["Equals", "NumpadAdd"]
 "view.zoom_out" = ["Minus", "NumpadSubtract"]
 "view.zoom_to_selection" = ["Z"]
@@ -48,6 +49,7 @@ version = 1
 "view.toggle_snap" = ["Ctrl+4"]
 "view.fixed_grid" = ["Ctrl+5"]
 "view.toggle_follow" = ["Ctrl+Shift+F"]
+"view.toggle_take_lanes" = ["Ctrl+Alt+U"]
 "view.toggle_mixer" = ["Ctrl+Alt+M"]
 "view.toggle_devices" = ["Ctrl+Alt+L"]
 "view.toggle_browser" = ["Ctrl+Alt+B"]

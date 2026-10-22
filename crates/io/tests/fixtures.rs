@@ -21,7 +21,8 @@ use musicable_model::mixer::Bus;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{
-    ClipType, DeviceKind, PluginFormat, Project, TestTone, Track, TrackId, TrackKind,
+    AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
+    Track, TrackId, TrackKind,
 };
 
 fn fixtures() -> Vec<(&'static str, Project)> {
@@ -34,6 +35,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("clips", clips()),
         ("locators", locators()),
         ("plugins", plugins()),
+        ("recording", recording()),
     ]
 }
 
@@ -411,6 +413,97 @@ fn plugins() -> Project {
     project.track_mut(synth).unwrap().devices = vec![surge, gain];
     project.track_mut(vocal).unwrap().devices = vec![gate, eq];
     project.master.devices = vec![limiter];
+    project
+}
+
+/// Recording, from version 6: punching in and out, inputs of every kind
+/// (the default input, a mono channel of another, one that isn't there any
+/// more, a MIDI input on one channel, and none), every kind of monitoring,
+/// an armed track, takes of audio and of MIDI with the parts comped onto
+/// their tracks, a take of two clips, an empty one, and a gap in the take
+/// ids where one was deleted.
+fn recording() -> Project {
+    let mut project = Project::new();
+    project.punch_in = true;
+    project.punch_out = true;
+    project.loop_region = BeatRange::new(Beats::new(4), Beats::new(12));
+    project.looping = true;
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let guitar = project.add_track("Guitar \"DI\"", TrackKind::Audio);
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let room = project.add_track("Room", TrackKind::Audio);
+    let reverb = project.add_track("Reverb", TrackKind::Return);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let audio = |file: &str, offset| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = offset;
+        ClipContent::Audio(audio)
+    };
+
+    // Two passes of the loop, and the second half of the first comped in.
+    let mut first = project.new_take("Take 1");
+    let clip = project.new_clip("Vocal", beats(4, 12), audio("Recordings/Vocal 1.wav", 0));
+    first.clips.push(clip);
+    project.new_take("Deleted");
+    let mut second = project.new_take("Take 2");
+    let clip = project.new_clip(
+        "Vocal",
+        beats(4, 12),
+        audio("Recordings/Vocal 1.wav", 384_000),
+    );
+    second.clips.push(clip);
+    let comped = [
+        project.new_clip(
+            "Vocal",
+            beats(4, 8),
+            audio("Recordings/Vocal 1.wav", 384_000),
+        ),
+        project.new_clip(
+            "Vocal",
+            beats(8, 12),
+            audio("Recordings/Vocal 1.wav", 192_000),
+        ),
+    ];
+    let track = project.track_mut(vocal).unwrap();
+    track.armed = true;
+    track.takes = vec![first, second];
+    track.clips = comped.into();
+
+    // A take of two clips, recorded through a punch, and an empty one.
+    let mut punched = project.new_take("Take 1");
+    for (range, offset) in [(beats(4, 6), 0), (beats(10, 12), 96_000)] {
+        let clip = project.new_clip("Guitar", range, audio("C:/Takes/Guitar.wav", offset));
+        punched.clips.push(clip);
+    }
+    let empty = project.new_take("");
+    let track = project.track_mut(guitar).unwrap();
+    track.input = Some(Input::Audio(AudioInput {
+        device: "{0.0.1.00000000}.{a5c2e7b0-9f1d-4c3e-8b6a-2d4f6e8a0c1b}".into(),
+        name: "Line In (USB Audio \u{1f3b8})".into(),
+        channel: 2,
+        stereo: false,
+    }));
+    track.monitor = Monitor::In;
+    track.takes = vec![punched, empty];
+
+    let mut played = MidiClip::default();
+    played.add_note(Beats::ZERO, Beats::new(1), 48, 0.75);
+    let mut take = project.new_take("Take 1");
+    take.clips
+        .push(project.new_clip("Keys", beats(4, 8), ClipContent::Midi(played)));
+    let track = project.track_mut(keys).unwrap();
+    track.input = Some(Input::Midi(MidiInput {
+        device: "Seaboard RISE 2".into(),
+        name: "Seaboard RISE 2".into(),
+        channel: Some(15),
+    }));
+    track.monitor = Monitor::Off;
+    track.takes = vec![take];
+
+    let track = project.track_mut(room).unwrap();
+    track.input = None;
+    track.armed = true;
+    project.track_mut(reverb).unwrap().monitor = Monitor::In;
     project
 }
 

@@ -88,11 +88,19 @@ pub fn register(registry: &mut Registry) {
                 Param::optional("clip", Type::Clip, "A clip to name."),
                 Param::optional("track", Type::Track, "A track to name."),
                 Param::optional("locator", Type::Locator, "A locator to name."),
+                Param::optional("take", Type::Take, "A take to name."),
             ]),
         |ctx, args| {
-            let named = match (args.opt("clip")?, args.opt("track")?, args.opt("locator")?) {
+            let named = match (
+                args.opt("clip")?,
+                args.opt("take")?,
+                args.opt("track")?,
+                args.opt("locator")?,
+            ) {
                 (Some(clip), ..) => Named::Clip(clip),
-                (_, Some(track), _) => Named::Track(track),
+                // A take's track may come with it, from where it was asked.
+                (_, Some(take), ..) => Named::Take(take),
+                (_, _, Some(track), _) => Named::Track(track),
                 (.., Some(locator)) => Named::Locator(locator),
                 // The selected clip, if just one is, or else the selected
                 // track.
@@ -467,7 +475,7 @@ fn split_track(tx: &mut Transaction<'_>, track: TrackId, at: Beats) {
 #[cfg(test)]
 mod tests {
     use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
-    use musicable_model::{LocatorId, TrackKind};
+    use musicable_model::{LocatorId, TakeId, TrackKind};
 
     use super::*;
     use crate::testing::Setup;
@@ -496,6 +504,14 @@ mod tests {
 
         fn playhead(&self) -> Beats {
             Beats::ZERO
+        }
+
+        fn is_recording(&self) -> bool {
+            false
+        }
+
+        fn set_recording(&mut self, _: bool) {
+            self.0 += 1;
         }
     }
 
@@ -838,6 +854,9 @@ mod tests {
         setup.run(&RENAME);
         let args = Args::new().with("locator", 3_i64);
         setup.run_with(&RENAME, args).unwrap();
+        // A take, with its track, as a take lane's menu asks.
+        let args = Args::new().with("take", 4_i64).with("track", keys);
+        setup.run_with(&RENAME, args).unwrap();
         assert_eq!(
             setup.requests,
             [
@@ -845,6 +864,7 @@ mod tests {
                 // Two clips: the selected track, Keys'.
                 Request::Rename(Named::Track(keys)),
                 Request::Rename(Named::Locator(LocatorId(3))),
+                Request::Rename(Named::Take(TakeId(4))),
             ]
         );
     }

@@ -28,10 +28,10 @@ mod widgets;
 
 pub use devices::{BROWSER, DEVICES, PluginEntry, PluginStatus, Plugins};
 pub use keys::{KeyPresses, chord};
-pub use mixer::{Level, Levels};
+pub use mixer::{InputChoice, Level, Levels};
 pub use mouse::{Gesture, MouseAction, MouseMap, Target};
 pub use shell::{
-    Action, Audio, KeymapStatus, MIXER, Playback, SaveChoice, Shell, View, ask_to_save,
+    Action, Audio, KeymapStatus, MIXER, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
 };
 pub use theme::{DeviceSizes, MixerSizes, Theme};
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};

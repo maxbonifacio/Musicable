@@ -11,9 +11,11 @@ use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::AUDCLNT_E_BUFFER_TOO_LARGE;
 use windows::Win32::System::Threading::WaitForMultipleObjects;
 
+use super::capture::{self, Output};
 use super::client::{self, Client};
 use super::com::{Call, Com, Event, Failed, Mmcss, Qpc, device_gone, os};
 use super::device;
+use crate::input::{self, Bus, Playback, StreamInput};
 use crate::period::frames_to_hns;
 use crate::stats::Counters;
 use crate::xrun::{Detector, Medians, Reading};
@@ -39,7 +41,12 @@ struct Ended {
     error: Option<Error>,
 }
 
-pub(crate) fn open(request: &StreamRequest) -> Result<(StreamInfo, OpenStream), Error> {
+/// What the audio thread reports once the device and the inputs opened.
+type Opened = (StreamInfo, Vec<StreamInput>);
+
+pub(crate) fn open(
+    request: &StreamRequest,
+) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let shared = Arc::new(Shared {
         counters: Counters::default(),
         stop: Event::manual_reset()?,
@@ -57,8 +64,9 @@ pub(crate) fn open(request: &StreamRequest) -> Result<(StreamInfo, OpenStream), 
             message: e.to_string(),
         })?;
     match opened.recv() {
-        Ok(Ok(info)) => Ok((
+        Ok(Ok((info, inputs))) => Ok((
             info,
+            inputs,
             OpenStream {
                 thread: Some(thread),
                 start: Some(start),
@@ -82,7 +90,7 @@ pub(crate) fn open(request: &StreamRequest) -> Result<(StreamInfo, OpenStream), 
 fn audio_thread(
     request: &StreamRequest,
     shared: &Shared,
-    opened: &SyncSender<Result<StreamInfo, Error>>,
+    opened: &SyncSender<Result<Opened, Error>>,
     start: &Receiver<Engine>,
     started: &SyncSender<Result<(), Error>>,
 ) -> Ended {
@@ -95,14 +103,41 @@ fn audio_thread(
     };
     // First, so the period check runs at the priority the stream will.
     let mmcss = Mmcss::join();
-    let (client, info) = match open_device(request, mmcss.is_some()) {
+    let (client, mut info, container) = match open_device(request, mmcss.is_some()) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = opened.send(Err(error));
             return Ended::default();
         }
     };
-    if opened.send(Ok(info)).is_err() {
+    // The inputs start capturing now, and line up with the output once it
+    // plays. They stop when this thread ends, as `captures` drops.
+    let playback = Arc::new(Playback::default());
+    let output = Output {
+        id: info.device.id.clone(),
+        container,
+        rate: info.sample_rate,
+        exclusive: client.exclusive(),
+        clock: playback.clone(),
+    };
+    let captures = capture::open(&request.inputs, &output);
+    let opened_inputs = captures
+        .iter()
+        .map(|capture| {
+            capture
+                .as_ref()
+                .map(|c| c.input.clone())
+                .map_err(Clone::clone)
+        })
+        .collect();
+    let (infos, stream_inputs, bus_inputs) = input::assemble(&request.inputs, opened_inputs);
+    let bus = Bus::new(
+        bus_inputs,
+        client.buffer as usize,
+        input::max_lag(info.sample_rate),
+    );
+    info.inputs = infos;
+    if opened.send(Ok((info, stream_inputs))).is_err() {
         return Ended::default();
     }
     // Wait for the engine. Closing the stream without starting it drops the
@@ -110,7 +145,7 @@ fn audio_thread(
     let Ok(mut engine) = start.recv() else {
         return Ended::default();
     };
-    let mut runner = Runner::new(&client, &shared.counters);
+    let mut runner = Runner::new(&client, &shared.counters, bus, &playback);
     if let Err(error) = runner.start(&mut engine) {
         let _ = started.send(Err(error));
         return Ended {
@@ -129,19 +164,30 @@ fn audio_thread(
     }
 }
 
-fn open_device(request: &StreamRequest, realtime: bool) -> Result<(Client, StreamInfo), Error> {
+/// Opens the output, and says which physical device it belongs to.
+fn open_device(
+    request: &StreamRequest,
+    realtime: bool,
+) -> Result<(Client, StreamInfo, Option<windows::core::GUID>), Error> {
     let enumerator = device::enumerator()?;
     let endpoint = device::find(&enumerator, request.device.as_deref())?;
     let described = device::describe(&endpoint, device::default_id(&enumerator).as_deref())?;
     let client = client::open(&endpoint, request)?;
     let info = client.info(described, realtime);
-    Ok((client, info))
+    Ok((client, info, device::container_id(&endpoint)))
 }
 
 /// The stream, as the audio thread runs it.
 struct Runner<'a> {
     client: &'a Client,
     counters: &'a Counters,
+    /// The inputs, for the engine.
+    bus: Bus,
+    /// Where the inputs learn when each engine frame plays.
+    playback: &'a Playback,
+    /// The engine frame the stream started with: the one the device's
+    /// position 0 plays.
+    first_frame: u64,
     detector: Detector,
     /// The frames queued ahead of the play position, for their median.
     latency: Medians,
@@ -157,11 +203,14 @@ struct Runner<'a> {
 }
 
 impl<'a> Runner<'a> {
-    fn new(client: &'a Client, counters: &'a Counters) -> Self {
+    fn new(client: &'a Client, counters: &'a Counters, bus: Bus, playback: &'a Playback) -> Self {
         let format = client.format;
         Self {
             client,
             counters,
+            bus,
+            playback,
+            first_frame: 0,
             detector: Detector::new(client.exclusive(), client.period, format.rate),
             latency: Medians::default(),
             qpc: Qpc::new(),
@@ -174,6 +223,7 @@ impl<'a> Runner<'a> {
 
     /// Fills the buffer, so the first period plays audio, and starts.
     fn start(&mut self, engine: &mut Engine) -> Result<(), Error> {
+        self.first_frame = engine.time();
         let target = self.client.target;
         rt::scope(|| self.write(engine, target))?;
         // SAFETY: an initialized client with its buffer written.
@@ -274,6 +324,13 @@ impl<'a> Runner<'a> {
                 if let Some(queued) = self.latency.push(self.written as i64 - played as i64) {
                     self.counters.queued(queued.max(0) as u64);
                 }
+                // The clock stands at zero until the device starts playing.
+                if played > 0 {
+                    let frame = (self.first_frame + played).saturating_sub(self.detector.shift());
+                    // QPC times come in 100 ns units.
+                    let rate = self.client.format.rate;
+                    self.playback.publish(frame, qpc.saturating_mul(100), rate);
+                }
                 Ok(())
             }
             Err(error) if device_gone(error.code()) => Err(Failed {
@@ -299,14 +356,15 @@ impl<'a> Runner<'a> {
         // SAFETY: an initialized client, and `frames` fits in the free space.
         let data = unsafe { self.client.render.GetBuffer(frames) }
             .call("IAudioRenderClient::GetBuffer")?;
+        let input = self.bus.fill(engine.time(), frames as usize);
         if format.sample == SampleFormat::F32 && data.cast::<f32>().is_aligned() {
             // SAFETY: WASAPI handed over `frames` frames of `channels` f32
             // samples, aligned as checked, until `ReleaseBuffer`.
             let out = unsafe { slice::from_raw_parts_mut(data.cast::<f32>(), samples) };
-            engine.process_interleaved(out, channels);
+            engine.process_interleaved_with_input(input, out, channels);
         } else {
             let scratch = &mut self.scratch[..samples];
-            engine.process_interleaved(scratch, channels);
+            engine.process_interleaved_with_input(input, scratch, channels);
             // SAFETY: as above, in the stream's sample format.
             let out = unsafe { slice::from_raw_parts_mut(data, samples * format.sample.bytes()) };
             format.sample.write(scratch, out);
@@ -324,6 +382,7 @@ impl<'a> Runner<'a> {
             .call("IAudioRenderClient::ReleaseBuffer")?;
         self.written += u64::from(frames);
         self.counters.wrote(frames);
+        self.counters.inputs(self.bus.delay(), self.bus.late());
         Ok(queued)
     }
 }

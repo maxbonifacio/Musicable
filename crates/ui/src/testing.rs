@@ -95,10 +95,13 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 redo: state.redo,
                 playback: Playback {
                     playing: false,
+                    record: false,
                     playhead: Beats::ZERO,
                     seconds: 0.0,
                 },
+                recordings: &[],
                 levels: &state.levels,
+                inputs: &[],
                 audio: Audio {
                     summary: "48 kHz · 128 samples · 5.3 ms",
                     running: true,

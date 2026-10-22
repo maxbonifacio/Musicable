@@ -39,6 +39,10 @@ pub enum Target {
     TrackHeader,
     /// A track's bottom edge, in its header.
     TrackEdge,
+    /// A take's lane, under its track's while the track shows its takes.
+    TakeLane,
+    /// The header beside a take's lane, with the take's name.
+    TakeHeader,
     /// A track's solo button, in its header or its mixer strip.
     SoloButton,
     /// A fader, a pan control or a send in the mixer.
@@ -96,6 +100,12 @@ pub enum MouseAction {
     MoveLocator,
     Rename,
     ResizeTrack,
+    /// Copies a stretch of a take to its track, replacing what the track
+    /// has there: the stretch dragged over, snapping to the grid, or the
+    /// take's clip that was clicked.
+    Comp,
+    /// Copies the stretch dragged over without snapping.
+    CompFree,
     /// Solos the track alone, or unsolos it.
     ExclusiveSolo,
     /// Solos the track along with the tracks soloed already.
@@ -208,6 +218,10 @@ impl MouseMap {
         bind(T::TrackHeader, Click, &toggle, A::ToggleSelect);
         bind(T::TrackHeader, DoubleClick, &[none], A::Rename);
         bind(T::TrackEdge, Drag, &[none], A::ResizeTrack);
+        bind(T::TakeLane, Click, &[none], A::Comp);
+        bind(T::TakeLane, Drag, &[none], A::Comp);
+        bind(T::TakeLane, Drag, &[alt], A::CompFree);
+        bind(T::TakeHeader, DoubleClick, &[none], A::Rename);
         bind(T::SoloButton, Click, &[none], A::ExclusiveSolo);
         bind(T::SoloButton, Click, &ctrl, A::AddSolo);
         bind(T::MixerControl, Drag, &[none], A::Coarse);

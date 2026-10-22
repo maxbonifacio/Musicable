@@ -11,7 +11,8 @@ use clap_sys::events::{
     CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_PRESSURE, CLAP_NOTE_EXPRESSION_TUNING,
     CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE,
-    CLAP_TRANSPORT_IS_PLAYING, clap_event_header, clap_event_transport,
+    CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING, clap_event_header,
+    clap_event_transport,
 };
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, clap_note_dialect};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
@@ -447,6 +448,9 @@ fn transport(ctx: Option<&ProcessContext<'_>>) -> clap_event_transport {
         | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
     if at.playing {
         flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    if ctx.transport.recording {
+        flags |= CLAP_TRANSPORT_IS_RECORDING;
     }
     let mut looping = [0; 4];
     if let Some(range) = at.looping {

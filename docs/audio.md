@@ -1,8 +1,9 @@
 # Audio devices
 
-How `crates/audio` gets the engine's output to a device: the backends, opening
-a stream, periods and latency, counting dropouts, what happens when a device
-goes away, and ASIO.
+How `crates/audio` gets the engine's output to a device, and what the device's
+inputs capture back to the engine: the backends, opening a stream, periods and
+latency, counting dropouts, what happens when a device goes away, inputs, and
+ASIO.
 
 ## Backends
 
@@ -93,8 +94,9 @@ let Stopped { engine, error } = stream.stop();
   the app does.
 - With ASIO, both are the output latency the driver reports
   ([ASIO](#asio)).
-- There are no input streams yet, so no input latency either. They come with
-  recording.
+- Inputs have latencies of their own, which [Inputs](#inputs) takes care of:
+  a recording lands where it was played, and `StreamStats::input_delay` says
+  how far behind the output monitoring plays.
 
 ## Dropouts
 
@@ -187,6 +189,103 @@ loop, and a locate to where the old engine was.
 A stream on the default output stays on the device it opened when the default
 changes, until that device goes away. Following the default is still to do.
 
+## Inputs
+
+A stream records from the inputs `StreamRequest::inputs` lists, along with its
+output, and lines each one up with the output's timeline: frame `w` of an
+input's buffer holds what the input captured as engine frame `w` was heard. A
+recording reads it there, so it lands where it was played, and the engine gets
+it a fixed delay later, to monitor.
+
+```rust
+let request = StreamRequest {
+    inputs: vec![input.id.clone()],
+    ..StreamRequest::default()
+};
+let open = musicable_audio::open(&request)?;
+let buffers = open.input_buffers(); // Some(InputBuffer) for each input that opened
+let stream = open.start(engine)?;
+// On any thread: frames `range.start..range.end` are there to read.
+let range = buffers[0].as_ref().unwrap().frames();
+```
+
+- `input_devices` lists what a stream can record from: each input device
+  that's plugged in and enabled (`InputKind::Device`), then on Windows each
+  output device's loopback (`InputKind::Loopback`: `loopback_id` of the
+  output's id), and in ASIO builds each driver's inputs, which have the
+  driver's own id. The ids stay the same across runs.
+- `StreamInfo::inputs` says what each requested input opened as: its name,
+  channels, rate and `InputClock`, and its first channel among the engine's
+  device inputs, or why it didn't open. An input that doesn't open has no
+  channels, and doesn't stop the stream.
+- `Stream::input_buffers` hands out each input's `InputBuffer`, which any
+  thread can read without locks: the last 8 seconds at least, from a fraction
+  of a second after the stream starts, when the input has lined up. Frames it
+  hasn't captured yet read as `ReadError::NotYet`, and frames it no longer
+  holds as `ReadError::Gone`, so a reader that falls behind finds out.
+- `Stream::input_stats` has each input's counters: frames captured and lost,
+  slips, discontinuities the device flagged, whether it has lined up, its
+  clock and drift, and why it stopped if it did. A stopped input's channels
+  are silent.
+- The engine gets every input's channels, one input after another, in
+  `ProcessContext::input` ([engine.md](engine.md)), `StreamStats::input_delay`
+  frames behind the output: the monitoring latency, from a sound at the input
+  to hearing it, leaving out converter delays.
+
+**Lining up, on WASAPI.** Each input captures on a thread of its own, in
+shared mode. At each wake-up the output publishes which engine frame its
+device clock says it was playing, and when, by the performance counter. Each
+packet an input captures comes with the device's position for its first frame
+and when that was captured, on the same counter. Together they give each
+packet's offset: its position, less the engine frame heard as it was
+captured (scaled by the two rates).
+
+- An input on the output's clock, at its rate, has an offset that can't
+  drift: the median of the first 16 packets', then of the first full window
+  of 64, to the nearest frame. Its frames are copied as they are. That's the
+  output device's own loopback, and an input in the same physical device as
+  the output: the same container id, which Windows gives every endpoint of a
+  device, leaving out the one all built-in endpoints share. Every 16 packets
+  the median is checked again. Moved by more than 4 frames twice in a row,
+  the input slips to it, which `slips` counts. A second slip the same way
+  means the clocks drift apart after all, and the input goes over to being
+  resampled, without a gap.
+- Any other input is resampled with the engine's resampler, following the
+  offsets with a phase-locked loop: wide at first to line up within a second,
+  then narrower, so jitter in the timings doesn't come through as wow. Its
+  corrections glide in over the next 10 ms rather than jump, and
+  `drift_ppm` says how much faster the input's clock runs. If the loop ends up
+  more than 5 ms from the median offset twice in a row, as when the device's
+  timing jumps, or 2,048 frames off at once, it starts again from there, which
+  counts as a slip.
+
+Frames the device skips are silence in the buffer and count as lost. Packets
+whose time the device can't vouch for are recorded, but don't move the offset.
+
+**Loopback** records what an output device plays: every app's audio as the
+system mixes it, Musicable's own included when it plays there. Windows sends
+a loopback nothing while nothing plays, so for a device other than the
+stream's output the input plays silence to that device itself, to keep it
+running. A loopback of the stream's own output in exclusive mode can't open,
+since that bypasses the mix. Protected audio may record as silence.
+
+**Monitoring.** The engine reads every input the same delay behind the
+output: as far behind as the furthest input was at its first packet, plus a
+packet's worth of room for inputs on threads of their own, since their
+packets come in steps. If an input falls further behind, the delay grows to
+match and never shrinks back, so monitoring never jumps back in time:
+`input_late` counts the frames that played silent meanwhile. Recordings
+don't lose them. An input more than a quarter of a second behind has
+stalled, and plays silent rather than holding back the rest, as does one
+that stopped.
+
+**When Windows won't let Musicable record.** An input the microphone privacy
+setting blocks fails with `Error::AccessDenied`'s message, which says where
+to allow it.
+
+**Elsewhere.** On macOS and Linux, inputs don't open yet: each says so in
+`StreamInfo::inputs`.
+
 ## The audio thread
 
 Each WASAPI stream has its own thread, named `musicable-audio`. It joins COM's
@@ -200,6 +299,10 @@ errors are carried out of the scope before anything formats a message.
 
 The engine renders straight into the device buffer when it takes 32-bit float,
 and into a buffer of its own to convert from when it takes integers.
+
+Each WASAPI input captures on a thread of its own, `musicable-input`, the same
+way: in the multithreaded apartment and the "Pro Audio" task, with its WASAPI
+calls on it and its work on each packet inside `rt::scope`.
 
 ASIO streams render on the driver's own thread instead ([ASIO](#asio)).
 
@@ -249,6 +352,20 @@ latency the driver reports (`ASIOGetLatencies`): from a buffer switch until
 the half written then plays. Drivers are asked to count their converters and
 any buffers of their own in it. `queued` follows the driver when it says its
 latency changed.
+
+**Inputs.** A stream on a driver records from the driver's own inputs when
+`StreamRequest::inputs` has the driver's id: all its input channels, up to 64
+(`AsioCapabilities::inputs`). Their buffers are created with the outputs', and
+each half they hand over is taken in the same callback, before the engine
+renders, so they're on the output's clock and copied as they are. The input
+latency the driver reports is how old a half's first frame is at its buffer
+switch, a buffer at the least, and the half rendered at that switch plays the
+output latency after it, so the half goes in at the engine frame rendered then
+less the two latencies. That's also the monitoring delay. Inputs through the
+system can open alongside, lined up by when the driver says each half plays,
+and always resampled, since ASIO doesn't say which clock the driver is on.
+Another driver's inputs can't: ASIO runs one driver at a time. A driver that
+won't create its input buffers plays without them.
 
 **Threads.** ASIO allows one driver per process, so there's one ASIO stream
 at a time: opening a second fails. A stream loads its driver on a thread of
@@ -356,6 +473,25 @@ cargo run --release -p musicable-audio --features asio --example tone -- --list
 cargo run --release -p musicable-audio --features asio --example tone -- --asio --seconds 3600
 ```
 
+The round trip example plays clicks and records them back, through a cable from
+an output to an input or through a loopback, and says where each one landed,
+to a fraction of a frame. It opens the stream again for each run, to see
+whether the offset stays put, which is what calibrating it needs. With
+`--soak`, it plays a tone instead, for as many minutes as asked, and checks
+every frame it records for a glitch: a tone changes smoothly, so a lost,
+repeated or misplaced frame shows.
+
+```sh
+cargo run --release -p musicable-audio --example round_trip -- --list
+cargo run --release -p musicable-audio --example round_trip -- --loopback --runs 5
+cargo run --release -p musicable-audio --example round_trip -- --output RME --input RME
+cargo run --release -p musicable-audio --features asio --example round_trip -- --asio
+cargo run --release -p musicable-audio --example round_trip -- --input RME --soak 60
+```
+
+Under Wine, its capture timings are a packet or two out, so a resampled input
+wanders by a few milliseconds there. That says nothing of Windows.
+
 The tests in `crates/audio/tests/device.rs` that play need an output device,
 so they're ignored by default:
 
@@ -370,9 +506,17 @@ Debian and Ubuntu).
 
 - A late ASIO callback counted on real hardware, and whether the RME reports
   its own dropouts: its hour ran before the stream timed callbacks.
-- ASIO's outputs past the first two, and its inputs, which come with
-  recording, as do input streams and the input latency for the other
-  backends.
+- ASIO's outputs past the first two.
+- Inputs measured on real hardware: where a click lands through a cable and
+  through a loopback, and whether that stays put from one stream to the next.
+  What WASAPI's capture times mean for a loopback, mixed or played, isn't
+  known yet.
+- Calibrating inputs by what the round trip measures, and MIDI inputs.
+  Recording itself is the app's ([app.md](app.md#recording)).
+- Inputs on macOS and Linux.
+- A resampled input follows its device's timings, so timings that jitter by a
+  millisecond leave it wandering by a few frames. A loop that learned the
+  jitter and narrowed to suit it would do better.
 - Choosing an ASIO driver's clock source. The driver's own settings do it
   for now.
 - Packaging ASIO builds for release, with the GPL's text and the offer of

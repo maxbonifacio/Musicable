@@ -30,7 +30,8 @@ of Musicable, and where Tier 1 work plugs in.
   several snapshots are waiting it compiles only the newest. A node that
   takes its time to prepare, as a plugin can, holds up this thread only.
 - The **audio thread** owns the `Engine` and calls `Engine::process` or
-  `Engine::process_interleaved` once per device callback.
+  `Engine::process_interleaved` once per device callback, or their
+  `_with_input` forms with the audio devices' inputs.
 - With the `ParallelRenderer`, **worker threads** help the audio thread
   render each block (see [Parallel rendering](#parallel-rendering)).
 - The **disk thread** (`musicable-disk`) reads the audio files that stream
@@ -84,6 +85,59 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   ends where the transport changes and where the loop jumps back,
   `ProcessContext::transport` holds for every frame of the block, and while
   playing, frame `i` is at song position `position + i`.
+- `ProcessContext::time` is the block's engine time, and `Engine::time` the
+  engine time the next callback starts at.
+
+**Device inputs.** `Engine::process_with_input` and
+`process_interleaved_with_input` take what the audio devices' inputs captured
+for the callback, planar, exactly as many frames as the output: each input
+device's channels, one device after another, as the audio backend lays them
+out. Every node gets the block's share in `ProcessContext::input`, whatever
+the blocks a callback splits into, and none when the stream has no inputs.
+The backend gives them a fixed delay behind the output, the monitoring
+latency it reports ([audio.md](audio.md#inputs)), so frame `i` of the block
+is what the inputs captured that long before frame `i` is heard. Recording
+doesn't go through the engine: it reads the inputs' buffers, which line up
+with the output exactly. The resampler (`musicable_engine::resample`) is
+public, for the backend's inputs on another clock.
+
+## Recording
+
+`TransportCommand::Record(on)` is the record button: while it's on, the
+transport records as it plays. `Punch { start, end }` narrows that to the
+punch range, in song positions: recording punches in at `start` and out at
+`end`, either of which can be left open. `TransportState::record` is the
+button, and `recording` whether the transport records now. A block ends
+where recording punches in or out, as at the loop end, so `recording` holds
+for every frame of a block. `Stop` turns recording off.
+
+The engine records nothing itself. It publishes the transport's course on a
+`Timeline` (`Engine::take_timeline`, taken before the engine goes to the
+audio thread): a `Segment` wherever the transport stops running on
+steadily, with the engine time it starts at, the song position there,
+whether it plays, records and is recording, and the graph's latency. A
+recorder reads them on another thread, and `Read::until` says how far in
+engine time they go. The queue holds 4,096 segments, and `Read::lost` says
+when a reader fell so far behind that some were dropped.
+
+The segments place what the inputs captured. What plays at song position
+`p` is rendered at engine time `t`, and with the graph's latency `L`, it's
+heard at `t + L`. Frame `t + L` of an input's buffer is what the input
+captured then ([Device inputs](#time-and-events)), so it belongs at `p`,
+the position the segment gives for `t`. That's the frame a player heard `p`
+on, however late the plugins made it.
+
+**Monitoring inputs.** `compile_with_inputs` gives each audio track an
+`InputMonitor` after its clip player (key `compile::keys::track_input`),
+which plays the track's input in place of its clips: always with
+`Monitor::In`, with `Auto` while the track is armed and the transport is
+stopped or recording, and never with `Off`, going over in 10 ms. An
+`InputLayout` says where each input is among the engine's device inputs,
+by the ids the audio backend gave them, and which input the default one is.
+A track whose input isn't laid out monitors silence. Arming and monitoring
+are the node's parameters (`InputMonitor::ARMED`, `MONITOR`), so changing
+them doesn't rebuild the graph. `compile` and `compile_with_devices` lay out
+no inputs.
 
 ## Musical time
 

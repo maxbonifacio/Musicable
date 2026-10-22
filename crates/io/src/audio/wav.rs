@@ -79,6 +79,10 @@ fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Encoding), AudioError> {
     Ok((channels, sample_rate, encoding))
 }
 
+/// The most bytes of samples a WAV file holds, with room for its header
+/// within the 4 GiB its sizes can say.
+const MAX_DATA: u64 = u32::MAX as u64 - 64;
+
 pub(super) fn write(
     out: &mut impl Write,
     sample_rate: u32,
@@ -88,33 +92,15 @@ pub(super) fn write(
     let frames = frames_of(channels)?;
     let count = channels.len();
     let block = count * format.bytes();
-    let data = u32::try_from(frames * block)
-        .ok()
-        .filter(|&size| size < u32::MAX - 64)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "too long for a WAV file"))?;
-    let float = format == SampleFormat::Float32;
-    // Float files need a fact chunk with their length.
-    let fact = if float { 12 } else { 0 };
-    let mut bytes = Vec::with_capacity(44 + fact as usize + data as usize + 1);
-    bytes.extend_from_slice(b"RIFF");
-    let riff = 4 + 24 + fact + 8 + data + data % 2;
-    bytes.extend_from_slice(&riff.to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&(if float { FLOAT } else { PCM }).to_le_bytes());
-    bytes.extend_from_slice(&(count as u16).to_le_bytes());
-    bytes.extend_from_slice(&sample_rate.to_le_bytes());
-    bytes.extend_from_slice(&(sample_rate * block as u32).to_le_bytes());
-    bytes.extend_from_slice(&(block as u16).to_le_bytes());
-    bytes.extend_from_slice(&(format.bytes() as u16 * 8).to_le_bytes());
-    if float {
-        bytes.extend_from_slice(b"fact");
-        bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(&(frames as u32).to_le_bytes());
+    let data = frames as u64 * block as u64;
+    if data >= MAX_DATA {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too long for a WAV file",
+        ));
     }
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data.to_le_bytes());
+    let mut bytes = Vec::with_capacity(HEADER + data as usize + 1);
+    header(&mut bytes, sample_rate, format, count as u16, frames as u64);
     for i in 0..frames {
         for channel in channels {
             format.encode(channel[i], &mut bytes);
@@ -124,6 +110,157 @@ pub(super) fn write(
         bytes.push(0);
     }
     out.write_all(&bytes)
+}
+
+/// The most bytes [`header`] writes.
+const HEADER: usize = 56;
+
+/// Writes the header of a WAV file of `frames` frames of `channels`
+/// channels of `format` samples at `sample_rate`, up to the start of its
+/// samples.
+fn header(out: &mut Vec<u8>, sample_rate: u32, format: SampleFormat, channels: u16, frames: u64) {
+    let block = u32::from(channels) * format.bytes() as u32;
+    // Callers keep the samples within MAX_DATA.
+    let data = (frames * u64::from(block)) as u32;
+    let float = format == SampleFormat::Float32;
+    // Float files need a fact chunk with their length.
+    let fact = if float { 12 } else { 0 };
+    out.extend_from_slice(b"RIFF");
+    let riff = 4 + 24 + fact + 8 + data + data % 2;
+    out.extend_from_slice(&riff.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&(if float { FLOAT } else { PCM }).to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * block).to_le_bytes());
+    out.extend_from_slice(&(block as u16).to_le_bytes());
+    out.extend_from_slice(&(format.bytes() as u16 * 8).to_le_bytes());
+    if float {
+        out.extend_from_slice(b"fact");
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&(frames as u32).to_le_bytes());
+    }
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+}
+
+/// Writes a WAV file of 32-bit float samples as they come, such as a
+/// recording's. The header gives the file's length as of the last
+/// [`flush`](Self::flush), and until the first, says the samples run to the
+/// end, so a file cut off by a crash reads back as far as it got.
+#[derive(Debug)]
+pub struct WavWriter<W: Write + Seek> {
+    out: W,
+    sample_rate: u32,
+    channels: u16,
+    frames: u64,
+    /// Bytes for the samples to come, before they go to `out`.
+    buffer: Vec<u8>,
+}
+
+impl<W: Write + Seek> WavWriter<W> {
+    /// Starts a file of `channels` channels at `sample_rate` at the start of
+    /// `out`, writing its header.
+    ///
+    /// # Panics
+    ///
+    /// If `channels` is 0.
+    pub fn new(mut out: W, sample_rate: u32, channels: u16) -> io::Result<Self> {
+        assert!(channels > 0, "a WAV file needs a channel");
+        let mut bytes = Vec::with_capacity(HEADER);
+        header(&mut bytes, sample_rate, SampleFormat::Float32, channels, 0);
+        out.seek(SeekFrom::Start(0))?;
+        out.write_all(&bytes)?;
+        Ok(Self {
+            out,
+            sample_rate,
+            channels,
+            frames: 0,
+            buffer: Vec::new(),
+        })
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The frames written so far.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// How many more frames the file has room for: a WAV file holds at most
+    /// 4 GiB.
+    pub fn room(&self) -> u64 {
+        MAX_DATA / (u64::from(self.channels) * 4) - self.frames
+    }
+
+    /// Writes `samples`, whole frames of interleaved channels, after the
+    /// ones before.
+    ///
+    /// # Panics
+    ///
+    /// If `samples` isn't whole frames, or the file hasn't room for them.
+    pub fn write(&mut self, samples: &[f32]) -> io::Result<()> {
+        let channels = usize::from(self.channels);
+        assert!(
+            samples.len().is_multiple_of(channels),
+            "{} samples aren't whole frames of {channels} channels",
+            samples.len()
+        );
+        let frames = (samples.len() / channels) as u64;
+        assert!(frames <= self.room(), "a WAV file holds 4 GiB at most");
+        self.buffer.clear();
+        self.buffer.reserve(samples.len() * 4);
+        for sample in samples {
+            self.buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+        self.out.write_all(&self.buffer)?;
+        self.frames += frames;
+        Ok(())
+    }
+
+    /// Writes silence for `frames` frames.
+    pub fn write_silence(&mut self, frames: u64) -> io::Result<()> {
+        let chunk = vec![0.0; 4096 * usize::from(self.channels)];
+        let mut left = frames;
+        while left > 0 {
+            let n = left.min(4096) as usize;
+            self.write(&chunk[..n * usize::from(self.channels)])?;
+            left -= n as u64;
+        }
+        Ok(())
+    }
+
+    /// Puts the length so far in the header, and flushes `out`.
+    pub fn flush(&mut self) -> io::Result<()> {
+        let mut bytes = Vec::with_capacity(HEADER);
+        header(
+            &mut bytes,
+            self.sample_rate,
+            SampleFormat::Float32,
+            self.channels,
+            self.frames,
+        );
+        let end = self.out.stream_position()?;
+        self.out.seek(SeekFrom::Start(0))?;
+        self.out.write_all(&bytes)?;
+        self.out.seek(SeekFrom::Start(end))?;
+        self.out.flush()
+    }
+
+    /// Finishes the file and hands back `out`. Float samples are 4 bytes,
+    /// so the samples never need a pad byte.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.flush()?;
+        Ok(self.out)
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +340,51 @@ mod tests {
             decoder.read_all().unwrap(),
             [vec![0.25, 1.0], vec![-0.5, 0.125]]
         );
+    }
+
+    #[test]
+    fn a_wav_writer_writes_as_the_samples_come() {
+        let mut writer = WavWriter::new(Cursor::new(Vec::new()), 44_100, 2).unwrap();
+        let samples: Vec<f32> = (0..200).map(|i| i as f32 / 256.0 - 0.5).collect();
+        writer.write(&samples[..100]).unwrap();
+        // Cut off before the length was written: it runs to the end.
+        let cut = writer.out.get_ref().clone();
+        let decoder = decode(cut);
+        assert_eq!(decoder.info().frames, 50);
+        assert_eq!(decoder.info().sample_rate, 44_100);
+        writer.flush().unwrap();
+        writer.write(&samples[100..]).unwrap();
+        writer.write_silence(3).unwrap();
+        assert_eq!(writer.frames(), 103);
+        let bytes = writer.finish().unwrap().into_inner();
+        let mut decoder = decode(bytes.clone());
+        assert_eq!(decoder.info().frames, 103);
+        let channels = decoder.read_all().unwrap();
+        let left: Vec<f32> = samples.iter().step_by(2).copied().chain([0.0; 3]).collect();
+        assert_eq!(channels[0], left);
+        // What write_wav writes for the same samples.
+        let right: Vec<f32> = samples
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .copied()
+            .chain([0.0; 3])
+            .collect();
+        let mut whole = Vec::new();
+        write(
+            &mut whole,
+            44_100,
+            SampleFormat::Float32,
+            &[&left[..], &right[..]],
+        )
+        .unwrap();
+        assert_eq!(bytes, whole);
+    }
+
+    #[test]
+    fn a_wav_writer_has_room_for_4_gib() {
+        let writer = WavWriter::new(Cursor::new(Vec::new()), 48_000, 2).unwrap();
+        assert_eq!(writer.room(), (u64::from(u32::MAX) - 64) / 8);
     }
 
     #[test]

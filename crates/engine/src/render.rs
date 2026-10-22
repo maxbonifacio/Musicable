@@ -2,16 +2,18 @@
 
 use musicable_model::time::TempoMap;
 
-use crate::{Inputs, NodeEvent, PreparedGraph, ProcessContext, TransportState, rt};
+use crate::{AudioRef, Inputs, NodeEvent, PreparedGraph, ProcessContext, TransportState, rt};
 
 /// One block, as a renderer sees it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Block<'a> {
     pub frames: usize,
     /// Engine time of the first frame.
     pub time: u64,
     pub transport: TransportState,
     pub tempo: &'a TempoMap,
+    /// The audio devices' inputs for the block: [`ProcessContext::input`].
+    pub input: AudioRef<'a>,
 }
 
 impl<'a> Block<'a> {
@@ -25,6 +27,7 @@ impl<'a> Block<'a> {
             transport: self.transport,
             tempo: self.tempo,
             events,
+            input: self.input,
         }
     }
 }
@@ -98,6 +101,7 @@ mod tests {
             time: 0,
             transport: TransportState::default(),
             tempo: &TempoMap::default(),
+            input: AudioRef::empty(frames),
         };
         ReferenceRenderer.render(&mut prepared, &block);
         prepared

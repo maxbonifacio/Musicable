@@ -287,6 +287,7 @@ fn play(options: &Options) -> Result<ExitCode, String> {
         mode: options.mode,
         sample_rate: options.rate,
         period: options.period,
+        inputs: Vec::new(),
     };
     let open = audio::open(&request).map_err(|e| e.to_string())?;
     print_info(open.info());

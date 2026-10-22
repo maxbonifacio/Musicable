@@ -37,7 +37,7 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportCommand {
     Play,
-    /// Stops playback, keeping the position.
+    /// Stops playback, keeping the position, and turns recording off.
     Stop,
     /// Moves the playhead to a musical position: the frame it falls on (see
     /// [`TempoMap::frame_at`](musicable_model::time::TempoMap::frame_at)).
@@ -50,6 +50,17 @@ pub enum TransportCommand {
     /// one already past the end plays on. A region shorter than a frame
     /// doesn't loop.
     Loop(Option<BeatRange>),
+    /// Turns recording on or off: the record button. While it's on, the
+    /// transport records as it plays, within the punch range if there is
+    /// one (see [`TransportState::recording`]).
+    Record(bool),
+    /// Records only from `start` on, if it's given, and only up to `end`:
+    /// punching in and out there. Both `None` records wherever the
+    /// transport plays.
+    Punch {
+        start: Option<Beats>,
+        end: Option<Beats>,
+    },
 }
 
 /// The transport during one block. The engine ends a block wherever the
@@ -63,6 +74,12 @@ pub struct TransportState {
     pub position: u64,
     /// The loop region, while looping is on.
     pub looping: Option<BeatRange>,
+    /// Whether recording is on: the record button.
+    pub record: bool,
+    /// Whether the transport records: it plays with recording on, inside
+    /// the punch range. The engine ends a block where recording punches in
+    /// or out, so this holds for every frame of the block.
+    pub recording: bool,
     /// How many times the playhead has jumped since the engine started: each
     /// locate counts, and each time a loop jumps back. A node that keeps
     /// track of what's playing, such as a clip player's sounding notes,

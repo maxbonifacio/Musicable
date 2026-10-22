@@ -32,15 +32,16 @@ pub mod meter;
 pub mod nodes;
 mod parallel;
 mod render;
-mod resample;
+pub mod resample;
 pub mod rt;
 pub mod tasks;
+pub mod timeline;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
-    Compiled, Compiler, Devices, NodeMaker, compile, compile_metered, compile_with_devices,
-    compile_with_media,
+    Compiled, Compiler, Devices, InputChannels, InputLayout, NodeMaker, compile, compile_metered,
+    compile_with_devices, compile_with_inputs, compile_with_media,
 };
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{
@@ -50,6 +51,7 @@ pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
+pub use timeline::{Segment, Timeline};
 
 #[cfg(test)]
 #[global_allocator]
@@ -142,4 +144,11 @@ pub struct ProcessContext<'a> {
     /// This node's events for the block, in order, each with an offset below
     /// `frames`.
     pub events: &'a [NodeEvent],
+    /// The audio devices' inputs for the block, `frames` long: each input
+    /// device's channels, one device after another, as the audio backend
+    /// lays them out. No channels when the stream has no inputs. Frame `i`
+    /// is what the inputs captured a fixed time before the block's frame
+    /// `i` is heard: the input delay that monitoring adds, which the audio
+    /// backend reports.
+    pub input: AudioRef<'a>,
 }

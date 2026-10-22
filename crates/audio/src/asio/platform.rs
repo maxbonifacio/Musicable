@@ -3,7 +3,7 @@
 //! settings come to the front. Elsewhere than on Windows these are
 //! stand-ins, for the tests.
 
-pub(super) use imp::{Apartment, Wake, allow_foreground};
+pub(super) use imp::{Apartment, Wake, allow_foreground, now_ns};
 
 #[cfg(windows)]
 mod imp {
@@ -14,6 +14,7 @@ mod imp {
     use windows::Win32::System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     };
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     use windows::Win32::System::Threading::{CreateEventW, SetEvent};
     use windows::Win32::UI::WindowsAndMessaging::{
         ASFW_ANY, AllowSetForegroundWindow, DispatchMessageW, MSG, MWMO_INPUTAVAILABLE,
@@ -104,6 +105,21 @@ mod imp {
         // isn't in front.
         let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     }
+
+    /// The performance counter in nanoseconds: the time base of the times
+    /// WASAPI gives what it captures. Real-time safe.
+    pub fn now_ns() -> u64 {
+        let (mut count, mut frequency) = (0, 0);
+        // SAFETY: each writes one i64. They can't fail on Windows XP or
+        // later.
+        unsafe {
+            let _ = QueryPerformanceCounter(&mut count);
+            let _ = QueryPerformanceFrequency(&mut frequency);
+        }
+        let nanos =
+            u128::from(count as u64) * 1_000_000_000 / u128::from((frequency as u64).max(1));
+        nanos as u64
+    }
 }
 
 #[cfg(not(windows))]
@@ -148,4 +164,13 @@ mod imp {
     }
 
     pub fn allow_foreground() {}
+
+    /// Inputs that capture on threads of their own are Windows only: this
+    /// is for the tests.
+    pub fn now_ns() -> u64 {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+    }
 }

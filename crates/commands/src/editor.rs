@@ -40,6 +40,8 @@ pub struct Editor {
     pub sample_rate: u32,
     /// What Cut and Copy took, for Paste.
     pub clipboard: Option<Clipboard>,
+    /// The tracks whose takes the arrangement shows in lanes under them.
+    pub take_lanes: BTreeSet<TrackId>,
 }
 
 impl Default for Editor {
@@ -56,6 +58,7 @@ impl Default for Editor {
             files: BTreeMap::new(),
             sample_rate: 48_000,
             clipboard: None,
+            take_lanes: BTreeSet::new(),
         }
     }
 }
@@ -94,7 +97,7 @@ impl Editor {
     }
 
     /// Forgets what `project` doesn't have any more: selected clips and
-    /// tracks that went, and their heights.
+    /// tracks that went, their heights and their take lanes.
     pub fn prune(&mut self, project: &Project) {
         let tracks: BTreeSet<TrackId> = project.tracks.iter().map(|t| t.id).collect();
         let selection = &mut self.selection;
@@ -118,6 +121,7 @@ impl Editor {
             self.selected_track = None;
         }
         self.track_heights.retain(|id, _| tracks.contains(id));
+        self.take_lanes.retain(|id| tracks.contains(id));
     }
 }
 

@@ -18,6 +18,7 @@ use windows::core::{GUID, HRESULT, HSTRING, Interface, PCWSTR, PWSTR, w};
 use super::driver::Driver;
 use super::stream::{self, OpenStream};
 use super::sys::Object;
+use crate::input::{InputDevice, InputKind, StreamInput};
 use crate::{ASIO_ID_PREFIX, Capabilities, Device, DriverType, Error, StreamInfo, StreamRequest};
 
 /// A driver as the registry lists it.
@@ -48,12 +49,31 @@ pub(crate) fn output_devices() -> Vec<Device> {
     installed().iter().map(Installed::device).collect()
 }
 
+/// The installed drivers' inputs, each with its driver's id. How many
+/// channels each has, only its driver says, once loaded: see
+/// [`AsioCapabilities::inputs`](crate::AsioCapabilities::inputs).
+pub(crate) fn input_devices() -> Vec<InputDevice> {
+    installed()
+        .into_iter()
+        .map(|driver| InputDevice {
+            id: driver.id,
+            name: driver.name,
+            is_default: false,
+            kind: InputKind::Device,
+            channels: 0,
+        })
+        .collect()
+}
+
 pub(crate) fn capabilities(id: &str) -> Result<Capabilities, Error> {
     let driver = find(id)?;
     stream::capabilities(&driver.id, driver.loader())
 }
 
-pub(crate) fn open(id: &str, request: &StreamRequest) -> Result<(StreamInfo, OpenStream), Error> {
+pub(crate) fn open(
+    id: &str,
+    request: &StreamRequest,
+) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let driver = find(id)?;
     stream::open(request, driver.device(), driver.loader())
 }

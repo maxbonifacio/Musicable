@@ -20,11 +20,14 @@ use super::context::{self, CALLBACKS, Context, Published, Shared, TryLock};
 use super::convert::Encoding;
 use super::driver::{BufferSizes, Driver};
 use super::platform::{self, Apartment};
-use super::render::{Output, Render};
+use super::render::{Inputs, Output, Render};
 use super::sys::{BufferInfo, Long};
+use crate::input::{
+    self, Bus, InputBuffer, InputClock, InputCounters, OpenedInput, Playback, StreamInput,
+};
 use crate::{
-    Api, AsioCapabilities, Capabilities, Device, Error, StartError, Stopped, StreamInfo,
-    StreamRequest, StreamStats,
+    Api, AsioCapabilities, Capabilities, Device, DriverType, Error, StartError, Stopped,
+    StreamInfo, StreamRequest, StreamStats,
 };
 
 /// Loads and initializes a driver, on the thread that is to use it.
@@ -43,6 +46,9 @@ const COMMON_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000
 /// How many outputs a stream plays through: the driver's first two, which
 /// drivers make their most useful pair, analog if they have any.
 const OUTPUTS: u32 = 2;
+
+/// The most inputs a stream records from: the driver's first 64.
+const MAX_INPUTS: u32 = 64;
 
 /// Whether an ASIO stream is open in this process: there can only be one.
 static OPEN: AtomicBool = AtomicBool::new(false);
@@ -105,7 +111,7 @@ pub(super) fn capabilities(id: &str, load: Loader) -> Result<Capabilities, Error
 }
 
 fn describe(driver: &Driver) -> Result<Capabilities, Error> {
-    let outputs = driver.outputs()?;
+    let (inputs, outputs) = driver.channels()?;
     let rate = driver.sample_rate()?;
     let sizes = driver.buffer_sizes()?;
     let sample_rates = COMMON_RATES
@@ -122,16 +128,20 @@ fn describe(driver: &Driver) -> Result<Capabilities, Error> {
             sample_rates,
             buffer_sizes: sizes.offered(),
             reports_dropouts: driver.reports_overloads(),
+            inputs: inputs.min(MAX_INPUTS) as u16,
         }),
     })
 }
+
+/// What the host thread reports once the driver and the inputs opened.
+type Opened = (StreamInfo, Vec<StreamInput>);
 
 /// Opens the driver `load` loads, as `device`.
 pub(super) fn open(
     request: &StreamRequest,
     device: Device,
     load: Loader,
-) -> Result<(StreamInfo, OpenStream), Error> {
+) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     open_with(request, device, load, GIVE_UP)
 }
 
@@ -141,7 +151,7 @@ pub(super) fn open_with(
     device: Device,
     load: Loader,
     give_up: Duration,
-) -> Result<(StreamInfo, OpenStream), Error> {
+) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let claim = Claim::take()?;
     let shared = Arc::new(Shared::new()?);
     let (opened_tx, opened) = mpsc::sync_channel(1);
@@ -168,8 +178,9 @@ pub(super) fn open_with(
             message: e.to_string(),
         })?;
     match opened.recv() {
-        Ok(Ok(info)) => Ok((
+        Ok(Ok((info, inputs))) => Ok((
             info,
+            inputs,
             OpenStream {
                 thread: Some(thread),
                 start: Some(start),
@@ -203,7 +214,7 @@ struct HostThread {
     load: Loader,
     shared: Arc<Shared>,
     give_up: Duration,
-    opened: SyncSender<Result<StreamInfo, Error>>,
+    opened: SyncSender<Result<Opened, Error>>,
     start: Receiver<Engine>,
     started: SyncSender<Result<(), Error>>,
 }
@@ -221,14 +232,18 @@ impl HostThread {
             let _loading = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
             Session::open(&self.request, self.device, self.load, &self.shared)
         };
-        let mut session = match opened {
-            Ok(session) => session,
+        let (mut session, inputs) = match opened {
+            Ok(opened) => opened,
             Err(error) => {
                 let _ = self.opened.send(Err(error));
                 return Ended::default();
             }
         };
-        if self.opened.send(Ok(session.info.clone())).is_err() {
+        if self
+            .opened
+            .send(Ok((session.info.clone(), inputs)))
+            .is_err()
+        {
             return Ended::default();
         }
         // Wait for the engine. Closing the stream without starting it drops
@@ -264,6 +279,10 @@ struct Session {
     published: Option<Published>,
     driver: Driver,
     running: bool,
+    /// Inputs that capture through the system's audio, on threads of their
+    /// own, until the session drops.
+    #[cfg(windows)]
+    captures: Vec<Result<crate::wasapi::Capture, String>>,
 }
 
 impl Session {
@@ -272,9 +291,10 @@ impl Session {
         device: Device,
         load: Loader,
         shared: &Arc<Shared>,
-    ) -> Result<Session, Error> {
+    ) -> Result<(Session, Vec<StreamInput>), Error> {
         let driver = load()?;
-        let outputs = driver.outputs()?.min(OUTPUTS);
+        let (driver_inputs, outputs) = driver.channels()?;
+        let outputs = outputs.min(OUTPUTS);
         if outputs == 0 {
             return Err(Error::Os {
                 call: "ASIOGetChannels",
@@ -288,6 +308,23 @@ impl Session {
                 Encoding::from_type(driver.output_type(channel)?).ok_or(Error::UnsupportedFormat)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // The driver's own inputs, if the stream records from them: they
+        // have the driver's id.
+        let device_id = device.id.clone();
+        let ours = |id: &String| id.eq_ignore_ascii_case(&device_id);
+        let mut input_encodings = Ok(Vec::new());
+        if request.inputs.iter().any(ours) {
+            input_encodings = (0..driver_inputs.min(MAX_INPUTS))
+                .map(|channel| {
+                    Encoding::from_type(driver.input_type(channel)?).ok_or(Error::UnsupportedFormat)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+                .and_then(|encodings| match encodings.is_empty() {
+                    true => Err("the driver has no inputs".to_owned()),
+                    false => Ok(encodings),
+                });
+        }
         let capabilities = describe(&driver)?;
         let output_ready = driver.takes_output_ready();
         shared.set_rate(rate);
@@ -295,7 +332,16 @@ impl Session {
             shared: shared.clone(),
             render: TryLock::new(None),
         })?;
-        let (period, buffers) = create_buffers(&driver, outputs, &sizes, request.period)?;
+        let inputs = input_encodings.as_ref().map_or(0, Vec::len) as u32;
+        let (period, buffers) =
+            match create_buffers(&driver, outputs, inputs, &sizes, request.period) {
+                Err(error) if inputs > 0 => {
+                    // Play without them, rather than not at all.
+                    input_encodings = Err(error.to_string());
+                    create_buffers(&driver, outputs, 0, &sizes, request.period)?
+                }
+                created => created?,
+            };
         let mut session = Session {
             info: StreamInfo {
                 device,
@@ -309,20 +355,27 @@ impl Session {
                 // The driver's own thread, which ASIO has drivers run at
                 // real-time priority.
                 realtime: true,
+                inputs: Vec::new(),
             },
             published: Some(published),
             driver,
             running: false,
+            #[cfg(windows)]
+            captures: Vec::new(),
         };
         let driver_reports = session.driver.reports_overloads();
-        if let Ok(latency) = session.driver.output_latency()
-            && latency > 0
-        {
-            session.info.latency = latency;
+        let mut input_latency = 0;
+        if let Ok((input, output)) = session.driver.latencies() {
+            if output > 0 {
+                session.info.latency = output;
+            }
+            input_latency = input;
         }
         shared.set_latency(session.info.latency);
+        shared.set_input_latency(input_latency.max(period));
 
-        let outputs: Vec<Output> = buffers
+        let (output_buffers, input_buffers) = buffers.split_at(outputs as usize);
+        let outputs: Vec<Output> = output_buffers
             .iter()
             .zip(encodings)
             .map(|(info, encoding)| Output {
@@ -330,6 +383,100 @@ impl Session {
                 encoding,
             })
             .collect();
+        let (driver_input, opened_driver_input) = match input_encodings {
+            Ok(encodings) if !encodings.is_empty() => {
+                let channels: Vec<Output> = input_buffers
+                    .iter()
+                    .zip(encodings)
+                    .map(|(info, encoding)| Output {
+                        halves: info.buffers.map(|half| half.cast::<u8>()),
+                        encoding,
+                    })
+                    .collect();
+                let count = channels.len();
+                let (buffer, writer) = InputBuffer::new(count, input::buffer_frames(rate));
+                let counters = Arc::new(InputCounters::default());
+                let opened = OpenedInput {
+                    name: session.info.device.name.clone(),
+                    channels: count as u16,
+                    rate,
+                    clock: InputClock::Output,
+                    buffer,
+                    counters: counters.clone(),
+                    // Written in the same callback the engine renders in.
+                    room: 0,
+                };
+                let inputs = Inputs {
+                    channels,
+                    writer,
+                    counters,
+                    frames: vec![0.0; period as usize * count],
+                    channel: vec![0.0; period as usize],
+                };
+                (Some(inputs), Ok(opened))
+            }
+            // Not asked for.
+            Ok(_) => (None, Err("not opened".to_owned())),
+            Err(error) => (None, Err(error)),
+        };
+
+        // Inputs through the system's audio capture on threads of their
+        // own, lined up by when the output plays each frame.
+        let system: Vec<String> = request
+            .inputs
+            .iter()
+            .filter(|id| DriverType::of(id) == DriverType::System)
+            .cloned()
+            .collect();
+        let playback = (!system.is_empty()).then(|| Arc::new(Playback::default()));
+        #[cfg(windows)]
+        let mut system_inputs = {
+            let output = crate::wasapi::Output {
+                id: session.info.device.id.clone(),
+                container: None,
+                rate,
+                exclusive: false,
+                clock: playback.clone().unwrap_or_default(),
+            };
+            session.captures = crate::wasapi::open_inputs(&system, &output);
+            session
+                .captures
+                .iter()
+                .map(|capture| {
+                    capture
+                        .as_ref()
+                        .map(|c| c.input.clone())
+                        .map_err(Clone::clone)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        #[cfg(not(windows))]
+        let mut system_inputs = system
+            .iter()
+            .map(|_| Err::<OpenedInput, _>("only Windows records so far".into()));
+        let opened: Vec<Result<OpenedInput, String>> = request
+            .inputs
+            .iter()
+            .map(|id| {
+                if ours(id) {
+                    opened_driver_input.clone()
+                } else if DriverType::of(id) == DriverType::Asio {
+                    Err(
+                        "an ASIO driver's inputs open only with its own output: ASIO runs one \
+                         driver at a time"
+                            .into(),
+                    )
+                } else {
+                    system_inputs
+                        .next()
+                        .unwrap_or_else(|| Err("not opened".into()))
+                }
+            })
+            .collect();
+        let (infos, stream_inputs, bus_inputs) = input::assemble(&request.inputs, opened);
+        session.info.inputs = infos;
+        let bus = Bus::new(bus_inputs, period as usize, input::max_lag(rate));
         // The device plays one half before the first callback asks for
         // anything: silence, in both.
         for output in &outputs {
@@ -346,11 +493,12 @@ impl Session {
             rate,
             output_ready,
             driver_reports,
-        );
+        )
+        .with_inputs(driver_input, bus, playback);
         *session.context().render.lock() = Some(render);
         *PLAYING.lock().unwrap_or_else(PoisonError::into_inner) =
             Some((session.info.device.id.clone(), capabilities));
-        Ok(session)
+        Ok((session, stream_inputs))
     }
 
     fn context(&self) -> &Context {
@@ -396,9 +544,10 @@ impl Session {
                 return Err(Error::DriverReset);
             }
             if requests & context::LATENCIES != 0
-                && let Ok(latency) = self.driver.output_latency()
+                && let Ok((input, output)) = self.driver.latencies()
             {
-                shared.set_latency(latency);
+                shared.set_latency(output);
+                shared.set_input_latency(input.max(self.info.period));
             }
             if requests & context::SETTINGS != 0 {
                 platform::allow_foreground();
@@ -468,19 +617,24 @@ fn set_rate(driver: &Driver, requested: Option<u32>) -> Result<u32, Error> {
     }
 }
 
-/// Asks the driver for the first `outputs` outputs' buffers, at the size the
-/// request picks, or at the driver's preferred size if it won't take that
-/// one. Returns the size, and the buffers.
+/// Asks the driver for the first `outputs` outputs' buffers, then the first
+/// `inputs` inputs', at the size the request picks, or at the driver's
+/// preferred size if it won't take that one. Returns the size, and the
+/// buffers.
 fn create_buffers(
     driver: &Driver,
     outputs: u32,
+    inputs: u32,
     sizes: &BufferSizes,
     requested: Option<u32>,
 ) -> Result<(u32, Vec<BufferInfo>), Error> {
     let infos = || -> Vec<BufferInfo> {
-        (0..outputs)
-            .map(|channel| BufferInfo {
-                is_input: 0,
+        let outputs = (0..outputs).map(|channel| (0, channel));
+        let inputs = (0..inputs).map(|channel| (1, channel));
+        outputs
+            .chain(inputs)
+            .map(|(is_input, channel)| BufferInfo {
+                is_input,
                 channel: channel as Long,
                 buffers: [ptr::null_mut(); 2],
             })

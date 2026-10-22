@@ -15,6 +15,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub(crate) struct StubTransport {
     pub playing: bool,
+    pub recording: bool,
     pub playhead: Beats,
     pub calls: Vec<String>,
 }
@@ -31,6 +32,7 @@ impl Transport for StubTransport {
 
     fn stop(&mut self) {
         self.playing = false;
+        self.recording = false;
         self.calls.push("stop".into());
     }
 
@@ -41,6 +43,15 @@ impl Transport for StubTransport {
 
     fn playhead(&self) -> Beats {
         self.playhead
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+        self.calls.push(format!("record {on}"));
     }
 }
 
