@@ -168,11 +168,12 @@ built yet, except where it says so.
   process, so a plugin that crashes doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
   plugin code for what our allocation checker can't see.
-- **Plugin delay compensation.** Nodes need to report their
-  latency (a `Node::latency` method), and `Graph::prepare` needs a pass that
-  delays the faster paths wherever paths of different latency meet, and
-  reports the graph's total. Oversampled native stages report their latency
-  the same way.
+- **Plugin delay compensation.** Built: nodes report their latency
+  (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
+  paths of different latency meet, lines the cue output up with the output,
+  and reports the graph's total (`PreparedGraph::latency`, `Stats::latency`;
+  [engine.md](engine.md#delay-compensation)). Oversampled native stages will
+  report their latency the same way.
 - **The mixer.** Built: group and return tracks are buses with strips of
   their own, summing through `compile::Summing`; sends before or after the
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and

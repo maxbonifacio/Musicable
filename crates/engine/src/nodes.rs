@@ -52,6 +52,172 @@ impl Node for Sum {
     }
 }
 
+/// Plays what comes in a whole number of frames later. Delay compensation
+/// puts one wherever a path meets another with more latency, to line them
+/// up (see [`Graph::prepare`](crate::Graph::prepare)).
+///
+/// It sums its inputs, as [`Sum`] does, and delays the sum. Taking over from
+/// another delay in a swap, it carries on with the frames that one holds,
+/// so nothing drops out. If the length changed, it takes the newest frames
+/// it has room for, and starts with silence where the old one had too few.
+#[derive(Debug, Clone)]
+pub struct Delay {
+    frames: usize,
+    channels: usize,
+    /// The last `frames` frames that came in, channel after channel. Each
+    /// channel's are a ring, the oldest at `next`.
+    held: Vec<f32>,
+    next: usize,
+}
+
+impl Delay {
+    /// Delays a stereo signal by `frames`.
+    pub fn new(frames: usize) -> Self {
+        Self {
+            frames,
+            channels: 2,
+            held: Vec::new(),
+            next: 0,
+        }
+    }
+
+    pub fn with_channels(mut self, channels: usize) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    /// How many frames late it plays what comes in.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Copies the newest `out.len()` frames channel `c` holds into `out`,
+    /// oldest first.
+    fn newest(&self, c: usize, out: &mut [f32]) {
+        let ring = &self.held[c * self.frames..][..self.frames];
+        let k = out.len();
+        if k <= self.next {
+            out.copy_from_slice(&ring[self.next - k..self.next]);
+        } else {
+            let wrapped = k - self.next;
+            out[..wrapped].copy_from_slice(&ring[self.frames - wrapped..]);
+            out[wrapped..].copy_from_slice(&ring[..self.next]);
+        }
+    }
+}
+
+impl Node for Delay {
+    fn channels(&self) -> usize {
+        self.channels
+    }
+
+    fn prepare(&mut self, _config: &EngineConfig) {
+        self.held = vec![0.0; self.channels * self.frames];
+        self.next = 0;
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        let Some(previous) = previous.downcast_mut::<Delay>() else {
+            return;
+        };
+        if (previous.frames, previous.channels) == (self.frames, self.channels) {
+            std::mem::swap(&mut self.held, &mut previous.held);
+            self.next = previous.next;
+            return;
+        }
+        // Silence first, then the newest frames the previous one holds, so
+        // what it held plays out without a gap.
+        let k = self.frames.min(previous.frames);
+        for c in 0..self.channels.min(previous.channels) {
+            let start = c * self.frames + self.frames - k;
+            previous.newest(c, &mut self.held[start..][..k]);
+        }
+    }
+
+    fn process(
+        &mut self,
+        _ctx: &ProcessContext<'_>,
+        inputs: Inputs<'_>,
+        output: &mut AudioMut<'_>,
+    ) {
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+        let frames = self.frames;
+        if frames == 0 {
+            return;
+        }
+        // Each frame of the block swaps places with the frame `frames`
+        // earlier, which the ring holds.
+        let mut next = self.next;
+        for (c, out) in output.channels_mut().enumerate().take(self.channels) {
+            let ring = &mut self.held[c * frames..][..frames];
+            next = self.next;
+            let mut done = 0;
+            while done < out.len() {
+                let n = (frames - next).min(out.len() - done);
+                out[done..done + n].swap_with_slice(&mut ring[next..next + n]);
+                done += n;
+                next = (next + n) % frames;
+            }
+        }
+        self.next = next;
+    }
+}
+
+/// A node with latency, for tests: it plays what comes in late, as a
+/// [`Delay`] does, and reports the delay as its latency, as a plugin that
+/// looks ahead does.
+#[cfg(test)]
+pub(crate) struct Latent(pub Delay);
+
+#[cfg(test)]
+impl Node for Latent {
+    fn channels(&self) -> usize {
+        self.0.channels()
+    }
+
+    fn prepare(&mut self, config: &EngineConfig) {
+        self.0.prepare(config);
+    }
+
+    fn latency(&self) -> usize {
+        self.0.frames()
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<Latent>() {
+            self.0.adopt(&mut previous.0);
+        }
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        self.0.process(ctx, inputs, output);
+    }
+}
+
+/// A single 1.0 on every channel at engine time `at`, and silence
+/// otherwise, for tests. It ignores what comes in.
+#[cfg(test)]
+pub(crate) struct Impulse {
+    pub at: u64,
+}
+
+#[cfg(test)]
+impl Node for Impulse {
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        if let Some(offset) = self.at.checked_sub(ctx.time)
+            && offset < ctx.frames as u64
+        {
+            for channel in output.channels_mut() {
+                channel[offset as usize] = 1.0;
+            }
+        }
+    }
+}
+
 /// A parameter that ramps to each new value instead of jumping to it, so
 /// changing a gain doesn't click.
 ///
@@ -944,7 +1110,7 @@ mod tests {
     use musicable_model::time::{TempoMap, TimeSignature};
 
     use super::*;
-    use crate::{AudioBuffer, AudioRef, TransportState};
+    use crate::{AudioBuffer, AudioRef, TransportState, rt};
 
     fn context<'a>(
         frames: usize,
@@ -969,6 +1135,76 @@ mod tests {
         NodeEvent {
             offset,
             kind: NodeEventKind::Param { param, value },
+        }
+    }
+
+    /// Runs `delay` over the counting numbers from `from`, `block` frames at a
+    /// time, for `frames` frames, in stereo with the right channel negated,
+    /// and returns the left channel.
+    fn delayed(delay: &mut Delay, from: usize, frames: usize, block: usize) -> Vec<f32> {
+        let mut left = Vec::new();
+        for start in (from..from + frames).step_by(block) {
+            let n = block.min(from + frames - start);
+            let mut input: Vec<f32> = (start..start + n).map(|i| i as f32).collect();
+            input.extend((start..start + n).map(|i| -(i as f32)));
+            let inputs = [AudioRef::from_planar(&input, 2)];
+            let mut out = AudioBuffer::new(2, n);
+            let tempo = TempoMap::default();
+            let ctx = context(n, &[], true, &tempo);
+            let mut view = out.view_mut(n);
+            rt::scope(|| delay.process(&ctx, Inputs::from_views(&inputs), &mut view));
+            let out = out.view(n);
+            let right: Vec<f32> = out.channel(1).iter().map(|s| -s).collect();
+            assert_eq!(out.channel(0), right, "the channels are delayed alike");
+            left.extend_from_slice(out.channel(0));
+        }
+        left
+    }
+
+    /// The counting numbers from `from`, `by` frames late, with silence
+    /// before frame `silent_until`.
+    fn late(from: usize, frames: usize, by: usize, silent_until: usize) -> Vec<f32> {
+        let sample = |i: usize| match i.checked_sub(by) {
+            Some(source) if i >= silent_until => source as f32,
+            _ => 0.0,
+        };
+        (from..from + frames).map(sample).collect()
+    }
+
+    #[test]
+    fn delays_play_what_comes_in_late_whatever_the_blocks() {
+        for frames in [0, 1, 5, 16, 37] {
+            for block in [1, 3, 16, 64] {
+                let mut delay = Delay::new(frames);
+                delay.prepare(&SLOW);
+                assert_eq!(
+                    delayed(&mut delay, 0, 200, block),
+                    late(0, 200, frames, frames),
+                    "{frames} frames in blocks of {block}"
+                );
+                assert_eq!(delay.latency(), 0, "a delay isn't latency");
+            }
+        }
+    }
+
+    #[test]
+    fn delays_take_over_what_the_delay_before_them_holds() {
+        // Swapped 50 frames in, for a delay as long, shorter and longer.
+        for frames in [20, 7, 33] {
+            let mut first = Delay::new(20);
+            first.prepare(&SLOW);
+            delayed(&mut first, 0, 50, 6);
+            let mut second = Delay::new(frames);
+            second.prepare(&SLOW);
+            rt::scope(|| second.adopt(&mut first));
+            // A longer delay is silent at first, where it goes back further
+            // than the first one did.
+            let silent_until = 50 + frames.saturating_sub(20);
+            assert_eq!(
+                delayed(&mut second, 50, 60, 6),
+                late(50, 60, frames, silent_until),
+                "{frames}"
+            );
         }
     }
 

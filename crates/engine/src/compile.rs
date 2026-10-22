@@ -629,6 +629,7 @@ mod tests {
     use musicable_model::{DeviceId, SendId, TestTone, TrackId, TrackKind};
 
     use super::*;
+    use crate::nodes::{Delay, Impulse, Latent};
     use crate::{
         AudioMut, Block, Engine, Event, Inputs, ProcessContext, ReferenceRenderer, Renderer,
         TransportCommand, TransportState,
@@ -936,6 +937,47 @@ mod tests {
         // In another slot it's another node, so it starts again.
         handle.swap_graph(graph(Slot::PreFader)).unwrap();
         assert_eq!(left(play(&mut engine, 100)), count(0));
+    }
+
+    #[test]
+    fn tracks_line_up_at_the_master_whatever_their_latency() {
+        // Two tracks play an impulse on frame 100, one of them through a
+        // stage with 37 frames of latency and then a group. Both send to a
+        // return track.
+        let mut p = Project::new();
+        let late = p.add_track("Late", TrackKind::Audio);
+        let on_time = p.add_track("On time", TrackKind::Audio);
+        let group = p.add_track("Group", TrackKind::Group);
+        let reverb = p.add_track("Reverb", TrackKind::Return);
+        p.track_mut(late).unwrap().output = Bus::Group(group);
+        for (track, level) in [(late, 0.25), (on_time, 0.5)] {
+            let mut send = p.new_send(reverb);
+            send.level = level;
+            p.track_mut(track).unwrap().sends.push(send);
+        }
+        let stages = |channel: Channel<'_>, slot: Slot| {
+            let Channel::Track(track) = channel else {
+                return None;
+            };
+            let stage: Box<dyn Node> = match (track.name.as_str(), slot) {
+                ("Late" | "On time", Slot::PreFader) => Box::new(Impulse { at: 100 }),
+                ("Late", Slot::PostFader) => Box::new(Latent(Delay::new(37))),
+                _ => return None,
+            };
+            Some(stage)
+        };
+        let graph = compile_with(&p, &Meters::new(), &Media::new(), stages)
+            .prepare(&CONFIG)
+            .unwrap();
+        assert_eq!(graph.latency(), 37);
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(graph).unwrap();
+        let out = play(&mut engine, 300);
+        assert_eq!(handle.stats().latency, 37);
+        // Each track once, and the sends at their levels through the
+        // return, all on the same frame, in both channels.
+        let loud: Vec<_> = out.iter().enumerate().filter(|(_, s)| **s != 0.0).collect();
+        assert_eq!(loud, [(2 * 137, &2.75), (2 * 137 + 1, &2.75)]);
     }
 
     #[test]
