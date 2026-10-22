@@ -1,8 +1,9 @@
 //! What the host thread needs from the system: a COM apartment for the
-//! driver, and a way for the callbacks to wake it. Elsewhere than on Windows
-//! these are stand-ins, for the tests.
+//! driver, a way for the callbacks to wake it, and letting the driver's
+//! settings come to the front. Elsewhere than on Windows these are
+//! stand-ins, for the tests.
 
-pub(super) use imp::{Apartment, Wake};
+pub(super) use imp::{Apartment, Wake, allow_foreground};
 
 #[cfg(windows)]
 mod imp {
@@ -15,8 +16,8 @@ mod imp {
     };
     use windows::Win32::System::Threading::{CreateEventW, SetEvent};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
-        PeekMessageW, QS_ALLINPUT, TranslateMessage,
+        ASFW_ANY, AllowSetForegroundWindow, DispatchMessageW, MSG, MWMO_INPUTAVAILABLE,
+        MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage,
     };
 
     use crate::Error;
@@ -95,6 +96,14 @@ mod imp {
             let _ = unsafe { CloseHandle(self.0) };
         }
     }
+
+    /// Lets another process bring a window to the front while ours is
+    /// there: a driver's settings are often a window of its own helper app.
+    pub fn allow_foreground() {
+        // SAFETY: takes no pointers. It fails, harmlessly, when this process
+        // isn't in front.
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
 }
 
 #[cfg(not(windows))]
@@ -137,4 +146,6 @@ mod imp {
             *woken = false;
         }
     }
+
+    pub fn allow_foreground() {}
 }

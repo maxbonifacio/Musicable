@@ -205,6 +205,12 @@ fn print_capabilities(capabilities: &Capabilities) {
         );
         println!("  rates: {} Hz", list(&asio.sample_rates));
         println!("  buffer sizes: {} frames", list(&asio.buffer_sizes));
+        let dropouts = if asio.reports_dropouts {
+            "the driver reports its own, and a stream counts only those"
+        } else {
+            "a stream looks for the signs"
+        };
+        println!("  dropouts: {dropouts}");
         return;
     }
     println!(

@@ -277,22 +277,50 @@ callback aborts the process, since it can't unwind into the driver.
   switch to the other.
 - **The last callback took longer than a buffer**, so the device played the
   half it was writing before it was done.
+- **The callback came after its half started playing**: more than a buffer
+  and the output latency the driver reports after the last one. Buffer
+  switches come a buffer apart, and the half asked for at one plays the
+  latency after it. The specification asks drivers to call back for every
+  half, late or not, and then the position and the halves keep step: only
+  the time shows the dropout.
 
 A driver that says it reports every dropout itself is taken at its word, as
-the specification asks, and only its reports count. The first 8 callbacks
-fill the device's buffers before it starts, so their timing means nothing yet
-and the checks begin after them. Signs in the 10 callbacks after a dropout
-count towards it, as on the other backends. `lost_frames` adds up what the
-sample position skipped, or a buffer per sign when nothing says more.
-`late_wakeups` counts callbacks more than one and a half buffers apart, and
-`system_dropouts` stays at 0: there's no system audio engine in between.
-`src/asio/detector.rs` has the details.
+the specification asks, and only its reports count: `reports_dropouts` in
+`AsioCapabilities` says which drivers do. The first 8 callbacks fill the
+device's buffers before it starts, so their timing means nothing yet and the
+checks begin after them. The next 64 show whether the driver calls back
+evenly: one that calls back twice within a quarter of a buffer in them does
+it in bursts, from buffers of its own, and its late callbacks don't count.
+Signs in the 10 callbacks after a dropout count towards it, as on the other
+backends. `lost_frames` adds up what the sample position skipped, or a buffer
+per sign when nothing says more. `late_wakeups` counts callbacks more than one
+and a half buffers apart, and `system_dropouts` stays at 0: there's no system
+audio engine in between. `src/asio/detector.rs` has the details.
 
 **The driver's settings, and resets.** `Stream::show_driver_settings` opens
 the driver's own settings panel, from the stream's thread. When its settings
 change, or its rate is changed from outside, the driver asks to be reset: the
 stream ends with `Error::DriverReset`, and opening it again picks up the new
 settings. The app does that at once, and says what the driver plays with now.
+Some drivers' settings are a window of another app of theirs, so the stream
+lets other apps bring a window to the front while it opens them.
+
+**On the RME HDSPe AIO.** Its ASIO driver, "ASIO Hammerfall DSP" (version
+4.6.2.0), only takes the buffer size set in its settings, and reports that
+size and 65 frames more as its latency: 321 frames at 256, 7.28 ms at
+44.1 kHz. Its settings are a window of RME's settings app, which opened
+behind the others when the tone example asked for it from the background.
+Changing the size there from 256 to 512 and back reset the stream each time,
+and it played again at the new size within a tenth of a second, with no
+dropouts. Holding up the audio thread for five buffers every 10 seconds
+counted one dropout each time. An hour at 256 frames counted none in 620,162
+callbacks, the longest of which took 0.23 ms. Two callbacks came late, in the
+minute Windows made a shadow copy of the disk, one of them 18.26 ms after the
+one before: more than a buffer and the latency, 13.08 ms, so its half had
+started playing. The position and the halves kept step, and nothing counted
+it: the last of the signs above comes from that hour. Whether the RME reports
+its own dropouts, which would leave that sign out for it, wasn't recorded;
+`--list` shows it now.
 
 **Tests.** `src/asio/fake.rs` is a fake driver built in Rust, set up to behave
 as drivers do, that records what the stream asks of it, and the tests in
@@ -318,9 +346,10 @@ an id or part of a device name, and `--help` lists the rest. When the device
 goes away mid-run, it keeps trying to open it again.
 
 With the `asio` feature, `--list` shows the ASIO drivers as well, and
-`--asio` plays through one: the one `--device` names, or the only one
-installed. `--driver-settings` opens the driver's own settings once it
-plays, to see a change there reset the stream and reopen it.
+whether each reports its own dropouts. `--asio` plays through one: the one
+`--device` names, or the only one installed. `--driver-settings` opens the
+driver's own settings once it plays, to see a change there reset the stream
+and reopen it.
 
 ```sh
 cargo run --release -p musicable-audio --features asio --example tone -- --list
@@ -339,8 +368,8 @@ Debian and Ubuntu).
 
 ## Not done yet
 
-- An hour through an ASIO driver on real hardware, the RME HDSPe AIO's. Only
-  the fake driver has played so far.
+- A late ASIO callback counted on real hardware, and whether the RME reports
+  its own dropouts: its hour ran before the stream timed callbacks.
 - ASIO's outputs past the first two, and its inputs, which come with
   recording, as do input streams and the input latency for the other
   backends.

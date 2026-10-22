@@ -52,6 +52,8 @@ pub(super) struct Shared {
     /// The stream's sample rate, to tell a real change of rate from a
     /// repeat.
     rate: AtomicU32,
+    /// The output latency the driver reports, in frames.
+    latency: AtomicU32,
     wake: Wake,
 }
 
@@ -62,6 +64,7 @@ impl Shared {
             requests: AtomicU32::new(0),
             reported: AtomicU32::new(0),
             rate: AtomicU32::new(0),
+            latency: AtomicU32::new(0),
             wake: Wake::new()?,
         })
     }
@@ -83,6 +86,18 @@ impl Shared {
 
     pub fn set_rate(&self, rate: u32) {
         self.rate.store(rate, Ordering::Relaxed);
+    }
+
+    /// The output latency the driver reports, in frames, for the callbacks
+    /// and the stats.
+    pub fn set_latency(&self, frames: u32) {
+        self.latency.store(frames, Ordering::Relaxed);
+        self.counters.queued(u64::from(frames));
+    }
+
+    /// Real-time safe.
+    pub fn latency(&self) -> u32 {
+        self.latency.load(Ordering::Relaxed)
     }
 
     /// Waits up to `timeout` for a request.

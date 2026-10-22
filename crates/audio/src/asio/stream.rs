@@ -19,7 +19,7 @@ use musicable_engine::Engine;
 use super::context::{self, CALLBACKS, Context, Published, Shared, TryLock};
 use super::convert::Encoding;
 use super::driver::{BufferSizes, Driver};
-use super::platform::Apartment;
+use super::platform::{self, Apartment};
 use super::render::{Output, Render};
 use super::sys::{BufferInfo, Long};
 use crate::{
@@ -121,6 +121,7 @@ fn describe(driver: &Driver) -> Result<Capabilities, Error> {
         asio: Some(AsioCapabilities {
             sample_rates,
             buffer_sizes: sizes.offered(),
+            reports_dropouts: driver.reports_overloads(),
         }),
     })
 }
@@ -319,7 +320,7 @@ impl Session {
         {
             session.info.latency = latency;
         }
-        shared.counters.queued(u64::from(session.info.latency));
+        shared.set_latency(session.info.latency);
 
         let outputs: Vec<Output> = buffers
             .iter()
@@ -397,9 +398,10 @@ impl Session {
             if requests & context::LATENCIES != 0
                 && let Ok(latency) = self.driver.output_latency()
             {
-                shared.counters.queued(u64::from(latency));
+                shared.set_latency(latency);
             }
             if requests & context::SETTINGS != 0 {
+                platform::allow_foreground();
                 // Some drivers wait until the user closes their settings.
                 let _ = self.driver.control_panel();
                 heard = Instant::now();

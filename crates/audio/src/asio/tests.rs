@@ -9,6 +9,7 @@ use musicable_engine::nodes::Constant;
 use musicable_engine::{Engine, EngineHandle, Graph, NodeKey, rt};
 
 use super::context::CALLBACKS;
+use super::detector::{SETTLING, STARTUP};
 use super::fake::{Fake, Settings};
 use super::stream::{self, OpenStream, Stream};
 use super::sys::{self, Long, message, sample_type};
@@ -367,6 +368,41 @@ fn counts_a_half_asked_for_twice() {
 }
 
 #[test]
+fn counts_a_callback_after_its_half_started_playing() {
+    let _turn = turn();
+    let fake = Fake::new(Settings::default());
+    let (info, stream, _handle) = play(&fake, &large(), 0.0);
+    // Evenly, with the position and the halves in step, as a driver calls
+    // back for every half: more than a quarter of a buffer apart is enough.
+    // The time between these doesn't count, so a busy machine can't fail
+    // the test.
+    for _ in 0..STARTUP + SETTLING {
+        thread::sleep(info.period_duration() / 3);
+        switch(&fake, 1);
+    }
+    assert_eq!(stream.stats().underruns, 0);
+    // The first callback timed: more than a buffer and the latency after
+    // the last one.
+    thread::sleep(info.period_duration() * 3);
+    switch(&fake, 1);
+    let stats = stream.stats();
+    assert_eq!((stats.underruns, stats.lost_frames), (1, 2048));
+    assert_eq!(stream.stop().engine.stats().xruns, 1);
+}
+
+#[test]
+fn does_not_time_a_driver_that_calls_back_in_bursts() {
+    let _turn = turn();
+    let fake = Fake::new(Settings::default());
+    let (info, stream, _handle) = play(&fake, &large(), 0.0);
+    // All at once, as the tests call back.
+    switch(&fake, 100);
+    thread::sleep(info.period_duration() * 3);
+    switch(&fake, 1);
+    assert_eq!(stream.stats().underruns, 0);
+}
+
+#[test]
 fn a_reset_request_ends_the_stream() {
     let _turn = turn();
     for selector in [message::RESET_REQUEST, message::BUFFER_SIZE_CHANGE] {
@@ -465,6 +501,7 @@ fn capabilities_come_from_the_driver() {
     let fake = Fake::new(Settings {
         outputs: 1,
         sizes: [32, 1024, 128, -1],
+        reports_overloads: true,
         ..Settings::default()
     });
     let capabilities = stream::capabilities(ID, fake.loader()).unwrap();
@@ -479,6 +516,7 @@ fn capabilities_come_from_the_driver() {
             asio: Some(AsioCapabilities {
                 sample_rates: vec![44_100, 48_000, 96_000],
                 buffer_sizes: vec![32, 64, 128, 256, 512, 1024],
+                reports_dropouts: true,
             }),
         }
     );

@@ -156,6 +156,9 @@ pub struct AsioCapabilities {
     /// among them, with its smallest, largest and preferred. Many drivers
     /// take only the size set in their own settings.
     pub buffer_sizes: Vec<u32>,
+    /// Whether the driver finds dropouts itself and reports each one. A
+    /// stream then counts only those, as ASIO asks of hosts.
+    pub reports_dropouts: bool,
 }
 
 /// What `device` supports, or the default output's if it's `None`. For an

@@ -25,6 +25,7 @@ pub(super) struct Render {
     outputs: Vec<Output>,
     period: usize,
     period_duration: Duration,
+    rate: u32,
     /// Whether to tell the driver when each half is written.
     output_ready: bool,
     /// The engine renders here, a channel after another, before the samples
@@ -57,6 +58,7 @@ impl Render {
             outputs,
             period: period as usize,
             period_duration: frames_to_duration(u64::from(period), rate),
+            rate,
             output_ready,
             scratch: vec![0.0; period as usize * channels],
             engine: None,
@@ -73,10 +75,13 @@ impl Render {
         let woke = Instant::now();
         let counters = &shared.counters;
         self.callbacks += 1;
-        if let Some(last) = self.last_callback.replace(woke)
+        let interval = self
+            .last_callback
+            .replace(woke)
+            .map(|last| woke.saturating_duration_since(last));
+        if let Some(interval) = interval
             && self.callbacks > detector::STARTUP
         {
-            let interval = woke.saturating_duration_since(last);
             counters.interval(interval);
             if interval * 2 > self.period_duration * 3 {
                 counters.late_wakeup();
@@ -91,6 +96,8 @@ impl Render {
         let outcome = self.detector.observe(Callback {
             index: half,
             position,
+            interval: interval.map(|interval| frames(interval, self.rate)),
+            latency: u64::from(shared.latency()),
             overran: self.overran,
             reported: shared.take_reported(),
         });
@@ -129,4 +136,10 @@ impl Render {
         counters.busy(busy);
         self.overran = busy > self.period_duration;
     }
+}
+
+/// `duration` in frames at `rate`, rounded down. Real-time safe.
+fn frames(duration: Duration, rate: u32) -> u64 {
+    let frames = duration.as_nanos() * u128::from(rate) / 1_000_000_000;
+    u64::try_from(frames).unwrap_or(u64::MAX)
 }
