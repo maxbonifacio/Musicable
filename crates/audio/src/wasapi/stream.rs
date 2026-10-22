@@ -16,10 +16,13 @@ use super::client::{self, Client};
 use super::com::{Call, Com, Event, Failed, Mmcss, Qpc, device_gone, os};
 use super::device;
 use crate::input::{self, Bus, Playback, StreamInput};
+use crate::midi::MidiBus;
 use crate::period::frames_to_hns;
 use crate::stats::Counters;
 use crate::xrun::{Detector, Medians, Reading};
-use crate::{Error, SampleFormat, StartError, Stopped, StreamInfo, StreamRequest, StreamStats};
+use crate::{
+    Error, Feeds, SampleFormat, StartError, Stopped, StreamInfo, StreamRequest, StreamStats,
+};
 
 /// How long the audio thread waits for a wake-up before checking that the
 /// device is still there, in milliseconds.
@@ -46,6 +49,7 @@ type Opened = (StreamInfo, Vec<StreamInput>);
 
 pub(crate) fn open(
     request: &StreamRequest,
+    feeds: Feeds,
 ) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let shared = Arc::new(Shared {
         counters: Counters::default(),
@@ -58,7 +62,16 @@ pub(crate) fn open(
     let thread_shared = shared.clone();
     let thread = thread::Builder::new()
         .name("musicable-audio".into())
-        .spawn(move || audio_thread(&request, &thread_shared, &opened_tx, &start_rx, &started_tx))
+        .spawn(move || {
+            audio_thread(
+                &request,
+                feeds,
+                &thread_shared,
+                &opened_tx,
+                &start_rx,
+                &started_tx,
+            )
+        })
         .map_err(|e| Error::Os {
             call: "spawning the audio thread",
             message: e.to_string(),
@@ -89,6 +102,7 @@ pub(crate) fn open(
 
 fn audio_thread(
     request: &StreamRequest,
+    feeds: Feeds,
     shared: &Shared,
     opened: &SyncSender<Result<Opened, Error>>,
     start: &Receiver<Engine>,
@@ -103,7 +117,7 @@ fn audio_thread(
     };
     // First, so the period check runs at the priority the stream will.
     let mmcss = Mmcss::join();
-    let (client, mut info, container) = match open_device(request, mmcss.is_some()) {
+    let (client, mut info, (container, adapter)) = match open_device(request, mmcss.is_some()) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = opened.send(Err(error));
@@ -112,10 +126,11 @@ fn audio_thread(
     };
     // The inputs start capturing now, and line up with the output once it
     // plays. They stop when this thread ends, as `captures` drops.
-    let playback = Arc::new(Playback::default());
+    let Feeds { playback, midi } = feeds;
     let output = Output {
         id: info.device.id.clone(),
         container,
+        adapter,
         rate: info.sample_rate,
         exclusive: client.exclusive(),
         clock: playback.clone(),
@@ -145,7 +160,7 @@ fn audio_thread(
     let Ok(mut engine) = start.recv() else {
         return Ended::default();
     };
-    let mut runner = Runner::new(&client, &shared.counters, bus, &playback);
+    let mut runner = Runner::new(&client, &shared.counters, bus, midi, &playback);
     if let Err(error) = runner.start(&mut engine) {
         let _ = started.send(Err(error));
         return Ended {
@@ -164,17 +179,26 @@ fn audio_thread(
     }
 }
 
-/// Opens the output, and says which physical device it belongs to.
+/// The physical device and the adapter an output belongs to, if Windows
+/// says.
+type Hardware = (Option<windows::core::GUID>, Option<String>);
+
+/// Opens the output, and says which physical device and adapter it
+/// belongs to.
 fn open_device(
     request: &StreamRequest,
     realtime: bool,
-) -> Result<(Client, StreamInfo, Option<windows::core::GUID>), Error> {
+) -> Result<(Client, StreamInfo, Hardware), Error> {
     let enumerator = device::enumerator()?;
     let endpoint = device::find(&enumerator, request.device.as_deref())?;
     let described = device::describe(&endpoint, device::default_id(&enumerator).as_deref())?;
     let client = client::open(&endpoint, request)?;
     let info = client.info(described, realtime);
-    Ok((client, info, device::container_id(&endpoint)))
+    let hardware = (
+        device::container_id(&endpoint),
+        device::adapter_id(&endpoint),
+    );
+    Ok((client, info, hardware))
 }
 
 /// The stream, as the audio thread runs it.
@@ -183,6 +207,8 @@ struct Runner<'a> {
     counters: &'a Counters,
     /// The inputs, for the engine.
     bus: Bus,
+    /// The MIDI inputs, for the engine.
+    midi: MidiBus,
     /// Where the inputs learn when each engine frame plays.
     playback: &'a Playback,
     /// The engine frame the stream started with: the one the device's
@@ -203,12 +229,19 @@ struct Runner<'a> {
 }
 
 impl<'a> Runner<'a> {
-    fn new(client: &'a Client, counters: &'a Counters, bus: Bus, playback: &'a Playback) -> Self {
+    fn new(
+        client: &'a Client,
+        counters: &'a Counters,
+        bus: Bus,
+        midi: MidiBus,
+        playback: &'a Playback,
+    ) -> Self {
         let format = client.format;
         Self {
             client,
             counters,
             bus,
+            midi,
             playback,
             first_frame: 0,
             detector: Detector::new(client.exclusive(), client.period, format.rate),
@@ -356,15 +389,20 @@ impl<'a> Runner<'a> {
         // SAFETY: an initialized client, and `frames` fits in the free space.
         let data = unsafe { self.client.render.GetBuffer(frames) }
             .call("IAudioRenderClient::GetBuffer")?;
-        let input = self.bus.fill(engine.time(), frames as usize);
+        let time = engine.time();
+        let input = self.bus.fill(time, frames as usize);
+        // QPC times come in 100 ns units.
+        let now = self.qpc.now().saturating_mul(100);
+        let heard = self.playback.reading().map(|r| r.frame_at(now));
+        let midi = self.midi.fill(time, frames as usize, heard, format.rate);
         if format.sample == SampleFormat::F32 && data.cast::<f32>().is_aligned() {
             // SAFETY: WASAPI handed over `frames` frames of `channels` f32
             // samples, aligned as checked, until `ReleaseBuffer`.
             let out = unsafe { slice::from_raw_parts_mut(data.cast::<f32>(), samples) };
-            engine.process_interleaved_with_input(input, out, channels);
+            engine.process_interleaved_with_input(input, midi, out, channels);
         } else {
             let scratch = &mut self.scratch[..samples];
-            engine.process_interleaved_with_input(input, scratch, channels);
+            engine.process_interleaved_with_input(input, midi, scratch, channels);
             // SAFETY: as above, in the stream's sample format.
             let out = unsafe { slice::from_raw_parts_mut(data, samples * format.sample.bytes()) };
             format.sample.write(scratch, out);
@@ -383,6 +421,7 @@ impl<'a> Runner<'a> {
         self.written += u64::from(frames);
         self.counters.wrote(frames);
         self.counters.inputs(self.bus.delay(), self.bus.late());
+        self.counters.midi(self.midi.delay(), self.midi.late());
         Ok(queued)
     }
 }

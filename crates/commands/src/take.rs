@@ -5,12 +5,13 @@
 //! song while it recorded: a loop recorded four times makes four takes.
 //! Each pass is comped onto its track as it's added, later passes over
 //! earlier ones, so the track plays the last pass, as a tape machine
-//! would, and comping by hand picks other parts from there.
+//! would, and comping by hand picks other parts from there. A MIDI track's
+//! pass without notes makes no take.
 
 use std::collections::BTreeSet;
 
-use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId};
-use musicable_model::time::{BeatRange, Beats};
+use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Dimension, MidiClip, Point};
+use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{TakeId, TrackId, TrackKind};
 
 use crate::arrange::{after_frames, clear, crop};
@@ -122,50 +123,85 @@ pub struct Pass {
     pub offset: u64,
 }
 
-/// What a track recorded, a pass at a time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Recorded {
-    pub track: TrackId,
-    /// In the order they were played.
-    pub passes: Vec<Pass>,
+/// What a MIDI track recorded in one pass of the playhead over the song:
+/// the notes played over it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotePass {
+    /// The song position it starts at, in frames at the recording's sample
+    /// rate.
+    pub start: u64,
+    /// How long it is, in frames.
+    pub frames: u64,
+    /// In the order they started.
+    pub notes: Vec<PlayedNote>,
+}
+
+/// A note played, at song positions in frames at the recording's sample
+/// rate. A note held as its pass ended stops at the end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayedNote {
+    pub start: u64,
+    pub end: u64,
+    /// The MIDI note number, from 0 to 127.
+    pub key: u8,
+    /// From 0.0 to 1.0, as [`Note::velocity`](musicable_model::clip::Note).
+    pub velocity: f32,
+    pub release_velocity: f32,
+    /// How its expression changed, in order: where, which dimension, and
+    /// to what, in the values [`Expression`](musicable_model::clip::Expression)
+    /// takes.
+    pub expression: Vec<(u64, Dimension, f32)>,
+}
+
+/// What a track recorded, a pass at a time, in the order they were played.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Recorded {
+    Audio {
+        track: TrackId,
+        passes: Vec<Pass>,
+    },
+    Midi {
+        track: TrackId,
+        passes: Vec<NotePass>,
+    },
 }
 
 /// Adds what tracks recorded at `rate`, as one transaction: a take for each
 /// pass, under its track, each comped onto the track in turn, so later
-/// passes replace earlier ones where they overlap. A pass that goes on in
-/// another file is one take of a clip for each file. Returns the takes'
-/// ids.
+/// passes replace earlier ones where they overlap. An audio pass that goes
+/// on in another file is one take of a clip for each file; a MIDI pass
+/// without notes makes no take. Returns the takes' ids.
 ///
 /// Passes start on the frame they were recorded at: a clip's start is the
 /// first position that falls on that frame, or in the rare tempos where no
-/// position does, the next frame, with the clip starting that much further
-/// into its file. Tracks that went, or can't hold audio, are left out.
+/// position does, the next frame, with an audio clip starting that much
+/// further into its file. Notes start and stop on their frames the same
+/// way. Tracks that went, or of another kind, are left out.
 pub fn add_recording(document: &mut Document, rate: u32, recorded: &[Recorded]) -> Vec<TakeId> {
     document.transact("Record", |tx| {
         let mut takes = Vec::new();
-        for Recorded { track, passes } in recorded {
-            let Some(t) = tx.project().track(*track) else {
+        for recorded in recorded {
+            let (track, kind) = match recorded {
+                Recorded::Audio { track, .. } => (*track, TrackKind::Audio),
+                Recorded::Midi { track, .. } => (*track, TrackKind::Midi),
+            };
+            let Some(name) = tx.project().track(track).filter(|t| t.kind == kind) else {
                 continue;
             };
-            if t.kind != TrackKind::Audio {
-                continue;
-            }
-            let name = t.name.clone();
-            // A pass that starts where the one before stopped goes on from
-            // it, in another file.
-            for pass in passes.chunk_by(|a, b| a.start + a.frames == b.start) {
-                let clips: Vec<Clip> = pass
-                    .iter()
-                    .filter_map(|part| clip_of(tx, &name, rate, part))
-                    .collect();
+            let name = name.name.clone();
+            let clips = match recorded {
+                Recorded::Audio { passes, .. } => audio_takes(tx, &name, rate, passes),
+                Recorded::Midi { passes, .. } => midi_takes(tx, &name, rate, passes),
+            };
+            for clips in clips {
                 let (Some(first), Some(last)) = (clips.first(), clips.last()) else {
                     continue;
                 };
                 let range = BeatRange::new(first.start, last.end());
-                let mut take = tx.new_take(next_take_name(tx, *track));
+                let mut take = tx.new_take(next_take_name(tx, track));
                 take.clips = clips;
                 let id = take.id;
-                tx.add_take(*track, usize::MAX, take);
+                tx.add_take(track, usize::MAX, take);
                 if tx.project().find_take(id).is_some() {
                     comp(tx, id, range);
                     takes.push(id);
@@ -174,6 +210,37 @@ pub fn add_recording(document: &mut Document, rate: u32, recorded: &[Recorded]) 
         }
         takes
     })
+}
+
+/// The clips of an audio track's takes of `passes`, named `name`, a
+/// take's after another. A pass that starts where the one before stopped
+/// goes on from it, in another file.
+fn audio_takes(tx: &mut Transaction<'_>, name: &str, rate: u32, passes: &[Pass]) -> Vec<Vec<Clip>> {
+    passes
+        .chunk_by(|a, b| a.start + a.frames == b.start)
+        .map(|pass| {
+            pass.iter()
+                .filter_map(|part| clip_of(tx, name, rate, part))
+                .collect()
+        })
+        .collect()
+}
+
+/// The clips of a MIDI track's takes of `passes`, named `name`: a clip
+/// each, for the passes with notes.
+fn midi_takes(
+    tx: &mut Transaction<'_>,
+    name: &str,
+    rate: u32,
+    passes: &[NotePass],
+) -> Vec<Vec<Clip>> {
+    passes
+        .iter()
+        .filter_map(|pass| {
+            let (range, midi) = notes_of(&tx.project().tempo, rate, pass)?;
+            Some(vec![tx.new_clip(name, range, ClipContent::Midi(midi))])
+        })
+        .collect()
 }
 
 /// A clip playing `pass`, named `name`, with a new id, or `None` if the
@@ -191,6 +258,34 @@ fn clip_of(tx: &mut Transaction<'_>, name: &str, rate: u32, pass: &Pass) -> Opti
     let mut audio = AudioClip::new(pass.file.clone());
     audio.offset = pass.offset + skip;
     Some(tx.new_clip(name, BeatRange::new(start, end), ClipContent::Audio(audio)))
+}
+
+/// Where a clip of `pass` plays, and its notes, or `None` if it has none
+/// that can be placed.
+fn notes_of(tempo: &TempoMap, rate: u32, pass: &NotePass) -> Option<(BeatRange, MidiClip)> {
+    // The first position on the frame, or just after.
+    let at = |frame: u64| after_frames(tempo, rate, i64::try_from(frame).unwrap_or(i64::MAX), 0);
+    let range = BeatRange::new(at(pass.start), at(pass.start + pass.frames));
+    let mut midi = MidiClip::default();
+    for played in &pass.notes {
+        let start = at(played.start).max(range.start);
+        let end = at(played.end).min(range.end);
+        if end <= start {
+            continue;
+        }
+        let note = midi.add_note(
+            start - range.start,
+            end - start,
+            played.key,
+            played.velocity,
+        );
+        note.release_velocity = played.release_velocity;
+        for &(frame, dimension, value) in &played.expression {
+            let point = Point::new(at(frame).max(start) - start, value);
+            note.expression.curve_mut(dimension).push(point);
+        }
+    }
+    (!range.is_empty() && !midi.notes.is_empty()).then_some((range, midi))
 }
 
 /// "Take" and a number one past the highest the track's takes have.
@@ -270,7 +365,7 @@ mod tests {
         // file, the passes one after another in it.
         let first = pass(2 * BEAT, 6 * BEAT, 0);
         let loops = (0..3).map(|i| pass(4 * BEAT, 4 * BEAT, (6 + 4 * i) * BEAT));
-        let recorded = Recorded {
+        let recorded = Recorded::Audio {
             track: vocal,
             passes: std::iter::once(first).chain(loops).collect(),
         };
@@ -304,7 +399,7 @@ mod tests {
             file: "Recordings/Vocal 2.wav".into(),
             ..pass(4 * BEAT, 2 * BEAT, 0)
         };
-        let recorded = Recorded {
+        let recorded = Recorded::Audio {
             track: vocal,
             passes: vec![pass(2 * BEAT, 2 * BEAT, 0), rest],
         };
@@ -337,7 +432,7 @@ mod tests {
         tempo.set_tempo(97.3);
         setup.document.transact("Tempo", |tx| tx.set_tempo(tempo));
         let start = 123_457;
-        let recorded = Recorded {
+        let recorded = Recorded::Audio {
             track: vocal,
             passes: vec![pass(start, 48_001, 17)],
         };
@@ -363,17 +458,17 @@ mod tests {
             }
         });
         let recorded = [
-            Recorded {
+            Recorded::Audio {
                 track: vocal,
                 passes: vec![pass(0, BEAT, 0)],
             },
             // MIDI tracks don't record audio, and passes too short to place
             // are left out.
-            Recorded {
+            Recorded::Audio {
                 track: keys,
                 passes: vec![pass(0, BEAT, 0)],
             },
-            Recorded {
+            Recorded::Audio {
                 track: vocal,
                 passes: vec![pass(BEAT, 0, 0)],
             },
@@ -392,7 +487,7 @@ mod tests {
         let takes = add_recording(
             &mut setup.document,
             RATE,
-            &[Recorded {
+            &[Recorded::Audio {
                 track: vocal,
                 passes,
             }],
@@ -451,7 +546,7 @@ mod tests {
         add_recording(
             &mut setup.document,
             RATE,
-            &[Recorded {
+            &[Recorded::Audio {
                 track: vocal,
                 passes: vec![pass(0, 4 * BEAT, 0)],
             }],
@@ -513,5 +608,159 @@ mod tests {
             setup.committed_names(),
             ["Take", "Rename Take", "Delete Take"]
         );
+    }
+
+    /// A note on key 60 played from frame `start` to `end`.
+    fn played(start: u64, end: u64) -> PlayedNote {
+        PlayedNote {
+            start,
+            end,
+            key: 60,
+            velocity: 0.75,
+            release_velocity: 0.25,
+            expression: Vec::new(),
+        }
+    }
+
+    /// The notes of the track's clips, by position, as (song position,
+    /// length, key).
+    fn notes(setup: &Setup, track: TrackId) -> Vec<(Beats, Beats, u8)> {
+        let track = setup.document.project().track(track).unwrap();
+        let mut notes: Vec<_> = (track.clips.iter())
+            .flat_map(|clip| {
+                let ClipContent::Midi(midi) = &clip.content else {
+                    panic!("a MIDI clip");
+                };
+                (midi.notes.iter())
+                    .map(|note| (clip.start + note.start - midi.offset, note.length, note.key))
+            })
+            .collect();
+        notes.sort_by_key(|&(start, length, key)| (start, length, key));
+        notes
+    }
+
+    #[test]
+    fn a_midi_pass_is_a_take_of_the_notes_played() {
+        let (mut setup, _, keys) = setup();
+        let mut note = played(3 * BEAT, 4 * BEAT + BEAT / 2);
+        note.expression = vec![
+            (3 * BEAT, Dimension::Pressure, 0.25),
+            (4 * BEAT, Dimension::Pressure, 0.5),
+            (4 * BEAT, Dimension::PitchBend, -2.0),
+        ];
+        // From beat 2 to 6, and a note still held at the end.
+        let pass = NotePass {
+            start: 2 * BEAT,
+            frames: 4 * BEAT,
+            notes: vec![note, played(5 * BEAT, 6 * BEAT)],
+        };
+        let recorded = Recorded::Midi {
+            track: keys,
+            passes: vec![pass],
+        };
+        let takes = add_recording(&mut setup.document, RATE, &[recorded]);
+        assert_eq!(takes.len(), 1);
+        let (_, take) = setup.document.project().find_take(takes[0]).unwrap();
+        assert_eq!(take.name, "Take 1");
+        let clip = &take.clips[0];
+        assert_eq!((clip.range(), clip.name.as_str()), (beats(2, 6), "Keys"));
+        let ClipContent::Midi(midi) = &clip.content else {
+            panic!("a MIDI clip");
+        };
+        let first = &midi.notes[0];
+        let half = Beats::from_f64(0.5);
+        assert_eq!(
+            (first.start, first.length, first.key),
+            (Beats::new(1), Beats::new(1) + half, 60)
+        );
+        assert_eq!((first.velocity, first.release_velocity), (0.75, 0.25));
+        let pressure = [
+            Point::new(Beats::ZERO, 0.25),
+            Point::new(Beats::new(1), 0.5),
+        ];
+        assert_eq!(first.expression.pressure, pressure);
+        assert_eq!(
+            first.expression.pitch_bend,
+            [Point::new(Beats::new(1), -2.0)]
+        );
+        // The track plays it.
+        assert_eq!(
+            notes(&setup, keys),
+            [
+                (Beats::new(3), Beats::new(1) + half, 60),
+                (Beats::new(5), Beats::new(1), 60)
+            ]
+        );
+        assert!(setup.document.undo());
+        assert!(
+            setup
+                .document
+                .project()
+                .track(keys)
+                .unwrap()
+                .takes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_midi_pass_without_notes_makes_no_take() {
+        let (mut setup, _, keys) = setup();
+        // Three times round a loop from beat 4 to 8, playing only the first
+        // two times.
+        let pass = |notes| NotePass {
+            start: 4 * BEAT,
+            frames: 4 * BEAT,
+            notes,
+        };
+        let recorded = Recorded::Midi {
+            track: keys,
+            passes: vec![
+                pass(vec![played(4 * BEAT, 5 * BEAT)]),
+                pass(vec![played(6 * BEAT, 7 * BEAT)]),
+                pass(Vec::new()),
+            ],
+        };
+        let takes = add_recording(&mut setup.document, RATE, &[recorded]);
+        assert_eq!(takes.len(), 2);
+        // The last pass that played plays.
+        assert_eq!(notes(&setup, keys), [(Beats::new(6), Beats::new(1), 60)]);
+    }
+
+    #[test]
+    fn notes_land_on_the_frames_they_were_played_at() {
+        let (mut setup, vocal, keys) = setup();
+        let mut tempo = setup.document.project().tempo.clone();
+        tempo.set_tempo(97.3);
+        setup.document.transact("Tempo", |tx| tx.set_tempo(tempo));
+        let (start, end) = (123_457, 171_458);
+        let pass = NotePass {
+            start: 100_001,
+            frames: 100_000,
+            notes: vec![played(start, end)],
+        };
+        let recorded = [
+            Recorded::Midi {
+                track: keys,
+                passes: vec![pass.clone()],
+            },
+            // Audio tracks don't record notes.
+            Recorded::Midi {
+                track: vocal,
+                passes: vec![pass],
+            },
+        ];
+        assert_eq!(add_recording(&mut setup.document, RATE, &recorded).len(), 1);
+        let project = setup.document.project();
+        let clip = &project.track(keys).unwrap().clips[0];
+        let ClipContent::Midi(midi) = &clip.content else {
+            panic!("a MIDI clip");
+        };
+        let note = &midi.notes[0];
+        let frame = |at| project.tempo.frame_at(at, RATE);
+        assert_eq!(frame(clip.start), 100_001);
+        assert_eq!(frame(clip.start + note.start), start as i64);
+        assert_eq!(frame(clip.start + note.end()), end as i64);
+        assert!(project.track(vocal).unwrap().takes.is_empty());
     }
 }

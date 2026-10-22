@@ -1,14 +1,14 @@
 //! The audio device the engine plays through: opened from the settings,
 //! opened again when it comes back, and switched when the settings change,
-//! with the audio inputs the project's tracks record and monitor.
+//! with the audio and MIDI inputs the project's tracks record and monitor.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use musicable_audio::{
-    self as audio, Api, DriverType, InputBuffer, InputKind, InputStats, OpenStream, SampleFormat,
-    StartError, Stream, StreamInfo, StreamRequest, StreamStats,
+    self as audio, Api, DriverType, InputBuffer, InputKind, InputStats, MidiBuffer, OpenStream,
+    SampleFormat, StartError, Stream, StreamInfo, StreamRequest, StreamStats,
 };
 use musicable_engine::{
     Engine, EngineConfig, EngineHandle, InputLayout, ParallelMonitor, ParallelStats,
@@ -29,6 +29,10 @@ const RETRY: Duration = Duration::from_secs(2);
 /// How often the CPU meter updates.
 const METER_WINDOW: Duration = Duration::from_millis(250);
 
+/// How often the MIDI inputs are listed again while tracks want any, to
+/// open those plugged in since.
+const MIDI_LISTING: Duration = Duration::from_secs(2);
+
 /// The audio device, playing what the engine renders.
 ///
 /// The engine is built for the device: for its sample rate, with the period
@@ -40,15 +44,20 @@ const METER_WINDOW: Duration = Duration::from_millis(250);
 /// the device again every two seconds. An ASIO driver that asks to be reset,
 /// after a change in its own settings, opens again at once.
 ///
-/// The stream opens the audio inputs it's asked to
+/// The stream opens the audio and MIDI inputs it's asked to
 /// ([`want_inputs`](Self::want_inputs)) as well as the output, and keeps
-/// them open until the device changes, so arming tracks one after another
+/// them open, the audio inputs until the device changes and the MIDI
+/// inputs while they're plugged in, so arming tracks one after another
 /// opens the stream again only for an input it hasn't open yet.
 pub struct Output {
     /// The stream to keep open, without its inputs.
     request: StreamRequest,
     /// The inputs to open with it.
     inputs: Vec<String>,
+    /// The MIDI inputs to open with it.
+    midi_inputs: Vec<String>,
+    /// The MIDI inputs plugged in, as last listed, and when.
+    midi_listed: Option<(Instant, Vec<String>)>,
     /// The input among them that tracks taking the default input take,
     /// once one wants it: `Some(None)` if there's none.
     default_input: Option<Option<String>>,
@@ -108,6 +117,8 @@ impl Output {
         let mut output = Self {
             request,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
+            midi_listed: None,
             default_input: None,
             started: 0,
             stream: None,
@@ -134,6 +145,8 @@ impl Output {
         let output = Self {
             request: StreamRequest::default(),
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
+            midi_listed: None,
             default_input: None,
             started: 0,
             stream: None,
@@ -229,10 +242,17 @@ impl Output {
 
     /// Opens the audio inputs `wanted` with the stream, by their ids, with
     /// `""` for the default input: the ASIO driver's own while one plays,
-    /// or else the system's. The inputs open already stay open. If that
-    /// takes opening the stream again and it doesn't open, the output tries
-    /// again later, as when the device fails.
-    pub fn want_inputs(&mut self, wanted: &BTreeSet<String>, session: &mut Session) {
+    /// or else the system's. Opens the MIDI inputs `midi` names too, with
+    /// `""` for every one, while they're plugged in. The inputs open
+    /// already stay open. If that takes opening the stream again and it
+    /// doesn't open, the output tries again later, as when the device
+    /// fails.
+    pub fn want_inputs(
+        &mut self,
+        wanted: &BTreeSet<String>,
+        midi: &BTreeSet<String>,
+        session: &mut Session,
+    ) {
         if wanted.contains("") && self.default_input.is_none() {
             self.default_input = Some(self.find_default_input());
         }
@@ -248,14 +268,39 @@ impl Output {
                 inputs.push(id);
             }
         }
-        if inputs == self.inputs {
+        let mut midi_inputs = self.midi_inputs.clone();
+        if !midi.is_empty() {
+            // One unplugged since it opened is forgotten, without opening
+            // the stream again, so that it opens again once it's back.
+            let listed = self.midi_devices().to_vec();
+            self.midi_inputs.retain(|id| listed.contains(id));
+            midi_inputs = midi_inputs_to_open(&self.midi_inputs, midi, &listed);
+        }
+        if (&inputs, &midi_inputs) == (&self.inputs, &self.midi_inputs) {
             return;
         }
         self.inputs = inputs;
+        self.midi_inputs = midi_inputs;
         let request = self.request.clone();
         if let Err(error) = self.start(&request, session) {
             self.failed(&error);
         }
+    }
+
+    /// The ids of the MIDI inputs plugged in, listed again if the last list
+    /// is [`MIDI_LISTING`] old.
+    fn midi_devices(&mut self) -> &[String] {
+        let now = Instant::now();
+        if self
+            .midi_listed
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= MIDI_LISTING)
+        {
+            let devices = audio::midi_input_devices().unwrap_or_default();
+            let ids = devices.into_iter().map(|device| device.id).collect();
+            self.midi_listed = Some((now, ids));
+        }
+        self.midi_listed.as_ref().map_or(&[], |(_, ids)| ids)
     }
 
     /// The input tracks taking the default input record from.
@@ -279,7 +324,8 @@ impl Output {
     }
 
     /// Where the playing stream's inputs are among the engine's device
-    /// inputs, by their ids, and which takes the default input's place.
+    /// inputs, by their ids, and which takes the default input's place,
+    /// and its MIDI inputs' order.
     pub fn input_layout(&self) -> InputLayout {
         let mut layout = InputLayout::new();
         for input in self.info().map_or(&[][..], |info| &info.inputs) {
@@ -288,6 +334,9 @@ impl Output {
                 input.first_channel,
                 usize::from(input.channels),
             );
+        }
+        for input in self.info().map_or(&[][..], |info| &info.midi_inputs) {
+            layout.add_midi(input.id.clone());
         }
         if let Some(Some(default)) = &self.default_input {
             layout.set_default(default.clone());
@@ -303,6 +352,14 @@ impl Output {
             .map_or_else(Vec::new, Stream::input_buffers)
     }
 
+    /// The buffers the playing stream's MIDI inputs bring what they play
+    /// into, in the layout's order.
+    pub fn midi_buffers(&self) -> Vec<Option<MidiBuffer>> {
+        self.stream
+            .as_ref()
+            .map_or_else(Vec::new, Stream::midi_buffers)
+    }
+
     /// The counters of the playing stream's inputs, in the layout's order.
     pub fn input_stats(&self) -> Vec<InputStats> {
         self.stream
@@ -313,6 +370,22 @@ impl Output {
     /// The playing stream, as the device set it up.
     pub fn info(&self) -> Option<&StreamInfo> {
         self.stream.as_ref().map(Stream::info)
+    }
+
+    /// Why the playing stream's inputs that didn't open didn't, for the
+    /// status bar: tracks taking them don't monitor or record them.
+    pub fn input_problems(&self) -> Vec<String> {
+        let Some(info) = self.info() else {
+            return Vec::new();
+        };
+        let audio = (info.inputs.iter())
+            .filter_map(|input| Some(("input", &input.name, input.error.as_ref()?)));
+        let midi = (info.midi_inputs.iter())
+            .filter_map(|input| Some(("MIDI input", &input.name, input.error.as_ref()?)));
+        audio
+            .chain(midi)
+            .map(|(what, name, error)| format!("The {what} {name} didn't open: {error}."))
+            .collect()
     }
 
     /// Why no stream plays.
@@ -440,6 +513,7 @@ impl Output {
         self.stop();
         let request = StreamRequest {
             inputs: self.inputs.clone(),
+            midi_inputs: self.midi_inputs.clone(),
             ..request.clone()
         };
         let open = audio::open(&request)?;
@@ -598,9 +672,55 @@ fn audio_duration(frames: u64, sample_rate: u32) -> Duration {
     Duration::from_secs_f64(frames as f64 / f64::from(sample_rate.max(1)))
 }
 
+/// The MIDI inputs for a stream to open: those it has `open` that are
+/// still `listed`, plugged in, then those listed that `wanted` names, with
+/// `""` for every one.
+fn midi_inputs_to_open(
+    open: &[String],
+    wanted: &BTreeSet<String>,
+    listed: &[String],
+) -> Vec<String> {
+    let mut inputs: Vec<String> = (open.iter())
+        .filter(|id| listed.contains(id))
+        .cloned()
+        .collect();
+    for id in listed {
+        if (wanted.contains("") || wanted.contains(id)) && !inputs.contains(id) {
+            inputs.push(id.clone());
+        }
+    }
+    inputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn midi_inputs_open_while_they_are_plugged_in() {
+        let ids = |ids: &[&str]| -> Vec<String> { ids.iter().map(|&id| id.to_owned()).collect() };
+        let wanted =
+            |ids: &[&str]| -> BTreeSet<String> { ids.iter().map(|&id| id.to_owned()).collect() };
+        let listed = ids(&["Keystep", "Pads", "Launchkey"]);
+        // Those wanted that are plugged in, after those open already.
+        let open = ids(&["Pads"]);
+        assert_eq!(
+            midi_inputs_to_open(&open, &wanted(&["Keystep", "Arturia"]), &listed),
+            ids(&["Pads", "Keystep"])
+        );
+        // Every one, for a track that takes them all.
+        assert_eq!(midi_inputs_to_open(&[], &wanted(&[""]), &listed), listed);
+        // One unplugged goes, and comes back with the next listing that
+        // has it.
+        let open = ids(&["Pads", "Keystep"]);
+        let unplugged = ids(&["Keystep"]);
+        let left = midi_inputs_to_open(&open, &wanted(&["Pads"]), &unplugged);
+        assert_eq!(left, ids(&["Keystep"]));
+        assert_eq!(
+            midi_inputs_to_open(&left, &wanted(&["Pads"]), &listed),
+            ids(&["Keystep", "Pads"])
+        );
+    }
 
     #[test]
     fn rates_and_times_read_as_people_say_them() {
@@ -629,6 +749,7 @@ mod tests {
             latency: 128,
             realtime: true,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
         };
         let mut stats = StreamStats::default();
         assert_eq!(millis(latency(&info, &stats)), "2.7 ms");

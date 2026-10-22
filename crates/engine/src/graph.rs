@@ -908,6 +908,7 @@ mod tests {
                 },
                 tempo: &tempo,
                 input: AudioRef::empty(64),
+                midi: &[],
             };
             // Notes from the engine, as `Event::Note` sends them, come to a
             // player with the notes of the players before it.
@@ -995,6 +996,7 @@ mod tests {
                 transport: TransportState::default(),
                 tempo: &tempo,
                 input: AudioRef::empty(n),
+                midi: &[],
             };
             rt::scope(|| ReferenceRenderer.render(graph, &block));
             output.extend_from_slice(graph.output(n).channel(0));

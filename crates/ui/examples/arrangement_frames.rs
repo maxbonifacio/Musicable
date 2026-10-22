@@ -229,6 +229,7 @@ impl Bench {
                 recordings: &[],
                 levels: &self.levels,
                 inputs: &[],
+                midi_inputs: &[],
                 audio: Audio {
                     summary: "48 kHz · 128 samples · 5.3 ms",
                     running: true,

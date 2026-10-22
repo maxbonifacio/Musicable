@@ -70,6 +70,7 @@ fn render(
             transport: TransportState::default(),
             tempo: &tempo,
             input: AudioRef::empty(FRAMES),
+            midi: &[],
         };
         let started = Instant::now();
         renderer.render(graph, &block);

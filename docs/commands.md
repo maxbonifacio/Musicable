@@ -201,7 +201,9 @@ there.
 the track's highest, so one undo takes a whole recording back. A pass
 starts on the frame it was recorded at, whatever the tempo, and one that
 went on in another file, at WAV's 4 GB, is a take with a clip for each
-file. Comping copies
+file. A MIDI track's pass (`Recorded::Midi`) is a take with a MIDI clip of
+the notes played, each starting and ending on its frames, with its
+expression; a pass without notes makes no take. Comping copies
 the take's clips, so the take keeps them. `view.toggle_take_lanes` (see
 below) shows the takes.
 

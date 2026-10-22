@@ -16,8 +16,8 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, Playback, PluginEntry,
-    PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
+    PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
@@ -57,6 +57,8 @@ pub struct App {
     inputs_started: u64,
     /// The inputs the mixer's input menus offer, as last listed.
     input_choices: Vec<InputChoice>,
+    /// The MIDI inputs the mixer's MIDI input menus offer, as last listed.
+    midi_choices: Vec<MidiChoice>,
     shell: Shell,
     /// The headers and the waveforms of the project's audio files.
     audio_files: AudioFiles,
@@ -156,6 +158,7 @@ impl App {
             output,
             inputs_started: 0,
             input_choices: Vec::new(),
+            midi_choices: Vec::new(),
             shell: Shell::new(),
             audio_files: AudioFiles::new(),
             files_found: None,
@@ -531,19 +534,22 @@ impl App {
         self.audio_window.applied(outcome);
     }
 
-    /// Opens the audio inputs the tracks want with the stream, unless that
-    /// would cut a recording short, and hands a new stream's inputs to the
-    /// session.
+    /// Opens the audio and MIDI inputs the tracks want with the stream,
+    /// unless that would cut a recording short, and hands a new stream's
+    /// inputs to the session.
     fn follow_inputs(&mut self) {
         let recording = self.session.is_recording() && self.session.stats().playing;
         if !recording {
             let wanted = self.session.wanted_inputs();
-            self.output.want_inputs(&wanted, &mut self.session);
+            let midi = self.session.wanted_midi_inputs();
+            self.output.want_inputs(&wanted, &midi, &mut self.session);
         }
         if self.output.started() != self.inputs_started {
             self.inputs_started = self.output.started();
             let layout = self.output.input_layout();
-            self.session.set_inputs(layout, self.output.input_buffers());
+            let (buffers, midi) = (self.output.input_buffers(), self.output.midi_buffers());
+            self.session.set_inputs(layout, buffers, midi);
+            self.messages.extend(self.output.input_problems());
             self.list_inputs();
         }
     }
@@ -579,6 +585,21 @@ impl App {
                     name,
                     channels,
                 }
+            })
+            .collect();
+        let midi = match musicable_audio::midi_input_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                self.messages
+                    .push(format!("The MIDI inputs couldn't be listed: {error}."));
+                Vec::new()
+            }
+        };
+        self.midi_choices = midi
+            .into_iter()
+            .map(|device| MidiChoice {
+                id: device.id,
+                name: device.name,
             })
             .collect();
     }
@@ -726,6 +747,7 @@ impl eframe::App for App {
             recordings: &recordings,
             levels: &self.levels,
             inputs: &self.input_choices,
+            midi_inputs: &self.midi_choices,
             waveforms: self.audio_files.waveforms(),
             audio: Audio {
                 summary: &summary,

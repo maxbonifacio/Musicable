@@ -104,14 +104,15 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Automation, Locator, Transport, View and Options. Undo and Redo name the
-  change they would make, as in "Undo Set Tempo", and are greyed out when
-  there's nothing to undo or redo, as is any command that doesn't apply
-  now, such as Split with nothing selected. Toggles, such as Follow and
-  Snap to Grid, are ticked while on. A command in an area with no menu yet
-  gets a menu named after its area, before View, so every command can be
-  reached; commands that need arguments are left out, as menus can't give
-  them. On the right are the CPU meter and the dropout counter.
+  Track, Clip, Automation, Locator, Transport, View and Options. Undo and
+  Redo name the change they would make, as in "Undo Set Tempo", and are
+  greyed out when there's nothing to undo or redo, as is any command that
+  doesn't apply now, such as Split with nothing selected. Toggles, such as
+  Follow and Snap to Grid, are ticked while on. A command in an area with
+  no menu yet gets a menu named after its area, before View, so every
+  command can be reached; commands that need arguments are left out, as
+  menus can't give them. On the right are the CPU meter and the dropout
+  counter.
 - **The transport bar** has go to start, play, stop, record, loop, punch in
   and punch out, the metronome, the tempo, the time signature, and the
   playhead in bars, beats and sixteenths and in minutes and seconds.
@@ -227,8 +228,9 @@ header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
 locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
 and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
 automation lane. Each shows its keys, and takes its arguments from where
-the menu was opened: the clip, the track, the parameter, or the position. Rename, from a menu,
-a key or a double-click, opens a box for the new name.
+the menu was opened: the clip, the track, the parameter, or the position.
+Rename, from a menu, a key or a double-click, opens a box for the new
+name.
 
 Audio files dropped on the window become clips, one after another, where
 they're dropped: on that track if it's an audio track, or else the
@@ -344,9 +346,9 @@ the strips in sight are drawn. From the top, a strip has:
 
 - **The name.** Hovering it shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
-- **The input**, on audio tracks: what the track records from
+- **The input**, on audio and MIDI tracks: what the track records from
   ([Recording](#recording)).
-- **Monitoring**, on audio tracks: **In**, **Auto** or **Off**.
+- **Monitoring**, on audio and MIDI tracks: **In**, **Auto** or **Off**.
 - **The output**: the master, or a group track the track can feed. Return
   tracks always feed the master.
 - **A send to each return track**, from silence to 0 dB, with **Pre** to
@@ -395,9 +397,10 @@ app runs as its command with `Session::change_mixer`
 Arm a track with its arm button, in its header or its strip, choose its
 input in the strip's input menu, and press **Record** (F9) in the transport
 bar. Playing starts from the start marker, as Space does, and every armed
-audio track records its input while the transport plays. Record while
-playing turns recording on or off there. Stop ends the recording, and each
-pass of the playhead over the song becomes a take on its track
+track records its input while the transport plays: an audio track what its
+audio input captures, a MIDI track the notes its MIDI input plays. Record
+while playing turns recording on or off there. Stop ends the recording, and
+each pass of the playhead over the song becomes a take on its track
 ([commands.md](commands.md#take)): one take for a recording straight
 through, and one for each time round the loop while looping, the last of
 them on the track. One undo takes the whole recording back.
@@ -418,15 +421,31 @@ inputs again when it opens, for a device plugged in since. An input that
 isn't plugged in keeps its name, in red. The stream opens the inputs that
 armed tracks and tracks monitoring In take, and keeps them open until the
 device changes. Opening one restarts the stream, so it waits while
-recording. A track whose input didn't open records nothing, and the status
-bar says so.
+recording. An input that doesn't open, such as one another app has to
+itself, says so in the status bar, and a track taking it records nothing.
+
+**MIDI inputs.** A MIDI track records from one MIDI input or all of them,
+and from one MIDI channel or all sixteen. A new MIDI track takes every
+channel of every input, "All Inputs", as an MPE controller needs: its
+channels read as MPE ([engine.md](engine.md#notes)), and a keyboard's
+single channel plays as it is. The input menu lists All Inputs and then
+each MIDI input plugged in, each with **All** and its channels 1 to 16,
+and lists them again when it opens. The stream opens the MIDI inputs that
+armed MIDI tracks and MIDI tracks monitoring In take, while they're plugged
+in, and keeps them open. While tracks want any, the app looks at what's
+plugged in every two seconds, except while recording: it opens an input
+plugged in since that a track takes, or one plugged in again after it was
+pulled out. MIDI inputs open on Windows only so far
+([audio.md](audio.md#midi-inputs)).
 
 **Monitoring.** In plays the track's input instead of its clips. Auto, a new
 track's, plays it while the track is armed and the transport is stopped or
 recording, so you hear yourself as you record and the takes as you play
 them back. Off never does, for an interface that monitors itself. The input
 plays through the track's devices, the stream's monitoring latency late
-([audio.md](audio.md#inputs)).
+([audio.md](audio.md#inputs)). A MIDI track plays its input's notes on its
+instrument, with Auto whenever it's armed, as in Live, the stream's MIDI
+delay late ([audio.md](audio.md#midi-inputs)).
 
 **Where it lands.** A track records what its input captured as each song
 position was heard, so it lands where it was played: the audio backend
@@ -434,7 +453,18 @@ lines the inputs' buffers up with the output, frame for frame, and the
 engine's timeline says which song position each frame played, and how late
 the plugins' latency made it ([engine.md](engine.md#recording)). A delay in
 an interface's converters that its driver doesn't report isn't made up for
-yet.
+yet. A MIDI message lands the same way: the backend stamps each with the
+frame heard as it came in.
+
+**Notes.** A MIDI track records the notes played, with their velocities,
+their release velocities and their expression: pitch bend, pressure and
+slide, each note's own with MPE. Each pass with notes is a take with a MIDI
+clip as long as the pass; a pass without notes makes no take. A note held
+as recording punches in isn't recorded, and one held as it punches out or
+stops ends there. Round a loop, a note held over the loop's end ends there
+and starts again at the loop's start, in the next pass. The sustain pedal
+and other controllers aren't recorded yet: they come with the piano roll's
+controller lanes.
 
 **Files.** Recordings are 32-bit float WAV files at the engine's sample
 rate, in a `Recordings` folder in the project's folder, named after the
@@ -450,19 +480,26 @@ the same take.
 engine's timeline and the inputs' buffers every 10 ms, and writes what the
 armed tracks record. The audio thread never waits for it. The inputs'
 buffers hold 8 seconds at least: if the recorder falls further behind than
-that, or an input stops capturing for two seconds, the recording has
-silence there, and the status bar says how much. A recording that the
-engine's replacement cuts short, for new audio settings, ends where it got
-to. One that finishes after its project was closed doesn't go into the
-project open then, and the status bar names its files.
+that, or an input stops capturing for two seconds, the recording has silence
+there, and the status bar says how much. A MIDI track's recording waits for
+its inputs to bring every message up to where it records, which the stream
+says 5 ms behind what's heard, for two seconds at most. A MIDI input's
+buffer holds 16,384 messages: if the recorder falls further behind, the
+status bar says how many are missing. A recording that the engine's
+replacement cuts short, for new audio settings, ends where it got to. One
+that finishes after its project was closed doesn't go into the project open
+then, and the status bar names its files.
 
 `Session::set_inputs` hands the session a stream's input layout and
-buffers, `Session::wanted_inputs` says which inputs the tracks want open,
-and `Session::recordings` what the tracks have recorded so far, for the
+buffers, the MIDI inputs' too, `Session::wanted_inputs` and
+`wanted_midi_inputs` say which inputs the tracks want open, and
+`Session::recordings` what the tracks have recorded so far, for the
 arrangement. `crates/app/tests/recording.rs` records a second of a ramp
-through the session, checks it landed on the frame, and undoes it;
+through the session, checks it landed on the frame, and undoes it, and
+records a note on a MIDI track the same way;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
-waiting for and giving up on inputs, and stopping.
+waiting for and giving up on inputs, and stopping, for audio and MIDI
+tracks, and the notes held over loops and punches.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks
@@ -486,7 +523,7 @@ trip's do there ([audio.md](audio.md#trying-it)). That says nothing of
 Windows.
 
 After a new project's first save, it records into the Unsaved Recordings
-folder until it's opened again. MIDI recording isn't done yet.
+folder until it's opened again.
 
 ## Plugins
 

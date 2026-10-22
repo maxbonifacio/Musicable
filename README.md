@@ -7,8 +7,8 @@ recording, editing and mixing. Live performance (Session View) comes later.
 > Status: pre-alpha. Nothing usable yet. Tier 0, the foundation, is done:
 > the app plays, loops and saves projects of test tones. Tier 1 is under
 > way, with undo, a mixer, changing keys in the app, audio and MIDI clips,
-> an arrangement view to arrange them in, and CLAP and VST3 plugins on
-> tracks so far. See
+> an arrangement view to arrange them in, CLAP and VST3 plugins on tracks,
+> and recording audio and MIDI into takes so far. See
 > [docs/app.md](docs/app.md), and
 > [docs/architecture.md](docs/architecture.md) for how it fits together.
 

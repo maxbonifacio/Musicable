@@ -211,13 +211,14 @@ built yet, except where it says so.
   grid. Moving a control by hand overrides its lane until it's re-enabled
   ([engine.md](engine.md#automation), [commands.md](commands.md#automation),
   [app.md](app.md#the-arrangement)). Tempo automation is Tier 2.
-- **Recording.** Built for audio: the backend captures inputs, system
-  loopback on Windows among them, lined up with the output frame for frame
-  ([audio.md](audio.md#inputs)); each audio track monitors its input
-  through an `InputMonitor` node; and the app's recorder thread reads the
+- **Recording.** Built: the backend captures inputs, system loopback on
+  Windows among them, lined up with the output frame for frame
+  ([audio.md](audio.md#inputs)), and stamps each MIDI message with the
+  frame heard as it came in ([audio.md](audio.md#midi-inputs)); each audio
+  track monitors its input through an `InputMonitor` node, and each MIDI
+  track through a `MidiMonitor`; and the app's recorder thread reads the
   inputs' lock-free buffers and the engine's timeline, and writes takes
-  ([engine.md](engine.md#recording), [app.md](app.md#recording)). MIDI
-  recording is next.
+  ([engine.md](engine.md#recording), [app.md](app.md#recording)).
 - **Undo and redo.** Built: every committed transaction is a step in the
   document's history, and undo applies its edits' old values as a
   transaction of its own, which `Session::sync` sends to the engine like any

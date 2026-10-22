@@ -159,6 +159,7 @@ pub(crate) fn play(node: &mut impl Node, input: &[f32], block: &Block<'_>) -> [V
         tempo: &block.tempo,
         events: block.events,
         input: AudioRef::empty(frames),
+        midi: &[],
     };
     {
         let views = [AudioRef::from_planar(&planar_in, 2)];
