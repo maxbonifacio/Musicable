@@ -102,6 +102,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 recordings: &[],
                 levels: &state.levels,
                 inputs: &[],
+                midi_inputs: &[],
                 audio: Audio {
                     summary: "48 kHz · 128 samples · 5.3 ms",
                     running: true,

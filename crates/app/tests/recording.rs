@@ -1,6 +1,7 @@
 //! Recording through the app: an armed track records its input while the
 //! transport records, and plays it as it does, and the recording becomes a
-//! take on the track, which undo takes back.
+//! take on the track, which undo takes back. An armed MIDI track records
+//! the notes its MIDI input plays the same way.
 
 use std::fs;
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use musicable_app::Session;
-use musicable_audio::{InputBuffer, InputWriter};
+use musicable_audio::{InputBuffer, InputWriter, MidiBuffer};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::{Keymap, edit, transport};
 use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, rt};
@@ -63,7 +64,7 @@ impl Studio {
         let mut layout = InputLayout::new();
         layout.add("mic", 0, 2);
         layout.set_default("mic");
-        session.set_inputs(layout, vec![Some(buffer)]);
+        session.set_inputs(layout, vec![Some(buffer)], Vec::new());
         Self {
             engine,
             session,
@@ -163,4 +164,63 @@ fn armed_tracks_record_takes_where_they_were_played() {
     let track = studio.session.project().track(lead).unwrap();
     assert!(track.takes.is_empty() && track.clips.is_empty());
     let _ = fs::remove_dir_all(&studio.folder);
+}
+
+#[test]
+fn armed_midi_tracks_record_the_notes_played() {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    project.track_mut(keys).unwrap().armed = true;
+    let (mut engine, handle) = Engine::new(CONFIG);
+    let mut session = Session::offline(project, None, Keymap::default_keymap(), handle);
+    // The stream opened one MIDI input, which plays a note from a quarter
+    // of a second in to three quarters.
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut layout = InputLayout::new();
+    layout.add_midi("Keystep");
+    session.set_inputs(layout, Vec::new(), vec![Some(buffer.clone())]);
+    writer.push(12_000, [0x90, 60, 100]);
+    writer.push(36_000, [0x80, 60, 64]);
+    session.run(&transport::RECORD).unwrap();
+    session.wait_for_graph();
+    let mut output = vec![0.0; 2 * CONFIG.max_block];
+    let mut time = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut shown = false;
+    while session.project().track(keys).unwrap().takes.is_empty() {
+        assert!(Instant::now() < deadline, "no take after ten seconds");
+        if time == 48_000 {
+            session.run(&transport::STOP).unwrap();
+        }
+        engine.process_interleaved(&mut output, 2);
+        time += CONFIG.max_block as u64;
+        // As the stream says once it has played a frame.
+        buffer.settle(time);
+        session.tick();
+        shown |= session.recordings().iter().any(|r| r.track == keys);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(shown, "the recording didn't show as it recorded");
+    assert_eq!(session.take_problems(), Vec::<String>::new());
+
+    // A clip of the two beats recorded, with the note half a beat in, a
+    // beat long.
+    let track = session.project().track(keys).unwrap();
+    assert_eq!(track.takes.len(), 1);
+    assert_eq!(track.clips.len(), 1);
+    let clip = &track.clips[0];
+    assert_eq!((clip.start, clip.end()), (Beats::ZERO, Beats::new(2)));
+    let ClipContent::Midi(midi) = &clip.content else {
+        panic!("{clip:?}");
+    };
+    let notes: Vec<_> = (midi.notes.iter())
+        .map(|note| (note.start, note.length, note.key, note.velocity))
+        .collect();
+    let half = Beats::from_f64(0.5);
+    assert_eq!(notes, [(half, Beats::new(1), 60, 100.0 / 127.0)]);
+
+    assert_eq!(session.undo_name(), Some("Record"));
+    session.run(&edit::UNDO).unwrap();
+    let track = session.project().track(keys).unwrap();
+    assert!(track.takes.is_empty() && track.clips.is_empty());
 }

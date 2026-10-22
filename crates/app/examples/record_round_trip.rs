@@ -361,11 +361,12 @@ fn add_clicks(
 fn follow_inputs(output: &mut Output, session: &mut Session, started: &mut u64) {
     if !(session.is_recording() && session.stats().playing) {
         let wanted: BTreeSet<String> = session.wanted_inputs();
-        output.want_inputs(&wanted, session);
+        output.want_inputs(&wanted, &session.wanted_midi_inputs(), session);
     }
     if output.started() != *started {
         *started = output.started();
-        session.set_inputs(output.input_layout(), output.input_buffers());
+        let (buffers, midi) = (output.input_buffers(), output.midi_buffers());
+        session.set_inputs(output.input_layout(), buffers, midi);
     }
 }
 
