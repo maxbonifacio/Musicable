@@ -43,6 +43,8 @@ egui_kittest = "0.37"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# Set in RTSan builds: see crates/engine/src/rt.rs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(musicable_rtsan)"] }
 
 [workspace.lints.clippy]
 all = "warn"

@@ -527,7 +527,7 @@ impl Node for Rendezvous {
                 self.missed.fetch_add(1, Relaxed);
                 break;
             }
-            thread::yield_now();
+            rt::allowed(thread::yield_now);
         }
         output.clear();
     }
@@ -611,7 +611,7 @@ impl Node for PanicsOnce {
     fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
         if !self.panicked {
             self.panicked = true;
-            panic!("a node failed");
+            rt::allowed(|| panic!("a node failed"));
         }
         output.clear();
     }
@@ -835,7 +835,7 @@ impl Node for Splits {
                     seen.missed.fetch_add(1, Relaxed);
                     break;
                 }
-                thread::yield_now();
+                rt::allowed(thread::yield_now);
             }
         });
         output.clear();
@@ -958,7 +958,7 @@ impl Node for TasksPanicOnce {
         crate::tasks::run(8, &|index| {
             seen.runs[index as usize].fetch_add(1, Relaxed);
             if panic {
-                panic!("a task failed");
+                rt::allowed(|| panic!("a task failed"));
             }
         });
         output.clear();

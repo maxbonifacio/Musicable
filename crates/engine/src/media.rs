@@ -25,6 +25,8 @@ use std::time::Duration;
 
 use musicable_model::clip::ClipId;
 
+use crate::rt;
+
 /// Random access to an audio file's frames, for the disk thread.
 pub trait AudioReader: Send {
     fn channels(&self) -> usize;
@@ -404,7 +406,7 @@ impl Stream {
                 self.missed.fetch_add(1, Relaxed);
                 return false;
             }
-            thread::yield_now();
+            rt::allowed(thread::yield_now);
         }
     }
 
@@ -509,7 +511,7 @@ impl Disk {
     /// Wakes the disk thread to load what's wanted now. Real-time safe.
     fn wake(&self) {
         if let Some(thread) = self.thread.get() {
-            thread.unpark();
+            rt::allowed(|| thread.unpark());
         }
     }
 }

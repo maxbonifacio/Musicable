@@ -25,7 +25,24 @@ fn built() -> PathBuf {
     [deps.join(&file), deps.parent().unwrap_or(deps).join(&file)]
         .into_iter()
         .find(|path| path.exists())
+        .or_else(|| built_apart(&exe, &file))
         .expect("Cargo builds the test plugins before the tests that list them")
+}
+
+/// Where the library is in the layout nightly Cargo builds in, which keeps
+/// each package's output apart: the tests run from
+/// `target/<profile>/build/<package>/<hash>/out`, and the library is in
+/// `musicable-test-plugins/<hash>/out` beside theirs. The newest, as the
+/// one in `deps` is.
+fn built_apart(exe: &Path, file: &str) -> Option<PathBuf> {
+    let packages = exe.ancestors().nth(4)?;
+    fs::read_dir(packages.join("musicable-test-plugins"))
+        .ok()?
+        .flatten()
+        .map(|build| build.path().join("out").join(file))
+        .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
+        .max()
+        .map(|(_, path)| path)
 }
 
 /// Copies the test plugins' library to `name.clap` in `dir`, without

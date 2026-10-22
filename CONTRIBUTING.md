@@ -97,6 +97,11 @@ static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::Checked
 A render that allocates then panics, naming the first allocation. Run the
 test with `RUST_BACKTRACE=1` to see where it happened. Clippy bans locks,
 sleeping and printing in the engine crate (`crates/engine/clippy.toml`).
+CI also runs the engine's and the plugins' tests with RealtimeSanitizer,
+which stops at what the checking allocator can't see, such as system calls
+and a plugin's C or C++ allocations. `crates/engine/src/rt.rs` has the
+command. Real-time code that has to make a call it stops at, such as waking
+a thread, makes it in `rt::allowed`.
 
 [docs/engine.md](docs/engine.md) explains the engine's threads, timing and
 rules in full.

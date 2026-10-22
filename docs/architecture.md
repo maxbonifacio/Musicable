@@ -189,8 +189,8 @@ built yet, except where it says so.
   makes transactions of the changes made in their windows, so undo covers
   them. Scanning runs in a process of its own, so a plugin that crashes
   doesn't take the app with it.
-  [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
-  plugin code for what our allocation checker can't see.
+  [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) checks plugin
+  code in CI for what our allocation checker can't see.
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
   paths of different latency meet, lines the cue output up with the output,
@@ -260,6 +260,10 @@ built yet, except where it says so.
   trips, the commands and the shell, and the Tier 0 demo itself
   ([`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs)).
   CI runs it on Windows, macOS and Linux.
+- The RTSan workflow (`.github/workflows/rtsan.yml`) runs the engine's and
+  the plugins' tests with RealtimeSanitizer on Linux when they change, for
+  what the allocation checker can't see, such as plugins' C and C++ code
+  ([engine.md](engine.md#how-its-checked)).
 - `musicable null-test [PROJECT]` plays a project with both renderers and
   compares them, on whatever machine it runs on.
 - The scheduler benchmarks run in CI on Windows when the engine changes

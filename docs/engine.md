@@ -677,10 +677,20 @@ block, though never on two at once, so keep no state in thread-locals.
   space, so it can't be caught at run time. Clippy bans the lock types,
   `thread::sleep` and the print macros in the engine crate instead
   (`crates/engine/clippy.toml`), and CI runs Clippy with `-D warnings`.
-- **Not covered yet:** allocations and system calls in C or C++ code, such as
-  plugins. When plugin hosting lands we can add
-  [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html), which catches
-  those (but not uncontended Rust locks).
+- **Everything else, with RealtimeSanitizer.** The RTSan workflow
+  (`.github/workflows/rtsan.yml`) runs the engine's and the plugins' tests
+  on Linux, whenever they change, in a debug build made with
+  [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html), nightly
+  Rust's `-Zsanitizer=realtime`. There `rt::scope` tells RTSan where
+  real-time code runs, and RTSan stops the process at any allocation, lock,
+  sleep, system call or I/O inside, from any code: plugins' C and C++ code
+  too, and the test plugins, whose allocations go through an allocator of
+  their own. It can't see an uncontended Rust lock either.
+  What real-time code does on purpose that RTSan would stop at runs in
+  `rt::allowed`: waking a sleeping worker or the disk thread, and yielding
+  while waiting for one, which are system calls that don't block, and
+  Rust's allocations, which the allocation checker records itself.
+  `crates/engine/src/rt.rs` has the command that runs it.
 
 ### Denormals
 

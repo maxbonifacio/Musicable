@@ -321,7 +321,13 @@ scanner's test runs the test binary itself as the scanning process
 (`tests::scan_child`).
 
 The node is checked for allocations like every node. The plugin's own code
-isn't: its allocations go through its own allocator. RTSan will check that.
+is checked by RTSan instead, as its allocations go through its own
+allocator: the RTSan workflow runs these tests with it
+([engine.md](engine.md#how-its-checked)). So the test plugins keep the
+rules too. They read each block's parameter changes and events into
+buffers made beforehand, and Test Synth's thread pool tasks tell threads
+apart without a thread-local, whose copy for each thread a library loaded
+at run time may allocate the first time the thread touches it.
 
 The app's tests use the same plugins, in both formats:
 [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays them
@@ -346,4 +352,3 @@ VST3 plugin on a track and opens its window.
 - VST3's MIDI mapping, so MIDI controllers reach plugins that only take
   them as parameters.
 - ARA 2.
-- A CI job with [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html).
