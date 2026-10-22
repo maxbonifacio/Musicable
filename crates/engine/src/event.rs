@@ -83,6 +83,13 @@ pub struct NodeEvent {
 pub enum NodeEventKind {
     /// Takes effect from `offset` on. Nodes ignore parameters they don't have.
     Param { param: ParamId, value: f64 },
+    /// Offsets a parameter from its value by `amount`, in the parameter's
+    /// units, from `offset` on: what a modulator does, as CLAP's parameter
+    /// modulation does. The value itself stays as it was, so the offset never
+    /// ends up in the project, and the next modulation of the parameter
+    /// replaces this one rather than adding to it. Nodes ignore it for
+    /// parameters they don't have or can't modulate.
+    Modulation { param: ParamId, amount: f64 },
     /// A note starts, changes or ends. Nodes that don't play notes ignore
     /// it.
     Note(NoteEvent),

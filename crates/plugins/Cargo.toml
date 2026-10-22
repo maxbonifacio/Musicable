@@ -1,13 +1,25 @@
 [package]
 name = "musicable-plugins"
-description = "Plugin hosting: VST3, CLAP and ARA (planned)."
+description = "Plugin hosting: CLAP, then VST3 and ARA (planned)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# CLAP's C API (1.2.2) as Rust types.
+clap-sys = "0.5"
+# Loads plugin libraries.
+libloading = "0.9"
 musicable-engine.workspace = true
+musicable-model.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Built for its plugin library, which the tests load. Nothing links to it.
+musicable-test-plugins = { path = "../test-plugins" }
 
 [lints]
 workspace = true

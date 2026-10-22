@@ -105,6 +105,13 @@ impl DeviceKind {
     }
 }
 
+/// A plugin format Musicable hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PluginFormat {
+    Clap,
+    Vst3,
+}
+
 /// Stable identifier for a send, unique within a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SendId(pub u32);

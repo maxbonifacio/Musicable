@@ -16,7 +16,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
-| `plugins` | `engine` | Nothing yet: CLAP and VST3 hosting in Tier 1, ARA in Tier 2 |
+| `plugins` | `engine`, `model` | CLAP hosting: plugin instances and the nodes that process them, and scanning in a process of its own. VST3 next, ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
 | `ui` | `model`, `commands` | What the window shows, drawn with egui: a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
@@ -160,12 +160,14 @@ built yet, except where it says so.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. So far
-  there are a test gain and a test instrument. CLAP and VST3 instances live in
-  `crates/plugins` as `Node`s: created and activated in `prepare`, which runs on the
-  compiler's thread, and handed from the old graph to the new one in
-  `adopt`. A plugin's own parameter changes come back to the model as
-  transactions, so undo covers them. Scanning should run in a separate
-  process, so a plugin that crashes doesn't take the app with it.
+  there are a test gain and a test instrument. CLAP hosting is built in
+  `crates/plugins` ([plugins.md](plugins.md)): an `Instance` lives on the
+  main thread, where CLAP wants everything but processing done, and makes
+  the `Node`s that process it, so every graph's node plays the same plugin.
+  A plugin's changes in its own window come back from `Instance::poll`, for
+  the session to make transactions of, so undo covers them. Scanning runs
+  in a process of its own, so a plugin that crashes doesn't take the app
+  with it. Plugin devices in projects and the app are next, then VST3.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
   plugin code for what our allocation checker can't see.
 - **Plugin delay compensation.** Built: nodes report their latency
