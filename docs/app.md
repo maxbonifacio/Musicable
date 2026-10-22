@@ -524,9 +524,11 @@ slide, each note's own with MPE. Each pass with notes is a take with a MIDI
 clip as long as the pass; a pass without notes makes no take. A note held
 as recording punches in isn't recorded, and one held as it punches out or
 stops ends there. Round a loop, a note held over the loop's end ends there
-and starts again at the loop's start, in the next pass. The sustain pedal
-and other controllers aren't recorded yet: they come with the piano roll's
-controller lanes.
+and starts again at the loop's start, in the next pass. It records how the
+controllers moved too, such as the sustain pedal and the mod wheel, as the
+clip's [controller curves](#the-piano-roll), each pass starting with them
+where they are: a pedal held down as a pass starts holds its notes in the
+take as it did while recording.
 
 **Files.** Recordings are 32-bit float WAV files at the engine's sample
 rate, in a `Recordings` folder in the project's folder, named after the
@@ -559,9 +561,13 @@ buffers, the MIDI inputs' too, `Session::wanted_inputs` and
 arrangement. `crates/app/tests/recording.rs` records a second of a ramp
 through the session, checks it landed on the frame, and undoes it, and
 records a note on a MIDI track the same way;
+`crates/app/tests/mpe.rs` records an MPE performance, with the sustain pedal
+and the mod wheel, into a synth that takes only MPE MIDI, and checks the
+take plays back into it as it played, to the sample;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping, for audio and MIDI
-tracks, and the notes held over loops and punches.
+tracks, the notes held over loops and punches, and where the controllers
+start each pass.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks

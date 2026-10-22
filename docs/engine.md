@@ -157,12 +157,15 @@ plays them as players expect of an instrument track: always with `In`,
 while the track is armed with `Auto`, whether the transport plays or not,
 and never with `Off`. The clips play too, except with `In` and while an
 armed `Auto` track records over them. The notes sounding end when either
-stops playing, and the clips' controllers go on while the clips play. It
-reads its parameters as it renders, after it has played the block's notes,
-so arming changes what plays from the next block. The layout lists the
-MIDI inputs (`InputLayout::add_midi`), and `find_midi` says which messages
-a track's `MidiInput` takes: one input's or every input's, one channel or
-all of them. A track whose input isn't laid out plays none.
+stops playing. Controllers go on from whichever plays, as their notes do:
+when one stops, the switches it held on, such as the sustain pedal, are let
+go, and when the clips play again, their controllers go back to what the
+clips hold. It reads its parameters as it renders, after it has played
+the block's notes, so arming changes what plays from the next block. The
+layout lists the MIDI inputs (`InputLayout::add_midi`), and `find_midi`
+says which messages a track's `MidiInput` takes: one input's or every
+input's, one channel or all of them. A track whose input isn't laid out
+plays none.
 
 ## Musical time
 
@@ -572,9 +575,13 @@ message (RPN 6) sets the zones. Members bend 48 semitones until they're told
 otherwise, and the master's bend bends every note in its zone on top of the
 note's own. Taking one channel, it reads that channel as a keyboard plays
 it. All Notes Off and All Sound Off (CC 123, 120) end a channel's notes,
-and Reset All Controllers (CC 121) takes its expression back to rest. The
-sustain pedal and other controllers play no part yet: they come with the
-piano roll's controller lanes.
+and Reset All Controllers (CC 121) takes its expression back to rest. Other
+control changes move controllers for every note (`Played::Controller`),
+from any channel it takes: all but slide, the registered and non-registered
+parameters and their data entry (6, 38 and 96 to 101), and the channel mode
+messages. Reset All Controllers lets go of the switches held on as well. It
+knows what each controller holds (`MidiNotes::controllers`), so a recording
+can start with them where they are.
 
 A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
 a swap gives a track another input, the notes held on the old one end at

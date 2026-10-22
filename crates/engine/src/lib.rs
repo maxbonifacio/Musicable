@@ -50,7 +50,7 @@ pub use event::{
 };
 pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
-pub use midi::{MidiMessage, MidiMonitor, MidiNotes};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
 pub use timeline::{Segment, Timeline};

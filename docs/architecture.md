@@ -187,8 +187,10 @@ built yet, except where it says so.
   and has a viewport of its own ([app.md](app.md#the-piano-roll)). Plugins
   get notes as CLAP's own or VST3's note expression, or as MPE MIDI, and
   controllers as MIDI or, for VST3, through the plugin's MIDI mapping
-  ([plugins.md](plugins.md#notes-and-the-transport)). Recording the sustain
-  pedal and controllers comes next.
+  ([plugins.md](plugins.md#notes-and-the-transport)). Recording takes the
+  controllers' moves as the clip's curves, so a recorded MPE performance
+  plays back into an MPE synth as it played, to the sample
+  (`crates/app/tests/mpe.rs`).
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There
