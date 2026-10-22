@@ -69,8 +69,13 @@ Some optional components sit behind opt-in build features, and binaries built
 with them are distributed under GPLv3: ASIO output on Windows (the `asio`
 feature, see [docs/audio.md](docs/audio.md#asio)) and, later, Rubber Band. The
 default build has none of them. The source in this repository stays MIT OR
-Apache-2.0. ASIO is a trademark of Steinberg Media Technologies GmbH.
+Apache-2.0.
 
 Contributions are accepted under the same terms. See
 [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see
 [SECURITY.md](SECURITY.md).
+
+ASIO and VST are trademarks of Steinberg Media Technologies GmbH, Ableton and
+Live are trademarks of Ableton AG, and Melodyne is a trademark of Celemony
+Software GmbH. Musicable is an independent project and isn't affiliated with
+or endorsed by any of them.
