@@ -1,4 +1,5 @@
-//! The options commands: the windows that change Musicable's settings.
+//! The options commands: the windows that change Musicable's settings, and
+//! scanning for plugins.
 //!
 //! Commands can't show a window, so these ask the app to, with a [`Request`].
 
@@ -8,15 +9,19 @@ use crate::{CommandId, Registry, Request};
 pub const AUDIO_SETTINGS: CommandId = CommandId::new("options.audio_settings");
 /// Shows the keyboard shortcuts, where every command's keys can be changed.
 pub const KEYBOARD_SHORTCUTS: CommandId = CommandId::new("options.keyboard_shortcuts");
+/// Scans for plugins again, loading the libraries that were left out as bad
+/// too.
+pub const RESCAN_PLUGINS: CommandId = CommandId::new("options.rescan_plugins");
 
 /// Every options command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 2] = [
+const COMMANDS: [(CommandId, &str, Request); 3] = [
     (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
     (
         KEYBOARD_SHORTCUTS,
         "Keyboard Shortcuts...",
         Request::KeyboardShortcuts,
     ),
+    (RESCAN_PLUGINS, "Rescan Plugins", Request::RescanPlugins),
 ];
 
 /// Registers the options commands.
@@ -39,7 +44,13 @@ mod tests {
         view::register(&mut registry);
         let mut document = Document::new(Project::new());
         let mut requests = Vec::new();
-        for id in [AUDIO_SETTINGS, KEYBOARD_SHORTCUTS, view::COMMAND_PALETTE] {
+        let ids = [
+            AUDIO_SETTINGS,
+            KEYBOARD_SHORTCUTS,
+            RESCAN_PLUGINS,
+            view::COMMAND_PALETTE,
+        ];
+        for id in ids {
             let mut ctx = Context {
                 document: &mut document,
                 transport: &mut StubTransport::default(),
@@ -52,6 +63,7 @@ mod tests {
             [
                 Request::AudioSettings,
                 Request::KeyboardShortcuts,
+                Request::RescanPlugins,
                 Request::CommandPalette
             ]
         );

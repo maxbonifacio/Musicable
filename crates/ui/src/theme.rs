@@ -77,6 +77,8 @@ pub struct Theme {
     pub header_text: Color32,
     /// Lines between tracks and around panels.
     pub divider: Color32,
+    /// The devices panel's boxes, one for each device.
+    pub device: Color32,
 
     // The arrangement's sizes, in points.
     /// The ruler over the tracks, and the strip at its top for the loop
@@ -112,6 +114,7 @@ pub struct Theme {
     pub small_text: f32,
 
     pub mixer: MixerSizes,
+    pub devices: DeviceSizes,
 }
 
 /// The mixer's sizes, in points.
@@ -141,6 +144,20 @@ pub struct MixerSizes {
     pub readout_text: f32,
     pub small_text: f32,
     pub scale_text: f32,
+}
+
+/// The devices panel's and the plugin browser's sizes, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceSizes {
+    /// The devices panel's height until the user drags its edge.
+    pub panel: f32,
+    /// A device's box's width.
+    pub device: f32,
+    /// The space around what's in a device's box, and between the boxes.
+    pub margin: f32,
+    pub gap: f32,
+    /// The plugin browser's width until the user drags its edge.
+    pub browser: f32,
 }
 
 impl MixerSizes {
@@ -207,6 +224,7 @@ impl Default for Theme {
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),
             divider: Color32::from_gray(24),
+            device: Color32::from_gray(46),
 
             ruler_height: 40.0,
             ruler_strip: 18.0,
@@ -240,6 +258,13 @@ impl Default for Theme {
                 readout_text: 11.0,
                 small_text: 10.0,
                 scale_text: 9.0,
+            },
+            devices: DeviceSizes {
+                panel: 130.0,
+                device: 170.0,
+                margin: 4.0,
+                gap: 6.0,
+                browser: 220.0,
             },
         }
     }

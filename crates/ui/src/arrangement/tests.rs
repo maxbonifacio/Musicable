@@ -18,7 +18,7 @@ use musicable_model::{LocatorId, Project, TrackId, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::{Levels, Waveforms};
+use crate::{Levels, Plugins, Waveforms};
 
 /// A transport that plays along: locating moves its playhead.
 #[derive(Debug, Default)]
@@ -214,6 +214,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         },
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
+                        plugins: Plugins::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state

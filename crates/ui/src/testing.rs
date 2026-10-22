@@ -7,7 +7,7 @@ use musicable_commands::{Editor, Keymap, Problem, Registry, view};
 use musicable_model::Project;
 use musicable_model::time::Beats;
 
-use crate::{Action, Audio, KeymapStatus, Levels, Playback, Shell, View, Waveforms};
+use crate::{Action, Audio, KeymapStatus, Levels, Playback, Plugins, Shell, View, Waveforms};
 
 /// What the shell shows in the tests, and what it hands back.
 pub(crate) struct State {
@@ -90,6 +90,7 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
                         notice: None,
                     },
                     messages: &[],
+                    plugins: Plugins::default(),
                 };
                 let mut actions = state.shell.show(ui, &view);
                 for action in &actions {

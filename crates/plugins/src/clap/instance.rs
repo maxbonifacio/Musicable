@@ -216,9 +216,9 @@ impl Instance {
         self.shared.plugin()
     }
 
-    /// The plugin itself, for tests to drive the test plugins with.
-    #[cfg(test)]
-    pub(crate) fn raw(&self) -> *const clap_plugin {
+    /// The plugin itself, as CLAP's `clap_plugin`, for code that drives it
+    /// directly, such as tests driving the test plugins.
+    pub fn raw(&self) -> *const clap_plugin {
         self.plugin()
     }
 
@@ -549,6 +549,14 @@ impl Instance {
     }
 
     // State.
+
+    /// Whether the plugin has a state to save, besides its parameters. One
+    /// that hasn't is set by its parameters alone.
+    pub fn has_state(&self) -> bool {
+        // SAFETY: the extension lives as long as the plugin.
+        let state = unsafe { self.ext.state.as_ref() };
+        state.is_some_and(|s| s.save.is_some() && s.load.is_some())
+    }
 
     /// The plugin's state, as it saves it: everything it needs to come back
     /// as it is, in its own format.

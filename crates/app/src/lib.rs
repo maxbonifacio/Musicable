@@ -9,11 +9,15 @@ mod keymap_file;
 mod media;
 pub mod null_test;
 mod output;
+mod plugin_scan;
+mod plugin_windows;
+mod plugins;
 mod session;
 mod settings;
 
 pub use app::App;
 pub use output::Output;
+pub use plugin_scan::{PLUGINS_FILE, SCAN_PLUGIN};
 pub use session::Session;
 pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
 
