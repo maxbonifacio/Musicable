@@ -101,6 +101,44 @@ doesn't go through the engine: it reads the inputs' buffers, which line up
 with the output exactly. The resampler (`musicable_engine::resample`) is
 public, for the backend's inputs on another clock.
 
+## Recording
+
+`TransportCommand::Record(on)` is the record button: while it's on, the
+transport records as it plays. `Punch { start, end }` narrows that to the
+punch range, in song positions: recording punches in at `start` and out at
+`end`, either of which can be left open. `TransportState::record` is the
+button, and `recording` whether the transport records now. A block ends
+where recording punches in or out, as at the loop end, so `recording` holds
+for every frame of a block. `Stop` turns recording off.
+
+The engine records nothing itself. It publishes the transport's course on a
+`Timeline` (`Engine::take_timeline`, taken before the engine goes to the
+audio thread): a `Segment` wherever the transport stops running on
+steadily, with the engine time it starts at, the song position there,
+whether it plays, records and is recording, and the graph's latency. A
+recorder reads them on another thread, and `Read::until` says how far in
+engine time they go. The queue holds 4,096 segments, and `Read::lost` says
+when a reader fell so far behind that some were dropped.
+
+The segments place what the inputs captured. What plays at song position
+`p` is rendered at engine time `t`, and with the graph's latency `L`, it's
+heard at `t + L`. Frame `t + L` of an input's buffer is what the input
+captured then ([Device inputs](#time-and-events)), so it belongs at `p`,
+the position the segment gives for `t`. That's the frame a player heard `p`
+on, however late the plugins made it.
+
+**Monitoring inputs.** `compile_with_inputs` gives each audio track an
+`InputMonitor` after its clip player (key `compile::keys::track_input`),
+which plays the track's input in place of its clips: always with
+`Monitor::In`, with `Auto` while the track is armed and the transport is
+stopped or recording, and never with `Off`, going over in 10 ms. An
+`InputLayout` says where each input is among the engine's device inputs,
+by the ids the audio backend gave them, and which input the default one is.
+A track whose input isn't laid out monitors silence. Arming and monitoring
+are the node's parameters (`InputMonitor::ARMED`, `MONITOR`), so changing
+them doesn't rebuild the graph. `compile` and `compile_with_devices` lay out
+no inputs.
+
 ## Musical time
 
 Musical positions are `Beats` from `musicable_model::time`: quarter notes,

@@ -3,8 +3,11 @@
 //! Each track becomes a channel strip: its source, its devices, its fader
 //! and its output stage, with built-in slots for native stages along the way
 //! (see [`Slot`]). An audio or MIDI track's source is its clip player
-//! ([`AudioClips`], [`MidiClips`]), with the track's test tone feeding it. A
-//! MIDI track's notes go to its first instrument. Group and return tracks
+//! ([`AudioClips`], [`MidiClips`]), with the track's test tone feeding it.
+//! An audio track with an input plays it through an [`InputMonitor`] after
+//! its clip player, which plays the input in place of the clips while the
+//! track monitors it: the [`InputLayout`] says where the input is. A MIDI
+//! track's notes go to its first instrument. Group and return tracks
 //! are buses with strips of their own: what feeds them sums at the head of
 //! their strip. Tracks feed the master or a group, sends feed return tracks,
 //! and the master's strip feeds the audio device. Empty slots add no nodes.
@@ -24,13 +27,14 @@ use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
 use musicable_model::{
-    ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Master, Project, Track, TrackKind,
+    AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, Project,
+    Track, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
 use crate::media::Media;
 use crate::meter::Meters;
-use crate::nodes::{Clipper, Gain, Metronome, Sine, Sum, TestInstrument};
+use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
 use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
@@ -38,7 +42,8 @@ use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGrap
 /// A track's nodes have its id in the low 32 bits of the key and their role
 /// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 6 for
 /// the built-in slots, 7 for the output stage, 8 for a group's or a
-/// return's bus and 11 for an audio or MIDI track's clip player. The slot in
+/// return's bus, 11 for an audio or MIDI track's clip player and 12 for an
+/// audio track's input monitor. The slot in
 /// front of a device also has the device's position in the top 16 bits. The
 /// master's strip has the keys of a track whose id is `u32::MAX`, which no
 /// track has. Sends and devices have their own ids in the low 32 bits, with
@@ -102,6 +107,12 @@ pub mod keys {
     /// [`MidiClips`](crate::clips::MidiClips), at the head of its strip.
     pub fn track_clips(track: TrackId) -> NodeKey {
         track_key(11, track)
+    }
+
+    /// An audio track's [`InputMonitor`](crate::nodes::InputMonitor),
+    /// right after its clip player.
+    pub fn track_input(track: TrackId) -> NodeKey {
+        track_key(12, track)
     }
 
     /// A send, a [`Gain`](crate::nodes::Gain) at the send's level that feeds
@@ -246,20 +257,115 @@ pub fn compile_with_media(project: &Project, meters: &Meters, media: &Media) -> 
     compile_with_devices(project, meters, media, &Devices::new())
 }
 
-/// Builds the graph for `project`. Each channel's output stage measures
-/// into its meter in `meters`: call [`Meters::follow`] first, or channels
-/// without a meter there get one nobody reads. Audio clips play their audio
-/// from `media`, and clips it doesn't have are silent. Plugin devices
-/// process through the nodes `devices` makes for them, and the ones it has
-/// none for, such as a plugin that isn't installed, pass their signal
-/// through.
+/// Builds the graph for `project`, without audio inputs: tracks that
+/// monitor their inputs monitor silence. See [`compile_with_inputs`].
 pub fn compile_with_devices(
     project: &Project,
     meters: &Meters,
     media: &Media,
     devices: &Devices,
 ) -> Graph {
-    compile_with(project, meters, media, devices, native_stage)
+    compile_with_inputs(project, meters, media, devices, &InputLayout::new())
+}
+
+/// Builds the graph for `project`. Each channel's output stage measures
+/// into its meter in `meters`: call [`Meters::follow`] first, or channels
+/// without a meter there get one nobody reads. Audio clips play their audio
+/// from `media`, and clips it doesn't have are silent. Plugin devices
+/// process through the nodes `devices` makes for them, and the ones it has
+/// none for, such as a plugin that isn't installed, pass their signal
+/// through. Tracks monitor their inputs where `inputs` lays them out, and
+/// the ones it doesn't have are silent.
+pub fn compile_with_inputs(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+    inputs: &InputLayout,
+) -> Graph {
+    compile_with(project, meters, media, devices, inputs, native_stage)
+}
+
+/// Where the audio inputs tracks take are among the engine's device inputs
+/// ([`ProcessContext::input`](crate::ProcessContext::input)): the inputs a
+/// stream opened, by their ids. Tracks monitor their inputs through it,
+/// and a recorder finds them in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InputLayout {
+    inputs: Vec<LaidOut>,
+    /// The input that tracks taking the default input take.
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaidOut {
+    id: String,
+    first: usize,
+    channels: usize,
+}
+
+/// Where the channels an audio input takes are, in an [`InputLayout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputChannels {
+    /// Which of the layout's inputs it is, in the order they were added.
+    pub index: usize,
+    /// The first channel it takes, counting the input's own from 0.
+    pub channel: usize,
+    /// The first channel it takes among the engine's device inputs.
+    pub first: usize,
+    /// How many channels it takes: one or two.
+    pub count: usize,
+}
+
+impl InputLayout {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Lays out the input `id`, with `channels` channels from the engine's
+    /// device input channel `first`. An input that didn't open has none.
+    pub fn add(&mut self, id: impl Into<String>, first: usize, channels: usize) {
+        self.inputs.push(LaidOut {
+            id: id.into(),
+            first,
+            channels,
+        });
+    }
+
+    /// Has tracks that take the default input take the input `id`.
+    pub fn set_default(&mut self, id: impl Into<String>) {
+        self.default = Some(id.into());
+    }
+
+    /// The input that tracks taking the default input take, if there is
+    /// one.
+    pub fn default_input(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+
+    /// The inputs' ids, in the order they were added.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.inputs.iter().map(|input| input.id.as_str())
+    }
+
+    /// Where the channels `input` takes are, or `None` if its input isn't
+    /// laid out, or hasn't those channels.
+    pub fn find(&self, input: &AudioInput) -> Option<InputChannels> {
+        let id = match input.device.as_str() {
+            "" => self.default.as_deref()?,
+            id => id,
+        };
+        let index = self.inputs.iter().position(|laid| laid.id == id)?;
+        let laid = &self.inputs[index];
+        let channel = usize::from(input.channel);
+        let count = usize::from(input.channels());
+        (channel + count <= laid.channels).then_some(InputChannels {
+            index,
+            channel,
+            first: laid.first + channel,
+            count,
+        })
+    }
 }
 
 /// Makes the nodes for a device that processes outside the engine, such as
@@ -309,13 +415,14 @@ impl fmt::Debug for Devices {
     }
 }
 
-/// Like [`compile_with_devices`], with `stages` choosing the native stage
+/// Like [`compile_with_inputs`], with `stages` choosing the native stage
 /// for each slot of each channel. `None` leaves the slot empty.
 pub(crate) fn compile_with(
     project: &Project,
     meters: &Meters,
     media: &Media,
     devices: &Devices,
+    inputs: &InputLayout,
     mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -351,7 +458,19 @@ pub(crate) fn compile_with(
             }
             player
         });
-        let head = buses.get(&track.id).copied().or(player);
+        let monitor = match (&track.input, player) {
+            (Some(Input::Audio(input)), Some(player)) => {
+                let mut monitor = InputMonitor::new(track.monitor, track.armed);
+                if let Some(channels) = inputs.find(input) {
+                    monitor = monitor.with_input(channels.first, channels.count);
+                }
+                let monitor = graph.add(keys::track_input(track.id), monitor);
+                connect(&mut graph, player, monitor);
+                Some(monitor)
+            }
+            _ => None,
+        };
+        let head = buses.get(&track.id).copied().or(monitor).or(player);
         let mut strip = Strip {
             graph: &mut graph,
             tail: head,
@@ -702,7 +821,7 @@ mod tests {
 
     use musicable_model::clip::ClipContent;
     use musicable_model::time::{BeatRange, Beats};
-    use musicable_model::{DeviceId, SendId, TestTone, TrackId, TrackKind};
+    use musicable_model::{DeviceId, Monitor, SendId, TestTone, TrackId, TrackKind};
 
     use super::*;
     use crate::nodes::{Delay, Impulse, Latent};
@@ -825,9 +944,9 @@ mod tests {
         let graph = compile(&p).prepare(&CONFIG).unwrap();
         // The master bus, the cue bus, the metronome, the reverb's bus, a
         // fader and an output stage for each track, clip players and tones
-        // for the drums and the bass, and the master's fader and output
-        // stage.
-        assert_eq!(graph.len(), 16);
+        // for the drums and the bass, the drums' input monitor, and the
+        // master's fader and output stage.
+        assert_eq!(graph.len(), 17);
         for key in [
             keys::MASTER,
             keys::CUE,
@@ -851,6 +970,10 @@ mod tests {
             assert_eq!(
                 graph.contains(keys::track_clips(track.id)),
                 !track.kind.is_bus()
+            );
+            assert_eq!(
+                graph.contains(keys::track_input(track.id)),
+                track.kind == TrackKind::Audio
             );
         }
         assert_eq!(shape(&graph).1, keys::master_output());
@@ -885,6 +1008,7 @@ mod tests {
                 keys::track_output(track),
                 keys::track_bus(track),
                 keys::track_clips(track),
+                keys::track_input(track),
             ];
             let others = [keys::send(SendId(id)), keys::device(DeviceId(id))];
             for key in strip.into_iter().chain(roles).chain(others) {
@@ -937,9 +1061,16 @@ mod tests {
         let p = project();
         let shape_with = |stages| {
             shape(
-                &compile_with(&p, &Meters::new(), &Media::new(), &Devices::new(), stages)
-                    .prepare(&CONFIG)
-                    .unwrap(),
+                &compile_with(
+                    &p,
+                    &Meters::new(),
+                    &Media::new(),
+                    &Devices::new(),
+                    &InputLayout::new(),
+                    stages,
+                )
+                .prepare(&CONFIG)
+                .unwrap(),
             )
         };
         let all_off = shape(&compile(&p).prepare(&CONFIG).unwrap());
@@ -951,14 +1082,28 @@ mod tests {
         let p = project();
         let meters = Meters::new();
         let off = || {
-            compile_with(&p, &meters, &Media::new(), &Devices::new(), no_stages)
-                .prepare(&CONFIG)
-                .unwrap()
+            compile_with(
+                &p,
+                &meters,
+                &Media::new(),
+                &Devices::new(),
+                &InputLayout::new(),
+                no_stages,
+            )
+            .prepare(&CONFIG)
+            .unwrap()
         };
         let on = || {
-            compile_with(&p, &meters, &Media::new(), &Devices::new(), half_drums)
-                .prepare(&CONFIG)
-                .unwrap()
+            compile_with(
+                &p,
+                &meters,
+                &Media::new(),
+                &Devices::new(),
+                &InputLayout::new(),
+                half_drums,
+            )
+            .prepare(&CONFIG)
+            .unwrap()
         };
         assert_eq!(on().len(), off().len() + 1);
         assert!(on().contains(keys::track_slot(p.tracks[0].id, Slot::PostFader)));
@@ -997,9 +1142,16 @@ mod tests {
         };
         let meters = Meters::new();
         let graph = |at: Slot| {
-            compile_with(&p, &meters, &Media::new(), &Devices::new(), ramp_in(at))
-                .prepare(&CONFIG)
-                .unwrap()
+            compile_with(
+                &p,
+                &meters,
+                &Media::new(),
+                &Devices::new(),
+                &InputLayout::new(),
+                ramp_in(at),
+            )
+            .prepare(&CONFIG)
+            .unwrap()
         };
         let left = |out: Vec<f32>| -> Vec<f32> { out.into_iter().step_by(2).collect() };
         let count = |from: u16| -> Vec<f32> { (from..from + 100).map(f32::from).collect() };
@@ -1042,9 +1194,16 @@ mod tests {
             };
             Some(stage)
         };
-        let graph = compile_with(&p, &Meters::new(), &Media::new(), &Devices::new(), stages)
-            .prepare(&CONFIG)
-            .unwrap();
+        let graph = compile_with(
+            &p,
+            &Meters::new(),
+            &Media::new(),
+            &Devices::new(),
+            &InputLayout::new(),
+            stages,
+        )
+        .prepare(&CONFIG)
+        .unwrap();
         assert_eq!(graph.latency(), 37);
         let (mut engine, mut handle) = Engine::new(CONFIG);
         handle.swap_graph(graph).unwrap();
@@ -1148,6 +1307,57 @@ mod tests {
     }
 
     #[test]
+    fn tracks_monitor_their_inputs_where_the_layout_puts_them() {
+        let mut p = Project::new();
+        let vocal = p.add_track("Vocal", TrackKind::Audio);
+        p.add_track("Guitar", TrackKind::Audio);
+        let mut layout = InputLayout::new();
+        layout.add("mic", 0, 1);
+        layout.add("rme", 1, 4);
+        layout.set_default("mic");
+        // The interface's second channel, alone, and the default input in
+        // stereo, which the microphone hasn't the channels for.
+        let second = AudioInput {
+            device: "rme".into(),
+            channel: 1,
+            stereo: false,
+            ..AudioInput::default()
+        };
+        assert_eq!(
+            layout.find(&second),
+            Some(InputChannels {
+                index: 1,
+                channel: 1,
+                first: 2,
+                count: 1
+            })
+        );
+        assert_eq!(layout.find(&AudioInput::default()), None);
+        let mono = AudioInput {
+            stereo: false,
+            ..AudioInput::default()
+        };
+        assert_eq!(layout.find(&mono).map(|c| c.first), Some(0));
+        p.track_mut(vocal).unwrap().input = Some(Input::Audio(second));
+        for track in &mut p.tracks {
+            track.monitor = Monitor::In;
+        }
+        let graph =
+            compile_with_inputs(&p, &Meters::new(), &Media::new(), &Devices::new(), &layout);
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(graph.prepare(&CONFIG).unwrap()).unwrap();
+        let channels = [0.25, 0.0, 0.5, 0.0, 0.0];
+        let input: Vec<f32> = channels.iter().flat_map(|&c| [c; 64]).collect();
+        let mut out = vec![0.0; 2 * 64];
+        engine.process_with_input(
+            crate::AudioRef::from_planar(&input, 5),
+            &mut AudioMut::from_planar(&mut out, 2),
+        );
+        // The vocal's input in both channels; the guitar's is silent.
+        assert!(out.iter().all(|&s| s == 0.5));
+    }
+
+    #[test]
     fn muted_tracks_are_silent() {
         let mut p = project();
         let all = render(compile(&p).prepare(&CONFIG).unwrap(), 256);
@@ -1179,9 +1389,10 @@ mod tests {
                 break compiled.graph.unwrap();
             }
         };
-        // Five nodes for the master, the cue and the metronome, and three
-        // per track: a clip player, a fader and an output stage.
-        assert_eq!(last.len(), 20);
+        // Five nodes for the master, the cue and the metronome, and four
+        // per track: a clip player, an input monitor, a fader and an output
+        // stage.
+        assert_eq!(last.len(), 25);
         assert!(jobs.is_sorted());
         assert!(compiler.try_recv().is_none());
     }

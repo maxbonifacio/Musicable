@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::timeline::{Segment, Timeline, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
     AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, NodeEvent, NodeEventKind, NodeKey,
@@ -126,7 +127,8 @@ pub enum SwapError {
 /// changes and transport commands at the exact frame they are due. It renders
 /// whatever number of frames the device asks for, in blocks of at most
 /// [`EngineConfig::max_block`], ending a block early wherever the transport
-/// changes or a loop jumps back.
+/// changes, a loop jumps back or recording punches in or out. It publishes
+/// the transport's course on a [`Timeline`], for recording.
 ///
 /// Drop the engine off the audio thread, since that frees its graph.
 pub struct Engine {
@@ -142,6 +144,7 @@ pub struct Engine {
     /// What plays before the first graph arrives.
     silence: AudioBuffer,
     counters: Arc<Counters>,
+    timeline: TimelineWriter,
 }
 
 impl Engine {
@@ -166,6 +169,7 @@ impl Engine {
         let (message_tx, message_rx) = RingBuffer::new(QUEUE_CAPACITY);
         let (garbage_tx, garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
         let counters = Arc::new(Counters::default());
+        let (timeline, timeline_reader) = crate::timeline::timeline();
         let engine = Engine {
             config,
             renderer,
@@ -177,6 +181,7 @@ impl Engine {
             pending: Vec::with_capacity(EVENT_CAPACITY),
             silence: AudioBuffer::new(1, config.max_block),
             counters: counters.clone(),
+            timeline,
         };
         let handle = EngineHandle {
             config,
@@ -184,6 +189,7 @@ impl Engine {
             garbage: garbage_rx,
             counters,
             params: BTreeMap::new(),
+            timeline: Some(timeline_reader),
         };
         (engine, handle)
     }
@@ -305,6 +311,7 @@ impl Engine {
         self.counters.time.store(self.time, Relaxed);
         self.counters.position.store(transport.position, Relaxed);
         self.counters.playing.store(transport.playing, Relaxed);
+        self.timeline.until(self.time);
     }
 
     /// Takes everything the control thread has sent.
@@ -364,8 +371,8 @@ impl Engine {
     fn render(&mut self, input: AudioRef<'_>, offset: usize, max: usize) -> usize {
         let start = self.time;
         // Transport changes due by now apply before the block. The block ends
-        // at the next change, and where the loop jumps back, so each block has
-        // one transport state.
+        // at the next change, where the loop jumps back and where recording
+        // punches in or out, so each block has one transport state.
         let due_now = self.pending.partition_point(|p| p.time <= start);
         for i in 0..due_now {
             if let Event::Transport(command) = self.pending[i].event {
@@ -373,8 +380,26 @@ impl Engine {
             }
         }
         self.transport.wrap();
+        let state = self.transport.state();
+        self.timeline.block(Segment {
+            time: start,
+            position: state.position,
+            playing: state.playing,
+            record: state.record,
+            recording: state.recording,
+            latency: self
+                .graph
+                .as_ref()
+                .map_or(0, |graph| graph.latency() as u64),
+        });
         let mut end = start + max.min(self.config.max_block) as u64;
-        if let Some(frames) = self.transport.frames_to_loop_end() {
+        for frames in [
+            self.transport.frames_to_loop_end(),
+            self.transport.frames_to_punch(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             end = end.min(start + frames);
         }
         for p in &self.pending[due_now..] {
@@ -456,6 +481,7 @@ pub struct EngineHandle {
     /// again after each swap, since a node that is new in the graph missed
     /// anything sent while the graph was being compiled.
     params: BTreeMap<(NodeKey, ParamId), LastValue>,
+    timeline: Option<Timeline>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -474,6 +500,14 @@ impl EngineHandle {
 
     pub fn stats(&self) -> Stats {
         self.counters.snapshot()
+    }
+
+    /// The engine's [`Timeline`], for a recorder: where in the song each
+    /// frame it renders plays, and whether it records. There's one, and the
+    /// first call takes it. Read it every so often, or the engine drops
+    /// what it publishes.
+    pub fn take_timeline(&mut self) -> Option<Timeline> {
+        self.timeline.take()
     }
 
     /// Sends an event to apply at the start of the engine's next `process`
@@ -645,6 +679,25 @@ mod tests {
                     false => -1.0,
                 };
             }
+        }
+    }
+
+    /// Outputs 1 while the transport records, and 0 otherwise.
+    struct Recording;
+
+    impl Node for Recording {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            _inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            let recording = if ctx.transport.recording { 1.0 } else { 0.0 };
+            output.channel_mut(0).fill(recording);
         }
     }
 
@@ -1004,6 +1057,71 @@ mod tests {
                 } as f32)
                 .collect();
             assert_eq!(out, expected, "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn recording_punches_in_and_out_on_its_frames_and_the_timeline_follows() {
+        for sizes in [&[1][..], &[7, 64, 1000], &[5000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            let mut timeline = handle.take_timeline().unwrap();
+            assert!(handle.take_timeline().is_none());
+            handle.swap_graph(single(0, Recording)).unwrap();
+            // Looping over frames 0 to 18,000, recording from 6,000 to 12,000.
+            let quarter = |n| Some(Beats::from_ratio(n, 4));
+            let punch = TransportCommand::Punch {
+                start: quarter(1),
+                end: quarter(2),
+            };
+            handle.send(Event::Transport(punch)).unwrap();
+            handle
+                .send(looping(Beats::ZERO, Beats::from_ratio(3, 4)))
+                .unwrap();
+            let record = Event::Transport(TransportCommand::Record(true));
+            handle.send(record).unwrap();
+            handle.send(play()).unwrap();
+            let out = render(&mut engine, 40_000, sizes);
+            let expected: Vec<f32> = (0..40_000)
+                .map(|i| match i % 18_000 {
+                    6_000..12_000 => 1.0,
+                    _ => 0.0,
+                })
+                .collect();
+            assert_eq!(out, expected, "{sizes:?}");
+
+            let mut segments = Vec::new();
+            let read = timeline.read(&mut segments);
+            assert_eq!((read.until, read.lost), (40_000, false));
+            let course: Vec<(u64, u64, bool)> = segments
+                .iter()
+                .map(|s| {
+                    assert!(s.playing && s.record && s.latency == 0);
+                    (s.time, s.position, s.recording)
+                })
+                .collect();
+            assert_eq!(
+                course,
+                [
+                    (0, 0, false),
+                    (6_000, 6_000, true),
+                    (12_000, 12_000, false),
+                    (18_000, 0, false),
+                    (24_000, 6_000, true),
+                    (30_000, 12_000, false),
+                    (36_000, 0, false),
+                ],
+                "{sizes:?}"
+            );
+
+            // Stopping stops recording.
+            handle
+                .send(Event::Transport(TransportCommand::Stop))
+                .unwrap();
+            render(&mut engine, 10, sizes);
+            segments.clear();
+            timeline.read(&mut segments);
+            assert_eq!(segments.len(), 1);
+            assert!(!segments[0].playing && !segments[0].record);
         }
     }
 

@@ -35,12 +35,13 @@ mod render;
 pub mod resample;
 pub mod rt;
 pub mod tasks;
+pub mod timeline;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
-    Compiled, Compiler, Devices, NodeMaker, compile, compile_metered, compile_with_devices,
-    compile_with_media,
+    Compiled, Compiler, Devices, InputChannels, InputLayout, NodeMaker, compile, compile_metered,
+    compile_with_devices, compile_with_inputs, compile_with_media,
 };
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{
@@ -50,6 +51,7 @@ pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
+pub use timeline::{Segment, Timeline};
 
 #[cfg(test)]
 #[global_allocator]

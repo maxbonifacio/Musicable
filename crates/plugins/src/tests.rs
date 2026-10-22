@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use clap_sys::events::{
     CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_IS_LOOP_ACTIVE,
-    CLAP_TRANSPORT_IS_PLAYING,
+    CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING,
 };
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use musicable_engine::nodes::Sum;
@@ -679,6 +679,8 @@ fn plugins_see_the_transport() {
             playing: true,
             position: 48_000,
             looping: Some(BeatRange::new(Beats::ZERO, Beats::new(4))),
+            record: true,
+            recording: true,
             jumps: 0,
         },
         tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
@@ -690,6 +692,7 @@ fn plugins_see_the_transport() {
         CLAP_TRANSPORT_HAS_TEMPO,
         CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
         CLAP_TRANSPORT_IS_PLAYING,
+        CLAP_TRANSPORT_IS_RECORDING,
         CLAP_TRANSPORT_IS_LOOP_ACTIVE,
     ] {
         assert_ne!(flags & flag, 0, "{flag}");
