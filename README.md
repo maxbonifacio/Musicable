@@ -6,7 +6,8 @@ recording, editing and mixing. Live performance (Session View) comes later.
 
 > Status: pre-alpha. Nothing usable yet. Tier 0, the foundation, is done:
 > the app plays, loops and saves projects of test tones. Tier 1 is under
-> way, with undo, a mixer and changing keys in the app so far. See
+> way, with undo, a mixer, changing keys in the app, audio and MIDI clips,
+> and an arrangement view to arrange them in so far. See
 > [docs/app.md](docs/app.md), and
 > [docs/architecture.md](docs/architecture.md) for how it fits together.
 

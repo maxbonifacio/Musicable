@@ -1,22 +1,59 @@
 # Commands and keymaps
 
 Every user action in Musicable is a named command, and key presses reach
-commands only through a keymap. Menus and the command palette run the same
-commands, and scripts and agents will, so remapping a shortcut is just
-editing the keymap. This page covers the commands so far, the transactions
-they change the project through, undo and redo, how the app runs them, key
-chords and the keymap file. How the app's window hands key presses to the
-keymap, and how keys are changed there, is in [app.md](app.md#keys).
+commands only through a keymap. Menus, the command palette and the
+arrangement's mouse gestures run the same commands, and scripts and agents
+will, so remapping a shortcut is just editing the keymap. This page covers
+the commands so far, the editor's state they read and change, the
+transactions they change the project through, undo and redo, how the app
+runs them, key chords and the keymap file. How the app's window hands key
+presses to the keymap, and how keys are changed there, is in
+[app.md](app.md#keys).
 
 ## Commands
 
 A command has a dotted id, `area.action` in lower case, and a title in title
 case for menus and the palette. Keymap files name commands by id, so a
 command keeps its id once it has shipped. Each area registers its commands
-with the `Registry`, as `transport::register` does, and `Registry::run` runs
-one by id. A running command gets a `Context`: the open project's `Document`,
-the engine's `Transport`, and a list of `Request`s for what only the app can
-do, such as showing a file dialog.
+with the `Registry`, as `transport::register` does, and
+`musicable_commands::register_all` registers every area's. A running command
+gets a `Context`: the open project's `Document`, with the editor's state
+(below), the engine's `Transport`, and a list of `Request`s for what only
+the app can do, such as showing a file dialog.
+
+### Arguments and results
+
+A command can take arguments, and give back a result, so the arrangement's
+gestures, scripts and agents can say exactly what to change. Its `params`
+list them: each `Param` has a name, a `Type` (a bool, an integer, a number,
+text, a position in beats, a track, a clip, a locator, or a list of one of
+those), whether it's optional, and a line on what it's for.
+
+- `Registry::run_with(id, &args, ctx)` runs a command with `Args`, built
+  with `Args::new().with("clips", ids).with("by", Beats::new(4))`. It checks
+  them against the params first: a missing required argument, one the
+  command doesn't take, or one of the wrong type is an error, and nothing
+  runs. It returns the command's result, a `Value`, such as the ids of the
+  clips Move Clips copied.
+- A command that names something the project doesn't have, or asks for what
+  can't be done, such as an audio clip on a MIDI track, returns
+  `CommandError::Invalid` with the reason, and changes nothing.
+- `Registry::run` runs one without arguments, as keys, menus and the
+  command palette do.
+- `Command::needs_arguments` says whether it has a required param. Keys,
+  menus and the palette can't give arguments, so they leave those commands
+  out: the keyboard shortcuts window and the palette don't list them. The
+  arrangement's context menus fill them in from where they were opened
+  ([app.md](app.md#the-arrangement)).
+
+### When a command applies
+
+A command's `when` says when it applies without arguments: always, or only
+with clips selected, with something to paste, and so on (`When`). Menus,
+context menus and the palette grey out a command that doesn't apply, and a
+key that runs one does nothing: `Registry::run` returns without running it,
+and `run_with` returns `CommandError::NotNow`. A command given arguments
+runs whatever is selected, as they say what it works on.
 
 ### Transport
 
@@ -24,19 +61,29 @@ The default keymap follows Ableton Live's shortcuts where Live has one.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `transport.play_stop` | Play/Stop | Plays from the playhead, or stops if playing | Space | Space |
-| `transport.play` | Play | Plays from the playhead | Shift+Space | Shift+Space (continue from the stop point) |
+| `transport.play_stop` | Play/Stop | Plays from the start marker, or stops if playing | Space | Space |
+| `transport.play` | Play | Plays from the playhead: where playing stopped | Shift+Space | Shift+Space (continue from the stop point) |
 | `transport.stop` | Stop | Stops, leaving the playhead where it is | Ctrl+Period | none |
-| `transport.go_to_start` | Go to Start | Moves the playhead to the start of the song | Home | Home |
-| `transport.toggle_loop` | Toggle Loop | Turns looping over the loop region on or off | Ctrl+L | Ctrl+L |
+| `transport.go_to_start` | Go to Start | Moves the start marker and the playhead to the start of the song | Home | Home |
+| `transport.toggle_loop` | Toggle Loop | Loops the selection, or else turns looping over the loop region on or off | Ctrl+L | Ctrl+L |
 | `transport.toggle_metronome` | Toggle Metronome | Turns the metronome on or off | O | O |
 | `transport.tempo_up` | Tempo Up | Raises the tempo by 1 BPM | Ctrl+Shift+Up | none |
 | `transport.tempo_down` | Tempo Down | Lowers the tempo by 1 BPM | Ctrl+Shift+Down | none |
 
-In Live, Space plays from the start marker. Musicable has no start marker
-yet, so for now Space and Shift+Space both play from the playhead. Live has
-no keys for stop and tempo; the ones chosen do nothing in Live outside its
-MIDI note editor.
+These take arguments, for the ruler's gestures and the tempo field:
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `transport.locate` | Locate | `at` | Moves the start marker and the playhead there; playing goes on from there |
+| `transport.set_start_marker` | Set Start Marker | `at` | Moves the start marker, and the playhead with it while stopped |
+| `transport.set_loop` | Set Loop | `start`, `end`, `looping`? | Sets the loop region, and turns looping on or off |
+| `transport.set_tempo` | Set Tempo | `bpm`, `at`? | Sets the tempo at `at`, or the playhead, moving every other tempo by as much |
+
+Space plays from the start marker, as in Live, so playing again starts
+where the last play did. The `play_from` setting
+([app.md](app.md#settings-and-your-keymap)) has it play from wherever the
+playhead stopped instead. Live has no keys for stop and tempo; the ones
+chosen do nothing in Live outside its MIDI note editor.
 
 ### File
 
@@ -51,19 +98,81 @@ has run ([app.md](app.md#files)).
 | `file.open` | Open Project... | Asks for a project file and opens it | Ctrl+O |
 | `file.save` | Save Project | Saves the project, asking where if it has no file yet | Ctrl+S |
 | `file.save_as` | Save Project As... | Asks where to save the project, and saves it there | Ctrl+Shift+S |
+| `file.import_audio` | Import Audio Files... | Asks for audio files, and puts them on the selected track | none |
 | `file.quit` | Quit | Closes Musicable | Ctrl+Q |
 
 New, New Demo, Open and Quit ask about unsaved changes first.
 
 ### Edit
 
+The edit commands work on the selection ([below](#the-editors-state)):
+the selected clips, or else the time selection, or else the selected
+tracks.
+
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
 | `edit.undo` | Undo | Takes back the last change to the project | Ctrl+Z | Ctrl+Z |
 | `edit.redo` | Redo | Makes the last change undo took back again | Ctrl+Y, Ctrl+Shift+Z | Ctrl+Y |
+| `edit.cut` | Cut | Copies the selection, then deletes it | Ctrl+X | Ctrl+X |
+| `edit.copy` | Copy | Copies the selected clips, or the parts of clips in the time selection | Ctrl+C | Ctrl+C |
+| `edit.paste` | Paste | Puts what was copied at the start marker, from the selected track down | Ctrl+V | Ctrl+V |
+| `edit.duplicate` | Duplicate | Puts a copy of the selection just after it, and selects the copy | Ctrl+D | Ctrl+D |
+| `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
+| `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
+| `edit.select_all` | Select All | Selects every clip | Ctrl+A | Ctrl+A |
+| `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track | Ctrl+R | Ctrl+R |
+
+And for the arrangement's clicks, scripts and agents:
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `edit.select_clips` | Select Clips | `clips`, `toggle`? | Selects the clips, or adds them to the selection or takes them away |
+| `edit.select_time` | Select Time | `start`, `end`, `tracks` | Selects a stretch of time on some tracks |
+| `edit.select_tracks` | Select Tracks | `tracks`, `toggle`? | Selects tracks |
 
 The Edit menu names the change, as in "Undo Tempo Up". Ctrl+Shift+Z is
-the other common key for redo.
+the other common key for redo. Clips that land where others are, by
+pasting, moving or duplicating, overwrite what's there, as in Live: it's
+trimmed back, split around them, or removed. Cut, Copy and Paste keep the
+clips in the editor's clipboard, not the system's.
+
+### Clip
+
+These change the clips their arguments name, for the arrangement's
+gestures, scripts and agents. Splitting and trimming keep a clip's content
+where it plays in the song, so an audio clip split in two plays exactly as
+before.
+
+| Command | Title | Arguments | What it does | Default key |
+|---|---|---|---|---|
+| `clip.move` | Move Clips | `clips`, `by`?, `tracks`?, `copy`? | Moves the clips, or copies them, some beats later or earlier and some tracks down or up; gives back the ids of the clips moved or the copies | none |
+| `clip.trim` | Trim Clip | `clip`, `start`?, `end`? | Moves a clip's start or end. An audio clip doesn't go past its file's end | none |
+| `clip.set_fades` | Set Fades | `clip`, `fade_in`?, `fade_out`? | Sets an audio clip's fades, which fit inside it | none |
+| `clip.rename` | Rename Clip | `clip`, `name` | Names a clip | none |
+| `clip.split` | Split Clips | `clips`, `at` | Splits the clips at a position | none |
+| `clip.delete` | Delete Clips | `clips` | Deletes clips | none |
+| `clip.insert_midi_clip` | Insert MIDI Clip | `track`?, `start`?, `end`? | Adds an empty MIDI clip: over the time selection on its MIDI tracks, or else a bar from the start marker on the selected track | Ctrl+Shift+M |
+| `clip.insert_audio` | Insert Audio | `files`, `track`?, `at`? | Adds clips that play whole audio files, one after another, on the selected audio track or a new one, from the time selection's start or the start marker | none |
+
+When the clips can't all land on tracks that hold them, such as an audio
+clip on a MIDI track, they keep their tracks and only move in time. Moving
+clips before the start of the song stops at the start. Insert Audio needs each file's header read into
+the editor first ([below](#the-editors-state)): the app reads it when a file
+is dropped or imported.
+
+### Locator
+
+| Command | Title | Arguments | What it does | Default key |
+|---|---|---|---|---|
+| `locator.add` | Add Locator | `at`?, `name`? | Adds a locator at the playhead while playing, or else at the start marker, as Live's Set button does | none |
+| `locator.previous` | Previous Locator | | Jumps to the locator before the playhead, or before the start marker while stopped | none |
+| `locator.next` | Next Locator | | Jumps to the locator after it | none |
+| `locator.move` | Move Locator | `locator`, `at` | Moves a locator | none |
+| `locator.rename` | Rename Locator | `locator`, `name` | Names a locator | none |
+| `locator.delete` | Delete Locator | `locator` | Deletes a locator | none |
+
+A new locator is named with a number, counting the locators. Live has no
+keys for these either.
 
 ### Track
 
@@ -73,6 +182,8 @@ the other common key for redo.
 | `track.new_midi_track` | New MIDI Track | Adds a MIDI track | Ctrl+Shift+T | Ctrl+Shift+T |
 | `track.new_return_track` | New Return Track | Adds a return track | Ctrl+Alt+T | Ctrl+Alt+T |
 | `track.new_group_track` | New Group Track | Adds an empty group track | none | none |
+| `track.delete` | Delete Tracks | Deletes the selected tracks, or the ones its `tracks` argument names | none | Delete, with tracks selected |
+| `track.rename` | Rename Track | Names the track its `track` argument names, `name` | none | none |
 
 A new track is named after its kind and how many of that kind there are,
 such as "Audio 3". Return tracks go at the end of the list, and other tracks
@@ -82,10 +193,12 @@ which needs a selection, so New Group Track has no key yet.
 
 ### The mixer's controls
 
-The mixer's faders, pan, sends, buttons and menus set values, and commands
-don't take values yet. So, like the tempo field, each control hands back a
-`mixer::Change`, and `mixer::change` makes it as one transaction, named for
-the Edit menu:
+The mixer's faders, pan, sends, buttons and menus hand back a
+`mixer::Change`. `Change::command` names the command that makes it, with
+its arguments, such as `mixer.set_volume` with `track` and `gain`, and the
+app runs that, so scripts and agents set the same values the same way.
+`mixer::change` makes a change as one transaction directly, named for the
+Edit menu:
 
 | Change | What it does | Named |
 |---|---|---|
@@ -102,8 +215,13 @@ the Edit menu:
 | `RemoveSend` | Removes a send | Remove Send |
 | `Delete` | Deletes a track; what fed it feeds the master, and sends to it go | Delete Track |
 
-A change the routing rules don't allow, such as an output that would make a
-loop, does nothing.
+The commands are `mixer.set_volume`, `set_pan`, `set_mute`, `set_solo`,
+`set_solo_safe`, `set_arm`, `set_output`, `set_clip_type`,
+`set_send_level`, `set_send_pre_fader`, `remove_send`,
+`set_master_volume`, `set_master_pan` and `set_master_clip_type`; deleting a
+track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
+(left) to 1. A change the routing rules don't allow, such as an output that
+would make a loop, does nothing.
 
 ### Options and View
 
@@ -115,9 +233,55 @@ other. They push a `Request`, as the file commands do.
 | `options.audio_settings` | Audio Settings... | Shows the audio settings | Ctrl+Comma | Ctrl+Comma (Preferences) |
 | `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the keys, where they're changed | Ctrl+K | Ctrl+K (Key Map Mode) |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
+| `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
+| `view.zoom_in` | Zoom In | Zooms the arrangement in, around the start marker | Equals, NumpadAdd | + |
+| `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
+| `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement | Z | Z |
+| `view.toggle_follow` | Follow | Scrolls the arrangement to keep the playhead in sight, or stops | Ctrl+Shift+F | Ctrl+Shift+F |
+| `view.narrow_grid` | Narrow Grid | Brings the grid's lines closer | Ctrl+1 | Ctrl+1 |
+| `view.widen_grid` | Widen Grid | Takes them further apart | Ctrl+2 | Ctrl+2 |
+| `view.triplet_grid` | Triplet Grid | Turns triplet lines on or off | Ctrl+3 | Ctrl+3 |
+| `view.toggle_snap` | Snap to Grid | Turns snapping on or off | Ctrl+4 | Ctrl+4 |
+| `view.fixed_grid` | Fixed Grid | Keeps the grid's step whatever the zoom, or lets it follow the zoom | Ctrl+5 | Ctrl+5 |
 
-Live has no command palette. Ctrl+Shift+P is the usual key for one in other
-apps.
+`view.set_viewport` (`start`, `zoom`, `top`, `width`) and
+`view.set_track_height` (`track`, `height`) carry the arrangement's
+scrolling, zooming and track heights. They change the editor's state, not
+the project, so undo leaves them alone. Live has no command palette.
+Ctrl+Shift+P is the usual key for one in other apps.
+
+## The editor's state
+
+What the arrangement edits besides the project lives in an `Editor`, kept
+with the `Document` (`Document::editor` and `editor_mut`), outside the
+widgets. Commands read and change it just as the UI does, and so will
+extensions and agents; the piano roll will share it. It isn't saved with the
+project, undo leaves it alone, and opening a project starts a new one, but
+for the behaviour settings.
+
+- **The selection** (`Selection`): clips, a time selection (a stretch of
+  beats on some tracks), or tracks, and the selected track, which new clips
+  and pasting start from.
+- **The start marker**: where Play/Stop plays from, Paste pastes to and
+  Split splits the selected clips. Clicking in the arrangement puts it
+  there.
+- **The grid** (`Grid`): adaptive, with lines at least `Grid::MIN_SPACING`
+  points apart and a density Narrow and Widen Grid change, or fixed at a
+  step; triplets; and whether gestures snap to it.
+- **The viewport** (`Viewport`): the position at the left edge, the zoom in
+  points per beat, how far down the tracks are scrolled, and the timeline's
+  width, which the arrangement reports so zooming to fit works. Follow
+  turns its pages while the playhead plays out of sight.
+- **Track heights** in points, between `view::MIN_TRACK_HEIGHT` and
+  `MAX_TRACK_HEIGHT`, for the tracks whose height was changed.
+- **Behaviour** (`Behaviour`): how editing behaves where people's habits
+  differ, kept as settings so profiles can follow other DAWs. So far:
+  where Play/Stop plays from.
+- **Audio files** (`AudioFile`): the sample rate, length and channels of
+  each file clips play, by the path the clips give. The app reads them
+  ([app.md](app.md#audio-files)). Trimming keeps an audio clip inside its
+  file, and positions inside a file count in the file's own frames.
+- **The clipboard**: what Cut and Copy took, for Paste.
 
 ## Transactions
 
@@ -134,7 +298,9 @@ ctx.document.transact("Toggle Metronome", |tx| {
 A `Transaction` has a setter for each part of the project that commands
 change: the tempo map, the loop region, looping and the metronome; adding
 and removing tracks and sends; each mixer setting of a track, a send and the
-master.
+master; adding and removing clips, and their timing, fades and names; and
+adding, moving, naming and removing locators. `Transaction::editor` reads
+the editor's state, such as the files' sample rates.
 Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
 recorded leaves no trace. Any other is committed under its name, which the
@@ -193,7 +359,11 @@ stops the transport at the start of the song. Then:
 - `Session::key_pressed` looks a chord up in the keymap and runs the command
   bound to it. It returns `false` if no command is bound, so the key can go
   elsewhere.
-- `Session::run` runs a command by id, for menus and the command palette.
+- `Session::run` runs a command by id, for menus and the command palette,
+  and `Session::run_with` runs one with arguments, for the arrangement's
+  gestures and context menus, and returns its result.
+- `Session::editor` and `editor_mut` are the editor's state. The app puts
+  the audio files' headers there as it reads them.
 - After each command, the session sends the engine what the committed
   transactions changed:
 
@@ -205,7 +375,8 @@ stops the transport at the start of the song. Then:
   | Track or master gain and pan, send level | The fader's or the send's `Gain::GAIN` or `Gain::PAN` parameter |
   | Mute, solo, solo-safe | `Gain::MUTE` for each output stage and send whose mute changed |
   | Adding or removing a track or a send, an output, pre/post, a clip type | A new graph, which the compiler's thread builds |
-  | Track name, arm | Nothing yet |
+  | Adding or removing a clip, its timing, its fades | A new graph |
+  | Track and clip names, arm, locators | Nothing yet |
 
   Play, stop and go to start send their `TransportCommand` as they run.
 - `Session::take_requests` hands over what the commands asked of the app,
@@ -217,6 +388,14 @@ stops the transport at the start of the song. Then:
   to read.
 - `Session::begin_gesture` and `end_gesture` make a drag one step in the
   undo history, and `undo_name` and `redo_name` are for the Edit menu.
+- `Session::revision` goes up with every change to the project, undone and
+  redone ones too, and when another project opens, for what follows the
+  project, such as the app's reading of its audio files.
+- `Session::heard_position` is where the playhead is in what's heard:
+  while playing, the engine's position less the graph's latency
+  (`Stats::latency`) and the device's output latency, which the app passes
+  in. The transport bar and the arrangement show that, and
+  `Session::beats_at` turns it into beats.
 - `Session::tick` belongs in every UI frame. While the engine's queue is
   full, as when the audio device has stopped, the session holds on to what
   doesn't fit, and `tick` sends it, in order, once there is room. It also
@@ -355,6 +534,7 @@ these:
   have, which the window shows with a Remove button.
 
 [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
-drives the whole window as eframe would: it gives every command new keys in
-the keyboard shortcuts window, finds every command in the command palette
-with its keys, and starts the app again to see they're kept.
+drives the whole window as eframe would: it gives every command that takes
+no arguments new keys in the keyboard shortcuts window, finds each in the
+command palette with its keys, and starts the app again to see they're
+kept.

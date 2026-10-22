@@ -18,7 +18,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
 | `plugins` | `engine` | Nothing yet: CLAP and VST3 hosting in Tier 1, ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
-| `ui` | `model`, `commands` | What the window shows, drawn with egui: a `View` in, `Action`s out |
+| `ui` | `model`, `commands` | What the window shows, drawn with egui: the arrangement, the mixer, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
 
 Cargo enforces the directions that matter. The engine knows nothing of
@@ -35,6 +35,7 @@ compiler, a node and the UI, in that order.
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
+| Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
 
 There is one worker per physical core, minus one for the audio thread,
 which works too, and no more than 24 on Windows. While audio plays, the
@@ -132,6 +133,11 @@ Tier 1 has to keep these. The tests check most of them.
 - **Every parameter change goes through `EngineHandle::send` or
   `send_at`**, even when it's also written to the model, so a value sent
   while a new graph was compiling isn't lost.
+- **The mouse runs commands too.** A gesture in the arrangement or the
+  mixer runs a command with arguments, not code of its own, and a drag runs
+  one when it ends, so it's one step to undo. Context menus list commands
+  from the registry. Selections, the zoom and the like live in the
+  `Editor`, not in the widgets.
 - **A change to what a project file holds is a new format version**, with a
   migration step and fixtures
   ([project-format.md](project-format.md#changing-the-format)).
@@ -155,8 +161,19 @@ built yet, except where it says so.
   `NodeEventKind::Note`s at sample offsets, and can pass through a chain of
   nodes, such as a MIDI effect, on their way to an instrument
   ([engine.md](engine.md#clips), [app.md](app.md#audio-files)). The
-  arrangement view, where clips are made and edited, is next; edits to
-  clips and notes come with it as new kinds of `Edit`.
+  arrangement view makes and edits them (below); editing notes comes with
+  the piano roll.
+- **The arrangement view.** Built: tracks with headers, clips with
+  waveforms and notes, the ruler with locators, the start marker and the
+  loop brace, drawn with egui's painter, only what's in sight, so a hundred
+  tracks of clips take 3 to 4 ms a frame ([app.md](app.md#the-arrangement)).
+  Its gestures run commands with typed arguments, such as `clip.move`, and
+  commands say when they apply (`When`). What it edits besides the project
+  (the selection, the start marker, the grid, the zoom, the behaviour
+  settings) is the `Editor`, kept with the `Document` outside the widgets,
+  where the piano roll, extensions and agents will find it too
+  ([commands.md](commands.md#the-editors-state)). Colours and sizes come
+  from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. So far
