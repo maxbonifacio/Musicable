@@ -122,7 +122,12 @@ That's what `ParallelOptions::inline_below` is for
   Tempo" transaction, and a whole drag is one step in the undo history.
 - **The arrangement** fills the middle of the window: the tracks over time,
   with their clips, under a ruler ([below](#the-arrangement)).
-- **The mixer** is a panel under it, with a strip for each track and the
+- **The devices panel** is under the arrangement: the selected track's
+  devices, or the master's, with Add Plugin to open the plugin browser (see
+  [Plugins](#plugins)). **View > Devices** (Ctrl+Alt+L) hides or shows it.
+- **The plugin browser** is a panel on the left, hidden until Add Plugin or
+  **View > Plugin Browser** (Ctrl+Alt+B) shows it.
+- **The mixer** is a panel under them, with a strip for each track and the
   master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
   make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
   shows it.
@@ -342,6 +347,48 @@ mixer's controls hand back `Action::Mixer` with a `mixer::Change`, which the
 app runs as its command with `Session::change_mixer`
 ([commands.md](commands.md#the-mixers-controls)).
 
+## Plugins
+
+The app finds CLAP plugins in CLAP's usual places, and in the folders in
+`CLAP_PATH` ([plugins.md](plugins.md#scanning)). It scans in the background
+as it starts, with the plugins the last scan found ready at once, and
+loads only the libraries that are new or changed since. A library that
+crashes, hangs or fails as it loads is left out, and the status bar says
+which; **Options > Rescan Plugins** tries those again too.
+
+**The plugin browser** lists the plugins found by name: all of them, or
+only the instruments or the effects. Hovering one shows its vendor, its
+kind and its format. The search field finds plugins by name or vendor, the
+best matches first. Double-click a plugin to put it at the end of the
+selected track's devices, or the master's while the devices panel shows
+those. The browser's foot says how many plugins there are, and has Rescan,
+or says "Scanning..." while a scan runs.
+
+**The devices panel** shows the devices of the selected track, which a
+click on its header selects, in the order the signal goes through them,
+left to right. The buttons above them pick the selected track's or the
+master's. Each device has its name, its kind and format ("Instrument ·
+CLAP"), and:
+
+- **Plugin Window**, which opens the plugin's own window, or closes it.
+  Double-clicking the device's name opens it too, as in Live. On Windows
+  the plugin's window goes inside a window of Musicable's that stays in
+  front of the main window and minimizes with it; elsewhere it's a window
+  of the plugin's own.
+- **×**, which deletes the device.
+- Why the plugin isn't playing, when it isn't: it isn't installed, it
+  didn't load, or the scan that finds it hasn't finished. A device whose
+  plugin isn't playing lets the signal through as it is, and keeps its
+  settings for when the plugin is there.
+
+Adding, deleting and every change made in a plugin's window are steps in
+the undo history, named after the plugin, such as "Change Surge XT"; a
+whole drag of a knob is one. Saving the project saves each plugin's state
+as it is then. Delay compensation lines up every track with the latest
+one, so a plugin that looks ahead doesn't put its track out of time
+([engine.md](engine.md#delay-compensation)). [plugins.md](plugins.md)
+has how the app hosts plugins.
+
 ## Keys
 
 Every key press goes to the keymap before egui sees it, through
@@ -476,6 +523,10 @@ The app keeps its settings and your keymap in its config folder:
 The `MUSICABLE_CONFIG_DIR` environment variable picks another folder, which
 is handy for testing.
 
+`plugins.json` is what the plugin scans found, so the next start has the
+plugins at once and scans only what changed. Deleting it makes the next
+scan load every library again.
+
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
 describes. The app reads it at startup and when you click Reload in
 Options > Keyboard Shortcuts, which shows any mistakes in it. A file that
@@ -592,7 +643,12 @@ for, since those builds are distributed under it.
   inserts a MIDI clip, moves, duplicates, splits, deletes, trims and fades
   clips, draws and toggles the loop, adds a locator from the ruler's menu,
   zooms, undoes every step and redoes it, then saves and opens the project
-  again. `crates/app/src/app/testing.rs` has what both share.
+  again.
+  [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
+  puts the test plugins on a track from the plugin browser, opens and
+  closes a plugin's window from the devices panel, turns a knob in it,
+  undoes, deletes a device, saves, and opens the project again.
+  `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
   only what's in sight of a hundred tracks is laid out.
@@ -618,6 +674,11 @@ for, since those builds are distributed under it.
   one of them streaming, and whose MIDI clip plays the test instrument. It
   checks that every renderer plays it the same, and that a missing file is
   reported.
+- [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays the
+  test plugins on tracks through the session: saved and opened again,
+  undoing changes made in their windows, missing, and lined up with a dry
+  track by delay compensation. It also runs the app's binary as the plugin
+  scanner.
 
 To see the window without Windows, a Linux build runs under Xvfb, and the
 Windows build runs under Wine with `WGPU_BACKEND=vulkan` (Wine's Direct3D 12
@@ -627,6 +688,8 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
+- Dragging plugins from the browser onto tracks, moving devices along a
+  chain, and a device's parameters in the devices panel.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would

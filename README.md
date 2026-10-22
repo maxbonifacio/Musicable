@@ -7,7 +7,8 @@ recording, editing and mixing. Live performance (Session View) comes later.
 > Status: pre-alpha. Nothing usable yet. Tier 0, the foundation, is done:
 > the app plays, loops and saves projects of test tones. Tier 1 is under
 > way, with undo, a mixer, changing keys in the app, audio and MIDI clips,
-> and an arrangement view to arrange them in so far. See
+> an arrangement view to arrange them in, and CLAP plugins on tracks so
+> far. See
 > [docs/app.md](docs/app.md), and
 > [docs/architecture.md](docs/architecture.md) for how it fits together.
 
@@ -34,7 +35,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/commands` | Command registry, keymaps and transactions. See [docs/commands.md](docs/commands.md). |
 | `crates/engine` | Real-time audio engine: graph, reference renderer and parallel scheduler. See [docs/engine.md](docs/engine.md). |
 | `crates/audio` | Audio device output: our own WASAPI backend on Windows, and our own ASIO host with the `asio` feature; cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
-| `crates/plugins` | CLAP, VST3 and ARA hosting. |
+| `crates/plugins` | CLAP hosting so far, then VST3 and ARA. See [docs/plugins.md](docs/plugins.md). |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
 | `crates/app` | The `musicable` app: its window, the audio output, and the session that runs commands and keeps the engine in step with the project. |
