@@ -49,9 +49,9 @@ the stable channel. On Windows, use the MSVC toolchain, as CI does:
    rustup default stable
    ```
 
-Plugins and their SDKs are built with MSVC, the ASIO build will need it, and
-Windows debuggers read its debug information. The GNU toolchain
-(`x86_64-pc-windows-gnu`) builds Musicable too, but nothing tests it.
+Plugins and their SDKs are built with MSVC, and Windows debuggers read its
+debug information. The GNU toolchain (`x86_64-pc-windows-gnu`) builds
+Musicable too, but nothing tests it.
 
 ## Before opening a pull request
 
@@ -59,6 +59,14 @@ Windows debuggers read its debug information. The GNU toolchain
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+CI also checks the ASIO build (the `asio` feature, [docs/audio.md](docs/audio.md#asio)),
+which matters when you change `crates/audio` or the app's audio settings:
+
+```sh
+cargo clippy --workspace --all-targets --features musicable-app/asio -- -D warnings
+cargo test -p musicable-audio --features asio
 ```
 
 ## Project files

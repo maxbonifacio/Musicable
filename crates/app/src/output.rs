@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use musicable_audio::{
-    self as audio, Api, OpenStream, SampleFormat, StartError, Stream, StreamInfo, StreamRequest,
-    StreamStats,
+    self as audio, Api, DriverType, OpenStream, SampleFormat, StartError, Stream, StreamInfo,
+    StreamRequest, StreamStats,
 };
 use musicable_engine::{Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelStats};
 
@@ -33,7 +33,8 @@ const METER_WINDOW: Duration = Duration::from_millis(250);
 /// it to the [`Session`], which sets it up where the old one left off.
 ///
 /// When the device fails or goes away, the engine waits, and the output tries
-/// the device again every two seconds.
+/// the device again every two seconds. An ASIO driver that asks to be reset,
+/// after a change in its own settings, opens again at once.
 pub struct Output {
     /// The stream to keep open.
     request: StreamRequest,
@@ -47,6 +48,8 @@ pub struct Output {
     problem: Option<String>,
     /// When to try the device again, while no stream plays.
     retry_at: Option<Instant>,
+    /// Whether the stream ended because an ASIO driver asked to be reset.
+    reset: bool,
     meter: LoadMeter,
     /// The stream's dropouts when the user last reset the count.
     dropouts_from: u64,
@@ -62,11 +65,22 @@ impl Output {
     pub fn open(request: StreamRequest, notices: &mut Vec<String>) -> (Self, EngineHandle) {
         let mut request = request;
         let mut opened = audio::open(&request);
-        if matches!(opened, Err(audio::Error::DeviceNotFound)) && request.device.is_some() {
+        if matches!(opened, Err(audio::Error::DeviceNotFound))
+            && let Some(device) = &request.device
+        {
+            let asio = DriverType::of(device) == DriverType::Asio;
             notices.push(
-                "The audio device in the settings isn't plugged in, so Musicable plays through \
-                 the default output."
-                    .to_owned(),
+                if asio && !audio::driver_types().contains(&DriverType::Asio) {
+                    "The audio settings name an ASIO driver, and this build of Musicable has no \
+                     ASIO, so it plays through the default output."
+                } else if asio {
+                    "The ASIO driver in the audio settings isn't installed, so Musicable plays \
+                     through the default output."
+                } else {
+                    "The audio device in the settings isn't plugged in, so Musicable plays \
+                     through the default output."
+                }
+                .to_owned(),
             );
             request = StreamRequest::default();
             opened = audio::open(&request);
@@ -82,6 +96,7 @@ impl Output {
             monitor,
             problem: None,
             retry_at: None,
+            reset: false,
             meter: LoadMeter::default(),
             dropouts_from: 0,
         };
@@ -104,6 +119,7 @@ impl Output {
             monitor,
             problem: Some("the tests play through no device".to_owned()),
             retry_at: None,
+            reset: false,
             meter: LoadMeter::default(),
             dropouts_from: 0,
         };
@@ -115,11 +131,17 @@ impl Output {
     /// says what happened.
     pub fn tick(&mut self, session: &mut Session, notices: &mut Vec<String>) {
         if self.stream.as_ref().is_some_and(Stream::has_ended) {
-            let reason = match self.stop() {
+            let error = self.stop();
+            // An ASIO driver whose own settings changed asks to be opened
+            // again with them, which is no news until it plays.
+            self.reset = matches!(error, Some(audio::Error::DriverReset));
+            let reason = match error {
                 Some(error) => error.to_string(),
                 None => "it stopped".to_owned(),
             };
-            notices.push(format!("The audio device stopped playing: {reason}."));
+            if !self.reset {
+                notices.push(format!("The audio device stopped playing: {reason}."));
+            }
             self.problem = Some(reason);
             // It may well open again at once, as after a change of format in
             // the system's sound settings.
@@ -128,8 +150,21 @@ impl Output {
         if self.retry_at.is_some_and(|at| Instant::now() >= at) {
             let request = self.request.clone();
             match self.start(&request, session) {
+                Ok(()) if std::mem::take(&mut self.reset) => notices.push(format!(
+                    "{} changed its settings, and plays with them now: {}.",
+                    self.device_name(),
+                    self.summary()
+                )),
                 Ok(()) => notices.push(format!("Playing through {}.", self.device_name())),
-                Err(error) => self.failed(&error),
+                Err(error) => {
+                    if std::mem::take(&mut self.reset) {
+                        notices.push(format!(
+                            "The ASIO driver changed its settings, and didn't open again with \
+                             them: {error}."
+                        ));
+                    }
+                    self.failed(&error);
+                }
             }
         }
         if let Some(stream) = &self.stream {
@@ -267,6 +302,14 @@ impl Output {
         text
     }
 
+    /// Opens the playing ASIO driver's own settings. Returns `false` when no
+    /// ASIO driver plays.
+    pub fn show_driver_settings(&self) -> bool {
+        self.stream
+            .as_ref()
+            .is_some_and(Stream::show_driver_settings)
+    }
+
     /// The device's name, as the system calls it.
     pub fn device_name(&self) -> String {
         self.info().map_or("the audio device".to_owned(), |info| {
@@ -360,6 +403,7 @@ fn latency(info: &StreamInfo, stats: &StreamStats) -> Duration {
 fn describe(info: &StreamInfo, latency: Duration) -> String {
     let format = match info.format {
         SampleFormat::F32 => "32-bit float",
+        SampleFormat::F64 => "64-bit float",
         SampleFormat::I32 => "32-bit",
         SampleFormat::I24 => "24-bit",
         SampleFormat::I16 => "16-bit",
@@ -457,6 +501,7 @@ mod tests {
                 id: "speakers".to_owned(),
                 name: "Speakers".to_owned(),
                 is_default: true,
+                driver_type: DriverType::System,
             },
             api: Api::WasapiLowLatency,
             sample_rate: 48_000,

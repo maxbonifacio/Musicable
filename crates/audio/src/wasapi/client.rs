@@ -597,5 +597,6 @@ pub(super) fn capabilities(device: &IMMDevice) -> Result<Capabilities, Error> {
         min_period: Some(min_period),
         default_period: Some(default_period),
         exclusive,
+        asio: None,
     })
 }

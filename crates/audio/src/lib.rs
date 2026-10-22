@@ -3,7 +3,9 @@
 //! On Windows this is our own WASAPI backend. Shared mode runs at the
 //! smallest period the driver offers through IAudioClient3, or at the audio
 //! engine's default period (usually 10 ms) when it offers nothing smaller.
-//! Exclusive mode is an option. On macOS and Linux it goes through
+//! Exclusive mode is an option. Builds with the `asio` feature play through
+//! ASIO drivers too, with our own ASIO host; those builds are distributed
+//! under the GPL, version 3. On macOS and Linux it goes through
 //! [cpal](https://docs.rs/cpal): it builds and plays, but isn't tuned.
 //!
 //! Opening a stream takes two steps, because the engine has to be built for
@@ -44,6 +46,10 @@ mod cpal_host;
 #[cfg(not(windows))]
 use cpal_host as backend;
 
+// Elsewhere than on Windows, only the tests build it, with a fake driver.
+#[cfg(all(feature = "asio", any(windows, test)))]
+mod asio;
+
 pub use stats::StreamStats;
 
 #[cfg(test)]
@@ -59,11 +65,54 @@ pub struct Device {
     pub name: String,
     /// Whether it is the system's default output.
     pub is_default: bool,
+    /// What it plays through.
+    pub driver_type: DriverType,
 }
 
-/// The output devices that are plugged in and enabled.
+/// What a device plays through: the audio settings' "driver type".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DriverType {
+    /// The system's own audio: WASAPI on Windows, CoreAudio on macOS and
+    /// ALSA on Linux.
+    #[default]
+    System,
+    /// An ASIO driver, which talks to its hardware itself. Windows builds
+    /// with the `asio` feature only.
+    Asio,
+}
+
+impl DriverType {
+    /// What the device `id` names plays through, from the id alone. The
+    /// device needn't be installed, nor this build able to play through it.
+    pub fn of(id: &str) -> DriverType {
+        if id.starts_with(ASIO_ID_PREFIX) {
+            DriverType::Asio
+        } else {
+            DriverType::System
+        }
+    }
+}
+
+/// What ASIO drivers' device ids start with, before the driver's class id.
+const ASIO_ID_PREFIX: &str = "asio:";
+
+/// The driver types this build plays through, the system's first.
+pub fn driver_types() -> &'static [DriverType] {
+    if cfg!(all(windows, feature = "asio")) {
+        &[DriverType::System, DriverType::Asio]
+    } else {
+        &[DriverType::System]
+    }
+}
+
+/// The output devices that are plugged in and enabled, and in builds with
+/// ASIO, the ASIO drivers that are installed.
 pub fn output_devices() -> Result<Vec<Device>, Error> {
-    backend::output_devices()
+    let devices = backend::output_devices()?;
+    #[cfg(all(windows, feature = "asio"))]
+    let devices = devices.into_iter().chain(asio::output_devices()).collect();
+    Ok(devices)
 }
 
 /// What a device supports, for offering choices before opening it.
@@ -73,12 +122,17 @@ pub struct Capabilities {
     pub sample_rate: u32,
     pub channels: u16,
     /// The smallest period a shared-mode stream can have, in frames. `None`
-    /// when the system only decides once the stream opens.
+    /// when the system only decides once the stream opens. For an ASIO
+    /// driver, its smallest buffer size.
     pub min_period: Option<u32>,
-    /// The period a shared-mode stream gets by default, in frames.
+    /// The period a shared-mode stream gets by default, in frames. For an
+    /// ASIO driver, the buffer size it prefers, which is the one set in its
+    /// own settings if it has any.
     pub default_period: Option<u32>,
     /// Exclusive mode, if the device supports it.
     pub exclusive: Option<ExclusiveCapabilities>,
+    /// What an ASIO driver supports: ASIO drivers only.
+    pub asio: Option<AsioCapabilities>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,8 +145,29 @@ pub struct ExclusiveCapabilities {
     pub min_period: u32,
 }
 
-/// What `device` supports, or the default output's if it's `None`.
+/// What an ASIO driver supports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsioCapabilities {
+    /// The common rates the driver can switch to. Switching changes the
+    /// rate for everything the device plays.
+    pub sample_rates: Vec<u32>,
+    /// The buffer sizes worth offering, in frames, smallest first: every one
+    /// the driver takes, or for a driver that takes many, the powers of two
+    /// among them, with its smallest, largest and preferred. Many drivers
+    /// take only the size set in their own settings.
+    pub buffer_sizes: Vec<u32>,
+    /// Whether the driver finds dropouts itself and reports each one. A
+    /// stream then counts only those, as ASIO asks of hosts.
+    pub reports_dropouts: bool,
+}
+
+/// What `device` supports, or the default output's if it's `None`. For an
+/// ASIO driver, this loads it, unless a stream has it open.
 pub fn capabilities(device: Option<&str>) -> Result<Capabilities, Error> {
+    #[cfg(all(windows, feature = "asio"))]
+    if let Some(id) = device.filter(|&id| DriverType::of(id) == DriverType::Asio) {
+        return asio::capabilities(id);
+    }
     backend::capabilities(device)
 }
 
@@ -103,7 +178,7 @@ pub enum Mode {
     #[default]
     Shared,
     /// The device to ourselves, with the lowest latency. Other apps go
-    /// silent. WASAPI only.
+    /// silent. WASAPI only: ASIO drivers have one mode, and ignore this.
     Exclusive,
 }
 
@@ -118,8 +193,9 @@ pub struct StreamRequest {
     /// run at that rate.
     pub sample_rate: Option<u32>,
     /// Frames per period, the "buffer size", or `None` for the smallest the
-    /// device supports. Drivers round it, and some ignore it:
-    /// [`StreamInfo::period`] says what the stream got.
+    /// device supports, or for an ASIO driver, the size it prefers. Drivers
+    /// round it, and some ignore it: [`StreamInfo::period`] says what the
+    /// stream got.
     pub period: Option<u32>,
 }
 
@@ -135,6 +211,8 @@ pub enum Api {
     WasapiExclusive,
     /// cpal's default host: CoreAudio on macOS, ALSA on Linux.
     Cpal,
+    /// An ASIO driver.
+    Asio,
 }
 
 impl fmt::Display for Api {
@@ -144,6 +222,7 @@ impl fmt::Display for Api {
             Self::WasapiLowLatency => "WASAPI shared, low latency",
             Self::WasapiExclusive => "WASAPI exclusive",
             Self::Cpal => "cpal",
+            Self::Asio => "ASIO",
         })
     }
 }
@@ -152,7 +231,9 @@ impl fmt::Display for Api {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFormat {
     F32,
-    /// 32-bit integers. Some devices only use the top 24 bits.
+    /// 64-bit floats, which a few ASIO drivers take.
+    F64,
+    /// 32-bit integers. Some devices only use 24 bits of them, or fewer.
     I32,
     /// Packed 24-bit integers, 3 bytes each.
     I24,
@@ -171,8 +252,8 @@ pub struct StreamInfo {
     /// delivers, which can differ from the one requested.
     pub period: u32,
     /// The device buffer, in frames. In shared mode the most the stream can
-    /// queue; in exclusive mode each of the two halves the device alternates
-    /// between.
+    /// queue; in exclusive mode and with ASIO each of the two halves the
+    /// device alternates between.
     pub buffer: u32,
     /// Output latency in frames, estimated from the buffer sizes as the
     /// stream opens: how far ahead of the device's play position a punctual
@@ -181,9 +262,12 @@ pub struct StreamInfo {
     /// can be a few periods short: the system can report less than its audio
     /// engine and driver hold, or nothing. [`StreamStats::queued`] measures
     /// the latency while the stream runs, as the device's clock sees it.
+    /// With ASIO it's what the driver reports: from a buffer switch until
+    /// the half written then plays.
     pub latency: u32,
     /// Whether the audio thread runs at real-time priority: MMCSS "Pro
-    /// Audio" on Windows.
+    /// Audio" on Windows. ASIO renders on the driver's own thread, which
+    /// ASIO has drivers run at that priority.
     pub realtime: bool,
 }
 
@@ -214,15 +298,42 @@ pub(crate) fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
 /// Opens a device for output. It doesn't play until it's started with an
 /// engine.
 pub fn open(request: &StreamRequest) -> Result<OpenStream, Error> {
+    #[cfg(all(windows, feature = "asio"))]
+    if let Some(id) = request.device.as_deref()
+        && DriverType::of(id) == DriverType::Asio
+    {
+        let (info, inner) = asio::open(id, request)?;
+        return Ok(OpenStream {
+            info,
+            inner: OpenInner::Asio(inner),
+        });
+    }
     let (info, inner) = backend::open(request)?;
-    Ok(OpenStream { info, inner })
+    Ok(OpenStream {
+        info,
+        inner: OpenInner::System(inner),
+    })
 }
 
 /// A device opened for output, not playing yet. Dropping it closes the
 /// device.
 pub struct OpenStream {
     info: StreamInfo,
-    inner: backend::OpenStream,
+    inner: OpenInner,
+}
+
+/// The backend an open stream is on.
+enum OpenInner {
+    System(backend::OpenStream),
+    #[cfg(all(windows, feature = "asio"))]
+    Asio(asio::OpenStream),
+}
+
+/// The backend a stream plays on.
+enum StreamInner {
+    System(backend::Stream),
+    #[cfg(all(windows, feature = "asio"))]
+    Asio(asio::Stream),
 }
 
 impl OpenStream {
@@ -244,7 +355,11 @@ impl OpenStream {
                 },
             });
         }
-        let inner = self.inner.start(engine)?;
+        let inner = match self.inner {
+            OpenInner::System(open) => StreamInner::System(open.start(engine)?),
+            #[cfg(all(windows, feature = "asio"))]
+            OpenInner::Asio(open) => StreamInner::Asio(open.start(engine)?),
+        };
         Ok(Stream {
             info: self.info,
             inner,
@@ -278,7 +393,7 @@ impl std::error::Error for StartError {}
 /// Dropping it stops it too, and drops the engine on the dropping thread.
 pub struct Stream {
     info: StreamInfo,
-    inner: backend::Stream,
+    inner: StreamInner,
 }
 
 impl Stream {
@@ -287,18 +402,43 @@ impl Stream {
     }
 
     pub fn stats(&self) -> StreamStats {
-        self.inner.stats()
+        match &self.inner {
+            StreamInner::System(stream) => stream.stats(),
+            #[cfg(all(windows, feature = "asio"))]
+            StreamInner::Asio(stream) => stream.stats(),
+        }
     }
 
     /// Whether the stream ended by itself, because the device went away or
     /// failed. [`stop`](Stream::stop) says why.
     pub fn has_ended(&self) -> bool {
-        self.inner.has_ended()
+        match &self.inner {
+            StreamInner::System(stream) => stream.has_ended(),
+            #[cfg(all(windows, feature = "asio"))]
+            StreamInner::Asio(stream) => stream.has_ended(),
+        }
+    }
+
+    /// Opens an ASIO driver's own settings, where many drivers set their
+    /// buffer size. A change there makes the driver ask to be reset, which
+    /// ends the stream with [`Error::DriverReset`]: open it again. Returns
+    /// `false` for streams with no settings of their own: all but ASIO's.
+    pub fn show_driver_settings(&self) -> bool {
+        #[cfg(all(windows, feature = "asio"))]
+        if let StreamInner::Asio(stream) = &self.inner {
+            stream.show_driver_settings();
+            return true;
+        }
+        false
     }
 
     /// Stops the stream and hands back the engine, off the audio thread.
     pub fn stop(self) -> Stopped {
-        self.inner.stop()
+        match self.inner {
+            StreamInner::System(stream) => stream.stop(),
+            #[cfg(all(windows, feature = "asio"))]
+            StreamInner::Asio(stream) => stream.stop(),
+        }
     }
 }
 
@@ -335,6 +475,9 @@ pub enum Error {
     EngineRate { engine: u32, stream: u32 },
     /// The device stopped asking for audio, without reporting an error.
     Timeout,
+    /// The ASIO driver asked to be reset, as after a change in its own
+    /// settings, or its sample rate changed. Open the stream again.
+    DriverReset,
     /// Anything else the system reported: the call that failed, and why.
     Os { call: &'static str, message: String },
 }
@@ -364,6 +507,9 @@ impl fmt::Display for Error {
                 "the engine runs at {engine} Hz but the stream at {stream} Hz"
             ),
             Self::Timeout => f.write_str("the device stopped asking for audio"),
+            Self::DriverReset => f.write_str(
+                "the ASIO driver asked to be reset, after a change in its settings or rate",
+            ),
             Self::Os { call, message } => write!(f, "{call} failed: {message}"),
         }
     }

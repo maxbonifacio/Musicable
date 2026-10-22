@@ -33,7 +33,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/model` | Pure-data project model. No audio, no UI. |
 | `crates/commands` | Command registry, keymaps and transactions. See [docs/commands.md](docs/commands.md). |
 | `crates/engine` | Real-time audio engine: graph, reference renderer and parallel scheduler. See [docs/engine.md](docs/engine.md). |
-| `crates/audio` | Audio device output: our own WASAPI backend on Windows, cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
+| `crates/audio` | Audio device output: our own WASAPI backend on Windows, and our own ASIO host with the `asio` feature; cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP, VST3 and ARA hosting. |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
@@ -50,6 +50,7 @@ cargo test --workspace
 cargo run --release -p musicable-app                    # the app; File > New Demo Project plays the demo
 cargo run --release -p musicable-app -- null-test       # the parallel scheduler against the reference renderer
 cargo run --release -p musicable-audio --example tone   # a test tone on the default output
+cargo run --release -p musicable-app --features asio    # Windows: ASIO drivers too, in a GPLv3 build
 ```
 
 On Windows, install the Visual Studio Build Tools and use Rust's MSVC
@@ -62,10 +63,11 @@ Debian and Ubuntu).
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT), at your option.
 
-Optional components that depend on GPL-licensed SDKs or libraries (the ASIO
-SDK and Rubber Band) will live behind opt-in build features. Binaries built
-with those features are distributed under GPLv3. The source in this
-repository stays MIT OR Apache-2.0.
+Some optional components sit behind opt-in build features, and binaries built
+with them are distributed under GPLv3: ASIO output on Windows (the `asio`
+feature, see [docs/audio.md](docs/audio.md#asio)) and, later, Rubber Band. The
+default build has none of them. The source in this repository stays MIT OR
+Apache-2.0. ASIO is a trademark of Steinberg Media Technologies GmbH.
 
 Contributions are accepted under the same terms. See
 [CONTRIBUTING.md](CONTRIBUTING.md).

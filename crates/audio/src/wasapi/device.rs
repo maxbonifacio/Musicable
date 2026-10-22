@@ -12,7 +12,7 @@ use windows::core::{HSTRING, Interface};
 
 use super::client;
 use super::com::{TaskMem, in_mta, os};
-use crate::{Capabilities, Device, Error};
+use crate::{Capabilities, Device, DriverType, Error};
 
 pub(crate) fn output_devices() -> Result<Vec<Device>, Error> {
     in_mta(|| {
@@ -93,6 +93,7 @@ pub(super) fn describe(device: &IMMDevice, default_id: Option<&str>) -> Result<D
         is_default: default_id == Some(id.as_str()),
         id,
         name,
+        driver_type: DriverType::System,
     })
 }
 

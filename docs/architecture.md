@@ -15,7 +15,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
-| `audio` | `engine` | Device output: our own WASAPI backend on Windows, cpal elsewhere |
+| `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP hosting: plugin instances and the nodes that process them, and scanning in a process of its own. VST3 next, ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
 | `ui` | `model`, `commands` | What the window shows, drawn with egui: the arrangement, the mixer, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
@@ -33,6 +33,7 @@ compiler, a node and the UI, in that order.
 | Main | The window and the `Session`: key presses, commands, transactions, sending the engine what changed | Normal |
 | Compiler (`musicable-compiler`) | Building and preparing the graphs the session asks for: `compile()`, then `Graph::prepare` | Normal |
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
+| ASIO driver's (instead, in ASIO streams) | `Engine::process`, once per buffer half. The stream's own thread, `musicable-asio`, makes the driver's other calls | The driver's: real-time, as ASIO asks of drivers |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
@@ -230,8 +231,9 @@ built yet, except where it says so.
   palette runs any command ([app.md](app.md#changing-keys),
   [commands.md](commands.md#changing-keys-in-the-app)). Keymaps in the style
   of other DAWs would be keymap files to import.
-- **ASIO**, as an opt-in GPL build feature, moved to Tier 1. It's another
-  backend behind `musicable_audio::open`.
+- **ASIO** is built: our own host, behind `musicable_audio::open` like the
+  other backends, in builds with the opt-in `asio` feature, which are
+  distributed under the GPLv3 ([audio.md](audio.md#asio)).
 
 ## Known gaps
 

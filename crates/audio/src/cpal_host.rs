@@ -13,8 +13,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::stats::Counters;
 use crate::{
-    Api, Capabilities, Device, Error, Mode, SampleFormat, StartError, Stopped, StreamInfo,
-    StreamRequest, StreamStats, frames_to_duration,
+    Api, Capabilities, Device, DriverType, Error, Mode, SampleFormat, StartError, Stopped,
+    StreamInfo, StreamRequest, StreamStats, frames_to_duration,
 };
 
 /// The block size when the system picks the period and won't say what it
@@ -44,6 +44,7 @@ pub(crate) fn capabilities(id: Option<&str>) -> Result<Capabilities, Error> {
         min_period,
         default_period: None,
         exclusive: None,
+        asio: None,
     })
 }
 
@@ -57,6 +58,7 @@ fn describe(device: &cpal::Device, default: Option<&cpal::DeviceId>) -> Result<D
         is_default: default == Some(&id),
         id: id.to_string(),
         name,
+        driver_type: DriverType::System,
     })
 }
 
