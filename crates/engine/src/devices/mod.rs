@@ -12,33 +12,39 @@
 //! A kind whose DSP isn't built yet has no node, so it passes the signal
 //! through unchanged. [`BUILT`] lists the kinds that have one.
 
+mod compressor;
 mod eq;
+mod gate;
 mod params;
 mod svf;
 mod utility;
 
 use musicable_model::native::{NativeDevice, NativeKind};
 
+pub use compressor::Compressor;
 pub use eq::Equalizer;
+pub use gate::Gate;
 pub use params::{Param, Params, Span, Values};
 pub use utility::Utility;
 
 use crate::Node;
 
 /// The kinds with DSP so far, in the browser's order.
-pub const BUILT: &[NativeKind] = &[NativeKind::Eq, NativeKind::Utility];
+pub const BUILT: &[NativeKind] = &[
+    NativeKind::Eq,
+    NativeKind::Compressor,
+    NativeKind::Gate,
+    NativeKind::Utility,
+];
 
 /// The node that plays `device`, if its kind has DSP.
 pub fn node(device: &NativeDevice) -> Option<Box<dyn Node>> {
     match device.kind {
         NativeKind::Eq => Some(Box::new(Equalizer::new(device))),
+        NativeKind::Compressor => Some(Box::new(Compressor::new(device))),
+        NativeKind::Gate => Some(Box::new(Gate::new(device))),
         NativeKind::Utility => Some(Box::new(Utility::new(device))),
-        NativeKind::Compressor
-        | NativeKind::Gate
-        | NativeKind::Delay
-        | NativeKind::Reverb
-        | NativeKind::Sampler
-        | NativeKind::Synth => None,
+        NativeKind::Delay | NativeKind::Reverb | NativeKind::Sampler | NativeKind::Synth => None,
     }
 }
 

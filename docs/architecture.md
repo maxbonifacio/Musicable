@@ -195,8 +195,8 @@ built yet, except where it says so.
   table in `musicable_model::native` that the format, the commands and the
   devices panel's controls all work from, in format version 7. The engine's
   `devices` module has the nodes, with each parameter worked out per frame
-  from the value set and any modulation (`devices::Params`); the EQ and the
-  utility play, and the other six follow
+  from the value set and any modulation (`devices::Params`); the EQ, the
+  compressor, the gate and the utility play, and the other four follow
   ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
