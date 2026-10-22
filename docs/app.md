@@ -516,10 +516,12 @@ play_from = "start_marker"
 
 Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
-smallest the device supports. `play_from` is where Space plays from: the
-start marker (`start_marker`), as in Live, or wherever the playhead stopped
-(`playhead`). The app reads it at startup; there's no window for it yet.
-Fields this version doesn't know are ignored.
+smallest the device supports, or an ASIO driver's preferred size. `play_from`
+is where Space plays from: the start marker (`start_marker`), as in Live, or
+wherever the playhead stopped (`playhead`). The app reads it at startup;
+there's no window for it yet. Fields this version doesn't know are ignored.
+An ASIO driver's id starts with `asio:`; a build without ASIO plays through
+the default output instead, and says why.
 
 ## Audio
 
@@ -533,7 +535,9 @@ Fields this version doesn't know are ignored.
   (`musicable_app::engine`).
 - When the stream ends by itself, because the device was unplugged or its
   format changed, the output tries it again at once and then every two
-  seconds. While nothing plays, the engine waits, and the commands sent to it
+  seconds. An ASIO driver that asks to be reset, after a change in its own
+  settings, opens again at once with them, and the app says what it plays
+  with now. While nothing plays, the engine waits, and the commands sent to it
   wait in its queue and the session's.
 - **Apply** in the audio settings stops the stream and opens the new one. If
   it needs another sample rate or block size, a new engine takes over:
@@ -547,6 +551,13 @@ plugging one in), offers exclusive mode where the device does, the device's
 rates in exclusive mode, and buffer sizes from the smallest the device
 supports. Drivers round the buffer size, and some ignore it, so "Now playing"
 says what the stream got.
+
+Windows builds with the `asio` feature ([audio.md](audio.md#asio)) add a
+driver type, WASAPI or ASIO, above the device. For ASIO it lists the
+installed drivers, the rates each can switch to and the buffer sizes it
+takes, by default the one it prefers, and Driver Settings opens the playing
+driver's own settings. The foot of the window has the notice the GPL asks
+for, since those builds are distributed under it.
 
 ### Meters
 

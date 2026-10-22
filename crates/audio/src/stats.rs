@@ -35,7 +35,8 @@ pub struct StreamStats {
     /// Frames queued ahead of the device's play position as the stream
     /// writes: the output latency as the device's clock sees it, 0 until
     /// measured. On Windows it's the median of each block of 16 wake-ups, so
-    /// a late one doesn't show; with cpal, from the last one.
+    /// a late one doesn't show; with cpal, from the last one. With ASIO, the
+    /// output latency the driver reports.
     pub queued: u64,
 }
 
@@ -73,7 +74,7 @@ impl Counters {
     }
 
     // cpal doesn't say how much audio an xrun lost.
-    #[cfg(windows)]
+    #[cfg(any(windows, all(test, feature = "asio")))]
     pub fn lost(&self, frames: u64) {
         if frames > 0 {
             self.lost_frames.fetch_add(frames, Relaxed);

@@ -10,6 +10,11 @@ rust-version.workspace = true
 name = "musicable"
 path = "src/main.rs"
 
+[features]
+# ASIO output on Windows. Builds with it are distributed under the GPLv3:
+# see docs/audio.md.
+asio = ["musicable-audio/asio"]
+
 [dependencies]
 musicable-model.workspace = true
 musicable-commands.workspace = true
