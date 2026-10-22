@@ -680,10 +680,13 @@ parameters in `devices::Params`, which works each one out for every frame:
   and hands each span the values for each of its frames (`Values::frames`),
   and whether a parameter holds one value over the span
   (`Values::steady`), for a fast path. A device that moves a value its own
-  way, as the delay fades to a new time, reads the value set and its
-  modulation apart instead (`Values::target`, `Values::modulation`). An
-  event applies before the span it starts, which gets the event too, for a
-  note or a note's modulation.
+  way, as the delay fades to a new time and the reverb glides to a new
+  size, reads where the value is heading on each frame and its modulation
+  apart instead (`Values::target`, `Values::modulation`): the value set,
+  without its ramp, or with automation the lane's value on the frame,
+  without the glide after a jump (`automation::Param::render_with_targets`).
+  An event applies before the span it starts, which gets the event too, for
+  a note or a note's modulation.
 
 So a change or a modulation lands on its frame, and a device renders the
 same samples however the blocks fall, and on any thread: the parallel
@@ -742,10 +745,12 @@ the longest time, 5 s, read between frames by cubic (Catmull-Rom)
 interpolation, which is exact on a whole frame. A synced time is its
 note's length at the tempo where the playhead is (`ProcessContext::tempo`
 at the transport's position), and moves on the frame a tempo change
-plays. A new time, whether it's set, synced to a new note or tempo, or
-switched between the two, fades in over 50 ms from a second read of the
-line as the first fades out, a raised cosine; modulating the time moves
-both reads at once, which bends the echoes' pitch. What goes back into
+plays. A new time, whether it's set or automated, synced to a new note or
+tempo, or switched between the two, fades in over 50 ms from a second read
+of the line as the first fades out, a raised cosine, and one that comes
+during a fade waits for it to end, so a lane sweeping the time steps it
+every 50 ms; modulating the time moves both reads at once, which bends the
+echoes' pitch. What goes back into
 the lines goes through the cuts, the EQ's 12 dB cuts, and saturates
 softly above full scale only. `delay::repeat_response` in the model works
 out what each echo keeps of the last, and the reference test measures
@@ -762,8 +767,8 @@ matrix. Both matrices are orthogonal, so the tail loses only what each
 line takes away on its way round: a gain for the decay, the same per
 second whatever the line's length, and a one-pole low pass that takes as
 much again at the damping frequency. The lines' lengths come to whole
-frames, and a new size glides them there by no more than a sixteenth of a
-frame a frame, bending the tail's pitch by about a semitone at most. The
+frames, and a new size, set or automated, glides them there by no more
+than a sixteenth of a frame a frame, bending the tail's pitch by about a semitone at most. The
 tail's level makes up for the size, so rooms of any size ring about as
 loud. The reference tests read the decay off the tail's energy decay
 curve (Schroeder's backward integral): to within 3% of the decay set in

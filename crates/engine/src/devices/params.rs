@@ -43,7 +43,9 @@ impl Params {
         self.values = Values {
             data: vec![0.0; self.params.len() * config.max_block],
             steady: vec![true; self.params.len()],
-            targets: vec![0.0; self.params.len()],
+            set: vec![0.0; self.params.len()],
+            automated: vec![false; self.params.len()],
+            lanes: vec![0.0; self.params.len() * config.max_block],
             modulations: vec![0.0; self.params.len()],
             stride: config.max_block,
             len: 0,
@@ -107,8 +109,14 @@ impl Params {
         values.len = frames.len();
         for (i, param) in self.params.iter_mut().enumerate() {
             let slot = &mut values.data[i * values.stride..][..frames.len()];
-            values.steady[i] = param.render(ctx, frames.clone(), slot);
-            values.targets[i] = param.target();
+            values.automated[i] = param.is_automated();
+            values.steady[i] = if values.automated[i] {
+                let lane = &mut values.lanes[i * values.stride..][..frames.len()];
+                param.render_with_targets(ctx, frames.clone(), slot, lane)
+            } else {
+                param.render(ctx, frames.clone(), slot)
+            };
+            values.set[i] = param.target();
             values.modulations[i] = param.modulation();
         }
         render(Span {
@@ -162,8 +170,12 @@ pub struct Values {
     steady: Vec<bool>,
     /// Each parameter's value set and its modulation, which hold over a
     /// span: only an event changes them.
-    targets: Vec<f32>,
+    set: Vec<f32>,
     modulations: Vec<f32>,
+    /// Whether each parameter follows automation, and for those that do,
+    /// the automation's value on each frame, laid out as `data` is.
+    automated: Vec<bool>,
+    lanes: Vec<f32>,
     stride: usize,
     len: usize,
 }
@@ -184,11 +196,17 @@ impl Values {
         self.steady[param]
     }
 
-    /// The value it's set to, without its ramp or its modulation: where it
-    /// is heading. For what a device can't take halfway, such as a choice,
-    /// or would rather move its own way, such as a delay's time.
-    pub fn target(&self, param: usize) -> f32 {
-        self.targets[param]
+    /// Where it's heading on the span's frame `frame`, without its ramp or
+    /// its modulation: the value set, or with automation the automation's
+    /// value on the frame, without the glide after a jump. For what a
+    /// device can't take halfway, such as a choice, or would rather move
+    /// its own way, such as a delay's time.
+    pub fn target(&self, param: usize, frame: usize) -> f32 {
+        if self.automated[param] {
+            self.lanes[param * self.stride + frame]
+        } else {
+            self.set[param]
+        }
     }
 
     /// Its modulation for every voice over the span, in its units: 0.0 for
@@ -317,7 +335,7 @@ mod tests {
         params.run(&context(32, &events), |span| {
             let values = span.values;
             seen.push((
-                values.target(pan),
+                values.target(pan, 0),
                 values.modulation(pan),
                 values.steady(pan),
             ));

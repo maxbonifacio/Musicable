@@ -17,7 +17,7 @@ use musicable_model::time::{TempoChange, TempoMap};
 
 use super::svf::{Coefficients, State};
 use super::{Params, Span, Values};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The delay's node.
 #[derive(Debug, Clone)]
@@ -62,6 +62,10 @@ impl Node for Delay {
         echoes.mask = len - 1;
         echoes.fade = (FADE_SECONDS * echoes.sample_rate).round().max(1.0) as u32;
         echoes.cuts = Cuts::new();
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
@@ -123,8 +127,7 @@ impl Echoes {
         if playing {
             position += span.frames.start as u64;
         }
-        let (bpm, mut next_change) = tempo_at(ctx.tempo, position, ctx.sample_rate);
-        self.time.wanted = wanted(values, bpm, sample_rate);
+        let (mut bpm, mut next_change) = tempo_at(ctx.tempo, position, ctx.sample_rate);
         let [shortest, longest] = time_range(sample_rate);
         let modulation = f64::from(values.modulation(TIME)) * sample_rate / 1000.0;
         let steady_cuts = values.steady(LOW_CUT) && values.steady(HIGH_CUT);
@@ -143,10 +146,10 @@ impl Echoes {
         let len = self.mask + 1;
         for i in 0..frames {
             if playing && next_change == Some(position) {
-                let (bpm, next) = tempo_at(ctx.tempo, position, ctx.sample_rate);
-                self.time.wanted = wanted(values, bpm, sample_rate);
-                next_change = next;
+                (bpm, next_change) = tempo_at(ctx.tempo, position, ctx.sample_rate);
             }
+            // Automation can move the time set on any frame.
+            self.time.wanted = wanted(values, i, bpm, sample_rate);
             if !steady_cuts {
                 self.cuts.tune(low[i], high[i], sample_rate);
             }
@@ -276,14 +279,14 @@ fn time_range(sample_rate: f64) -> [f64; 2] {
     [frames(time.min).max(2.0), frames(time.max)]
 }
 
-/// The time set, in whole frames: the note at `bpm` if synced, or the time
-/// in ms, held to the time's range.
-fn wanted(values: &Values, bpm: f64, sample_rate: f64) -> f64 {
-    let ms = if values.target(SYNC) >= 0.5 {
-        let note = values.target(NOTE).round().max(0.0) as usize;
+/// The time set on the span's frame `frame`, in whole frames: the note at
+/// `bpm` if synced, or the time in ms, held to the time's range.
+fn wanted(values: &Values, frame: usize, bpm: f64, sample_rate: f64) -> f64 {
+    let ms = if values.target(SYNC, frame) >= 0.5 {
+        let note = values.target(NOTE, frame).round().max(0.0) as usize;
         NOTE_BEATS[note.min(NOTE_BEATS.len() - 1)] * 60_000.0 / bpm
     } else {
-        f64::from(values.target(TIME))
+        f64::from(values.target(TIME, frame))
     };
     let time = &NativeKind::Delay.params()[TIME];
     let ms = if ms.is_nan() {
@@ -346,6 +349,7 @@ fn saturate(x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::automation::Point;
     use musicable_model::native::delay::{NOTES, repeat_response};
     use musicable_model::time::{Beats, TimeSignature};
 
@@ -683,6 +687,27 @@ mod tests {
         for block in [1, 7, 64, 333] {
             assert_eq!(render(block), reference, "blocks of {block}");
         }
+    }
+
+    /// The reference for automation: a lane's step plays as setting the
+    /// time on the step's frame does, a fade to the new time, however the
+    /// value glides there.
+    #[test]
+    fn a_lane_on_the_time_plays_as_setting_it_does() {
+        let input = noise(48_000);
+        let settings = wet(100.0, &[(FEEDBACK, 50.0)]);
+        // Beat 1 at 120 bpm: half a second in.
+        let set = run(&settings)
+            .playing()
+            .render(&input, &[param(24_000, TIME, 200.0)]);
+        let mut delay = Delay::new(&device(&settings));
+        let step =
+            [(0, 100.0), (1, 100.0), (1, 200.0)].map(|(at, ms)| Point::new(Beats::new(at), ms));
+        let lane = Automation::new(&step, NativeKind::Delay.params()[TIME].scale).unwrap();
+        assert!(delay.automate(ParamId(TIME as u32), lane).is_none());
+        let automated = Run::new(Box::new(delay)).playing().render(&input, &[]);
+        assert_eq!(automated, set);
+        assert_ne!(automated, run(&settings).playing().render(&input, &[]));
     }
 
     #[test]

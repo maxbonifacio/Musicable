@@ -24,7 +24,7 @@ use musicable_model::native::{NativeDevice, NativeKind, delay};
 use super::delay::read;
 use super::svf::{Coefficients, State};
 use super::{Params, Span};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The network's channels.
 const CHANNELS: usize = 8;
@@ -92,6 +92,10 @@ impl Node for Reverb {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
         self.space.prepare(f64::from(config.sample_rate));
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
@@ -186,9 +190,6 @@ impl Space {
         }
         let mut out = output.range_mut(span.frames.clone());
         let sample_rate = self.sample_rate;
-        self.lengths
-            .aim(values.target(SIZE), sample_rate, !self.started);
-        self.started = true;
         let steady_absorb = values.steady(DECAY) && values.steady(DAMPING);
         let steady_cut = values.steady(LOW_CUT);
         if steady_cut {
@@ -205,6 +206,10 @@ impl Space {
         let longest_predelay = (self.rings[0].mask - 3) as f64;
         let stereo = out.channels() >= 2;
         for i in 0..frames {
+            // Automation can move the size on any frame.
+            let size = values.target(SIZE, i);
+            self.lengths.aim(size, sample_rate, !self.started);
+            self.started = true;
             let gliding = self.lengths.glide();
             if gliding || !steady_absorb || i == 0 {
                 let network = self.lengths.now[STEPS * CHANNELS..].try_into().unwrap();
@@ -471,6 +476,9 @@ fn hadamard(v: &mut [f32; CHANNELS]) {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::automation::Point;
+    use musicable_model::time::Beats;
+
     use super::*;
     use crate::devices::testing::{Run, db, gain_at, modulation, param};
 
@@ -800,6 +808,25 @@ mod tests {
         for block in [1, 7, 64, 333] {
             assert_eq!(render(block), reference, "blocks of {block}");
         }
+    }
+
+    /// A lane's step on the size glides there as setting the size on the
+    /// step's frame does.
+    #[test]
+    fn a_lane_on_the_size_plays_as_setting_it_does() {
+        let input = noise(48_000);
+        // Beat 1 at 120 bpm: half a second in.
+        let set = run(&[])
+            .playing()
+            .render(&input, &[param(24_000, SIZE, 80.0)]);
+        let mut reverb = Reverb::new(&device(&[]));
+        let step =
+            [(0, 50.0), (1, 50.0), (1, 80.0)].map(|(at, size)| Point::new(Beats::new(at), size));
+        let lane = Automation::new(&step, NativeKind::Reverb.params()[SIZE].scale).unwrap();
+        assert!(reverb.automate(ParamId(SIZE as u32), lane).is_none());
+        let automated = Run::new(Box::new(reverb)).playing().render(&input, &[]);
+        assert_eq!(automated, set);
+        assert_ne!(automated, run(&[]).playing().render(&input, &[]));
     }
 
     #[test]
