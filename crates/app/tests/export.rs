@@ -1,11 +1,11 @@
 //! Exports, as the export window starts them: the project rendered offline,
 //! on a thread of its own, to files. An exported mixdown is what the app
-//! plays live, to the sample, with a latent plugin and audio files at
-//! another rate; each stem is its track soloed, and with solo on the mix
-//! is as heard. The tail renders a release and leaves the quiet end off,
-//! normalising takes the peak to full scale, and FLAC and 16-bit files
-//! hold the same samples, rounded. A cancelled export, or one that fails,
-//! leaves no files behind.
+//! plays live, to the sample, with a latent plugin, a built-in device,
+//! automation, and audio files at another rate; each stem is its track
+//! soloed, and with solo on the mix is as heard. The tail renders a
+//! release and leaves the quiet end off, normalising takes the peak to full
+//! scale, and FLAC and 16-bit files hold the same samples, rounded. A
+//! cancelled export, or one that fails, leaves no files behind.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -21,10 +21,13 @@ use musicable_app::export::{
 use musicable_commands::{Editor, Keymap, transport};
 use musicable_engine::{EngineConfig, rt};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav, write_aiff};
+use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
+use musicable_model::native::{NativeDevice, NativeKind, compressor};
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{Chain, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
 use musicable_plugins::PluginInfo;
 use musicable_plugins::scan;
 use musicable_test_plugins::testing::Library;
@@ -90,9 +93,10 @@ fn plugins(dir: &Path, test: &str) -> (Library, Vec<PluginInfo>) {
     (library, installed)
 }
 
-/// Four beats at 120 BPM, two seconds: drums from a WAV file, a bass line
-/// from an AIFF file at 44.1 kHz through Test Gain with latency, chords on
-/// a test instrument, and a test tone, panned and muted. The audio files
+/// Four beats at 120 BPM, two seconds: drums from a WAV file through the
+/// compressor, their fader automated, a bass line from an AIFF file at
+/// 44.1 kHz through Test Gain with latency and its gain automated, chords
+/// on a test instrument, and a test tone, panned and muted. The audio files
 /// go into `dir`.
 fn song(dir: &Path) -> Project {
     let drums = signal(2, 60_000, 48_000);
@@ -112,6 +116,17 @@ fn song(dir: &Path) -> Project {
     let mut audio = AudioClip::new("Audio/Drums.wav");
     audio.offset = 10_000;
     audio_clip(&mut p, drums, beats(5, 2), beats(4, 1), audio);
+    let mut squash = NativeDevice::new(NativeKind::Compressor);
+    squash.set(compressor::THRESHOLD, -24.0);
+    let squash = p.new_device(DeviceKind::Native(squash));
+    p.track_mut(drums).unwrap().devices.push(squash);
+    let down_and_up = vec![
+        Point::new(beats(0, 1), 1.0),
+        Point::new(beats(3, 2), 0.25),
+        Point::new(beats(3, 1), 1.0),
+    ];
+    let fader = ParamAddress::Volume(Chain::Track(drums));
+    p.automation.push(Lane::new(fader, down_and_up));
 
     let bass = p.add_track("Bass", TrackKind::Audio);
     let mut audio = AudioClip::new("Audio/Bass.aif");
@@ -127,6 +142,9 @@ fn song(dir: &Path) -> Project {
         instrument: false,
         settings,
     }));
+    let up = vec![Point::new(beats(1, 1), 0.5), Point::new(beats(3, 1), 1.0)];
+    p.automation
+        .push(Lane::new(ParamAddress::Device(gain.id, GAIN), up));
     let track = p.track_mut(bass).unwrap();
     track.devices.push(gain);
     track.pan = 0.3;
