@@ -193,6 +193,15 @@ bus, `compile::keys::CUE`. It plays through the same two channels as the
 master until the engine has more (see
 [architecture.md](architecture.md#known-gaps)).
 
+**Taps.** A graph can also have taps, nodes whose output an offline render
+takes as well as the graph's: `Graph::add_tap`, numbered in the order
+they're added. `Engine::process_with_taps` renders the output, without the
+cue, into one buffer and each tap into one of its own. An export's stems
+are taps ([app.md](app.md#exporting-audio)): `compile_with_stems` taps the
+tracks it's given where they feed their bus, after their fader and their
+slots and before the output stage that mutes them, so mute and solo don't
+cut them. `Engine::process` and the device's callbacks leave taps alone.
+
 **Setting up from a project.** The graph carries the metronome setting. The
 tempo map and the loop are transport state, so send them when a project
 opens and whenever they change:
@@ -272,7 +281,9 @@ late its output is: `Node::latency`, read once the node is prepared.
   latent plugin lines up with a dry track to the sample.
 - The cue output gets a delay that lines it up with the output, or the
   output one that lines it up with the cue, whichever is earlier, so the
-  metronome clicks in time with what plays.
+  metronome clicks in time with what plays. Taps line up the same way: the
+  output, the cue and each tap are delayed to the latest of them, so an
+  export's stems line up with its mix to the sample.
 - `PreparedGraph::latency` says how late the output is in the end, and
   `Stats::latency` reports the running graph's. The audio device adds its
   own output latency on top. So what you hear left the clip players that

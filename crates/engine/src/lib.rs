@@ -41,7 +41,7 @@ mod transport;
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
     Compiled, Compiler, Devices, InputChannels, InputLayout, NodeMaker, compile, compile_metered,
-    compile_with_devices, compile_with_inputs, compile_with_media,
+    compile_with_devices, compile_with_inputs, compile_with_media, compile_with_stems,
 };
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{

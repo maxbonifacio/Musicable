@@ -62,6 +62,8 @@ pub struct Graph {
     outputs: Vec<Vec<NodeId>>,
     output: Option<NodeId>,
     cue: Option<NodeId>,
+    /// The nodes [`add_tap`](Graph::add_tap) tapped, in order.
+    taps: Vec<NodeId>,
     /// Which nodes' notes go to which, from [`send_notes`](Graph::send_notes).
     note_routes: Vec<(NodeId, NodeId)>,
 }
@@ -149,6 +151,17 @@ impl Graph {
         Ok(())
     }
 
+    /// Taps `node`'s output, for an offline render to keep alongside the
+    /// output, such as an export's stems: see
+    /// [`Engine::process_with_taps`](crate::Engine::process_with_taps).
+    /// Taps line up with the output the way the cue output does. Returns the
+    /// tap's number: they count from 0, in the order they're added.
+    pub fn add_tap(&mut self, node: NodeId) -> Result<usize, GraphError> {
+        self.check(node)?;
+        self.taps.push(node);
+        Ok(self.taps.len() - 1)
+    }
+
     /// Calls [`Node::prepare`] on each node, compensates for their latency,
     /// orders them and allocates their buffers.
     ///
@@ -157,7 +170,7 @@ impl Graph {
     /// paths of different lateness meet at a node, the earlier ones go
     /// through a [`Delay`] that lines them up with the latest. The cue
     /// output gets one to line it up with the output, or the output with it,
-    /// so the metronome clicks in time with what plays.
+    /// so the metronome clicks in time with what plays, and so do taps.
     /// [`PreparedGraph::latency`] says how late the output is in the end,
     /// at most [`MAX_LATENCY`](Graph::MAX_LATENCY). Notes sent with
     /// [`send_notes`](Graph::send_notes) aren't delayed, so an instrument's
@@ -237,6 +250,7 @@ impl Graph {
             order,
             output,
             cue: self.cue,
+            taps: self.taps,
             buffers,
             by_key,
             delays,
@@ -254,7 +268,8 @@ impl Graph {
     /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
     /// describes, once the nodes are prepared. Returns the delays it added,
     /// with where they are, and how late the output is. `output` becomes the
-    /// delay after the output, if it needs one.
+    /// delay after the output, if it needs one, and so do the cue output and
+    /// each tap.
     fn compensate(
         &mut self,
         config: &EngineConfig,
@@ -293,22 +308,39 @@ impl Graph {
             }
         }
         let cue_late = self.cue.map_or(0, |cue| late[cue.0]);
-        let latency = late[output.0].max(cue_late);
-        if let Some(cue) = self.cue
-            && cue_late < latency
-        {
-            let delay = self.add_delay(cue, latency - cue_late, config);
-            self.outputs[cue.0].push(delay);
-            self.cue = Some(delay);
-            delays.push((Joint::Cue, delay));
+        let taps_late = self.taps.iter().map(|tap| late[tap.0]).max();
+        let latency = late[output.0].max(cue_late).max(taps_late.unwrap_or(0));
+        if let Some(cue) = self.cue {
+            self.cue = Some(self.line_up(cue, &late, latency, Joint::Cue, &mut delays, config));
         }
-        if late[output.0] < latency {
-            let delay = self.add_delay(*output, latency - late[output.0], config);
-            self.outputs[output.0].push(delay);
-            *output = delay;
-            delays.push((Joint::Output, delay));
+        *output = self.line_up(*output, &late, latency, Joint::Output, &mut delays, config);
+        for n in 0..self.taps.len() {
+            let joint = Joint::Tap(u32::try_from(n).unwrap_or(u32::MAX));
+            let tap = self.taps[n];
+            self.taps[n] = self.line_up(tap, &late, latency, joint, &mut delays, config);
         }
         (delays, latency)
+    }
+
+    /// Lines `node`'s output up with the graph's `latency`, through a delay
+    /// at `joint` if it's earlier, and returns the node whose output is
+    /// lined up: `node` or the delay.
+    fn line_up(
+        &mut self,
+        node: NodeId,
+        late: &[usize],
+        latency: usize,
+        joint: Joint,
+        delays: &mut Vec<(Joint, NodeId)>,
+        config: &EngineConfig,
+    ) -> NodeId {
+        if late[node.0] >= latency {
+            return node;
+        }
+        let delay = self.add_delay(node, latency - late[node.0], config);
+        self.outputs[node.0].push(delay);
+        delays.push((joint, delay));
+        delay
     }
 
     /// Adds a prepared [`Delay`] of `frames` that `from` feeds. It feeds
@@ -394,6 +426,8 @@ pub struct PreparedGraph {
     pub(crate) order: Vec<NodeId>,
     pub(crate) output: NodeId,
     pub(crate) cue: Option<NodeId>,
+    /// The nodes whose outputs are the taps, lined up with the output.
+    taps: Vec<NodeId>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -437,6 +471,8 @@ enum Joint {
     Cue,
     /// After the output.
     Output,
+    /// After the tap with this number.
+    Tap(u32),
 }
 
 /// A node event on its way into a graph, with its arrival order.
@@ -530,6 +566,17 @@ impl PreparedGraph {
     /// [`Graph::set_cue`]).
     pub fn cue(&self, frames: usize) -> Option<AudioRef<'_>> {
         self.cue.map(|cue| self.buffers[cue.0].view(frames))
+    }
+
+    /// Tap `n`'s most recent `frames` frames, if the graph has it (see
+    /// [`Graph::add_tap`]).
+    pub fn tap(&self, n: usize, frames: usize) -> Option<AudioRef<'_>> {
+        self.taps.get(n).map(|tap| self.buffers[tap.0].view(frames))
+    }
+
+    /// How many taps the graph has.
+    pub fn taps(&self) -> usize {
+        self.taps.len()
     }
 
     /// How many frames late the output plays, after delay compensation: the
@@ -681,6 +728,7 @@ impl fmt::Debug for PreparedGraph {
             .field("nodes", &self.nodes.len())
             .field("output", &self.output)
             .field("cue", &self.cue)
+            .field("taps", &self.taps.len())
             .field("latency", &self.latency)
             .finish_non_exhaustive()
     }
@@ -1083,6 +1131,51 @@ mod tests {
             let (output, cue) = play(&mut graph, 0, 64, 16);
             assert_eq!(peaks(&output), [(5 + latency, 1.0)], "{latency}");
             assert_eq!(peaks(&cue), [(5 + latency, 1.0)], "{latency}");
+        }
+    }
+
+    #[test]
+    fn taps_line_up_with_the_output() {
+        // A dry source tapped before a latent path to the output, and a
+        // latent node off to the side that feeds nothing but its tap, which
+        // makes it the latest of all.
+        for side_latency in [0, 30] {
+            let mut g = Graph::new();
+            let source = g.add(NodeKey(0), impulse(5));
+            let wet = g.add(NodeKey(1), latent(20));
+            let side = g.add(NodeKey(2), latent(side_latency));
+            g.connect(source, wet).unwrap();
+            g.connect(source, side).unwrap();
+            g.set_output(wet).unwrap();
+            assert_eq!(g.add_tap(source), Ok(0));
+            assert_eq!(g.add_tap(side), Ok(1));
+            assert_eq!(
+                g.add_tap(NodeId(9)),
+                Err(GraphError::UnknownNode(NodeId(9)))
+            );
+            let mut graph = g.prepare(&CONFIG).unwrap();
+            let latency = 20.max(side_latency);
+            assert_eq!((graph.latency(), graph.taps()), (latency, 2));
+            let tempo = TempoMap::default();
+            let mut heard: [Vec<f32>; 3] = Default::default();
+            for from in (0..64).step_by(16) {
+                let block = Block {
+                    frames: 16,
+                    time: from,
+                    transport: TransportState::default(),
+                    tempo: &tempo,
+                    input: AudioRef::empty(16),
+                };
+                rt::scope(|| ReferenceRenderer.render(&mut graph, &block));
+                heard[0].extend_from_slice(graph.output(16).channel(0));
+                for n in 0..2 {
+                    heard[n + 1].extend_from_slice(graph.tap(n, 16).unwrap().channel(0));
+                }
+            }
+            assert!(graph.tap(2, 16).is_none());
+            for signal in &heard {
+                assert_eq!(peaks(signal), [(5 + latency, 1.0)], "{side_latency}");
+            }
         }
     }
 
