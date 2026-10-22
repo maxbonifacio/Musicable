@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Request, arrange};
+use musicable_commands::{Args, CommandError, Request, arrange, device};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_model::time::{BeatRange, Beats};
@@ -34,8 +34,8 @@ const STOPPED_FRAME: Duration = Duration::from_millis(250);
 /// How often the app looks for a graph while one compiles, to send it to the
 /// engine soon after it's ready.
 const COMPILING_FRAME: Duration = Duration::from_millis(5);
-/// The audio files the Import Audio dialog shows. The app reads a file by
-/// what's in it, whatever it's called.
+/// The audio files the Import Audio and Load Sample dialogs show. The app
+/// reads a file by what's in it, whatever it's called.
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"];
 
 /// The app's window, and everything it drives.
@@ -336,6 +336,23 @@ impl App {
                 show: false,
             } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
+            Request::LoadSample(device) => {
+                if let Some(path) = self.audio_dialog(frame).pick_file() {
+                    self.set_sample(device, &path);
+                }
+            }
+        }
+    }
+
+    /// Gives the sampler `device` the audio file at `path`, through
+    /// [`device::SET_SAMPLE`]. The sampler reads it when the graph is
+    /// built, and the status bar says if it can't.
+    fn set_sample(&mut self, device: DeviceId, path: &Path) {
+        let file = clip_path(path, self.project_folder());
+        let args = Args::new().with("device", device).with("file", file);
+        if let Err(error) = self.session.run_with(&device::SET_SAMPLE, &args) {
+            self.messages
+                .push(format!("Couldn't load the sample: {error}."));
         }
     }
 

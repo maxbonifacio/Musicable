@@ -1,6 +1,7 @@
 //! The device commands: adding Musicable's own devices and plugins to a
-//! track's devices or the master's, setting their parameters, showing and
-//! closing plugins' windows, and deleting devices.
+//! track's devices or the master's, setting their parameters, giving
+//! samplers their samples, showing and closing plugins' windows, and
+//! deleting devices.
 
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::plugin::{PluginDevice, PluginSettings};
@@ -17,6 +18,10 @@ pub const ADD: CommandId = CommandId::new("device.add");
 pub const ADD_PLUGIN: CommandId = CommandId::new("device.add_plugin");
 /// Sets a device's parameter, or leaves a plugin's to its state.
 pub const SET_PARAM: CommandId = CommandId::new("device.set_param");
+/// Gives a sampler a sample, or takes its sample away.
+pub const SET_SAMPLE: CommandId = CommandId::new("device.set_sample");
+/// Asks for an audio file for a sampler to play: see [`SET_SAMPLE`].
+pub const LOAD_SAMPLE: CommandId = CommandId::new("device.load_sample");
 /// Shows a plugin's own window.
 pub const SHOW_WINDOW: CommandId = CommandId::new("device.show_window");
 /// Closes a plugin's own window.
@@ -164,6 +169,42 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+    registry.add(
+        Command::new(SET_SAMPLE, "Set Sample").with_params(&[
+            DEVICE,
+            Param::optional(
+                "file",
+                Type::Text,
+                "The audio file's path, as clips name files: relative to the project's \
+                 folder, with / between names, or absolute. Without it, the sampler has no \
+                 sample.",
+            ),
+        ]),
+        |ctx, args| {
+            let device = args.get("device")?;
+            let file: Option<String> = args.opt("file")?;
+            if file.as_ref().is_some_and(String::is_empty) {
+                return Err(CommandError::invalid("a sample's path can't be empty"));
+            }
+            sampler(ctx, device)?;
+            let name = match file {
+                Some(_) => "Load Sample",
+                None => "Remove Sample",
+            };
+            ctx.document
+                .transact(name, |tx| tx.set_native_sample(device, file));
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(LOAD_SAMPLE, "Load Sample...").with_params(&[DEVICE]),
+        |ctx, args| {
+            let device = args.get("device")?;
+            sampler(ctx, device)?;
+            ctx.requests.push(Request::LoadSample(device));
+            Ok(Value::None)
+        },
+    );
     for (id, title, show) in [
         (SHOW_WINDOW, "Show Plugin Window", true),
         (HIDE_WINDOW, "Hide Plugin Window", false),
@@ -261,6 +302,15 @@ fn plugin<'a>(ctx: &'a Context<'_>, device: DeviceId) -> Result<&'a PluginDevice
         .kind
         .plugin()
         .ok_or_else(|| CommandError::invalid(format!("device {} isn't a plugin", device.0)))
+}
+
+/// The sampler with id `device`, if the project has it.
+fn sampler<'a>(ctx: &'a Context<'_>, device: DeviceId) -> Result<&'a NativeDevice, CommandError> {
+    find(ctx, device)?
+        .kind
+        .native()
+        .filter(|native| native.kind == NativeKind::Sampler)
+        .ok_or_else(|| CommandError::invalid(format!("device {} isn't a sampler", device.0)))
 }
 
 fn no_device(device: DeviceId) -> CommandError {
@@ -554,6 +604,67 @@ mod tests {
         let values = native(&setup, device).values;
         assert_eq!(values[freq], 1000.0);
         assert_eq!(values[eq::OUTPUT], 0.0);
+    }
+
+    #[test]
+    fn samplers_get_samples_from_files_the_app_asks_for() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut setup = Setup::new(project);
+        let mut add = |key: &str| {
+            let added = Args::new().with("kind", key).with("track", keys);
+            match setup.run_with(&ADD, added).unwrap() {
+                Value::Device(device) => device,
+                other => panic!("a device, not {other:?}"),
+            }
+        };
+        let (sampler, synth) = (add("sampler"), add("synth"));
+        let sample = |device: DeviceId, file: Option<&str>| {
+            let args = Args::new().with("device", device);
+            match file {
+                Some(file) => args.with("file", file),
+                None => args,
+            }
+        };
+        let kick = sample(sampler, Some("Samples/kick.wav"));
+        setup.run_with(&SET_SAMPLE, kick.clone()).unwrap();
+        assert_eq!(
+            native(&setup, sampler).sample.as_deref(),
+            Some("Samples/kick.wav")
+        );
+        // The same file again changes nothing.
+        setup.run_with(&SET_SAMPLE, kick).unwrap();
+        setup.run_with(&SET_SAMPLE, sample(sampler, None)).unwrap();
+        assert_eq!(native(&setup, sampler).sample, None);
+        assert_eq!(
+            setup.run_with(&SET_SAMPLE, sample(synth, Some("kick.wav"))),
+            Err(CommandError::invalid("device 1 isn't a sampler"))
+        );
+        assert_eq!(
+            setup.run_with(&SET_SAMPLE, sample(sampler, Some(""))),
+            Err(CommandError::invalid("a sample's path can't be empty"))
+        );
+        assert_eq!(
+            setup.run_with(&SET_SAMPLE, sample(DeviceId(7), None)),
+            Err(CommandError::invalid("there's no device 7"))
+        );
+        assert_eq!(
+            setup.committed_names(),
+            ["Add Sampler", "Add Synth", "Load Sample", "Remove Sample"]
+        );
+        assert!(setup.document.undo());
+        assert_eq!(
+            native(&setup, sampler).sample.as_deref(),
+            Some("Samples/kick.wav")
+        );
+
+        // Loading asks the app for the file.
+        setup.run_with(&LOAD_SAMPLE, sample(sampler, None)).unwrap();
+        assert_eq!(
+            setup.run_with(&LOAD_SAMPLE, sample(synth, None)),
+            Err(CommandError::invalid("device 1 isn't a sampler"))
+        );
+        assert_eq!(setup.requests, [Request::LoadSample(sampler)]);
     }
 
     #[test]

@@ -1,12 +1,20 @@
 //! Musicable's own devices in the app: the device commands add them, their
 //! parameters reach the engine as they change, undo takes the changes back,
-//! and they keep their settings when the graph is built again.
+//! and they keep their settings when the graph is built again. The
+//! instruments play their tracks' notes, and a sampler the file it's given.
+
+use std::f64::consts::TAU;
+use std::fs;
+use std::path::PathBuf;
 
 use musicable_app::Session;
 use musicable_commands::{Args, CommandId, Keymap, Value, device, edit, track, transport};
 use musicable_engine::{Engine, EngineConfig, rt};
-use musicable_model::native::utility;
-use musicable_model::{DeviceId, Project, TestTone, TrackKind};
+use musicable_io::audio::{SampleFormat, save_wav};
+use musicable_model::clip::{ClipContent, MidiClip};
+use musicable_model::native::{NativeDevice, NativeKind, utility};
+use musicable_model::time::{BeatRange, Beats};
+use musicable_model::{DeviceId, DeviceKind, Project, TestTone, TrackKind};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -128,4 +136,77 @@ fn a_utility_on_a_track_follows_its_controls() {
     rig.run(&device::DELETE, Args::new().with("device", utility));
     near(rig.peaks(), [0.5, 0.5]);
     assert_eq!(rig.session.undo_name(), Some("Delete Utility"));
+}
+
+/// A project with a MIDI track holding middle C at full velocity for its
+/// first two beats, a second at 120 BPM, and a `kind` on the track to play
+/// it. Returns the device's id too.
+fn playing(kind: NativeKind) -> (Project, DeviceId) {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let mut notes = MidiClip::default();
+    notes.add_note(Beats::new(0), Beats::new(2), 60, 1.0);
+    let range = BeatRange::new(Beats::new(0), Beats::new(2));
+    let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
+    let device = project.new_device(DeviceKind::Native(NativeDevice::new(kind)));
+    let id = device.id;
+    let track = project.track_mut(keys).unwrap();
+    track.clips.push(clip);
+    track.devices.push(device);
+    (project, id)
+}
+
+#[test]
+fn a_synth_plays_its_tracks_notes() {
+    let (project, synth) = playing(NativeKind::Synth);
+    let mut rig = Rig::new(project);
+    rig.session.run(&transport::PLAY).unwrap();
+    let [left, right] = rig.peaks();
+    assert!(left > 0.05 && left == right, "{left}, {right}");
+    rig.run(&device::DELETE, Args::new().with("device", synth));
+    near(rig.peaks(), [0.0, 0.0]);
+}
+
+/// A folder of its own for the test, empty.
+fn folder(name: &str) -> PathBuf {
+    let folder = std::env::temp_dir()
+        .join(format!("musicable-built-in-{}", std::process::id()))
+        .join(name);
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+#[test]
+fn a_sampler_plays_the_file_it_is_given() {
+    let folder = folder("sampler");
+    let path = folder.join("sine.wav");
+    let sine: Vec<f32> = (0..48_000)
+        .map(|i| (0.5 * (TAU * 440.0 * f64::from(i) / 48_000.0).sin()) as f32)
+        .collect();
+    save_wav(&path, 48_000, SampleFormat::Float32, &[&sine]).unwrap();
+    let (project, sampler) = playing(NativeKind::Sampler);
+    let mut rig = Rig::new(project);
+    let load = |path: PathBuf| {
+        let file = path.to_string_lossy().into_owned();
+        Args::new().with("device", sampler).with("file", file)
+    };
+    rig.run(&device::SET_SAMPLE, load(path));
+    assert_eq!(rig.session.undo_name(), Some("Load Sample"));
+    rig.session.run(&transport::PLAY).unwrap();
+    // Middle C is the root, so the sample plays at its own pitch.
+    near(rig.peaks(), [0.5, 0.5]);
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+
+    // Without its sample, it's silent.
+    rig.run(&edit::UNDO, Args::new());
+    near(rig.peaks(), [0.0, 0.0]);
+    // And with a file that isn't there, the app hears why.
+    rig.run(&device::SET_SAMPLE, load(folder.join("missing.wav")));
+    near(rig.peaks(), [0.0, 0.0]);
+    let problems = rig.session.take_problems();
+    assert!(
+        problems.len() == 1 && problems[0].starts_with("Couldn't read the sample"),
+        "{problems:?}"
+    );
 }

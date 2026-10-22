@@ -232,6 +232,8 @@ device's id as `device`.
 | `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, with every parameter at its default. Returns the new device | none | Double-click in the browser |
 | `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
 | `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
+| `device.set_sample` | Set Sample | Gives the sampler `device` the audio file `file` to play, a path as clips name files ([project-format.md](project-format.md)), or takes its sample away without one | none | Drop a file on Simpler |
+| `device.load_sample` | Load Sample... | Asks for an audio file and gives it to the sampler `device` with `device.set_sample` | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
 | `device.hide_window` | Hide Plugin Window | Closes it | none | Ctrl+Alt+P |
 | `device.delete` | Delete Device | Deletes a device | none | Delete, with the device selected |
@@ -239,9 +241,13 @@ device's id as `device`.
 Adding, changing and deleting are transactions named after the device:
 a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
 plugin by its name, such as "Delete Surge XT". So undo covers them, and
-dragging a control is one gesture, which one undo takes back. The window commands ask the app, with `Request::PluginWindow`; a
-plugin that isn't playing has no window to show, and the status bar says
-why. A new device starts with the plugin's own defaults. Its settings fill
+dragging a control is one gesture, which one undo takes back. Giving a
+sampler its sample is "Load Sample", and taking it away "Remove Sample".
+`device.load_sample` asks the app, with `Request::LoadSample`, which shows
+a dialog in the project's folder; the sampler reads the file when the
+graph is next built, and the status bar says if it can't. The window
+commands ask the app, with `Request::PluginWindow`; a plugin that isn't
+playing has no window to show, and the status bar says why. A new device starts with the plugin's own defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
 ### The mixer's controls

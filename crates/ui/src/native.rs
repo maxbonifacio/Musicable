@@ -3,8 +3,6 @@
 //! a menu for a choice. They stand in columns in the order of the device's
 //! table, a column for each group of parameters, such as an EQ's band.
 
-use std::ops::Range;
-
 use egui::text::{CCursor, CCursorRange};
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Key, Rangef, Rect, Response, RichText, Sense,
@@ -24,19 +22,20 @@ use crate::widgets::{Face, toggle};
 /// one.
 pub(crate) const ROWS: usize = 5;
 
-/// The parameters in each column, as ranges of their places in `params`:
-/// runs of one group, at most [`ROWS`] long.
-fn columns(params: &[ParamInfo]) -> Vec<Range<usize>> {
-    let mut columns: Vec<Range<usize>> = Vec::new();
+/// The parameters in each column, by their places in `params`: a group's,
+/// at most [`ROWS`] to a column, with the groups in the order they first
+/// come in the table. Tables only grow at the end, so a parameter added to
+/// an earlier group joins it there.
+fn columns(params: &[ParamInfo]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
     for (index, info) in params.iter().enumerate() {
-        match columns.last_mut() {
-            Some(column) if column.len() < ROWS && params[column.start].group == info.group => {
-                column.end = index + 1;
-            }
-            _ => columns.push(index..index + 1),
+        match groups.iter_mut().find(|(group, _)| *group == info.group) {
+            Some((_, members)) => members.push(index),
+            None => groups.push((info.group, vec![index])),
         }
     }
-    columns
+    let columns = groups.iter().flat_map(|(_, members)| members.chunks(ROWS));
+    columns.map(<[usize]>::to_vec).collect()
 }
 
 /// How wide `device`'s controls are, side by side.
@@ -65,7 +64,7 @@ pub(crate) fn controls(
         let mut group = None;
         for column in columns(params) {
             // A group's name heads its first column.
-            let title = params[column.start].group;
+            let title = params[column[0]].group;
             let heading = if group == Some(title) { "" } else { title };
             group = Some(title);
             ui.vertical(|ui| {
@@ -330,25 +329,43 @@ mod tests {
 
     #[test]
     fn groups_stand_in_columns_of_at_most_five() {
-        let ranges = |kind: NativeKind| columns(kind.params());
+        let all = |kind: NativeKind| columns(kind.params());
         // A column for each band, and one for the output.
-        let eq = ranges(NativeKind::Eq);
+        let eq = all(NativeKind::Eq);
         assert_eq!(eq.len(), eq::BANDS + 1);
-        assert_eq!(eq[2], 2 * eq::PER_BAND..3 * eq::PER_BAND);
-        assert_eq!(eq[eq::BANDS], eq::OUTPUT..eq::OUTPUT + 1);
+        assert_eq!(eq[2], Vec::from_iter(2 * eq::PER_BAND..3 * eq::PER_BAND));
+        assert_eq!(eq[eq::BANDS], [eq::OUTPUT]);
         // Seven ungrouped controls take two columns.
-        assert_eq!(ranges(NativeKind::Utility), [0..5, 5..7]);
+        assert_eq!(all(NativeKind::Utility), [vec![0, 1, 2, 3, 4], vec![5, 6]]);
         assert_eq!(utility::DC, 6);
-        // The sampler's eight sample controls take two.
-        let sampler = ranges(NativeKind::Sampler);
-        assert_eq!(sampler[..2], [0..5, 5..8]);
-        assert_eq!(sampler[2].start, sampler::ATTACK);
+        // The sampler's nine sample controls take two, with the loop's fade,
+        // which came later, among them.
+        let sampler = all(NativeKind::Sampler);
+        let fade = sampler::LOOP_FADE;
+        assert_eq!(sampler[..2], [vec![0, 1, 2, 3, 4], vec![5, 6, 7, fade]]);
+        assert_eq!(sampler[2][0], sampler::ATTACK);
         for kind in NativeKind::ALL {
-            let columns = ranges(kind);
-            assert_eq!(columns.first().map(|c| c.start), Some(0));
-            assert_eq!(columns.last().map(|c| c.end), Some(kind.params().len()));
-            assert!(columns.windows(2).all(|pair| pair[0].end == pair[1].start));
-            assert!(columns.iter().all(|c| !c.is_empty() && c.len() <= ROWS));
+            let params = kind.params();
+            let columns = all(kind);
+            // Each parameter once, a group's in the table's order.
+            let mut places = columns.concat();
+            places.sort_unstable();
+            assert!(places.into_iter().eq(0..params.len()), "{kind:?}");
+            for column in &columns {
+                assert!(!column.is_empty() && column.len() <= ROWS);
+                assert!(column.windows(2).all(|pair| pair[0] < pair[1]));
+                let group = params[column[0]].group;
+                assert!(column.iter().all(|&i| params[i].group == group));
+            }
+            // A group's columns stand together.
+            let groups: Vec<_> = columns.iter().map(|c| params[c[0]].group).collect();
+            let mut seen = Vec::new();
+            for (i, group) in groups.iter().enumerate() {
+                if i == 0 || groups[i - 1] != *group {
+                    assert!(!seen.contains(group), "{kind:?}: {group} twice");
+                    seen.push(*group);
+                }
+            }
         }
     }
 }

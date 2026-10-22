@@ -467,10 +467,12 @@ folder until it's opened again. MIDI recording isn't done yet.
 
 Musicable has devices of its own, which play without plugins: an EQ, a
 compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
-So far the EQ and the utility play; the others come in the next few
-changes, and until then the browser leaves them out. Each is a node in the
-engine ([engine.md](engine.md#built-in-devices)), and the project saves
-its settings ([project-format.md](project-format.md)).
+So far the EQ, the utility, the sampler and the synth play; the others
+come in the next few changes, and until then the browser leaves them out.
+Each is a node in the engine ([engine.md](engine.md#built-in-devices)),
+and the project saves its settings ([project-format.md](project-format.md)).
+The sampler and the synth play their track's notes, each note with its
+own bend and expression, as MPE sends them.
 
 The plugin browser lists them under **Built-in**, above the plugins, and
 finds them by name; All, Instruments and Effects pick among them too. A
@@ -479,7 +481,8 @@ master's, with every control at its default.
 
 In the devices panel, a built-in device shows its controls in columns, a
 column for each group of them, such as one of the EQ's bands, under the
-group's name:
+group's name, and more columns, side by side, for a group of more than
+five:
 
 - **A bar** for each number, filled as far as the value is along its range
   (from zero, for a range either side of it, such as a gain in dB), with
@@ -498,6 +501,15 @@ as "Change EQ", and a whole drag is one. The engine hears each as it's
 made, and smooths it over 10 ms. Screen readers find each control by the
 device's name and the control's, such as "EQ Band 3 Freq", and can set a
 bar to a number.
+
+A sampler shows the name of its sample's file beside its own, and **Load
+Sample...** asks for an audio file for it to play (WAV, AIFF or FLAC), in
+the project's folder; right-click the name to remove it. As for an audio
+clip, the project keeps the file's path relative to its folder if it's in
+there. The sampler reads the whole file when the graph is next built, and
+samplers playing the same file share it; if it can't, it plays nothing,
+and the status bar says why. Loading and removing a sample are steps in
+the undo history: "Load Sample" and "Remove Sample".
 
 ## Plugins
 
