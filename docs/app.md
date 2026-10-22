@@ -104,7 +104,7 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Locator, Transport, View and Options. Undo and Redo name the
+  Track, Clip, Notes, Locator, Transport, View and Options. Undo and Redo name the
   change they would make, as in "Undo Set Tempo", and are greyed out when
   there's nothing to undo or redo, as is any command that doesn't apply
   now, such as Split with nothing selected. Toggles, such as Follow and
@@ -127,6 +127,10 @@ That's what `ParallelOptions::inline_below` is for
 - **The devices panel** is under the arrangement: the selected track's
   devices, or the master's, with Add Plugin to open the plugin browser (see
   [Plugins](#plugins)). **View > Devices** (Ctrl+Alt+L) hides or shows it.
+- **The piano roll** takes the devices panel's place, as Live's clip view
+  takes its device view's: showing one hides the other. Double-clicking a
+  MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
+  switches between the two ([below](#the-piano-roll)).
 - **The plugin browser** is a panel on the left, hidden until Add Plugin or
   **View > Plugin Browser** (Ctrl+Alt+B) shows it.
 - **The mixer** is a panel under them, with a strip for each track and the
@@ -185,6 +189,7 @@ The mouse does what it does in Live:
 | | Drag; Ctrl-drag; Alt-drag | Moves the selected clips, also to other tracks of their kind; copies them; moves them off the grid |
 | | Double-click | Renames the clip |
 | A clip's body | Click | Selects the clip and puts the start marker there, so Ctrl+E splits it there |
+| | Double-click | Opens a MIDI clip in the piano roll |
 | | Drag | Selects time, as on an empty lane |
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
 | A fade handle | Drag | Makes the fade longer or shorter |
@@ -217,12 +222,13 @@ transport plays, **Follow** (Ctrl+Shift+F) turns the page when the playhead
 leaves the view; scrolling away pauses it until the playhead is in sight
 again.
 
-**Themes and mouse maps.** The arrangement and the mixer draw every colour
-and size from a `musicable_ui::Theme`, and look up what each gesture does,
-from where it starts and the modifiers held, in a `MouseMap`.
-`MouseMap::live()` is the table above. `Shell::set_theme` and
-`set_mouse_map` change them, for the profiles of Tier 2. Each view is a
-panel with its own id, such as `musicable_ui::MIXER`.
+**Themes and mouse maps.** The arrangement, the piano roll and the mixer
+draw every colour and size from a `musicable_ui::Theme`, and look up what
+each gesture does, from where it starts and the modifiers held, in a
+`MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
+`Shell::set_theme` and `set_mouse_map` change them, for the profiles of
+Tier 2. Each view is a panel with its own id, such as
+`musicable_ui::MIXER` and `PIANO_ROLL`.
 
 ### How fast it draws
 
@@ -261,6 +267,75 @@ triangles, such as automation of hundreds of tracks zoomed out, the lanes'
 drawing (`crates/ui/src/arrangement/paint.rs`) can move into an
 `egui_wgpu::Callback` with a render pass of its own, with the gestures left
 as they are.
+
+## The piano roll
+
+The piano roll shows the notes of a MIDI clip, as Live's MIDI note editor
+does: rows of keys beside a keyboard, under a ruler, over a lane of the
+notes' velocities. It shows the MIDI clip selected last in the arrangement,
+or opened with a double-click. Across, it shows song positions, as the
+arrangement does, so the start marker, the playhead and the grid line up
+with it; its zoom and scrolling are its own. Everything it does runs a
+command ([commands.md](commands.md#notes)), and a drag runs one when it
+ends, so it's one step to undo.
+
+- **Notes** take their track's colour, fainter the softer they start, with
+  their names on them when there's room. Selected notes are outlined. While
+  a drag lasts, ghosts show where notes will go.
+- **The rows** of the black keys are darker, with a line under each C,
+  where an octave starts. The clip's notes before its start or after its
+  end are shaded, as they don't play.
+- **The keyboard** names the Cs: middle C, MIDI note 60, is C3, as in
+  Live, unless the `middle_c` setting says otherwise
+  ([below](#settings-and-your-keymap)).
+- **The velocities** are stems at the notes' starts, as tall as the notes
+  start hard.
+- **Draw Mode** (B) turns clicks and drags on the rows into drawing, as in
+  Live, and its button is in the Notes menu and the rows' context menu.
+
+| Where | Gesture | What it does |
+|---|---|---|
+| A note | Click; Ctrl- or Shift-click | Selects the note; adds it to the selection or takes it out |
+| | Drag; Ctrl-drag; Alt-drag | Moves the selected notes in time and to other keys, on the grid; copies them; changes their velocity |
+| | Double-click | Deletes the note |
+| A note's start or end | Drag; Alt-drag | Trims the selected notes, on the grid; off it |
+| A row | Click | Clears the selection and puts the start marker there |
+| | Double-click | Adds a note, a step of the grid long, on the line before the pointer |
+| | Drag | Selects the notes in the rectangle dragged over |
+| A row, in Draw Mode | Click; drag | Adds a note; draws a note at each step of the grid dragged over, on the key under the pointer |
+| A note, in Draw Mode | Click | Deletes the note |
+| A key | Click; Ctrl- or Shift-click | Selects the notes on the key; adds them |
+| | Wheel; Ctrl-wheel | Scrolls up and down; makes the rows taller or shorter around the pointer |
+| The velocities | Drag | Changes the velocity of the note dragged, or the selected notes |
+| The ruler | Click; drag | Puts the start marker and the playhead there; zooms |
+| Anywhere else | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
+
+Live turns off the grid with Alt while a drag goes, but Alt-dragging a note
+changes its velocity there, so moving notes off the grid is Snap to Grid
+(Ctrl+4) turned off. Escape cancels a drag. A right-click opens a context
+menu of commands from the registry, as the arrangement's do: Cut, Copy,
+Paste, Duplicate, Delete, Quantize and Zoom to Selection on a note; Paste,
+Select All, Draw Mode and Quantize on the rows; the grid on both; and Locate
+and Follow on the ruler.
+
+**The focus.** Clicking in the piano roll gives it the focus, and clicking
+in the arrangement gives the arrangement the focus back. While the piano
+roll has it, the edit commands (Ctrl+X, C, V, D, A and Delete), Zoom and the
+arrow keys act on its notes: Up and Down transpose, Shift with them by
+octaves, Left and Right nudge by the grid, Shift+Left and Shift+Right
+shorten and lengthen, Ctrl+Up and Ctrl+Down change velocities, and Ctrl+U
+quantizes ([commands.md](commands.md#notes)). Hiding the piano roll gives
+the arrangement the focus.
+
+**For Tier 2's extensions and profiles.** What the piano roll shows, its
+selection, its zoom and the focus are the `Editor`'s, beside the
+arrangement's, where commands and agents read and change them; its context
+menus list commands from the registry; its colours and sizes are in the
+`Theme` (`theme.piano_roll` and the piano roll's colours); its gestures are
+the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
+`DrawGrid`, `PianoKey` and `VelocityLane`; its panel's id is
+`musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
+setting.
 
 ## The command palette
 
@@ -547,8 +622,10 @@ has how the app hosts plugins.
 Every key press goes to the keymap before egui sees it, through
 `musicable_ui::KeyPresses`. A bound chord runs its command through
 `Session::key_pressed` and goes no further, so Space plays even when a button
-has keyboard focus. Unbound keys go on to egui. Key presses never reach the
-engine any other way.
+has keyboard focus. Unbound keys go on to egui, and so do keys whose command
+doesn't apply now (`Session::takes_key`): with no notes selected in the
+piano roll, the arrow keys move the keyboard focus between controls, as
+egui does with them. Key presses never reach the engine any other way.
 
 - While a text field has focus, such as the tempo field being typed into,
   every key goes to it instead. Ctrl+C, Ctrl+X and Ctrl+V reach the keymap
@@ -716,14 +793,17 @@ buffer_size = 128
 
 [behaviour]
 play_from = "start_marker"
+middle_c = "c3"
 ```
 
 Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
 smallest the device supports, or an ASIO driver's preferred size. `play_from`
 is where Space plays from: the start marker (`start_marker`), as in Live, or
-wherever the playhead stopped (`playhead`). The app reads it at startup;
-there's no window for it yet. Fields this version doesn't know are ignored.
+wherever the playhead stopped (`playhead`). `middle_c` is what the piano
+roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
+as in scientific pitch notation and Reaper, or `c5`, as in FL Studio. The
+app reads them at startup; there's no window for them yet. Fields this version doesn't know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
@@ -806,6 +886,11 @@ for, since those builds are distributed under it.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
   only what's in sight of a hundred tracks is laid out.
+  `crates/ui/src/piano_roll/tests.rs` does the same for the piano roll's
+  gestures, Draw Mode, keyboard, wheel and context menus.
+- [`crates/app/tests/piano_roll.rs`](../crates/app/tests/piano_roll.rs)
+  edits notes with the piano roll's commands and keys, and checks that the
+  test instrument plays them as they are after each change and undo.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
   tempo field and undoing a drag of it, and a new engine taking over. The
@@ -847,6 +932,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
+- In the piano roll: controller lanes and MPE (coming with N9's next
+  steps), drawing velocities across the lane, folding to the keys in use,
+  scales, and repeating the arrow keys while they're held.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.

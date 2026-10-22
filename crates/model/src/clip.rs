@@ -231,7 +231,7 @@ impl MidiClip {
     /// Adds a note without expression, let go at no particular speed, with
     /// a new id, and returns it.
     pub fn add_note(&mut self, start: Beats, length: Beats, key: u8, velocity: f32) -> &mut Note {
-        let id = NoteId(crate::next_id(&mut self.next_note_id, "note"));
+        let id = self.new_note_id();
         self.notes.push(Note {
             id,
             start,
@@ -242,6 +242,11 @@ impl MidiClip {
             expression: Expression::default(),
         });
         self.notes.last_mut().expect("the note just added")
+    }
+
+    /// An id no note in the clip has had, for a new note.
+    pub fn new_note_id(&mut self) -> NoteId {
+        NoteId(crate::next_id(&mut self.next_note_id, "note"))
     }
 
     pub fn note(&self, id: NoteId) -> Option<&Note> {
@@ -287,6 +292,11 @@ impl Note {
 
     pub fn end(&self) -> Beats {
         self.start + self.length
+    }
+
+    /// When the note sounds, in its clip's own time.
+    pub fn range(&self) -> BeatRange {
+        BeatRange::new(self.start, self.end())
     }
 }
 

@@ -1,5 +1,6 @@
-//! What the arrangement edits besides the project: the selection, the start
-//! marker, the grid, the zoom and how the editing behaves.
+//! What the arrangement and the piano roll edit besides the project: the
+//! selection, the start marker, the grid, the zoom and how the editing
+//! behaves.
 //!
 //! It lives with the [`Document`](crate::Document), outside the widgets, so
 //! commands read and change it just as the UI does, and so will extensions
@@ -7,12 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use musicable_model::clip::{Clip, ClipId};
+use musicable_model::clip::{Clip, ClipContent, ClipId, Note, NoteId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 use serde::{Deserialize, Serialize};
 
-/// The arrangement's editing state.
+/// The arrangement's and the piano roll's editing state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Editor {
     pub selection: Selection,
@@ -42,6 +43,10 @@ pub struct Editor {
     pub clipboard: Option<Clipboard>,
     /// The tracks whose takes the arrangement shows in lanes under them.
     pub take_lanes: BTreeSet<TrackId>,
+    /// Which view the edit commands and the keys act on.
+    pub focus: Focus,
+    /// What the piano roll shows and has selected.
+    pub piano_roll: PianoRoll,
 }
 
 impl Default for Editor {
@@ -59,6 +64,8 @@ impl Default for Editor {
             sample_rate: 48_000,
             clipboard: None,
             take_lanes: BTreeSet::new(),
+            focus: Focus::default(),
+            piano_roll: PianoRoll::default(),
         }
     }
 }
@@ -96,8 +103,33 @@ impl Editor {
         )
     }
 
+    /// Shows `clip` in the piano roll, if it's a MIDI clip, as selecting it
+    /// in the arrangement does. A clip it doesn't show already comes into
+    /// sight with no notes selected. Returns whether it's a MIDI clip.
+    pub fn show_in_piano_roll(&mut self, clip: &Clip) -> bool {
+        let ClipContent::Midi(midi) = &clip.content else {
+            return false;
+        };
+        let roll = &mut self.piano_roll;
+        if roll.clip != Some(clip.id) {
+            roll.clip = Some(clip.id);
+            roll.notes.clear();
+            roll.show(clip, &midi.notes);
+        }
+        true
+    }
+
+    /// Shows `clip` in the piano roll, if it's a MIDI clip, and gives the
+    /// piano roll the focus.
+    pub fn open_in_piano_roll(&mut self, clip: &Clip) {
+        if self.show_in_piano_roll(clip) {
+            self.focus = Focus::PianoRoll;
+        }
+    }
+
     /// Forgets what `project` doesn't have any more: selected clips and
-    /// tracks that went, their heights and their take lanes.
+    /// tracks that went, their heights and their take lanes, and the piano
+    /// roll's clip and notes.
     pub fn prune(&mut self, project: &Project) {
         let tracks: BTreeSet<TrackId> = project.tracks.iter().map(|t| t.id).collect();
         let selection = &mut self.selection;
@@ -122,7 +154,135 @@ impl Editor {
         }
         self.track_heights.retain(|id, _| tracks.contains(id));
         self.take_lanes.retain(|id| tracks.contains(id));
+        let roll = &mut self.piano_roll;
+        let shown = roll
+            .clip
+            .and_then(|id| match &project.find_clip(id)?.1.content {
+                ClipContent::Midi(midi) => Some(midi),
+                ClipContent::Audio(_) => None,
+            });
+        match shown {
+            Some(midi) => {
+                if !roll.notes.is_empty() {
+                    let notes: BTreeSet<NoteId> = midi.notes.iter().map(|n| n.id).collect();
+                    roll.notes.retain(|id| notes.contains(id));
+                }
+            }
+            None => {
+                roll.clip = None;
+                roll.notes.clear();
+                self.focus = Focus::Arrangement;
+            }
+        }
     }
+}
+
+/// The views that edit: where the edit commands, such as Copy and Delete,
+/// and the keys act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    /// The arrangement, and its selected clips, time or tracks.
+    #[default]
+    Arrangement,
+    /// The piano roll, and its selected notes.
+    PianoRoll,
+}
+
+/// What the piano roll edits: the MIDI clip it shows, its selected notes,
+/// its zoom and scrolling, and what Cut and Copy took from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PianoRoll {
+    /// The MIDI clip it shows: the one selected or opened last. Always one
+    /// of the tracks' clips.
+    pub clip: Option<ClipId>,
+    /// The selected notes of that clip.
+    pub notes: BTreeSet<NoteId>,
+    /// The zoom and the scrolling sideways, in song positions, as the
+    /// arrangement's, with `top` how far down the keys are scrolled from the
+    /// top of the highest one, in points.
+    pub viewport: Viewport,
+    /// How tall each key's row is, in points.
+    pub key_height: f32,
+    /// How tall the rows of keys are together on screen, as the piano roll
+    /// last drew them, for scrolling notes into sight.
+    pub height: f32,
+    /// Whether clicks and drags on the grid draw notes, and clicks on notes
+    /// delete them: Live's Draw Mode.
+    pub draw: bool,
+    /// What Cut and Copy took from it, for Paste.
+    pub clipboard: Option<NoteClipboard>,
+}
+
+impl Default for PianoRoll {
+    /// Four bars of 4/4 across a thousand points, from the song's start, a
+    /// few octaves around middle C in sight.
+    fn default() -> Self {
+        let key_height = 12.0;
+        let height = 240.0;
+        Self {
+            clip: None,
+            notes: BTreeSet::new(),
+            viewport: Viewport {
+                start: Beats::ZERO,
+                zoom: 62.5,
+                width: 1000.0,
+                top: Self::top_for(60.0, key_height, height),
+            },
+            key_height,
+            height,
+            draw: false,
+            clipboard: None,
+        }
+    }
+}
+
+impl PianoRoll {
+    /// The shortest and the tallest a key's row gets, in points.
+    pub const MIN_KEY_HEIGHT: f32 = 4.0;
+    pub const MAX_KEY_HEIGHT: f32 = 40.0;
+
+    /// Shows `clip`, whose notes are `notes`: its whole length across, and
+    /// the keys its notes are on, or middle C, in the middle.
+    pub fn show(&mut self, clip: &Clip, notes: &[Note]) {
+        self.viewport.show(clip.range());
+        let keys = notes.iter().map(|n| f32::from(n.key));
+        let (low, high) = keys.fold((f32::MAX, f32::MIN), |(low, high), key| {
+            (low.min(key), high.max(key))
+        });
+        let middle = if low <= high {
+            (low + high) / 2.0
+        } else {
+            60.0
+        };
+        self.viewport.top = Self::top_for(middle, self.key_height, self.height);
+    }
+
+    /// Zooms and scrolls to show `range`, song positions, across, and the
+    /// keys from `low` to `high` around the middle.
+    pub fn show_notes(&mut self, range: BeatRange, low: u8, high: u8) {
+        self.viewport.show(range);
+        let middle = (f32::from(low) + f32::from(high)) / 2.0;
+        self.viewport.top = Self::top_for(middle, self.key_height, self.height);
+    }
+
+    /// How far down to scroll for `key` to be in the middle of rows
+    /// `height` points tall together, each `key_height` points tall.
+    fn top_for(key: f32, key_height: f32, height: f32) -> f32 {
+        let rows = f32::from(Note::MAX_KEY) + 1.0;
+        let middle = (rows - key - 0.5) * key_height;
+        (middle - height / 2.0).clamp(0.0, (rows * key_height - height).max(0.0))
+    }
+}
+
+/// Notes that Cut or Copy took in the piano roll.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteClipboard {
+    /// In their clip's own time.
+    pub notes: Vec<Note>,
+    /// When they sound together, in the same time: from the first note's
+    /// start to the last note's end. Paste puts its start at the start
+    /// marker.
+    pub range: BeatRange,
 }
 
 /// What's selected in the arrangement.
@@ -387,11 +547,27 @@ impl Grid {
 
     /// The line nearest `at` at `zoom`, whether snapping is on or not.
     pub fn nearest(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        let (before, after) = self.around(tempo, at, zoom);
+        if at - before <= after - at {
+            before
+        } else {
+            after
+        }
+    }
+
+    /// The line at `at` or the last before it, at `zoom`, whether snapping
+    /// is on or not: where a note drawn at `at` starts.
+    pub fn floor(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        self.around(tempo, at, zoom).0
+    }
+
+    /// The line at `at` or the last before it, and the next, at `zoom`.
+    fn around(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> (Beats, Beats) {
         let bar = tempo.bar_at(at).bar;
         let start = tempo.bar_start(bar);
         let next = tempo.bar_start(bar + 1);
         let step = self.step(zoom, next - start);
-        let (before, after) = match step.bars() {
+        match step.bars() {
             // Steps of several bars count from bar 0.
             Some(bars) => {
                 let first = bar - bar.rem_euclid(bars);
@@ -405,11 +581,6 @@ impl Grid {
                 let before = start + Beats::from_ticks(into - into % length);
                 (before, (before + Beats::from_ticks(length)).min(next))
             }
-        };
-        if at - before <= after - at {
-            before
-        } else {
-            after
         }
     }
 
@@ -417,6 +588,14 @@ impl Grid {
     /// `bar` beats.
     pub fn spacing(&self, zoom: f64, bar: Beats) -> f64 {
         self.length(self.step(zoom, bar), bar).to_f64() * zoom
+    }
+
+    /// How long the grid's step is in the bar at `at`, at `zoom`: what
+    /// nudging notes moves them by, and how long a note drawn there is.
+    pub fn step_at(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        let bar = tempo.bar_at(at).bar;
+        let length = tempo.bar_start(bar + 1) - tempo.bar_start(bar);
+        self.length(self.step(zoom, length), length)
     }
 }
 
@@ -428,6 +607,8 @@ impl Grid {
 pub struct Behaviour {
     /// Where Play/Stop starts playing from.
     pub play_from: PlayFrom,
+    /// What the piano roll calls middle C, MIDI note 60.
+    pub middle_c: MiddleC,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -439,6 +620,36 @@ pub enum PlayFrom {
     StartMarker,
     /// Wherever the playhead stopped.
     Playhead,
+}
+
+/// What middle C, MIDI note 60, is called, which names every key: DAWs
+/// count octaves from different places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MiddleC {
+    /// C3, as in Live, Cubase, Logic and Bitwig.
+    #[default]
+    C3,
+    /// C4, as in scientific pitch notation and Reaper.
+    C4,
+    /// C5, as in FL Studio.
+    C5,
+}
+
+impl MiddleC {
+    /// The name of the MIDI note number `key`, such as "C3" or "F#-1".
+    pub fn name(self, key: u8) -> String {
+        const NAMES: [&str; 12] = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
+        let octave = i32::from(key / 12)
+            + match self {
+                MiddleC::C3 => -2,
+                MiddleC::C4 => -1,
+                MiddleC::C5 => 0,
+            };
+        format!("{}{octave}", NAMES[usize::from(key % 12)])
+    }
 }
 
 /// What the app read in an audio file's header.
@@ -541,6 +752,9 @@ mod tests {
         };
         assert_eq!(off.snap(&tempo, beats(13), 16.0), beats(13));
         assert_eq!(off.nearest(&tempo, beats(13), 16.0), beats(12));
+        // A note drawn there starts at the line before.
+        assert_eq!(off.floor(&tempo, near_the_end, 16.0), beats(14));
+        assert_eq!(off.floor(&tempo, beats(14), 16.0), beats(14));
 
         // Triplets, and steps of several bars.
         let triplets = Grid {

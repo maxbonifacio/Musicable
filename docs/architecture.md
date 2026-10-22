@@ -164,8 +164,8 @@ built yet, except where it says so.
   `NodeEventKind::Note`s at sample offsets, and can pass through a chain of
   nodes, such as a MIDI effect, on their way to an instrument
   ([engine.md](engine.md#clips), [app.md](app.md#audio-files)). The
-  arrangement view makes and edits them (below); editing notes comes with
-  the piano roll.
+  arrangement view makes and edits them (below), and the piano roll edits
+  their notes.
 - **The arrangement view.** Built: tracks with headers, clips with
   waveforms and notes, the ruler with locators, the start marker and the
   loop brace, drawn with egui's painter, only what's in sight, so a hundred
@@ -174,9 +174,16 @@ built yet, except where it says so.
   commands say when they apply (`When`). What it edits besides the project
   (the selection, the start marker, the grid, the zoom, the behaviour
   settings) is the `Editor`, kept with the `Document` outside the widgets,
-  where the piano roll, extensions and agents will find it too
+  where the piano roll, extensions and agents find it too
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
+- **The piano roll.** Built: a MIDI clip's notes on rows of keys beside a
+  keyboard, with a velocity lane, in the devices panel's place, drawn and
+  tested as the arrangement is. Its gestures run the note commands
+  (`notes.move` and the rest) and Live's keys, which act where the
+  `Editor`'s focus is; it shares the arrangement's grid and song positions,
+  and has a viewport of its own ([app.md](app.md#the-piano-roll)).
+  Controller lanes and MPE out to plugins come next.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There

@@ -54,6 +54,29 @@ version = 1
 "view.toggle_devices" = ["Ctrl+Alt+L"]
 "view.toggle_browser" = ["Ctrl+Alt+B"]
 
+# Live's keys for its clip view, which the piano roll stands in for: Live 12
+# shows and hides it with Ctrl+Alt+3, and switches between it and the device
+# view with F12 or Shift+Tab. Shift+Tab is left to move the keyboard focus
+# back, as it does everywhere else.
+"view.toggle_piano_roll" = ["Ctrl+Alt+3"]
+"view.switch_devices_piano_roll" = ["F12"]
+
+# Live's keys for its MIDI note editor. The arrow keys act on the notes
+# selected in the piano roll while it has the focus; with none selected,
+# they move the keyboard focus between controls instead.
+"notes.toggle_draw" = ["B"]
+"notes.quantize" = ["Ctrl+U"]
+"notes.transpose_up" = ["Up"]
+"notes.transpose_down" = ["Down"]
+"notes.octave_up" = ["Shift+Up"]
+"notes.octave_down" = ["Shift+Down"]
+"notes.nudge_left" = ["Left"]
+"notes.nudge_right" = ["Right"]
+"notes.shorten" = ["Shift+Left"]
+"notes.lengthen" = ["Shift+Right"]
+"notes.velocity_up" = ["Ctrl+Up"]
+"notes.velocity_down" = ["Ctrl+Down"]
+
 # Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
 # groups the selected tracks, which needs a selection.
 "track.new_audio_track" = ["Ctrl+T"]
