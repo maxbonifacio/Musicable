@@ -247,10 +247,13 @@ built yet, except where it says so.
   other. A new kind of edit is undoable once it has its inverse
   ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's, is
   a gesture (`Action::BeginGesture` and `EndGesture`), so it's one step.
-- **Export.** Rendering faster than real time is the engine without a
-  device. `null_test::Player` already plays a project offline, block by
-  block, with either renderer, its streams waiting for the disk; export
-  does the same on a background thread and writes the samples to a file.
+- **Export.** Built: an export plays the project offline in a session of
+  its own, as `null_test::Player` does, on a background thread, faster than
+  real time, and writes WAV, AIFF or FLAC files through
+  `musicable_io::audio::Writer`. Stems are taps on the graph, lined up with
+  the mix by delay compensation, and the tests check that an exported mix
+  is what the app plays live, sample for sample
+  ([app.md](app.md#exporting-audio)).
 - **The clip stage.** Built: Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.

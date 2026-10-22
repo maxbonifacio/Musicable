@@ -21,9 +21,11 @@ console, and are much slower: the engine checks every allocation, and egui
 runs unoptimised.
 
 `musicable keymap [FILE]` still prints the keys, as
-[commands.md](commands.md#trying-it-out) describes, and
+[commands.md](commands.md#trying-it-out) describes,
 `musicable null-test [PROJECT]` checks the parallel scheduler against the
-reference renderer (see [The null test](#the-null-test)).
+reference renderer (see [The null test](#the-null-test)), and
+`musicable export PROJECT FILE` renders a project to audio files (see
+[Exporting audio](#exporting-audio)).
 
 ## The Tier 0 demo
 
@@ -857,6 +859,77 @@ fading in and out, and chords on the test instrument that swell with
 pressure and bend at the end of each bar. The null test plays it too:
 `musicable null-test "target/clips-demo/Clips demo.musicable"`.
 
+## Exporting audio
+
+**File > Export Audio...** (Ctrl+Shift+R, as in Live) opens the export
+window, which renders the song to audio files faster than real time, on a
+thread of its own, while the app plays on:
+
+| Setting | What it does |
+|---|---|
+| Render | The song, from its start to the end of its last clip; the loop region; or the selection: the time selection, or else from the first selected clip to the end of the last. It starts on the selection when there is one. |
+| Files | The mix, as you hear it, mute and solo too; and each track ticked on its own (stems): the track after its fader, pan and slots, as it feeds its bus, before mute and solo. A return track's file is its return; a group's, what its unmuted tracks feed it. Sends aren't in a track's file, and the master's devices aren't in any but the mix's. |
+| Format | WAV, AIFF or FLAC, 16-bit or 24-bit, or 32-bit float in WAV and AIFF, which keeps what goes over full scale. FLAC files carry the samples' MD5, as libFLAC's do. |
+| Sample rate | The engine's, or another: the song then renders at that rate, its plugins too, and audio files at other rates are converted as they play. |
+| Dither | Adds triangular noise of one step as integer samples are rounded, so quiet sounds fade out smoothly. Exact silence stays silent, and every export of the same song is the same, bit for bit. |
+| Normalise | Raises or lowers each file so its loudest sample is at 0 dBFS. |
+| Render the tail | Renders on after the end until everything has been quiet, below -96 dBFS, for two seconds, for 30 seconds at most, and leaves the quiet end off, so reverbs and releases ring out. |
+
+**Export...** asks where to save the mix, and the stems go next to it,
+named after it and their track's number: `Song.wav`, `Song 01 Drums.wav`,
+`Song 02 Bass.wav`. The window then shows how far along the export is and
+how many times faster than real time it renders, and Cancel stops it.
+Closing the window leaves it running, and the status bar says when it's
+done. The window then lists each file with its peak, and warns about
+samples over full scale, which clip in integer files. The window's
+settings are kept in `settings.toml` for the next export.
+
+An export renders exactly what the app plays. It plays a copy of the
+project as it would be saved, with each plugin's state saved afresh, in a
+session of its own (`Session::exporting`), as the null test's player does:
+its own engine, whose parallel scheduler's workers don't take real-time
+priority, and its own instances of the project's plugins, loaded on the
+main thread, which serves what they ask of it while the export runs. The
+copy plays without the metronome, looping or punching in, from the start of
+the range, and the transport stops at its end, to the frame. The render
+thread asks the engine for 4,096 frames at a time and skips the frames the
+graph's latency delays the output by, so a file starts with the range,
+lined up to the sample however late the plugins are. Stems are taps on the
+graph ([engine.md](engine.md#delay-compensation)), lined up with the mix by
+delay compensation, and render with solo cleared, so a group's stem has all
+its unmuted tracks; when solo is on and the mix is wanted too, the mix
+renders as it's heard, in a pass of its own.
+
+Files are written by `musicable_io::audio::Writer`, which streams WAV, AIFF
+and FLAC files with our own FLAC encoder, and named `NAME.part` until
+they're whole, so a cancelled or failed export leaves no half-written files.
+Normalising renders to a float file first, `NAME.float.part`, then writes
+the file from it.
+
+`musicable export` does the same from the command line, with the plugins
+the app's last plugin scan found:
+
+```sh
+cargo run --release -p musicable-app -- export song.musicable out/Song.flac --stems
+cargo run --release -p musicable-app -- export song.musicable Song.wav --bits 16 --rate 44100 --normalize
+```
+
+`--help` lists its options: the loop instead of the song, the format (the
+file's extension by default), the bits, the rate, the block size, stems
+with or without the mix, normalising, and no dither or no tail. On a 4-core
+cloud VM, the clips demo below, 38.4 seconds and four tracks, exports at 54
+times real time to a WAV file, 39 times to FLAC, and 22 times with the mix
+and the four stems in FLAC. The engine sets the pace: the null test renders
+it at 46 times real time.
+
+[`crates/app/tests/export.rs`](../crates/app/tests/export.rs) is the done
+test: an exported mixdown is what the app plays live, sample for sample,
+with a latent plugin, an audio file at 44.1 kHz, a test instrument and a
+muted track, the live render asked for in 441-frame buffers. Each stem is
+its track soloed, the tail is the release the live render plays, and
+normalised, 16-bit, AIFF, FLAC and 96 kHz files hold the same samples,
+scaled or rounded. A cancelled or failed export leaves no files behind.
+
 ## Settings and your keymap
 
 The app keeps its settings and your keymap in its config folder:
@@ -911,6 +984,15 @@ buffer_size = 128
 [behaviour]
 play_from = "start_marker"
 middle_c = "c3"
+
+[export]
+format = "wav"
+bits = 24
+dither = true
+normalize = false
+tail = true
+mixdown = true
+stems = false
 ```
 
 Every setting is optional: no device is the default output, no
@@ -920,7 +1002,11 @@ is where Space plays from: the start marker (`start_marker`), as in Live, or
 wherever the playhead stopped (`playhead`). `middle_c` is what the piano
 roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
 as in scientific pitch notation and Reaper, or `c5`, as in FL Studio. The
-app reads them at startup; there's no window for them yet. Fields this version doesn't know are ignored.
+app reads them at startup; there's no window for them yet. `[export]` is
+the export window's settings as it was last used: `format` is `wav`, `aiff`
+or `flac`, `bits` is 16, 24, or 32 for floats, and a `sample_rate` there
+renders at that rate instead of the engine's. Fields this version doesn't
+know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
@@ -1025,6 +1111,12 @@ for, since those builds are distributed under it.
   graph.
 - `musicable_app::null_test` plays projects offline for the null test and
   for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
+- `musicable_app::export` renders exports, and
+  [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) checks them
+  against what the app plays live (see [Exporting audio](#exporting-audio)).
+  [`crates/app/src/app/exporting.rs`](../crates/app/src/app/exporting.rs)
+  opens the export window with Ctrl+Shift+R and exports from it in the
+  background.
 - [`crates/app/tests/clips.rs`](../crates/app/tests/clips.rs) saves a
   project whose audio clips play WAV, AIFF and FLAC files from its folder,
   one of them streaming, and whose MIDI clip plays the test instrument. It
@@ -1064,3 +1156,6 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - A macOS default keymap with Cmd.
 - Following the default output when it changes.
 - An icon, and opening `.musicable` files from the file manager.
+- Exporting to MP3 or other lossy formats, stems with the returns' and the
+  master's effects (Live's "Include Return and Master Effects"), and
+  remembering which tracks were ticked for stems.

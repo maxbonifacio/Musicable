@@ -5,6 +5,8 @@
 mod app;
 mod audio_files;
 mod audio_window;
+pub mod export;
+mod export_window;
 mod keymap_file;
 mod media;
 pub mod null_test;

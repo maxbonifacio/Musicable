@@ -162,7 +162,7 @@ fn coded_number(bytes: &[u8]) -> Option<(u64, usize)> {
 }
 
 /// The CRC frame headers end with: polynomial x⁸ + x² + x + 1.
-fn crc8(bytes: &[u8]) -> u8 {
+pub(super) fn crc8(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0, |crc, &byte| {
         (0..8).fold(crc ^ byte, |crc, _| {
             if crc & 0x80 != 0 {

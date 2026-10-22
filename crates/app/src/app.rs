@@ -1,7 +1,7 @@
 //! The window: the UI crate's shell, wired to the session, the audio device
 //! and the project's file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +22,8 @@ use musicable_ui::{
 
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::audio_window::AudioWindow;
+use crate::export::{self, Export, ExportSettings, Job, Report};
+use crate::export_window::{Asked, ExportWindow};
 use crate::keymap_file::UserKeymap;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
@@ -66,6 +68,11 @@ pub struct App {
     files_found: Option<u64>,
     keys: KeyPresses,
     audio_window: AudioWindow,
+    export_window: ExportWindow,
+    /// The export under way, if one is.
+    export: Option<Export>,
+    /// Where the last export went, where the next one's dialog starts.
+    export_folder: Option<PathBuf>,
     /// The project's file, once it has one.
     path: Option<PathBuf>,
     /// Where the file dialogs start: the folder a project was last opened
@@ -164,6 +171,9 @@ impl App {
             files_found: None,
             keys: KeyPresses::new(),
             audio_window: AudioWindow::new(),
+            export_window: ExportWindow::new(),
+            export: None,
+            export_folder: None,
             path,
             folder,
             messages,
@@ -353,6 +363,12 @@ impl App {
                     self.insert_audio(files, None, None);
                 }
             }
+            Request::ExportAudio => self.export_window.open(
+                &self.settings.export,
+                self.session.project(),
+                self.session.editor(),
+                self.export.is_some(),
+            ),
             Request::TogglePanel(panel) => {
                 self.shell.toggle_panel(panel);
                 self.focus_in_sight();
@@ -519,6 +535,88 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Asks where to export `range` of the song with `settings`, the tracks
+    /// `tracks` on their own if the settings want stems, and starts the
+    /// export. The settings are kept for the next one.
+    fn start_export(
+        &mut self,
+        range: BeatRange,
+        settings: ExportSettings,
+        tracks: &BTreeSet<TrackId>,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        let format = settings.format;
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .add_filter(format.name(), format.extensions())
+            .set_file_name(format!("{}.{}", self.name(), format.extensions()[0]));
+        let folder = self.export_folder.as_deref();
+        let dialog = match folder.or(self.project_folder()).or(self.folder.as_deref()) {
+            Some(folder) => dialog.set_directory(folder),
+            None => dialog,
+        };
+        if let Some(file) = dialog.save_file() {
+            self.export_to(&file, range, settings, tracks, ctx);
+        }
+    }
+
+    /// Exports as [`start_export`](Self::start_export) does, once the
+    /// dialog has said where: to `file`, and the stems next to it.
+    fn export_to(
+        &mut self,
+        file: &Path,
+        range: BeatRange,
+        settings: ExportSettings,
+        tracks: &BTreeSet<TrackId>,
+        ctx: &egui::Context,
+    ) {
+        self.export_folder = file.parent().map(Path::to_owned);
+        self.settings.export = settings;
+        self.save_settings();
+        let project = self.session.saved_project();
+        let (mixdown, stems) = export::files_for(file, &project, &settings, tracks);
+        let job = Job {
+            project,
+            folder: self.project_folder().map(Path::to_owned),
+            range,
+            settings,
+            config: self.session.engine_config(),
+            installed: self.session.installed_plugins().to_vec(),
+            waker: Some(waker(ctx)),
+            mixdown,
+            stems,
+        };
+        match Export::start(job) {
+            Ok(export) => self.export = Some(export),
+            Err(error) => self.export_window.finished(Report {
+                failed: Some(error),
+                ..Report::default()
+            }),
+        }
+    }
+
+    /// Carries the export under way on, and once it's finished, says how it
+    /// went.
+    fn tick_export(&mut self) {
+        let Some(export) = &mut self.export else {
+            return;
+        };
+        export.tick();
+        let Some(report) = export.report().cloned() else {
+            return;
+        };
+        self.export = None;
+        let message = match (&report.failed, report.cancelled, report.files.len()) {
+            (Some(failed), ..) => format!("The export stopped: {failed}."),
+            (None, true, _) => "The export was cancelled.".to_owned(),
+            (None, false, 1) => format!("Exported {}.", report.files[0].path.display()),
+            (None, false, files) => format!("Exported {files} files."),
+        };
+        self.messages.push(message);
+        self.export_window.finished(report);
     }
 
     /// A dialog for picking a project file, in the folder of the last one.
@@ -719,6 +817,7 @@ impl eframe::App for App {
         }
         self.session.tick();
         self.plugin_windows.tick(&mut self.session);
+        self.tick_export();
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         self.follow_inputs();
@@ -741,6 +840,14 @@ impl eframe::App for App {
         } else {
             STOPPED_FRAME
         };
+        // The export's progress, and its session, which sends its engine
+        // the graphs as they compile.
+        if let Some(export) = &self.export {
+            frame = frame.min(match export.stage() {
+                export::Stage::Preparing { .. } => COMPILING_FRAME,
+                _ => PLAYING_FRAME,
+            });
+        }
         // A plugin's timer.
         if let Some(due) = self.session.next_plugin_timer() {
             frame = frame.min(due.saturating_duration_since(Instant::now()));
@@ -815,6 +922,23 @@ impl eframe::App for App {
         }
         if let Some(request) = self.audio_window.show(&ctx, &self.output) {
             self.apply_audio(request);
+        }
+        let project = self.session.project();
+        let editor = self.session.editor();
+        let export = self.export.as_ref();
+        match self.export_window.show(&ctx, project, editor, rate, export) {
+            Some(Asked::Export {
+                range,
+                settings,
+                tracks,
+            }) => self.start_export(range, settings, &tracks, &ctx, frame),
+            Some(Asked::Cancel) => {
+                if let Some(export) = &mut self.export {
+                    export.cancel();
+                }
+                self.tick_export();
+            }
+            None => {}
         }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
@@ -924,6 +1048,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 mod arranging;
 #[cfg(test)]
 mod built_in_devices;
+#[cfg(test)]
+mod exporting;
 #[cfg(test)]
 mod plugins_on_tracks;
 #[cfg(test)]
