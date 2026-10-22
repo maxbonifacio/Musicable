@@ -6,6 +6,7 @@ impl SampleFormat {
     /// Bytes per sample.
     pub(crate) fn bytes(self) -> usize {
         match self {
+            Self::F64 => 8,
             Self::F32 | Self::I32 => 4,
             Self::I24 => 3,
             Self::I16 => 2,
@@ -27,6 +28,7 @@ impl SampleFormat {
         let pairs = samples.iter().zip(out.chunks_exact_mut(self.bytes()));
         match self {
             Self::F32 => pairs.for_each(|(s, o)| o.copy_from_slice(&s.to_le_bytes())),
+            Self::F64 => pairs.for_each(|(s, o)| o.copy_from_slice(&f64::from(*s).to_le_bytes())),
             Self::I32 => pairs.for_each(|(s, o)| o.copy_from_slice(&to_i32(*s).to_le_bytes())),
             Self::I24 => pairs.for_each(|(s, o)| o.copy_from_slice(&to_i24(*s).to_le_bytes()[..3])),
             Self::I16 => pairs.for_each(|(s, o)| o.copy_from_slice(&to_i16(*s).to_le_bytes())),
@@ -37,12 +39,19 @@ impl SampleFormat {
 // Full scale is the largest positive value, so +1.0 and -1.0 stay
 // symmetrical. A NaN becomes zero: `as` saturates and maps NaN to 0.
 
+/// `sample` as a `bits`-bit integer, from 2 to 32 bits, clipping at full
+/// scale.
+pub(crate) fn to_int(sample: f32, bits: u32) -> i32 {
+    let full_scale = ((1_i64 << (bits - 1)) - 1) as f64;
+    (f64::from(sample.clamp(-1.0, 1.0)) * full_scale).round() as i32
+}
+
 fn to_i32(sample: f32) -> i32 {
-    (f64::from(sample.clamp(-1.0, 1.0)) * f64::from(i32::MAX)).round() as i32
+    to_int(sample, 32)
 }
 
 fn to_i24(sample: f32) -> i32 {
-    (f64::from(sample.clamp(-1.0, 1.0)) * f64::from((1 << 23) - 1)).round() as i32
+    to_int(sample, 24)
 }
 
 fn to_i16(sample: f32) -> i16 {
@@ -64,6 +73,8 @@ mod tests {
         let out = written(SampleFormat::F32, &[0.25, -1.5]);
         assert_eq!(out[..4], 0.25f32.to_le_bytes());
         assert_eq!(out[4..], (-1.5f32).to_le_bytes(), "floats aren't clipped");
+        let out = written(SampleFormat::F64, &[0.25]);
+        assert_eq!(out, 0.25f64.to_le_bytes());
     }
 
     #[test]

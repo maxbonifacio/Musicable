@@ -3,12 +3,14 @@
 //!
 //! ```text
 //! cargo run --release -p musicable-audio --example tone -- --period 128 --seconds 3600
+//! cargo run --release -p musicable-audio --features asio --example tone -- --asio --seconds 3600
 //! ```
 //!
 //! It prints the stream's counters every few seconds and a summary at the
 //! end, and fails if there was a dropout it didn't cause on purpose with
-//! `--stall-every`. When the device goes away it opens the stream again once
-//! a second, as an app would. `--help` lists the options.
+//! `--stall-every`. When the device goes away, or an ASIO driver asks to be
+//! reset, it opens the stream again once a second, as an app would. `--help`
+//! lists the options.
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -16,8 +18,8 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use musicable_audio::{
-    self as audio, Capabilities, Device, Mode, Stopped, Stream, StreamInfo, StreamRequest,
-    StreamStats,
+    self as audio, Capabilities, Device, DriverType, Mode, Stopped, Stream, StreamInfo,
+    StreamRequest, StreamStats,
 };
 use musicable_engine::nodes::Sine;
 use musicable_engine::{
@@ -38,6 +40,10 @@ Usage: tone [options]
   --list              list the output devices and what they support
   --device <text>     a device id, or part of a device name
                       (default: the default output)
+  --asio              play through an ASIO driver: the one --device names,
+                      or the only one installed (Windows builds with the
+                      asio feature)
+  --driver-settings   open the ASIO driver's own settings once it plays
   --exclusive         use the device in exclusive mode (Windows only)
   --rate <hz>         sample rate (default: the device's)
   --period <frames>   frames per period, the buffer size
@@ -76,6 +82,8 @@ fn main() -> ExitCode {
 struct Options {
     list: bool,
     device: Option<String>,
+    asio: bool,
+    driver_settings: bool,
     mode: Mode,
     rate: Option<u32>,
     period: Option<u32>,
@@ -91,6 +99,8 @@ impl Options {
         let mut options = Self {
             list: false,
             device: None,
+            asio: false,
+            driver_settings: false,
             mode: Mode::Shared,
             rate: None,
             period: None,
@@ -105,6 +115,8 @@ impl Options {
             let mut value = || args.next().ok_or_else(|| format!("{option} needs a value"));
             match option.as_str() {
                 "--list" => options.list = true,
+                "--asio" => options.asio = true,
+                "--driver-settings" => options.driver_settings = true,
                 "--exclusive" => options.mode = Mode::Exclusive,
                 "--device" => options.device = Some(value()?),
                 "--rate" => options.rate = Some(positive(&option, &value()?)?),
@@ -160,7 +172,12 @@ fn list() -> Result<ExitCode, String> {
     }
     for device in devices {
         let default = if device.is_default { " (default)" } else { "" };
-        println!("{}{default}", device.name);
+        let asio = if device.driver_type == DriverType::Asio {
+            " (ASIO driver)"
+        } else {
+            ""
+        };
+        println!("{}{default}{asio}", device.name);
         println!("  id: {}", device.id);
         match audio::capabilities(Some(&device.id)) {
             Ok(capabilities) => print_capabilities(&capabilities),
@@ -176,6 +193,20 @@ fn print_capabilities(capabilities: &Capabilities) {
         Some(frames) => format!("{frames} frames ({})", ms(frames.into(), rate)),
         None => "set when the stream opens".to_owned(),
     };
+    if let Some(asio) = &capabilities.asio {
+        let list = |values: &[u32]| {
+            let values: Vec<String> = values.iter().map(u32::to_string).collect();
+            values.join(", ")
+        };
+        println!(
+            "  {rate} Hz now, {} channels, preferred buffer {}",
+            capabilities.channels,
+            period(capabilities.default_period),
+        );
+        println!("  rates: {} Hz", list(&asio.sample_rates));
+        println!("  buffer sizes: {} frames", list(&asio.buffer_sizes));
+        return;
+    }
     println!(
         "  shared: {rate} Hz, {} channels, smallest period {}, default period {}",
         capabilities.channels,
@@ -195,11 +226,39 @@ fn print_capabilities(capabilities: &Capabilities) {
     }
 }
 
-/// Finds the device `text` names: its id, or part of its name.
-fn find_device(text: &str) -> Result<String, String> {
-    let devices = audio::output_devices().map_err(|e| e.to_string())?;
+/// Finds the device `text` names: its id, or part of its name. With `asio`,
+/// only ASIO drivers count, and with no `text`, the only one installed does.
+/// `None` is the default output.
+fn find_device(text: Option<&str>, asio: bool) -> Result<Option<String>, String> {
+    if !asio && text.is_none() {
+        return Ok(None);
+    }
+    let devices: Vec<Device> = audio::output_devices()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|device| !asio || device.driver_type == DriverType::Asio)
+        .collect();
+    let Some(text) = text else {
+        return match devices.as_slice() {
+            [device] => Ok(Some(device.id.clone())),
+            [] if audio::driver_types().contains(&DriverType::Asio) => {
+                Err("no ASIO drivers are installed".to_owned())
+            }
+            [] if cfg!(windows) => {
+                Err("this build has no ASIO: build it with --features asio".to_owned())
+            }
+            [] => Err("ASIO is for Windows only".to_owned()),
+            _ => {
+                let names: Vec<&str> = devices.iter().map(|device| device.name.as_str()).collect();
+                Err(format!(
+                    "pick one of the ASIO drivers with --device: {}",
+                    names.join(", ")
+                ))
+            }
+        };
+    };
     if devices.iter().any(|device| device.id == text) {
-        return Ok(text.to_owned());
+        return Ok(Some(text.to_owned()));
     }
     let wanted = text.to_lowercase();
     let found: Vec<&Device> = devices
@@ -207,7 +266,7 @@ fn find_device(text: &str) -> Result<String, String> {
         .filter(|device| device.name.to_lowercase().contains(&wanted))
         .collect();
     match found.as_slice() {
-        [device] => Ok(device.id.clone()),
+        [device] => Ok(Some(device.id.clone())),
         [] => Err(format!("no output device matches \"{text}\" (see --list)")),
         _ => {
             let names: Vec<&str> = found.iter().map(|device| device.name.as_str()).collect();
@@ -218,7 +277,7 @@ fn find_device(text: &str) -> Result<String, String> {
 
 fn play(options: &Options) -> Result<ExitCode, String> {
     let request = StreamRequest {
-        device: options.device.as_deref().map(find_device).transpose()?,
+        device: find_device(options.device.as_deref(), options.asio)?,
         mode: options.mode,
         sample_rate: options.rate,
         period: options.period,
@@ -230,6 +289,9 @@ fn play(options: &Options) -> Result<ExitCode, String> {
         .unwrap_or_else(|| open.info().period_duration() * 5);
     let (engine, handle) = new_engine(open.info(), options.level)?;
     let stream = open.start(engine).map_err(|e| e.to_string())?;
+    if options.driver_settings && !stream.show_driver_settings() {
+        println!("The device has no settings of its own: only ASIO drivers do.");
+    }
 
     let mut run = Run {
         request,

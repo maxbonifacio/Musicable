@@ -1,14 +1,15 @@
 # Audio devices
 
 How `crates/audio` gets the engine's output to a device: the backends, opening
-a stream, periods and latency, counting dropouts, and what happens when a
-device goes away.
+a stream, periods and latency, counting dropouts, what happens when a device
+goes away, and ASIO.
 
 ## Backends
 
 | Platform | Backend | Modes |
 |---|---|---|
 | Windows | Our own WASAPI backend | Shared (the default) and exclusive |
+| Windows, with the `asio` feature | Our own ASIO host as well ([ASIO](#asio)) | One: the driver's |
 | macOS | cpal, CoreAudio | Shared only. Builds and plays, not tuned |
 | Linux | cpal, ALSA | Shared only. Builds and plays, not tuned |
 
@@ -74,7 +75,7 @@ let Stopped { engine, error } = stream.stop();
 - `StreamInfo::period` is the number of frames the device asks for at each
   wake-up: the period it really delivers.
 - `StreamInfo::buffer` is the device buffer: in shared mode the most the
-  stream can queue, in exclusive mode each of the two halves.
+  stream can queue, in exclusive mode and with ASIO each of the two halves.
 - `StreamInfo::latency` is the output latency estimated from the buffer sizes
   as the stream opens: how far ahead of the play position a punctual wake-up
   starts writing, plus the delay the system reports beyond that
@@ -90,6 +91,8 @@ let Stopped { engine, error } = stream.stop();
   writes. It's the median of each block of 16 wake-ups, so a late wake-up
   doesn't show. Once the stream runs, use it rather than the estimate, as
   the app does.
+- With ASIO, both are the output latency the driver reports
+  ([ASIO](#asio)).
 - There are no input streams yet, so no input latency either. They come with
   recording.
 
@@ -162,6 +165,7 @@ latency up a period, from 8.6 to 16.6 ms in all.
 
 On macOS and Linux, a dropout is whatever cpal reports as an xrun: ALSA
 underruns and CoreAudio overloads. cpal doesn't say how much audio they lost.
+ASIO streams look for signs of their own ([ASIO](#asio)).
 
 ## When the device goes away
 
@@ -169,7 +173,9 @@ When the device is unplugged or disabled, its format is changed in the sound
 settings, or the audio service restarts, the stream ends by itself:
 `Stream::has_ended` turns true, and `Stream::stop` hands back the engine with
 the reason, such as `Error::DeviceLost`. A device that stops waking the stream
-without reporting anything ends it with `Error::Timeout` after two seconds.
+without reporting anything ends it with `Error::Timeout` after two seconds. An
+ASIO driver whose own settings change asks to be reset, which ends the stream
+with `Error::DriverReset`.
 
 To carry on, open the same `StreamRequest` again until it works, as the tone
 example does once a second, and the app every two seconds
@@ -183,7 +189,7 @@ changes, until that device goes away. Following the default is still to do.
 
 ## The audio thread
 
-Each Windows stream has its own thread, named `musicable-audio`. It joins COM's
+Each WASAPI stream has its own thread, named `musicable-audio`. It joins COM's
 multithreaded apartment and the MMCSS "Pro Audio" task at critical priority,
 and does all its WASAPI calls itself, from opening the device to closing it.
 The engine reaches it through a channel at `start` and comes back with the
@@ -194,6 +200,106 @@ errors are carried out of the scope before anything formats a message.
 
 The engine renders straight into the device buffer when it takes 32-bit float,
 and into a buffer of its own to convert from when it takes integers.
+
+ASIO streams render on the driver's own thread instead ([ASIO](#asio)).
+
+## ASIO
+
+Windows builds with the `asio` feature play through ASIO drivers too, with a
+host of our own in `src/asio/`:
+
+```sh
+cargo build --release -p musicable-app --features asio
+```
+
+Nothing else needs installing: no SDK, and no LLVM for bindings. The driver
+interface is written from Steinberg's ASIO 2.3 specification, in our own
+words, and the drivers come with the hardware. Builds are 64-bit only.
+
+**License.** The source stays MIT OR Apache-2.0, as the rest of the
+repository. Builds with the feature are distributed under the GNU GPL,
+version 3, as the project decided for ASIO, and the app shows the notice the
+GPL asks for at the foot of its audio settings in those builds. The default
+build has no ASIO code: the module only compiles with the feature, and CI
+checks that the app's default build doesn't turn it on. ASIO is a trademark
+of Steinberg Media Technologies GmbH.
+
+**Drivers as devices.** `output_devices` lists each ASIO driver installed for
+64-bit apps (under `HKEY_LOCAL_MACHINE\SOFTWARE\ASIO`, with its COM class
+registered for 64-bit) as a `Device` with `driver_type: DriverType::Asio`, and
+an id of `asio:` and its class id, which stays the same across runs.
+`DriverType::of` tells an ASIO driver's id from another device's in any
+build, and `driver_types` says which types a build plays through.
+
+**What a stream gets.** A stream plays through the driver's first two
+outputs, which drivers make their most useful pair: the first analog outputs,
+on most interfaces. `capabilities` lists the common rates the driver can
+switch to, and its buffer sizes: every one it takes, or for a driver that
+takes many, the powers of two among them, with its smallest, largest and
+preferred. With no `StreamRequest::period` the stream takes the preferred
+size, which is the one set in the driver's own settings if it has any, and a
+requested size is rounded up to one the driver takes. Many drivers, RME's
+among them, only take the size set in their settings, so the stream gets
+that one whatever it asks for. A requested rate switches the driver's rate,
+for everything its hardware plays. `Mode` doesn't apply.
+
+**Latency.** `StreamInfo::buffer` is each of the driver's two buffer halves,
+a period long. `StreamInfo::latency` and `StreamStats::queued` are the output
+latency the driver reports (`ASIOGetLatencies`): from a buffer switch until
+the half written then plays. Drivers are asked to count their converters and
+any buffers of their own in it. `queued` follows the driver when it says its
+latency changed.
+
+**Threads.** ASIO allows one driver per process, so there's one ASIO stream
+at a time: opening a second fails. A stream loads its driver on a thread of
+its own, `musicable-asio`, in a single-threaded COM apartment, as drivers
+expect. That thread makes every call to the driver but the real-time ones,
+from loading it to releasing it, and handles the window messages and requests
+the driver sends meanwhile. The driver calls back on its own thread to have
+each buffer half filled, and drivers run that thread at real-time priority.
+The callback renders the engine there, inside `rt::scope`, and writes the
+samples in each output's sample type: 16-, 24- and 32-bit integers in either
+byte order, the 32-bit types with fewer bits in use, and 32- and 64-bit
+floats. DSD isn't supported. A callback never waits for a lock: one that comes
+while the last is still rendering, from a driver that calls again too soon,
+leaves its half as it is. Both halves start silent, and some drivers ask for
+the first one from inside `ASIOStart`, on the stream's thread. A panic in a
+callback aborts the process, since it can't unwind into the driver.
+
+**Dropouts.** At each buffer switch the stream looks for the signs of one:
+
+- **The driver reported one**: an overload message, or a request to
+  resynchronize because it lost audio.
+- **The sample position jumped** by more than one and a half buffers since
+  the last callback: the driver skipped buffer switches while the host ran
+  late.
+- **The driver asked for the same half twice in a row**, having skipped the
+  switch to the other.
+- **The last callback took longer than a buffer**, so the device played the
+  half it was writing before it was done.
+
+A driver that says it reports every dropout itself is taken at its word, as
+the specification asks, and only its reports count. The first 8 callbacks
+fill the device's buffers before it starts, so their timing means nothing yet
+and the checks begin after them. Signs in the 10 callbacks after a dropout
+count towards it, as on the other backends. `lost_frames` adds up what the
+sample position skipped, or a buffer per sign when nothing says more.
+`late_wakeups` counts callbacks more than one and a half buffers apart, and
+`system_dropouts` stays at 0: there's no system audio engine in between.
+`src/asio/detector.rs` has the details.
+
+**The driver's settings, and resets.** `Stream::show_driver_settings` opens
+the driver's own settings panel, from the stream's thread. When its settings
+change, or its rate is changed from outside, the driver asks to be reset: the
+stream ends with `Error::DriverReset`, and opening it again picks up the new
+settings. The app does that at once, and says what the driver plays with now.
+
+**Tests.** `src/asio/fake.rs` is a fake driver built in Rust, set up to behave
+as drivers do, that records what the stream asks of it, and the tests in
+`src/asio/tests.rs` play the driver's thread. They run on every platform with
+`cargo test -p musicable-audio --features asio`: elsewhere than on Windows the
+module builds only for them, with stand-ins for COM and for the event the
+stream's thread waits on.
 
 ## Trying it
 
@@ -211,6 +317,16 @@ periods every five seconds, to see that each one is counted. `--device` takes
 an id or part of a device name, and `--help` lists the rest. When the device
 goes away mid-run, it keeps trying to open it again.
 
+With the `asio` feature, `--list` shows the ASIO drivers as well, and
+`--asio` plays through one: the one `--device` names, or the only one
+installed. `--driver-settings` opens the driver's own settings once it
+plays, to see a change there reset the stream and reopen it.
+
+```sh
+cargo run --release -p musicable-audio --features asio --example tone -- --list
+cargo run --release -p musicable-audio --features asio --example tone -- --asio --seconds 3600
+```
+
 The tests in `crates/audio/tests/device.rs` that play need an output device,
 so they're ignored by default:
 
@@ -223,9 +339,15 @@ Debian and Ubuntu).
 
 ## Not done yet
 
-- ASIO, as an opt-in GPL build feature. It moves to Tier 1, which the plan
-  allows.
-- Input streams, and the input latency that comes with them.
+- An hour through an ASIO driver on real hardware, the RME HDSPe AIO's. Only
+  the fake driver has played so far.
+- ASIO's outputs past the first two, and its inputs, which come with
+  recording, as do input streams and the input latency for the other
+  backends.
+- Choosing an ASIO driver's clock source. The driver's own settings do it
+  for now.
+- Packaging ASIO builds for release, with the GPL's text and the offer of
+  the source.
 - Following the default output when it changes.
 - Counting glitches downstream that don't hold up the audio engine, such as
   a late driver on a device whose clock drifts against it. Without a late
