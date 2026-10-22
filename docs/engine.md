@@ -708,14 +708,41 @@ fades in and out over 10 ms when it's switched on or off. A sample goes
 through all of a band's sections in `f64`, rounded to `f32` only after the
 last.
 
+**The compressor** (`devices::Compressor`): feed-forward, in decibels,
+after Giannoulis, Massberg and Reiss (JAES, 2012). On each frame it takes
+the louder channel's level, its peak or its power averaged over the attack
+time, and reads how far to turn it down off the static curve
+(`musicable_model::native::compressor::gain_reduction`: the ratio above
+the threshold, eased in across the knee by a parabola). A one-pole filter
+smooths that amount in dB, with the attack's coefficient while it grows
+and the release's while it shrinks, so each is a time constant whatever
+the level. Then the output gain, on the compressed signal only, and the
+mix with the dry; at 0% the output is the input exactly. The power is
+averaged in peak mode too, so the 10 ms fade of a switch to RMS finds it
+ready, and a NaN or infinity going in doesn't stick in the detector. The
+tests hold levels from -54 to 0 dB and find the node settled on the
+designed curve to within 0.001 dB, for both detectors, hard and soft
+knees; they follow the reduction frame by frame along the attack's and
+the release's exponentials; and RMS reads a sine 3 dB under its peak.
+
+**The gate** (`devices::Gate`): opens on the frame the louder channel's
+peak reaches the threshold, and closes once the peak has stayed more than
+`return` dB under it for the hold. Its gain fades in a straight line, from
+the floor to 1 over the attack and back over the release; a fade that
+starts part of the way takes that part of the time, and open, the signal
+passes untouched. A new gate starts open, so it lets a signal through
+until there's a quiet spell. Its tests check the hold, the fades, the
+floor and the return frame by frame, and that one loud channel opens both.
+
 **Adding a kind.** Write its node in a file of its own in `devices/`, make
 it in `devices::node`, add it to `BUILT`, and forward `Node::automate` to
-`Params::automate`. Its parameters are in its
-table already, and the format and commands handle them. Test it with
-`devices::testing::Run`, which renders a node over a signal in blocks of
-any length with events on given frames, under the real-time checks, and
-measure it against what it's meant to do, as the EQ's test does: a
-reference test, not a snapshot of what it happens to do.
+`Params::automate`. Its parameters are in its table already, and the
+format and commands handle them. Test it with `devices::testing::Run`,
+which renders a node over a signal in blocks of any length with events on
+given frames, under the real-time checks, and measure it against what it's
+meant to do, as the EQ's test does: a reference test, not a snapshot of
+what it happens to do. Give its parameters lanes in `tests/automation.rs`
+too, which plays them in blocks of any size.
 
 ## Parallel rendering
 

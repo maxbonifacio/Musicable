@@ -630,10 +630,10 @@ folder until it's opened again.
 
 Musicable has devices of its own, which play without plugins: an EQ, a
 compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
-So far the EQ and the utility play; the others come in the next few
-changes, and until then the browser leaves them out. Each is a node in the
-engine ([engine.md](engine.md#built-in-devices)), and the project saves
-its settings ([project-format.md](project-format.md)).
+So far the EQ, the compressor, the gate and the utility play; the others
+come in the next few changes, and until then the browser leaves them out.
+Each is a node in the engine ([engine.md](engine.md#built-in-devices)),
+and the project saves its settings ([project-format.md](project-format.md)).
 
 The plugin browser lists them under **Built-in**, above the plugins, and
 finds them by name; All, Instruments and Effects pick among them too. A

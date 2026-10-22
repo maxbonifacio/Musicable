@@ -12,7 +12,7 @@ use musicable_engine::{
 };
 use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{ClipContent, MidiClip};
-use musicable_model::native::{NativeDevice, NativeKind, eq, utility};
+use musicable_model::native::{NativeDevice, NativeKind, compressor, eq, gate, utility};
 use musicable_model::param::{ParamAddress, Scale};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{Chain, DeviceKind, Project, TestTone, TrackKind};
@@ -161,8 +161,11 @@ fn automation_loops_and_locates_as_clips_do() {
 /// instrument's level, which it gets as events, and an overridden lane.
 /// Then lanes on built-in devices, which read their own: an EQ on the bass
 /// whose shelf rises and moves, whose 24 dB cut (two sections) comes in and
-/// goes out and whose bell turns to a notch, and a utility on the master
-/// whose gain, balance and DC filter move.
+/// goes out and whose bell turns to a notch, a utility on the master
+/// whose gain, balance and DC filter move, a compressor on the chords
+/// whose threshold, knee, attack, release and mix move and whose detector
+/// switches to RMS, and a gate on the return that closes and opens again
+/// as its threshold steps, while its hold, release and floor move.
 fn project() -> Project {
     let mut p = Project::new();
     let bass = p.add_track("Bass", TrackKind::Audio);
@@ -200,6 +203,14 @@ fn project() -> Project {
     let utility = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Utility)));
     let utility_id = utility.id;
     p.master.devices.push(utility);
+    let compressor = p.new_device(DeviceKind::Native(NativeDevice::new(
+        NativeKind::Compressor,
+    )));
+    let compressor_id = compressor.id;
+    p.track_mut(chords).unwrap().devices.push(compressor);
+    let gate = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Gate)));
+    let gate_id = gate.id;
+    p.track_mut(reverb).unwrap().devices.push(gate);
 
     let lane = |param, at: &[(Beats, f64)]| Lane::new(param, points(at));
     let mut overridden = lane(ParamAddress::Pan(Chain::Master), &[(beats(0, 1), 1.0)]);
@@ -257,6 +268,43 @@ fn project() -> Project {
         utility(utility::GAIN, &[(beats(0, 1), 1.0), (beats(4, 1), 0.5)]),
         utility(utility::PAN, &[(beats(2, 1), 0.0), (beats(6, 1), -0.5)]),
         utility(utility::DC, &[(beats(1, 1), 0.0), (beats(1, 1), 1.0)]),
+    ]);
+    let compressor = |param: usize, at: &[(Beats, f64)]| {
+        lane(ParamAddress::Device(compressor_id, param as u32), at)
+    };
+    let gate =
+        |param: usize, at: &[(Beats, f64)]| lane(ParamAddress::Device(gate_id, param as u32), at);
+    p.automation.extend([
+        compressor(
+            compressor::THRESHOLD,
+            &[(beats(0, 1), -30.0), (beats(4, 1), -6.0)],
+        ),
+        compressor(compressor::DETECTOR, &[(two, 0.0), (two, 1.0)]),
+        compressor(
+            compressor::ATTACK,
+            &[(beats(0, 1), 0.1), (beats(3, 1), 50.0)],
+        ),
+        compressor(
+            compressor::RELEASE,
+            &[(beats(1, 1), 5.0), (beats(5, 1), 500.0)],
+        ),
+        compressor(compressor::KNEE, &[(beats(0, 1), 0.0), (beats(3, 1), 24.0)]),
+        compressor(
+            compressor::MIX,
+            &[(beats(0, 1), 100.0), (beats(6, 1), 20.0)],
+        ),
+        gate(
+            gate::THRESHOLD,
+            &[
+                (beats(1, 1), -40.0),
+                (beats(1, 1), -6.0),
+                (beats(3, 1), -6.0),
+                (beats(3, 1), -40.0),
+            ],
+        ),
+        gate(gate::HOLD, &[(beats(0, 1), 0.0), (beats(4, 1), 50.0)]),
+        gate(gate::RELEASE, &[(beats(0, 1), 1.0), (beats(5, 1), 200.0)]),
+        gate(gate::FLOOR, &[(beats(0, 1), -80.0), (beats(5, 1), -20.0)]),
     ]);
     p
 }
