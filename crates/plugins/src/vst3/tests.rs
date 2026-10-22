@@ -18,7 +18,7 @@ use musicable_test_plugins::vst3::{PEAK, VST3_GAIN_ID, VST3_SYNTH_ID, Vst3Transp
 use musicable_test_plugins::{GAIN, LATENCY, LEVEL, gui};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
-    kTempoValid, kTimeSigValid,
+    kRecording, kTempoValid, kTimeSigValid,
 };
 use vst3::Steinberg::Vst::RestartFlags_::{
     kIoChanged, kLatencyChanged, kParamTitlesChanged, kParamValuesChanged, kReloadComponent,
@@ -682,6 +682,8 @@ fn plugins_see_the_transport() {
             playing: true,
             position: 48_000,
             looping: Some(BeatRange::new(Beats::ZERO, Beats::new(4))),
+            record: true,
+            recording: true,
             jumps: 0,
         },
         tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
@@ -692,6 +694,7 @@ fn plugins_see_the_transport() {
     let transport = plugins.transport(&instance).unwrap();
     for flag in [
         kPlaying,
+        kRecording,
         kTempoValid,
         kTimeSigValid,
         kProjectTimeMusicValid,

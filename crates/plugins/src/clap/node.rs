@@ -449,7 +449,7 @@ fn transport(ctx: Option<&ProcessContext<'_>>) -> clap_event_transport {
     if at.playing {
         flags |= CLAP_TRANSPORT_IS_PLAYING;
     }
-    if ctx.transport.recording {
+    if at.recording {
         flags |= CLAP_TRANSPORT_IS_RECORDING;
     }
     let mut looping = [0; 4];
