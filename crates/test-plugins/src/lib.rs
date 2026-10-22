@@ -24,6 +24,11 @@
 //! plugins do, for the scanner to catch: a name starting with `crash` makes
 //! it crash as the host initializes it, `hang` makes it never return from
 //! initializing, and `refuse` makes it fail to initialize.
+//!
+//! The library is also a VST3 module with the same two plugins, which check
+//! VST3's rules, in the same count: see [`vst3`]. Tests make a VST3 bundle
+//! of their own with it, with [`testing::Library::copy_vst3`], and its name
+//! misbehaves in the same way.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
@@ -40,6 +45,7 @@ use clap_sys::version::CLAP_VERSION;
 
 mod plugin;
 pub mod testing;
+pub mod vst3;
 
 pub use plugin::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS};
 

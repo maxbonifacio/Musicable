@@ -1,6 +1,6 @@
 [package]
 name = "musicable-plugins"
-description = "Plugin hosting: CLAP, then VST3 and ARA (planned)."
+description = "Plugin hosting: CLAP and VST3, then ARA (planned)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,9 @@ musicable-model.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# VST3's API (the 3.8 SDK's interfaces) as Rust types, and COM objects in
+# Rust.
+vst3 = "0.3"
 
 [dev-dependencies]
 # Built for its plugin library, which the tests load, and for the hooks into

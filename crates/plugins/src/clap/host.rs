@@ -1,7 +1,7 @@
 //! The host side of CLAP: the `clap_host` each plugin gets, the host
 //! extensions it can call, and what an instance shares with its nodes.
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::Mutex;
@@ -36,17 +36,8 @@ use clap_sys::plugin::clap_plugin;
 use clap_sys::version::CLAP_VERSION;
 
 use super::node::Audio;
+use crate::threads::{AudioThread, Busy, BusyFlag, INACTIVE, is_audio_thread, thread_mark};
 use crate::{Error, Waker};
-
-/// Created and initialized, but not active.
-pub(crate) const INACTIVE: u8 = 0;
-/// Active, and not yet processing: the next node to process it starts it.
-pub(crate) const ACTIVE: u8 = 1;
-pub(crate) const PROCESSING: u8 = 2;
-/// Active, but it failed to start processing: its nodes play silence.
-pub(crate) const FAILED: u8 = 3;
-/// Destroyed: nothing calls it any more.
-pub(crate) const DESTROYED: u8 = 4;
 
 /// What a plugin instance shares with its nodes and with the plugin's own
 /// callbacks, at a fixed address for as long as any of them can use it.
@@ -64,9 +55,8 @@ pub(crate) struct Shared {
     lifecycle: AtomicU8,
     /// The plugin's latency, in frames, as it said when it last activated.
     latency: AtomicUsize,
-    /// Set while a node processes the plugin, or while the main thread
-    /// changes how it's set up. Whoever sets it has `audio`.
-    busy: AtomicBool,
+    /// Whoever holds it has `audio`.
+    busy: BusyFlag,
     pub(crate) requests: Requests,
     /// Timers the plugin registered. The main thread's only.
     pub(crate) timers: Mutex<Timers>,
@@ -132,7 +122,7 @@ impl Shared {
             main_thread: thread_mark(),
             lifecycle: AtomicU8::new(INACTIVE),
             latency: AtomicUsize::new(0),
-            busy: AtomicBool::new(false),
+            busy: BusyFlag::default(),
             requests: Requests {
                 window_resize: AtomicU64::new(NO_RESIZE),
                 ..Requests::default()
@@ -166,29 +156,13 @@ impl Shared {
 
     /// Takes `busy` if no one has it, as a node does to process.
     pub(crate) fn try_enter(&self) -> Option<Busy<'_>> {
-        self.busy
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| Busy(self))
+        self.busy.try_enter()
     }
 
     /// Takes `busy` on the main thread, waiting for a node that's
-    /// processing to finish its block. Nodes that try to process meanwhile
-    /// play silence.
+    /// processing to finish its block.
     pub(crate) fn enter(&self) -> Result<Busy<'_>, Error> {
-        let start = Instant::now();
-        loop {
-            if let Some(busy) = self.try_enter() {
-                return Ok(busy);
-            }
-            if start.elapsed() > Duration::from_secs(5) {
-                return Err(Error::new(format!(
-                    "{} has been processing one block for over five seconds",
-                    self.name
-                )));
-            }
-            std::thread::yield_now();
-        }
+        self.busy.enter(&self.name)
     }
 
     /// Whether this is the thread that made the instance.
@@ -205,15 +179,6 @@ impl Shared {
         {
             waker();
         }
-    }
-}
-
-/// [`Shared::busy`], held: released when dropped.
-pub(crate) struct Busy<'a>(&'a Shared);
-
-impl Drop for Busy<'_> {
-    fn drop(&mut self) {
-        self.0.busy.store(false, Ordering::Release);
     }
 }
 
@@ -255,42 +220,6 @@ static HOST_VERSION: &CStr =
         Ok(version) => version,
         Err(_) => c"0",
     };
-
-thread_local! {
-    /// Only its address matters: each thread's is its own.
-    static MARK: u8 = const { 0 };
-    /// How many plugin calls the thread is inside that CLAP counts as on an
-    /// audio thread: processing, and thread pool tasks.
-    static AUDIO: Cell<u32> = const { Cell::new(0) };
-}
-
-/// Tells this thread from every other thread alive. Unlike
-/// `thread::current().id()`, it never allocates, so it's safe on any thread.
-pub(crate) fn thread_mark() -> usize {
-    MARK.with(|mark| ptr::from_ref(mark) as usize)
-}
-
-/// Whether this thread is in a plugin call CLAP counts as on an audio
-/// thread.
-pub(crate) fn is_audio_thread() -> bool {
-    AUDIO.with(Cell::get) > 0
-}
-
-/// Marks this thread as an audio thread, for CLAP, until dropped.
-pub(crate) struct AudioThread(());
-
-impl AudioThread {
-    pub(crate) fn enter() -> Self {
-        AUDIO.with(|depth| depth.set(depth.get() + 1));
-        Self(())
-    }
-}
-
-impl Drop for AudioThread {
-    fn drop(&mut self) {
-        AUDIO.with(|depth| depth.set(depth.get() - 1));
-    }
-}
 
 /// The instance's shared state, from the host pointer a plugin calls back
 /// with.

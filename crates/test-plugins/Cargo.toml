@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 clap-sys = "0.5"
 # For `testing`, which loads a copy of the library for its hooks.
 libloading = "0.9"
+vst3 = "0.3"
 
 [lints]
 workspace = true

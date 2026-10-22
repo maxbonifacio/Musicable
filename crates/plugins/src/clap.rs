@@ -10,7 +10,7 @@ mod instance;
 mod library;
 mod node;
 
-pub use instance::{Instance, ParentWindow};
+pub use instance::Instance;
 pub use node::{ClapNode, NodeSource};
 
 pub(crate) use library::Library;

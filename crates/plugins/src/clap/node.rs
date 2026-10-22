@@ -3,7 +3,6 @@
 
 use std::fmt;
 use std::ptr;
-use std::slice;
 use std::sync::Arc;
 
 use clap_sys::audio_buffer::clap_audio_buffer;
@@ -16,31 +15,21 @@ use clap_sys::events::{
 };
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, clap_note_dialect};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
-use clap_sys::id::clap_id;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, NoteId,
-    ProcessContext,
+    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, ProcessContext,
 };
 use musicable_model::clip::Dimension;
-use musicable_model::time::Beats;
 
 use super::events::{self, Event, InputEvents, OutEvent};
-use super::host::{ACTIVE, AudioThread, FAILED, PROCESSING, Shared};
+use super::host::Shared;
 use super::library::Library;
+use crate::process::{Channels, ParamChange, Sounding, SoundingNote, Transport};
+use crate::threads::{ACTIVE, AudioThread, FAILED, PROCESSING};
 
 /// How many events a plugin can get in one block, beyond which they're
 /// dropped and counted.
 pub(crate) const EVENT_CAPACITY: usize = 4096;
-/// How many notes can sound on a plugin at once.
-const SOUNDING_CAPACITY: usize = 512;
-
-/// A parameter change from the main thread, for the next block.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ParamChange {
-    pub(crate) id: clap_id,
-    pub(crate) value: f64,
-}
 
 /// Everything processing a plugin needs. Whoever holds the instance's
 /// `busy` flag has it: the node processing, or the main thread setting the
@@ -113,139 +102,41 @@ pub(crate) struct NotePort {
 }
 
 /// The buffers for one side of a plugin's audio ports.
+#[derive(Default)]
 pub(crate) struct Ports {
-    /// The samples of every channel of every port, one channel after
-    /// another. Only ever touched through `channels`, which point into it.
-    _samples: Vec<f32>,
-    /// One pointer per channel, port after port.
-    channels: Vec<*mut f32>,
+    channels: Channels,
     buffers: Vec<clap_audio_buffer>,
-    /// Where each port's channels start in `channels`.
-    first: Vec<usize>,
-    /// The port audio goes in or comes out of: the one the plugin calls
-    /// main, or the first.
-    main: Option<usize>,
-    frames: usize,
-}
-
-impl Default for Ports {
-    fn default() -> Self {
-        Self::new(&[], 0)
-    }
 }
 
 impl Ports {
     fn new(ports: &[PortInfo], frames: usize) -> Self {
-        let total: usize = ports.iter().map(|p| p.channels as usize).sum();
-        let mut samples = vec![0.0f32; total * frames];
-        let base = samples.as_mut_ptr();
-        // SAFETY: each channel starts inside `samples`, or at its end when
-        // it holds nothing.
-        let mut channels: Vec<*mut f32> = (0..total)
-            .map(|c| unsafe { base.add(c * frames) })
-            .collect();
-        let mut first = Vec::with_capacity(ports.len());
-        let mut start = 0;
-        for port in ports {
-            first.push(start);
-            start += port.channels as usize;
-        }
-        let pointers = channels.as_mut_ptr();
-        let buffers = ports
-            .iter()
-            .zip(&first)
-            .map(|(port, &first)| clap_audio_buffer {
-                // SAFETY: `first` is at most the number of channels.
-                data32: unsafe { pointers.add(first) },
-                data64: ptr::null_mut(),
-                channel_count: port.channels,
-                latency: 0,
-                constant_mask: 0,
-            })
-            .collect();
+        let counts: Vec<u32> = ports.iter().map(|p| p.channels).collect();
+        // The port the plugin calls main, or the first.
         let main = ports
             .iter()
             .position(|p| p.main)
             .or((!ports.is_empty()).then_some(0));
-        Self {
-            _samples: samples,
-            channels,
-            buffers,
-            first,
-            main,
-            frames,
-        }
-    }
-
-    /// Port `port`'s channels, `frames` long.
-    fn port_channels(&self, port: usize, frames: usize) -> impl Iterator<Item = *mut f32> + '_ {
-        debug_assert!(frames <= self.frames);
-        let count = self.buffers[port].channel_count as usize;
-        self.channels[self.first[port]..][..count].iter().copied()
+        let mut channels = Channels::new(&counts, main, frames);
+        let buffers = ports
+            .iter()
+            .enumerate()
+            .map(|(port, info)| clap_audio_buffer {
+                data32: channels.pointers(port),
+                data64: ptr::null_mut(),
+                channel_count: info.channels,
+                latency: 0,
+                constant_mask: 0,
+            })
+            .collect();
+        Self { channels, buffers }
     }
 
     /// Silences every port, and gets the buffers ready to hand over.
     fn clear(&mut self, frames: usize) {
-        for &channel in &self.channels {
-            // SAFETY: every channel holds `self.frames` samples, and
-            // nothing else uses them now.
-            unsafe { slice::from_raw_parts_mut(channel, frames) }.fill(0.0);
-        }
+        self.channels.clear(frames);
         for buffer in &mut self.buffers {
             buffer.constant_mask = 0;
         }
-    }
-}
-
-/// The notes sounding on a plugin, by the engine's ids, with the ids the
-/// plugin knows them by. Allocated once.
-pub(crate) struct Sounding {
-    notes: Vec<SoundingNote>,
-    next_id: i32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SoundingNote {
-    note: NoteId,
-    id: i32,
-    key: i16,
-}
-
-impl Sounding {
-    fn new() -> Self {
-        Self {
-            notes: Vec::with_capacity(SOUNDING_CAPACITY),
-            next_id: 0,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.notes.clear();
-    }
-
-    /// Starts `note` on `key`, unless too many notes are sounding.
-    fn start(&mut self, note: NoteId, key: u8) -> Option<SoundingNote> {
-        if self.notes.len() == self.notes.capacity() {
-            return None;
-        }
-        let sounding = SoundingNote {
-            note,
-            id: self.next_id,
-            key: key.into(),
-        };
-        // CLAP's note ids are never negative.
-        self.next_id = self.next_id.checked_add(1).unwrap_or(0);
-        self.notes.push(sounding);
-        Some(sounding)
-    }
-
-    fn find(&self, note: NoteId) -> Option<SoundingNote> {
-        self.notes.iter().find(|n| n.note == note).copied()
-    }
-
-    fn end(&mut self, note: NoteId) -> Option<SoundingNote> {
-        let index = self.notes.iter().position(|n| n.note == note)?;
-        Some(self.notes.swap_remove(index))
     }
 }
 
@@ -366,8 +257,8 @@ fn run(
 
     audio.inputs.clear(frames);
     audio.outputs.clear(frames);
-    if let Some(main) = audio.inputs.main {
-        mix_into(&audio.inputs, main, inputs, frames);
+    if let Some(main) = audio.inputs.channels.main() {
+        audio.inputs.channels.mix_into(main, inputs, frames);
     }
     events_for_block(ctx, audio);
     *transport_event = transport(Some(ctx));
@@ -396,57 +287,11 @@ fn run(
     if status == CLAP_PROCESS_ERROR {
         return false;
     }
-    let Some(main) = audio.outputs.main else {
+    let Some(main) = audio.outputs.channels.main() else {
         return false;
     };
-    play(&audio.outputs, main, frames, output);
+    audio.outputs.channels.play(main, frames, 0, output);
     true
-}
-
-/// Mixes the node's inputs into an input port.
-fn mix_into(ports: &Ports, port: usize, inputs: Inputs<'_>, frames: usize) {
-    let mono = ports.buffers[port].channel_count == 1;
-    for (c, channel) in ports.port_channels(port, frames).enumerate() {
-        // SAFETY: the port's buffers hold `frames` samples, and the plugin
-        // isn't using them.
-        let channel = unsafe { slice::from_raw_parts_mut(channel, frames) };
-        for input in inputs.iter() {
-            if mono && input.channels() > 1 {
-                for ((sample, left), right) in channel
-                    .iter_mut()
-                    .zip(input.channel(0))
-                    .zip(input.channel(1))
-                {
-                    *sample += 0.5 * (left + right);
-                }
-            } else if input.channels() == 1 || c < input.channels() {
-                let source = input.channel(if input.channels() == 1 { 0 } else { c });
-                for (sample, s) in channel.iter_mut().zip(source) {
-                    *sample += s;
-                }
-            }
-        }
-    }
-}
-
-/// Plays an output port: its first two channels, or its one channel on
-/// both sides.
-fn play(ports: &Ports, port: usize, frames: usize, output: &mut AudioMut<'_>) {
-    let channels: [Option<*mut f32>; 2] = {
-        let mut port_channels = ports.port_channels(port, frames);
-        let first = port_channels.next();
-        [first, port_channels.next().or(first)]
-    };
-    for c in 0..output.channels() {
-        match channels.get(c).copied().flatten() {
-            // SAFETY: the port's buffers hold `frames` samples, which the
-            // plugin wrote and is done with.
-            Some(channel) => output
-                .channel_mut(c)
-                .copy_from_slice(unsafe { slice::from_raw_parts(channel, frames) }),
-            None => output.channel_mut(c).fill(0.0),
-        }
-    }
 }
 
 /// Puts the block's events in the plugin's list: parameter changes from the
@@ -595,45 +440,38 @@ fn transport(ctx: Option<&ProcessContext<'_>>) -> clap_event_transport {
             tsig_denom: 4,
         };
     };
-    let (rate, tempo) = (ctx.sample_rate.max(1), ctx.tempo);
-    let seconds_per_sample = 1.0 / f64::from(rate);
-    let position = ctx.transport.position as f64;
-    let beats = tempo.beats_at(position, rate);
-    let at = Beats::from_f64(beats);
-    let bar = tempo.bar_at(at);
-    let signature = tempo.signature_at(at);
+    let at = Transport::at(ctx);
     let mut flags = CLAP_TRANSPORT_HAS_TEMPO
         | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
         | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
         | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
-    if ctx.transport.playing {
+    if at.playing {
         flags |= CLAP_TRANSPORT_IS_PLAYING;
     }
     let mut looping = [0; 4];
-    if let Some(range) = ctx.transport.looping {
+    if let Some(range) = at.looping {
         flags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
-        let seconds = |at: Beats| tempo.sample_at(at, rate) * seconds_per_sample;
         looping = [
-            beattime(range.start.to_f64()),
-            beattime(range.end.to_f64()),
-            sectime(seconds(range.start)),
-            sectime(seconds(range.end)),
+            beattime(range.beats[0]),
+            beattime(range.beats[1]),
+            sectime(range.seconds[0]),
+            sectime(range.seconds[1]),
         ];
     }
     clap_event_transport {
         header,
         flags,
-        song_pos_beats: beattime(beats),
-        song_pos_seconds: sectime(position * seconds_per_sample),
-        tempo: tempo.bpm_at(at),
+        song_pos_beats: beattime(at.beats),
+        song_pos_seconds: sectime(at.seconds),
+        tempo: at.bpm,
         tempo_inc: 0.0,
         loop_start_beats: looping[0],
         loop_end_beats: looping[1],
         loop_start_seconds: looping[2],
         loop_end_seconds: looping[3],
-        bar_start: beattime(tempo.bar_start(bar.bar).to_f64()),
-        bar_number: bar.bar.clamp(i32::MIN.into(), i32::MAX.into()) as i32,
-        tsig_num: signature.numerator().into(),
-        tsig_denom: signature.denominator().into(),
+        bar_start: beattime(at.bar_start),
+        bar_number: at.bar.clamp(i32::MIN.into(), i32::MAX.into()) as i32,
+        tsig_num: at.signature.numerator().into(),
+        tsig_denom: at.signature.denominator().into(),
     }
 }

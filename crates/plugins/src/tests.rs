@@ -1,5 +1,6 @@
 //! CLAP hosting, tested against the test plugins (`crates/test-plugins`),
-//! which count every time the host breaks one of CLAP's rules.
+//! which count every time the host breaks one of CLAP's rules, and what the
+//! VST3 tests share with these.
 
 use std::f64::consts::TAU;
 use std::fs;
@@ -27,9 +28,9 @@ use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
 
 use crate::scan::{self, Outcome};
-use crate::{ClapNode, Instance, ParentWindow, PluginEvent};
+use crate::{Instance, ParentWindow, PluginEvent};
 
-const CONFIG: EngineConfig = EngineConfig {
+pub(crate) const CONFIG: EngineConfig = EngineConfig {
     sample_rate: 48_000,
     max_block: 256,
 };
@@ -133,15 +134,15 @@ impl TestPlugins {
 
 /// What a block is played with.
 #[derive(Default)]
-struct Block<'a> {
-    transport: TransportState,
-    tempo: TempoMap,
-    events: &'a [NodeEvent],
+pub(crate) struct Block<'a> {
+    pub(crate) transport: TransportState,
+    pub(crate) tempo: TempoMap,
+    pub(crate) events: &'a [NodeEvent],
 }
 
 /// Plays one block of `node`, with `input` on the left and its negative on
 /// the right, and returns both channels. It mustn't allocate.
-fn play(node: &mut ClapNode, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] {
+pub(crate) fn play(node: &mut impl Node, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] {
     let frames = input.len();
     let planar_in: Vec<f32> = input
         .iter()
@@ -167,17 +168,17 @@ fn play(node: &mut ClapNode, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] 
     [planar_out, right]
 }
 
-fn ramp(frames: usize) -> Vec<f32> {
+pub(crate) fn ramp(frames: usize) -> Vec<f32> {
     (0..frames)
         .map(|i| (i + 1) as f32 / frames as f32)
         .collect()
 }
 
-fn scaled(signal: &[f32], by: f32) -> Vec<f32> {
+pub(crate) fn scaled(signal: &[f32], by: f32) -> Vec<f32> {
     signal.iter().map(|s| s * by).collect()
 }
 
-fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
+pub(crate) fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
     NodeEvent {
         offset,
         kind: NodeEventKind::Param {
@@ -187,14 +188,14 @@ fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
     }
 }
 
-fn note(offset: usize, event: NoteEvent) -> NodeEvent {
+pub(crate) fn note(offset: usize, event: NoteEvent) -> NodeEvent {
     NodeEvent {
         offset,
         kind: NodeEventKind::Note(event),
     }
 }
 
-fn assert_close(actual: &[f32], expected: &[f32]) {
+pub(crate) fn assert_close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
     for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
         assert!((a - e).abs() < 1e-4, "frame {i}: {a} isn't {e}");
@@ -223,8 +224,8 @@ fn the_gain_plugin_describes_its_parameters() {
         ),
         ("Gain", "Test", 0.0, 2.0, 1.0)
     );
-    assert!(gain.automatable && gain.modulatable && !gain.stepped);
-    assert!(params[1].stepped && !params[1].automatable);
+    assert!(gain.automatable && gain.modulatable && gain.steps == 0);
+    assert!(params[1].steps == 48_000 && !params[1].automatable);
     assert_eq!(instance.param_value(GAIN), Some(1.0));
     assert_eq!(instance.param_value(99), None);
     assert_eq!(
@@ -414,8 +415,8 @@ fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_path() {
 }
 
 /// A single 1.0 at engine time `at`.
-struct Impulse {
-    at: u64,
+pub(crate) struct Impulse {
+    pub(crate) at: u64,
 }
 
 impl Node for Impulse {
@@ -493,7 +494,7 @@ fn changes_in_the_plugins_window_come_back() {
 
 /// What the test synth plays for a note at `frequency` and `amplitude`,
 /// from `phase` in cycles, for `frames` frames, and the phase it ends on.
-fn sine(frequency: f64, amplitude: f64, phase: f64, frames: usize) -> (Vec<f32>, f64) {
+pub(crate) fn sine(frequency: f64, amplitude: f64, phase: f64, frames: usize) -> (Vec<f32>, f64) {
     let mut phase = phase;
     let samples = (0..frames)
         .map(|_| {
@@ -756,13 +757,17 @@ fn scan_child() {
 
 const SCAN_CHILD: &str = "MUSICABLE_SCAN_CHILD";
 
-fn scan_copy(name: &str, timeout: Duration) -> Outcome {
-    let path = testing::copy(&temp_dir(name), name);
+/// Scans the library at `path` in a scanning process of its own.
+pub(crate) fn scan_path(path: &Path, timeout: Duration) -> Outcome {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", "tests::scan_child", "--test-threads", "1"])
-        .env(SCAN_CHILD, &path);
+        .env(SCAN_CHILD, path);
     scan::scan_isolated(command, timeout)
+}
+
+fn scan_copy(name: &str, timeout: Duration) -> Outcome {
+    scan_path(&testing::copy(&temp_dir(name), name), timeout)
 }
 
 #[test]
