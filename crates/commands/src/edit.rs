@@ -7,7 +7,12 @@
 //!
 //! Cut, Copy, Duplicate, Delete and Split act on the selected clips, or else
 //! on the time selection, as Live's do. The select commands set what's
-//! selected, for the arrangement's mouse gestures, scripts and agents.
+//! selected, for the arrangement's mouse gestures, scripts and agents, and
+//! give the arrangement the focus.
+//!
+//! While the piano roll has the [focus](crate::Focus), Cut, Copy, Paste,
+//! Duplicate, Delete and Select All act on its notes instead (see
+//! [`notes`]). Split acts on clips only.
 
 use std::collections::BTreeSet;
 
@@ -15,12 +20,12 @@ use musicable_model::clip::{Clip, ClipId};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackId};
 
-use crate::arrange;
-use crate::editor::{Clipboard, Editor, Selection, TimeSelection};
+use crate::editor::{Clipboard, Editor, Focus, Selection, TimeSelection};
 use crate::{
     Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction, Type,
     Value, When,
 };
+use crate::{arrange, notes};
 
 /// Takes back the last change to the project.
 pub const UNDO: CommandId = CommandId::new("edit.undo");
@@ -64,14 +69,34 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
     (REDO, "Redo", When::Always, |ctx| {
         ctx.document.redo();
     }),
-    (CUT, "Cut", When::ClipsOrTimeSelected, cut),
-    (COPY, "Copy", When::ClipsOrTimeSelected, copy),
-    (PASTE, "Paste", When::CanPaste, paste),
-    (DUPLICATE, "Duplicate", When::ClipsOrTimeSelected, duplicate),
-    (DELETE, "Delete", When::SomethingSelected, delete),
+    (CUT, "Cut", When::CanCopy, |ctx| {
+        by_focus(ctx, notes::cut, cut)
+    }),
+    (COPY, "Copy", When::CanCopy, |ctx| {
+        by_focus(ctx, notes::copy, copy);
+    }),
+    (PASTE, "Paste", When::CanPaste, |ctx| {
+        by_focus(ctx, notes::paste, paste);
+    }),
+    (DUPLICATE, "Duplicate", When::CanCopy, |ctx| {
+        by_focus(ctx, notes::duplicate, duplicate);
+    }),
+    (DELETE, "Delete", When::SomethingSelected, |ctx| {
+        by_focus(ctx, notes::delete, delete);
+    }),
     (SPLIT, "Split", When::ClipsOrTimeSelected, split),
-    (SELECT_ALL, "Select All", When::Always, select_all),
+    (SELECT_ALL, "Select All", When::Always, |ctx| {
+        by_focus(ctx, notes::select_all, select_all);
+    }),
 ];
+
+/// Runs `notes` while the piano roll has the focus, or else `arrangement`.
+fn by_focus(ctx: &mut Context<'_>, notes: Handler, arrangement: Handler) {
+    match ctx.document.editor().focus {
+        Focus::PianoRoll => notes(ctx),
+        Focus::Arrangement => arrangement(ctx),
+    }
+}
 
 /// Registers the edit commands.
 pub fn register(registry: &mut Registry) {
@@ -173,7 +198,8 @@ pub fn register(registry: &mut Registry) {
 }
 
 /// Selects `clips`, or toggles them in the selection, and makes the track
-/// of the last one the selected track.
+/// of the last one the selected track. The piano roll shows the last MIDI
+/// clip still selected, as Live's clip view does.
 fn select_clips(
     (project, editor): (&Project, &mut Editor),
     clips: &[ClipId],
@@ -197,6 +223,18 @@ fn select_clips(
     }
     if let Some(&track) = tracks.last() {
         editor.selected_track = Some(track);
+    }
+    editor.focus = Focus::Arrangement;
+    let selected: Vec<ClipId> = clips
+        .iter()
+        .rev()
+        .filter(|id| editor.selection.clips.contains(id))
+        .copied()
+        .collect();
+    for (_, clip) in selected.into_iter().filter_map(|id| project.find_clip(id)) {
+        if editor.show_in_piano_roll(clip) {
+            break;
+        }
     }
     Ok(())
 }
@@ -222,6 +260,7 @@ fn select_time(
         time,
         ..Selection::default()
     };
+    editor.focus = Focus::Arrangement;
     Ok(())
 }
 
@@ -245,6 +284,7 @@ fn select_tracks(
     if let Some(&track) = tracks.iter().rev().find(|t| selection.tracks.contains(t)) {
         editor.selected_track = Some(track);
     }
+    editor.focus = Focus::Arrangement;
     Ok(())
 }
 

@@ -113,13 +113,15 @@ impl Event {
     }
 
     /// Modulation of a parameter for one note's voice: the note with
-    /// `note_id` on `key`, or, when `note_id` is -1, every note on `key`.
+    /// `note_id` on `key`, or, when `note_id` is -1, every note on `key` on
+    /// `channel`.
     pub(crate) fn note_modulation(
         time: u32,
         param: clap_id,
         amount: f64,
         note_id: i32,
         port: i16,
+        channel: i16,
         key: i16,
     ) -> Self {
         Self {
@@ -129,7 +131,7 @@ impl Event {
                 cookie: ptr::null_mut(),
                 note_id,
                 port_index: port,
-                channel: 0,
+                channel,
                 key,
                 amount,
             },
@@ -286,7 +288,7 @@ unsafe extern "C" fn output_try_push(
             // SAFETY: as above.
             let event = unsafe { &*event.cast::<clap_event_note>() };
             if let Some(voices) = output.voices.as_deref_mut() {
-                voices.end(event.note_id, event.key);
+                voices.end(event.note_id, event.channel, event.key);
             }
             return true;
         }
@@ -333,6 +335,7 @@ mod tests {
             note: NoteId(5),
             id: 1,
             key: 60,
+            channel: 0,
         });
         let mut output = Output {
             queue: &mut producer,

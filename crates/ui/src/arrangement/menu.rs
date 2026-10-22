@@ -7,7 +7,7 @@
 //! the menu was opened. A command that needs an argument the menu can't give
 //! is left out.
 
-use egui::{Button, Ui};
+use egui::Ui;
 use musicable_commands::{
     Args, Command, CommandId, Type, Value, arrange, edit, file, locator, take, track, transport,
     view,
@@ -16,7 +16,8 @@ use musicable_model::TrackKind;
 use musicable_model::time::Beats;
 
 use super::{Hit, Scene, Spot};
-use crate::shell::{Action, toggled, with_keys};
+use crate::menus::context_menu;
+use crate::shell::Action;
 
 /// A context menu's commands, in order. `None` is a separator.
 type Items = &'static [Option<CommandId>];
@@ -135,43 +136,7 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
             entries.push(Some((command, args)));
         }
     }
-    // No separator first, last, or after another.
-    let mut previous_was_command = false;
-    let shown: Vec<_> = entries
-        .iter()
-        .enumerate()
-        .filter(|(i, entry)| {
-            let keep = match entry {
-                Some(_) => true,
-                None => previous_was_command && entries[i + 1..].iter().any(Option::is_some),
-            };
-            if keep {
-                previous_was_command = entry.is_some();
-            }
-            keep
-        })
-        .map(|(_, entry)| entry)
-        .collect();
-    for entry in shown {
-        let Some((command, args)) = entry else {
-            ui.separator();
-            continue;
-        };
-        let id = &command.id;
-        let enabled = !args.is_empty() || command.when.applies(view.project, view.editor);
-        let mut button = with_keys(Button::new(command.title.as_str()), view.keymap, id);
-        if let Some(on) = toggled(view, id) {
-            button = button.selected(on);
-        }
-        if ui.add_enabled(enabled, button).clicked() {
-            actions.push(if args.is_empty() {
-                Action::Run(id.clone())
-            } else {
-                Action::RunWith(id.clone(), args.clone())
-            });
-            ui.close();
-        }
-    }
+    context_menu(ui, view, &entries, actions);
 }
 
 /// The arguments `command` takes from `spot`, or `None` if it needs one

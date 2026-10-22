@@ -19,11 +19,20 @@
 //! parameter. The plugins' windows are pretend ones that only record what
 //! the host asks of them.
 //!
+//! The synth plays notes from MIDI too, as MPE has them or as a keyboard
+//! does: pitch bend, channel and key pressure, and controller 74 shape them
+//! as the note expressions do, and registered parameter 0 sets how far a
+//! channel bends. Whichever way its notes come, the sustain pedal
+//! (controller 64) holds the notes let go. It keeps a log of the MIDI it
+//! gets, which tests read with [`musicable_test_midi`].
+//!
 //! Tests copy the library to a `.clap` file of their own, with
 //! [`testing::Library`], and the file's name can make it misbehave as broken
 //! plugins do, for the scanner to catch: a name starting with `crash` makes
 //! it crash as the host initializes it, `hang` makes it never return from
-//! initializing, and `refuse` makes it fail to initialize.
+//! initializing, and `refuse` makes it fail to initialize. A name starting
+//! with `mpe` makes the synth an MPE synth, which takes notes only as MIDI
+//! with MPE, as many do.
 //!
 //! The library is also a VST3 module with the same two plugins, which check
 //! VST3's rules, in the same count: see [`vst3`]. Tests make a VST3 bundle
@@ -63,6 +72,10 @@ pub static clap_entry: clap_plugin_entry = clap_plugin_entry {
 /// `deinit`.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the synth takes notes only as MIDI with MPE: the library's file
+/// is named so.
+pub(crate) static MPE: AtomicBool = AtomicBool::new(false);
+
 unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     let name = if path.is_null() {
         String::new()
@@ -86,6 +99,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     if name.starts_with("refuse") {
         return false;
     }
+    MPE.store(name.starts_with("mpe"), Ordering::SeqCst);
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         violation("the library was initialized twice without deinit in between");
     }
@@ -372,4 +386,27 @@ pub unsafe extern "C" fn musicable_test_transport(
         tempo.write(t);
     }
     true
+}
+
+/// Takes the MIDI messages the synth got since the last time, oldest first:
+/// each is its status byte and two data bytes, from the lowest byte up.
+/// Copies up to `capacity` of them into `buffer`, and returns how many
+/// there were, which is more than the synth logs if it got more than it
+/// keeps. Call it between blocks.
+///
+/// # Safety
+///
+/// `plugin` must be a plugin of this library that isn't destroyed, and
+/// `buffer` valid for writing `capacity` messages.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_midi(
+    plugin: *const clap_plugin,
+    buffer: *mut u32,
+    capacity: u32,
+) -> u32 {
+    // SAFETY: the caller's promise.
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, capacity as usize) };
+    // SAFETY: the caller's promise.
+    let logged = unsafe { plugin::from_clap(plugin) }.take_midi(buffer);
+    logged.try_into().unwrap_or(u32::MAX)
 }

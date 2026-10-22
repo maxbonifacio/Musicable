@@ -157,7 +157,10 @@ plays them as players expect of an instrument track: always with `In`,
 while the track is armed with `Auto`, whether the transport plays or not,
 and never with `Off`. The clips play too, except with `In` and while an
 armed `Auto` track records over them. The notes sounding end when either
-stops playing. It reads its parameters as it renders, after it has played
+stops playing. Controllers go on from whichever plays, as their notes do:
+when one stops, the switches it held on, such as the sustain pedal, are let
+go, and when the clips play again, their controllers go back to what the
+clips hold. It reads its parameters as it renders, after it has played
 the block's notes, so arming changes what plays from the next block. The
 layout lists the MIDI inputs (`InputLayout::add_midi`), and `find_midi`
 says which messages a track's `MidiInput` takes: one input's or every
@@ -510,6 +513,12 @@ expression (pitch bend in semitones, pressure and timbre from 0 to 1), and
 the same key can sound at once, each with its own expression, as MPE, VST3
 and CLAP allow.
 
+Controllers travel with the notes: `NodeEventKind::Controller` moves a MIDI
+controller, such as the mod wheel or the sustain pedal, to a value from 0 to
+1, for every note the node plays, and it holds until the next move. It goes
+where notes go (`Notes::send_controller`, and `NodeEventKind::is_played`
+for either), in order with them, and takes room in a block as a note does.
+
 - `Graph::send_notes(from, to)` sends a node's notes to another, with or
   without an audio connection between them. Before a block renders, each
   node whose notes go somewhere plays them for the block
@@ -540,6 +549,21 @@ their expression, to the track's first instrument (`Track::instrument`).
   rebuilt player takes over, it lets go of the notes it doesn't have
   sounding as they are: a note deleted, moved, transposed, or shortened to
   end before the playhead. A note made longer plays on.
+- A clip's controller curves move their controllers as it plays, from its
+  `offset` for its length. Unlike notes, controllers are chased: wherever
+  playback starts or jumps, the player first sends each controller the
+  value its last move before there left it at, from any clip, so the song
+  sounds as it does played from its start. Before a controller's first
+  move, the player leaves it alone.
+- Controllers keep their values when a clip ends or the transport stops,
+  as MIDI's do, but a switch (64 to 69, such as the sustain pedal) held on
+  is let go then, so no notes ring on. A recompiled player sends only what
+  its curves hold differently from what the last one sent, so drawing a
+  curve while the song plays moves the controller at once.
+- At the same moment, a switch a clip lets go of comes first, then
+  controllers' moves, then notes ending, then notes starting, with each
+  note's expression after its start. So the next clip's pedal holds, and a
+  note that starts with the pedal goes down held.
 
 **MIDI input.** `midi::MidiNotes` turns MIDI 1.0 channel messages into
 notes, each with an id of its own. A note takes its channel's pitch bend,
@@ -551,9 +575,13 @@ message (RPN 6) sets the zones. Members bend 48 semitones until they're told
 otherwise, and the master's bend bends every note in its zone on top of the
 note's own. Taking one channel, it reads that channel as a keyboard plays
 it. All Notes Off and All Sound Off (CC 123, 120) end a channel's notes,
-and Reset All Controllers (CC 121) takes its expression back to rest. The
-sustain pedal and other controllers play no part yet: they come with the
-piano roll's controller lanes.
+and Reset All Controllers (CC 121) takes its expression back to rest. Other
+control changes move controllers for every note (`Played::Controller`),
+from any channel it takes: all but slide, the registered and non-registered
+parameters and their data entry (6, 38 and 96 to 101), and the channel mode
+messages. Reset All Controllers lets go of the switches held on as well. It
+knows what each controller holds (`MidiNotes::controllers`), so a recording
+can start with them where they are.
 
 A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
 a swap gives a track another input, the notes held on the old one end at
@@ -565,8 +593,9 @@ know, so a note started before the monitor came along still ends.
 stands in for instruments until plugin hosting. It plays each note with a
 sine at its pitch, bent by its pitch bend, with its second harmonic blended
 in by its timbre, and louder with velocity and pressure. A note rises over
-2 ms and rings out over 30 ms once let go. It adds what it plays to what
-comes into it.
+2 ms and rings out over 30 ms once let go, and while the sustain pedal is
+down, notes let go sound on until it comes up. It adds what it plays to
+what comes into it.
 
 ## Built-in devices
 

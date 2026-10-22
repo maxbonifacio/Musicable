@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui_kittest::{Harness, HarnessBuilder};
-use musicable_commands::{Editor, Keymap, Problem, Registry, view};
+use musicable_commands::{Editor, Keymap, Problem, Registry, Transport, view};
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project};
@@ -40,6 +40,45 @@ pub(crate) struct State {
     /// The built-in devices the browser lists: all of them.
     pub native: Vec<NativeKind>,
     pub actions: Vec<Action>,
+}
+
+/// A transport that plays along: locating moves its playhead.
+#[derive(Debug, Default)]
+pub(crate) struct Player {
+    pub playing: bool,
+    pub recording: bool,
+    pub playhead: Beats,
+}
+
+impl Transport for Player {
+    fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    fn play(&mut self) {
+        self.playing = true;
+    }
+
+    fn stop(&mut self) {
+        self.playing = false;
+        self.recording = false;
+    }
+
+    fn locate(&mut self, at: Beats) {
+        self.playhead = at;
+    }
+
+    fn playhead(&self) -> Beats {
+        self.playhead
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+    }
 }
 
 /// Every command the app has.
@@ -136,11 +175,22 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 }
             }
             // As the app would, keep the zoom and scrolling the
-            // arrangement asks for, as the tests don't look for them.
+            // arrangement and the piano roll ask for, as the tests don't
+            // look for them.
             actions.retain(|action| match action {
-                Action::RunWith(id, args) if *id == view::SET_VIEWPORT => {
+                Action::RunWith(id, args)
+                    if *id == view::SET_VIEWPORT || *id == view::SET_PIANO_ROLL_VIEWPORT =>
+                {
                     let number = |name| args.get::<f64>(name).unwrap_or_default();
-                    let viewport = &mut state.editor.viewport;
+                    let roll = &mut state.editor.piano_roll;
+                    let viewport = match *id == view::SET_VIEWPORT {
+                        true => &mut state.editor.viewport,
+                        false => {
+                            roll.height = number("height") as f32;
+                            roll.key_height = number("key_height") as f32;
+                            &mut roll.viewport
+                        }
+                    };
                     viewport.start = args.get("start").unwrap_or_default();
                     viewport.zoom = number("zoom");
                     viewport.top = number("top") as f32;
