@@ -1,0 +1,775 @@
+//! CLAP hosting, tested against the test plugins (`crates/test-plugins`),
+//! which count every time the host breaks one of CLAP's rules.
+
+use std::f64::consts::TAU;
+use std::ffi::{CStr, CString, c_char};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+use clap_sys::events::{
+    CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_IS_LOOP_ACTIVE,
+    CLAP_TRANSPORT_IS_PLAYING,
+};
+use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
+use clap_sys::plugin::clap_plugin;
+use musicable_engine::nodes::Sum;
+use musicable_engine::{
+    AudioMut, AudioRef, Engine, EngineConfig, Graph, Inputs, Node, NodeEvent, NodeEventKind,
+    NodeKey, NoteEvent, NoteId, ParamId, ProcessContext, TransportState, rt,
+};
+use musicable_model::clip::Dimension;
+use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
+use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
+
+use crate::scan::{self, Outcome};
+use crate::{ClapNode, Instance, ParentWindow, PluginEvent};
+
+const CONFIG: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 256,
+};
+
+/// A directory of its own for a test to write in.
+pub(crate) fn temp_dir(name: &str) -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "musicable-plugins-{}-{name}-{n}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A copy of the test plugins' library, named `name.clap`, so each test
+/// gets the library's statics to itself.
+fn copy_library(name: &str) -> PathBuf {
+    let file = format!(
+        "{}musicable_test_plugins{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let exe = std::env::current_exe().unwrap();
+    let deps = exe.parent().unwrap();
+    let built = [deps.join(&file), deps.parent().unwrap().join(&file)]
+        .into_iter()
+        .find(|path| path.exists())
+        .expect("Cargo builds the test plugins before the tests");
+    let copy = temp_dir(name).join(format!("{name}.clap"));
+    fs::copy(built, &copy).unwrap();
+    copy
+}
+
+/// A copy of the test plugins, with the hooks tests drive them with.
+struct TestPlugins {
+    path: PathBuf,
+    hooks: libloading::Library,
+}
+
+impl TestPlugins {
+    fn new(name: &str) -> Self {
+        let path = copy_library(name);
+        // The same path the host loads it by, so it's the same library.
+        let canonical = crate::clap::canonical(&path).unwrap();
+        // SAFETY: loading runs no plugin code: CLAP's starts with the
+        // entry's init, which the host calls.
+        let hooks = unsafe { libloading::Library::new(&canonical) }.unwrap();
+        Self { path, hooks }
+    }
+
+    fn hook<T: Copy>(&self, name: &str) -> T {
+        let name = CString::new(name).unwrap();
+        // SAFETY: each hook is asked for with its type.
+        *unsafe { self.hooks.get::<T>(name.as_bytes_with_nul()) }.unwrap()
+    }
+
+    fn violations(&self) -> u32 {
+        self.hook::<extern "C" fn() -> u32>("musicable_test_violations")()
+    }
+
+    fn first_violation(&self) -> String {
+        let first = self.hook::<unsafe extern "C" fn(*mut c_char, u32) -> bool>(
+            "musicable_test_first_violation",
+        );
+        let mut buffer = [0 as c_char; 512];
+        // SAFETY: the buffer holds as much as it says.
+        if unsafe { first(buffer.as_mut_ptr(), buffer.len() as u32) } {
+            // SAFETY: the hook nul-terminates it.
+            unsafe { CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        }
+    }
+
+    fn alive(&self) -> u32 {
+        self.hook::<extern "C" fn() -> u32>("musicable_test_alive")()
+    }
+
+    /// Checks that the host kept CLAP's rules, and destroyed every plugin
+    /// it made.
+    fn assert_alright(&self) {
+        assert_eq!(self.violations(), 0, "{}", self.first_violation());
+        assert_eq!(self.alive(), 0, "plugins left alive");
+    }
+
+    fn gui(&self, instance: &Instance, action: u32, param: u32, value: f64) {
+        let gui = self
+            .hook::<unsafe extern "C" fn(*const clap_plugin, u32, u32, f64)>("musicable_test_gui");
+        // SAFETY: the instance's plugin, on its main thread.
+        unsafe { gui(instance.raw(), action, param, value) };
+    }
+
+    fn set_label(&self, instance: &Instance, label: &str) {
+        let set = self.hook::<unsafe extern "C" fn(*const clap_plugin, *const c_char)>(
+            "musicable_test_set_label",
+        );
+        let label = CString::new(label).unwrap();
+        // SAFETY: as above.
+        unsafe { set(instance.raw(), label.as_ptr()) };
+    }
+
+    fn label(&self, instance: &Instance) -> String {
+        let get = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut c_char, u32)>(
+            "musicable_test_label",
+        );
+        let mut buffer = [0 as c_char; 256];
+        // SAFETY: as above, and the buffer holds as much as it says.
+        unsafe {
+            get(instance.raw(), buffer.as_mut_ptr(), buffer.len() as u32);
+            CStr::from_ptr(buffer.as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    fn request_callback(&self, instance: &Instance) {
+        let request = self
+            .hook::<unsafe extern "C" fn(*const clap_plugin)>("musicable_test_request_callback");
+        // SAFETY: as above.
+        unsafe { request(instance.raw()) };
+    }
+
+    fn main_thread_calls(&self, instance: &Instance) -> u32 {
+        let calls = self.hook::<unsafe extern "C" fn(*const clap_plugin) -> u32>(
+            "musicable_test_main_thread_calls",
+        );
+        // SAFETY: as above.
+        unsafe { calls(instance.raw()) }
+    }
+
+    /// The pretend window: -1 for none, 0 hidden, 1 showing, and its
+    /// parent.
+    fn window(&self, instance: &Instance) -> (i32, usize) {
+        let window = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut usize) -> i32>(
+            "musicable_test_window",
+        );
+        let mut parent = 0;
+        // SAFETY: as above.
+        let state = unsafe { window(instance.raw(), &mut parent) };
+        (state, parent)
+    }
+
+    fn request_resize(&self, instance: &Instance, width: u32, height: u32) -> bool {
+        let resize = self.hook::<unsafe extern "C" fn(*const clap_plugin, u32, u32) -> bool>(
+            "musicable_test_request_resize",
+        );
+        // SAFETY: as above.
+        unsafe { resize(instance.raw(), width, height) }
+    }
+
+    /// How many times the plugin had the host run its tasks, and on how
+    /// many threads they ran.
+    fn pool_use(&self, instance: &Instance) -> (u32, u32) {
+        let pool = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut u32, *mut u32)>(
+            "musicable_test_pool_use",
+        );
+        let (mut requests, mut threads) = (0, 0);
+        // SAFETY: as above.
+        unsafe { pool(instance.raw(), &mut requests, &mut threads) };
+        (requests, threads)
+    }
+
+    /// The transport's flags, position in beats and tempo, as the plugin
+    /// last saw them.
+    fn transport(&self, instance: &Instance) -> Option<(u32, i64, f64)> {
+        type Transport =
+            unsafe extern "C" fn(*const clap_plugin, *mut u32, *mut i64, *mut f64) -> bool;
+        let transport = self.hook::<Transport>("musicable_test_transport");
+        let (mut flags, mut beats, mut tempo) = (0, 0, 0.0);
+        // SAFETY: as above.
+        unsafe { transport(instance.raw(), &mut flags, &mut beats, &mut tempo) }
+            .then_some((flags, beats, tempo))
+    }
+
+    fn gain(&self) -> Instance {
+        Instance::new(&self.path, GAIN_ID.to_str().unwrap(), None).unwrap()
+    }
+
+    fn synth(&self) -> Instance {
+        Instance::new(&self.path, SYNTH_ID.to_str().unwrap(), None).unwrap()
+    }
+}
+
+/// What a block is played with.
+#[derive(Default)]
+struct Block<'a> {
+    transport: TransportState,
+    tempo: TempoMap,
+    events: &'a [NodeEvent],
+}
+
+/// Plays one block of `node`, with `input` on the left and its negative on
+/// the right, and returns both channels. It mustn't allocate.
+fn play(node: &mut ClapNode, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] {
+    let frames = input.len();
+    let planar_in: Vec<f32> = input
+        .iter()
+        .copied()
+        .chain(input.iter().map(|s| -s))
+        .collect();
+    let mut planar_out = vec![f32::NAN; frames * 2];
+    let ctx = ProcessContext {
+        frames,
+        sample_rate: CONFIG.sample_rate,
+        time: 0,
+        transport: block.transport,
+        tempo: &block.tempo,
+        events: block.events,
+    };
+    {
+        let views = [AudioRef::from_planar(&planar_in, 2)];
+        let inputs = Inputs::from_views(&views);
+        let mut output = AudioMut::from_planar(&mut planar_out, 2);
+        rt::scope(|| node.process(&ctx, inputs, &mut output));
+    }
+    let right = planar_out.split_off(frames);
+    [planar_out, right]
+}
+
+fn ramp(frames: usize) -> Vec<f32> {
+    (0..frames)
+        .map(|i| (i + 1) as f32 / frames as f32)
+        .collect()
+}
+
+fn scaled(signal: &[f32], by: f32) -> Vec<f32> {
+    signal.iter().map(|s| s * by).collect()
+}
+
+fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
+    NodeEvent {
+        offset,
+        kind: NodeEventKind::Param {
+            param: ParamId(param),
+            value,
+        },
+    }
+}
+
+fn note(offset: usize, event: NoteEvent) -> NodeEvent {
+    NodeEvent {
+        offset,
+        kind: NodeEventKind::Note(event),
+    }
+}
+
+fn assert_close(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!((a - e).abs() < 1e-4, "frame {i}: {a} isn't {e}");
+    }
+}
+
+#[test]
+fn the_gain_plugin_describes_its_parameters() {
+    let plugins = TestPlugins::new("params");
+    let instance = plugins.gain();
+    assert_eq!(instance.info().name, "Test Gain");
+    assert!(!instance.info().is_instrument());
+    let params = instance.params();
+    assert_eq!(
+        params.iter().map(|p| p.id).collect::<Vec<_>>(),
+        [GAIN, LATENCY]
+    );
+    let gain = &params[0];
+    assert_eq!(
+        (
+            gain.name.as_str(),
+            gain.module.as_str(),
+            gain.min,
+            gain.max,
+            gain.default
+        ),
+        ("Gain", "Test", 0.0, 2.0, 1.0)
+    );
+    assert!(gain.automatable && gain.modulatable && !gain.stepped);
+    assert!(params[1].stepped && !params[1].automatable);
+    assert_eq!(instance.param_value(GAIN), Some(1.0));
+    assert_eq!(instance.param_value(99), None);
+    assert_eq!(
+        instance.value_to_text(LATENCY, 64.0).as_deref(),
+        Some("64 samples")
+    );
+    assert_eq!(instance.text_to_value(GAIN, "0.25"), Some(0.25));
+    assert_eq!(instance.text_to_value(GAIN, "loud"), None);
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
+fn the_gain_plugin_plays_its_input() {
+    let plugins = TestPlugins::new("gain");
+    let mut instance = plugins.gain();
+    let mut node = instance.node_source().node();
+    let input = ramp(64);
+    let silence = vec![0.0; 64];
+    assert_eq!(
+        play(&mut node, &input, &Block::default()),
+        [silence.clone(), silence]
+    );
+
+    instance.activate(CONFIG).unwrap();
+    assert!(instance.is_active());
+    let [left, right] = play(&mut node, &input, &Block::default());
+    assert_eq!((left, right), (input.clone(), scaled(&input, -1.0)));
+
+    // Changes from the main thread apply from the next block's start, and
+    // the node's events from their offsets.
+    instance.set_param(GAIN, 0.5);
+    let [left, _] = play(&mut node, &input, &Block::default());
+    assert_eq!(left, scaled(&input, 0.5));
+    assert_eq!(instance.param_value(GAIN), Some(0.5));
+    let events = [param(10, GAIN, 2.0)];
+    let block = Block {
+        events: &events,
+        ..Block::default()
+    };
+    let [left, _] = play(&mut node, &input, &block);
+    assert_eq!(left[..10], scaled(&input[..10], 0.5));
+    assert_eq!(left[10..], scaled(&input[10..], 2.0));
+
+    // Blocks longer than the plugin was activated for play silence.
+    assert_eq!(
+        play(&mut node, &ramp(257), &Block::default())[0],
+        vec![0.0; 257]
+    );
+    instance.deactivate().unwrap();
+    assert_eq!(play(&mut node, &input, &Block::default())[0], vec![0.0; 64]);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn changes_to_an_inactive_plugin_apply_at_once() {
+    let plugins = TestPlugins::new("inactive");
+    let mut instance = plugins.gain();
+    instance.set_param(GAIN, 0.25);
+    instance.set_param(LATENCY, 32.0);
+    assert_eq!(instance.param_value(GAIN), Some(0.25));
+    instance.activate(CONFIG).unwrap();
+    assert_eq!(instance.latency(), 32);
+    // Changes waiting for a node when the plugin deactivates get to it.
+    instance.set_param(GAIN, 0.75);
+    instance.deactivate().unwrap();
+    assert_eq!(instance.param_value(GAIN), Some(0.75));
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_latency_change_restarts_the_plugin() {
+    let plugins = TestPlugins::new("latency");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    assert_eq!((instance.latency(), node.latency()), (0, 0));
+    instance.set_param(LATENCY, 100.0);
+    play(&mut node, &ramp(64), &Block::default());
+    assert_eq!(
+        instance.poll(),
+        [PluginEvent::Restarted {
+            latency_changed: true
+        }]
+    );
+    assert_eq!((instance.latency(), node.latency()), (100, 100));
+    let mut impulse = vec![0.0; 256];
+    impulse[0] = 1.0;
+    let [left, _] = play(&mut node, &impulse, &Block::default());
+    let peaks: Vec<_> = left
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s != 0.0)
+        .collect();
+    assert_eq!(peaks, [(100, &1.0)]);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_path() {
+    let plugins = TestPlugins::new("compensation");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, 123.0);
+    instance.activate(CONFIG).unwrap();
+    let mut g = Graph::new();
+    let source = g.add(NodeKey(0), Impulse { at: 10 });
+    let wet = g.add(NodeKey(1), instance.node_source().node());
+    let sum = g.add(NodeKey(2), Sum::new(2));
+    g.connect(source, wet).unwrap();
+    g.connect(wet, sum).unwrap();
+    g.connect(source, sum).unwrap();
+    g.set_output(sum).unwrap();
+    let graph = g.prepare(&CONFIG).unwrap();
+    assert_eq!(graph.latency(), 123);
+    let (mut engine, mut handle) = Engine::new(CONFIG);
+    handle.swap_graph(graph).unwrap();
+    let mut output = Vec::new();
+    for _ in 0..4 {
+        let mut block = vec![0.0; 2 * 256];
+        engine.process(&mut AudioMut::from_planar(&mut block, 2));
+        output.extend_from_slice(&block[..256]);
+    }
+    assert_eq!(engine.stats().latency, 123);
+    let peaks: Vec<_> = output
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s != 0.0)
+        .collect();
+    assert_eq!(peaks, [(133, &2.0)], "both paths, to the sample");
+    drop((engine, handle));
+    drop(instance);
+    plugins.assert_alright();
+}
+
+/// A single 1.0 at engine time `at`.
+struct Impulse {
+    at: u64,
+}
+
+impl Node for Impulse {
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        if let Some(offset) = self.at.checked_sub(ctx.time)
+            && offset < ctx.frames as u64
+        {
+            for channel in output.channels_mut() {
+                channel[offset as usize] = 1.0;
+            }
+        }
+    }
+}
+
+#[test]
+fn state_saves_and_loads() {
+    let plugins = TestPlugins::new("state");
+    let mut first = plugins.gain();
+    first.set_param(GAIN, 0.75);
+    plugins.set_label(&first, "warm");
+    assert_eq!(first.poll(), [PluginEvent::StateChanged]);
+    let state = first.save_state().unwrap();
+    assert!(String::from_utf8_lossy(&state).contains("label=warm"));
+    let mut second = plugins.gain();
+    second.load_state(&state).unwrap();
+    assert_eq!(second.param_value(GAIN), Some(0.75));
+    assert_eq!(plugins.label(&second), "warm");
+    assert!(second.load_state(b"nonsense").is_err());
+    drop((first, second));
+    plugins.assert_alright();
+}
+
+#[test]
+fn changes_in_the_plugins_window_come_back() {
+    let plugins = TestPlugins::new("window-changes");
+    let mut instance = plugins.gain();
+    // Inactive, the plugin is flushed on the main thread.
+    plugins.gui(&instance, gui::BEGIN, GAIN, 0.0);
+    plugins.gui(&instance, gui::VALUE, GAIN, 0.3);
+    plugins.gui(&instance, gui::END, GAIN, 0.0);
+    assert_eq!(
+        instance.poll(),
+        [
+            PluginEvent::GestureBegin { param: GAIN },
+            PluginEvent::ParamChanged {
+                param: GAIN,
+                value: 0.3
+            },
+            PluginEvent::GestureEnd { param: GAIN },
+        ]
+    );
+    // Active, the changes come out of processing.
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    plugins.gui(&instance, gui::VALUE, GAIN, 1.5);
+    assert_eq!(instance.poll(), []);
+    play(&mut node, &ramp(16), &Block::default());
+    assert_eq!(
+        instance.poll(),
+        [PluginEvent::ParamChanged {
+            param: GAIN,
+            value: 1.5
+        }]
+    );
+    let input = ramp(16);
+    assert_eq!(
+        play(&mut node, &input, &Block::default())[0],
+        scaled(&input, 1.5)
+    );
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+/// What the test synth plays for a note at `frequency` and `amplitude`,
+/// from `phase` in cycles, for `frames` frames, and the phase it ends on.
+fn sine(frequency: f64, amplitude: f64, phase: f64, frames: usize) -> (Vec<f32>, f64) {
+    let mut phase = phase;
+    let samples = (0..frames)
+        .map(|_| {
+            let sample = (amplitude * (phase * TAU).sin()) as f32;
+            phase = (phase + frequency / f64::from(CONFIG.sample_rate)).fract();
+            sample
+        })
+        .collect();
+    (samples, phase)
+}
+
+#[test]
+fn the_synth_plays_notes_with_their_expression() {
+    let plugins = TestPlugins::new("synth");
+    let mut instance = plugins.synth();
+    assert!(instance.info().is_instrument());
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let silence = vec![0.0; 128];
+    let a = NoteId(7);
+    let on = [note(
+        0,
+        NoteEvent::On {
+            note: a,
+            key: 69,
+            velocity: 1.0,
+        },
+    )];
+    let block = |events| Block {
+        events,
+        ..Block::default()
+    };
+    // Level 0.5, velocity 1, A at 440 Hz.
+    let [left, right] = play(&mut node, &silence, &block(&on));
+    let (expected, phase) = sine(440.0, 0.5, 0.0, 128);
+    assert_close(&left, &expected);
+    assert_close(&right, &expected);
+
+    // Bent up an octave, and pressed as hard as it goes.
+    let expression = [
+        note(
+            0,
+            NoteEvent::Expression {
+                note: a,
+                dimension: Dimension::PitchBend,
+                value: 12.0,
+            },
+        ),
+        note(
+            0,
+            NoteEvent::Expression {
+                note: a,
+                dimension: Dimension::Pressure,
+                value: 1.0,
+            },
+        ),
+    ];
+    let [left, _] = play(&mut node, &silence, &block(&expression));
+    assert_close(&left, &sine(880.0, 1.0, phase, 128).0);
+
+    // A second note on the same key is a note of its own, which lets go
+    // separately.
+    let b = NoteId(8);
+    let more = [
+        note(
+            0,
+            NoteEvent::On {
+                note: b,
+                key: 69,
+                velocity: 0.5,
+            },
+        ),
+        note(
+            64,
+            NoteEvent::Off {
+                note: a,
+                velocity: 0.0,
+            },
+        ),
+    ];
+    let [left, _] = play(&mut node, &silence, &block(&more));
+    let (second, _) = sine(440.0, 0.25, 0.0, 128);
+    assert_close(&left[64..], &second[64..]);
+    let off = [note(
+        0,
+        NoteEvent::Off {
+            note: b,
+            velocity: 0.0,
+        },
+    )];
+    assert_eq!(play(&mut node, &silence, &block(&off))[0], silence);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn the_synth_runs_its_voices_on_the_thread_pool() {
+    let plugins = TestPlugins::new("pool");
+    let mut instance = plugins.synth();
+    instance.set_param(THREADS, 1.0);
+    instance.set_param(LEVEL, 1.0);
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let on = [note(
+        0,
+        NoteEvent::On {
+            note: NoteId(1),
+            key: 60,
+            velocity: 1.0,
+        },
+    )];
+    let block = Block {
+        events: &on,
+        ..Block::default()
+    };
+    let [left, _] = play(&mut node, &[0.0; 64], &block);
+    assert!(left.iter().any(|s| *s != 0.0));
+    // For now the tasks all run on the thread processing the plugin.
+    assert_eq!(plugins.pool_use(&instance), (1, 1));
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn plugins_see_the_transport() {
+    let plugins = TestPlugins::new("transport");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    assert_eq!(plugins.transport(&instance), None);
+    let block = Block {
+        // One second in at 120 bpm: two beats.
+        transport: TransportState {
+            playing: true,
+            position: 48_000,
+            looping: Some(BeatRange::new(Beats::ZERO, Beats::new(4))),
+            jumps: 0,
+        },
+        tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
+        events: &[],
+    };
+    play(&mut node, &ramp(16), &block);
+    let (flags, beats, tempo) = plugins.transport(&instance).unwrap();
+    for flag in [
+        CLAP_TRANSPORT_HAS_TEMPO,
+        CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+        CLAP_TRANSPORT_IS_PLAYING,
+        CLAP_TRANSPORT_IS_LOOP_ACTIVE,
+    ] {
+        assert_ne!(flags & flag, 0, "{flag}");
+    }
+    assert_eq!((beats, tempo), (2 * CLAP_BEATTIME_FACTOR, 120.0));
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn plugins_get_the_main_thread_when_they_ask() {
+    let plugins = TestPlugins::new("callback");
+    let woken = Arc::new(AtomicU32::new(0));
+    let waker = {
+        let woken = Arc::clone(&woken);
+        Arc::new(move || {
+            woken.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let mut instance =
+        Instance::new(&plugins.path, GAIN_ID.to_str().unwrap(), Some(waker)).unwrap();
+    plugins.request_callback(&instance);
+    assert_eq!(woken.load(Ordering::SeqCst), 1);
+    assert_eq!(plugins.main_thread_calls(&instance), 0);
+    assert_eq!(instance.poll(), []);
+    assert_eq!(plugins.main_thread_calls(&instance), 1);
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
+fn the_plugins_window_opens_inside_ours() {
+    let plugins = TestPlugins::new("window");
+    let mut instance = plugins.gain();
+    assert!(instance.has_window());
+    let parent = ParentWindow::Win32(ptr::without_provenance_mut(77));
+    assert_eq!(instance.open_window(parent, 1.0), Ok((400, 300)));
+    assert!(instance.is_window_open());
+    assert_eq!(plugins.window(&instance), (1, 77));
+    assert_eq!(instance.resize_window(500, 50), Some((500, 100)));
+    assert!(plugins.request_resize(&instance, 640, 480));
+    assert_eq!(
+        instance.poll(),
+        [PluginEvent::WindowResize {
+            width: 640,
+            height: 480
+        }]
+    );
+    instance.close_window();
+    assert_eq!(plugins.window(&instance).0, -1);
+    instance.open_floating_window("Test Gain").unwrap();
+    assert_eq!(plugins.window(&instance).0, 1);
+    // Destroying the plugin closes its window first.
+    drop(instance);
+    plugins.assert_alright();
+}
+
+/// Is the scanning process, when a test runs this binary as one.
+#[test]
+fn scan_child() {
+    if let Some(path) = std::env::var_os(SCAN_CHILD) {
+        scan::child(Path::new(&path));
+    }
+}
+
+const SCAN_CHILD: &str = "MUSICABLE_SCAN_CHILD";
+
+fn scan_copy(name: &str, timeout: Duration) -> Outcome {
+    let path = copy_library(name);
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "tests::scan_child", "--test-threads", "1"])
+        .env(SCAN_CHILD, &path);
+    scan::scan_isolated(command, timeout)
+}
+
+#[test]
+fn the_scanner_finds_plugins_and_survives_bad_ones() {
+    let Outcome::Found(found) = scan_copy("good", scan::TIMEOUT) else {
+        panic!("the good library wasn't found");
+    };
+    let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Test Gain", "Test Synth"]);
+    assert!(found[1].features.iter().any(|f| f == "instrument"));
+    let crashed = scan_copy("crash", scan::TIMEOUT);
+    assert!(matches!(&crashed, Outcome::Crashed(_)), "{crashed:?}");
+    let hung = scan_copy("hang", Duration::from_secs(1));
+    assert!(
+        matches!(&hung, Outcome::Crashed(reason) if reason.contains("still loading")),
+        "{hung:?}"
+    );
+    let refused = scan_copy("refuse", scan::TIMEOUT);
+    assert!(
+        matches!(&refused, Outcome::Failed(reason) if reason.contains("failed to initialize")),
+        "{refused:?}"
+    );
+}
