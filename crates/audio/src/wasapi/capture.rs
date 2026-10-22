@@ -49,6 +49,8 @@ pub(crate) struct Output {
     pub id: String,
     /// The physical device it belongs to, if Windows says.
     pub container: Option<GUID>,
+    /// The adapter it belongs to, such as a sound card, if Windows says.
+    pub adapter: Option<String>,
     pub rate: u32,
     pub exclusive: bool,
     /// When the output plays each engine frame.
@@ -258,9 +260,13 @@ impl Input {
         }
         let name = device::friendly_name(&device).unwrap_or_else(|| id.to_owned());
         // A device's inputs and outputs share its clock, and a loopback
-        // runs on its output's.
+        // runs on its output's. Built-in devices share a container, so for
+        // them, such as a sound card, its adapter says.
         let container = device::container_id(&device).filter(|&found| found != BUILT_IN);
-        let same_clock = ours || (container.is_some() && container == output.container);
+        let adapter = device::adapter_id(&device);
+        let same_clock = ours
+            || (container.is_some() && container == output.container)
+            || (adapter.is_some() && adapter == output.adapter);
         Input::start(&device, loopback, ours, name, same_clock).map_err(|e| message(&e))
     }
 

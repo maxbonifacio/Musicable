@@ -18,7 +18,7 @@ use musicable_model::{Project, TrackId};
 use crate::arrangement::Arrangement;
 use crate::devices::{BROWSER, Browser, DEVICES, DevicesPanel, Plugins};
 use crate::menus::menus;
-use crate::mixer::{self, InputChoice, Levels};
+use crate::mixer::{self, Choices, InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::shortcuts::Shortcuts;
@@ -60,6 +60,8 @@ pub struct View<'a> {
     /// The audio inputs tracks can record from, for the mixer's input
     /// menus.
     pub inputs: &'a [InputChoice],
+    /// The MIDI inputs, for the mixer's MIDI input menus.
+    pub midi_inputs: &'a [MidiChoice],
     pub audio: Audio<'a>,
     /// The user's keymap file.
     pub keymap_file: KeymapStatus<'a>,
@@ -145,8 +147,8 @@ pub enum Action {
     EndGesture,
     /// Make a change from the mixer, such as moving a fader.
     Mixer(Change),
-    /// List the audio inputs again, for the mixer's input menus: the user
-    /// opened one, maybe after plugging a device in.
+    /// List the audio and MIDI inputs again, for the mixer's input menus:
+    /// the user opened one, maybe after plugging a device in.
     ListInputs,
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
@@ -276,7 +278,10 @@ impl Shell {
                         ui,
                         view.project,
                         view.levels,
-                        view.inputs,
+                        Choices {
+                            audio: view.inputs,
+                            midi: view.midi_inputs,
+                        },
                         theme,
                         &self.mouse,
                         &mut actions,

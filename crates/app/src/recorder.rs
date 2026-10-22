@@ -1,14 +1,17 @@
 //! Recording: what armed tracks' inputs capture while the transport
-//! records, written to audio files on a thread of its own, and made into
-//! takes when recording stops.
+//! records, written to audio files on a thread of its own, or for MIDI
+//! tracks, the notes their inputs play, made into takes when recording
+//! stops.
 //!
-//! The recorder reads two things the audio thread writes, without asking it
+//! The recorder reads what the audio thread writes, without asking it
 //! anything: the engine's [`Timeline`], which says where in the song each
-//! frame it rendered played and whether it recorded, and the inputs'
+//! frame it rendered played and whether it recorded, the inputs'
 //! [`InputBuffer`]s, where frame `w` is what an input captured as engine
-//! frame `w` was heard. What was heard at `w` left the clips the graph's
-//! latency before, so a frame captured at `w` goes where the song was at
-//! `w` minus the latency, and minus the input's own calibration offset.
+//! frame `w` was heard, and the MIDI inputs' [`MidiBuffer`]s, where each
+//! message has the engine frame heard as it came in. What was heard at `w`
+//! left the clips the graph's latency before, so a frame captured at `w`
+//! goes where the song was at `w` minus the latency, and minus the input's
+//! own calibration offset, and a MIDI message the same way.
 //! `docs/app.md` describes it.
 
 use std::collections::VecDeque;
@@ -20,14 +23,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use musicable_audio::{InputBuffer, ReadError};
+use musicable_audio::{InputBuffer, MidiBuffer, ReadError};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::take::{Pass, Recorded};
 use musicable_engine::timeline::Read;
-use musicable_engine::{InputChannels, InputLayout, Segment, Timeline};
+use musicable_engine::{InputChannels, InputLayout, MidiSource, Segment, Timeline};
 use musicable_io::audio::WavWriter;
-use musicable_model::{AudioInput, TrackId};
+use musicable_model::{AudioInput, Input, TrackId};
 
+use self::midi::MidiTape;
 use crate::audio_files::clip_path;
 
 /// How often the recorder's thread looks for more to write.
@@ -42,13 +46,15 @@ const FLUSH_SECONDS: u64 = 1;
 /// input that stalled.
 const PATIENCE_SECONDS: u64 = 2;
 
-/// A track to record when the transport records: an armed audio track.
+/// A track to record when the transport records: an armed audio or MIDI
+/// track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Armed {
     pub track: TrackId,
     /// The track's name, which its files are named after.
     pub name: String,
-    pub input: AudioInput,
+    /// An audio input for an audio track, a MIDI input for a MIDI track.
+    pub input: Input,
     /// How many frames late the input buffer has what the input captured:
     /// the input's calibration, beyond the latency its driver reports.
     pub offset: i64,
@@ -92,7 +98,7 @@ pub struct Recording {
 
 enum Command {
     Timeline(Timeline),
-    Inputs(InputLayout, Vec<Option<InputBuffer>>),
+    Inputs(InputLayout, Buffers),
     Tracks {
         rate: u32,
         armed: Vec<Armed>,
@@ -137,8 +143,8 @@ impl Recorder {
     }
 
     /// Records from the stream's inputs from now on: their buffers, in the
-    /// order `layout` has them.
-    pub fn set_inputs(&self, layout: InputLayout, buffers: Vec<Option<InputBuffer>>) {
+    /// order `layout` has them, its inputs' and then its MIDI inputs'.
+    pub fn set_inputs(&self, layout: InputLayout, buffers: Buffers) {
         self.send(Command::Inputs(layout, buffers));
     }
 
@@ -232,6 +238,14 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
     }
 }
 
+/// The buffers of a stream's inputs and of its MIDI inputs, each in the
+/// order the stream has them: `None` for one that didn't open.
+#[derive(Clone, Default)]
+pub(crate) struct Buffers {
+    pub audio: Vec<Option<InputBuffer>>,
+    pub midi: Vec<Option<MidiBuffer>>,
+}
+
 /// What the recorder's thread keeps: the timeline so far, the inputs, the
 /// tracks to record, and the recording running.
 struct Tape {
@@ -240,7 +254,7 @@ struct Tape {
     place: Option<Place>,
     project: u64,
     layout: InputLayout,
-    buffers: Vec<Option<InputBuffer>>,
+    buffers: Buffers,
     /// The timeline, from the segment the recording running, or the
     /// transport, is in now.
     segments: VecDeque<Segment>,
@@ -266,6 +280,8 @@ struct Running {
     place: Option<Place>,
     project: u64,
     tracks: Vec<TrackTape>,
+    /// The MIDI tracks.
+    notes: Vec<MidiTape>,
     /// The engine time recording stopped at, once the timeline says.
     end: Option<u64>,
 }
@@ -275,16 +291,16 @@ impl Running {
     /// failed.
     fn is_finished(&self) -> bool {
         self.end.is_some_and(|end| {
-            self.tracks
-                .iter()
-                .all(|t| t.done >= end || t.failed.is_some())
+            let audio = (self.tracks.iter()).all(|t| t.done >= end || t.failed.is_some());
+            audio && self.notes.iter().all(|t| t.done >= end)
         })
     }
 }
 
-/// What one track records.
+/// What one audio track records.
 struct TrackTape {
     armed: Armed,
+    input: AudioInput,
     buffer: InputBuffer,
     channels: InputChannels,
     /// The engine time it has recorded up to.
@@ -316,7 +332,7 @@ impl Tape {
             place: None,
             project: 0,
             layout: InputLayout::new(),
-            buffers: Vec::new(),
+            buffers: Buffers::default(),
             segments: VecDeque::new(),
             until: 0,
             running: None,
@@ -335,13 +351,22 @@ impl Tape {
     }
 
     /// Takes the stream's inputs. Tracks recording now go on from their
-    /// inputs' new buffers: what the old ones didn't capture is silent.
-    fn set_inputs(&mut self, layout: InputLayout, buffers: Vec<Option<InputBuffer>>) {
+    /// inputs' new buffers: what the old ones didn't capture is silent, and
+    /// what the old MIDI inputs hadn't brought is missing.
+    fn set_inputs(&mut self, layout: InputLayout, buffers: Buffers) {
         if let Some(running) = &mut self.running {
             for track in &mut running.tracks {
-                if let Some((buffer, channels)) = find(&layout, &buffers, &track.armed.input) {
+                if let Some((buffer, channels)) = find(&layout, &buffers.audio, &track.input) {
                     track.buffer = buffer;
                     track.channels = channels;
+                }
+            }
+            for track in &mut running.notes {
+                if let Input::Midi(input) = &track.armed.input
+                    && let Some(source) = layout.find_midi(input)
+                {
+                    track.source = source;
+                    track.set_inputs(midi_buffers(source, &buffers.midi));
                 }
             }
         }
@@ -416,23 +441,40 @@ impl Tape {
         self.segments.drain(..at);
         let start = self.segments[0].time;
         let mut tracks = Vec::new();
+        let mut notes = Vec::new();
         for armed in &self.armed {
-            match find(&self.layout, &self.buffers, &armed.input) {
-                Some((buffer, channels)) => tracks.push(TrackTape {
-                    armed: armed.clone(),
-                    buffer,
-                    channels,
-                    done: start,
-                    file: None,
-                    files: Vec::new(),
-                    passes: Vec::new(),
-                    lost: 0,
-                    failed: None,
-                }),
-                None => self.reports.push(Report::Problem(format!(
-                    "{} records nothing: its input isn't open.",
-                    armed.name
-                ))),
+            match &armed.input {
+                Input::Audio(input) => match find(&self.layout, &self.buffers.audio, input) {
+                    Some((buffer, channels)) => tracks.push(TrackTape {
+                        armed: armed.clone(),
+                        input: input.clone(),
+                        buffer,
+                        channels,
+                        done: start,
+                        file: None,
+                        files: Vec::new(),
+                        passes: Vec::new(),
+                        lost: 0,
+                        failed: None,
+                    }),
+                    None => self.reports.push(Report::Problem(format!(
+                        "{} records nothing: its input isn't open.",
+                        armed.name
+                    ))),
+                },
+                Input::Midi(input) => {
+                    let source = self.layout.find_midi(input);
+                    let buffers = source.map(|s| midi_buffers(s, &self.buffers.midi));
+                    match source.zip(buffers.filter(|b| !b.is_empty())) {
+                        Some((source, buffers)) => {
+                            notes.push(MidiTape::new(armed.clone(), source, buffers, start));
+                        }
+                        None => self.reports.push(Report::Problem(format!(
+                            "{} records nothing: its MIDI input isn't open.",
+                            armed.name
+                        ))),
+                    }
+                }
             }
         }
         self.running = Some(Running {
@@ -441,6 +483,7 @@ impl Tape {
             place: self.place.clone(),
             project: self.project,
             tracks,
+            notes,
             end: None,
         });
         true
@@ -463,10 +506,42 @@ impl Tape {
             rate,
             place,
             tracks,
+            notes,
             ..
         } = running;
         for track in tracks {
             self.advance_track(track, *rate, place.as_ref(), limit, forced);
+        }
+        for track in notes {
+            self.advance_notes(track, *rate, limit, forced);
+        }
+    }
+
+    /// Records what `track`'s MIDI inputs played, from where it got to up
+    /// to engine time `limit`, as far as they have brought every message,
+    /// or with `forced`, all the way.
+    fn advance_notes(&self, track: &mut MidiTape, rate: u32, limit: u64, forced: bool) {
+        while track.done < limit {
+            let e = track.done;
+            let index = self.segments.partition_point(|s| s.time <= e);
+            let Some(segment) = index.checked_sub(1).map(|i| self.segments[i]) else {
+                // Before the timeline starts: nothing played.
+                track.done = self.segments.front().map_or(limit, |s| s.time.min(limit));
+                continue;
+            };
+            let mut until = (self.segments.get(index)).map_or(limit, |next| next.time.min(limit));
+            // How far its inputs have brought every message, in engine time.
+            let lag = i128::from(segment.latency) + i128::from(track.armed.offset);
+            let settled = i128::from(track.settled()) - lag;
+            let settled = u64::try_from(settled.max(0)).unwrap_or(u64::MAX);
+            let stalled = self.until.saturating_sub(settled) > u64::from(rate) * PATIENCE_SECONDS;
+            if settled < until && !forced && !stalled {
+                if settled <= e {
+                    break;
+                }
+                until = settled;
+            }
+            track.record(&segment, until);
         }
     }
 
@@ -667,10 +742,25 @@ impl Tape {
             files.extend(track.files);
             track.passes.retain(|pass| pass.frames > 0);
             if !track.passes.is_empty() {
-                recorded.push(Recorded {
+                recorded.push(Recorded::Audio {
                     track: track.armed.track,
                     passes: track.passes,
                 });
+            }
+        }
+        for tape in running.notes {
+            let lost = tape.lost();
+            if lost > 0 {
+                self.reports.push(Report::Problem(format!(
+                    "{lost} MIDI messages of {}'s recording are missing: the recorder fell \
+                     behind.",
+                    tape.armed.name
+                )));
+            }
+            let track = tape.armed.track;
+            let passes = tape.finish();
+            if !passes.is_empty() {
+                recorded.push(Recorded::Midi { track, passes });
             }
         }
         if !recorded.is_empty() {
@@ -692,13 +782,11 @@ impl Tape {
         let Some(running) = &self.running else {
             return;
         };
-        let oldest = running
-            .tracks
-            .iter()
+        let audio = (running.tracks.iter())
             .filter(|t| t.failed.is_none())
-            .map(|t| t.done)
-            .min()
-            .unwrap_or(self.until);
+            .map(|t| t.done);
+        let notes = running.notes.iter().map(|t| t.done);
+        let oldest = audio.chain(notes).min().unwrap_or(self.until);
         while self.segments.len() > 1 && self.segments[1].time <= oldest {
             self.segments.pop_front();
         }
@@ -709,15 +797,18 @@ impl Tape {
         let Some(running) = &self.running else {
             return Vec::new();
         };
-        running
-            .tracks
-            .iter()
-            .flat_map(|track| {
-                track.passes.iter().map(|pass| Recording {
-                    track: track.armed.track,
-                    start: pass.start,
-                    frames: pass.frames,
-                })
+        let audio = running.tracks.iter().flat_map(|track| {
+            (track.passes.iter()).map(|pass| (track.armed.track, pass.start, pass.frames))
+        });
+        let notes = running.notes.iter().flat_map(|track| {
+            (track.passes.iter()).map(|pass| (track.armed.track, pass.start, pass.frames))
+        });
+        audio
+            .chain(notes)
+            .map(|(track, start, frames)| Recording {
+                track,
+                start,
+                frames,
             })
             .collect()
     }
@@ -765,6 +856,15 @@ fn close(track: &mut TrackTape) -> io::Result<()> {
         track.files.push((file.name, audio));
     }
     Ok(())
+}
+
+/// The buffers of the MIDI inputs `source` takes, of the stream's
+/// `buffers`, that opened.
+fn midi_buffers(source: MidiSource, buffers: &[Option<MidiBuffer>]) -> Vec<MidiBuffer> {
+    match source.input {
+        Some(index) => buffers.get(index).cloned().flatten().into_iter().collect(),
+        None => buffers.iter().flatten().cloned().collect(),
+    }
 }
 
 /// The buffer `input` takes from, and where its channels are in it.
@@ -815,5 +915,6 @@ pub(crate) fn unsaved_folder() -> Option<PathBuf> {
     )
 }
 
+mod midi;
 #[cfg(test)]
 mod tests;

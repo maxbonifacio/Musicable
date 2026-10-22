@@ -17,6 +17,7 @@ use super::platform;
 use super::sys::Long;
 use crate::frames_to_duration;
 use crate::input::{Bus, InputCounters, InputWriter, Playback};
+use crate::midi::MidiBus;
 
 /// A channel: its two buffer halves, and how it stores samples.
 pub(super) struct Output {
@@ -103,9 +104,11 @@ pub(super) struct Render {
     inputs: Option<Inputs>,
     /// Every input, for the engine.
     bus: Bus,
-    /// Where inputs that capture on threads of their own learn when each
-    /// engine frame plays, if there are any.
-    playback: Option<Arc<Playback>>,
+    /// The MIDI inputs, for the engine.
+    midi: MidiBus,
+    /// Where inputs that capture on threads of their own, and MIDI inputs,
+    /// learn when each engine frame plays.
+    playback: Arc<Playback>,
 }
 
 // SAFETY: the driver's buffers are for whichever thread has the render lock,
@@ -137,21 +140,25 @@ impl Render {
             overran: false,
             inputs: None,
             bus: Bus::new(Vec::new(), period as usize, 0),
-            playback: None,
+            midi: MidiBus::default(),
+            playback: Arc::default(),
         }
     }
 
     /// Records from the driver's `inputs`, if any, and gives the engine
-    /// what the `bus` holds: those and any others. `playback` is for
-    /// inputs on threads of their own.
+    /// what the `bus` holds, those and any others, and what the `midi` bus
+    /// holds. It publishes to `playback` when each engine frame plays, for
+    /// inputs on threads of their own and MIDI inputs.
     pub fn with_inputs(
         mut self,
         inputs: Option<Inputs>,
         bus: Bus,
-        playback: Option<Arc<Playback>>,
+        midi: MidiBus,
+        playback: Arc<Playback>,
     ) -> Self {
         self.inputs = inputs;
         self.bus = bus;
+        self.midi = midi;
         self.playback = playback;
         self
     }
@@ -207,22 +214,24 @@ impl Render {
                     let latency = u64::from(shared.input_latency()) + output_latency;
                     inputs.take(half, time, latency, self.period);
                 }
-                if let Some(playback) = &self.playback {
-                    // The half rendered now plays the output latency after
-                    // the buffer switch.
-                    let ahead = frames_to_duration(output_latency, self.rate);
-                    playback.publish(
-                        time,
-                        platform::now_ns() + ahead.as_nanos() as u64,
-                        self.rate,
-                    );
-                }
+                // The half rendered now plays the output latency after the
+                // buffer switch.
+                let ahead = frames_to_duration(output_latency, self.rate);
+                self.playback.publish(
+                    time,
+                    platform::now_ns() + ahead.as_nanos() as u64,
+                    self.rate,
+                );
                 let input = self.bus.fill(time, self.period);
+                let heard = time as f64 - output_latency as f64;
+                let midi = self.midi.fill(time, self.period, Some(heard), self.rate);
                 engine.process_with_input(
                     input,
+                    midi,
                     &mut AudioMut::from_planar(&mut self.scratch, channels),
                 );
                 counters.inputs(self.bus.delay(), self.bus.late());
+                counters.midi(self.midi.delay(), self.midi.late());
             }
             None => self.scratch.fill(0.0),
         }

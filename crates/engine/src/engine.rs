@@ -11,8 +11,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::timeline::{Segment, Timeline, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
-    AudioMut, AudioRef, Block, EngineConfig, Event, NodeEvent, NodeEventKind, NodeKey, ParamId,
-    PreparedGraph, ReferenceRenderer, Renderer, rt,
+    AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent, NodeEventKind, NodeKey,
+    ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
 /// Messages the control thread can have in flight.
@@ -215,20 +215,29 @@ impl Engine {
     /// Real-time safe.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
         let frames = output.frames();
-        self.process_with_input(AudioRef::empty(frames), output);
+        self.process_with_input(AudioRef::empty(frames), &[], output);
     }
 
     /// [`process`](Self::process), with `input` holding the audio devices'
     /// inputs for the same frames, which nodes find in
-    /// [`ProcessContext::input`](crate::ProcessContext::input). Real-time
-    /// safe.
+    /// [`ProcessContext::input`](crate::ProcessContext::input), and `midi`
+    /// the messages from the MIDI inputs that play in them, in order of
+    /// time, which nodes find in
+    /// [`ProcessContext::midi`](crate::ProcessContext::midi). A message for
+    /// a time before the first frame plays at the first, and one for a time
+    /// after the last at the last. Real-time safe.
     ///
     /// # Panics
     ///
     /// If `input` isn't as long as `output`.
-    pub fn process_with_input(&mut self, input: AudioRef<'_>, output: &mut AudioMut<'_>) {
+    pub fn process_with_input(
+        &mut self,
+        input: AudioRef<'_>,
+        midi: &[MidiMessage],
+        output: &mut AudioMut<'_>,
+    ) {
         rt::scope(|| {
-            self.run(input, output.frames(), |start, frames, graph| {
+            self.run(input, midi, output.frames(), |start, frames, graph| {
                 let mut part = output.range_mut(start..start + frames);
                 let Some(graph) = graph else {
                     part.clear();
@@ -259,22 +268,27 @@ impl Engine {
             "the taps aren't all {frames} frames long"
         );
         rt::scope(|| {
-            self.run(AudioRef::empty(frames), frames, |start, frames, graph| {
-                let range = start..start + frames;
-                match graph {
-                    Some(graph) => output
-                        .range_mut(range.clone())
-                        .copy_from(graph.output(frames)),
-                    None => output.range_mut(range.clone()).clear(),
-                }
-                for (n, tap) in taps.iter_mut().enumerate() {
-                    let mut part = tap.range_mut(range.clone());
-                    match graph.and_then(|graph| graph.tap(n, frames)) {
-                        Some(source) => part.copy_from(source),
-                        None => part.clear(),
+            self.run(
+                AudioRef::empty(frames),
+                &[],
+                frames,
+                |start, frames, graph| {
+                    let range = start..start + frames;
+                    match graph {
+                        Some(graph) => output
+                            .range_mut(range.clone())
+                            .copy_from(graph.output(frames)),
+                        None => output.range_mut(range.clone()).clear(),
                     }
-                }
-            });
+                    for (n, tap) in taps.iter_mut().enumerate() {
+                        let mut part = tap.range_mut(range.clone());
+                        match graph.and_then(|graph| graph.tap(n, frames)) {
+                            Some(source) => part.copy_from(source),
+                            None => part.clear(),
+                        }
+                    }
+                },
+            );
         });
     }
 
@@ -286,12 +300,14 @@ impl Engine {
     /// If `output.len()` isn't a multiple of `channels`.
     pub fn process_interleaved(&mut self, output: &mut [f32], channels: usize) {
         let frames = output.len() / channels.max(1);
-        self.process_interleaved_with_input(AudioRef::empty(frames), output, channels);
+        self.process_interleaved_with_input(AudioRef::empty(frames), &[], output, channels);
     }
 
     /// [`process_interleaved`](Self::process_interleaved), with `input`
-    /// holding the audio devices' inputs for the same frames. Real-time
-    /// safe.
+    /// holding the audio devices' inputs for the same frames and `midi` the
+    /// MIDI inputs' messages, as
+    /// [`process_with_input`](Self::process_with_input) has them.
+    /// Real-time safe.
     ///
     /// # Panics
     ///
@@ -300,6 +316,7 @@ impl Engine {
     pub fn process_interleaved_with_input(
         &mut self,
         input: AudioRef<'_>,
+        midi: &[MidiMessage],
         output: &mut [f32],
         channels: usize,
     ) {
@@ -309,26 +326,33 @@ impl Engine {
             output.len()
         );
         rt::scope(|| {
-            self.run(input, output.len() / channels, |start, frames, graph| {
-                let part = &mut output[start * channels..(start + frames) * channels];
-                let Some(graph) = graph else {
-                    part.fill(0.0);
-                    return;
-                };
-                graph.output(frames).write_interleaved(part, channels);
-                if let Some(cue) = graph.cue(frames) {
-                    cue.add_interleaved(part, channels);
-                }
-            });
+            self.run(
+                input,
+                midi,
+                output.len() / channels,
+                |start, frames, graph| {
+                    let part = &mut output[start * channels..(start + frames) * channels];
+                    let Some(graph) = graph else {
+                        part.fill(0.0);
+                        return;
+                    };
+                    graph.output(frames).write_interleaved(part, channels);
+                    if let Some(cue) = graph.cue(frames) {
+                        cue.add_interleaved(part, channels);
+                    }
+                },
+            );
         });
     }
 
     /// Renders `frames` frames block by block, with `input` holding the
-    /// device inputs for them, handing each block's offset and length to
-    /// `write`, with the graph that rendered it, if there is one yet.
+    /// device inputs for them and `midi` the MIDI inputs' messages, handing
+    /// each block's offset and length to `write`, with the graph that
+    /// rendered it, if there is one yet.
     fn run(
         &mut self,
         input: AudioRef<'_>,
+        mut midi: &[MidiMessage],
         frames: usize,
         mut write: impl FnMut(usize, usize, Option<&PreparedGraph>),
     ) {
@@ -341,7 +365,7 @@ impl Engine {
         self.receive();
         let mut done = 0;
         while done < frames {
-            let block = self.render(input, done, frames - done);
+            let block = self.render(input, &mut midi, done, frames - done);
             write(done, block, self.graph.as_deref());
             done += block;
         }
@@ -405,8 +429,16 @@ impl Engine {
     }
 
     /// Renders the next block, of at most `max` frames, and returns its
-    /// length. Its device inputs start at frame `offset` of `input`.
-    fn render(&mut self, input: AudioRef<'_>, offset: usize, max: usize) -> usize {
+    /// length. Its device inputs start at frame `offset` of `input`, and
+    /// its MIDI messages are those at the front of `midi` due before it
+    /// ends, which it takes off: all of them, if it is the last block.
+    fn render(
+        &mut self,
+        input: AudioRef<'_>,
+        midi: &mut &[MidiMessage],
+        offset: usize,
+        max: usize,
+    ) -> usize {
         let start = self.time;
         // Transport changes due by now apply before the block. The block ends
         // at the next change, where the loop jumps back and where recording
@@ -486,6 +518,12 @@ impl Engine {
         }
 
         let frames = (end - start) as usize;
+        let due = match frames == max {
+            true => midi.len(),
+            false => midi.partition_point(|m| m.time < end),
+        };
+        let (messages, later) = midi.split_at(due);
+        *midi = later;
         if let Some(graph) = graph {
             let block = Block {
                 frames,
@@ -493,6 +531,7 @@ impl Engine {
                 transport: self.transport.state(),
                 tempo: self.transport.tempo(),
                 input: input.range(offset..offset + frames),
+                midi: messages,
             };
             let dropped = graph.play_notes(&block);
             if dropped > 0 {
@@ -801,6 +840,29 @@ mod tests {
         }
     }
 
+    /// Outputs each MIDI message's key at the frame it plays.
+    struct Keys;
+
+    impl Node for Keys {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            _inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            output.clear();
+            let out = output.channel_mut(0);
+            for message in ctx.midi {
+                let at = message.time.saturating_sub(ctx.time) as usize;
+                out[at.min(ctx.frames - 1)] += f32::from(message.bytes[1]);
+            }
+        }
+    }
+
     /// Reports the thread it is dropped on.
     struct DropProbe(mpsc::Sender<ThreadId>);
 
@@ -949,6 +1011,7 @@ mod tests {
                 assert_eq!(engine.time(), done as u64);
                 engine.process_with_input(
                     AudioRef::from_planar(&planar, 2),
+                    &[],
                     &mut AudioMut::from_planar(&mut out[done..done + size], 1),
                 );
                 done += size;
@@ -964,12 +1027,75 @@ mod tests {
     }
 
     #[test]
+    fn midi_messages_come_in_the_blocks_they_play_in() {
+        for sizes in [&[1][..], &[7, 64, 65, 200, 3], &[1000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(single(0, Keys)).unwrap();
+            let frames = 1000;
+            let messages: Vec<MidiMessage> = (0..100u8)
+                .map(|i| MidiMessage {
+                    time: 9 * u64::from(i) + 3,
+                    input: 0,
+                    bytes: [0x90, i + 1, 100],
+                })
+                .collect();
+            let mut out = vec![0.0; frames];
+            let mut done = 0;
+            for &size in sizes.iter().cycle() {
+                let size = size.min(frames - done);
+                let callback = done as u64..(done + size) as u64;
+                let midi: Vec<MidiMessage> = (messages.iter())
+                    .filter(|m| callback.contains(&m.time))
+                    .copied()
+                    .collect();
+                engine.process_with_input(
+                    AudioRef::empty(size),
+                    &midi,
+                    &mut AudioMut::from_planar(&mut out[done..done + size], 1),
+                );
+                done += size;
+                if done == frames {
+                    break;
+                }
+            }
+            for message in &messages {
+                let key = f32::from(message.bytes[1]);
+                assert_eq!(out[message.time as usize], key, "{sizes:?}");
+            }
+            let played = out.iter().filter(|&&s| s != 0.0).count();
+            assert_eq!(played, messages.len(), "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn midi_messages_timed_outside_the_callback_play_at_its_ends() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(single(0, Keys)).unwrap();
+        let mut out = vec![0.0; 100];
+        engine.process(&mut AudioMut::from_planar(&mut out, 1));
+        let message = |time, key| MidiMessage {
+            time,
+            input: 0,
+            bytes: [0x90, key, 100],
+        };
+        // Late, on time and early. The callback is two blocks long.
+        let midi = [message(50, 7), message(130, 9), message(400, 11)];
+        engine.process_with_input(
+            AudioRef::empty(100),
+            &midi,
+            &mut AudioMut::from_planar(&mut out, 1),
+        );
+        assert_eq!((out[0], out[30], out[99]), (7.0, 9.0, 11.0));
+        assert_eq!(out.iter().filter(|&&s| s != 0.0).count(), 3);
+    }
+
+    #[test]
     fn interleaved_output_takes_device_inputs_too() {
         let (mut engine, mut handle) = Engine::new(CONFIG);
         handle.swap_graph(single(0, Echo(0))).unwrap();
         let input: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let mut out = vec![0.0; 2 * 100];
-        engine.process_interleaved_with_input(AudioRef::from_planar(&input, 1), &mut out, 2);
+        engine.process_interleaved_with_input(AudioRef::from_planar(&input, 1), &[], &mut out, 2);
         for (frame, samples) in out.chunks(2).enumerate() {
             assert_eq!(samples, [frame as f32; 2]);
         }
@@ -986,6 +1112,7 @@ mod tests {
         let mut out = [0.0; 20];
         engine.process_with_input(
             AudioRef::from_planar(&input, 1),
+            &[],
             &mut AudioMut::from_planar(&mut out, 1),
         );
     }

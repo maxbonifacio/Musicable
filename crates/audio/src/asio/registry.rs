@@ -19,7 +19,9 @@ use super::driver::Driver;
 use super::stream::{self, OpenStream};
 use super::sys::Object;
 use crate::input::{InputDevice, InputKind, StreamInput};
-use crate::{ASIO_ID_PREFIX, Capabilities, Device, DriverType, Error, StreamInfo, StreamRequest};
+use crate::{
+    ASIO_ID_PREFIX, Capabilities, Device, DriverType, Error, Feeds, StreamInfo, StreamRequest,
+};
 
 /// A driver as the registry lists it.
 struct Installed {
@@ -73,9 +75,10 @@ pub(crate) fn capabilities(id: &str) -> Result<Capabilities, Error> {
 pub(crate) fn open(
     id: &str,
     request: &StreamRequest,
+    feeds: Feeds,
 ) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let driver = find(id)?;
-    stream::open(request, driver.device(), driver.loader())
+    stream::open(request, driver.device(), driver.loader(), feeds)
 }
 
 fn find(id: &str) -> Result<Installed, Error> {

@@ -111,6 +111,7 @@ impl AudioSettings {
             sample_rate: self.sample_rate,
             period: self.buffer_size,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
         }
     }
 
@@ -295,6 +296,7 @@ mod tests {
             sample_rate: Some(44_100),
             period: None,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
         };
         assert_eq!(AudioSettings::from_request(&request).request(), request);
     }

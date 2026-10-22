@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use musicable_audio::InputBuffer;
+use musicable_audio::{InputBuffer, MidiBuffer};
 use musicable_commands::{
     Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
     Request, Transport, UnknownCommand, Value, mixer, take, transport,
@@ -24,7 +24,7 @@ use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::media::MediaPool;
 use crate::plugins::{Change, Plugins};
-use crate::recorder::{self, Armed, Place, Recorder, Recording, Report};
+use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report};
 
 /// Builds the graph for a project, with its meters, its audio files, its
 /// plugins' nodes and the audio inputs it monitors, on the compiler's
@@ -55,9 +55,10 @@ const RECORDINGS: &str = "Recordings";
 /// Armed audio tracks record from the audio inputs the session is told the
 /// stream opened ([`set_inputs`](Self::set_inputs)) while the transport
 /// records, into files in a `Recordings` folder by the project's file, or
-/// for a project that isn't saved, in the user's music folder. When
-/// recording stops, what each track recorded becomes takes, in one step of
-/// the undo history.
+/// for a project that isn't saved, in the user's music folder. Armed MIDI
+/// tracks record the notes their MIDI inputs play. When recording stops,
+/// what each track recorded becomes takes, in one step of the undo
+/// history.
 pub struct Session {
     document: Document,
     commands: Registry,
@@ -297,10 +298,20 @@ impl Session {
 
     /// The audio inputs the stream opened are laid out among the engine's
     /// device inputs as `layout` says, and capture into `buffers`, in the
-    /// same order: tracks monitor and record them from now on. Call it
-    /// whenever the stream opens. Until it's first called, tracks have no
-    /// inputs.
-    pub fn set_inputs(&mut self, layout: InputLayout, buffers: Vec<Option<InputBuffer>>) {
+    /// same order, and its MIDI inputs, in the layout's order too, bring
+    /// what they play into `midi`: tracks monitor and record them from now
+    /// on. Call it whenever the stream opens. Until it's first called,
+    /// tracks have no inputs.
+    pub fn set_inputs(
+        &mut self,
+        layout: InputLayout,
+        buffers: Vec<Option<InputBuffer>>,
+        midi: Vec<Option<MidiBuffer>>,
+    ) {
+        let buffers = Buffers {
+            audio: buffers,
+            midi,
+        };
         self.recorder.set_inputs(layout.clone(), buffers);
         if self.engine.inputs != layout {
             self.engine.inputs = layout;
@@ -320,6 +331,23 @@ impl Session {
             .filter(|track| track.armed || track.monitor == Monitor::In)
             .filter_map(|track| match &track.input {
                 Some(Input::Audio(input)) if track.kind == TrackKind::Audio => {
+                    Some(input.device.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The MIDI inputs the project's tracks want open: those of armed MIDI
+    /// tracks, and of those that always monitor. `""` is every MIDI input.
+    pub fn wanted_midi_inputs(&self) -> BTreeSet<String> {
+        self.document
+            .project()
+            .tracks
+            .iter()
+            .filter(|track| track.armed || track.monitor == Monitor::In)
+            .filter_map(|track| match &track.input {
+                Some(Input::Midi(input)) if track.kind == TrackKind::Midi => {
                     Some(input.device.clone())
                 }
                 _ => None,
@@ -354,9 +382,10 @@ impl Session {
         let armed = project
             .tracks
             .iter()
-            .filter(|track| track.armed && track.kind == TrackKind::Audio)
-            .filter_map(|track| match &track.input {
-                Some(Input::Audio(input)) => Some(Armed {
+            .filter(|track| track.armed)
+            .filter_map(|track| match (&track.input, track.kind) {
+                (Some(input @ Input::Audio(_)), TrackKind::Audio)
+                | (Some(input @ Input::Midi(_)), TrackKind::Midi) => Some(Armed {
                     track: track.id,
                     name: track.name.clone(),
                     input: input.clone(),

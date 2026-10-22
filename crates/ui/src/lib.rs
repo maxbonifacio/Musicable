@@ -28,7 +28,7 @@ mod widgets;
 
 pub use devices::{BROWSER, DEVICES, PluginEntry, PluginStatus, Plugins};
 pub use keys::{KeyPresses, chord};
-pub use mixer::{InputChoice, Level, Levels};
+pub use mixer::{InputChoice, Level, Levels, MidiChoice};
 pub use mouse::{Gesture, MouseAction, MouseMap, Target};
 pub use shell::{
     Action, Audio, KeymapStatus, MIXER, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
