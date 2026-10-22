@@ -130,8 +130,10 @@ fn palette_row(app: &App, id: &CommandId) -> String {
 fn new_chords(count: usize) -> Vec<KeyChord> {
     let defaults = Keymap::default_keymap();
     let letters = ('A'..='Z').map(|letter| format!("Ctrl+Alt+Shift+{letter}"));
+    let digits = (0..=9).map(|n| format!("Ctrl+Alt+Shift+{n}"));
     let functions = (1..=24).map(|n| format!("Ctrl+Alt+Shift+F{n}"));
     let chords: Vec<_> = letters
+        .chain(digits)
         .chain(functions)
         .map(|text| chord(&text))
         .filter(|&chord| defaults.lookup(chord).is_none())
@@ -149,11 +151,14 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
 fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
     let config = ConfigDir::new("every-command");
     let mut harness = window(&config.0);
+    // Keys can't give a command arguments, so the commands that need them,
+    // such as Move Clips, have none.
     let ids: Vec<CommandId> = harness
         .state()
         .session
         .commands()
         .iter()
+        .filter(|command| !command.needs_arguments())
         .map(|command| command.id.clone())
         .collect();
     let chords = new_chords(ids.len());

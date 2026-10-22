@@ -1,4 +1,4 @@
-//! The file commands: new, open, save and quit.
+//! The file commands: new, open, save and quit, and importing audio files.
 //!
 //! Commands can't show a file dialog or close a window, so these ask the app
 //! to, with a [`Request`] in [`Context::requests`](crate::Context::requests).
@@ -20,14 +20,18 @@ pub const SAVE: CommandId = CommandId::new("file.save");
 pub const SAVE_AS: CommandId = CommandId::new("file.save_as");
 /// Closes Musicable.
 pub const QUIT: CommandId = CommandId::new("file.quit");
+/// Asks for audio files and inserts them: see
+/// [`arrange::INSERT_AUDIO`](crate::arrange::INSERT_AUDIO).
+pub const IMPORT_AUDIO: CommandId = CommandId::new("file.import_audio");
 
 /// Every file command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 6] = [
+const COMMANDS: [(CommandId, &str, Request); 7] = [
     (NEW, "New Project", Request::New),
     (NEW_DEMO, "New Demo Project", Request::NewDemo),
     (OPEN, "Open Project...", Request::Open),
     (SAVE, "Save Project", Request::Save),
     (SAVE_AS, "Save Project As...", Request::SaveAs),
+    (IMPORT_AUDIO, "Import Audio Files...", Request::ImportAudio),
     (QUIT, "Quit", Request::Quit),
 ];
 
@@ -75,5 +79,6 @@ mod tests {
         assert_eq!(chords(SAVE_AS), ["Ctrl+Shift+S"]);
         assert_eq!(chords(QUIT), ["Ctrl+Q"]);
         assert_eq!(chords(NEW_DEMO), Vec::<String>::new());
+        assert_eq!(chords(IMPORT_AUDIO), Vec::<String>::new());
     }
 }

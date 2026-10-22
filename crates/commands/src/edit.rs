@@ -243,7 +243,10 @@ fn select_tracks(
 /// `tracks` as a set, if the project has each of them.
 fn existing(project: &Project, tracks: &[TrackId]) -> Result<BTreeSet<TrackId>, CommandError> {
     match tracks.iter().find(|&&id| project.track(id).is_none()) {
-        Some(track) => Err(CommandError::invalid(format!("there's no track {}", track.0))),
+        Some(track) => Err(CommandError::invalid(format!(
+            "there's no track {}",
+            track.0
+        ))),
         None => Ok(tracks.iter().copied().collect()),
     }
 }
@@ -688,7 +691,10 @@ mod tests {
         setup.select_clips(&[b]);
         setup.run(&DUPLICATE);
         // The copy of Bass's clip lands at 8, and is selected.
-        assert_eq!(clips(&setup, bass), [row("B", 0.0, 8.0), row("B", 8.0, 16.0)]);
+        assert_eq!(
+            clips(&setup, bass),
+            [row("B", 0.0, 8.0), row("B", 8.0, 16.0)]
+        );
         let copy = setup.document.project().tracks[0].clips[1].id;
         assert_eq!(setup.document.editor().selection, Selection::clips([copy]));
         // Again, after the copy.
@@ -701,7 +707,11 @@ mod tests {
         setup.run(&DUPLICATE);
         assert_eq!(
             clips(&setup, keys),
-            [row("K", 4.0, 8.0), row("K", 8.0, 10.0), row("K", 10.0, 12.0)]
+            [
+                row("K", 4.0, 8.0),
+                row("K", 8.0, 10.0),
+                row("K", 10.0, 12.0)
+            ]
         );
         let time = setup.document.editor().selection.time.clone().unwrap();
         assert_eq!(time.range, BeatRange::new(Beats::new(6), Beats::new(10)));
@@ -721,7 +731,10 @@ mod tests {
 
         setup.select_time(2, 4, &[bass, vox]);
         setup.run(&DELETE);
-        assert_eq!(clips(&setup, bass), [row("B", 0.0, 2.0), row("B", 4.0, 8.0)]);
+        assert_eq!(
+            clips(&setup, bass),
+            [row("B", 0.0, 2.0), row("B", 4.0, 8.0)]
+        );
         assert_eq!(clips(&setup, vox), [row("V", 4.0, 6.0)]);
 
         setup.select_tracks(&[keys, vox]);
@@ -734,7 +747,10 @@ mod tests {
             .map(|t| t.name.as_str())
             .collect();
         assert_eq!(names, ["Bass"]);
-        assert_eq!(setup.committed_names(), ["Delete", "Delete", "Delete Tracks"]);
+        assert_eq!(
+            setup.committed_names(),
+            ["Delete", "Delete", "Delete Tracks"]
+        );
         // The selection forgot what went.
         assert!(setup.document.editor().selection.is_empty());
     }
@@ -745,7 +761,10 @@ mod tests {
         setup.select_clips(&[b]);
         setup.document.editor_mut().start_marker = Beats::new(3);
         setup.run(&SPLIT);
-        assert_eq!(clips(&setup, bass), [row("B", 0.0, 3.0), row("B", 3.0, 8.0)]);
+        assert_eq!(
+            clips(&setup, bass),
+            [row("B", 0.0, 3.0), row("B", 3.0, 8.0)]
+        );
         // Outside the clip, the start marker splits nothing.
         setup.document.editor_mut().start_marker = Beats::new(20);
         setup.run(&SPLIT);
@@ -796,9 +815,7 @@ mod tests {
         assert_eq!(editor.selected_track, Some(vox));
 
         setup.select_tracks(&[keys]);
-        let args = Args::new()
-            .with("tracks", vec![bass])
-            .with("toggle", true);
+        let args = Args::new().with("tracks", vec![bass]).with("toggle", true);
         setup.run_with(&SELECT_TRACKS, args).unwrap();
         let editor = setup.document.editor();
         assert_eq!(editor.selection.tracks, [bass, keys].into());

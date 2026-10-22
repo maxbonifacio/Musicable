@@ -751,7 +751,10 @@ fn clip_ids_are_unique_across_tracks_and_below_the_next_id() {
 /// reaches.
 fn located() -> Project {
     let mut project = sample();
-    for (name, at) in [("Verse", Beats::new(8)), ("End", Beats::from_ticks(MAX_TICKS))] {
+    for (name, at) in [
+        ("Verse", Beats::new(8)),
+        ("End", Beats::from_ticks(MAX_TICKS)),
+    ] {
         let locator = project.new_locator(name, at);
         project.locators.push(locator);
     }
@@ -773,7 +776,9 @@ fn locators_have_unique_ids_and_places_within_reach() {
         "a locator has id 1",
     );
     refused(
-        &edited_from(&located(), |f| f["locators"][1]["at"] = json!(MAX_TICKS + 1)),
+        &edited_from(&located(), |f| {
+            f["locators"][1]["at"] = json!(MAX_TICKS + 1)
+        }),
         "locators[1].at",
         "within",
     );

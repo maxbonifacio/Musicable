@@ -3,7 +3,9 @@
 
 use musicable_model::{TrackId, TrackKind};
 
-use crate::{Command, CommandId, Context, Document, Param, Registry, Type, Value, When};
+use crate::{
+    Command, CommandId, Context, Document, Param, Registry, Transaction, Type, Value, When,
+};
 
 /// Adds an audio track.
 pub const NEW_AUDIO_TRACK: CommandId = CommandId::new("track.new_audio_track");
@@ -65,7 +67,14 @@ pub fn register(registry: &mut Registry) {
         |ctx, args| {
             let tracks: Vec<TrackId> = match args.opt("tracks")? {
                 Some(tracks) => tracks,
-                None => ctx.document.editor().selection.tracks.iter().copied().collect(),
+                None => ctx
+                    .document
+                    .editor()
+                    .selection
+                    .tracks
+                    .iter()
+                    .copied()
+                    .collect(),
             };
             delete(ctx.document, &tracks);
             Ok(Value::None)
@@ -88,8 +97,7 @@ pub fn delete(document: &mut Document, tracks: &[TrackId]) {
 }
 
 /// Adds a track of `kind`, named after its kind and how many of them there
-/// are, such as "Audio 3". Return tracks go at the end of the list, and the
-/// others before the first return track, so the returns stay together.
+/// are, such as "Audio 3".
 fn new_track(ctx: &mut Context<'_>, kind: TrackKind) {
     let (title, word) = match kind {
         TrackKind::Audio => ("New Audio Track", "Audio"),
@@ -98,18 +106,32 @@ fn new_track(ctx: &mut Context<'_>, kind: TrackKind) {
         TrackKind::Group => ("New Group Track", "Group"),
     };
     ctx.document.transact(title, |tx| {
-        let tracks = &tx.project().tracks;
-        let count = tracks.iter().filter(|t| t.kind == kind).count();
-        let index = match kind {
-            TrackKind::Return => tracks.len(),
-            _ => tracks
-                .iter()
-                .position(|t| t.kind == TrackKind::Return)
-                .unwrap_or(tracks.len()),
-        };
-        let track = tx.new_track(format!("{word} {}", count + 1), kind);
-        tx.add_track(index, track);
+        let count = tx
+            .project()
+            .tracks
+            .iter()
+            .filter(|t| t.kind == kind)
+            .count();
+        add_track(tx, format!("{word} {}", count + 1), kind);
     });
+}
+
+/// Adds a track of `kind` called `name`, and returns its id. Return tracks
+/// go at the end of the list, and the others before the first return track,
+/// so the returns stay together.
+pub(crate) fn add_track(tx: &mut Transaction<'_>, name: String, kind: TrackKind) -> TrackId {
+    let tracks = &tx.project().tracks;
+    let index = match kind {
+        TrackKind::Return => tracks.len(),
+        _ => tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Return)
+            .unwrap_or(tracks.len()),
+    };
+    let track = tx.new_track(name, kind);
+    let id = track.id;
+    tx.add_track(index, track);
+    id
 }
 
 #[cfg(test)]

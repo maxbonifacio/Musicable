@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use musicable_model::clip::{Clip, ClipId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
+use serde::{Deserialize, Serialize};
 
 /// The arrangement's editing state.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,16 +80,17 @@ impl Editor {
             return None;
         }
         let clips = project.tracks.iter().flat_map(|t| &t.clips);
-        clips
-            .filter(|clip| selected.contains(&clip.id))
-            .fold(None, |range: Option<BeatRange>, clip| {
+        clips.filter(|clip| selected.contains(&clip.id)).fold(
+            None,
+            |range: Option<BeatRange>, clip| {
                 Some(match range {
                     Some(range) => {
                         BeatRange::new(range.start.min(clip.start), range.end.max(clip.end()))
                     }
                     None => clip.range(),
                 })
-            })
+            },
+        )
     }
 
     /// Forgets what `project` doesn't have any more: selected clips and
@@ -155,7 +157,8 @@ pub struct TimeSelection {
 /// The arrangement's horizontal zoom and where it's scrolled to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
-    /// The song position at the left edge of the timeline.
+    /// The song position at the left edge of the timeline: the song's
+    /// start, or later.
     pub start: Beats,
     /// How many points a beat takes.
     pub zoom: f64,
@@ -205,11 +208,12 @@ impl Viewport {
         BeatRange::new(self.start, self.beats_at(self.width))
     }
 
-    /// Zooms by `factor`, keeping `at` where it is on screen.
+    /// Zooms by `factor`, keeping `at` where it is on screen, unless that
+    /// would show what's before the song's start.
     pub fn zoom_around(&mut self, factor: f64, at: Beats) {
         let x = self.x_of(at);
         self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
-        self.start = at - Beats::from_f64(f64::from(x) / self.zoom);
+        self.start = (at - Beats::from_f64(f64::from(x) / self.zoom)).max(Beats::ZERO);
     }
 
     /// Zooms and scrolls to show `range` across the timeline, with a little
@@ -222,7 +226,7 @@ impl Viewport {
         let margin = f64::from(self.width) / 20.0;
         let room = (f64::from(self.width) - 2.0 * margin).max(1.0);
         self.zoom = (room / length).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
-        self.start = range.start - Beats::from_f64(margin / self.zoom);
+        self.start = (range.start - Beats::from_f64(margin / self.zoom)).max(Beats::ZERO);
     }
 
     /// Scrolls so `at` is in sight, if it isn't: a page on, as Live's Follow
@@ -230,7 +234,7 @@ impl Viewport {
     pub fn follow(&mut self, at: Beats) {
         let visible = self.visible();
         if at < visible.start || at >= visible.end {
-            self.start = at - self.beats_in(self.width / 20.0);
+            self.start = (at - self.beats_in(self.width / 20.0)).max(Beats::ZERO);
         }
     }
 }
@@ -413,14 +417,17 @@ impl Grid {
 }
 
 /// How editing behaves where people's habits differ. Kept as settings, not
-/// built in, so profiles can follow other DAWs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// built in, so profiles can follow other DAWs: the app reads it from its
+/// settings file, as `[behaviour]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Behaviour {
     /// Where Play/Stop starts playing from.
     pub play_from: PlayFrom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlayFrom {
     /// The start marker, as in Live: playing again starts where the last
     /// play did.
@@ -495,10 +502,7 @@ mod tests {
         assert_eq!(grid.step(64.0, bar), Step::SIXTEENTH);
         assert_eq!(grid.step(4.0, bar), Step::BAR);
         assert_eq!(grid.step(0.001, bar), Step::WIDEST);
-        let wide = Grid {
-            density: 2,
-            ..grid
-        };
+        let wide = Grid { density: 2, ..grid };
         assert_eq!(wide.step(64.0, bar), Step::QUARTER);
         let fixed = Grid {
             fixed: Some(Step::new(-3)),
@@ -520,10 +524,7 @@ mod tests {
         // last one an eighth short.
         let lines = grid.lines(&tempo, BeatRange::new(Beats::ZERO, Beats::new(8)), 16.0);
         let beats = |n| Beats::from_ratio(n, 2);
-        assert_eq!(
-            lines,
-            [0, 2, 4, 6, 8, 10, 12, 14, 15].map(beats).to_vec()
-        );
+        assert_eq!(lines, [0, 2, 4, 6, 8, 10, 12, 14, 15].map(beats).to_vec());
         assert_eq!(grid.snap(&tempo, beats(13), 16.0), beats(12));
         // The bar's last step is an eighth short, so its bar line is nearer.
         let near_the_end = Beats::from_ratio(73, 10);
@@ -542,7 +543,11 @@ mod tests {
             triplet: true,
             ..grid
         };
-        let lines = triplets.lines(&TempoMap::default(), BeatRange::new(Beats::ZERO, Beats::new(2)), 24.0);
+        let lines = triplets.lines(
+            &TempoMap::default(),
+            BeatRange::new(Beats::ZERO, Beats::new(2)),
+            24.0,
+        );
         assert_eq!(lines, [0, 2, 4].map(|n| Beats::from_ratio(n, 3)).to_vec());
         let bars = Grid {
             fixed: Some(Step::new(1)),

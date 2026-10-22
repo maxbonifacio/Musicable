@@ -9,7 +9,9 @@ use musicable_model::TrackId;
 use musicable_model::time::Beats;
 
 use crate::editor::{Editor, Step, Viewport};
-use crate::{Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When};
+use crate::{
+    Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When,
+};
 
 /// Shows the command palette, which finds any command by name and runs it.
 pub const COMMAND_PALETTE: CommandId = CommandId::new("view.command_palette");
@@ -105,17 +107,23 @@ pub fn register(registry: &mut Registry) {
             Param::required("start", Type::Beats, "The song position at the left edge."),
             Param::required("zoom", Type::Number, "How many points a beat takes."),
             Param::required("top", Type::Number, "How far down the tracks are scrolled."),
-            Param::required("width", Type::Number, "How wide the timeline is, in points."),
+            Param::required(
+                "width",
+                Type::Number,
+                "How wide the timeline is, in points.",
+            ),
         ]),
         |ctx, args| {
             let zoom: f64 = args.get("zoom")?;
             let top: f64 = args.get("top")?;
             let width: f64 = args.get("width")?;
             if zoom <= 0.0 || width < 0.0 {
-                return Err(CommandError::invalid("the zoom and the width can't be negative"));
+                return Err(CommandError::invalid(
+                    "the zoom and the width can't be negative",
+                ));
             }
             ctx.document.editor_mut().viewport = Viewport {
-                start: args.get("start")?,
+                start: Beats::max(args.get("start")?, Beats::ZERO),
                 zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
                 top: top.max(0.0) as f32,
                 width: width as f32,
@@ -133,7 +141,10 @@ pub fn register(registry: &mut Registry) {
             let height: f64 = args.get("height")?;
             let (project, editor) = ctx.document.parts();
             if project.track(track).is_none() {
-                return Err(CommandError::invalid(format!("there's no track {}", track.0)));
+                return Err(CommandError::invalid(format!(
+                    "there's no track {}",
+                    track.0
+                )));
             }
             let height = (height as f32).clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
             editor.track_heights.insert(track, height);
@@ -254,10 +265,16 @@ mod tests {
         assert_eq!(setup.document.editor().grid.fixed, None);
 
         let keymap = crate::Keymap::default_keymap();
-        let chords: Vec<String> = [NARROW_GRID, WIDEN_GRID, TRIPLET_GRID, TOGGLE_SNAP, FIXED_GRID]
-            .iter()
-            .flat_map(|id| keymap.chords_for(id).map(|c| c.to_string()))
-            .collect();
+        let chords: Vec<String> = [
+            NARROW_GRID,
+            WIDEN_GRID,
+            TRIPLET_GRID,
+            TOGGLE_SNAP,
+            FIXED_GRID,
+        ]
+        .iter()
+        .flat_map(|id| keymap.chords_for(id).map(|c| c.to_string()))
+        .collect();
         assert_eq!(chords, ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5"]);
     }
 
@@ -279,7 +296,10 @@ mod tests {
 
         let height = |h: f64| Args::new().with("track", keys).with("height", h);
         setup.run_with(&SET_TRACK_HEIGHT, height(1.0)).unwrap();
-        assert_eq!(setup.document.editor().track_heights[&keys], MIN_TRACK_HEIGHT);
+        assert_eq!(
+            setup.document.editor().track_heights[&keys],
+            MIN_TRACK_HEIGHT
+        );
         setup.run_with(&SET_TRACK_HEIGHT, height(90.0)).unwrap();
         assert_eq!(setup.document.editor().track_heights[&keys], 90.0);
         setup.run(&TOGGLE_FOLLOW);

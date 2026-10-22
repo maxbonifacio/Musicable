@@ -188,8 +188,18 @@ mod tests {
         faded.fade_out = Beats::new(1);
         let clips = [
             (audio, "Faded", range(0, 8), ClipContent::Audio(faded)),
-            (midi, "Bass", range(4, 8), ClipContent::Midi(MidiClip::default())),
-            (audio, "Take", range(8, 12), ClipContent::Audio(AudioClip::new("b.wav"))),
+            (
+                midi,
+                "Bass",
+                range(4, 8),
+                ClipContent::Midi(MidiClip::default()),
+            ),
+            (
+                audio,
+                "Take",
+                range(8, 12),
+                ClipContent::Audio(AudioClip::new("b.wav")),
+            ),
         ];
         for (track, name, range, content) in clips {
             let clip = project.new_clip(name, range, content);

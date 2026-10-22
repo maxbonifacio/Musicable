@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
-use musicable_commands::Request;
+use musicable_commands::{Args, CommandError, Request, arrange};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
-use musicable_model::Project;
+use musicable_model::time::Beats;
+use musicable_model::{Project, TrackId};
 use musicable_ui::{
     Action, Audio, KeyPresses, KeymapStatus, Level, Levels, Playback, SaveChoice, Shell, View,
 };
 
+use crate::audio_files::{AudioFiles, clip_path};
 use crate::audio_window::AudioWindow;
 use crate::keymap_file::UserKeymap;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
@@ -25,12 +27,19 @@ const STOPPED_FRAME: Duration = Duration::from_millis(250);
 /// How often the app looks for a graph while one compiles, to send it to the
 /// engine soon after it's ready.
 const COMPILING_FRAME: Duration = Duration::from_millis(5);
+/// The audio files the Import Audio dialog shows. The app reads a file by
+/// what's in it, whatever it's called.
+const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"];
 
 /// The app's window, and everything it drives.
 pub struct App {
     session: Session,
     output: Output,
     shell: Shell,
+    /// The headers and the waveforms of the project's audio files.
+    audio_files: AudioFiles,
+    /// The session's revision whose audio files were asked for.
+    files_found: Option<u64>,
     keys: KeyPresses,
     audio_window: AudioWindow,
     /// The project's file, once it has one.
@@ -104,10 +113,14 @@ impl App {
             None => (Project::new(), None),
         };
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
+        let mut session = Session::new(project, folder.as_deref(), keymap, handle);
+        session.editor_mut().behaviour = settings.behaviour;
         Self {
-            session: Session::new(project, folder.as_deref(), keymap, handle),
+            session,
             output,
             shell: Shell::new(),
+            audio_files: AudioFiles::new(),
+            files_found: None,
             keys: KeyPresses::new(),
             audio_window: AudioWindow::new(),
             path,
@@ -139,6 +152,11 @@ impl App {
             Action::Run(id) => {
                 let _ = self.session.run(&id);
             }
+            Action::RunWith(id, args) => match self.session.run_with(&id, &args) {
+                Ok(_) | Err(CommandError::NotNow(_)) => {}
+                Err(error) => self.messages.push(capital(&format!("{error}."))),
+            },
+            Action::DropFiles { files, track, at } => self.insert_audio(files, track, at),
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
             Action::BeginGesture => self.session.begin_gesture(),
             Action::EndGesture => self.session.end_gesture(),
@@ -217,13 +235,78 @@ impl App {
             Request::CommandPalette => self.shell.open_palette(),
             Request::AudioSettings => self.audio_window.open(&self.output),
             Request::KeyboardShortcuts => self.shell.open_shortcuts(),
+            Request::ImportAudio => {
+                if let Some(files) = self.audio_dialog(frame).pick_files() {
+                    self.insert_audio(files, None, None);
+                }
+            }
+            Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
+            Request::Rename(named) => self.shell.rename(named),
         }
     }
 
     fn open_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.session
             .open(project, path.as_deref().and_then(Path::parent));
+        self.audio_files.forget();
         self.set_path(path);
+    }
+
+    /// The folder of the project's file, which audio clips' relative paths
+    /// start from. A project that isn't saved has none.
+    fn project_folder(&self) -> Option<&Path> {
+        self.path.as_deref().and_then(Path::parent)
+    }
+
+    /// Puts the audio files at `paths` on `track` from `at`, one after
+    /// another, through [`arrange::INSERT_AUDIO`], which says where they go
+    /// without those. Files that can't be read are left out, and the status
+    /// bar says why.
+    fn insert_audio(&mut self, paths: Vec<PathBuf>, track: Option<TrackId>, at: Option<Beats>) {
+        let folder = self.project_folder().map(Path::to_owned);
+        let mut files = Vec::new();
+        for path in paths {
+            let name = clip_path(&path, folder.as_deref());
+            match self.audio_files.read_now(&name, &path) {
+                Ok(file) => {
+                    self.session.editor_mut().files.insert(name.clone(), file);
+                    files.push(name);
+                }
+                Err(error) => self.messages.push(format!(
+                    "Couldn't read the audio file {}: {error}",
+                    path.display()
+                )),
+            }
+        }
+        if files.is_empty() {
+            return;
+        }
+        let mut args = Args::new().with("files", files);
+        if let Some(track) = track {
+            args.set("track", track);
+        }
+        if let Some(at) = at {
+            args.set("at", at);
+        }
+        if let Err(error) = self.session.run_with(&arrange::INSERT_AUDIO, &args) {
+            self.messages
+                .push(format!("Couldn't insert the audio files: {error}."));
+        }
+    }
+
+    /// Asks for the headers and the waveforms of the project's audio files
+    /// when the project has changed, and takes in those read since.
+    fn read_audio_files(&mut self, ctx: &egui::Context) {
+        let revision = self.session.revision();
+        if self.files_found != Some(revision) {
+            self.files_found = Some(revision);
+            let folder = self.project_folder().map(Path::to_owned);
+            self.audio_files
+                .find(self.session.project(), folder.as_deref());
+        }
+        if self.audio_files.receive(self.session.editor_mut()) {
+            ctx.request_repaint();
+        }
     }
 
     fn set_path(&mut self, path: Option<PathBuf>) {
@@ -268,6 +351,17 @@ impl App {
             .set_parent(frame)
             .add_filter("Musicable project", &[EXTENSION]);
         match &self.folder {
+            Some(folder) => dialog.set_directory(folder),
+            None => dialog,
+        }
+    }
+
+    /// A dialog for picking audio files, in the project's folder.
+    fn audio_dialog(&self, frame: &eframe::Frame) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .add_filter("Audio files", AUDIO_EXTENSIONS);
+        match self.project_folder().or(self.folder.as_deref()) {
             Some(folder) => dialog.set_directory(folder),
             None => dialog,
         }
@@ -379,6 +473,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending.get_or_insert(Request::Quit);
         }
+        self.read_audio_files(ctx);
         self.levels = levels(self.session.meters(), self.session.project());
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
@@ -401,6 +496,7 @@ impl eframe::App for App {
         self.handle_requests(&ctx, frame);
 
         let stats = self.session.stats();
+        let heard = self.session.heard_position(self.output.latency());
         let rate = self.session.engine_config().sample_rate;
         let summary = self.output.summary();
         let details = self.output.details();
@@ -414,12 +510,14 @@ impl eframe::App for App {
             default_keymap: self.keymap_file.defaults(),
             undo: self.session.undo_name(),
             redo: self.session.redo_name(),
+            editor: self.session.editor(),
             playback: Playback {
                 playing: stats.playing,
-                playhead: self.session.playhead(),
-                seconds: stats.position as f64 / f64::from(rate),
+                playhead: self.session.beats_at(heard),
+                seconds: heard as f64 / f64::from(rate),
             },
             levels: &self.levels,
+            waveforms: self.audio_files.waveforms(),
             audio: Audio {
                 summary: &summary,
                 running: self.output.info().is_some(),

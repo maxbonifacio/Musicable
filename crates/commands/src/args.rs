@@ -260,7 +260,9 @@ impl FromValue for Beats {
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Beats(beats) => Some(*beats),
-            Value::Int(beats) => beats.checked_mul(Beats::TICKS_PER_BEAT).map(Beats::from_ticks),
+            Value::Int(beats) => beats
+                .checked_mul(Beats::TICKS_PER_BEAT)
+                .map(Beats::from_ticks),
             Value::Number(beats) if beats.is_finite() => Some(Beats::from_f64(*beats)),
             _ => None,
         }
@@ -413,7 +415,10 @@ mod tests {
             .with("clips", vec![ClipId(1), ClipId(4)])
             .with("by", Beats::new(2));
         assert_eq!(args.check(&PARAMS), Ok(()));
-        assert_eq!(args.get::<Vec<ClipId>>("clips"), Ok(vec![ClipId(1), ClipId(4)]));
+        assert_eq!(
+            args.get::<Vec<ClipId>>("clips"),
+            Ok(vec![ClipId(1), ClipId(4)])
+        );
         assert_eq!(args.get("by"), Ok(Beats::new(2)));
         assert_eq!(args.opt::<bool>("copy"), Ok(None));
 

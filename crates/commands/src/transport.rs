@@ -9,9 +9,7 @@
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::editor::PlayFrom;
-use crate::{
-    Command, CommandError, CommandId, Context, Document, Param, Registry, Type, Value,
-};
+use crate::{Command, CommandError, CommandId, Context, Document, Param, Registry, Type, Value};
 
 /// Plays from the start marker when stopped, and stops when playing. The
 /// behaviour settings can have it play from the playhead instead.
@@ -333,7 +331,10 @@ mod tests {
             .with("end", Beats::new(8));
         setup.run_with(&SET_LOOP, args).unwrap();
         let project = setup.document.project();
-        assert_eq!(project.loop_region, BeatRange::new(Beats::new(8), Beats::new(16)));
+        assert_eq!(
+            project.loop_region,
+            BeatRange::new(Beats::new(8), Beats::new(16))
+        );
         assert!(project.looping);
         let empty = Args::new()
             .with("start", Beats::new(3))

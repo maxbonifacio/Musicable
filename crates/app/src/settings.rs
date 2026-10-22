@@ -9,6 +9,9 @@
 //! device = "{0.0.0.00000000}.{a1b2c3d4-...}"
 //! exclusive = false
 //! buffer_size = 128
+//!
+//! [behaviour]
+//! play_from = "start_marker"
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -20,6 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use musicable_audio::{Mode, StreamRequest};
+use musicable_commands::editor::Behaviour;
 use serde::{Deserialize, Serialize};
 
 const FORMAT: &str = "musicable-settings";
@@ -57,6 +61,10 @@ pub fn config_dir() -> Option<PathBuf> {
 #[serde(default)]
 pub struct Settings {
     pub audio: AudioSettings,
+    /// How editing behaves where people's habits differ, such as where
+    /// Play/Stop starts from: the start marker (`start_marker`), as in Live,
+    /// or wherever the playhead stopped (`playhead`).
+    pub behaviour: Behaviour,
 }
 
 /// The audio device to play through, and how.
@@ -190,6 +198,8 @@ impl std::error::Error for SettingsError {}
 
 #[cfg(test)]
 mod tests {
+    use musicable_commands::editor::PlayFrom;
+
     use super::*;
 
     #[test]
@@ -200,6 +210,9 @@ mod tests {
                 exclusive: true,
                 sample_rate: Some(96_000),
                 buffer_size: Some(64),
+            },
+            behaviour: Behaviour {
+                play_from: PlayFrom::Playhead,
             },
         };
         let text = settings.to_toml();
@@ -216,6 +229,7 @@ mod tests {
         assert_eq!(Settings::parse("").unwrap(), Settings::default());
         let settings = Settings::parse("[audio]\nbuffer_size = 256\nlater = true\n").unwrap();
         assert_eq!(settings.audio.buffer_size, Some(256));
+        assert_eq!(settings.behaviour, Behaviour::default());
         assert_eq!(
             settings.audio.request(),
             StreamRequest {
@@ -237,6 +251,10 @@ mod tests {
         ));
         assert!(matches!(
             Settings::parse("[audio]\nexclusive = \"yes\""),
+            Err(SettingsError::Toml(_))
+        ));
+        assert!(matches!(
+            Settings::parse("[behaviour]\nplay_from = \"anywhere\""),
             Err(SettingsError::Toml(_))
         ));
     }

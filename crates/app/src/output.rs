@@ -209,6 +209,18 @@ impl Output {
         }
     }
 
+    /// How many frames late the device plays what the engine renders: the
+    /// output latency [`summary`](Self::summary) gives, in frames. None
+    /// without a device.
+    pub fn latency(&self) -> u64 {
+        self.stream
+            .as_ref()
+            .map_or(0, |stream| match stream.stats().queued {
+                0 => u64::from(stream.info().latency),
+                queued => queued,
+            })
+    }
+
     /// The stream, the load and the dropouts in more words, for a tooltip.
     pub fn details(&self) -> String {
         let Some(stream) = &self.stream else {

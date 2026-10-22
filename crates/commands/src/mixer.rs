@@ -63,7 +63,10 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
     (
         SET_MUTE,
         "Set Mute",
-        &[TRACK, Param::required("muted", Type::Bool, "Whether it's muted.")],
+        &[
+            TRACK,
+            Param::required("muted", Type::Bool, "Whether it's muted."),
+        ],
         |args| Ok(Change::Muted(args.get("track")?, args.get("muted")?)),
     ),
     (
@@ -87,14 +90,21 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
         "Set Solo-Safe",
         &[
             TRACK,
-            Param::required("solo_safe", Type::Bool, "Whether soloing others leaves it on."),
+            Param::required(
+                "solo_safe",
+                Type::Bool,
+                "Whether soloing others leaves it on.",
+            ),
         ],
         |args| Ok(Change::SoloSafe(args.get("track")?, args.get("solo_safe")?)),
     ),
     (
         SET_ARM,
         "Set Arm",
-        &[TRACK, Param::required("armed", Type::Bool, "Whether it's armed.")],
+        &[
+            TRACK,
+            Param::required("armed", Type::Bool, "Whether it's armed."),
+        ],
         |args| Ok(Change::Armed(args.get("track")?, args.get("armed")?)),
     ),
     (
@@ -102,20 +112,31 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
         "Set Output",
         &[
             TRACK,
-            Param::optional("group", Type::Track, "The group track it feeds: the master without it."),
+            Param::optional(
+                "group",
+                Type::Track,
+                "The group track it feeds: the master without it.",
+            ),
         ],
         |args| {
             let bus = args.opt("group")?.map_or(Bus::Master, Bus::Group);
             Ok(Change::Output(args.get("track")?, bus))
         },
     ),
-    (SET_CLIP_TYPE, "Set Clip Type", &[TRACK, CLIP_TYPE], |args| {
-        Ok(Change::ClipType(args.get("track")?, clip_type(args)?))
-    }),
+    (
+        SET_CLIP_TYPE,
+        "Set Clip Type",
+        &[TRACK, CLIP_TYPE],
+        |args| Ok(Change::ClipType(args.get("track")?, clip_type(args)?)),
+    ),
     (
         SET_SEND_LEVEL,
         "Set Send Level",
-        &[TRACK, TO, Param::required("level", Type::Number, "The level, linear.")],
+        &[
+            TRACK,
+            TO,
+            Param::required("level", Type::Number, "The level, linear."),
+        ],
         |args| {
             Ok(Change::SendLevel {
                 track: args.get("track")?,
@@ -130,7 +151,11 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
         &[
             TRACK,
             TO,
-            Param::required("pre_fader", Type::Bool, "Whether it takes the signal before the fader."),
+            Param::required(
+                "pre_fader",
+                Type::Bool,
+                "Whether it takes the signal before the fader.",
+            ),
         ],
         |args| {
             Ok(Change::SendPreFader {
@@ -152,18 +177,24 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
     (SET_MASTER_PAN, "Set Master Pan", &[PAN], |args| {
         Ok(Change::MasterPan(number(args, "pan")?))
     }),
-    (SET_MASTER_CLIP_TYPE, "Set Master Clip Type", &[CLIP_TYPE], |args| {
-        Ok(Change::MasterClipType(clip_type(args)?))
-    }),
+    (
+        SET_MASTER_CLIP_TYPE,
+        "Set Master Clip Type",
+        &[CLIP_TYPE],
+        |args| Ok(Change::MasterClipType(clip_type(args)?)),
+    ),
 ];
 
 /// Registers the mixer's commands.
 pub fn register(registry: &mut Registry) {
     for (id, title, params, build) in COMMANDS {
-        registry.add(Command::new(id, title).with_params(params), move |ctx, args| {
-            change(ctx.document, build(args)?);
-            Ok(Value::None)
-        });
+        registry.add(
+            Command::new(id, title).with_params(params),
+            move |ctx, args| {
+                change(ctx.document, build(args)?);
+                Ok(Value::None)
+            },
+        );
     }
 }
 
@@ -643,7 +674,11 @@ mod tests {
             assert_eq!(setup.document.project(), expected.project(), "{change:?}");
         }
         let names = setup.committed_names();
-        let expected: Vec<_> = expected.take_committed().into_iter().map(|c| c.name).collect();
+        let expected: Vec<_> = expected
+            .take_committed()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         assert_eq!(names, expected);
         // They're for the mixer's controls, scripts and agents, not keys.
         for (id, ..) in COMMANDS {

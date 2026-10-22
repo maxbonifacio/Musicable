@@ -416,7 +416,10 @@ mod tests {
         };
         assert!(clip.set_timing(timing));
         assert_eq!(clip.timing(), timing);
-        assert_eq!(timing.range(), BeatRange::new(Beats::new(8), Beats::new(10)));
+        assert_eq!(
+            timing.range(),
+            BeatRange::new(Beats::new(8), Beats::new(10))
+        );
         // Too short for the fades, no length, and the wrong kind of offset.
         let short = Timing {
             length: Beats::from_ratio(3, 2),
@@ -464,7 +467,10 @@ mod tests {
         };
         let earlier = midi.timing_over(earlier, &tempo, 48_000).unwrap();
         assert_eq!(earlier.offset, Offset::Beats(Beats::new(-2)));
-        assert_eq!(earlier.range(), BeatRange::new(Beats::new(2), Beats::new(8)));
+        assert_eq!(
+            earlier.range(),
+            BeatRange::new(Beats::new(2), Beats::new(8))
+        );
     }
 
     #[test]

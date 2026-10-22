@@ -18,8 +18,8 @@ use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
 use musicable_model::{LocatorId, Project, TrackId};
 
-pub mod arrange;
 mod args;
+pub mod arrange;
 mod document;
 pub mod edit;
 pub mod editor;
@@ -165,6 +165,9 @@ pub enum Request {
     Save,
     SaveAs,
     Quit,
+    /// Ask for audio files, read them, and insert them with
+    /// [`arrange::INSERT_AUDIO`].
+    ImportAudio,
     /// Show the command palette.
     CommandPalette,
     /// Show the audio settings.

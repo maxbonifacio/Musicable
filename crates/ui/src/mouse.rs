@@ -1,0 +1,281 @@
+//! The mouse map: what a mouse gesture does, from where it starts and the
+//! modifiers held.
+//!
+//! The arrangement and the mixer look gestures up here instead of deciding
+//! for themselves, so a profile can make the mouse work as another DAW's
+//! does, as a keymap does for keys. [`MouseMap::live`], the map Musicable
+//! starts with, follows Ableton Live on Windows, with Cmd standing in for
+//! Ctrl on a Mac.
+
+use std::collections::BTreeMap;
+
+use musicable_commands::Modifiers;
+
+/// Where a gesture starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Target {
+    /// A clip's title bar, along its top. A clip too short for a body is
+    /// all title bar.
+    ClipTitle,
+    /// The rest of a clip, under its title bar.
+    ClipBody,
+    /// Near a clip's start or end.
+    ClipEdge,
+    /// The handle of an audio clip's fade in or fade out.
+    FadeHandle,
+    /// A track's lane, where it has no clip.
+    Lane,
+    /// Under the last track.
+    Empty,
+    /// The ruler's bar numbers.
+    Ruler,
+    /// The strip along the top of the ruler, which has the loop brace and
+    /// the locators.
+    Strip,
+    LoopBrace,
+    /// Near the loop brace's start or end.
+    LoopEdge,
+    Locator,
+    TrackHeader,
+    /// A track's bottom edge, in its header.
+    TrackEdge,
+    /// A track's solo button, in its header or its mixer strip.
+    SoloButton,
+    /// A fader, a pan control or a send in the mixer.
+    MixerControl,
+    /// The arrangement's tracks and ruler, for the wheel.
+    Timeline,
+}
+
+/// What the user does with the mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Gesture {
+    Click,
+    DoubleClick,
+    Drag,
+    Wheel,
+}
+
+/// What a gesture does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseAction {
+    /// Selects just the clip, or just the track.
+    Select,
+    /// Adds the clip or the track to the selection, or takes it out.
+    ToggleSelect,
+    /// Selects the clip and puts the start marker where it was clicked, so
+    /// Split splits it there.
+    SelectAndMark,
+    /// Moves the selected clips, snapping to the grid.
+    Move,
+    /// Copies the selected clips, snapping to the grid.
+    Copy,
+    /// Moves the selected clips without snapping.
+    MoveFree,
+    /// Moves a clip's start or end, snapping to the grid.
+    Trim,
+    TrimFree,
+    /// Makes a fade longer or shorter.
+    Fade,
+    /// Clears the selection, selects the track, and puts the start marker
+    /// there.
+    PlaceMarker,
+    /// Selects the time dragged over, on the tracks dragged over.
+    SelectTime,
+    /// Puts the start marker there, and the playhead with it.
+    Locate,
+    /// Drags up or down to zoom, and sideways to scroll, as Live's ruler
+    /// does.
+    ScrubZoom,
+    /// Draws a new loop region.
+    DrawLoop,
+    ToggleLoop,
+    MoveLoop,
+    /// Moves the loop region's start or end.
+    ResizeLoop,
+    MoveLocator,
+    Rename,
+    ResizeTrack,
+    /// Solos the track alone, or unsolos it.
+    ExclusiveSolo,
+    /// Solos the track along with the tracks soloed already.
+    AddSolo,
+    /// Moves a control as far as the mouse moves.
+    Coarse,
+    /// Moves a control a tenth as far, for small changes.
+    Fine,
+    /// Scrolls the way the wheel turns: up and down, or sideways on a
+    /// trackpad.
+    Scroll,
+    /// Scrolls sideways as the wheel turns.
+    ScrollSideways,
+    /// Zooms in and out around the pointer.
+    Zoom,
+}
+
+/// Gestures and what they do. See the [module docs](self).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MouseMap {
+    bindings: BTreeMap<(Target, Gesture, Modifiers), MouseAction>,
+}
+
+impl MouseMap {
+    /// A mouse map where no gesture does anything.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes `gesture` on `target` with exactly `mods` held do `action`, and
+    /// returns what it did before.
+    pub fn bind(
+        &mut self,
+        target: Target,
+        gesture: Gesture,
+        mods: Modifiers,
+        action: MouseAction,
+    ) -> Option<MouseAction> {
+        self.bindings.insert((target, gesture, mods), action)
+    }
+
+    /// Makes `gesture` on `target` with exactly `mods` held do nothing of
+    /// its own, and returns what it did.
+    pub fn unbind(
+        &mut self,
+        target: Target,
+        gesture: Gesture,
+        mods: Modifiers,
+    ) -> Option<MouseAction> {
+        self.bindings.remove(&(target, gesture, mods))
+    }
+
+    /// What `gesture` on `target` does with `mods` held: what's bound to
+    /// those modifiers, or else what's bound to none, so a modifier that
+    /// means nothing there is ignored.
+    pub fn action(&self, target: Target, gesture: Gesture, mods: Modifiers) -> Option<MouseAction> {
+        let action = |mods| self.bindings.get(&(target, gesture, mods)).copied();
+        action(mods).or_else(|| action(Modifiers::NONE))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Target, Gesture, Modifiers, MouseAction)> + '_ {
+        self.bindings
+            .iter()
+            .map(|(&(target, gesture, mods), &action)| (target, gesture, mods, action))
+    }
+
+    /// Ableton Live's mouse.
+    pub fn live() -> Self {
+        use Gesture::{Click, DoubleClick, Drag, Wheel};
+        use MouseAction as A;
+        use Target as T;
+        let none = Modifiers::NONE;
+        let shift = Modifiers::SHIFT;
+        let alt = Modifiers::ALT;
+        // Ctrl, and Cmd on a Mac.
+        let ctrl = [Modifiers::CTRL, Modifiers::CMD];
+        let mut map = Self::new();
+        let mut bind = |target, gesture, mods: &[Modifiers], action| {
+            for &mods in mods {
+                map.bind(target, gesture, mods, action);
+            }
+        };
+        let toggle = [Modifiers::CTRL, Modifiers::CMD, Modifiers::SHIFT];
+        bind(T::ClipTitle, Click, &[none], A::Select);
+        bind(T::ClipTitle, Click, &toggle, A::ToggleSelect);
+        bind(T::ClipTitle, DoubleClick, &[none], A::Rename);
+        bind(T::ClipTitle, Drag, &[none, shift], A::Move);
+        bind(T::ClipTitle, Drag, &ctrl, A::Copy);
+        bind(T::ClipTitle, Drag, &[alt], A::MoveFree);
+        bind(T::ClipBody, Click, &[none], A::SelectAndMark);
+        bind(T::ClipBody, Click, &toggle, A::ToggleSelect);
+        bind(T::ClipBody, Drag, &[none], A::SelectTime);
+        bind(T::ClipEdge, Drag, &[none], A::Trim);
+        bind(T::ClipEdge, Drag, &[alt], A::TrimFree);
+        bind(T::FadeHandle, Drag, &[none], A::Fade);
+        bind(T::Lane, Click, &[none], A::PlaceMarker);
+        bind(T::Lane, Drag, &[none], A::SelectTime);
+        bind(T::Empty, Click, &[none], A::PlaceMarker);
+        bind(T::Ruler, Click, &[none], A::Locate);
+        bind(T::Ruler, Drag, &[none], A::ScrubZoom);
+        bind(T::Strip, Click, &[none], A::Locate);
+        bind(T::Strip, Drag, &[none], A::DrawLoop);
+        bind(T::LoopBrace, Click, &[none], A::ToggleLoop);
+        bind(T::LoopBrace, Drag, &[none], A::MoveLoop);
+        bind(T::LoopEdge, Drag, &[none], A::ResizeLoop);
+        bind(T::Locator, Click, &[none], A::Locate);
+        bind(T::Locator, DoubleClick, &[none], A::Rename);
+        bind(T::Locator, Drag, &[none], A::MoveLocator);
+        bind(T::TrackHeader, Click, &[none], A::Select);
+        bind(T::TrackHeader, Click, &toggle, A::ToggleSelect);
+        bind(T::TrackHeader, DoubleClick, &[none], A::Rename);
+        bind(T::TrackEdge, Drag, &[none], A::ResizeTrack);
+        bind(T::SoloButton, Click, &[none], A::ExclusiveSolo);
+        bind(T::SoloButton, Click, &ctrl, A::AddSolo);
+        bind(T::MixerControl, Drag, &[none], A::Coarse);
+        bind(T::MixerControl, Drag, &ctrl, A::Fine);
+        bind(T::Timeline, Wheel, &[none], A::Scroll);
+        bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
+        bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);
+        map
+    }
+}
+
+/// The modifiers egui reports, as keymaps and mouse maps name them. egui's
+/// "command" without Cmd is Ctrl, as it is off a Mac.
+pub(crate) fn modifiers(modifiers: egui::Modifiers) -> Modifiers {
+    Modifiers {
+        ctrl: modifiers.ctrl || (modifiers.command && !modifiers.mac_cmd),
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        cmd: modifiers.mac_cmd,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifiers_that_mean_nothing_there_are_ignored() {
+        let map = MouseMap::live();
+        let drag = |mods| map.action(Target::ClipTitle, Gesture::Drag, mods);
+        assert_eq!(drag(Modifiers::NONE), Some(MouseAction::Move));
+        assert_eq!(drag(Modifiers::CTRL), Some(MouseAction::Copy));
+        assert_eq!(drag(Modifiers::CMD), Some(MouseAction::Copy));
+        assert_eq!(drag(Modifiers::ALT), Some(MouseAction::MoveFree));
+        // Nothing's bound to Ctrl+Alt, so it drags as nothing held does.
+        assert_eq!(
+            drag(Modifiers::CTRL | Modifiers::ALT),
+            Some(MouseAction::Move)
+        );
+        assert_eq!(
+            map.action(Target::Lane, Gesture::Wheel, Modifiers::NONE),
+            None
+        );
+        // egui's Ctrl, Cmd, and "command" off a Mac.
+        assert_eq!(modifiers(egui::Modifiers::CTRL), Modifiers::CTRL);
+        assert_eq!(modifiers(egui::Modifiers::MAC_CMD), Modifiers::CMD);
+        assert_eq!(modifiers(egui::Modifiers::COMMAND), Modifiers::CTRL);
+    }
+
+    #[test]
+    fn gestures_can_be_bound_again() {
+        let mut map = MouseMap::live();
+        let click = (Target::ClipTitle, Gesture::Click, Modifiers::NONE);
+        let was = map.bind(click.0, click.1, click.2, MouseAction::SelectAndMark);
+        assert_eq!(was, Some(MouseAction::Select));
+        assert_eq!(
+            map.action(click.0, click.1, click.2),
+            Some(MouseAction::SelectAndMark)
+        );
+        assert_eq!(
+            map.unbind(click.0, click.1, click.2),
+            Some(MouseAction::SelectAndMark)
+        );
+        assert_eq!(map.action(click.0, click.1, click.2), None);
+        // Shift-click toggles still: it has a binding of its own.
+        let shift = map.action(Target::ClipTitle, Gesture::Click, Modifiers::SHIFT);
+        assert_eq!(shift, Some(MouseAction::ToggleSelect));
+        assert!(map.iter().count() > 30);
+        assert_eq!(MouseMap::new().iter().count(), 0);
+    }
+}

@@ -19,7 +19,10 @@ use musicable_commands::mixer::Change;
 use musicable_model::mixer::Bus;
 use musicable_model::{ClipType, Project, Track, TrackId, TrackKind};
 
+use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::Action;
+use crate::theme::{MixerSizes, Theme};
+use crate::widgets::{Face, toggle};
 
 /// A channel's meter readings, linear: 1.0 is full scale.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -71,42 +74,21 @@ const LOUD: f32 = -6.0;
 /// The marks on the meters' scale, in dB.
 const MARKS: [f32; 6] = [6.0, 0.0, -6.0, -12.0, -24.0, -48.0];
 
-/// A strip's width, and the width of what's in it.
-const STRIP: f32 = 96.0;
-const INNER: f32 = STRIP - 2.0 * MARGIN;
-/// The space around what's in a strip, and between its controls.
-const MARGIN: f32 = 4.0;
-const GAP: f32 = 4.0;
-/// The height of a strip's rows of controls.
-const ROW: f32 = 20.0;
-/// The shortest a fader gets, however small the window.
-const MIN_FADER: f32 = 96.0;
-/// Room left under the strips for a scroll bar.
-const SCROLL_BAR: f32 = 10.0;
-/// A fader's cap, a meter's width and the width of the scale beside it.
-const CAP: Vec2 = Vec2::new(24.0, 12.0);
-const METER: f32 = 11.0;
-const SCALE: f32 = 18.0;
-
-/// The buttons' colours when they're on: amber for mute, blue for solo and
-/// red for arm.
-const MUTE: Color32 = Color32::from_rgb(232, 165, 50);
-const SOLO: Color32 = Color32::from_rgb(80, 160, 235);
-const ARM: Color32 = Color32::from_rgb(230, 75, 65);
-/// The meters' colours, from quiet to over full scale.
-const GREEN: Color32 = Color32::from_rgb(90, 190, 110);
-const YELLOW: Color32 = Color32::from_rgb(230, 200, 70);
-const RED: Color32 = Color32::from_rgb(230, 70, 60);
-/// The colour of the text on a lit button.
-const INK: Color32 = Color32::from_gray(24);
-
 /// What the mixer shows without tracks.
 const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and File > New Demo \
                          Project has a dozen test tones.";
 
 /// Shows the mixer for `project`, with the meters reading `levels`, and
 /// adds what the user changed to `actions`.
-pub(crate) fn show(ui: &mut Ui, project: &Project, levels: &Levels, actions: &mut Vec<Action>) {
+pub(crate) fn show(
+    ui: &mut Ui,
+    project: &Project,
+    levels: &Levels,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    let sizes = &theme.mixer;
     let returns: Vec<&Track> = project
         .tracks
         .iter()
@@ -115,12 +97,14 @@ pub(crate) fn show(ui: &mut Ui, project: &Project, levels: &Levels, actions: &mu
     // Every strip has the same rows, so the faders line up, and the faders
     // take the height the rows leave.
     let rows = 6 + returns.len();
-    let fixed = rows as f32 * (ROW + GAP) + 2.0 * MARGIN + SCROLL_BAR;
-    let fader = (ui.available_height() - fixed).max(MIN_FADER);
+    let fixed = rows as f32 * (sizes.row + sizes.gap) + 2.0 * sizes.margin + sizes.scroll_bar;
+    let fader = (ui.available_height() - fixed).max(sizes.min_fader);
     let mixer = Mixer {
         project,
         returns,
         fader,
+        theme,
+        mouse,
     };
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         mixer.master_strip(ui, levels.master, actions);
@@ -133,7 +117,7 @@ pub(crate) fn show(ui: &mut Ui, project: &Project, levels: &Levels, actions: &mu
         }
         ScrollArea::both().auto_shrink(false).show(ui, |ui| {
             ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
+                ui.spacing_mut().item_spacing.x = sizes.gap;
                 for track in &project.tracks {
                     mixer.track_strip(ui, track, levels.track(track.id), actions);
                 }
@@ -149,14 +133,20 @@ struct Mixer<'a> {
     returns: Vec<&'a Track>,
     /// How tall the faders are.
     fader: f32,
+    theme: &'a Theme,
+    mouse: &'a MouseMap,
 }
 
 impl Mixer<'_> {
+    fn sizes(&self) -> &MixerSizes {
+        &self.theme.mixer
+    }
+
     fn track_strip(&self, ui: &mut Ui, track: &Track, level: Level, actions: &mut Vec<Action>) {
         let id = track.id;
         let name = &track.name;
-        strip(ui, |ui| {
-            row(ui, |ui| title(ui, name))
+        self.strip(ui, |ui| {
+            self.row(ui, |ui| self.title(ui, name))
                 .on_hover_text(about(track))
                 .context_menu(|ui| {
                     let mut safe = track.solo_safe;
@@ -172,33 +162,33 @@ impl Mixer<'_> {
                         ui.close();
                     }
                 });
-            row(ui, |ui| {
+            self.row(ui, |ui| {
                 if let Some(bus) = self.output(ui, track) {
                     mix(actions, Change::Output(id, bus));
                 }
             });
             for to in &self.returns {
-                row(ui, |ui| {
+                self.row(ui, |ui| {
                     if track.kind != TrackKind::Return {
-                        send(ui, track, to, actions);
+                        self.send(ui, track, to, actions);
                     }
                 });
             }
-            row(ui, |ui| {
-                let pan = pan_control(ui, track.pan, &format!("{name} Pan"));
+            self.row(ui, |ui| {
+                let pan = self.pan_control(ui, track.pan, &format!("{name} Pan"));
                 moved(pan, actions, |pan| Change::Pan(id, pan));
             });
-            let fader = channel(ui, track.gain, level, name, self.fader);
+            let fader = self.channel(ui, track.gain, level, name);
             moved(fader, actions, |gain| Change::Gain(id, gain));
-            row(ui, |ui| {
-                readouts(ui, track.gain, level.highest, name, actions, |gain| {
+            self.row(ui, |ui| {
+                self.readouts(ui, track.gain, level.highest, name, actions, |gain| {
                     Change::Gain(id, gain)
                 });
             });
-            row(ui, |ui| buttons(ui, track, actions));
-            row(ui, |ui| {
+            self.row(ui, |ui| self.buttons(ui, track, actions));
+            self.row(ui, |ui| {
                 let label = format!("{name} Clip Type");
-                if let Some(clip_type) = clip_menu(ui, ("clip", id), track.clip_type, label) {
+                if let Some(clip_type) = self.clip_menu(ui, ("clip", id), track.clip_type, label) {
                     mix(actions, Change::ClipType(id, clip_type));
                 }
             });
@@ -207,22 +197,22 @@ impl Mixer<'_> {
 
     fn master_strip(&self, ui: &mut Ui, level: Level, actions: &mut Vec<Action>) {
         let master = &self.project.master;
-        strip(ui, |ui| {
-            row(ui, |ui| title(ui, "Master")).on_hover_text(
+        self.strip(ui, |ui| {
+            self.row(ui, |ui| self.title(ui, "Master")).on_hover_text(
                 "The master: every track ends up here, and it plays out of the audio device.",
             );
             // The master has no output to choose, and no sends.
             for _ in 0..1 + self.returns.len() {
-                row(ui, |_| ());
+                self.row(ui, |_| ());
             }
-            row(ui, |ui| {
-                let pan = pan_control(ui, master.pan, "Master Pan");
+            self.row(ui, |ui| {
+                let pan = self.pan_control(ui, master.pan, "Master Pan");
                 moved(pan, actions, Change::MasterPan);
             });
-            let fader = channel(ui, master.gain, level, "Master", self.fader);
+            let fader = self.channel(ui, master.gain, level, "Master");
             moved(fader, actions, Change::MasterGain);
-            row(ui, |ui| {
-                readouts(
+            self.row(ui, |ui| {
+                self.readouts(
                     ui,
                     master.gain,
                     level.highest,
@@ -231,10 +221,11 @@ impl Mixer<'_> {
                     Change::MasterGain,
                 );
             });
-            row(ui, |_| ());
-            row(ui, |ui| {
+            self.row(ui, |_| ());
+            self.row(ui, |ui| {
                 let label = "Master Clip Type".to_owned();
-                if let Some(clip_type) = clip_menu(ui, "master_clip", master.clip_type, label) {
+                if let Some(clip_type) = self.clip_menu(ui, "master_clip", master.clip_type, label)
+                {
                     mix(actions, Change::MasterClipType(clip_type));
                 }
             });
@@ -246,9 +237,10 @@ impl Mixer<'_> {
     fn output(&self, ui: &mut Ui, track: &Track) -> Option<Bus> {
         let current = self.project.output_of(track);
         let text = self.bus_name(current);
+        let sizes = self.sizes();
         if track.kind == TrackKind::Return {
             ui.add_sized(
-                [INNER, ROW],
+                [sizes.inner(), sizes.row],
                 Label::new(RichText::new(text).weak()).truncate(),
             )
             .on_hover_text("Return tracks feed the master.");
@@ -256,7 +248,7 @@ impl Mixer<'_> {
         }
         let mut picked = None;
         let menu = ComboBox::from_id_salt(("output", track.id))
-            .width(INNER)
+            .width(sizes.inner())
             .truncate()
             .selected_text(text)
             .show_ui(ui, |ui| {
@@ -307,42 +299,6 @@ fn moved<T>(
     }
 }
 
-/// Lays out a strip: a column [`STRIP`] wide, in a frame, where the layout
-/// puts the next widget.
-fn strip(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    let size = vec2(STRIP, ui.available_height());
-    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
-        Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .corner_radius(3.0)
-            .inner_margin(MARGIN)
-            .show(ui, |ui| {
-                ui.set_width(INNER);
-                ui.spacing_mut().item_spacing = vec2(GAP, GAP);
-                add(ui);
-            });
-    });
-}
-
-/// Lays out one of a strip's rows: [`ROW`] high and as wide as the strip,
-/// left to right.
-fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let size = vec2(INNER, ROW);
-    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-        ui.set_min_size(size);
-        add(ui)
-    })
-    .inner
-}
-
-/// A strip's name, which can be right-clicked.
-fn title(ui: &mut Ui, name: &str) -> Response {
-    let label = Label::new(RichText::new(name).strong())
-        .truncate()
-        .sense(Sense::click());
-    ui.add_sized([INNER, ROW], label)
-}
-
 /// What the strip's name says when hovered.
 fn about(track: &Track) -> String {
     let kind = match track.kind {
@@ -363,260 +319,536 @@ fn about(track: &Track) -> String {
     text
 }
 
-/// The track's send to the return track `to`: its level, and whether it
-/// takes the signal before the fader.
-fn send(ui: &mut Ui, track: &Track, to: &Track, actions: &mut Vec<Action>) {
-    let send = track.sends.iter().find(|send| send.to == to.id);
-    let (level, pre_fader) = send.map_or((0.0, false), |send| (send.level, send.pre_fader));
-    let pre_width = 26.0;
-    let label = format!("{} Send to {}", track.name, to.name);
-    let control = send_control(ui, level, &to.name, &label, INNER - GAP - pre_width);
-    if send.is_some() {
-        control.0.context_menu(|ui| {
-            if ui.button("Remove Send").clicked() {
-                let remove = Change::RemoveSend {
-                    track: track.id,
-                    to: to.id,
-                };
-                mix(actions, remove);
-                ui.close();
-            }
+impl Mixer<'_> {
+    /// Lays out a strip: a column a strip wide, in a frame, where the layout
+    /// puts the next widget.
+    fn strip(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+        let sizes = self.sizes();
+        let size = vec2(sizes.strip, ui.available_height());
+        ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+            Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(self.theme.corner)
+                .inner_margin(sizes.margin)
+                .show(ui, |ui| {
+                    ui.set_width(sizes.inner());
+                    ui.spacing_mut().item_spacing = vec2(sizes.gap, sizes.gap);
+                    add(ui);
+                });
         });
     }
-    moved(control, actions, |level| Change::SendLevel {
-        track: track.id,
-        to: to.id,
-        level,
-    });
-    let label = format!("Pre-Fader {} Send to {}", track.name, to.name);
-    let pre = toggle(ui, Face::Text("Pre"), pre_fader, SOLO, &label, pre_width)
-        .on_hover_text("Pre-fader: the send takes the signal before the fader and the pan.");
-    if pre.clicked() {
-        let pre = Change::SendPreFader {
+
+    /// Lays out one of a strip's rows: a row high and as wide as the strip,
+    /// left to right.
+    fn row<R>(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+        let size = vec2(self.sizes().inner(), self.sizes().row);
+        ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_size(size);
+            add(ui)
+        })
+        .inner
+    }
+
+    /// A strip's name, which can be right-clicked.
+    fn title(&self, ui: &mut Ui, name: &str) -> Response {
+        let label = Label::new(RichText::new(name).strong())
+            .truncate()
+            .sense(Sense::click());
+        ui.add_sized([self.sizes().inner(), self.sizes().row], label)
+    }
+
+    /// The track's send to the return track `to`: its level, and whether it
+    /// takes the signal before the fader.
+    fn send(&self, ui: &mut Ui, track: &Track, to: &Track, actions: &mut Vec<Action>) {
+        let sizes = self.sizes();
+        let send = track.sends.iter().find(|send| send.to == to.id);
+        let (level, pre_fader) = send.map_or((0.0, false), |send| (send.level, send.pre_fader));
+        let label = format!("{} Send to {}", track.name, to.name);
+        let width = sizes.inner() - sizes.gap - sizes.pre_button;
+        let control = self.send_control(ui, level, &to.name, &label, width);
+        if send.is_some() {
+            control.0.context_menu(|ui| {
+                if ui.button("Remove Send").clicked() {
+                    let remove = Change::RemoveSend {
+                        track: track.id,
+                        to: to.id,
+                    };
+                    mix(actions, remove);
+                    ui.close();
+                }
+            });
+        }
+        moved(control, actions, |level| Change::SendLevel {
             track: track.id,
             to: to.id,
-            pre_fader: !pre_fader,
-        };
-        mix(actions, pre);
-    }
-}
-
-/// Mute, solo, and arm for audio and MIDI tracks.
-fn buttons(ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
-    let id = track.id;
-    let name = &track.name;
-    let width = (INNER - 2.0 * GAP) / 3.0;
-    let mute = toggle(
-        ui,
-        Face::Text("M"),
-        track.muted,
-        MUTE,
-        &format!("Mute {name}"),
-        width,
-    )
-    .on_hover_text("Mute");
-    if mute.clicked() {
-        mix(actions, Change::Muted(id, !track.muted));
-    }
-    let hint = if track.solo_safe {
-        "Solo. Ctrl-click to solo more than one track.\nSolo-safe: soloing other tracks \
-         doesn't silence this one."
-    } else {
-        "Solo. Ctrl-click to solo more than one track."
-    };
-    let solo = toggle(
-        ui,
-        Face::Text("S"),
-        track.solo,
-        SOLO,
-        &format!("Solo {name}"),
-        width,
-    )
-    .on_hover_text(hint);
-    if solo.clicked() {
-        let solo = !track.solo;
-        // As in Live, a click solos the track alone, and Ctrl-click (Cmd-click
-        // on a Mac) solos it along with the others.
-        let exclusive = solo && !ui.input(|input| input.modifiers.command);
-        let solo = Change::Solo {
-            track: id,
-            solo,
-            exclusive,
-        };
-        mix(actions, solo);
-    }
-    if matches!(track.kind, TrackKind::Audio | TrackKind::Midi) {
-        let arm = toggle(
+            level,
+        });
+        let label = format!("Pre-Fader {} Send to {}", track.name, to.name);
+        let size = vec2(sizes.pre_button, sizes.row - 2.0);
+        let pre = toggle(
             ui,
-            Face::Dot,
-            track.armed,
-            ARM,
-            &format!("Arm {name}"),
-            width,
+            Face::Text("Pre"),
+            pre_fader,
+            self.theme.solo,
+            &label,
+            size,
+            self.theme,
         )
-        .on_hover_text("Arm for recording");
-        if arm.clicked() {
-            mix(actions, Change::Armed(id, !track.armed));
+        .on_hover_text("Pre-fader: the send takes the signal before the fader and the pan.");
+        if pre.clicked() {
+            let pre = Change::SendPreFader {
+                track: track.id,
+                to: to.id,
+                pre_fader: !pre_fader,
+            };
+            mix(actions, pre);
         }
     }
-}
 
-/// The fader beside the meter and its scale. Returns the fader, and the gain
-/// it was moved to.
-fn channel(
-    ui: &mut Ui,
-    gain: f32,
-    level: Level,
-    name: &str,
-    height: f32,
-) -> (Response, Option<f32>) {
-    let size = vec2(INNER, height);
-    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
-        ui.set_min_size(size);
-        ui.spacing_mut().item_spacing.x = 3.0;
-        let width = CAP.x + METER + SCALE + 2.0 * 3.0;
-        ui.add_space(((INNER - width) / 2.0).max(0.0));
-        let moved = fader(ui, gain, &format!("{name} Volume"), height);
-        meter(ui, level, &format!("{name} Level"), height);
-        scale(ui, height);
-        moved
-    })
-    .inner
-}
-
-/// The gain field and the highest peak under the fader. A gain typed or
-/// dragged into the field makes the `change`.
-fn readouts(
-    ui: &mut Ui,
-    gain: f32,
-    highest: f32,
-    name: &str,
-    actions: &mut Vec<Action>,
-    change: impl FnOnce(f32) -> Change,
-) {
-    let size = vec2((INNER - GAP) / 2.0, ROW - 2.0);
-    moved(gain_field(ui, gain, size), actions, change);
-    let peak = peak_readout(ui, highest, &format!("{name} Highest Peak"), size);
-    if peak.clicked() {
-        actions.push(Action::ClearPeaks);
-    }
-}
-
-/// A vertical fader for `gain`, from silence at the bottom to +6 dB at the
-/// top. Returns it, and the gain the user moved it to.
-fn fader(ui: &mut Ui, gain: f32, label: &str, height: f32) -> (Response, Option<f32>) {
-    let (rect, response) = ui.allocate_exact_size(vec2(CAP.x, height), Sense::click_and_drag());
-    let db = decibels_of(gain).max(FLOOR);
-    let range = f64::from(FLOOR)..=f64::from(FADER_TOP);
-    let mut moved =
-        slider_info(ui, &response, label, f64::from(db), range).map(|db| gain_of(db as f32));
-    let at = height_of(gain, FADER_TOP);
-    let (bottom, top) = travel(rect);
-    if let Some(to) = dragged(ui, &response, at, bottom - top, true) {
-        moved = Some(gain_at(to, FADER_TOP));
-    }
-    if response.double_clicked() {
-        moved = Some(1.0);
-    }
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let visuals = ui.style().interact(&response);
-        let x = rect.center().x;
-        let groove = Rect::from_x_y_ranges(x - 2.0..=x + 2.0, top..=bottom);
-        painter.rect_filled(groove, 2.0, ui.visuals().extreme_bg_color);
-        let unity = y_at(rect, height_of(1.0, FADER_TOP));
-        let mark = ui.visuals().widgets.noninteractive.fg_stroke;
-        painter.hline(rect.x_range(), unity, Stroke::new(1.0, mark.color));
-        let cap = Rect::from_center_size(pos2(x, y_at(rect, at)), CAP);
-        painter.rect(
-            cap,
-            3.0,
-            visuals.bg_fill,
-            visuals.bg_stroke,
-            StrokeKind::Inside,
-        );
-        painter.hline(
-            cap.shrink2(vec2(5.0, 0.0)).x_range(),
-            cap.center().y,
-            visuals.fg_stroke,
-        );
-    }
-    let response = response.on_hover_text(format!(
-        "Volume: {}\nDrag, or Ctrl-drag to move finely. Double-click for 0 dB.",
-        decibels(gain)
-    ));
-    (response, moved.filter(|&new| new != gain))
-}
-
-/// A stereo meter: the peak in light colours, the RMS in solid ones.
-fn meter(ui: &mut Ui, level: Level, label: &str, height: f32) {
-    let (rect, response) = ui.allocate_exact_size(vec2(METER, height), Sense::hover());
-    let loudest = level.peak[0].max(level.peak[1]);
-    response.widget_info(|| WidgetInfo {
-        value: Some(f64::from(decibels_of(loudest).max(FLOOR))),
-        ..WidgetInfo::labeled(Role::Meter, true, label)
-    });
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let painter = ui.painter();
-    let (bottom, top) = travel(rect);
-    let width = (METER - 1.0) / 2.0;
-    for c in 0..2 {
-        let left = rect.left() + c as f32 * (width + 1.0);
-        let x = Rangef::new(left, left + width);
-        let bar = Rect::from_x_y_ranges(x, top..=bottom);
-        painter.rect_filled(bar, 1.0, ui.visuals().extreme_bg_color);
-        paint_level(painter, rect, x, level.peak[c], 0.4);
-        paint_level(painter, rect, x, level.rms[c], 1.0);
-        let peak = shown(level.peak[c]);
-        if peak > 0.0 {
-            painter.hline(x, y_at(rect, peak), Stroke::new(1.5, zone(peak)));
+    /// Mute, solo, and arm for audio and MIDI tracks.
+    fn buttons(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        let id = track.id;
+        let name = &track.name;
+        let theme = self.theme;
+        let sizes = self.sizes();
+        let size = vec2((sizes.inner() - 2.0 * sizes.gap) / 3.0, sizes.row - 2.0);
+        let mute = toggle(
+            ui,
+            Face::Text("M"),
+            track.muted,
+            theme.mute,
+            &format!("Mute {name}"),
+            size,
+            theme,
+        )
+        .on_hover_text("Mute");
+        if mute.clicked() {
+            mix(actions, Change::Muted(id, !track.muted));
         }
-    }
-}
-
-/// The meters' scale in dB, beside a meter `height` high.
-fn scale(ui: &mut Ui, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(SCALE, height), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let painter = ui.painter();
-    let color = ui.visuals().weak_text_color();
-    for db in MARKS {
-        let y = y_at(rect, height_of(gain_of(db), FADER_TOP));
-        let text = if db > 0.0 {
-            format!("+{db}")
+        let hint = if track.solo_safe {
+            "Solo. Ctrl-click to solo more than one track.\nSolo-safe: soloing other tracks \
+             doesn't silence this one."
         } else {
-            format!("{db}")
+            "Solo. Ctrl-click to solo more than one track."
         };
-        painter.text(
-            pos2(rect.left(), y),
-            Align2::LEFT_CENTER,
-            text,
-            FontId::proportional(9.0),
-            color,
+        let solo = toggle(
+            ui,
+            Face::Text("S"),
+            track.solo,
+            theme.solo,
+            &format!("Solo {name}"),
+            size,
+            theme,
+        )
+        .on_hover_text(hint);
+        if solo.clicked() {
+            let solo = !track.solo;
+            // As in Live, a click solos the track alone, and Ctrl-click
+            // (Cmd-click on a Mac) solos it along with the others.
+            let mods = modifiers(ui.input(|input| input.modifiers));
+            let action = self.mouse.action(Target::SoloButton, Gesture::Click, mods);
+            let solo = Change::Solo {
+                track: id,
+                solo,
+                exclusive: solo && action != Some(MouseAction::AddSolo),
+            };
+            mix(actions, solo);
+        }
+        if matches!(track.kind, TrackKind::Audio | TrackKind::Midi) {
+            let arm = toggle(
+                ui,
+                Face::Dot,
+                track.armed,
+                theme.arm,
+                &format!("Arm {name}"),
+                size,
+                theme,
+            )
+            .on_hover_text("Arm for recording");
+            if arm.clicked() {
+                mix(actions, Change::Armed(id, !track.armed));
+            }
+        }
+    }
+
+    /// The fader beside the meter and its scale. Returns the fader, and the
+    /// gain it was moved to.
+    fn channel(&self, ui: &mut Ui, gain: f32, level: Level, name: &str) -> (Response, Option<f32>) {
+        let sizes = self.sizes();
+        let size = vec2(sizes.inner(), self.fader);
+        ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Min), |ui| {
+            ui.set_min_size(size);
+            let gap = sizes.gap - 1.0;
+            ui.spacing_mut().item_spacing.x = gap;
+            let width = sizes.cap.x + sizes.meter + sizes.scale + 2.0 * gap;
+            ui.add_space(((sizes.inner() - width) / 2.0).max(0.0));
+            let moved = self.fader(ui, gain, &format!("{name} Volume"));
+            self.meter(ui, level, &format!("{name} Level"));
+            self.scale(ui);
+            moved
+        })
+        .inner
+    }
+
+    /// The gain field and the highest peak under the fader. A gain typed or
+    /// dragged into the field makes the `change`.
+    fn readouts(
+        &self,
+        ui: &mut Ui,
+        gain: f32,
+        highest: f32,
+        name: &str,
+        actions: &mut Vec<Action>,
+        change: impl FnOnce(f32) -> Change,
+    ) {
+        let sizes = self.sizes();
+        let size = vec2((sizes.inner() - sizes.gap) / 2.0, sizes.row - 2.0);
+        moved(gain_field(ui, gain, size), actions, change);
+        let peak = self.peak_readout(ui, highest, &format!("{name} Highest Peak"), size);
+        if peak.clicked() {
+            actions.push(Action::ClearPeaks);
+        }
+    }
+
+    /// A vertical fader for `gain`, from silence at the bottom to +6 dB at
+    /// the top. Returns it, and the gain the user moved it to.
+    fn fader(&self, ui: &mut Ui, gain: f32, label: &str) -> (Response, Option<f32>) {
+        let cap = self.sizes().cap;
+        let size = vec2(cap.x, self.fader);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let db = decibels_of(gain).max(FLOOR);
+        let range = f64::from(FLOOR)..=f64::from(FADER_TOP);
+        let mut moved =
+            slider_info(ui, &response, label, f64::from(db), range).map(|db| gain_of(db as f32));
+        let at = height_of(gain, FADER_TOP);
+        let (bottom, top) = self.travel(rect);
+        if let Some(to) = self.dragged(ui, &response, at, bottom - top, true) {
+            moved = Some(gain_at(to, FADER_TOP));
+        }
+        if response.double_clicked() {
+            moved = Some(1.0);
+        }
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            let visuals = ui.style().interact(&response);
+            let x = rect.center().x;
+            let groove = Rect::from_x_y_ranges(x - 2.0..=x + 2.0, top..=bottom);
+            painter.rect_filled(groove, 2.0, ui.visuals().extreme_bg_color);
+            let unity = self.y_at(rect, height_of(1.0, FADER_TOP));
+            let mark = ui.visuals().widgets.noninteractive.fg_stroke;
+            painter.hline(rect.x_range(), unity, Stroke::new(1.0, mark.color));
+            let cap = Rect::from_center_size(pos2(x, self.y_at(rect, at)), cap);
+            painter.rect(
+                cap,
+                self.theme.corner,
+                visuals.bg_fill,
+                visuals.bg_stroke,
+                StrokeKind::Inside,
+            );
+            painter.hline(
+                cap.shrink2(vec2(5.0, 0.0)).x_range(),
+                cap.center().y,
+                visuals.fg_stroke,
+            );
+        }
+        let response = response.on_hover_text(format!(
+            "Volume: {}\nDrag, or Ctrl-drag to move finely. Double-click for 0 dB.",
+            decibels(gain)
+        ));
+        (response, moved.filter(|&new| new != gain))
+    }
+
+    /// A stereo meter: the peak in light colours, the RMS in solid ones.
+    fn meter(&self, ui: &mut Ui, level: Level, label: &str) {
+        let width = self.sizes().meter;
+        let (rect, response) = ui.allocate_exact_size(vec2(width, self.fader), Sense::hover());
+        let loudest = level.peak[0].max(level.peak[1]);
+        response.widget_info(|| WidgetInfo {
+            value: Some(f64::from(decibels_of(loudest).max(FLOOR))),
+            ..WidgetInfo::labeled(Role::Meter, true, label)
+        });
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let painter = ui.painter();
+        let (bottom, top) = self.travel(rect);
+        let width = (width - 1.0) / 2.0;
+        for c in 0..2 {
+            let left = rect.left() + c as f32 * (width + 1.0);
+            let x = Rangef::new(left, left + width);
+            let bar = Rect::from_x_y_ranges(x, top..=bottom);
+            painter.rect_filled(bar, 1.0, ui.visuals().extreme_bg_color);
+            let (bottom, top) = (self.y_at(rect, 0.0), self.y_at(rect, 1.0));
+            let column = Rect::from_x_y_ranges(x, top..=bottom);
+            paint_level(painter, column, level.peak[c], 0.4, self.theme);
+            paint_level(painter, column, level.rms[c], 1.0, self.theme);
+            let peak = meter_height(level.peak[c]);
+            if peak > 0.0 {
+                let colour = meter_colour(peak, self.theme);
+                painter.hline(x, self.y_at(rect, peak), Stroke::new(1.5, colour));
+            }
+        }
+    }
+
+    /// The meters' scale in dB, beside a meter.
+    fn scale(&self, ui: &mut Ui) {
+        let size = vec2(self.sizes().scale, self.fader);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let painter = ui.painter();
+        let color = ui.visuals().weak_text_color();
+        for db in MARKS {
+            let y = self.y_at(rect, height_of(gain_of(db), FADER_TOP));
+            let text = if db > 0.0 {
+                format!("+{db}")
+            } else {
+                format!("{db}")
+            };
+            painter.text(
+                pos2(rect.left(), y),
+                Align2::LEFT_CENTER,
+                text,
+                FontId::proportional(self.sizes().scale_text),
+                color,
+            );
+        }
+    }
+
+    /// The y coordinates of the bottom and the top of a fader's travel in
+    /// `rect`. A meter beside it reads on the same scale.
+    fn travel(&self, rect: Rect) -> (f32, f32) {
+        let cap = self.sizes().cap;
+        (rect.bottom() - cap.y / 2.0, rect.top() + cap.y / 2.0)
+    }
+
+    /// The y coordinate `height` of the way up the travel in `rect`.
+    fn y_at(&self, rect: Rect, height: f32) -> f32 {
+        let (bottom, top) = self.travel(rect);
+        bottom + (top - bottom) * height
+    }
+
+    /// A send's level, from silence at the left to 0 dB at the right, with
+    /// the return track's name `to` on it. Returns the level the user moved
+    /// it to.
+    fn send_control(
+        &self,
+        ui: &mut Ui,
+        level: f32,
+        to: &str,
+        label: &str,
+        width: f32,
+    ) -> (Response, Option<f32>) {
+        let size = vec2(width, self.sizes().row - 4.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let db = decibels_of(level).max(FLOOR);
+        let range = f64::from(FLOOR)..=f64::from(SEND_TOP);
+        let mut moved =
+            slider_info(ui, &response, label, f64::from(db), range).map(|db| gain_of(db as f32));
+        let at = height_of(level, SEND_TOP);
+        if let Some(to) = self.dragged(ui, &response, at, rect.width(), false) {
+            moved = Some(gain_at(to, SEND_TOP));
+        }
+        if response.double_clicked() {
+            moved = Some(0.0);
+        }
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+            let visuals = ui.style().interact(&response);
+            painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            let mut filled = rect;
+            filled.set_width(rect.width() * at);
+            painter.rect_filled(filled, 2.0, ui.visuals().selection.bg_fill);
+            let font = FontId::proportional(self.sizes().small_text);
+            let color = visuals.text_color();
+            let value = painter.text(
+                rect.right_center() - vec2(3.0, 0.0),
+                Align2::RIGHT_CENTER,
+                db_text(decibels_of(level)),
+                font.clone(),
+                color,
+            );
+            let room = Rect::from_x_y_ranges(rect.left()..=value.left() - 2.0, rect.y_range());
+            painter.with_clip_rect(room).text(
+                rect.left_center() + vec2(3.0, 0.0),
+                Align2::LEFT_CENTER,
+                to,
+                font,
+                color,
+            );
+            painter.rect_stroke(rect, 2.0, visuals.bg_stroke, StrokeKind::Inside);
+        }
+        let response = response.on_hover_text(format!(
+            "Send to {to}: {}\nDrag, or Ctrl-drag to move finely. Double-click to silence it.",
+            decibels(level)
+        ));
+        (response, moved.filter(|&new| new != level))
+    }
+
+    /// The pan, from hard left to hard right. Returns it, and the pan the
+    /// user moved it to.
+    fn pan_control(&self, ui: &mut Ui, pan: f32, label: &str) -> (Response, Option<f32>) {
+        let size = vec2(self.sizes().inner(), self.sizes().row - 4.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        // Screen readers set it from 50 left to 50 right, as it reads.
+        let range = -50.0..=50.0;
+        let mut moved = slider_info(ui, &response, label, f64::from(pan * 50.0), range)
+            .map(|pan| pan as f32 / 50.0);
+        let at = (pan + 1.0) / 2.0;
+        if let Some(to) = self.dragged(ui, &response, at, rect.width(), false) {
+            moved = Some(to * 2.0 - 1.0);
+        }
+        if response.double_clicked() {
+            moved = Some(0.0);
+        }
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            let visuals = ui.style().interact(&response);
+            painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            let centre = rect.center().x;
+            let x = rect.left() + rect.width() * at.clamp(0.0, 1.0);
+            let filled =
+                Rect::from_x_y_ranges(Rangef::new(centre.min(x), centre.max(x)), rect.y_range());
+            painter.rect_filled(filled, 0.0, ui.visuals().selection.bg_fill);
+            painter.vline(
+                centre,
+                rect.y_range(),
+                Stroke::new(1.0, visuals.fg_stroke.color),
+            );
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                pan_text(pan),
+                FontId::proportional(self.sizes().small_text),
+                visuals.text_color(),
+            );
+            painter.rect_stroke(rect, 2.0, visuals.bg_stroke, StrokeKind::Inside);
+        }
+        let response = response.on_hover_text(format!(
+            "Pan: {}\nDrag, or Ctrl-drag to move finely. Double-click to centre it.",
+            pan_text(pan)
+        ));
+        (response, moved.filter(|&new| new != pan))
+    }
+
+    /// The highest peak since the peaks were cleared, red once it's over
+    /// full scale. Clicking it clears them.
+    fn peak_readout(&self, ui: &mut Ui, highest: f32, label: &str, size: Vec2) -> Response {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let text = db_text(decibels_of(highest));
+        response.widget_info(|| WidgetInfo {
+            current_text_value: Some(text.clone()),
+            ..WidgetInfo::labeled(Role::Button, true, label)
+        });
+        if ui.is_rect_visible(rect) {
+            let over = highest > 1.0;
+            let visuals = ui.style().interact(&response);
+            let fill = if over {
+                self.theme.meter_over
+            } else {
+                ui.visuals().extreme_bg_color
+            };
+            let ink = if over {
+                self.theme.ink
+            } else {
+                visuals.text_color()
+            };
+            let painter = ui.painter();
+            painter.rect(rect, 2.0, fill, visuals.bg_stroke, StrokeKind::Inside);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                &text,
+                FontId::monospace(self.sizes().readout_text),
+                ink,
+            );
+        }
+        response.on_hover_text(
+            "The highest peak since the peaks were cleared. Red: the channel went over full \
+             scale.\nClick to clear every channel's peak.",
+        )
+    }
+
+    /// The clip stage's type: a menu of them. Returns the type the user
+    /// picked.
+    fn clip_menu(
+        &self,
+        ui: &mut Ui,
+        id: impl AsIdSalt,
+        clip_type: ClipType,
+        label: String,
+    ) -> Option<ClipType> {
+        let text = format!("Clip: {}", clip_name(clip_type));
+        let mut picked = None;
+        let menu = ComboBox::from_id_salt(id)
+            .width(self.sizes().inner())
+            .selected_text(text.as_str())
+            .show_ui(ui, |ui| {
+                for option in [ClipType::Off, ClipType::Hard, ClipType::Soft] {
+                    let item = ui
+                        .selectable_label(option == clip_type, clip_name(option))
+                        .on_hover_text(clip_hint(option));
+                    if item.clicked() && option != clip_type {
+                        picked = Some(option);
+                    }
+                }
+            });
+        name_menu(&menu.response, label, &text);
+        menu.response.on_hover_text(
+            "The clip stage after the fader, for a channel that goes over full scale",
         );
+        picked
+    }
+
+    /// Where the user dragged a control to, from `at` of the way along its
+    /// travel, which is `length` points long: up for `vertical` controls,
+    /// right for the others. The mouse map's fine drag, Ctrl-drag (Cmd on a
+    /// Mac) in Live's, moves it a tenth as far, for small changes.
+    fn dragged(
+        &self,
+        ui: &Ui,
+        response: &Response,
+        at: f32,
+        length: f32,
+        vertical: bool,
+    ) -> Option<f32> {
+        if !response.dragged() || length <= 0.0 {
+            return None;
+        }
+        let delta = response.drag_delta();
+        let moved = if vertical { -delta.y } else { delta.x };
+        if moved == 0.0 {
+            return None;
+        }
+        let mods = modifiers(ui.input(|input| input.modifiers));
+        let action = self.mouse.action(Target::MixerControl, Gesture::Drag, mods);
+        let scale = if action == Some(MouseAction::Fine) {
+            0.1
+        } else {
+            1.0
+        };
+        Some((at + moved / length * scale).clamp(0.0, 1.0))
     }
 }
 
-/// Fills a meter's bar over the x range `x` up to `gain`, in the colours of
-/// the scale's zones, `alpha` opaque.
-fn paint_level(painter: &Painter, rect: Rect, x: Rangef, gain: f32, alpha: f32) {
-    let at = shown(gain);
+/// Fills the meter bar `column` up to `gain`, in the colours of the scale's
+/// zones, `alpha` opaque.
+fn paint_level(painter: &Painter, column: Rect, gain: f32, alpha: f32, theme: &Theme) {
+    let at = meter_height(gain);
     let zones = [
-        (height_of(gain_of(LOUD), FADER_TOP), GREEN),
-        (height_of(1.0, FADER_TOP), YELLOW),
-        (1.0, RED),
+        (height_of(gain_of(LOUD), FADER_TOP), theme.meter_quiet),
+        (height_of(1.0, FADER_TOP), theme.meter_loud),
+        (1.0, theme.meter_over),
     ];
+    let y_at = |height: f32| column.bottom() - column.height() * height;
     let mut from = 0.0;
     for (to, color) in zones {
         let end = at.min(to);
         if end > from {
-            let y = Rangef::new(y_at(rect, end), y_at(rect, from));
+            let y = Rangef::new(y_at(end), y_at(from));
             painter.rect_filled(
-                Rect::from_x_y_ranges(x, y),
+                Rect::from_x_y_ranges(column.x_range(), y),
                 0.0,
                 color.gamma_multiply(alpha),
             );
@@ -625,136 +857,26 @@ fn paint_level(painter: &Painter, rect: Rect, x: Rangef, gain: f32, alpha: f32) 
     }
 }
 
-/// The colour of the zone at `height` on a meter.
-fn zone(height: f32) -> Color32 {
+/// The colour of a meter at `height` of the way up: the colour of the
+/// scale's zone there.
+pub(crate) fn meter_colour(height: f32, theme: &Theme) -> Color32 {
     if height < height_of(gain_of(LOUD), FADER_TOP) {
-        GREEN
+        theme.meter_quiet
     } else if height <= height_of(1.0, FADER_TOP) {
-        YELLOW
+        theme.meter_loud
     } else {
-        RED
+        theme.meter_over
     }
 }
 
-/// Where a meter shows `gain`: nothing below the floor.
-fn shown(gain: f32) -> f32 {
+/// How far up a meter shows `gain`, from 0.0 to 1.0: nothing below the
+/// floor.
+pub(crate) fn meter_height(gain: f32) -> f32 {
     if decibels_of(gain) > FLOOR {
         height_of(gain, FADER_TOP)
     } else {
         0.0
     }
-}
-
-/// The y coordinates of the bottom and the top of a fader's travel in
-/// `rect`. A meter beside it reads on the same scale.
-fn travel(rect: Rect) -> (f32, f32) {
-    (rect.bottom() - CAP.y / 2.0, rect.top() + CAP.y / 2.0)
-}
-
-/// The y coordinate `height` of the way up the travel in `rect`.
-fn y_at(rect: Rect, height: f32) -> f32 {
-    let (bottom, top) = travel(rect);
-    bottom + (top - bottom) * height
-}
-
-/// A send's level, from silence at the left to 0 dB at the right, with the
-/// return track's name `to` on it. Returns the level the user moved it to.
-fn send_control(
-    ui: &mut Ui,
-    level: f32,
-    to: &str,
-    label: &str,
-    width: f32,
-) -> (Response, Option<f32>) {
-    let size = vec2(width, ROW - 4.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let db = decibels_of(level).max(FLOOR);
-    let range = f64::from(FLOOR)..=f64::from(SEND_TOP);
-    let mut moved =
-        slider_info(ui, &response, label, f64::from(db), range).map(|db| gain_of(db as f32));
-    let at = height_of(level, SEND_TOP);
-    if let Some(to) = dragged(ui, &response, at, rect.width(), false) {
-        moved = Some(gain_at(to, SEND_TOP));
-    }
-    if response.double_clicked() {
-        moved = Some(0.0);
-    }
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter_at(rect);
-        let visuals = ui.style().interact(&response);
-        painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-        let mut filled = rect;
-        filled.set_width(rect.width() * at);
-        painter.rect_filled(filled, 2.0, ui.visuals().selection.bg_fill);
-        let font = FontId::proportional(10.0);
-        let color = visuals.text_color();
-        let value = painter.text(
-            rect.right_center() - vec2(3.0, 0.0),
-            Align2::RIGHT_CENTER,
-            db_text(decibels_of(level)),
-            font.clone(),
-            color,
-        );
-        let room = Rect::from_x_y_ranges(rect.left()..=value.left() - 2.0, rect.y_range());
-        painter.with_clip_rect(room).text(
-            rect.left_center() + vec2(3.0, 0.0),
-            Align2::LEFT_CENTER,
-            to,
-            font,
-            color,
-        );
-        painter.rect_stroke(rect, 2.0, visuals.bg_stroke, StrokeKind::Inside);
-    }
-    let response = response.on_hover_text(format!(
-        "Send to {to}: {}\nDrag, or Ctrl-drag to move finely. Double-click to silence it.",
-        decibels(level)
-    ));
-    (response, moved.filter(|&new| new != level))
-}
-
-/// The pan, from hard left to hard right. Returns it, and the pan the user
-/// moved it to.
-fn pan_control(ui: &mut Ui, pan: f32, label: &str) -> (Response, Option<f32>) {
-    let (rect, response) = ui.allocate_exact_size(vec2(INNER, ROW - 4.0), Sense::click_and_drag());
-    // Screen readers set it from 50 left to 50 right, as it reads.
-    let range = -50.0..=50.0;
-    let mut moved = slider_info(ui, &response, label, f64::from(pan * 50.0), range)
-        .map(|pan| pan as f32 / 50.0);
-    let at = (pan + 1.0) / 2.0;
-    if let Some(to) = dragged(ui, &response, at, rect.width(), false) {
-        moved = Some(to * 2.0 - 1.0);
-    }
-    if response.double_clicked() {
-        moved = Some(0.0);
-    }
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let visuals = ui.style().interact(&response);
-        painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-        let centre = rect.center().x;
-        let x = rect.left() + rect.width() * at.clamp(0.0, 1.0);
-        let filled =
-            Rect::from_x_y_ranges(Rangef::new(centre.min(x), centre.max(x)), rect.y_range());
-        painter.rect_filled(filled, 0.0, ui.visuals().selection.bg_fill);
-        painter.vline(
-            centre,
-            rect.y_range(),
-            Stroke::new(1.0, visuals.fg_stroke.color),
-        );
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            pan_text(pan),
-            FontId::proportional(10.0),
-            visuals.text_color(),
-        );
-        painter.rect_stroke(rect, 2.0, visuals.bg_stroke, StrokeKind::Inside);
-    }
-    let response = response.on_hover_text(format!(
-        "Pan: {}\nDrag, or Ctrl-drag to move finely. Double-click to centre it.",
-        pan_text(pan)
-    ));
-    (response, moved.filter(|&new| new != pan))
 }
 
 /// The gain in dB, to drag or type. Returns it, and the gain the user set.
@@ -778,68 +900,6 @@ fn gain_field(ui: &mut Ui, gain: f32, size: Vec2) -> (Response, Option<f32>) {
     (field, typed)
 }
 
-/// The highest peak since the peaks were cleared, red once it's over full
-/// scale. Clicking it clears them.
-fn peak_readout(ui: &mut Ui, highest: f32, label: &str, size: Vec2) -> Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let text = db_text(decibels_of(highest));
-    response.widget_info(|| WidgetInfo {
-        current_text_value: Some(text.clone()),
-        ..WidgetInfo::labeled(Role::Button, true, label)
-    });
-    if ui.is_rect_visible(rect) {
-        let over = highest > 1.0;
-        let visuals = ui.style().interact(&response);
-        let fill = if over {
-            RED
-        } else {
-            ui.visuals().extreme_bg_color
-        };
-        let ink = if over { INK } else { visuals.text_color() };
-        let painter = ui.painter();
-        painter.rect(rect, 2.0, fill, visuals.bg_stroke, StrokeKind::Inside);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            &text,
-            FontId::monospace(11.0),
-            ink,
-        );
-    }
-    response.on_hover_text(
-        "The highest peak since the peaks were cleared. Red: the channel went over full \
-         scale.\nClick to clear every channel's peak.",
-    )
-}
-
-/// The clip stage's type: a menu of them. Returns the type the user picked.
-fn clip_menu(
-    ui: &mut Ui,
-    id: impl AsIdSalt,
-    clip_type: ClipType,
-    label: String,
-) -> Option<ClipType> {
-    let text = format!("Clip: {}", clip_name(clip_type));
-    let mut picked = None;
-    let menu = ComboBox::from_id_salt(id)
-        .width(INNER)
-        .selected_text(text.as_str())
-        .show_ui(ui, |ui| {
-            for option in [ClipType::Off, ClipType::Hard, ClipType::Soft] {
-                let item = ui
-                    .selectable_label(option == clip_type, clip_name(option))
-                    .on_hover_text(clip_hint(option));
-                if item.clicked() && option != clip_type {
-                    picked = Some(option);
-                }
-            }
-        });
-    name_menu(&menu.response, label, &text);
-    menu.response
-        .on_hover_text("The clip stage after the fader, for a channel that goes over full scale");
-    picked
-}
-
 fn clip_name(clip_type: ClipType) -> &'static str {
     match clip_type {
         ClipType::Off => "Off",
@@ -856,63 +916,6 @@ fn clip_hint(clip_type: ClipType) -> &'static str {
             "Rounds off the signal above -6 dB, so it never quite reaches full scale."
         }
     }
-}
-
-/// How a toggle button shows what it does.
-#[derive(Debug, Clone, Copy)]
-enum Face {
-    Text(&'static str),
-    /// A dot, as record buttons have.
-    Dot,
-}
-
-/// A button `width` wide that's lit in `color` while `on`.
-fn toggle(ui: &mut Ui, face: Face, on: bool, color: Color32, label: &str, width: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(width, ROW - 2.0), Sense::click());
-    response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, label));
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
-        let (fill, ink) = if on {
-            (color, INK)
-        } else {
-            (visuals.weak_bg_fill, visuals.text_color())
-        };
-        let painter = ui.painter();
-        painter.rect(rect, 3.0, fill, visuals.bg_stroke, StrokeKind::Inside);
-        match face {
-            Face::Text(text) => {
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    text,
-                    FontId::proportional(12.0),
-                    ink,
-                );
-            }
-            Face::Dot => {
-                painter.circle_filled(rect.center(), 4.0, ink);
-            }
-        }
-    }
-    response
-}
-
-/// Where the user dragged a control to, from `at` of the way along its
-/// travel, which is `length` points long: up for `vertical` controls, right
-/// for the others. Ctrl (Cmd on a Mac) moves it a tenth as far, for small
-/// changes.
-fn dragged(ui: &Ui, response: &Response, at: f32, length: f32, vertical: bool) -> Option<f32> {
-    if !response.dragged() || length <= 0.0 {
-        return None;
-    }
-    let delta = response.drag_delta();
-    let moved = if vertical { -delta.y } else { delta.x };
-    if moved == 0.0 {
-        return None;
-    }
-    let fine = ui.input(|input| input.modifiers.command);
-    let scale = if fine { 0.1 } else { 1.0 };
-    Some((at + moved / length * scale).clamp(0.0, 1.0))
 }
 
 /// Names the slider `response` for screen readers, and tells them its
@@ -1059,7 +1062,9 @@ mod tests {
         Harness::builder().with_size([900.0, 600.0]).build_ui_state(
             |ui, state: &mut State| {
                 let mut actions = Vec::new();
-                show(ui, state.document.project(), &state.levels, &mut actions);
+                let (theme, mouse) = (Theme::default(), MouseMap::live());
+                let project = state.document.project();
+                show(ui, project, &state.levels, &theme, &mouse, &mut actions);
                 for action in &actions {
                     match action {
                         Action::Mixer(change) => mixer::change(&mut state.document, *change),

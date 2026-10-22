@@ -37,8 +37,8 @@ pub const SPLIT: CommandId = CommandId::new("clip.split");
 pub const DELETE: CommandId = CommandId::new("clip.delete");
 /// Adds an empty MIDI clip.
 pub const INSERT_MIDI_CLIP: CommandId = CommandId::new("clip.insert_midi_clip");
-/// Adds a clip playing a whole audio file.
-pub const INSERT_AUDIO_CLIP: CommandId = CommandId::new("clip.insert_audio_clip");
+/// Adds clips playing whole audio files, one after another.
+pub const INSERT_AUDIO: CommandId = CommandId::new("clip.insert_audio");
 
 /// What an inserted MIDI clip is called.
 const MIDI_CLIP: &str = "MIDI Clip";
@@ -49,8 +49,16 @@ pub fn register(registry: &mut Registry) {
         Command::new(MOVE, "Move Clips").with_params(&[
             Param::required("clips", Type::CLIPS, "The clips to move."),
             Param::optional("by", Type::Beats, "How far later, or earlier if negative."),
-            Param::optional("tracks", Type::Int, "How many tracks down, or up if negative."),
-            Param::optional("copy", Type::Bool, "Copies the clips instead of moving them."),
+            Param::optional(
+                "tracks",
+                Type::Int,
+                "How many tracks down, or up if negative.",
+            ),
+            Param::optional(
+                "copy",
+                Type::Bool,
+                "Copies the clips instead of moving them.",
+            ),
         ]),
         |ctx, args| {
             let clips: Vec<ClipId> = args.get("clips")?;
@@ -61,6 +69,8 @@ pub fn register(registry: &mut Registry) {
             let moved = ctx
                 .document
                 .transact(name, |tx| move_clips(tx, &clips, by, tracks, copy));
+            // Copies are selected, as in Live.
+            ctx.document.editor_mut().selection = Selection::clips(moved.clone());
             Ok(moved.into())
         },
     );
@@ -172,24 +182,33 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(INSERT_AUDIO_CLIP, "Insert Audio Clip").with_params(&[
-            Param::required("track", Type::Track, "An audio track."),
-            Param::required("at", Type::Beats, "Where the clip starts."),
+        Command::new(INSERT_AUDIO, "Insert Audio").with_params(&[
             Param::required(
-                "file",
-                Type::Text,
-                "The file's path, as clips name files. The app must have read the file \
+                "files",
+                Type::List(&Type::Text),
+                "The files' paths, as clips name files. The app must have read each file \
                  first: see Editor::files.",
+            ),
+            Param::optional(
+                "track",
+                Type::Track,
+                "An audio track. Without one, the clips go on the selected track if it's \
+                 an audio track, or else on a new one.",
+            ),
+            Param::optional(
+                "at",
+                Type::Beats,
+                "Where the first clip starts: the time selection's start, or else the start \
+                 marker.",
             ),
         ]),
         |ctx, args| {
-            let (track, at) = (args.get("track")?, args.get("at")?);
-            let file: String = args.get("file")?;
-            let clip = ctx.document.transact("Insert Audio Clip", |tx| {
-                insert_audio_clip(tx, track, at, &file)
-            })?;
-            ctx.document.editor_mut().selection = Selection::clips([clip]);
-            Ok(clip.into())
+            let files: Vec<String> = args.get("files")?;
+            let (track, clips) = insert_audio(ctx, &files, args.opt("track")?, args.opt("at")?)?;
+            let editor = ctx.document.editor_mut();
+            editor.selection = Selection::clips(clips.clone());
+            editor.selected_track = Some(track);
+            Ok(clips.into())
         },
     );
 }
@@ -343,8 +362,18 @@ pub fn trim(tx: &mut Transaction<'_>, clip: ClipId, start: Option<Beats>, end: O
         return;
     };
     let keep = BTreeSet::from([clip]);
-    clear(tx, track, BeatRange::new(timing.start, current.start), &keep);
-    clear(tx, track, BeatRange::new(current.end(), timing.end()), &keep);
+    clear(
+        tx,
+        track,
+        BeatRange::new(timing.start, current.start),
+        &keep,
+    );
+    clear(
+        tx,
+        track,
+        BeatRange::new(current.end(), timing.end()),
+        &keep,
+    );
     tx.set_clip_timing(clip, timing);
 }
 
@@ -417,7 +446,9 @@ pub fn insert_audio_clip(
         return Err(CommandError::invalid("audio clips go on audio tracks"));
     }
     if info.frames == 0 {
-        return Err(CommandError::invalid(format!("the audio file {file} is empty")));
+        return Err(CommandError::invalid(format!(
+            "the audio file {file} is empty"
+        )));
     }
     let at = at.max(Beats::ZERO);
     let tempo = &tx.project().tempo;
@@ -425,14 +456,81 @@ pub fn insert_audio_clip(
     // Long enough for the file's last frame.
     let first = tempo.frame_at(at, rate);
     let end = after_frames(tempo, rate, first, info.frames).max(at + Beats::from_ticks(1));
-    let name = Path::new(file)
-        .file_stem()
-        .map_or(file.to_owned(), |stem| stem.to_string_lossy().into_owned());
     let content = ClipContent::Audio(AudioClip::new(file));
-    let clip = tx.new_clip(name, BeatRange::new(at, end), content);
+    let clip = tx.new_clip(file_name(file), BeatRange::new(at, end), content);
     let id = clip.id;
     place(tx, vec![(track, clip)]);
     Ok(id)
+}
+
+/// Inserts a clip playing the whole of each of `files`, one after another,
+/// from `at` on the audio track `track`, or where [`INSERT_AUDIO`] says
+/// without them. Returns the track and the clips' ids.
+fn insert_audio(
+    ctx: &mut Context<'_>,
+    files: &[String],
+    track: Option<TrackId>,
+    at: Option<Beats>,
+) -> Result<(TrackId, Vec<ClipId>), CommandError> {
+    let editor = ctx.document.editor();
+    let project = ctx.document.project();
+    let Some(first) = files.first() else {
+        return Err(CommandError::invalid("there are no files to insert"));
+    };
+    for file in files {
+        match editor.files.get(file) {
+            None => {
+                let problem = format!("the audio file {file} hasn't been read");
+                return Err(CommandError::invalid(problem));
+            }
+            Some(info) if info.frames == 0 => {
+                return Err(CommandError::invalid(format!(
+                    "the audio file {file} is empty"
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    let audio = |id: TrackId| {
+        project
+            .track(id)
+            .is_some_and(|t| t.kind == TrackKind::Audio)
+    };
+    let track = match track {
+        Some(id) if project.track(id).is_none() => {
+            return Err(CommandError::invalid(format!("there's no track {}", id.0)));
+        }
+        Some(id) if !audio(id) => {
+            return Err(CommandError::invalid("audio clips go on audio tracks"));
+        }
+        Some(id) => Some(id),
+        None => editor.selected_track.filter(|&id| audio(id)),
+    };
+    let time = editor.selection.time.as_ref();
+    let at = at.unwrap_or_else(|| time.map_or(editor.start_marker, |time| time.range.start));
+    Ok(ctx.document.transact("Insert Audio", |tx| {
+        // A new track is named after the first file.
+        let track = track
+            .unwrap_or_else(|| crate::track::add_track(tx, file_name(first), TrackKind::Audio));
+        let mut at = at.max(Beats::ZERO);
+        let mut clips = Vec::with_capacity(files.len());
+        for file in files {
+            // The files were all checked.
+            if let Ok(clip) = insert_audio_clip(tx, track, at, file) {
+                at = tx.project().find_clip(clip).map_or(at, |(_, c)| c.end());
+                clips.push(clip);
+            }
+        }
+        (track, clips)
+    }))
+}
+
+/// A file's name without its folder or its extension, for a clip or a
+/// track playing it.
+fn file_name(file: &str) -> String {
+    Path::new(file)
+        .file_stem()
+        .map_or(file.to_owned(), |stem| stem.to_string_lossy().into_owned())
 }
 
 /// Inserts empty MIDI clips, as the insert command's arguments or the
@@ -485,7 +583,10 @@ fn insert_midi_clips(ctx: &mut Context<'_>, args: &Args) -> Result<Vec<ClipId>, 
             .into_iter()
             .map(|track| {
                 let content = ClipContent::Midi(MidiClip::default());
-                (track, tx.new_clip(MIDI_CLIP, BeatRange::new(start, end), content))
+                (
+                    track,
+                    tx.new_clip(MIDI_CLIP, BeatRange::new(start, end), content),
+                )
             })
             .collect();
         place(tx, clips)
@@ -606,7 +707,11 @@ mod tests {
             frames: 288_000,
             channels: 2,
         };
-        setup.document.editor_mut().files.insert("loop.wav".into(), file);
+        setup
+            .document
+            .editor_mut()
+            .files
+            .insert("loop.wav".into(), file);
         (setup, [drums, bass, keys], [d, b, k])
     }
 
@@ -649,7 +754,11 @@ mod tests {
         assert_eq!(clips(&setup, bass), []);
         assert_eq!(
             clips(&setup, keys),
-            [row("K", 0.0, 4.0), row("B", 4.0, 12.0), row("K", 12.0, 16.0)]
+            [
+                row("K", 0.0, 4.0),
+                row("B", 4.0, 12.0),
+                row("K", 12.0, 16.0)
+            ]
         );
         // The part after keeps playing what it played: its notes start 12
         // beats into the clip.
@@ -678,13 +787,19 @@ mod tests {
         assert_eq!(clips(&setup, keys), [row("K", 4.0, 20.0)]);
         // A copy leaves the clips where they are, and gets new ids.
         let copies = moved(&mut setup, &[d], 16, 0, true);
-        assert_eq!(clips(&setup, drums), [row("D", 0.0, 8.0), row("D", 16.0, 24.0)]);
+        assert_eq!(
+            clips(&setup, drums),
+            [row("D", 0.0, 8.0), row("D", 16.0, 24.0)]
+        );
         let Value::List(copies) = copies else {
             panic!("{copies:?}")
         };
         assert_eq!(copies.len(), 1);
         assert_ne!(copies[0], Value::Clip(d));
-        assert_eq!(setup.committed_names(), ["Move Clips", "Move Clips", "Copy Clips"]);
+        assert_eq!(
+            setup.committed_names(),
+            ["Move Clips", "Move Clips", "Copy Clips"]
+        );
     }
 
     #[test]
@@ -702,7 +817,10 @@ mod tests {
         };
         trim(&mut setup, Some(2), None);
         let trimmed = clip(&setup, d);
-        assert_eq!(trimmed.range(), BeatRange::new(Beats::new(2), Beats::new(8)));
+        assert_eq!(
+            trimmed.range(),
+            BeatRange::new(Beats::new(2), Beats::new(8))
+        );
         // Two beats at 120 BPM into a 48 kHz file, and the fade in that
         // was at the start went with it.
         assert_eq!(trimmed.content.offset(), Offset::Frames(48_000));
@@ -723,7 +841,10 @@ mod tests {
         setup.run_with(&MOVE, args).unwrap();
         trim(&mut setup, None, Some(10));
         trim(&mut setup, Some(0), Some(12));
-        assert_eq!(clips(&setup, drums), [row("D", 0.0, 12.0), row("D", 20.0, 32.0)]);
+        assert_eq!(
+            clips(&setup, drums),
+            [row("D", 0.0, 12.0), row("D", 20.0, 32.0)]
+        );
         let ends: Vec<_> = clips(&setup, drums).into_iter().map(|c| c.2).collect();
         assert_eq!(ends, [12.0, 32.0]);
     }
@@ -739,7 +860,10 @@ mod tests {
         let Value::Clip(tail) = parts[0] else {
             panic!("{parts:?}")
         };
-        assert_eq!(clips(&setup, drums), [row("D", 0.0, 4.0), row("D", 4.0, 8.0)]);
+        assert_eq!(
+            clips(&setup, drums),
+            [row("D", 0.0, 4.0), row("D", 4.0, 8.0)]
+        );
         let fades = |id| match clip(&setup, id).content {
             ClipContent::Audio(audio) => audio.fades(),
             ClipContent::Midi(_) => panic!("an audio clip"),
@@ -761,7 +885,9 @@ mod tests {
         );
         assert_eq!(clip(&setup, tail).content.offset(), Offset::Frames(96_000));
         // Outside the clip, nothing.
-        let args = Args::new().with("clips", vec![d]).with("at", Beats::new(30));
+        let args = Args::new()
+            .with("clips", vec![d])
+            .with("at", Beats::new(30));
         assert_eq!(setup.run_with(&SPLIT, args), Ok(Value::List(vec![])));
     }
 
@@ -769,7 +895,9 @@ mod tests {
     fn fades_fit_the_clip() {
         let (mut setup, _, [d, b, _]) = arrangement();
         let fade = |setup: &mut Setup, clip, fade_in: i64, fade_out: Option<i64>| {
-            let mut args = Args::new().with("clip", clip).with("fade_in", Beats::new(fade_in));
+            let mut args = Args::new()
+                .with("clip", clip)
+                .with("fade_in", Beats::new(fade_in));
             if let Some(fade_out) = fade_out {
                 args.set("fade_out", Beats::new(fade_out));
             }
@@ -793,7 +921,7 @@ mod tests {
 
     #[test]
     fn inserted_clips_take_the_selection_s_place() {
-        let (mut setup, [drums, bass, keys], [d, b, k]) = arrangement();
+        let (mut setup, [drums, bass, keys], [d, _, k]) = arrangement();
         // MIDI clips over the time selection, on its MIDI tracks.
         setup.document.editor_mut().selection.time = Some(TimeSelection {
             range: BeatRange::new(Beats::new(2), Beats::new(6)),
@@ -808,7 +936,10 @@ mod tests {
         setup.select_clips(&[k]);
         setup.document.editor_mut().start_marker = Beats::new(20);
         setup.run(&INSERT_MIDI_CLIP);
-        assert_eq!(clips(&setup, keys).last(), Some(&row("MIDI Clip", 20.0, 24.0)));
+        assert_eq!(
+            clips(&setup, keys).last(),
+            Some(&row("MIDI Clip", 20.0, 24.0))
+        );
         let inserted = &setup.document.editor().selection.clips;
         assert_eq!(inserted.len(), 1);
         assert!(!inserted.contains(&k));
@@ -821,21 +952,91 @@ mod tests {
 
         // An audio clip lasts as long as its file.
         let args = Args::new()
+            .with("files", vec!["loop.wav"])
             .with("track", drums)
-            .with("at", Beats::new(4))
-            .with("file", "loop.wav");
-        setup.run_with(&INSERT_AUDIO_CLIP, args.clone()).unwrap();
-        assert_eq!(clips(&setup, drums), [row("D", 0.0, 4.0), row("loop", 4.0, 16.0)]);
-        let unread = args.clone().with("file", "other.wav");
+            .with("at", Beats::new(4));
+        setup.run_with(&INSERT_AUDIO, args.clone()).unwrap();
         assert_eq!(
-            setup.run_with(&INSERT_AUDIO_CLIP, unread),
-            Err(CommandError::invalid("the audio file other.wav hasn't been read"))
+            clips(&setup, drums),
+            [row("D", 0.0, 4.0), row("loop", 4.0, 16.0)]
+        );
+        let unread = args.clone().with("files", vec!["loop.wav", "other.wav"]);
+        assert_eq!(
+            setup.run_with(&INSERT_AUDIO, unread),
+            Err(CommandError::invalid(
+                "the audio file other.wav hasn't been read"
+            ))
         );
         let midi = args.with("track", bass);
         assert_eq!(
-            setup.run_with(&INSERT_AUDIO_CLIP, midi),
+            setup.run_with(&INSERT_AUDIO, midi),
             Err(CommandError::invalid("audio clips go on audio tracks"))
         );
-        let _ = b;
+    }
+
+    #[test]
+    fn audio_without_a_track_goes_on_a_new_one() {
+        let (mut setup, [drums, _, _], [d, b, _]) = arrangement();
+        // The selected track is a MIDI track, so the files go on a new
+        // track, one after another from the start marker, in one step.
+        setup.select_clips(&[b]);
+        setup.document.editor_mut().start_marker = Beats::new(2);
+        let files = Args::new().with("files", vec!["loop.wav", "loop.wav"]);
+        let inserted = setup.run_with(&INSERT_AUDIO, files.clone()).unwrap();
+        let project = setup.document.project();
+        let track = project.tracks.last().unwrap();
+        assert_eq!(
+            (track.name.as_str(), track.kind),
+            ("loop", TrackKind::Audio)
+        );
+        assert_eq!(
+            clips(&setup, track.id),
+            [row("loop", 2.0, 14.0), row("loop", 14.0, 26.0)]
+        );
+        let editor = setup.document.editor();
+        assert_eq!(editor.selected_track, Some(track.id));
+        let Value::List(inserted) = inserted else {
+            panic!("{inserted:?}")
+        };
+        assert_eq!(editor.selection.clips.len(), inserted.len());
+        assert_eq!(setup.committed_names(), ["Insert Audio"]);
+        // On the selected audio track, from the time selection's start.
+        setup.select_clips(&[d]);
+        setup.select_time(20, 24, &[drums]);
+        setup.run_with(&INSERT_AUDIO, files).unwrap();
+        assert_eq!(
+            clips(&setup, drums),
+            [
+                row("D", 0.0, 8.0),
+                row("loop", 20.0, 32.0),
+                row("loop", 32.0, 44.0)
+            ]
+        );
+        assert_eq!(setup.document.project().tracks.len(), 4);
+        let none = Args::new().with("files", Vec::<String>::new());
+        assert_eq!(
+            setup.run_with(&INSERT_AUDIO, none),
+            Err(CommandError::invalid("there are no files to insert"))
+        );
+    }
+
+    #[test]
+    fn copies_are_selected() {
+        let (mut setup, _, [d, b, _]) = arrangement();
+        setup.select_clips(&[d, b]);
+        let copies = moved(&mut setup, &[d, b], 32, 0, true);
+        let Value::List(copies) = copies else {
+            panic!("{copies:?}")
+        };
+        let selected: Vec<Value> = setup
+            .document
+            .editor()
+            .selection
+            .clips
+            .iter()
+            .map(|&c| Value::Clip(c))
+            .collect();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|c| copies.contains(c)));
     }
 }

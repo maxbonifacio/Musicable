@@ -1282,8 +1282,7 @@ impl Edit {
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
             Edit::ClipTiming { from, to, .. } => from == to,
             Edit::ClipFades { from, to, .. } => from == to,
-            Edit::ClipName { from, to, .. }
-            | Edit::LocatorName { from, to, .. } => from == to,
+            Edit::ClipName { from, to, .. } | Edit::LocatorName { from, to, .. } => from == to,
             Edit::LocatorAt { from, to, .. } => from == to,
         }
     }

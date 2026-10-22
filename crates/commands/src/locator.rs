@@ -68,13 +68,16 @@ pub fn register(registry: &mut Registry) {
         (PREVIOUS, "Previous Locator", Step::Back),
         (NEXT, "Next Locator", Step::On),
     ] {
-        registry.add(Command::new(id, title).when(When::HasLocators), move |ctx, _| {
-            let from = here(ctx);
-            if let Some(at) = step.from(ctx.document.project(), from) {
-                crate::transport::jump(ctx, at);
-            }
-            Ok(Value::None)
-        });
+        registry.add(
+            Command::new(id, title).when(When::HasLocators),
+            move |ctx, _| {
+                let from = here(ctx);
+                if let Some(at) = step.from(ctx.document.project(), from) {
+                    crate::transport::jump(ctx, at);
+                }
+                Ok(Value::None)
+            },
+        );
     }
     registry.add(
         Command::new(MOVE, "Move Locator").with_params(&[
@@ -186,7 +189,9 @@ mod tests {
         setup.run(&ADD);
         // Not twice in one place.
         setup.run(&ADD);
-        let args = Args::new().with("at", Beats::new(16)).with("name", " Chorus ");
+        let args = Args::new()
+            .with("at", Beats::new(16))
+            .with("name", " Chorus ");
         let chorus = setup.run_with(&ADD, args).unwrap();
         assert_eq!(chorus, Value::Locator(LocatorId(2)));
         // In order along the song.
@@ -260,7 +265,12 @@ mod tests {
         // that move changed nothing.
         assert_eq!(
             setup.committed_names(),
-            ["Add Locator", "Move Locator", "Rename Locator", "Delete Locator"]
+            [
+                "Add Locator",
+                "Move Locator",
+                "Rename Locator",
+                "Delete Locator"
+            ]
         );
     }
 }
