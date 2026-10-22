@@ -1,12 +1,14 @@
 //! The gate: turns the signal down to `floor` while it's quieter than the
 //! threshold.
 //!
-//! It opens when the louder channel's peak rises above `threshold`, and
-//! closes once it falls `return` dB below it and `hold` has passed since it
-//! was last above: the gap stops it chattering on a level that hovers
-//! round the threshold. It fades open over `attack` and closed over
-//! `release`. Closed, it turns the signal down to `floor`, so a floor of
-//! -80 dB is all but silent and a higher one lets some through.
+//! It opens on the frame the louder channel's peak reaches `threshold`, and
+//! closes once the peak has stayed more than `return` dB below it for
+//! `hold`: the gap stops it chattering on a level that hovers round the
+//! threshold. It fades open over `attack` and closed over `release`, in a
+//! straight line in gain, and a fade that starts part of the way takes
+//! that part of the time. Closed, it turns the signal down to `floor`, so
+//! a floor of -80 dB is all but silent and a higher one lets some through.
+//! A new gate starts open.
 
 use super::Scale::{Fader, Linear, Log};
 use super::Unit::{Decibels, Milliseconds};
@@ -19,8 +21,8 @@ pub const THRESHOLD: usize = 0;
 pub const RETURN: usize = 1;
 /// In ms.
 pub const ATTACK: usize = 2;
-/// How long it stays open after the level was last above the threshold,
-/// in ms.
+/// How long it stays open once the peak has fallen `return` dB below the
+/// threshold, in ms.
 pub const HOLD: usize = 3;
 /// In ms.
 pub const RELEASE: usize = 4;
