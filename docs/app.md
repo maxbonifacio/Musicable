@@ -449,8 +449,10 @@ the same take.
 
 **The recorder** (`musicable-recorder`, a thread of its own) reads the
 engine's timeline and the inputs' buffers every 10 ms, and writes what the
-armed tracks record. The audio thread never waits for it. The inputs'
-buffers hold 8 seconds at least: if the recorder falls further behind than
+armed tracks record. The audio thread never waits for it. However late it
+runs, what the session sent it before the transport changed, such as a
+stream's inputs or the tracks just armed, takes effect before it follows
+the change. The inputs' buffers hold 8 seconds at least: if the recorder falls further behind than
 that, or an input stops capturing for two seconds, the recording has silence
 there, and the status bar says how much. A MIDI track's recording waits for
 its inputs to bring every message up to where it records, which the stream
