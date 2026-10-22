@@ -498,6 +498,59 @@ Windows.
 After a new project's first save, it records into the Unsaved Recordings
 folder until it's opened again.
 
+### Capture
+
+**Capture** (Ctrl+Shift+C), beside Record in the transport bar and in the
+Transport menu, records what you just played without recording, as Live's
+Capture MIDI does, for audio tracks as well as MIDI tracks. The recorder
+holds the last few minutes of what the inputs of armed tracks, and of
+tracks monitoring In, bring. Capture makes what they played over the
+transport's last run into takes, as if they had recorded it: the same
+files, passes and takes, a pass for each time round the loop, in one step
+of the undo history, named Capture.
+
+The last run goes from where the transport last started playing to where
+it stopped, or to now if it still plays. Stretches the transport recorded
+are left out, since they're takes already, and so is what came in while
+it was stopped, which has no place in the song. A run longer than the
+inputs are held is captured from as far back as they go. A capture asked
+for while playing waits for the inputs to bring what was heard up to then,
+as a recording does, for two seconds at most. With nothing to capture, the
+status bar says why.
+
+**How long.** `capture_minutes` in the settings
+([settings.toml](#settings-and-your-keymap)) is how long each input is
+held, 5 minutes by default; 0 turns Capture off. An audio input is held as
+32-bit floats at the engine's sample rate, rounded up to a power of two of
+frames: at 48 kHz, 5 minutes of a stereo input take 128 MiB. A MIDI input
+holds 2,000 messages for each second, 24 MiB for 5 minutes: one that sends
+more than that on average, such as an MPE controller played throughout,
+holds less than the whole length. Tracks on the same input channels share
+what's held. The held inputs take 2 GiB at most together: an input that
+would go past that isn't held, and the status bar names the tracks it's
+for.
+
+What's held is dropped when another project opens, when
+`capture_minutes` changes, and when new audio settings replace the engine.
+An input that no armed or monitoring-In track takes any more stops being
+held. Holding starts again with what the inputs bring next.
+
+Every 10 ms, the recorder copies each held audio input's channels from the
+stream's 8-second buffer into a buffer of its own, at the same engine
+frames, and each held MIDI input's messages, with the frames heard. It
+keeps the engine's timeline as far back as that and a minute more, for the
+plugins' latency. Capturing runs the recording's own code over what's
+held, on the run's timeline as a recording would have had it: recording on
+throughout, and recording wherever the transport didn't
+(`crates/app/src/recorder/capture.rs`). `Session::capture` asks for a
+capture, and `Session::set_capture_seconds` sets how long inputs are held.
+`crates/app/tests/recording.rs` captures a second of a ramp on an armed
+track and on one monitoring In, and a note on a MIDI track, through the
+session. `crates/app/src/recorder/tests.rs` checks where captures land,
+loops, leaving out what was recorded, the last run, waiting for inputs and
+the timeline, how far back inputs are held, new streams, shared and
+refused inputs, and why there's nothing to take, for audio and MIDI.
+
 ## Plugins
 
 The app finds CLAP and VST3 plugins in each format's usual places, and in
@@ -705,7 +758,7 @@ backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, and how editing behaves:
+ones, how editing behaves, and how long Capture holds the inputs:
 
 ```toml
 format = "musicable-settings"
@@ -718,13 +771,18 @@ buffer_size = 128
 
 [behaviour]
 play_from = "start_marker"
+
+[recording]
+capture_minutes = 5
 ```
 
 Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
 smallest the device supports, or an ASIO driver's preferred size. `play_from`
 is where Space plays from: the start marker (`start_marker`), as in Live, or
-wherever the playhead stopped (`playhead`). The app reads it at startup;
+wherever the playhead stopped (`playhead`). `capture_minutes` is how long
+[Capture](#capture) holds the inputs, 5 minutes if it's left out; 0 turns
+Capture off. The app reads it at startup;
 there's no window for it yet. Fields this version doesn't know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.

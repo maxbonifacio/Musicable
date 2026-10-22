@@ -12,6 +12,9 @@
 //!
 //! [behaviour]
 //! play_from = "start_marker"
+//!
+//! [recording]
+//! capture_minutes = 5
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -65,6 +68,22 @@ pub struct Settings {
     /// Play/Stop starts from: the start marker (`start_marker`), as in Live,
     /// or wherever the playhead stopped (`playhead`).
     pub behaviour: Behaviour,
+    pub recording: RecordingSettings,
+}
+
+/// How Musicable records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    /// How many minutes of the inputs of armed tracks, and of those
+    /// monitoring In, Capture holds in memory, at least: 0 turns it off.
+    pub capture_minutes: u32,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self { capture_minutes: 5 }
+    }
 }
 
 /// The audio device to play through, and how.
@@ -216,6 +235,7 @@ mod tests {
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
             },
+            recording: RecordingSettings { capture_minutes: 0 },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -232,6 +252,7 @@ mod tests {
         let settings = Settings::parse("[audio]\nbuffer_size = 256\nlater = true\n").unwrap();
         assert_eq!(settings.audio.buffer_size, Some(256));
         assert_eq!(settings.behaviour, Behaviour::default());
+        assert_eq!(settings.recording.capture_minutes, 5);
         assert_eq!(
             settings.audio.request(),
             StreamRequest {

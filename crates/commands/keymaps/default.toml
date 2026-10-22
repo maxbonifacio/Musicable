@@ -15,6 +15,7 @@ version = 1
 "transport.toggle_loop" = ["Ctrl+L"]
 "transport.toggle_metronome" = ["O"]
 "transport.record" = ["F9"]
+"transport.capture" = ["Ctrl+Shift+C"]
 
 # Live has no keys for these. None of the chords does anything in Live outside
 # its MIDI note editor.

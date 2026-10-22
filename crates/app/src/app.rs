@@ -140,6 +140,7 @@ impl App {
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
         session.editor_mut().behaviour = settings.behaviour;
+        session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_waker(waker(ctx));
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         // What the last scan found, while the next one runs. Before the
@@ -339,6 +340,7 @@ impl App {
                 show: false,
             } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
+            Request::Capture => self.session.capture(),
         }
     }
 

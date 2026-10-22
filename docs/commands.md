@@ -65,6 +65,7 @@ The default keymap follows Ableton Live's shortcuts where Live has one.
 | `transport.play` | Play | Plays from the playhead: where playing stopped | Shift+Space | Shift+Space (continue from the stop point) |
 | `transport.stop` | Stop | Stops, leaving the playhead where it is | Ctrl+Period | none |
 | `transport.record` | Record | Records the armed tracks, playing from the start marker as Play/Stop does; while playing, turns recording on or off | F9 | F9 (Arrangement Record) |
+| `transport.capture` | Capture | Makes what the armed tracks, and those monitoring In, played over the transport's last run into takes, as if they had recorded it ([app.md](app.md#capture)) | Ctrl+Shift+C | Ctrl+Shift+C (Capture MIDI) |
 | `transport.go_to_start` | Go to Start | Moves the start marker and the playhead to the start of the song | Home | Home |
 | `transport.toggle_loop` | Toggle Loop | Loops the selection, or else turns looping over the loop region on or off | Ctrl+L | Ctrl+L |
 | `transport.toggle_metronome` | Toggle Metronome | Turns the metronome on or off | O | O |

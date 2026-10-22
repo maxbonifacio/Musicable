@@ -178,7 +178,19 @@ pub enum Recorded {
 /// further into its file. Notes start and stop on their frames the same
 /// way. Tracks that went, or of another kind, are left out.
 pub fn add_recording(document: &mut Document, rate: u32, recorded: &[Recorded]) -> Vec<TakeId> {
-    document.transact("Record", |tx| {
+    add_takes(document, "Record", rate, recorded)
+}
+
+/// Adds what Capture took as [`add_recording`] adds a recording, as one
+/// transaction named Capture.
+pub fn add_capture(document: &mut Document, rate: u32, recorded: &[Recorded]) -> Vec<TakeId> {
+    add_takes(document, "Capture", rate, recorded)
+}
+
+/// Adds what tracks recorded, as one transaction called `name`: see
+/// [`add_recording`].
+fn add_takes(document: &mut Document, name: &str, rate: u32, recorded: &[Recorded]) -> Vec<TakeId> {
+    document.transact(name, |tx| {
         let mut takes = Vec::new();
         for recorded in recorded {
             let (track, kind) = match recorded {

@@ -81,6 +81,7 @@ const MENUS: [MenuSpec; 6] = [
             Some(transport::GO_TO_START),
             None,
             Some(transport::RECORD),
+            Some(transport::CAPTURE),
             Some(transport::TOGGLE_PUNCH_IN),
             Some(transport::TOGGLE_PUNCH_OUT),
             None,
