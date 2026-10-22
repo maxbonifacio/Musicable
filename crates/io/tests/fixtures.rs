@@ -29,6 +29,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("awkward-values", awkward_values()),
         ("mixer", mixer()),
         ("clips", clips()),
+        ("locators", locators()),
     ]
 }
 
@@ -302,6 +303,29 @@ fn clips() -> Project {
     track.clips = vec![empty, chords];
     track.devices = vec![instrument];
     project.next_clip_id += 1;
+    project
+}
+
+/// Locators, from version 4: out of order, two at the same place, one
+/// before the song starts and one as far in as a file reaches, names JSON
+/// has to escape, and a gap in the ids where one was deleted.
+fn locators() -> Project {
+    let mut project = Project::new();
+    project.tempo.set_tempo(87.0);
+    for (name, at) in [
+        ("Chorus", Beats::new(64)),
+        ("Intro", Beats::ZERO),
+        ("Deleted", Beats::new(8)),
+        ("Verse \"1\"\t\u{1f3a4}", Beats::new(16)),
+        ("Verse 2", Beats::new(16)),
+        ("", Beats::from_ratio(-7, 3)),
+        ("End", Beats::from_ticks(MAX_TICKS)),
+    ] {
+        let locator = project.new_locator(name, at);
+        project.locators.push(locator);
+    }
+    project.locators.retain(|locator| locator.name != "Deleted");
+    project.add_track("Audio", TrackKind::Audio);
     project
 }
 

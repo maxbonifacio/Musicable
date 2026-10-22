@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{self, Beats};
-use musicable_model::{self as model, DeviceId, SendId, TrackId};
+use musicable_model::{self as model, DeviceId, LocatorId, SendId, TrackId};
 use serde::{Deserialize, Serialize};
 
 use super::{FORMAT, Invalid, MAX_TICKS, VERSION};
@@ -33,8 +33,20 @@ pub(super) struct File {
     next_send_id: u32,
     next_device_id: u32,
     next_clip_id: u32,
+    next_locator_id: u32,
     tracks: Vec<Track>,
     master: Master,
+    locators: Vec<Locator>,
+}
+
+/// A named place in the song.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Locator {
+    id: u32,
+    name: String,
+    /// In ticks.
+    at: i64,
 }
 
 /// Tempo and time signature changes, each list in order.
@@ -230,10 +242,12 @@ impl From<&model::Project> for File {
             metronome,
             master,
             tracks,
+            locators,
             next_track_id,
             next_send_id,
             next_device_id,
             next_clip_id,
+            next_locator_id,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -247,8 +261,10 @@ impl From<&model::Project> for File {
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
             next_clip_id: *next_clip_id,
+            next_locator_id: *next_locator_id,
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
+            locators: locators.iter().map(Locator::from).collect(),
         }
     }
 }
@@ -269,8 +285,10 @@ impl File {
             next_send_id,
             next_device_id,
             next_clip_id,
+            next_locator_id,
             tracks,
             master,
+            locators,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
             let message = format!("must be {}", Beats::TICKS_PER_BEAT);
@@ -308,6 +326,14 @@ impl File {
             device_ids.add(device.id, &format!("master.devices[{j}]"))?;
         }
         device_ids.check_next()?;
+        let mut locator_ids = Ids::new("locator", "next_locator_id", *next_locator_id);
+        let mut model_locators = Vec::with_capacity(locators.len());
+        for (i, locator) in locators.iter().enumerate() {
+            let path = format!("locators[{i}]");
+            locator_ids.add(locator.id, &path)?;
+            model_locators.push(locator.to_model(&path)?);
+        }
+        locator_ids.check_next()?;
         let project = model::Project {
             tempo,
             loop_region,
@@ -315,10 +341,12 @@ impl File {
             metronome: *metronome,
             master: master.to_model()?,
             tracks: model_tracks,
+            locators: model_locators,
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
             next_clip_id: *next_clip_id,
+            next_locator_id: *next_locator_id,
         };
         check_loops(&project)?;
         Ok(project)
@@ -1099,6 +1127,28 @@ impl Master {
             devices: devices_to_model(devices, "master.devices")?,
             clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
+        })
+    }
+}
+
+impl From<&model::Locator> for Locator {
+    fn from(locator: &model::Locator) -> Self {
+        let model::Locator { id, name, at } = locator;
+        Self {
+            id: id.0,
+            name: name.clone(),
+            at: at.ticks(),
+        }
+    }
+}
+
+impl Locator {
+    fn to_model(&self, path: &str) -> Result<model::Locator, Invalid> {
+        let Self { id, name, at } = self;
+        Ok(model::Locator {
+            id: LocatorId(*id),
+            name: name.clone(),
+            at: position(*at, || format!("{path}.at"))?,
         })
     }
 }

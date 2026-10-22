@@ -5,7 +5,7 @@ use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERS
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::{DeviceKind, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{DeviceKind, LocatorId, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
 
 /// A small project with two tempos, two time signatures and two tracks.
@@ -745,6 +745,69 @@ fn clip_ids_are_unique_across_tracks_and_below_the_next_id() {
     let project = load(&file).unwrap();
     assert_eq!(project.tracks[0].clips[0].id, ClipId(7));
     assert_eq!(project.next_clip_id, 9);
+}
+
+/// The sample with two locators, the second at the furthest place a file
+/// reaches.
+fn located() -> Project {
+    let mut project = sample();
+    for (name, at) in [("Verse", Beats::new(8)), ("End", Beats::from_ticks(MAX_TICKS))] {
+        let locator = project.new_locator(name, at);
+        project.locators.push(locator);
+    }
+    project
+}
+
+#[test]
+fn locators_have_unique_ids_and_places_within_reach() {
+    let file = edited_from(&located(), |_| ());
+    assert_eq!(load(&file).unwrap(), located());
+    refused(
+        &edited_from(&located(), |f| f["locators"][1]["id"] = json!(0)),
+        "locators[1].id",
+        "locators[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&located(), |f| f["next_locator_id"] = json!(1)),
+        "next_locator_id",
+        "a locator has id 1",
+    );
+    refused(
+        &edited_from(&located(), |f| f["locators"][1]["at"] = json!(MAX_TICKS + 1)),
+        "locators[1].at",
+        "within",
+    );
+    refused(
+        &edited_from(&located(), |f| f["locators"][0]["at"] = json!(1.5)),
+        "locators[0].at",
+        "expected i64",
+    );
+    refused(
+        &edited_from(&located(), |f| f["locators"][0]["colour"] = json!("red")),
+        "locators[0].colour",
+        "unknown field",
+    );
+    refused(
+        &edited_from(&located(), |f| {
+            f["locators"][0].as_object_mut().unwrap().remove("name");
+        }),
+        "locators[0]",
+        "missing field `name`",
+    );
+    // Gaps, any order, and two in one place are fine.
+    let file = edited_from(&located(), |f| {
+        f["locators"][0]["id"] = json!(7);
+        f["locators"][1]["at"] = f["locators"][0]["at"].clone();
+        f["next_locator_id"] = json!(9);
+    });
+    let project = load(&file).unwrap();
+    assert_eq!(project.locators[0].id, LocatorId(7));
+    assert_eq!(project.locators[0].at, project.locators[1].at);
+    assert_eq!(project.next_locator_id, 9);
+    // Saving checks the same.
+    let mut project = located();
+    project.next_locator_id = 1;
+    refused_saving(&project, "next_locator_id", "a locator has id 1");
 }
 
 #[test]

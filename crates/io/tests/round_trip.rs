@@ -313,6 +313,11 @@ fn random_project(random: &mut Random) -> Project {
     project.next_send_id += random.below(3) as u32;
     project.next_device_id += random.below(3) as u32;
     project.next_clip_id += random.below(3) as u32;
+    for _ in 0..random.below(4) {
+        let locator = project.new_locator(random.name(), Beats::from_ticks(random.signed_ticks()));
+        project.locators.push(locator);
+    }
+    project.next_locator_id += random.below(3) as u32;
     project
 }
 

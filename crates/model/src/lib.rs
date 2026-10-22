@@ -5,7 +5,8 @@
 //! commands. [`time`] has musical time: beats, bars and the tempo map.
 //! [`mixer`] has the mixer's rules: where tracks can send their signal, and
 //! what mute and solo silence. [`clip`] has what tracks play: audio clips,
-//! and MIDI clips of notes with per-note expression.
+//! and MIDI clips of notes with per-note expression. [`Locator`]s name
+//! places in the song.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -183,6 +184,20 @@ impl Track {
     }
 }
 
+/// Stable identifier for a locator, unique within a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocatorId(pub u32);
+
+/// A named place in the song, shown on the arrangement's ruler, for finding
+/// the parts of a song and jumping between them: a locator, as Live calls
+/// them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Locator {
+    pub id: LocatorId,
+    pub name: String,
+    pub at: Beats,
+}
+
 /// The master bus's channel: every track that doesn't feed a group feeds
 /// the master, and the master feeds the audio device.
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +235,8 @@ pub struct Project {
     pub metronome: bool,
     pub master: Master,
     pub tracks: Vec<Track>,
+    /// In any order: the ruler shows them by position.
+    pub locators: Vec<Locator>,
     /// The id [`add_track`](Self::add_track) gives the next track. Ids are
     /// never reused, so it stays above the id of every track the project has
     /// had, deleted ones included.
@@ -230,6 +247,8 @@ pub struct Project {
     pub next_device_id: u32,
     /// The same for clips.
     pub next_clip_id: u32,
+    /// The same for locators.
+    pub next_locator_id: u32,
 }
 
 impl Default for Project {
@@ -243,10 +262,12 @@ impl Default for Project {
             metronome: false,
             master: Master::default(),
             tracks: Vec::new(),
+            locators: Vec::new(),
             next_track_id: 0,
             next_send_id: 0,
             next_device_id: 0,
             next_clip_id: 0,
+            next_locator_id: 0,
         }
     }
 }
@@ -319,11 +340,25 @@ impl Project {
         content: ClipContent,
     ) -> Clip {
         Clip {
-            id: ClipId(next_id(&mut self.next_clip_id, "clip")),
+            id: self.new_clip_id(),
             name: name.into(),
             start: range.start,
             length: range.len(),
             content,
+        }
+    }
+
+    /// The next clip id, for a copy of a clip.
+    pub fn new_clip_id(&mut self) -> ClipId {
+        ClipId(next_id(&mut self.next_clip_id, "clip"))
+    }
+
+    /// A locator with the next locator id, for the caller to add.
+    pub fn new_locator(&mut self, name: impl Into<String>, at: Beats) -> Locator {
+        Locator {
+            id: LocatorId(next_id(&mut self.next_locator_id, "locator")),
+            name: name.into(),
+            at,
         }
     }
 
@@ -338,6 +373,26 @@ impl Project {
     /// Where the track with `id` is in the track list.
     pub fn track_index(&self, id: TrackId) -> Option<usize> {
         self.tracks.iter().position(|t| t.id == id)
+    }
+
+    /// The clip with `id`, and the track it's on.
+    pub fn find_clip(&self, id: ClipId) -> Option<(&Track, &Clip)> {
+        self.tracks
+            .iter()
+            .find_map(|track| Some((track, track.clip(id)?)))
+    }
+
+    pub fn locator(&self, id: LocatorId) -> Option<&Locator> {
+        self.locators.iter().find(|l| l.id == id)
+    }
+
+    pub fn locator_mut(&mut self, id: LocatorId) -> Option<&mut Locator> {
+        self.locators.iter_mut().find(|l| l.id == id)
+    }
+
+    /// Where the locator with `id` is in the project's list of them.
+    pub fn locator_index(&self, id: LocatorId) -> Option<usize> {
+        self.locators.iter().position(|l| l.id == id)
     }
 }
 
@@ -406,6 +461,28 @@ mod tests {
         let midi = || ClipContent::Midi(clip::MidiClip::default());
         let clip = p.new_clip("", range, midi());
         assert_ne!(p.new_clip("", range, midi()).id, clip.id);
+        let locator = p.new_locator("Verse", Beats::new(16));
+        assert_ne!(p.new_locator("Verse", Beats::new(16)).id, locator.id);
+    }
+
+    #[test]
+    fn clips_and_locators_are_found_by_id() {
+        let mut p = Project::new();
+        let track = p.add_track("Keys", TrackKind::Midi);
+        let range = BeatRange::new(Beats::new(4), Beats::new(8));
+        let clip = p.new_clip("Riff", range, ClipContent::Midi(clip::MidiClip::default()));
+        let id = clip.id;
+        p.track_mut(track).unwrap().clips.push(clip);
+        let (found, clip) = p.find_clip(id).unwrap();
+        assert_eq!((found.id, clip.name.as_str()), (track, "Riff"));
+        assert!(p.find_clip(ClipId(id.0 + 1)).is_none());
+
+        let chorus = p.new_locator("Chorus", Beats::new(32));
+        let at = chorus.id;
+        p.locators.push(chorus);
+        p.locator_mut(at).unwrap().name = "Drop".into();
+        assert_eq!(p.locator(at).unwrap().name, "Drop");
+        assert_eq!(p.locator_index(at), Some(0));
     }
 
     #[test]
