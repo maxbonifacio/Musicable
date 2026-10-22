@@ -3,7 +3,9 @@
 //! found, a double-click puts a plugin on the selected track, and the
 //! devices panel opens the plugin's window and deletes the device. Changes
 //! made in the plugin's window are steps in the undo history, and the
-//! plugins come back from the project's file as they were saved.
+//! plugins come back from the project's file as they were saved. VST3
+//! plugins go on tracks the same way, and their windows open inside
+//! Musicable's on Windows.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -118,7 +120,8 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
     harness.get_by_label("Device Test Synth");
     harness.get_by_label("Device Test Gain");
     let synth = plugins(&harness, "Keys")[0].1;
-    let plugin = harness.state().session.plugin(synth).unwrap().raw();
+    let instance = harness.state().session.plugin(synth).unwrap();
+    let plugin = instance.as_clap().unwrap().raw();
 
     // The panel opens the plugin's window: inside a window of Musicable's
     // on Windows, a window of its own elsewhere. And it closes it again.
@@ -186,6 +189,58 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
     assert_eq!(names(&harness, "Keys"), ["Test Synth", "Test Gain"]);
     let instance = harness.state().session.plugin(synth).unwrap();
     assert_eq!(instance.param_value(LEVEL), Some(0.25));
+    drop(harness);
+    library.assert_alright();
+}
+
+#[test]
+fn a_vst3_plugin_goes_on_a_track_and_its_window_opens_inside_musicables() {
+    let config = TempDir::new("vst3-config");
+    let folder = TempDir::new("vst3-song");
+    let library = Library::copy_vst3(&folder.0, "test-plugins");
+    scanned(&config.0, &library);
+    let mut song = Project::new();
+    song.add_track("Keys", TrackKind::Midi);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path));
+
+    // The browser lists the VST3 module's plugins, and a double-click puts
+    // one on the selected track, where it loads.
+    let header = harness.get_by_label("Track Keys").rect();
+    click_at(
+        &mut harness,
+        pos2(header.left() + 12.0, header.center().y),
+        1,
+    );
+    click(&mut harness, "Add Plugin...");
+    harness.get_by_label("2 plugins");
+    double_click(&mut harness, "Test Gain");
+    assert_eq!(names(&harness, "Keys"), ["Test Gain"]);
+    let gain = plugins(&harness, "Keys")[0].1;
+    let instance = harness.state().session.plugin(gain).unwrap();
+    let controller = instance.as_vst3().unwrap().raw_controller();
+
+    // Its window opens inside a window of Musicable's on Windows. A VST3
+    // plugin's window only goes inside another, so elsewhere the app says
+    // it can't open yet.
+    click(&mut harness, "Test Gain Plugin Window");
+    // SAFETY: the instance's controller, on its main thread.
+    let (showing, parent, platform, _) = unsafe { library.vst3_window(controller) };
+    if cfg!(windows) {
+        assert!(harness.state().plugin_windows.is_open(gain));
+        assert_eq!((showing, parent != 0, platform), (1, true, 1));
+        click(&mut harness, "Test Gain Plugin Window");
+        assert!(!harness.state().plugin_windows.is_open(gain));
+        // SAFETY: as above.
+        assert_eq!(unsafe { library.vst3_window(controller) }.0, -1);
+    } else {
+        assert!(!harness.state().plugin_windows.is_open(gain));
+        assert_eq!(showing, -1);
+        let why = "Test Gain's window can't open here yet: Musicable shows VST3 \
+                   plugins' windows only on Windows so far.";
+        assert_eq!(harness.state().messages, [why]);
+    }
     drop(harness);
     library.assert_alright();
 }

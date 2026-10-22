@@ -16,7 +16,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
-| `plugins` | `engine`, `model` | CLAP hosting: plugin instances and the nodes that process them, and scanning in a process of its own. VST3 next, ARA in Tier 2 |
+| `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
 | `ui` | `model`, `commands` | What the window shows, drawn with egui: the arrangement, the mixer, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
@@ -180,15 +180,15 @@ built yet, except where it says so.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There
-  are plugins, and a test gain and a test instrument. CLAP hosting is built
-  in `crates/plugins` ([plugins.md](plugins.md)): an `Instance` lives on the
-  main thread, where CLAP wants everything but processing done, and makes
-  the `Node`s that process it, so every graph's node plays the same plugin.
-  The session's `Plugins` holds an instance for each plugin device, hands
-  the compiler their nodes, and makes transactions of the changes made in
-  their windows, so undo covers them. Scanning runs in a process of its
-  own, so a plugin that crashes doesn't take the app with it. VST3 is
-  next.
+  are plugins, and a test gain and a test instrument. CLAP and VST3
+  hosting are built in `crates/plugins` ([plugins.md](plugins.md)): an
+  `Instance` lives on the main thread, where both formats want everything
+  but processing done, and makes the `Node`s that process it, so every
+  graph's node plays the same plugin. The session's `Plugins` holds an
+  instance for each plugin device, hands the compiler their nodes, and
+  makes transactions of the changes made in their windows, so undo covers
+  them. Scanning runs in a process of its own, so a plugin that crashes
+  doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
   plugin code for what our allocation checker can't see.
 - **Plugin delay compensation.** Built: nodes report their latency

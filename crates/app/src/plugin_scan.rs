@@ -101,13 +101,17 @@ impl PluginScan {
     }
 }
 
-/// Scans the plugin libraries in CLAP's places that are new or changed
-/// since the scan kept in `file`, each with `program` in a process of its
-/// own, and keeps what it found there.
+/// Scans the plugin libraries in CLAP's and VST3's places that are new or
+/// changed since the scan kept in `file`, each with `program` in a process
+/// of its own, and keeps what it found there.
 fn run(program: &Path, file: Option<&Path>, retry_bad: bool) -> Scanned {
     let before = file.map(ScanCache::read).unwrap_or_default();
     let mut cache = before.clone();
-    let libraries = scan::find_libraries(&scan::clap_dirs());
+    let dirs: Vec<PathBuf> = scan::clap_dirs()
+        .into_iter()
+        .chain(scan::vst3_dirs())
+        .collect();
+    let libraries = scan::find_libraries(&dirs);
     let scanned = cache.update(&libraries, retry_bad, |library| {
         scan::scan_isolated(scanner(program, library), scan::TIMEOUT)
     });

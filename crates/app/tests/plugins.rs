@@ -1,11 +1,12 @@
 //! Plugins on tracks, through the app's session, with the test plugins
-//! (`crates/test-plugins`). A plugin loads once a scan says it's installed,
-//! plays, and comes back from the project's file as it was saved. Changes
-//! made in its window are steps in the undo history. A missing plugin lets
-//! the sound through and says why. Delay compensation lines a latent plugin
-//! up with a dry track to the sample, also after the plugin's latency
-//! changes. And the app's binary scans each library in a process of its own,
-//! so a library that crashes takes only that process down.
+//! (`crates/test-plugins`), CLAP and VST3 alike. A plugin loads once a scan
+//! says it's installed, plays, and comes back from the project's file as it
+//! was saved. Changes made in its window are steps in the undo history. A
+//! missing plugin lets the sound through and says why. Delay compensation
+//! lines a latent plugin up with a dry track to the sample, also after the
+//! plugin's latency changes. And the app's binary scans each library in a
+//! process of its own, so a library that crashes takes only that process
+//! down.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,9 +21,10 @@ use musicable_model::clip::{AudioClip, ClipContent};
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
-use musicable_plugins::PluginInfo;
 use musicable_plugins::scan::{self, Outcome};
+use musicable_plugins::{Instance, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
+use musicable_test_plugins::vst3::VST3_GAIN_ID;
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, gui};
 
 #[global_allocator]
@@ -44,25 +46,131 @@ fn folder(name: &str) -> PathBuf {
     dir
 }
 
-/// What a scan finds in the test plugins' library: Test Gain and Test
-/// Synth.
-fn installed(library: &Library) -> Vec<PluginInfo> {
-    scan::scan_here(library.path()).unwrap()
+/// The test plugins in one format, and what tests do to them in it.
+struct TestPlugins {
+    format: PluginFormat,
+    /// The test's folder, which they're in.
+    dir: PathBuf,
+    library: Library,
 }
 
-/// A plugin device for the plugin with id `id`, called `name`.
-fn plugin(project: &mut Project, id: &str, name: &str, settings: PluginSettings) -> Device {
+impl TestPlugins {
+    /// The test plugins in `format`, in a folder of their own for the test
+    /// `test`, so it gets the library's statics to itself.
+    fn new(format: PluginFormat, test: &str) -> Self {
+        let name = match format {
+            PluginFormat::Clap => format!("{test}-clap"),
+            PluginFormat::Vst3 => format!("{test}-vst3"),
+        };
+        let dir = folder(&name);
+        let library = match format {
+            PluginFormat::Clap => Library::copy(&dir, &name),
+            PluginFormat::Vst3 => Library::copy_vst3(&dir, &name),
+        };
+        Self {
+            format,
+            dir,
+            library,
+        }
+    }
+
+    /// What a scan finds: Test Gain and Test Synth.
+    fn installed(&self) -> Vec<PluginInfo> {
+        scan::scan_here(self.library.path()).unwrap()
+    }
+
+    /// A Test Gain device.
+    fn gain(&self, project: &mut Project, settings: PluginSettings) -> Device {
+        let id = match self.format {
+            PluginFormat::Clap => GAIN_ID.to_str().unwrap(),
+            PluginFormat::Vst3 => VST3_GAIN_ID,
+        };
+        plugin(project, self.format, id, "Test Gain", settings)
+    }
+
+    /// Test Gain's Gain for `factor`: the factor itself in CLAP, and
+    /// normalized from 0 to 2 in VST3.
+    fn factor(&self, factor: f64) -> f64 {
+        match self.format {
+            PluginFormat::Clap => factor,
+            PluginFormat::Vst3 => factor / 2.0,
+        }
+    }
+
+    /// Test Gain's Latency for `frames` frames: the frames in CLAP, and
+    /// normalized from 0 to 48,000 in VST3.
+    fn latency(&self, frames: u32) -> f64 {
+        match self.format {
+            PluginFormat::Clap => f64::from(frames),
+            PluginFormat::Vst3 => f64::from(frames) / 48_000.0,
+        }
+    }
+
+    // SAFETY, for the hooks below: each is given the instance's plugin, of
+    // this copy, on its main thread.
+
+    /// Does what someone does in the plugin's window: see [`gui`].
+    fn gui(&self, instance: &Instance, action: u32, param: u32, value: f64) {
+        match instance {
+            // SAFETY: as above.
+            Instance::Clap(plugin) => unsafe {
+                self.library.gui(plugin.raw(), action, param, value)
+            },
+            Instance::Vst3(plugin) => {
+                let controller = plugin.raw_controller();
+                // SAFETY: as above.
+                let taken = unsafe { self.library.vst3_gui(controller, action, param, value) };
+                assert!(taken, "the host didn't take the edit");
+            }
+        }
+    }
+
+    /// Sets the plugin's label, a state its parameters don't say, as
+    /// someone would in its window.
+    fn set_label(&self, instance: &Instance, label: &str) {
+        match instance {
+            // SAFETY: as above.
+            Instance::Clap(plugin) => unsafe { self.library.set_label(plugin.raw(), label) },
+            Instance::Vst3(plugin) => {
+                let controller = plugin.raw_controller();
+                // SAFETY: as above.
+                let sent = unsafe { self.library.vst3_set_label(controller, label) };
+                assert!(sent, "the label didn't get to the component");
+            }
+        }
+    }
+
+    /// The plugin's label, as its processor has it.
+    fn label(&self, instance: &Instance) -> String {
+        match instance {
+            // SAFETY: as above.
+            Instance::Clap(plugin) => unsafe { self.library.label(plugin.raw()) },
+            // SAFETY: as above.
+            Instance::Vst3(plugin) => unsafe { self.library.vst3_label(plugin.raw_component()) }
+                .expect("Test Gain's component has a label"),
+        }
+    }
+
+    fn assert_alright(&self) {
+        self.library.assert_alright();
+    }
+}
+
+/// A plugin device for the `format` plugin with id `id`, called `name`.
+fn plugin(
+    project: &mut Project,
+    format: PluginFormat,
+    id: &str,
+    name: &str,
+    settings: PluginSettings,
+) -> Device {
     project.new_device(DeviceKind::Plugin(PluginDevice {
-        format: PluginFormat::Clap,
+        format,
         id: id.to_owned(),
         name: name.to_owned(),
         instrument: false,
         settings,
     }))
-}
-
-fn test_gain(project: &mut Project, settings: PluginSettings) -> Device {
-    plugin(project, GAIN_ID.to_str().unwrap(), "Test Gain", settings)
 }
 
 fn with_param(param: u32, value: f64) -> PluginSettings {
@@ -109,8 +217,8 @@ impl Rig {
 
     /// Finds the project's plugins among the test plugins, as a scan
     /// finishing would, and waits for the graph with them.
-    fn install(&mut self, library: &Library) {
-        self.session.set_installed_plugins(installed(library));
+    fn install(&mut self, plugins: &TestPlugins) {
+        self.session.set_installed_plugins(plugins.installed());
         self.session.wait_for_graph();
     }
 
@@ -171,65 +279,77 @@ fn the_checker_is_installed() {
 }
 
 #[test]
-fn a_plugin_plays_on_its_track_and_comes_back_as_it_was_saved() {
-    let dir = folder("saved");
-    let library = Library::copy(&dir, "saved");
-    let (song, device) = tone_with(|p| test_gain(p, with_param(GAIN, 0.25)));
+fn a_clap_plugin_plays_on_its_track_and_comes_back_as_it_was_saved() {
+    plays_and_comes_back_as_it_was_saved(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_plugin_plays_on_its_track_and_comes_back_as_it_was_saved() {
+    plays_and_comes_back_as_it_was_saved(PluginFormat::Vst3);
+}
+
+fn plays_and_comes_back_as_it_was_saved(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "saved");
+    let quarter = with_param(GAIN, plugins.factor(0.25));
+    let (song, device) = tone_with(|p| plugins.gain(p, quarter));
     let mut rig = Rig::new(song, None);
 
     // Until a scan says what's installed, the device lets the sound
     // through.
     near(rig.peaks(), TONE);
-    rig.install(&library);
+    rig.install(&plugins);
     assert_eq!(rig.session.take_problems(), Vec::<String>::new());
     let wet = rig.peaks();
     near(wet, times(TONE, 0.25));
 
     // State that isn't a parameter, changed in the plugin's window, goes
     // into the project, as a step in the undo history.
-    let instance = rig.session.plugin(device.id).unwrap();
-    // SAFETY: the instance's plugin, on its main thread.
-    unsafe { library.set_label(instance.raw(), "Warm") };
+    plugins.set_label(rig.session.plugin(device.id).unwrap(), "Warm");
     rig.session.tick();
     assert_eq!(rig.session.undo_name(), Some("Change Test Gain"));
     assert!(rig.settings(device.id).state.is_some());
-    let path = dir.join("Song.musicable");
+    let path = plugins.dir.join("Song.musicable");
     project::save(&path, &rig.session.saved_project()).unwrap();
     drop(rig);
 
     // Opened again, it plays as it did, and has its label back.
     let opened = project::load(&path).unwrap();
-    let mut rig = Rig::new(opened, Some(&dir));
-    rig.install(&library);
+    let mut rig = Rig::new(opened, Some(&plugins.dir));
+    rig.install(&plugins);
     let instance = rig.session.plugin(device.id).unwrap();
-    // SAFETY: as above.
-    assert_eq!(unsafe { library.label(instance.raw()) }, "Warm");
+    assert_eq!(plugins.label(instance), "Warm");
     near(rig.peaks(), wet);
     drop(rig);
-    library.assert_alright();
+    plugins.assert_alright();
 }
 
 #[test]
-fn changes_in_a_plugins_window_are_steps_in_the_undo_history() {
-    let dir = folder("window");
-    let library = Library::copy(&dir, "window");
-    let (song, device) = tone_with(|p| test_gain(p, PluginSettings::default()));
+fn changes_in_a_clap_plugins_window_are_steps_in_the_undo_history() {
+    changes_in_its_window_are_steps_in_the_undo_history(PluginFormat::Clap);
+}
+
+#[test]
+fn changes_in_a_vst3_plugins_window_are_steps_in_the_undo_history() {
+    changes_in_its_window_are_steps_in_the_undo_history(PluginFormat::Vst3);
+}
+
+fn changes_in_its_window_are_steps_in_the_undo_history(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "window");
+    let (song, device) = tone_with(|p| plugins.gain(p, PluginSettings::default()));
     let mut rig = Rig::new(song, None);
-    rig.install(&library);
+    rig.install(&plugins);
     near(rig.peaks(), TONE);
 
     // Someone drags the gain's knob down to a half, in two moves.
-    let plugin = rig.session.plugin(device.id).unwrap().raw();
-    // SAFETY: the instance's plugin, on its main thread.
-    unsafe {
-        library.gui(plugin, gui::BEGIN, GAIN, 0.0);
-        library.gui(plugin, gui::VALUE, GAIN, 0.75);
-        library.gui(plugin, gui::VALUE, GAIN, 0.5);
-        library.gui(plugin, gui::END, GAIN, 0.0);
-    }
+    let instance = rig.session.plugin(device.id).unwrap();
+    plugins.gui(instance, gui::BEGIN, GAIN, 0.0);
+    plugins.gui(instance, gui::VALUE, GAIN, plugins.factor(0.75));
+    plugins.gui(instance, gui::VALUE, GAIN, plugins.factor(0.5));
+    plugins.gui(instance, gui::END, GAIN, 0.0);
     let half = times(TONE, 0.5);
     near(rig.peaks(), half);
-    assert_eq!(rig.settings(device.id).param(GAIN), Some(0.5));
+    let gain = rig.settings(device.id).param(GAIN);
+    assert_eq!(gain, Some(plugins.factor(0.5)));
     assert_eq!(rig.session.undo_name(), Some("Change Test Gain"));
 
     // One undo takes the whole drag back, in the plugin too, and redo puts
@@ -238,22 +358,25 @@ fn changes_in_a_plugins_window_are_steps_in_the_undo_history() {
     near(rig.peaks(), TONE);
     assert_eq!(rig.settings(device.id).param(GAIN), None);
     let instance = rig.session.plugin(device.id).unwrap();
-    assert_eq!(instance.param_value(GAIN), Some(1.0));
+    assert_eq!(instance.param_value(GAIN), Some(plugins.factor(1.0)));
     assert_eq!(rig.session.undo_name(), None);
     rig.session.run(&edit::REDO).unwrap();
     near(rig.peaks(), half);
     drop(rig);
-    library.assert_alright();
+    plugins.assert_alright();
 }
 
 #[test]
 fn a_missing_plugin_lets_the_sound_through_and_says_why() {
-    let dir = folder("missing");
-    let library = Library::copy(&dir, "missing");
+    let plugins = TestPlugins::new(PluginFormat::Clap, "missing");
     let settings = PluginSettings::default();
-    let (song, device) = tone_with(|p| plugin(p, "org.example.reverb", "Old Reverb", settings));
+    let reverb = |p: &mut Project| {
+        let id = "org.example.reverb";
+        plugin(p, PluginFormat::Clap, id, "Old Reverb", settings)
+    };
+    let (song, device) = tone_with(reverb);
     let mut rig = Rig::new(song, None);
-    rig.install(&library);
+    rig.install(&plugins);
     let why = "Old Reverb isn't installed, or Musicable hasn't found it: it plays nothing";
     assert_eq!(rig.session.take_problems(), [why]);
     assert_eq!(rig.session.plugin_problem(device.id), Some(why));
@@ -263,7 +386,7 @@ fn a_missing_plugin_lets_the_sound_through_and_says_why() {
     rig.session.tick();
     assert!(rig.session.take_problems().is_empty());
     drop(rig);
-    library.assert_alright();
+    plugins.assert_alright();
 }
 
 /// The left channel and the right, of interleaved stereo.
@@ -277,12 +400,21 @@ fn first_click(samples: &[f32]) -> Option<usize> {
 }
 
 #[test]
-fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_track() {
+fn delay_compensation_lines_a_latent_clap_plugin_up_with_a_dry_track() {
+    delay_compensation_lines_it_up_with_a_dry_track(PluginFormat::Clap);
+}
+
+#[test]
+fn delay_compensation_lines_a_latent_vst3_plugin_up_with_a_dry_track() {
+    delay_compensation_lines_it_up_with_a_dry_track(PluginFormat::Vst3);
+}
+
+fn delay_compensation_lines_it_up_with_a_dry_track(format: PluginFormat) {
     // Two tracks play the same clicks, one of them through Test Gain, which
     // reports its latency. Panned apart, the two come out the same, to the
     // sample.
-    let dir = folder("compensation");
-    let library = Library::copy(&dir, "compensation");
+    let plugins = TestPlugins::new(format, "compensation");
+    let dir = &plugins.dir;
     let clicks: Vec<f32> = (0..48_000)
         .map(|i| match i % 4_800 {
             0 => 1.0,
@@ -307,10 +439,10 @@ fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_track() {
         track.clips.push(clip);
         track.pan = pan;
     }
-    let device = test_gain(&mut song, with_param(LATENCY, 1_000.0));
+    let device = plugins.gain(&mut song, with_param(LATENCY, plugins.latency(1_000)));
     song.track_mut(wet).unwrap().devices.push(device.clone());
-    let mut rig = Rig::new(song, Some(&dir));
-    rig.install(&library);
+    let mut rig = Rig::new(song, Some(dir));
+    rig.install(&plugins);
 
     let play = |rig: &mut Rig| {
         rig.session.run(&transport::STOP).unwrap();
@@ -329,38 +461,40 @@ fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_track() {
     // restarts with it, and the graph is built again around it, where the
     // dry track jumps in time to line up again. Once what played before
     // the jump has played out, the two line up as before.
-    let plugin = rig.session.plugin(device.id).unwrap().raw();
-    // SAFETY: the instance's plugin, on its main thread.
-    unsafe {
-        library.gui(plugin, gui::BEGIN, LATENCY, 0.0);
-        library.gui(plugin, gui::VALUE, LATENCY, 3_000.0);
-        library.gui(plugin, gui::END, LATENCY, 0.0);
-    }
+    let instance = rig.session.plugin(device.id).unwrap();
+    plugins.gui(instance, gui::BEGIN, LATENCY, 0.0);
+    plugins.gui(instance, gui::VALUE, LATENCY, plugins.latency(3_000));
+    plugins.gui(instance, gui::END, LATENCY, 0.0);
     rig.render(4_800);
     rig.session.wait_for_graph();
     rig.render(4_800);
     assert_eq!(rig.session.stats().latency, 3_000);
-    assert_eq!(rig.settings(device.id).param(LATENCY), Some(3_000.0));
+    let latency = rig.settings(device.id).param(LATENCY);
+    assert_eq!(latency, Some(plugins.latency(3_000)));
     assert_eq!(play(&mut rig), Some(3_000));
     drop(rig);
-    library.assert_alright();
+    plugins.assert_alright();
 }
 
 #[test]
 fn the_app_scans_each_library_in_a_process_of_its_own() {
     let dir = folder("scan");
-    let scanner = |library: &Path| {
+    let scanned = |library: &Path| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_musicable"));
         command.arg(SCAN_PLUGIN).arg(library);
-        command
+        scan::scan_isolated(command, scan::TIMEOUT)
     };
-    let good = testing::copy(&dir, "good");
-    let Outcome::Found(found) = scan::scan_isolated(scanner(&good), scan::TIMEOUT) else {
-        panic!("the test plugins weren't found");
-    };
-    let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["Test Gain", "Test Synth"]);
-    let crash = testing::copy(&dir, "crash");
-    let crashed = scan::scan_isolated(scanner(&crash), scan::TIMEOUT);
-    assert!(matches!(crashed, Outcome::Crashed(_)), "{crashed:?}");
+    // A CLAP library and a VST3 bundle.
+    let copies = |name| [testing::copy(&dir, name), testing::copy_vst3(&dir, name).0];
+    for good in copies("good") {
+        let Outcome::Found(found) = scanned(&good) else {
+            panic!("the test plugins weren't found in {}", good.display());
+        };
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Test Gain", "Test Synth"]);
+    }
+    for crash in copies("crash") {
+        let crashed = scanned(&crash);
+        assert!(matches!(crashed, Outcome::Crashed(_)), "{crashed:?}");
+    }
 }
