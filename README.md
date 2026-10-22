@@ -36,6 +36,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/engine` | Real-time audio engine: graph, reference renderer and parallel scheduler. See [docs/engine.md](docs/engine.md). |
 | `crates/audio` | Audio device output: our own WASAPI backend on Windows, and our own ASIO host with the `asio` feature; cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP hosting so far, then VST3 and ARA. See [docs/plugins.md](docs/plugins.md). |
+| `crates/test-plugins` | Plugins that test the plugin hosting. Not shipped. |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
 | `crates/app` | The `musicable` app: its window, the audio output, and the session that runs commands and keeps the engine in step with the project. |
@@ -71,4 +72,5 @@ default build has none of them. The source in this repository stays MIT OR
 Apache-2.0. ASIO is a trademark of Steinberg Media Technologies GmbH.
 
 Contributions are accepted under the same terms. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see
+[SECURITY.md](SECURITY.md).

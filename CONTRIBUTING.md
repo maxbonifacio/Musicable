@@ -1,7 +1,9 @@
 # Contributing
 
 Thanks for helping out. The project is at a very early stage, so please open
-an issue to discuss bigger changes before starting on them.
+an issue to discuss bigger changes before starting on them. Security problems
+are the exception: report them privately, as [SECURITY.md](SECURITY.md)
+describes.
 
 ## Sign your commits (DCO)
 
