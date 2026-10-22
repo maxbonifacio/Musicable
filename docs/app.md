@@ -632,14 +632,12 @@ folder until it's opened again.
 
 Musicable has devices of its own, which play without plugins: an EQ, a
 compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
-So far the EQ, the compressor, the gate, the utility, the sampler and the
-synth play; the others come in the next few changes, and until then the
-browser leaves them out. Each is a node in the engine
-([engine.md](engine.md#built-in-devices)), and the project saves its
-settings ([project-format.md](project-format.md)). The sampler and the
-synth play their track's notes, from its clips or its MIDI input, each
-note bent on its own, as MPE bends them; a note's pressure and slide
-don't move them yet, and nor do controllers, such as the sustain pedal.
+Each is a node in the engine ([engine.md](engine.md#built-in-devices)),
+and the project saves its settings ([project-format.md](project-format.md)).
+The sampler and the synth play their track's notes, from its clips or its
+MIDI input, each note bent on its own, as MPE bends them; a note's
+pressure and slide don't move them yet, and nor do controllers, such as
+the sustain pedal.
 
 The plugin browser lists them under **Built-in**, above the plugins, and
 finds them by name; All, Instruments and Effects pick among them too. A
@@ -665,9 +663,10 @@ five:
 
 Every change is a step in the undo history named after the device, such
 as "Change EQ", and a whole drag is one. The engine hears each as it's
-made, and smooths it over 10 ms. Screen readers find each control by the
-device's name and the control's, such as "EQ Band 3 Freq", and can set a
-bar to a number.
+made, and smooths it over 10 ms, or moves it its device's own way: the
+delay fades in a new time over 50 ms, and the reverb glides to a new
+size. Screen readers find each control by the device's name and the
+control's, such as "EQ Band 3 Freq", and can set a bar to a number.
 
 A sampler shows the name of its sample's file beside its own, and **Load
 Sample...** asks for an audio file for it to play (WAV, AIFF or FLAC), in

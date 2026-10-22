@@ -12,11 +12,11 @@ use musicable_engine::event::ParamId;
 use musicable_engine::media::{AudioData, Media};
 use musicable_engine::{
     AudioMut, Engine, EngineConfig, Event, Meters, ParallelOptions, ParallelRenderer,
-    ReferenceRenderer, Renderer, TransportCommand, compile_with_media, rt,
+    ReferenceRenderer, Renderer, TransportCommand, compile, compile_with_media, rt,
 };
 use musicable_model::clip::{ClipContent, MidiClip};
-use musicable_model::native::{NativeDevice, NativeKind, compressor, eq, gate, utility};
-use musicable_model::time::{BeatRange, Beats};
+use musicable_model::native::{NativeDevice, NativeKind, compressor, delay, eq, gate, utility};
+use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{Device, DeviceKind, Project, TestTone, TrackKind};
 
 #[global_allocator]
@@ -85,6 +85,7 @@ fn reference(project: &Project) -> Vec<f32> {
 
 /// The built-in effects that leave the test tone as it is at their
 /// defaults. A compressor turns it down: it's 12 dB over the threshold.
+/// The delay and the reverb are heard as soon as they're added.
 const TRANSPARENT: [NativeKind; 3] = [NativeKind::Eq, NativeKind::Gate, NativeKind::Utility];
 
 #[test]
@@ -184,6 +185,33 @@ fn parameter_changes_land_on_their_frames() {
     // Faded out over 10 ms from frame 1000.
     assert_ne!(wet[1000], dry[1000]);
     assert!(wet[1480..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn the_delay_keeps_time_with_the_song() {
+    let p = project(|p| {
+        let sixteenth = [
+            (delay::NOTE, 2.0),
+            (delay::FEEDBACK, 0.0),
+            (delay::MIX, 100.0),
+        ];
+        vec![native(p, NativeKind::Delay, &sixteenth)]
+    });
+    let (mut engine, mut handle) = Engine::with_renderer(CONFIG, Box::new(ReferenceRenderer));
+    handle
+        .set_tempo_map(TempoMap::new(90.0, TimeSignature::FOUR_FOUR))
+        .unwrap();
+    handle
+        .swap_graph(compile(&p).prepare(&CONFIG).unwrap())
+        .unwrap();
+    handle
+        .send(Event::Transport(TransportCommand::Play))
+        .unwrap();
+    let mut out = vec![0.0; 2 * 9000];
+    engine.process(&mut AudioMut::from_planar(&mut out, 2));
+    // Only the echoes, a sixteenth at 90 bpm behind the tone: 8000 frames.
+    let first = out[..9000].iter().position(|&s| s != 0.0).unwrap();
+    assert!((8000..8002).contains(&first), "{first}");
 }
 
 /// SplitMix64, seeded so a failure happens again on the next run.

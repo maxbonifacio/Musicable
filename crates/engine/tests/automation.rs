@@ -19,7 +19,7 @@ use musicable_engine::{
 use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{ClipContent, MidiClip};
 use musicable_model::native::{
-    NativeDevice, NativeKind, compressor, eq, gate, sampler, synth, utility,
+    NativeDevice, NativeKind, compressor, delay, eq, gate, reverb, sampler, synth, utility,
 };
 use musicable_model::param::{ParamAddress, Scale};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -173,11 +173,15 @@ fn automation_loops_and_locates_as_clips_do() {
 /// whose gain, balance and DC filter move, a compressor on the chords
 /// whose threshold, knee, attack, release and mix move and whose detector
 /// switches to RMS, and a gate on the return that closes and opens again
-/// as its threshold steps, while its hold, release and floor move. Last, a
-/// synth and a looping sampler on tracks of their own, playing the same
-/// notes: the synth's cutoff and volume move and its wave and filter step,
-/// and the sampler's detune, loop start and cutoff move while its filter
-/// switches on and it steps to One-Shot.
+/// as its threshold steps, while its hold, release and floor move. After
+/// the compressor, a delay whose note moves while it's synced, and whose
+/// time moves once it isn't, with its feedback rising and ping pong
+/// switching on; after the gate, a reverb that grows and shrinks while its
+/// decay, pre-delay and damping move. Last, a synth and a looping sampler
+/// on tracks of their own, playing the same notes: the synth's cutoff and
+/// volume move and its wave and filter step, and the sampler's detune, loop
+/// start and cutoff move while its filter switches on and it steps to
+/// One-Shot.
 fn project() -> Project {
     let mut p = Project::new();
     let bass = p.add_track("Bass", TrackKind::Audio);
@@ -223,6 +227,12 @@ fn project() -> Project {
     let gate = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Gate)));
     let gate_id = gate.id;
     p.track_mut(reverb).unwrap().devices.push(gate);
+    let echoes = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Delay)));
+    let echoes_id = echoes.id;
+    p.track_mut(chords).unwrap().devices.push(echoes);
+    let space = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Reverb)));
+    let space_id = space.id;
+    p.track_mut(reverb).unwrap().devices.push(space);
     let mut melody = MidiClip::default();
     melody.add_note(beats(0, 1), beats(3, 1), 48, 0.8);
     melody.add_note(beats(1, 1), beats(5, 1), 55, 0.6);
@@ -336,6 +346,29 @@ fn project() -> Project {
         gate(gate::HOLD, &[(beats(0, 1), 0.0), (beats(4, 1), 50.0)]),
         gate(gate::RELEASE, &[(beats(0, 1), 1.0), (beats(5, 1), 200.0)]),
         gate(gate::FLOOR, &[(beats(0, 1), -80.0), (beats(5, 1), -20.0)]),
+    ]);
+    let echoes =
+        |param: usize, at: &[(Beats, f64)]| lane(ParamAddress::Device(echoes_id, param as u32), at);
+    let space =
+        |param: usize, at: &[(Beats, f64)]| lane(ParamAddress::Device(space_id, param as u32), at);
+    p.automation.extend([
+        echoes(delay::SYNC, &[(two, 1.0), (two, 0.0)]),
+        echoes(delay::NOTE, &[(beats(0, 1), 2.0), (two, 8.0)]),
+        echoes(delay::TIME, &[(two, 40.0), (beats(6, 1), 300.0)]),
+        echoes(delay::FEEDBACK, &[(beats(0, 1), 20.0), (beats(4, 1), 90.0)]),
+        echoes(delay::PING_PONG, &[(beats(3, 1), 0.0), (beats(3, 1), 1.0)]),
+        echoes(delay::MIX, &[(beats(0, 1), 40.0), (five, 100.0)]),
+        space(
+            reverb::SIZE,
+            &[(beats(0, 1), 10.0), (beats(3, 1), 90.0), (five, 30.0)],
+        ),
+        space(reverb::DECAY, &[(beats(0, 1), 0.5), (five, 4.0)]),
+        space(reverb::PREDELAY, &[(beats(1, 1), 0.0), (beats(4, 1), 80.0)]),
+        space(
+            reverb::DAMPING,
+            &[(beats(0, 1), 2000.0), (beats(6, 1), 15_000.0)],
+        ),
+        space(reverb::MIX, &[(beats(0, 1), 60.0), (beats(6, 1), 20.0)]),
     ]);
     let synth =
         |param: usize, at: &[(Beats, f64)]| lane(ParamAddress::Device(synth_id, param as u32), at);

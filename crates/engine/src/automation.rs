@@ -266,6 +266,17 @@ impl Param {
         self.value
     }
 
+    /// The value set, without its ramp or its modulation: where it's
+    /// heading while it has no automation.
+    pub fn target(&self) -> f32 {
+        self.set.target()
+    }
+
+    /// The modulation for every voice: 0.0 for none.
+    pub fn modulation(&self) -> f32 {
+        self.modulation
+    }
+
     /// Writes the value for each frame in `frames` of the block into
     /// `values`, which is as long, and returns `true` only if they're all
     /// the same, for a fast path. Call it for every frame of every block,
@@ -281,12 +292,35 @@ impl Param {
             return true;
         }
         if self.automation.is_some() {
-            self.render_automation(ctx, frames, values)
+            self.render_automation(ctx, frames, values, None)
         } else {
             if frames.start == 0 {
                 self.jumps = Some(ctx.transport.jumps);
             }
             self.render_set(values)
+        }
+    }
+
+    /// Renders as [`render`](Self::render) does, and writes where the
+    /// value is heading on each frame into `targets`, which is as long: the
+    /// value set, without its ramp, or the automation's value on the frame,
+    /// without the glide after a jump. Neither has the modulation in it.
+    /// For a node that takes a new value its own way, as the delay fades to
+    /// a new time.
+    pub fn render_with_targets(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        frames: Range<usize>,
+        values: &mut [f32],
+        targets: &mut [f32],
+    ) -> bool {
+        debug_assert_eq!(values.len(), targets.len(), "a target for each frame");
+        if self.automation.is_some() && !values.is_empty() {
+            self.render_automation(ctx, frames, values, Some(targets))
+        } else {
+            let steady = self.render(ctx, frames, values);
+            targets.fill(self.set.target());
+            steady
         }
     }
 
@@ -316,6 +350,7 @@ impl Param {
         ctx: &ProcessContext<'_>,
         frames: Range<usize>,
         values: &mut [f32],
+        mut targets: Option<&mut [f32]>,
     ) -> bool {
         let (tempo, rate) = (ctx.tempo, ctx.sample_rate);
         let transport = ctx.transport;
@@ -338,7 +373,7 @@ impl Param {
             }
         }
         let (min, max, modulation) = (self.min, self.max, self.modulation);
-        for (value, i) in values.iter_mut().zip(frames) {
+        for (k, (value, i)) in values.iter_mut().zip(frames).enumerate() {
             let frame = if transport.playing {
                 position + i as i64
             } else {
@@ -346,6 +381,9 @@ impl Param {
             };
             let passed = cursor.advance(automation, tempo, rate, frame);
             let target = cursor.value(automation, frame) as f32;
+            if let Some(targets) = targets.as_deref_mut() {
+                targets[k] = target;
+            }
             if passed >= 2 && started {
                 glide(&mut self.glide, self.base - target);
             }
@@ -599,6 +637,33 @@ mod tests {
         fresh.prepare(RATE);
         fresh.automate(automation(&[(0.0, 0.25)], Scale::Linear));
         assert_eq!(render(&mut fresh, 0, 2, 2), [0.25, 0.25]);
+    }
+
+    #[test]
+    fn targets_leave_out_ramps_glides_and_modulation() {
+        let tempo = TempoMap::default();
+        let ctx = context(4, playing(499, 0), &tempo, &[]);
+        let (mut values, mut targets) = ([0.0; 4], [0.0; 4]);
+        // Over a step, the value glides and the target is the automation's.
+        let step = automation(&[(0.0, 1.0), (1.0, 1.0), (1.0, 0.0)], Scale::Linear);
+        let mut param = Param::new(0.5, 0.0, 1.0);
+        param.prepare(RATE);
+        param.automate(step);
+        param.modulate(-0.25);
+        render(&mut param, 0, 499, 499);
+        param.render_with_targets(&ctx, 0..4, &mut values, &mut targets);
+        assert_close(&values, &[0.75, 0.65, 0.55, 0.45]);
+        assert_eq!(targets, [1.0, 0.0, 0.0, 0.0]);
+        // Without automation, the value ramps to the value set, the target.
+        let mut set = Param::new(0.0, 0.0, 1.0);
+        set.prepare(RATE);
+        set.modulate(0.25);
+        render(&mut set, 0, 1, 1);
+        set.set(0.5);
+        set.render_with_targets(&ctx, 0..4, &mut values, &mut targets);
+        assert_close(&values, &[0.3, 0.35, 0.4, 0.45]);
+        assert_eq!(targets, [0.5; 4]);
+        assert_eq!((set.target(), set.modulation()), (0.5, 0.25));
     }
 
     #[test]

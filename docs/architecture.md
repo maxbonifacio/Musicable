@@ -205,13 +205,12 @@ built yet, except where it says so.
   doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) checks plugin
   code in CI for what our allocation checker can't see.
-- **Built-in devices.** Partly built: eight kinds, each with a parameter
-  table in `musicable_model::native` that the format, the commands and the
-  devices panel's controls all work from, in format version 8. The engine's
+- **Built-in devices.** Built: eight kinds, each with a parameter table in
+  `musicable_model::native` that the format, the commands and the devices
+  panel's controls all work from, in format version 8. The engine's
   `devices` module has the nodes, with each parameter worked out per frame
   from the value set or its automation, and any modulation
-  (`devices::Params`); the EQ, the compressor, the gate, the utility, the
-  sampler and the synth play, and the other two follow
+  (`devices::Params`); all eight play
   ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
