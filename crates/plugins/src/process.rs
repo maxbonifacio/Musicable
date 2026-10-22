@@ -207,6 +207,8 @@ impl Sounding {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Transport {
     pub(crate) playing: bool,
+    /// Whether the transport records as it plays.
+    pub(crate) recording: bool,
     /// The song position in samples, in beats (quarter notes) and in
     /// seconds.
     pub(crate) samples: u64,
@@ -240,6 +242,7 @@ impl Transport {
         let seconds = |at: Beats| tempo.sample_at(at, rate) * seconds_per_sample;
         Self {
             playing: ctx.transport.playing,
+            recording: ctx.transport.recording,
             samples: ctx.transport.position,
             beats,
             seconds: position * seconds_per_sample,

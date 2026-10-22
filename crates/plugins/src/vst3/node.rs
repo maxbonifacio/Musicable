@@ -15,7 +15,7 @@ use vst3::Steinberg::Vst::Event_::EventTypes_::{
 use vst3::Steinberg::Vst::NoteExpressionTypeIDs_::{kBrightnessTypeID, kTuningTypeID};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
-    kTempoValid, kTimeSigValid,
+    kRecording, kTempoValid, kTimeSigValid,
 };
 use vst3::Steinberg::Vst::ProcessModes_::kRealtime;
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
@@ -493,6 +493,9 @@ fn context(transport: Option<&Transport>, sample_rate: u32, steady_time: i64) ->
         (kTempoValid | kTimeSigValid | kProjectTimeMusicValid | kBarPositionValid) as uint32;
     if transport.playing {
         context.state |= kPlaying as uint32;
+    }
+    if transport.recording {
+        context.state |= kRecording as uint32;
     }
     context.projectTimeSamples = transport.samples.min(i64::MAX as u64) as i64;
     context.projectTimeMusic = transport.beats;
