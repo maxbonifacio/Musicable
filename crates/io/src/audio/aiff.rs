@@ -139,19 +139,25 @@ fn rate_to_extended(rate: u32) -> [u8; 10] {
     bytes
 }
 
-pub(super) fn write(
-    out: &mut impl Write,
+/// The most bytes [`header`] writes.
+pub(super) const HEADER: usize = 84;
+
+/// The header of an AIFF file, or of an AIFF-C file for floats, with
+/// `frames` frames of `channels` channels of `format` samples at
+/// `sample_rate`, up to the start of its samples. Its chunks' sizes
+/// can't say more than 4 GiB.
+pub(super) fn header(
     sample_rate: u32,
     format: SampleFormat,
-    channels: &[&[f32]],
-) -> io::Result<()> {
-    let frames = frames_of(channels)?;
-    let size = format.bytes();
+    channels: u16,
+    frames: u64,
+) -> io::Result<Vec<u8>> {
+    let size = format.bytes() as u64;
     let float = format == SampleFormat::Float32;
-    let data = channels.len() * frames * size;
+    let data = u64::from(channels) * frames * size;
     let too_long = || io::Error::new(io::ErrorKind::InvalidInput, "too long for an AIFF file");
     let frame_count = u32::try_from(frames).map_err(|_| too_long())?;
-    let mut chunks = Vec::with_capacity(data + 64);
+    let mut chunks = Vec::with_capacity(HEADER);
     if float {
         chunks.extend_from_slice(b"FVER");
         chunks.extend_from_slice(&4u32.to_be_bytes());
@@ -163,7 +169,7 @@ pub(super) fn write(
     let name: &[u8] = if float { b"\x0832-bit float\0" } else { b"" };
     let common = 18 + if float { 4 + name.len() } else { 0 };
     chunks.extend_from_slice(&(common as u32).to_be_bytes());
-    chunks.extend_from_slice(&(channels.len() as i16).to_be_bytes());
+    chunks.extend_from_slice(&(channels as i16).to_be_bytes());
     chunks.extend_from_slice(&frame_count.to_be_bytes());
     chunks.extend_from_slice(&(size as i16 * 8).to_be_bytes());
     chunks.extend_from_slice(&rate_to_extended(sample_rate));
@@ -175,23 +181,41 @@ pub(super) fn write(
     let sound = u32::try_from(8 + data).map_err(|_| too_long())?;
     chunks.extend_from_slice(&sound.to_be_bytes());
     chunks.extend_from_slice(&[0; 8]);
+    let form = 4 + chunks.len() as u64 + data + data % 2;
+    let form = u32::try_from(form).map_err(|_| too_long())?;
+    let mut header = Vec::with_capacity(HEADER);
+    header.extend_from_slice(b"FORM");
+    header.extend_from_slice(&form.to_be_bytes());
+    header.extend_from_slice(if float { b"AIFC" } else { b"AIFF" });
+    header.extend_from_slice(&chunks);
+    Ok(header)
+}
+
+pub(super) fn write(
+    out: &mut impl Write,
+    sample_rate: u32,
+    format: SampleFormat,
+    channels: &[&[f32]],
+) -> io::Result<()> {
+    let frames = frames_of(channels)?;
+    let count = u16::try_from(channels.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many channels"))?;
+    let mut bytes = header(sample_rate, format, count, frames as u64)?;
+    let data = channels.len() * frames * format.bytes();
+    bytes.reserve(data + 1);
     let mut sample = Vec::with_capacity(4);
     for i in 0..frames {
         for channel in channels {
             sample.clear();
             format.encode(channel[i], &mut sample);
             sample.reverse();
-            chunks.extend_from_slice(&sample);
+            bytes.extend_from_slice(&sample);
         }
     }
     if data % 2 == 1 {
-        chunks.push(0);
+        bytes.push(0);
     }
-    let form = u32::try_from(4 + chunks.len()).map_err(|_| too_long())?;
-    out.write_all(b"FORM")?;
-    out.write_all(&form.to_be_bytes())?;
-    out.write_all(if float { b"AIFC" } else { b"AIFF" })?;
-    out.write_all(&chunks)
+    out.write_all(&bytes)
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Audio files: reading WAV, AIFF and FLAC, and writing WAV and AIFF.
+//! Audio files: reading and writing WAV, AIFF and FLAC.
 //!
 //! A [`Decoder`] reads any frame of a file on request, so a clip can play
 //! from anywhere in it and a stream can read ahead of the playhead in
@@ -17,25 +17,42 @@
 //!
 //! [`write_wav`] and [`write_aiff`] write 16- and 24-bit integer and 32-bit
 //! float files, and a [`WavWriter`] writes a 32-bit float WAV file as its
-//! samples come, as a recording does. Writing FLAC comes with exporting.
+//! samples come, as a recording does. A [`Writer`] writes any of the three
+//! formats as the samples come, as an export does, with dither if asked:
+//! FLAC in 16- and 24-bit integers, with an encoder of our own.
 
 mod aiff;
 mod flac;
+mod flac_encoder;
+mod md5;
 mod wav;
+mod writer;
 
 pub use wav::WavWriter;
+pub use writer::Writer;
 
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// A file format this module reads.
+/// A file format this module reads and writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Wav,
     Aiff,
     Flac,
+}
+
+impl Format {
+    /// The extension files of the format usually have.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Aiff => "aif",
+            Self::Flac => "flac",
+        }
+    }
 }
 
 /// What an audio file holds.
@@ -351,7 +368,7 @@ impl Pcm {
     }
 }
 
-/// How [`write_wav`] and [`write_aiff`] store samples.
+/// How [`write_wav`], [`write_aiff`] and a [`Writer`] store samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFormat {
     /// 16-bit integers, rounded and clipped at full scale.
