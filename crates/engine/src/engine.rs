@@ -56,6 +56,7 @@ struct Counters {
     position: AtomicU64,
     playing: AtomicBool,
     swaps: AtomicU64,
+    latency: AtomicU64,
     events_late: AtomicU64,
     events_dropped: AtomicU64,
     events_unmatched: AtomicU64,
@@ -73,6 +74,10 @@ pub struct Stats {
     pub playing: bool,
     /// Graphs installed.
     pub swaps: u64,
+    /// How many frames late the running graph's output plays, after delay
+    /// compensation ([`PreparedGraph::latency`]). The audio device adds its
+    /// own output latency to this.
+    pub latency: u64,
     /// Events applied later than the time they were sent for.
     pub events_late: u64,
     /// Events dropped because the engine was already holding as many as it
@@ -92,6 +97,7 @@ impl Counters {
             position: self.position.load(Relaxed),
             playing: self.playing.load(Relaxed),
             swaps: self.swaps.load(Relaxed),
+            latency: self.latency.load(Relaxed),
             events_late: self.events_late.load(Relaxed),
             events_dropped: self.events_dropped.load(Relaxed),
             events_unmatched: self.events_unmatched.load(Relaxed),
@@ -289,6 +295,8 @@ impl Engine {
         if let Some(old) = self.graph.as_deref_mut() {
             graph.adopt_from(old);
         }
+        let latency = graph.latency() as u64;
+        self.counters.latency.store(latency, Relaxed);
         if let Some(old) = self.graph.replace(graph) {
             // `receive` checked there is room.
             let returned = self.garbage.push(Garbage::Graph(old));

@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::buffer::{AudioBuffer, AudioRef};
 use crate::engine::EVENT_CAPACITY;
+use crate::nodes::Delay;
 use crate::parallel::Schedule;
 use crate::{Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent};
 
@@ -66,6 +67,12 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The most frames late a path can be, to compensate for: 262,144, about
+    /// 5.5 seconds at 48 kHz. Paths later than that are lined up as if they
+    /// were this late, so a node reporting a wild latency can't have the
+    /// graph allocate more delay than that.
+    pub const MAX_LATENCY: usize = 1 << 18;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -142,8 +149,19 @@ impl Graph {
         Ok(())
     }
 
-    /// Orders the nodes, calls [`Node::prepare`] on each and allocates their
-    /// buffers.
+    /// Calls [`Node::prepare`] on each node, compensates for their latency,
+    /// orders them and allocates their buffers.
+    ///
+    /// **Delay compensation.** Each node's output is as late as the latest
+    /// path into it, plus the node's own [latency](Node::latency). Wherever
+    /// paths of different lateness meet at a node, the earlier ones go
+    /// through a [`Delay`] that lines them up with the latest. The cue
+    /// output gets one to line it up with the output, or the output with it,
+    /// so the metronome clicks in time with what plays.
+    /// [`PreparedGraph::latency`] says how late the output is in the end,
+    /// at most [`MAX_LATENCY`](Graph::MAX_LATENCY). Notes sent with
+    /// [`send_notes`](Graph::send_notes) aren't delayed, so an instrument's
+    /// sound lines up as long as nothing latent comes before it.
     ///
     /// # Panics
     ///
@@ -153,22 +171,26 @@ impl Graph {
             config.sample_rate > 0 && config.max_block > 0,
             "invalid engine config {config:?}"
         );
-        let output = self.output.ok_or(GraphError::NoOutput)?;
+        let mut output = self.output.ok_or(GraphError::NoOutput)?;
         let mut by_key: Vec<(NodeKey, NodeId)> =
             self.keys.iter().copied().zip((0..).map(NodeId)).collect();
         by_key.sort_unstable();
         if let Some(pair) = by_key.windows(2).find(|pair| pair[0].0 == pair[1].0) {
             return Err(GraphError::DuplicateKey(pair[0].0));
         }
-        let mut buffers = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter_mut().enumerate() {
             node.prepare(config);
-            let channels = node.channels();
-            if channels == 0 {
+            if node.channels() == 0 {
                 return Err(GraphError::NoChannels(NodeId(i)));
             }
-            buffers.push(AudioBuffer::new(channels, config.max_block));
         }
+        let (mut delays, latency) = self.compensate(config, &mut output);
+        delays.sort_unstable();
+        let buffers: Vec<AudioBuffer> = self
+            .nodes
+            .iter()
+            .map(|node| AudioBuffer::new(node.channels(), config.max_block))
+            .collect();
         let order = self.topological_order();
         let schedule = Schedule::new(&self.inputs, &self.outputs, &order);
         self.note_routes.sort_unstable();
@@ -217,6 +239,8 @@ impl Graph {
             cue: self.cue,
             buffers,
             by_key,
+            delays,
+            latency,
             events: Vec::with_capacity(capacity),
             routed: Vec::with_capacity(capacity),
             players: ordered,
@@ -225,6 +249,77 @@ impl Graph {
             inbox_events: Vec::with_capacity(inbox),
             schedule,
         })
+    }
+
+    /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
+    /// describes, once the nodes are prepared. Returns the delays it added,
+    /// with where they are, and how late the output is. `output` becomes the
+    /// delay after the output, if it needs one.
+    fn compensate(
+        &mut self,
+        config: &EngineConfig,
+        output: &mut NodeId,
+    ) -> (Vec<(Joint, NodeId)>, usize) {
+        // How late each node's output is.
+        let mut late = vec![0usize; self.nodes.len()];
+        let mut delays = Vec::new();
+        for node in self.topological_order() {
+            let inputs = &self.inputs[node.0];
+            let arrival = inputs.iter().map(|i| late[i.0]).max().unwrap_or(0);
+            let latency = self.nodes[node.0].latency();
+            late[node.0] = arrival.saturating_add(latency).min(Self::MAX_LATENCY);
+            for slot in 0..self.inputs[node.0].len() {
+                let from = self.inputs[node.0][slot];
+                let early = arrival - late[from.0];
+                if early == 0 {
+                    continue;
+                }
+                let nth = self.inputs[node.0][..slot]
+                    .iter()
+                    .filter(|&&i| i == from)
+                    .count();
+                let joint = Joint::Input {
+                    to: self.keys[node.0],
+                    from: self.keys[from.0],
+                    nth: u32::try_from(nth).unwrap_or(u32::MAX),
+                };
+                let delay = self.add_delay(from, early, config);
+                self.inputs[node.0][slot] = delay;
+                let feeds = &mut self.outputs[from.0];
+                let at = feeds.iter().position(|&n| n == node);
+                feeds[at.expect("`from` feeds `node`")] = delay;
+                self.outputs[delay.0].push(node);
+                delays.push((joint, delay));
+            }
+        }
+        let cue_late = self.cue.map_or(0, |cue| late[cue.0]);
+        let latency = late[output.0].max(cue_late);
+        if let Some(cue) = self.cue
+            && cue_late < latency
+        {
+            let delay = self.add_delay(cue, latency - cue_late, config);
+            self.outputs[cue.0].push(delay);
+            self.cue = Some(delay);
+            delays.push((Joint::Cue, delay));
+        }
+        if late[output.0] < latency {
+            let delay = self.add_delay(*output, latency - late[output.0], config);
+            self.outputs[output.0].push(delay);
+            *output = delay;
+            delays.push((Joint::Output, delay));
+        }
+        (delays, latency)
+    }
+
+    /// Adds a prepared [`Delay`] of `frames` that `from` feeds. It feeds
+    /// nothing yet, and has no key: [`Joint`]s say where delays are.
+    fn add_delay(&mut self, from: NodeId, frames: usize, config: &EngineConfig) -> NodeId {
+        let mut delay = Delay::new(frames).with_channels(self.nodes[from.0].channels());
+        delay.prepare(config);
+        self.nodes.push(Box::new(delay));
+        self.inputs.push(vec![from]);
+        self.outputs.push(Vec::new());
+        NodeId(self.nodes.len() - 1)
     }
 
     fn check(&self, id: NodeId) -> Result<(), GraphError> {
@@ -303,6 +398,10 @@ pub struct PreparedGraph {
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
     pub(crate) by_key: Vec<(NodeKey, NodeId)>,
+    /// The delays delay compensation added, sorted by where they are.
+    delays: Vec<(Joint, NodeId)>,
+    /// How late the output is.
+    latency: usize,
     /// The current block's node events, grouped by node.
     pub(crate) events: Vec<NodeEvent>,
     /// Where each node's events are in `events`.
@@ -321,6 +420,23 @@ pub struct PreparedGraph {
     inbox_events: Vec<NodeEvent>,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
+}
+
+/// Where delay compensation put a delay. A delay takes over from the delay
+/// at the same joint in the graph it replaces, as nodes with the same key
+/// do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Joint {
+    /// On the `nth` connection from `from` into `to`, counting from 0.
+    Input {
+        to: NodeKey,
+        from: NodeKey,
+        nth: u32,
+    },
+    /// After the cue output.
+    Cue,
+    /// After the output.
+    Output,
 }
 
 /// A node event on its way into a graph, with its arrival order.
@@ -416,6 +532,15 @@ impl PreparedGraph {
         self.cue.map(|cue| self.buffers[cue.0].view(frames))
     }
 
+    /// How many frames late the output plays, after delay compensation: the
+    /// latency of the latest path to it, or to the cue output, which every
+    /// other path is lined up with ([`Graph::prepare`]). What the output
+    /// plays left the clips this many frames earlier, before the audio
+    /// device adds its own latency.
+    pub fn latency(&self) -> usize {
+        self.latency
+    }
+
     pub(crate) fn find(&self, key: NodeKey) -> Option<NodeId> {
         self.by_key
             .binary_search_by_key(&key, |&(k, _)| k)
@@ -423,23 +548,15 @@ impl PreparedGraph {
             .map(|i| self.by_key[i].1)
     }
 
-    /// Lets each node take over from the node with the same key in `old`.
-    /// Runs on the audio thread.
+    /// Lets each node take over from the node with the same key in `old`,
+    /// and each delay from the delay at the same joint. Runs on the audio
+    /// thread.
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
-        let (mut i, mut j) = (0, 0);
-        while let (Some(&(key, id)), Some(&(old_key, old_id))) =
-            (self.by_key.get(i), old.by_key.get(j))
-        {
-            match key.cmp(&old_key) {
-                Ordering::Less => i += 1,
-                Ordering::Greater => j += 1,
-                Ordering::Equal => {
-                    self.nodes[id.0].adopt(old.nodes[old_id.0].as_mut());
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
+        let (nodes, old_nodes) = (&mut self.nodes, &mut old.nodes);
+        let mut adopt =
+            |id: NodeId, old_id: NodeId| nodes[id.0].adopt(old_nodes[old_id.0].as_mut());
+        pairs(&self.by_key, &old.by_key, &mut adopt);
+        pairs(&self.delays, &old.delays, &mut adopt);
     }
 
     /// Queues an event for the next block. Returns whether there was room:
@@ -540,6 +657,23 @@ impl PreparedGraph {
     }
 }
 
+/// Calls `f` with the node of each identity in both `new` and `old`, which
+/// are sorted by identity, and the old one's.
+fn pairs<T: Ord>(new: &[(T, NodeId)], old: &[(T, NodeId)], f: &mut impl FnMut(NodeId, NodeId)) {
+    let (mut i, mut j) = (0, 0);
+    while let (Some((key, id)), Some((old_key, old_id))) = (new.get(i), old.get(j)) {
+        match key.cmp(old_key) {
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+            Ordering::Equal => {
+                f(*id, *old_id);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+}
+
 impl fmt::Debug for PreparedGraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PreparedGraph")
@@ -547,6 +681,7 @@ impl fmt::Debug for PreparedGraph {
             .field("nodes", &self.nodes.len())
             .field("output", &self.output)
             .field("cue", &self.cue)
+            .field("latency", &self.latency)
             .finish_non_exhaustive()
     }
 }
@@ -556,7 +691,7 @@ mod tests {
     use musicable_model::time::TempoMap;
 
     use super::*;
-    use crate::nodes::{Constant, Sum};
+    use crate::nodes::{Constant, Gain, Impulse, Latent, Sum};
     use crate::{
         AudioMut, Inputs, NoteId, ProcessContext, ReferenceRenderer, Renderer, TransportState, rt,
     };
@@ -772,6 +907,219 @@ mod tests {
             .downcast_mut::<Pulse>()
             .unwrap();
         assert_eq!(pulse.0, 1);
+    }
+
+    fn impulse(at: u64) -> Impulse {
+        Impulse { at }
+    }
+
+    fn latent(frames: usize) -> Latent {
+        Latent(Delay::new(frames))
+    }
+
+    /// Renders `frames` frames of `graph` from engine time `from`, in blocks
+    /// of `block`, and returns the first channel of the output and of the
+    /// cue output.
+    fn play(
+        graph: &mut PreparedGraph,
+        from: u64,
+        frames: usize,
+        block: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let tempo = TempoMap::default();
+        let (mut output, mut cue) = (Vec::new(), Vec::new());
+        let mut done = 0;
+        while done < frames {
+            let n = block.min(frames - done);
+            let block = Block {
+                frames: n,
+                time: from + done as u64,
+                transport: TransportState::default(),
+                tempo: &tempo,
+            };
+            rt::scope(|| ReferenceRenderer.render(graph, &block));
+            output.extend_from_slice(graph.output(n).channel(0));
+            if let Some(c) = graph.cue(n) {
+                cue.extend_from_slice(c.channel(0));
+            }
+            done += n;
+        }
+        (output, cue)
+    }
+
+    /// The frames that aren't silent, and what's on them.
+    fn peaks(signal: &[f32]) -> Vec<(usize, f32)> {
+        let loud = signal.iter().enumerate().filter(|&(_, &s)| s != 0.0);
+        loud.map(|(i, &s)| (i, s)).collect()
+    }
+
+    #[test]
+    fn a_latent_path_and_a_dry_one_line_up_where_they_meet() {
+        let mut g = Graph::new();
+        let source = g.add(NodeKey(0), impulse(50));
+        let wet = g.add(NodeKey(1), latent(37));
+        let sum = g.add(NodeKey(2), Sum::default());
+        g.connect(source, wet).unwrap();
+        g.connect(wet, sum).unwrap();
+        g.connect(source, sum).unwrap();
+        g.set_output(sum).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        assert_eq!(graph.latency(), 37);
+        assert_eq!(graph.len(), 4, "one delay, on the dry path");
+        let (output, _) = play(&mut graph, 0, 200, 16);
+        assert_eq!(peaks(&output), [(87, 2.0)]);
+    }
+
+    #[test]
+    fn paths_line_up_at_every_node_they_meet() {
+        let mut g = Graph::new();
+        let [source, five, eleven, bus, mix, out] = [
+            g.add(NodeKey(0), impulse(10)),
+            g.add(NodeKey(1), latent(5)),
+            g.add(NodeKey(2), latent(11)),
+            g.add(NodeKey(3), Sum::default()),
+            g.add(NodeKey(4), Sum::default()),
+            g.add(NodeKey(5), Sum::default()),
+        ];
+        for (from, to) in [
+            (source, five),
+            (five, bus),
+            (source, bus),
+            (source, eleven),
+            (eleven, mix),
+            // Twice, so it counts twice.
+            (bus, mix),
+            (bus, mix),
+            (mix, out),
+            (source, out),
+        ] {
+            g.connect(from, to).unwrap();
+        }
+        g.set_output(out).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        assert_eq!(graph.latency(), 11);
+        // Delays of 5 from the source into the bus, 6 on both connections
+        // from the bus into the mix, and 11 from the source into the output.
+        assert_eq!(graph.len(), 10);
+        let (output, _) = play(&mut graph, 0, 64, 7);
+        // The bus has 2 of the impulse, the mix 1 + 2 + 2, the output one more.
+        assert_eq!(peaks(&output), [(21, 6.0)]);
+    }
+
+    #[test]
+    fn latency_is_compensated_up_to_a_limit() {
+        let mut g = Graph::new();
+        let source = g.add(NodeKey(0), impulse(0));
+        let wild = g.add(NodeKey(1), Wild);
+        let sum = g.add(NodeKey(2), Sum::default());
+        g.connect(source, wild).unwrap();
+        g.connect(wild, sum).unwrap();
+        g.connect(source, sum).unwrap();
+        g.set_output(sum).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        assert_eq!(graph.latency(), Graph::MAX_LATENCY);
+        let (output, _) = play(&mut graph, 0, 64, 64);
+        assert_eq!(
+            peaks(&output),
+            [(0, 1.0)],
+            "the wild path, which isn't late"
+        );
+    }
+
+    /// Passes what comes in straight through, and reports far more latency
+    /// than anything has.
+    struct Wild;
+
+    impl Node for Wild {
+        fn latency(&self) -> usize {
+            usize::MAX
+        }
+
+        fn process(
+            &mut self,
+            _: &ProcessContext<'_>,
+            inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            output.clear();
+            for input in inputs.iter() {
+                output.add_from(input);
+            }
+        }
+    }
+
+    #[test]
+    fn graphs_without_latency_have_no_delays() {
+        let mut g = Graph::new();
+        let a = g.add(NodeKey(0), impulse(3));
+        let b = g.add(NodeKey(1), Gain::new(0.5));
+        let sum = g.add(NodeKey(2), Sum::default());
+        g.connect(a, b).unwrap();
+        g.connect(a, sum).unwrap();
+        g.connect(b, sum).unwrap();
+        g.set_output(sum).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        assert_eq!((graph.len(), graph.latency()), (3, 0));
+        assert_eq!(peaks(&play(&mut graph, 0, 16, 16).0), [(3, 1.5)]);
+    }
+
+    #[test]
+    fn the_cue_output_lines_up_with_the_output() {
+        for (output_latency, cue_latency) in [(20, 0), (0, 20), (8, 3)] {
+            let mut g = Graph::new();
+            let source = g.add(NodeKey(0), impulse(5));
+            let output = g.add(NodeKey(1), latent(output_latency));
+            let click = g.add(NodeKey(2), impulse(5));
+            let cue = g.add(NodeKey(3), latent(cue_latency));
+            g.connect(source, output).unwrap();
+            g.connect(click, cue).unwrap();
+            g.set_output(output).unwrap();
+            g.set_cue(cue).unwrap();
+            let mut graph = g.prepare(&CONFIG).unwrap();
+            let latency = output_latency.max(cue_latency);
+            assert_eq!(graph.latency(), latency);
+            let (output, cue) = play(&mut graph, 0, 64, 16);
+            assert_eq!(peaks(&output), [(5 + latency, 1.0)], "{latency}");
+            assert_eq!(peaks(&cue), [(5 + latency, 1.0)], "{latency}");
+        }
+    }
+
+    /// A latent path and a dry one at half the level, into a sum. With
+    /// `more`, another path into the sum comes first, so the dry path is the
+    /// sum's third input instead of its second.
+    fn wet_and_dry(latency: usize, more: bool) -> PreparedGraph {
+        let mut g = Graph::new();
+        let sum = g.add(NodeKey(0), Sum::default());
+        if more {
+            let silent = g.add(NodeKey(4), impulse(u64::MAX));
+            g.connect(silent, sum).unwrap();
+        }
+        let source = g.add(NodeKey(1), impulse(30));
+        let wet = g.add(NodeKey(2), latent(latency));
+        let dry = g.add(NodeKey(3), Gain::new(0.5));
+        g.connect(source, wet).unwrap();
+        g.connect(wet, sum).unwrap();
+        g.connect(source, dry).unwrap();
+        g.connect(dry, sum).unwrap();
+        g.set_output(sum).unwrap();
+        g.prepare(&CONFIG).unwrap()
+    }
+
+    #[test]
+    fn delays_carry_on_across_swaps() {
+        // The impulse at frame 30 is on its way through both paths when the
+        // graph is swapped at frame 40. Each delay takes over from the one
+        // in the same place, whichever input of the sum it's on, so the
+        // impulse comes out once: on time when the latency stays the same,
+        // and otherwise as late as the new latency says.
+        for (latency, at) in [(40, 70), (25, 55), (60, 90)] {
+            let mut first = wet_and_dry(40, false);
+            let (mut output, _) = play(&mut first, 0, 40, 8);
+            let mut second = wet_and_dry(latency, true);
+            rt::scope(|| second.adopt_from(&mut first));
+            output.extend(play(&mut second, 40, 60, 8).0);
+            assert_eq!(peaks(&output), [(at, 1.5)], "{latency}");
+        }
     }
 
     #[test]

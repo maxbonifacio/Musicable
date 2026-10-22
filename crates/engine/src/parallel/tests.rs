@@ -11,7 +11,7 @@ use proptest::test_runner::{Config, TestRunner};
 
 use super::*;
 use crate::graph::Routed;
-use crate::nodes::{Constant, Gain, Sine, Sum};
+use crate::nodes::{Constant, Delay, Gain, Latent, Sine, Sum};
 use crate::{
     AudioBuffer, AudioMut, EngineConfig, Graph, NodeEventKind, NodeKey, ParamId, ProcessContext,
     TransportState,
@@ -82,11 +82,28 @@ impl Node for Mix {
 /// What a random graph's node is.
 #[derive(Debug, Clone, Copy)]
 enum Kind {
-    Mix { seed: u8, channels: usize },
-    Sum { channels: usize },
-    Gain { gain: f32, channels: usize },
-    Constant { value: f32 },
-    Sine { frequency: f64 },
+    Mix {
+        seed: u8,
+        channels: usize,
+    },
+    Sum {
+        channels: usize,
+    },
+    Gain {
+        gain: f32,
+        channels: usize,
+    },
+    Constant {
+        value: f32,
+    },
+    Sine {
+        frequency: f64,
+    },
+    /// So delay compensation adds delays wherever its path meets another.
+    Latent {
+        frames: usize,
+        channels: usize,
+    },
 }
 
 impl Kind {
@@ -97,6 +114,9 @@ impl Kind {
             Kind::Gain { gain, channels } => Box::new(Gain::new(gain).with_channels(channels)),
             Kind::Constant { value } => Box::new(Constant::new(value)),
             Kind::Sine { frequency } => Box::new(Sine::new(frequency, 0.5)),
+            Kind::Latent { frames, channels } => {
+                Box::new(Latent(Delay::new(frames).with_channels(channels)))
+            }
         }
     }
 }
@@ -126,9 +146,10 @@ fn kind() -> impl Strategy<Value = Kind> {
     prop_oneof![
         4 => (any::<u8>(), channels.clone()).prop_map(|(seed, channels)| mix(seed, channels)),
         1 => channels.clone().prop_map(|channels| Kind::Sum { channels }),
-        1 => (0.0f32..2.0, channels).prop_map(|(gain, channels)| Kind::Gain { gain, channels }),
+        1 => (0.0f32..2.0, channels.clone()).prop_map(|(gain, channels)| Kind::Gain { gain, channels }),
         1 => (-1.0f32..1.0).prop_map(|value| Kind::Constant { value }),
         1 => (20.0f64..2000.0).prop_map(|frequency| Kind::Sine { frequency }),
+        1 => (0..80usize, channels).prop_map(|(frames, channels)| Kind::Latent { frames, channels }),
     ]
 }
 
@@ -279,6 +300,18 @@ fn check(
                 prop_assert!(
                     same(&graph.buffers[id.0], &expected.buffers[id.0], block.frames),
                     "node {node} differs in block {b} with {} workers",
+                    renderer.threads(),
+                );
+            }
+            // And the delays that delay compensation added after them.
+            for delay in ids.len()..expected.buffers.len() {
+                prop_assert!(
+                    same(
+                        &graph.buffers[delay],
+                        &expected.buffers[delay],
+                        block.frames
+                    ),
+                    "delay {delay} differs in block {b} with {} workers",
                     renderer.threads(),
                 );
             }

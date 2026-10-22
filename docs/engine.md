@@ -25,7 +25,8 @@ of Musicable, and where Tier 1 work plugs in.
   `Compiler` and the `EngineHandle`.
 - The **compiler thread** (`musicable-compiler`) turns model snapshots into
   `PreparedGraph`s: `compile()` builds a `Graph`, and `Graph::prepare`
-  orders it, calls each node's `prepare` and allocates its buffers. When
+  calls each node's `prepare`, compensates for latency, orders the nodes and
+  allocates their buffers. When
   several snapshots are waiting it compiles only the newest. A node that
   takes its time to prepare, as a plugin can, holds up this thread only.
 - The **audio thread** owns the `Engine` and calls `Engine::process` or
@@ -197,6 +198,42 @@ change goes through `send` or `send_at`**, even when it's also written to the
 model. Values sent again are never counted as late.
 `EngineHandle::forget_params` forgets them, for when the graphs to come
 belong to another project, whose nodes have values of their own.
+
+## Delay compensation
+
+A node with latency, such as a plugin that looks ahead, says how many frames
+late its output is: `Node::latency`, read once the node is prepared.
+`Graph::prepare` then lines up every path through the graph:
+
+- Each node's output is as late as the latest path into it, plus its own
+  latency.
+- Wherever paths of different lateness meet at a node, such as tracks at the
+  master's bus or a group's, or sends at a return's, the earlier ones go
+  through a `nodes::Delay` that makes up the difference. So a track with a
+  latent plugin lines up with a dry track to the sample.
+- The cue output gets a delay that lines it up with the output, or the
+  output one that lines it up with the cue, whichever is earlier, so the
+  metronome clicks in time with what plays.
+- `PreparedGraph::latency` says how late the output is in the end, and
+  `Stats::latency` reports the running graph's. The audio device adds its
+  own output latency on top. So what you hear left the clip players that
+  much before `Stats::position`, which is where a playhead that follows the
+  sound would subtract it.
+- A delay carries on with what the delay in the same place held in the
+  graph it replaces, so a recompile doesn't drop out. Its place is the
+  connection it's on, named by the keys of the nodes at either end. When
+  the latency changes, the path has to jump in time: the new delay keeps
+  the newest frames it has room for, and a longer one plays silence first,
+  for the frames the old one didn't hold.
+- A node whose latency changes, as a plugin's can when one of its settings
+  does, needs a new graph, and the new graph compensates for the new
+  latency.
+
+Two things aren't delayed. Notes sent with `Graph::send_notes` arrive at an
+instrument when they're due, so its sound lines up as long as nothing latent
+comes before it on its track, which is the usual chain. And meters measure
+where they are, before the delays at the buses, so a latent track's meter
+moves later than a dry one's.
 
 ## Parameter smoothing
 
@@ -587,6 +624,7 @@ thread, but node code shouldn't rely on denormals either way.
 | Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped` |
 | Notes sounding in a MIDI clip player | 1,024 | It doesn't start more |
 | Notes the test instrument plays at once | `TestInstrument::VOICES`, 32 | A new note takes the place of the one that started longest ago |
+| Latency delay compensation lines up | `Graph::MAX_LATENCY`, 262,144 frames (5.5 s at 48 kHz) | Later paths are lined up as if they were that late |
 
 A swap takes one queue slot, plus one for each remembered parameter of the new
 graph. The handle remembers every parameter it has sent until
