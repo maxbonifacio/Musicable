@@ -1,17 +1,22 @@
 //! Musicable's own devices in a project: they process where the chain puts
 //! them, a kind without DSP yet passes the signal through, parameter
-//! changes land on their frames through the engine, and every session
-//! sounds the same with the parallel renderer as with the reference
-//! renderer.
+//! changes land on their frames through the engine, and every session,
+//! instruments playing MIDI clips included, sounds the same with the
+//! parallel renderer as with the reference renderer.
+
+use std::sync::Arc;
 
 use musicable_engine::compile::keys;
-use musicable_engine::devices::BUILT;
+use musicable_engine::devices::{BUILT, Sample};
 use musicable_engine::event::ParamId;
+use musicable_engine::media::{AudioData, Media};
 use musicable_engine::{
-    AudioMut, Engine, EngineConfig, Event, ParallelOptions, ParallelRenderer, ReferenceRenderer,
-    Renderer, TransportCommand, compile, rt,
+    AudioMut, Engine, EngineConfig, Event, Meters, ParallelOptions, ParallelRenderer,
+    ReferenceRenderer, Renderer, TransportCommand, compile_with_media, rt,
 };
+use musicable_model::clip::{ClipContent, MidiClip};
 use musicable_model::native::{NativeDevice, NativeKind, eq, utility};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceKind, Project, TestTone, TrackKind};
 
 #[global_allocator]
@@ -50,13 +55,18 @@ fn native(p: &mut Project, kind: NativeKind, values: &[(usize, f64)]) -> Device 
     p.new_device(DeviceKind::Native(device))
 }
 
-/// Plays `project` from the start through `renderer`, sending each of
-/// `events` at its engine time, and returns the left channel.
-fn play(project: &Project, renderer: Box<dyn Renderer>, events: &[(u64, Event)]) -> Vec<f32> {
+/// Plays `project` from the start through `renderer`, with the samples
+/// in `media`, sending each of `events` at its engine time, and returns
+/// the left channel.
+fn play(
+    project: &Project,
+    media: &Media,
+    renderer: Box<dyn Renderer>,
+    events: &[(u64, Event)],
+) -> Vec<f32> {
     let (mut engine, mut handle) = Engine::with_renderer(CONFIG, renderer);
-    handle
-        .swap_graph(compile(project).prepare(&CONFIG).unwrap())
-        .unwrap();
+    let graph = compile_with_media(project, &Meters::new(), media);
+    handle.swap_graph(graph.prepare(&CONFIG).unwrap()).unwrap();
     handle
         .send(Event::Transport(TransportCommand::Play))
         .unwrap();
@@ -70,7 +80,7 @@ fn play(project: &Project, renderer: Box<dyn Renderer>, events: &[(u64, Event)])
 }
 
 fn reference(project: &Project) -> Vec<f32> {
-    play(project, Box::new(ReferenceRenderer), &[])
+    play(project, &Media::new(), Box::new(ReferenceRenderer), &[])
 }
 
 #[test]
@@ -132,7 +142,12 @@ fn parameter_changes_land_on_their_frames() {
         param: ParamId(utility::MUTE as u32),
         value: 1.0,
     };
-    let wet = play(&p, Box::new(ReferenceRenderer), &[(1000, mute)]);
+    let wet = play(
+        &p,
+        &Media::new(),
+        Box::new(ReferenceRenderer),
+        &[(1000, mute)],
+    );
     assert_eq!(wet[..1000], dry[..1000]);
     // Faded out over 10 ms from frame 1000.
     assert_ne!(wet[1000], dry[1000]);
@@ -157,20 +172,52 @@ impl Random {
     }
 }
 
-/// A project of tracks with built-in devices set at random, and events
-/// that move their parameters at random times.
-fn random_session(random: &mut Random) -> (Project, Vec<(u64, Event)>) {
+/// A project of tracks with built-in devices set at random: audio tracks
+/// with effects, and MIDI tracks with notes for an instrument and effects
+/// after it. And the samplers' samples, and events that move the devices'
+/// parameters at random times.
+fn random_session(random: &mut Random) -> (Project, Media, Vec<(u64, Event)>) {
     let mut p = Project::new();
+    let mut media = Media::new();
     let mut events = Vec::new();
-    for t in 0..4 {
-        let track = p.add_track(t.to_string(), TrackKind::Audio);
-        p.track_mut(track).unwrap().tone = Some(TestTone {
-            frequency: 100.0 + (random.next() % 3000) as f64,
-            level: 0.5,
-        });
+    let (instruments, effects): (Vec<NativeKind>, Vec<NativeKind>) =
+        BUILT.iter().partition(|kind| kind.is_instrument());
+    let pick = |random: &mut Random, kinds: &[NativeKind]| {
+        kinds[(random.next() % kinds.len() as u64) as usize]
+    };
+    for t in 0..6 {
+        let midi = t >= 4;
+        let kind = if midi {
+            TrackKind::Midi
+        } else {
+            TrackKind::Audio
+        };
+        let track = p.add_track(t.to_string(), kind);
+        let mut kinds = Vec::new();
+        if midi {
+            // Notes in the first fifth of a beat, a tenth of a second.
+            let mut clip = MidiClip::default();
+            for _ in 0..1 + random.next() % 6 {
+                let start = Beats::from_ratio((random.next() % 200) as i64, 1000);
+                let length = Beats::from_ratio(10 + (random.next() % 300) as i64, 1000);
+                let key = 36 + (random.next() % 60) as u8;
+                clip.add_note(start, length, key, random.unit() as f32);
+            }
+            let range = BeatRange::new(Beats::new(0), Beats::new(1));
+            let clip = p.new_clip("Notes", range, ClipContent::Midi(clip));
+            p.track_mut(track).unwrap().clips.push(clip);
+            kinds.push(pick(random, &instruments));
+        } else {
+            p.track_mut(track).unwrap().tone = Some(TestTone {
+                frequency: 100.0 + (random.next() % 3000) as f64,
+                level: 0.5,
+            });
+        }
+        for _ in 0..random.next() % 3 + u64::from(!midi) {
+            kinds.push(pick(random, &effects));
+        }
         let mut devices = Vec::new();
-        for _ in 0..1 + random.next() % 3 {
-            let kind = BUILT[(random.next() % BUILT.len() as u64) as usize];
+        for kind in kinds {
             let mut device = NativeDevice::new(kind);
             for (i, param) in kind.params().iter().enumerate() {
                 if random.next().is_multiple_of(3) {
@@ -178,6 +225,14 @@ fn random_session(random: &mut Random) -> (Project, Vec<(u64, Event)>) {
                 }
             }
             let device = p.new_device(DeviceKind::Native(device));
+            if kind == NativeKind::Sampler {
+                // Noise, at another rate than the engine's.
+                let channels = (0..1 + random.next() % 2)
+                    .map(|_| (0..2000).map(|_| random.unit() as f32 - 0.5).collect())
+                    .collect();
+                let sample = Sample::new(&AudioData::new(44_100, channels));
+                media.insert_sample(device.id, Arc::new(sample));
+            }
             for _ in 0..4 {
                 let i = (random.next() % kind.params().len() as u64) as usize;
                 let value = kind.params()[i].from_unit(random.unit());
@@ -192,15 +247,15 @@ fn random_session(random: &mut Random) -> (Project, Vec<(u64, Event)>) {
         }
         p.track_mut(track).unwrap().devices = devices;
     }
-    (p, events)
+    (p, media, events)
 }
 
 #[test]
 fn every_session_sounds_the_same_with_the_parallel_renderer() {
     let mut random = Random(11);
     for i in 0..12 {
-        let (project, events) = random_session(&mut random);
-        let expected = play(&project, Box::new(ReferenceRenderer), &events);
+        let (project, media, events) = random_session(&mut random);
+        let expected = play(&project, &media, Box::new(ReferenceRenderer), &events);
         assert!(expected.iter().any(|&s| s != 0.0));
         for threads in [1, 4] {
             let renderer = ParallelRenderer::new(ParallelOptions {
@@ -209,7 +264,7 @@ fn every_session_sounds_the_same_with_the_parallel_renderer() {
                 realtime: false,
                 ..ParallelOptions::default()
             });
-            let played = play(&project, Box::new(renderer), &events);
+            let played = play(&project, &media, Box::new(renderer), &events);
             let same = played
                 .iter()
                 .zip(&expected)

@@ -599,6 +599,7 @@ does is in the kind's file in `crates/model/src/native/`.
 | 15 | `cutoff` | Filter Cutoff | 20 to 20000 Hz | 2000 |
 | 16 | `resonance` | Filter Resonance | 0 to 100 % | 0 |
 | 17 | `voices` | Voices | 1 to 32, whole | 8 |
+| 18 | `loop_fade` | Sample Loop Fade | 0 to 1000 ms | 10 |
 
 **Synth** (`"synth"`):
 
