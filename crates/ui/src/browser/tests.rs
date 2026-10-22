@@ -118,6 +118,15 @@ fn with_file(id: musicable_commands::CommandId, path: &str) -> Action {
     Action::RunWith(id, Args::new().with("file", path))
 }
 
+/// The path of the file `file` in the library's folder `folder`, as the
+/// browser gives it: with the system's separator between the names it adds
+/// to the folder's, a backslash on Windows.
+fn in_folder(folder: &str, file: &str) -> String {
+    let mut path = PathBuf::from(folder);
+    path.extend(file.split('/'));
+    path.to_string_lossy().into_owned()
+}
+
 /// The text field whose hint is `hint`.
 fn field<'a>(harness: &'a Harness<'static, State>, hint: &'static str) -> egui_kittest::Node<'a> {
     harness.get_by(move |node| node.data().placeholder() == Some(hint))
@@ -149,8 +158,8 @@ fn the_folders_open_and_picking_a_sample_previews_it() {
     // A click selects a sample and previews it.
     click(&mut harness, "Kick 01");
     assert_eq!(toggled(&harness, "Kick 01"), Some(Toggled::True));
-    let kick = "/samples/Drums/Kicks/Kick 01.wav";
-    assert_eq!(actions(&mut harness), [with_file(browser::PREVIEW, kick)]);
+    let kick = in_folder("/samples/Drums", "Kicks/Kick 01.wav");
+    assert_eq!(actions(&mut harness), [with_file(browser::PREVIEW, &kick)]);
 
     // Without auto preview, it only selects it.
     harness.state_mut().library.auto_preview = false;
@@ -169,13 +178,10 @@ fn the_folders_open_and_picking_a_sample_previews_it() {
     assert_eq!(toggled(&harness, "Loop 120"), Some(Toggled::True));
     harness.key_press(Key::ArrowUp);
     harness.run();
-    let preview = |path| with_file(browser::PREVIEW, path);
+    let preview = |file| with_file(browser::PREVIEW, &in_folder("/samples/Drums", file));
     assert_eq!(
         actions(&mut harness),
-        [
-            preview("/samples/Drums/Loop 120.wav"),
-            preview("/samples/Drums/Kicks/Kick 02.wav")
-        ]
+        [preview("Loop 120.wav"), preview("Kicks/Kick 02.wav")]
     );
 
     // A double-click puts it on the selected track.
@@ -246,10 +252,10 @@ fn searches_list_what_the_library_found_and_files_like_one() {
     harness.get_by_label("Kick 01").click_secondary();
     harness.run();
     click(&mut harness, "Find Similar");
-    let kick = "/samples/Drums/Kicks/Kick 01.wav";
+    let kick = in_folder("/samples/Drums", "Kicks/Kick 01.wav");
     assert_eq!(
         actions(&mut harness),
-        [with_file(browser::FIND_SIMILAR, kick)]
+        [with_file(browser::FIND_SIMILAR, &kick)]
     );
     harness.get_by_label("Like Kick 01");
     harness.get_by_label("Vox");
@@ -272,7 +278,7 @@ fn searches_list_what_the_library_found_and_files_like_one() {
 #[test]
 fn tags_are_given_and_taken_away_in_a_samples_menu() {
     let mut library = samples();
-    let kick = PathBuf::from("/samples/Drums/Kicks/Kick 01.wav");
+    let kick = PathBuf::from(in_folder("/samples/Drums", "Kicks/Kick 01.wav"));
     let id = library.find(&kick).unwrap();
     library.tag(id, "dusty", true);
     let mut harness = harness(Project::new(), library);
