@@ -313,8 +313,9 @@ impl Instance {
         unsafe { to_value(self.plugin(), id, text.as_ptr(), &mut value) }.then_some(value)
     }
 
-    /// Sets a parameter. An active plugin gets the change as it next
-    /// processes; an inactive one at once.
+    /// Sets a parameter. A plugin a node processes gets the change as it
+    /// next processes. One that no node processes, inactive or not started
+    /// yet, as when there's no audio device, gets it at once.
     pub fn set_param(&mut self, id: u32, value: f64) {
         if !value.is_finite() {
             return;
@@ -330,36 +331,49 @@ impl Instance {
     /// Hands the plugin the changes waiting for it, or as many as it has
     /// room for.
     fn send_pending(&mut self) {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() || self.flush() {
             return;
         }
-        match self.shared.lifecycle() {
-            INACTIVE => self.flush(),
-            ACTIVE | PROCESSING => {
-                let room = self.to_audio.slots().min(self.pending.len());
-                for change in self.pending.drain(..room) {
-                    // There's room: just checked.
-                    let _ = self.to_audio.push(change);
-                }
+        if matches!(self.shared.lifecycle(), ACTIVE | PROCESSING) {
+            let room = self.to_audio.slots().min(self.pending.len());
+            for change in self.pending.drain(..room) {
+                // There's room: just checked.
+                let _ = self.to_audio.push(change);
             }
-            _ => {}
         }
     }
 
-    /// Hands an inactive plugin the changes waiting for it, and takes the
-    /// ones it has, through its `flush`.
-    fn flush(&mut self) {
+    /// Hands the plugin the changes waiting for it, and takes the ones it
+    /// has, through its `flush`, unless a node processes it: an inactive
+    /// plugin on the main thread, and an active one no node has started on
+    /// the main thread as its audio thread. Says whether it did, or false
+    /// when a node is to.
+    fn flush(&mut self) -> bool {
+        let unprocessed = |lifecycle| lifecycle == INACTIVE || lifecycle == ACTIVE;
+        if !unprocessed(self.shared.lifecycle()) {
+            return false;
+        }
         // SAFETY: the extension lives as long as the plugin.
         let Some(flush) = (unsafe { self.ext.params.as_ref() }).and_then(|p| p.flush) else {
-            self.pending.clear();
-            return;
+            // An active plugin without one takes the changes as it
+            // processes, and an inactive one can't take them.
+            if self.shared.lifecycle() == INACTIVE {
+                self.pending.clear();
+                return true;
+            }
+            return false;
         };
         let Ok(_busy) = self.shared.enter() else {
-            return;
+            return false;
         };
-        if self.shared.lifecycle() != INACTIVE {
-            return;
+        // A node may have started it meanwhile.
+        let lifecycle = self.shared.lifecycle();
+        if !unprocessed(lifecycle) {
+            return false;
         }
+        // CLAP lets any thread be the audio thread, one at a time, and
+        // `busy` makes this one the only one.
+        let _audio_thread = (lifecycle == ACTIVE).then(AudioThread::enter);
         // SAFETY: `busy` is held.
         let audio = unsafe { &mut *self.shared.audio.get() };
         audio.events.clear();
@@ -369,10 +383,12 @@ impl Instance {
         }
         let in_events = audio.events.list();
         let out_events = events::output_list(&mut audio.to_main);
-        // SAFETY: inactive, so on the main thread, with lists that stay put
-        // for the call.
+        // SAFETY: on the main thread while inactive, or on the audio thread
+        // while active and not processing, with lists that stay put for the
+        // call.
         unsafe { flush(self.plugin(), &in_events, &out_events) };
         audio.events.clear();
+        true
     }
 
     // Activation.
@@ -657,7 +673,8 @@ impl Instance {
             events.push(PluginEvent::ParamsChanged);
         }
         let requests = &self.shared.requests;
-        if requests.flush.swap(false, Ordering::AcqRel) && self.shared.lifecycle() == INACTIVE {
+        if requests.flush.swap(false, Ordering::AcqRel) {
+            // A node processing the plugin flushes it as it does.
             self.flush();
         }
         self.send_pending();

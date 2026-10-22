@@ -728,6 +728,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod arranging;
 #[cfg(test)]
+mod plugins_on_tracks;
+#[cfg(test)]
 mod remapping;
 #[cfg(test)]
 mod testing;

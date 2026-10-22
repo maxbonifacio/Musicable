@@ -289,10 +289,45 @@ fn changes_to_an_inactive_plugin_apply_at_once() {
     instance.activate(CONFIG).unwrap();
     assert_eq!(instance.latency(), 32);
     // Changes waiting for a node when the plugin deactivates get to it.
+    let mut node = instance.node_source().node();
+    play(&mut node, &ramp(16), &Block::default());
     instance.set_param(GAIN, 0.75);
     instance.deactivate().unwrap();
     assert_eq!(instance.param_value(GAIN), Some(0.75));
-    drop(instance);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn an_active_plugin_no_node_processes_trades_changes_at_once() {
+    // As when there's no audio device: active, and never processed.
+    let plugins = TestPlugins::new("unprocessed");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    instance.set_param(GAIN, 0.5);
+    assert_eq!(instance.param_value(GAIN), Some(0.5));
+    plugins.gui(&instance, gui::BEGIN, GAIN, 0.0);
+    plugins.gui(&instance, gui::VALUE, GAIN, 0.25);
+    plugins.gui(&instance, gui::END, GAIN, 0.0);
+    assert_eq!(
+        instance.poll(),
+        [
+            PluginEvent::GestureBegin { param: GAIN },
+            PluginEvent::ParamChanged {
+                param: GAIN,
+                value: 0.25
+            },
+            PluginEvent::GestureEnd { param: GAIN },
+        ]
+    );
+    // A node that starts it later plays it as it is.
+    let mut node = instance.node_source().node();
+    let input = ramp(16);
+    assert_eq!(
+        play(&mut node, &input, &Block::default())[0],
+        scaled(&input, 0.25)
+    );
+    drop((node, instance));
     plugins.assert_alright();
 }
 
@@ -432,9 +467,10 @@ fn changes_in_the_plugins_window_come_back() {
             PluginEvent::GestureEnd { param: GAIN },
         ]
     );
-    // Active, the changes come out of processing.
+    // Processed, the changes come out of processing.
     instance.activate(CONFIG).unwrap();
     let mut node = instance.node_source().node();
+    play(&mut node, &ramp(16), &Block::default());
     plugins.gui(&instance, gui::VALUE, GAIN, 1.5);
     assert_eq!(instance.poll(), []);
     play(&mut node, &ramp(16), &Block::default());
