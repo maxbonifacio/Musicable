@@ -28,10 +28,15 @@ CLAP names two threads, and Musicable's are:
   window, its timers, and the callbacks it asks for.
 - **The audio thread** is wherever a node processes the plugin: the audio
   thread, or one of the parallel renderer's workers. The host's thread check
-  says "audio thread" inside a node's `process` (a thread-local count), not
-  for a thread fixed at the start, since the thread processing a plugin can
-  change from block to block, and an ASIO driver can make its first call
-  from another thread.
+  says "audio thread" inside a node's `process` and inside the plugin's
+  thread pool tasks (a thread-local count), not for a thread fixed at the
+  start, since the thread processing a plugin can change from block to
+  block, and an ASIO driver can make its first call from another thread.
+- **The thread pool.** A plugin that asks the host to run tasks while it
+  processes gets them run on the renderer's threads, as many at once as are
+  free, through the engine's `tasks::run` (see
+  [engine.md](engine.md#parallel-rendering), Tasks). The thread processing
+  the plugin takes tasks too, and waits until they're all done.
 
 A plugin can call some of the host's functions from threads of its own:
 asking to restart, for a callback, to flush its parameters, or to resize its
@@ -205,8 +210,9 @@ standard places, and the ones in `CLAP_PATH`.
 multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Test Synth plays each note as a
 sine shaped by its note expression, and can render its voices on the
-host's thread pool. Both check which thread the host calls each function
-on, and in which state, and count every breach. Tests drive them through
+host's thread pool, noting which threads run them. Both check which thread
+the host calls each function on, and in which state, and count every
+breach. Tests drive them through
 hooks the library exports: turning a knob in the pretend window, changing
 state that isn't a parameter, asking for a callback or a resize.
 
@@ -234,8 +240,6 @@ does it all in the app's window, with the mouse and the keys.
   its window as it processes. If the audio device stops, they wait until
   it plays again, or until the project is saved, which saves the plugin's
   state.
-- The thread pool runs a plugin's tasks one after another on the thread
-  processing it, which CLAP allows. Sharing the renderer's workers is next.
 - Audio ports beyond the main ones (sidechains), 64-bit processing, MPE
   MIDI, notes a plugin plays, and letting a quiet plugin sleep.
 - VST3, then ARA 2.

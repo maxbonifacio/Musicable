@@ -951,6 +951,7 @@ impl TestPlugin {
     }
 
     fn exec(&self, task: u32) {
+        self.on_audio("thread_pool.exec");
         let mark = THREAD_MARK.with(|mark| ptr::from_ref(mark) as usize);
         for slot in &self.pool_threads {
             match slot.compare_exchange(0, mark, Ordering::SeqCst, Ordering::SeqCst) {

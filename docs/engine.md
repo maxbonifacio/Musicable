@@ -527,7 +527,8 @@ below).
 
 **Small blocks.** A block runs on the audio thread alone when the block
 before it took less than `ParallelOptions::inline_below` of work (100 µs by
-default), or when nothing in the graph can run alongside anything else.
+default), or when nothing in the graph can run alongside anything else and
+no node split its work into tasks in the block before (see Tasks, below).
 Sharing pays from much less work than that on a desktop CPU, about 30 µs on
 a Ryzen 9 3900X, but a block under 100 µs takes less than 8% of a 64-frame
 period at 48 kHz on its own, and the workers can stay asleep. A new graph's
@@ -539,6 +540,20 @@ thread alone too.
 inside `rt::scope`. A panic in a node on any thread, including a real-time
 violation, is caught, the rest of the block runs, and the audio thread
 raises the panic again when the block ends.
+
+**Tasks.** A node can split its own work into tasks with
+`tasks::run(count, &task)`, as a plugin using CLAP's thread pool splits its
+voices. In a shared block, the node's thread puts the tasks where other
+threads can take them, wakes up to two sleeping workers, and takes tasks
+itself until none are left. Each worker that takes one wakes up to two more
+while tasks are left, and threads with no node to run take tasks too. Then
+the node's thread waits for the tasks others took, and `run` returns.
+Elsewhere, in `ReferenceRenderer` or a block on the audio thread alone, the
+tasks run one after another on the node's thread, and the parallel renderer
+shares the blocks after it, if they take enough work, even when nothing in
+the graph can run alongside anything else. A task that calls `tasks::run`
+runs its own tasks itself. Tasks follow the real-time rules and are checked
+like nodes, and a panic in one comes out once every task has run.
 
 **Counters.** `ParallelRenderer::monitor` returns a `ParallelMonitor`, which
 reads `ParallelStats` from any thread: blocks shared and rendered alone, time

@@ -8,7 +8,7 @@ use std::process::Command;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap_sys::events::{
     CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_IS_LOOP_ACTIVE,
@@ -17,8 +17,9 @@ use clap_sys::events::{
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use musicable_engine::nodes::Sum;
 use musicable_engine::{
-    AudioMut, AudioRef, Engine, EngineConfig, Graph, Inputs, Node, NodeEvent, NodeEventKind,
-    NodeKey, NoteEvent, NoteId, ParamId, ProcessContext, TransportState, rt,
+    AudioMut, AudioRef, Engine, EngineConfig, Event, Graph, Inputs, Node, NodeEvent, NodeEventKind,
+    NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId, ProcessContext,
+    TransportState, rt,
 };
 use musicable_model::clip::Dimension;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -610,9 +611,57 @@ fn the_synth_runs_its_voices_on_the_thread_pool() {
     };
     let [left, _] = play(&mut node, &[0.0; 64], &block);
     assert!(left.iter().any(|s| *s != 0.0));
-    // For now the tasks all run on the thread processing the plugin.
+    // Outside a renderer, the tasks run one after another on the thread
+    // processing the plugin.
     assert_eq!(plugins.pool_use(&instance), (1, 1));
     drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn the_synths_voices_run_on_the_renderers_threads() {
+    let plugins = TestPlugins::new("pool-threads");
+    let mut instance = plugins.synth();
+    instance.set_param(THREADS, 1.0);
+    instance.activate(CONFIG).unwrap();
+    let mut g = Graph::new();
+    let synth = g.add(NodeKey(0), instance.node_source().node());
+    g.set_output(synth).unwrap();
+    // Nothing can run alongside the synth, so the workers only run its
+    // voices. They spin between blocks, to be there for each one.
+    let renderer = ParallelRenderer::new(ParallelOptions {
+        threads: 3,
+        spin: Duration::from_secs(1),
+        inline_below: None,
+        realtime: false,
+        ..ParallelOptions::default()
+    });
+    let (mut engine, mut handle) = Engine::with_renderer(CONFIG, Box::new(renderer));
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    for key in 0..16 {
+        let note = NoteEvent::On {
+            note: NoteId(key),
+            key: 48 + key as u8,
+            velocity: 1.0,
+        };
+        handle
+            .send(Event::Note {
+                node: NodeKey(0),
+                note,
+            })
+            .unwrap();
+    }
+    // Which thread takes which voice is up to how they run.
+    let mut block = vec![0.0; 2 * 256];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while plugins.pool_use(&instance).1 < 2 && Instant::now() < deadline {
+        engine.process(&mut AudioMut::from_planar(&mut block, 2));
+    }
+    let (requests, threads) = plugins.pool_use(&instance);
+    assert!(threads > 1, "{threads} thread in {requests} requests");
+    assert!(block.iter().any(|s| *s != 0.0));
+    drop((engine, handle));
+    drop(instance);
     plugins.assert_alright();
 }
 
