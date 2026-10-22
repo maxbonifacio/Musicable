@@ -196,7 +196,7 @@ pub fn find_libraries(dirs: &[PathBuf]) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if format_of(&path).is_some() {
+            if is_library(&path) {
                 found.push(path);
             } else if depth > 0 && path.is_dir() {
                 walk(&path, depth - 1, found);
@@ -210,6 +210,18 @@ pub fn find_libraries(dirs: &[PathBuf]) -> Vec<PathBuf> {
     found.sort();
     found.dedup();
     found
+}
+
+/// Whether `path` is a plugin library, not a directory to look in. A
+/// `.vst3` bundle is one everywhere, and a `.clap` one on macOS. Elsewhere
+/// CLAP's plugins are files, so a directory named `.clap`, as Debian
+/// installs some, is searched like any other, as CLAP asks.
+fn is_library(path: &Path) -> bool {
+    match format_of(path) {
+        Some(PluginFormat::Clap) => cfg!(target_os = "macos") || !path.is_dir(),
+        Some(PluginFormat::Vst3) => true,
+        None => false,
+    }
 }
 
 /// What scanning found, library by library, kept from one run to the next.
@@ -343,7 +355,16 @@ mod tests {
         let dir = crate::tests::temp_dir("find");
         fs::create_dir_all(dir.join("Vendor/Sub")).unwrap();
         fs::create_dir_all(dir.join("Bundle.clap/Contents/MacOS")).unwrap();
-        for file in ["a.clap", "Vendor/b.CLAP", "Vendor/Sub/c.vst3", "notes.txt"] {
+        fs::create_dir_all(dir.join("Bundle.vst3/Contents/x86_64-linux")).unwrap();
+        fs::create_dir_all(dir.join("Folder.clap")).unwrap();
+        for file in [
+            "a.clap",
+            "Vendor/b.CLAP",
+            "Vendor/Sub/c.vst3",
+            "notes.txt",
+            "Bundle.vst3/Contents/x86_64-linux/d.so",
+            "Folder.clap/e.clap",
+        ] {
             fs::write(dir.join(file), b"").unwrap();
         }
         let found = find_libraries(std::slice::from_ref(&dir));
@@ -356,15 +377,27 @@ mod tests {
                     .replace('\\', "/")
             })
             .collect();
-        assert_eq!(
-            names,
-            [
+        // A `.clap` directory is a bundle only on macOS. Elsewhere it's
+        // searched, as Debian installs some plugins in one.
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &[
                 "Bundle.clap",
+                "Bundle.vst3",
+                "Folder.clap",
                 "Vendor/Sub/c.vst3",
                 "Vendor/b.CLAP",
-                "a.clap"
+                "a.clap",
             ]
-        );
+        } else {
+            &[
+                "Bundle.vst3",
+                "Folder.clap/e.clap",
+                "Vendor/Sub/c.vst3",
+                "Vendor/b.CLAP",
+                "a.clap",
+            ]
+        };
+        assert_eq!(names, expected);
     }
 
     #[test]

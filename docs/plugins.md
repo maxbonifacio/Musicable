@@ -257,6 +257,11 @@ remembers every library scanned, good or bad, with its time and size, so
 the next scan only loads new and changed libraries, and a bad one isn't
 loaded again until it changes or someone asks. `scan::clap_dirs` has CLAP's
 standard places, and the ones in `CLAP_PATH`, and `scan::vst3_dirs` VST3's.
+`scan::find_libraries` looks for `.clap` and `.vst3` libraries in them and
+the folders below. A `.vst3` bundle is a library everywhere, and so is a
+`.clap` one on macOS. Elsewhere CLAP's plugins are files, so a folder named
+`.clap`, as Debian installs some plugins in, is searched like any other, as
+CLAP asks.
 
 ## Limits
 
