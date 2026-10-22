@@ -205,21 +205,9 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
         }
     };
     loop {
-        match commands.recv_timeout(POLL) {
-            Ok(Command::Timeline(new)) => {
-                // As far as the old engine got.
-                follow(&mut timeline, &mut tape);
-                tape.cut();
-                timeline = Some(new);
-            }
-            Ok(Command::Inputs(layout, buffers)) => tape.set_inputs(layout, buffers),
-            Ok(Command::Tracks {
-                rate,
-                armed,
-                place,
-                project,
-            }) => tape.set_tracks(rate, armed, place, project),
-            Err(RecvTimeoutError::Timeout) => {}
+        let mut next = match commands.recv_timeout(POLL) {
+            Ok(command) => Some(command),
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
                 follow(&mut timeline, &mut tape);
                 tape.cut();
@@ -228,8 +216,30 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
                 }
                 return;
             }
-        }
+        };
+        // The tape takes what the timeline says before it carries out the
+        // commands sent so far, and follows it after, so what was sent
+        // before the transport changed, such as the inputs of a stream
+        // opened just before recording started, comes first, however late
+        // this thread gets to it.
         follow(&mut timeline, &mut tape);
+        while let Some(command) = next.take().or_else(|| commands.try_recv().ok()) {
+            match command {
+                Command::Timeline(new) => {
+                    // As far as the old engine got.
+                    follow(&mut timeline, &mut tape);
+                    tape.cut();
+                    timeline = Some(new);
+                }
+                Command::Inputs(layout, buffers) => tape.set_inputs(layout, buffers),
+                Command::Tracks {
+                    rate,
+                    armed,
+                    place,
+                    project,
+                } => tape.set_tracks(rate, armed, place, project),
+            }
+        }
         tape.step();
         for report in tape.take_reports() {
             let _ = reports.send(report);

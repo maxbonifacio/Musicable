@@ -1,9 +1,9 @@
 //! The mouse map: what a mouse gesture does, from where it starts and the
 //! modifiers held.
 //!
-//! The arrangement and the mixer look gestures up here instead of deciding
-//! for themselves, so a profile can make the mouse work as another DAW's
-//! does, as a keymap does for keys. [`MouseMap::live`], the map Musicable
+//! The arrangement, the piano roll and the mixer look gestures up here
+//! instead of deciding for themselves, so a profile can make the mouse work
+//! as another DAW's does, as a keymap does for keys. [`MouseMap::live`], the map Musicable
 //! starts with, follows Ableton Live on Windows, with Cmd standing in for
 //! Ctrl on a Mac.
 
@@ -27,7 +27,7 @@ pub enum Target {
     Lane,
     /// Under the last track.
     Empty,
-    /// The ruler's bar numbers.
+    /// The ruler's bar numbers, over the arrangement or the piano roll.
     Ruler,
     /// The strip along the top of the ruler, which has the loop brace and
     /// the locators.
@@ -49,8 +49,25 @@ pub enum Target {
     MixerControl,
     /// A built-in device's control, in the devices panel.
     DeviceControl,
-    /// The arrangement's tracks and ruler, for the wheel.
+    /// The arrangement's tracks and ruler, and the piano roll's notes and
+    /// ruler, for the wheel.
     Timeline,
+    /// A note in the piano roll.
+    Note,
+    /// Near a note's start or end.
+    NoteEdge,
+    /// The piano roll's rows of keys, where there's no note.
+    NoteGrid,
+    /// A note while Draw Mode is on.
+    DrawNote,
+    /// The rows of keys, where there's no note, while Draw Mode is on.
+    DrawGrid,
+    /// A key of the piano roll's keyboard, beside the rows.
+    PianoKey,
+    /// The lane of the notes' velocities, under the rows.
+    VelocityLane,
+    /// The lane under the rows while it shows a controller.
+    ControllerLane,
 }
 
 /// What the user does with the mouse.
@@ -65,26 +82,28 @@ pub enum Gesture {
 /// What a gesture does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseAction {
-    /// Selects just the clip, or just the track.
+    /// Selects just the clip, the track or the note.
     Select,
-    /// Adds the clip or the track to the selection, or takes it out.
+    /// Adds the clip, the track or the note to the selection, or takes it
+    /// out.
     ToggleSelect,
     /// Selects the clip and puts the start marker where it was clicked, so
     /// Split splits it there.
     SelectAndMark,
-    /// Moves the selected clips, snapping to the grid.
+    /// Moves the selected clips or notes, snapping to the grid.
     Move,
-    /// Copies the selected clips, snapping to the grid.
+    /// Copies the selected clips or notes, snapping to the grid.
     Copy,
     /// Moves the selected clips without snapping.
     MoveFree,
-    /// Moves a clip's start or end, snapping to the grid.
+    /// Moves a clip's start or end, or the selected notes', snapping to the
+    /// grid.
     Trim,
     TrimFree,
     /// Makes a fade longer or shorter.
     Fade,
     /// Clears the selection, selects the track, and puts the start marker
-    /// there.
+    /// there. In the piano roll, clears the notes' selection.
     PlaceMarker,
     /// Selects the time dragged over, on the tracks dragged over.
     SelectTime,
@@ -123,6 +142,31 @@ pub enum MouseAction {
     ScrollSideways,
     /// Zooms in and out around the pointer.
     Zoom,
+    /// Adds a note there, a step of the grid long.
+    AddNote,
+    DeleteNote,
+    /// Adds notes a step of the grid long along the drag, on the keys it
+    /// passes over: Live's Draw Mode.
+    DrawNotes,
+    /// Selects the notes in the rectangle dragged over.
+    SelectArea,
+    /// Drags up or down to change how hard the note starts, or the
+    /// selected notes do, if it's one of them.
+    Velocity,
+    /// Selects every note on the key.
+    SelectKey,
+    /// Adds every note on the key to the selection.
+    AddKey,
+    /// Makes the keys' rows taller or shorter, around the pointer.
+    ZoomKeys,
+    /// Shows the MIDI clip in the piano roll, and gives it the focus.
+    Open,
+    /// Draws the controller's curve along the drag, a step of the grid at a
+    /// time, at the heights the drag passes.
+    DrawController,
+    /// Erases the controller's curve along the drag, so what came before
+    /// holds there.
+    EraseController,
 }
 
 /// Gestures and what they do. See the [module docs](self).
@@ -199,6 +243,7 @@ impl MouseMap {
         bind(T::ClipTitle, Drag, &[alt], A::MoveFree);
         bind(T::ClipBody, Click, &[none], A::SelectAndMark);
         bind(T::ClipBody, Click, &toggle, A::ToggleSelect);
+        bind(T::ClipBody, DoubleClick, &[none], A::Open);
         bind(T::ClipBody, Drag, &[none], A::SelectTime);
         bind(T::ClipEdge, Drag, &[none], A::Trim);
         bind(T::ClipEdge, Drag, &[alt], A::TrimFree);
@@ -233,6 +278,35 @@ impl MouseMap {
         bind(T::Timeline, Wheel, &[none], A::Scroll);
         bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
         bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);
+        // The MIDI note editor's. Live bypasses the grid with Alt while a
+        // drag goes, but Alt-dragging a note changes its velocity, so here
+        // Snap to Grid turns the grid off.
+        bind(T::Note, Click, &[none], A::Select);
+        bind(T::Note, Click, &toggle, A::ToggleSelect);
+        bind(T::Note, DoubleClick, &[none], A::DeleteNote);
+        bind(T::Note, Drag, &[none, shift], A::Move);
+        bind(T::Note, Drag, &ctrl, A::Copy);
+        bind(T::Note, Drag, &[alt], A::Velocity);
+        bind(T::NoteEdge, Drag, &[none], A::Trim);
+        bind(T::NoteEdge, Drag, &[alt], A::TrimFree);
+        bind(T::NoteGrid, Click, &[none], A::PlaceMarker);
+        bind(T::NoteGrid, DoubleClick, &[none], A::AddNote);
+        bind(T::NoteGrid, Drag, &[none], A::SelectArea);
+        bind(T::DrawNote, Click, &[none], A::DeleteNote);
+        bind(T::DrawNote, Drag, &[none, shift], A::Move);
+        bind(T::DrawNote, Drag, &ctrl, A::Copy);
+        bind(T::DrawNote, Drag, &[alt], A::Velocity);
+        bind(T::DrawGrid, Click, &[none], A::AddNote);
+        bind(T::DrawGrid, Drag, &[none], A::DrawNotes);
+        bind(T::PianoKey, Click, &[none], A::SelectKey);
+        bind(T::PianoKey, Click, &toggle, A::AddKey);
+        bind(T::PianoKey, Wheel, &[none], A::Scroll);
+        bind(T::PianoKey, Wheel, &[ctrl[0], ctrl[1], alt], A::ZoomKeys);
+        bind(T::VelocityLane, Drag, &[none], A::Velocity);
+        for gesture in [Click, Drag] {
+            bind(T::ControllerLane, gesture, &[none], A::DrawController);
+            bind(T::ControllerLane, gesture, &[alt], A::EraseController);
+        }
         map
     }
 }

@@ -1,6 +1,6 @@
 {
   "format": "musicable-project",
-  "version": 7,
+  "version": 8,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [

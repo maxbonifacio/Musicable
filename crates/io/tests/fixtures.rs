@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
+use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth, utility};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
@@ -37,6 +37,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("locators", locators()),
         ("plugins", plugins()),
         ("recording", recording()),
+        ("controllers", controllers()),
         ("built-in", built_in()),
     ]
 }
@@ -509,7 +510,61 @@ fn recording() -> Project {
     project
 }
 
-/// Musicable's own devices, from version 7: one of every kind, an EQ with
+/// Controllers, from version 7: the sustain pedal down and up across a
+/// clip's notes, held on at its end; the mod wheel with two points on the
+/// same tick, the later winning; the lowest and highest controllers, one
+/// MIDI names and one it doesn't; values at the edges of the range; a point
+/// before the clip's own time starts and one as far in as a file reaches;
+/// and a take's clip that moves a controller.
+fn controllers() -> Project {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let at = |beats: f64, value| Point::new(Beats::from_f64(beats), value);
+
+    let mut chords = MidiClip {
+        offset: Beats::from_ratio(-1, 2),
+        ..MidiClip::default()
+    };
+    chords.add_note(Beats::ZERO, Beats::new(2), 60, 0.75);
+    chords.add_note(Beats::new(2), Beats::new(2), 64, 0.75);
+    let controller = |number| Controller::new(number).unwrap();
+    chords.set_controller(
+        Controller::SUSTAIN,
+        vec![at(-0.5, 1.0), at(1.75, 0.0), at(2.0, 1.0)],
+    );
+    chords.set_controller(
+        Controller::MOD_WHEEL,
+        vec![
+            at(0.0, 0.0),
+            at(1.0, 0.25),
+            at(1.0, 64.0 / 127.0),
+            at(3.5, 1.0),
+        ],
+    );
+    chords.set_controller(controller(0), vec![at(0.0, 0.0)]);
+    chords.set_controller(controller(3), vec![at(0.25, 1.0 / 3.0)]);
+    chords.set_controller(
+        controller(Controller::MAX),
+        vec![Point::new(Beats::from_ticks(MAX_TICKS), 1.0)],
+    );
+    let chords = project.new_clip("Chords", beats(0, 4), ClipContent::Midi(chords));
+
+    let mut played = MidiClip::default();
+    played.add_note(Beats::ZERO, Beats::new(1), 48, 0.5);
+    played.set_controller(Controller::EXPRESSION, vec![at(0.0, 0.5), at(0.5, 0.0)]);
+    let mut take = project.new_take("Take 1");
+    take.clips
+        .push(project.new_clip("Keys", beats(4, 8), ClipContent::Midi(played)));
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
+    let track = project.track_mut(keys).unwrap();
+    track.clips = vec![chords];
+    track.takes = vec![take];
+    track.devices = vec![instrument];
+    project
+}
+
+/// Musicable's own devices, from version 8: one of every kind, an EQ with
 /// bands at the edges of their ranges, a sampler with a sample and one
 /// without, a synth playing a MIDI track, a utility on the master, and a
 /// gap in the device ids where one was deleted.

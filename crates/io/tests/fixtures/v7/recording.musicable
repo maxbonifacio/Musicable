@@ -254,7 +254,8 @@
                         "timbre": []
                       }
                     }
-                  ]
+                  ],
+                  "controllers": []
                 }
               }
             }

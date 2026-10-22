@@ -8,15 +8,15 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Request, arrange, device};
+use musicable_commands::{Args, CommandError, Focus, Request, arrange, device};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
-    PluginEntry, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, PIANO_ROLL,
+    Playback, PluginEntry, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
@@ -329,7 +329,18 @@ impl App {
                     self.insert_audio(files, None, None);
                 }
             }
-            Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
+            Request::TogglePanel(panel) => {
+                self.shell.toggle_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::ShowPanel(panel) => {
+                self.shell.show_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::SwitchDevicesPianoRoll => {
+                self.shell.switch_devices_piano_roll();
+                self.focus_in_sight();
+            }
             Request::Rename(named) => self.shell.rename(named),
             Request::PluginWindow { device, show: true } => {
                 self.show_plugin_window(device, ctx, frame);
@@ -356,6 +367,15 @@ impl App {
         if let Err(error) = self.session.run_with(&device::SET_SAMPLE, &args) {
             self.messages
                 .push(format!("Couldn't load the sample: {error}."));
+        }
+    }
+
+    /// Gives the arrangement the focus when the piano roll has it but is
+    /// hidden, so the keys act on what's in sight.
+    fn focus_in_sight(&mut self) {
+        let editor = self.session.editor_mut();
+        if editor.focus == Focus::PianoRoll && !self.shell.panel_shown(PIANO_ROLL) {
+            editor.focus = Focus::Arrangement;
         }
     }
 
@@ -642,6 +662,8 @@ impl App {
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
+    /// A key whose command doesn't apply now goes on to egui: with no notes
+    /// selected, the arrow keys move the keyboard focus between controls.
     /// While the keyboard shortcuts window waits for the keys to give a
     /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
@@ -656,7 +678,7 @@ impl eframe::App for App {
         // commands while the command palette is open either.
         let asking = self.pending.is_some() || self.shell.asking();
         self.keys.take(ctx, input, |chord, repeat| {
-            if asking || session.keymap().lookup(chord).is_none() {
+            if asking || !session.takes_key(chord) {
                 return false;
             }
             if !repeat {
