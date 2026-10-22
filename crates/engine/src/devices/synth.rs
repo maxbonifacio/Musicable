@@ -2,7 +2,7 @@
 
 use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::native::synth::{
     AMP_ATTACK, AMP_DECAY, AMP_RELEASE, AMP_SUSTAIN, CUTOFF, FILTER, FILTER_ATTACK, FILTER_DECAY,
     FILTER_ENV, FILTER_RELEASE, FILTER_SUSTAIN, GLIDE, KEY_TRACK, NOISE, OSC1_LEVEL, OSC1_OCTAVE,
@@ -141,7 +141,8 @@ impl Node for Synth {
     }
 }
 
-/// Applies a note, or modulation for one, with the values on its frame.
+/// Applies a note, modulation for one or the sustain pedal, with the
+/// values on its frame.
 fn handle(
     event: &NodeEvent,
     values: &Values,
@@ -186,11 +187,7 @@ fn handle(
                 key,
             });
         }
-        NodeEventKind::Note(NoteEvent::Off { note, .. }) => {
-            for voice in voices.with_note(note) {
-                voice.release();
-            }
-        }
+        NodeEventKind::Note(NoteEvent::Off { note, .. }) => voices.let_go(note, Voice::release),
         NodeEventKind::Note(NoteEvent::Expression {
             note,
             dimension: Dimension::PitchBend,
@@ -205,6 +202,10 @@ fn handle(
             amount,
             note: Some(note),
         } => voices.modulate(note, param.0 as usize, amount as f32, info),
+        NodeEventKind::Controller {
+            controller: Controller::SUSTAIN,
+            value,
+        } => voices.pedal(value, Voice::release),
         _ => {}
     }
 }
@@ -525,7 +526,7 @@ mod tests {
 
     use super::*;
     use crate::devices::instrument::tests::{
-        bend, cycles, for_note, frequency, gain_at, hz, level_at, off, on,
+        bend, controller, cycles, for_note, frequency, gain_at, hz, level_at, off, on, pedal,
     };
     use crate::devices::testing::{Run, context, modulation, param};
 
@@ -827,6 +828,62 @@ mod tests {
     }
 
     #[test]
+    fn the_sustain_pedal_holds_notes_let_go_until_it_comes_up() {
+        let synth = device(&[(OSC2_LEVEL, 50.0), (NOISE, 20.0), (AMP_RELEASE, 30.0)]);
+        // Let go with the pedal down, a note plays on, as one let go when
+        // the pedal comes up does.
+        let late = play(&synth, 9600, &[on(0, 1, 60, 1.0), off(6000, 1)]);
+        let events = [
+            on(0, 1, 60, 1.0),
+            pedal(500, true),
+            off(1000, 1),
+            pedal(6000, false),
+        ];
+        assert_eq!(play(&synth, 9600, &events), late);
+        // Let go before the pedal goes down, or with another controller
+        // all the way up, a note stops as it would without them.
+        let early = play(&synth, 9600, &[on(0, 1, 60, 1.0), off(1000, 1)]);
+        assert_ne!(early, late);
+        let events = [on(0, 1, 60, 1.0), off(1000, 1), pedal(2000, true)];
+        assert_eq!(play(&synth, 9600, &events), early);
+        let wheel = controller(500, Controller::MOD_WHEEL, 1.0);
+        assert_eq!(
+            play(&synth, 9600, &[on(0, 1, 60, 1.0), wheel, off(1000, 1)]),
+            early
+        );
+    }
+
+    #[test]
+    fn a_note_past_the_voices_takes_one_the_pedal_holds_before_a_held_one() {
+        let synth = device(&[(VOICES, 2.0)]);
+        let mut node = Synth::new(&synth);
+        node.prepare(&EngineConfig {
+            sample_rate: 48_000,
+            max_block: 4800,
+        });
+        let mut out = vec![0.0; 2 * 4800];
+        let events = [
+            on(0, 1, 60, 1.0),
+            pedal(0, true),
+            on(100, 2, 64, 1.0),
+            off(200, 2),
+            on(300, 3, 67, 1.0),
+        ];
+        let ctx = context(4800, &events);
+        let mut output = AudioMut::from_planar(&mut out, 2);
+        node.process(&ctx, Inputs::from_views(&[]), &mut output);
+        // The third note takes the second's voice, which the pedal holds
+        // on, rather than the first's, which is older but held.
+        assert_eq!(node.ended_voices(), [NoteId(2)]);
+        let mut sounding: Vec<u8> = (node.voices.slots.iter())
+            .filter(|v| v.playing.is_sounding())
+            .map(|v| v.playing.key)
+            .collect();
+        sounding.sort();
+        assert_eq!(sounding, [60, 67]);
+    }
+
+    #[test]
     fn notes_glide_from_the_last_notes_pitch() {
         // One voice, gliding over 100 ms: 4800 frames.
         let synth = device(&[(VOICES, 1.0), (GLIDE, 100.0)]);
@@ -882,6 +939,7 @@ mod tests {
             modulation(1200, RESONANCE, 20.0),
             on(1500, 4, 67, 0.3),
             for_note(1500, 4, CUTOFF, 3000.0),
+            pedal(1800, true),
             off(2100, 1),
             param(2500, FILTER, 3.0),
             param(2600, OSC1_WAVE, 3.0),
@@ -891,6 +949,7 @@ mod tests {
             off(5000, 4),
             off(5000, 5),
             off(5001, 2),
+            pedal(5500, false),
         ];
         (synth, events)
     }
