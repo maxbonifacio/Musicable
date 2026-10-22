@@ -579,8 +579,8 @@ for either), in order with them, and takes room in a block as a note does.
 - An instrument's voice can ring on after its note is let go. A node says
   which notes' voices it ended in the block it last rendered
   (`Node::ended_voices`), for modulators that run a copy for each voice,
-  which stop it when the voice ends. CLAP plugins say when their voices
-  end. Nothing reads it yet.
+  which stop it when the voice ends. CLAP plugins and the built-in
+  instruments say when their voices end. Nothing reads it yet.
 - A node can send `Notes::CAPACITY` (512) note events in a block. The rest
   are dropped, and counted in `Stats::events_dropped`.
 
@@ -652,8 +652,8 @@ Musicable's own devices (`DeviceKind::Native`) are nodes in
 each kind is (`musicable_model::native`): its parameter table, with each
 parameter's key, range, default, unit and scale, and what it does.
 `devices::node` makes a device's node from the device as the project has
-it, and `compile()` puts it where the device sits in its chain, as it does
-a plugin. `devices::BUILT` lists the kinds that have a node, which the
+it, and a sampler's with the sample `Media` has for it, and `compile()`
+puts it where the device sits in its chain, as it does a plugin. `devices::BUILT` lists the kinds that have a node, which the
 browser offers; a kind without one passes the signal through, so a project
 that has one still plays.
 
@@ -733,6 +733,75 @@ starts part of the way takes that part of the time, and open, the signal
 passes untouched. A new gate starts open, so it lets a signal through
 until there's a quiet spell. Its tests check the hold, the fades, the
 floor and the return frame by frame, and that one loud channel opens both.
+
+**Instruments** (`devices/instrument.rs`): the synth and the sampler play
+the notes in `ctx.events`, each on a voice of its own, from its start until
+its sound ends. A note past the device's `voices` takes the place of the
+voice let go longest ago, or of the oldest if none is, and that voice fades
+out over 5 ms beside the new one, so taking it doesn't click: an instrument
+has a slot for each of its up to 32 voices and as many again for voices
+fading out, all made with the node. Each note bends on its own (its
+`Dimension::PitchBend` expression, in semitones), and modulation for one
+note (`Modulation` with its id) moves that note's voice alone, for the
+first 48 parameters of the table, added on every frame to the values the
+device has. A note's pressure and timbre move nothing yet: modulation for
+one note is how a modulator will bring them to a parameter. Controllers
+(`NodeEventKind::Controller`) move nothing yet either, the sustain pedal
+among them, so a note let go with the pedal down is released all the same.
+Each voice has an attack, decay, sustain and release envelope that curves
+as an analog one does, heading a little past each stage's end and stopping
+there, so every stage takes its time to the frame, and a 12 dB state
+variable filter (the EQ's SVF) whose resonance runs from a Q of 0.707 to
+25, retuned on every frame its cutoff moves. A voice renders the same
+whatever blocks it falls in: what it keeps from frame to frame, such as
+its filter's tuning, is a function of what it's from alone. When a voice's
+sound ends, the instrument says so (`Node::ended_voices`), as a CLAP plugin
+does, so the engine hears when each note is over. Their tests check each
+part against what it's meant to do: the filters' responses against the
+analog prototypes' to within 0.001 dB, the envelopes' stages to the frame.
+
+**The synth** (`devices::Synth`): two oscillators and white noise, mixed at
+their levels, through the filter (low pass 12 and 24 dB, the 24 a
+Butterworth cascade of two sections, high pass and band pass) into the amp
+envelope. The triangle, the saw and the square are band-limited with
+two-sample PolyBLEPs where the saw and the square jump and PolyBLAMPs where
+the triangle turns (Välimäki, Pekonen and Nam; Esqueda, Välimäki and
+Bilbao), which makes each wave its ideal wave smoothed by a triangle two
+samples wide: the test measures the first 19 harmonics of each at the
+ideal's level times sinc²(f/fs) to within 0.001 dB, and what folds back
+from above half the rate, for D#6 at 48 kHz, under −95 dB below 5 kHz for
+the triangle and −65 dB for the saw and the square. The filter envelope
+moves the cutoff by `filter_env` semitones at its peak, and key tracking
+by the note's distance from C4, on every frame of each voice. A note glides
+from the last note's pitch, in semitones, over `glide` ms. The noise starts
+from a seed of each note's own, so a session plays the same each time.
+
+**The sampler** (`devices::Sampler`) plays its `devices::Sample`, which the
+app loads whole from the device's file (`NativeDevice::sample`) when it
+builds a graph, on the compiler's thread, sharing it among samplers of the
+same file, and hands to `compile()` in `Media` by device: a sampler without
+one is silent. A voice reads the sample from `start` at a speed set by the
+note's distance from `root`, `transpose`, `detune` and its bend, and by the
+sample's rate against the engine's, between the sample's frames through a
+Kaiser-windowed sinc 32 frames wide; the sinc passes the frames themselves
+through exactly where a position falls on one, so a note at the root at
+the sample's own rate plays it bit for bit. Reading faster than the
+sample's rate, the sinc widens (as the clips' resampler does), so what
+wouldn't fit under half the engine's rate is filtered out rather than
+folded back; an octave or more up, the voice reads a copy of the sample
+made at half its rate, two octaves up one at a quarter, and so on, eight
+in all with the sample itself. The tests measure tones read slower and
+faster, from samples at 44.1 and 48 kHz, at their levels to within 0.001
+dB, with what images or folds back 80 dB down, and each copy's band to
+within 0.001 dB, with what's above it 85 dB down. Looping, a note plays on
+from `end` back to `loop_start` until its sound ends, crossfading with equal
+power over the last `loop_fade` ms of the sample into the material before
+`loop_start`, as far as the loop and that material allow, so the jump
+doesn't click; settings that move take effect at the next pass. In
+"One-Shot" mode a note plays from `start` to `end` whatever its length,
+without looping, as drums want. Then the filter, if it's on, and the amp
+envelope. Start, end and loop points fall on the sample's frames. A
+sample's first two channels play, and a mono one plays on both sides.
 
 **Adding a kind.** Write its node in a file of its own in `devices/`, make
 it in `devices::node`, add it to `BUILT`, and forward `Node::automate` to

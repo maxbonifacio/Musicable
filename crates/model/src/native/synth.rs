@@ -3,13 +3,14 @@
 //!
 //! Each voice mixes oscillator 1 (an octave choice), oscillator 2 (in
 //! semitones and cents from it) and white noise, each at its level. The
-//! saw and the square are band-limited. The filter's cutoff moves by
-//! `filter_env` semitones at the filter envelope's peak, and follows the
-//! keyboard by `key_track` percent (100% moves it with the note's pitch,
-//! from C4). Resonance runs from none to just short of self-oscillation.
-//! Velocity sets the level by `velocity` percent of the way from full;
-//! notes glide from the last note's pitch over `glide` ms; a note past
-//! `voices` takes the oldest voice. Each note's pitch bend moves its
+//! triangle, the saw and the square are band-limited. The filter's cutoff
+//! moves by `filter_env` semitones at the filter envelope's peak, and
+//! follows the keyboard by `key_track` percent (100% moves it with the
+//! note's pitch, from C4). Resonance runs from none to just short of
+//! self-oscillation. Velocity sets the level by `velocity` percent of the
+//! way from full; notes glide from the last note's pitch over `glide` ms;
+//! a note past `voices` takes the place of the voice let go longest ago,
+//! or of the oldest if none is. Each note's pitch bend moves its
 //! oscillators.
 
 use super::Scale::{Fader, Linear, Log};

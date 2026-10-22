@@ -210,8 +210,8 @@ built yet, except where it says so.
   devices panel's controls all work from, in format version 8. The engine's
   `devices` module has the nodes, with each parameter worked out per frame
   from the value set or its automation, and any modulation
-  (`devices::Params`); the EQ, the compressor, the gate and the utility
-  play, and the other four follow
+  (`devices::Params`); the EQ, the compressor, the gate, the utility, the
+  sampler and the synth play, and the other two follow
   ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever

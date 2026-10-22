@@ -4,15 +4,23 @@
 //! blocks of any size. Nodes that read no automation of their own get it
 //! as parameter events, which win over the values set.
 
+use std::f64::consts::TAU;
+use std::sync::Arc;
+
 use musicable_engine::compile::keys;
+use musicable_engine::devices::Sample;
+use musicable_engine::media::{AudioData, Media};
 use musicable_engine::nodes::{Constant, Gain};
 use musicable_engine::{
-    AudioMut, Automation, Engine, EngineConfig, Event, Graph, NodeKey, ParallelOptions,
-    ParallelRenderer, ReferenceRenderer, Renderer, TransportCommand, compile, rt,
+    AudioMut, Automation, Engine, EngineConfig, Event, Graph, Meters, NodeKey, ParallelOptions,
+    ParallelRenderer, ReferenceRenderer, Renderer, TransportCommand, compile, compile_with_media,
+    rt,
 };
 use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{ClipContent, MidiClip};
-use musicable_model::native::{NativeDevice, NativeKind, compressor, eq, gate, utility};
+use musicable_model::native::{
+    NativeDevice, NativeKind, compressor, eq, gate, sampler, synth, utility,
+};
 use musicable_model::param::{ParamAddress, Scale};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{Chain, DeviceKind, Project, TestTone, TrackKind};
@@ -165,7 +173,11 @@ fn automation_loops_and_locates_as_clips_do() {
 /// whose gain, balance and DC filter move, a compressor on the chords
 /// whose threshold, knee, attack, release and mix move and whose detector
 /// switches to RMS, and a gate on the return that closes and opens again
-/// as its threshold steps, while its hold, release and floor move.
+/// as its threshold steps, while its hold, release and floor move. Last, a
+/// synth and a looping sampler on tracks of their own, playing the same
+/// notes: the synth's cutoff and volume move and its wave and filter step,
+/// and the sampler's detune, loop start and cutoff move while its filter
+/// switches on and it steps to One-Shot.
 fn project() -> Project {
     let mut p = Project::new();
     let bass = p.add_track("Bass", TrackKind::Audio);
@@ -211,6 +223,25 @@ fn project() -> Project {
     let gate = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Gate)));
     let gate_id = gate.id;
     p.track_mut(reverb).unwrap().devices.push(gate);
+    let mut melody = MidiClip::default();
+    melody.add_note(beats(0, 1), beats(3, 1), 48, 0.8);
+    melody.add_note(beats(1, 1), beats(5, 1), 55, 0.6);
+    melody.add_note(beats(4, 1), beats(8, 1), 62, 1.0);
+    let instrument = |p: &mut Project, name: &str, device: NativeDevice| {
+        let track = p.add_track(name, TrackKind::Midi);
+        let range = BeatRange::new(beats(0, 1), beats(8, 1));
+        let clip = p.new_clip(name, range, ClipContent::Midi(melody.clone()));
+        let device = p.new_device(DeviceKind::Native(device));
+        let id = device.id;
+        let track = p.track_mut(track).unwrap();
+        track.clips.push(clip);
+        track.devices.push(device);
+        id
+    };
+    let synth_id = instrument(&mut p, "Lead", NativeDevice::new(NativeKind::Synth));
+    let mut looping = NativeDevice::new(NativeKind::Sampler);
+    looping.set(sampler::LOOP, 1.0);
+    let sampler_id = instrument(&mut p, "Pads", looping);
 
     let lane = |param, at: &[(Beats, f64)]| Lane::new(param, points(at));
     let mut overridden = lane(ParamAddress::Pan(Chain::Master), &[(beats(0, 1), 1.0)]);
@@ -306,7 +337,62 @@ fn project() -> Project {
         gate(gate::RELEASE, &[(beats(0, 1), 1.0), (beats(5, 1), 200.0)]),
         gate(gate::FLOOR, &[(beats(0, 1), -80.0), (beats(5, 1), -20.0)]),
     ]);
+    let synth =
+        |param: usize, at: &[(Beats, f64)]| lane(ParamAddress::Device(synth_id, param as u32), at);
+    let sampler = |param: usize, at: &[(Beats, f64)]| {
+        lane(ParamAddress::Device(sampler_id, param as u32), at)
+    };
+    let three = beats(3, 1);
+    p.automation.extend([
+        synth(
+            synth::CUTOFF,
+            &[(beats(0, 1), 200.0), (beats(6, 1), 8000.0)],
+        ),
+        synth(synth::OSC1_WAVE, &[(two, 2.0), (two, 3.0)]),
+        synth(synth::FILTER, &[(three, 1.0), (three, 2.0)]),
+        synth(synth::VOLUME, &[(beats(0, 1), -12.0), (beats(5, 1), 0.0)]),
+        sampler(
+            sampler::DETUNE,
+            &[(beats(0, 1), -50.0), (beats(6, 1), 50.0)],
+        ),
+        sampler(
+            sampler::LOOP_START,
+            &[(beats(0, 1), 10.0), (beats(4, 1), 60.0)],
+        ),
+        sampler(sampler::FILTER, &[(two, 0.0), (two, 1.0)]),
+        sampler(
+            sampler::CUTOFF,
+            &[(beats(0, 1), 500.0), (beats(5, 1), 5000.0)],
+        ),
+        sampler(sampler::MODE, &[(five, 0.0), (five, 1.0)]),
+    ]);
     p
+}
+
+/// A second of a tone with overtones at 44.1 kHz, for each of `project`'s
+/// samplers to play.
+fn media(project: &Project) -> Media {
+    let tone = (0..44_100)
+        .map(|i| {
+            let phase = TAU * 220.0 * f64::from(i) / 44_100.0;
+            (0.3 * phase.sin() + 0.2 * (2.0 * phase).sin() + 0.1 * (5.0 * phase).sin()) as f32
+        })
+        .collect();
+    let sample = Arc::new(Sample::new(&AudioData::new(44_100, vec![tone])));
+    let mut media = Media::new();
+    for device in project.chains().flat_map(|(_, devices)| devices) {
+        if let DeviceKind::Native(native) = &device.kind
+            && native.kind == NativeKind::Sampler
+        {
+            media.insert_sample(device.id, sample.clone());
+        }
+    }
+    media
+}
+
+/// `project`'s graph, with its samplers' samples.
+fn build(project: &Project) -> Graph {
+    compile_with_media(project, &Meters::new(), &media(project))
 }
 
 /// Plays `project` through `renderer` in blocks of up to `max_block`, in
@@ -318,7 +404,7 @@ fn session(renderer: Box<dyn Renderer>, max_block: usize) -> Vec<f32> {
     let mut project = project();
     let (mut engine, mut handle) = Engine::with_renderer(config, renderer);
     handle
-        .swap_graph(compile(&project).prepare(&config).unwrap())
+        .swap_graph(build(&project).prepare(&config).unwrap())
         .unwrap();
     handle.send(transport(TransportCommand::Play)).unwrap();
     let mut played = Vec::new();
@@ -339,7 +425,7 @@ fn session(renderer: Box<dyn Renderer>, max_block: usize) -> Vec<f32> {
             40 => {
                 project.automation[0].points[1].value = 0.75;
                 project.automation[1].points.pop();
-                let graph = compile(&project).prepare(&config).unwrap();
+                let graph = build(&project).prepare(&config).unwrap();
                 handle.swap_graph(graph).unwrap();
             }
             55 => handle
@@ -353,7 +439,7 @@ fn session(renderer: Box<dyn Renderer>, max_block: usize) -> Vec<f32> {
             100 => {
                 project.automation[3].overridden = true;
                 project.master.gain = 0.25;
-                let graph = compile(&project).prepare(&config).unwrap();
+                let graph = build(&project).prepare(&config).unwrap();
                 handle.swap_graph(graph).unwrap();
             }
             120 => handle
@@ -400,10 +486,35 @@ fn play(project: &Project, frames: usize) -> Vec<f32> {
     let config = config(64);
     let (mut engine, mut handle) = Engine::new(config);
     handle
-        .swap_graph(compile(project).prepare(&config).unwrap())
+        .swap_graph(build(project).prepare(&config).unwrap())
         .unwrap();
     handle.send(transport(TransportCommand::Play)).unwrap();
     left(&mut engine, frames, 256)
+}
+
+/// The lanes reach the synth and the sampler: taking any one of theirs
+/// away changes what plays.
+#[test]
+fn the_instruments_follow_each_of_their_lanes() {
+    let project = project();
+    let frames = 8 * BEAT;
+    let all = play(&project, frames);
+    let instruments: Vec<_> = (project.chains().flat_map(|(_, devices)| devices))
+        .filter(|device| matches!(&device.kind, DeviceKind::Native(n) if n.kind.is_instrument()))
+        .map(|device| device.id)
+        .collect();
+    let mut followed = 0;
+    for (i, lane) in project.automation.iter().enumerate() {
+        if let ParamAddress::Device(device, _) = lane.param
+            && instruments.contains(&device)
+        {
+            let mut without = project.clone();
+            without.automation.remove(i);
+            assert!(!same(&play(&without, frames), &all), "{:?}", lane.param);
+            followed += 1;
+        }
+    }
+    assert_eq!(followed, 9);
 }
 
 #[test]

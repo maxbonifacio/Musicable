@@ -229,13 +229,18 @@ fn device_box(
 }
 
 /// A device's name, which shows its plugin's window when double-clicked, as
-/// in Live, and the button that deletes it.
+/// in Live, and the button that deletes it. And a sampler's sample.
 fn title_row(ui: &mut Ui, device: &Device, name: &str, theme: &Theme, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let delete = ui.small_button("×").on_hover_text("Delete");
             let label = format!("Delete {name}");
             delete.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+            let native = device.kind.native();
+            if let Some(sampler) = native.filter(|native| native.kind == NativeKind::Sampler) {
+                let file = sampler.sample.as_deref();
+                sample(ui, device.id, name, file, theme, actions);
+            }
             let title = RichText::new(name).strong().color(theme.header_text);
             let title = Label::new(title)
                 .truncate()
@@ -256,6 +261,53 @@ fn title_row(ui: &mut Ui, device: &Device, name: &str, theme: &Theme, actions: &
             }
         });
     });
+}
+
+/// The sample `file` of the sampler `device`, which the panel calls `name`:
+/// the button that loads another, and the file's name, whose menu takes it
+/// away. Right to left, beside the device's name.
+fn sample(
+    ui: &mut Ui,
+    device: DeviceId,
+    name: &str,
+    file: Option<&str>,
+    theme: &Theme,
+    actions: &mut Vec<Action>,
+) {
+    let args = Args::new().with("device", device);
+    let load = ui
+        .small_button("Load Sample...")
+        .on_hover_text("Asks for an audio file for it to play");
+    let label = format!("{name} Load Sample");
+    load.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    if load.clicked() {
+        actions.push(Action::RunWith(device::LOAD_SAMPLE, args.clone()));
+    }
+    // The file's own name, as far as there's room for three controls.
+    let shown = match file {
+        Some(file) => file.rsplit(['/', '\\']).next().unwrap_or(file),
+        None => "No sample",
+    };
+    let text = RichText::new(shown).size(theme.small_text);
+    let text = if file.is_some() { text } else { text.weak() };
+    let room = vec2(3.0 * theme.devices.control, ui.spacing().interact_size.y);
+    let layout = Layout::right_to_left(Align::Center);
+    let shown_name = ui.allocate_ui_with_layout(room, layout, |ui| {
+        let label = Label::new(text).truncate().selectable(false);
+        ui.add(label.sense(Sense::click()))
+    });
+    let label = format!("{name} Sample: {shown}");
+    let shown_name = shown_name.inner;
+    shown_name.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
+    if let Some(file) = file {
+        let shown_name = shown_name.on_hover_text(format!("{file}\nRight-click to remove it."));
+        shown_name.context_menu(|ui| {
+            if ui.button("Remove Sample").clicked() {
+                actions.push(Action::RunWith(device::SET_SAMPLE, args));
+                ui.close();
+            }
+        });
+    }
 }
 
 /// How the plugin of the plugin device `device` is doing: the button for
@@ -914,6 +966,50 @@ mod tests {
                 set(&eq, band(2, eq::FREQ), 1000.0),
                 set(&utility, utility::GAIN, 1.0),
                 set(&eq, band(1, eq::FREQ), 1200.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sampler_shows_its_sample_and_loads_another() {
+        let mut project = Project::new();
+        let mut kick = native(&mut project, NativeKind::Sampler);
+        kick.kind.native_mut().unwrap().sample = Some("Samples/kick.wav".to_owned());
+        let empty = native(&mut project, NativeKind::Sampler);
+        let synth = native(&mut project, NativeKind::Synth);
+        let devices = vec![kick.clone(), empty.clone(), synth];
+        let mut harness = showing(devices, project);
+        // Wide enough for both samplers.
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.run();
+        // By the file's own name, beside the device's.
+        let shown = harness.get_by_label("Sampler Sample: kick.wav").rect();
+        let title = harness
+            .get_all_by_label("Device Sampler")
+            .next()
+            .unwrap()
+            .rect();
+        assert!(title.right() < shown.left() && (shown.center().y - title.center().y).abs() < 2.0);
+        harness.get_by_label("Sampler Sample: No sample");
+        assert!(harness.query_by_label("Synth Load Sample").is_none());
+
+        // The second sampler's.
+        let load = |harness: &Harness<'static, State>| {
+            let mut buttons = harness.get_all_by_label("Sampler Load Sample");
+            buttons.nth(1).unwrap().click();
+        };
+        load(&harness);
+        harness.run();
+        harness
+            .get_by_label("Sampler Sample: kick.wav")
+            .click_secondary();
+        harness.run();
+        click(&mut harness, "Remove Sample");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                Action::RunWith(device::LOAD_SAMPLE, on(&empty)),
+                Action::RunWith(device::SET_SAMPLE, on(&kick)),
             ]
         );
     }
