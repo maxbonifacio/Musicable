@@ -5,20 +5,24 @@
 //! replaced, so everything that has to follow the project hooks in here: the
 //! engine and the undo history now, ARA change notifications in Tier 2.
 
+use musicable_model::clip::{Clip, ClipContent, ClipId, Fades, Timing};
 use musicable_model::mixer::Bus;
-use musicable_model::time::{BeatRange, TempoMap};
+use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
-    ClipType, Device, DeviceKind, Project, Send, SendId, Track, TrackId, TrackKind,
+    ClipType, Device, DeviceKind, Locator, LocatorId, Project, Send, SendId, Track, TrackId,
+    TrackKind,
 };
 
+use crate::editor::Editor;
 use crate::history::History;
 
 /// The open project. It hands out `&Project` only, so every change goes
 /// through a transaction, and it keeps the history that undo and redo step
-/// through.
+/// through, and the arrangement's [`Editor`] state.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     project: Project,
+    editor: Editor,
     /// Transactions committed since the last [`take_committed`](Self::take_committed).
     committed: Vec<Committed>,
     history: History,
@@ -28,6 +32,7 @@ impl Document {
     pub fn new(project: Project) -> Self {
         Self {
             project,
+            editor: Editor::default(),
             committed: Vec::new(),
             history: History::default(),
         }
@@ -37,12 +42,27 @@ impl Document {
         &self.project
     }
 
+    /// The selection, the start marker, the grid and the zoom. Changing them
+    /// isn't a change to the project: it leaves the undo history alone.
+    pub fn editor(&self) -> &Editor {
+        &self.editor
+    }
+
+    pub fn editor_mut(&mut self) -> &mut Editor {
+        &mut self.editor
+    }
+
+    /// The project, and the editor's state to change, at once.
+    pub fn parts(&mut self) -> (&Project, &mut Editor) {
+        (&self.project, &mut self.editor)
+    }
+
     /// Runs `edit` as one transaction. `name` is what the Edit menu calls
     /// it, as in "Undo Tempo Up". A transaction that changes nothing leaves
     /// no record. Any other becomes a step in the undo history, or joins the
     /// last one while a [gesture](Self::begin_gesture) is open.
     pub fn transact<R>(&mut self, name: &str, edit: impl FnOnce(&mut Transaction<'_>) -> R) -> R {
-        let mut transaction = Transaction::new(&mut self.project);
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
         let result = edit(&mut transaction);
         let edits = transaction.edits;
         if !edits.is_empty() {
@@ -51,6 +71,7 @@ impl Document {
                 name: name.to_owned(),
                 edits,
             });
+            self.editor.prune(&self.project);
         }
         result
     }
@@ -66,7 +87,7 @@ impl Document {
         let Some(step) = self.history.undo() else {
             return false;
         };
-        let mut transaction = Transaction::new(&mut self.project);
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
         for edit in step.edits.iter().rev() {
             transaction.apply(&edit.inverse());
         }
@@ -82,7 +103,7 @@ impl Document {
         let Some(step) = self.history.redo() else {
             return false;
         };
-        let mut transaction = Transaction::new(&mut self.project);
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
         for edit in &step.edits {
             transaction.apply(edit);
         }
@@ -137,6 +158,7 @@ impl Document {
     fn commit(&mut self, name: String, edits: Vec<Edit>) {
         if !edits.is_empty() {
             self.committed.push(Committed { name, edits });
+            self.editor.prune(&self.project);
         }
     }
 }
@@ -149,13 +171,15 @@ impl Document {
 #[derive(Debug)]
 pub struct Transaction<'a> {
     project: &'a mut Project,
+    editor: &'a Editor,
     edits: Vec<Edit>,
 }
 
 impl<'a> Transaction<'a> {
-    fn new(project: &'a mut Project) -> Self {
+    fn new(project: &'a mut Project, editor: &'a Editor) -> Self {
         Self {
             project,
+            editor,
             edits: Vec::new(),
         }
     }
@@ -165,6 +189,11 @@ impl Transaction<'_> {
     /// The project with the transaction's changes so far.
     pub fn project(&self) -> &Project {
         self.project
+    }
+
+    /// The editor's state, as it was when the transaction started.
+    pub fn editor(&self) -> &Editor {
+        self.editor
     }
 
     pub fn set_tempo(&mut self, tempo: TempoMap) {
@@ -454,6 +483,202 @@ impl Transaction<'_> {
         }
     }
 
+    /// A new clip with the next clip id, for [`add_clip`](Self::add_clip):
+    /// see [`Project::new_clip`].
+    pub fn new_clip(
+        &mut self,
+        name: impl Into<String>,
+        range: BeatRange,
+        content: ClipContent,
+    ) -> Clip {
+        self.project.new_clip(name, range, content)
+    }
+
+    /// The next clip id, for a copy of a clip.
+    pub fn new_clip_id(&mut self) -> ClipId {
+        self.project.new_clip_id()
+    }
+
+    /// Puts `clip` at `index` in the clips of the track with id `track`, or
+    /// at the end if `index` is past them. It's left out if the track can't
+    /// hold it, if the project has a clip with its id, or if a file couldn't
+    /// hold it: it must start at the song's start or after, last more than
+    /// zero, and have room for its fades.
+    pub fn add_clip(&mut self, track: TrackId, index: usize, clip: Clip) {
+        let fits = clip.start >= Beats::ZERO
+            && clip.length > Beats::ZERO
+            && fades_of(&clip).is_none_or(|fades| fades.total() <= clip.length);
+        if !fits || self.project.find_clip(clip.id).is_some() {
+            return;
+        }
+        let Some(t) = self.project.track_mut(track) else {
+            return;
+        };
+        if !t.holds(&clip.content) {
+            return;
+        }
+        let index = index.min(t.clips.len());
+        t.clips.insert(index, clip.clone());
+        self.edits.push(Edit::AddClip { track, index, clip });
+    }
+
+    /// Removes the clip with id `clip` from its track, and returns it.
+    pub fn remove_clip(&mut self, clip: ClipId) -> Option<Clip> {
+        let track = self.project.find_clip(clip)?.0.id;
+        let t = self.project.track_mut(track)?;
+        let index = t.clip_index(clip)?;
+        let clip = t.clips.remove(index);
+        self.edits.push(Edit::RemoveClip {
+            track,
+            index,
+            clip: clip.clone(),
+        });
+        Some(clip)
+    }
+
+    /// Moves or trims the clip with id `clip` to `timing`. An audio clip's
+    /// fades shorten first, each as an edit of its own, if they wouldn't fit
+    /// the new length. A timing a file couldn't hold, starting before the
+    /// song or without length, or with the other kind of offset from the
+    /// clip's content, does nothing.
+    pub fn set_clip_timing(&mut self, clip: ClipId, timing: Timing) {
+        let Some((track, current)) = self.project.find_clip(clip) else {
+            return;
+        };
+        let track = track.id;
+        if timing.start < Beats::ZERO
+            || timing.length <= Beats::ZERO
+            || std::mem::discriminant(&timing.offset)
+                != std::mem::discriminant(&current.content.offset())
+        {
+            return;
+        }
+        if let Some(fades) = fades_of(current)
+            && fades.total() > timing.length
+        {
+            let fade_in = fades.fade_in.min(timing.length);
+            let fade_out = fades.fade_out.min(timing.length - fade_in);
+            self.set_clip_fades(clip, Fades { fade_in, fade_out });
+        }
+        let Some(c) = self.clip_mut(track, clip) else {
+            return;
+        };
+        let from = c.timing();
+        if from != timing && c.set_timing(timing) {
+            self.edits.push(Edit::ClipTiming {
+                track,
+                clip,
+                from,
+                to: timing,
+            });
+        }
+    }
+
+    /// Sets an audio clip's fades. Each is at least zero, the fade in at
+    /// most the clip's length, and the fade out at most what that leaves.
+    /// MIDI clips have no fades, so it does nothing to them.
+    pub fn set_clip_fades(&mut self, clip: ClipId, fades: Fades) {
+        let Some((track, current)) = self.project.find_clip(clip) else {
+            return;
+        };
+        let track = track.id;
+        let length = current.length;
+        let fade_in = fades.fade_in.clamp(Beats::ZERO, length);
+        let fade_out = fades.fade_out.clamp(Beats::ZERO, length - fade_in);
+        let to = Fades { fade_in, fade_out };
+        let Some(Clip {
+            content: ClipContent::Audio(audio),
+            ..
+        }) = self.clip_mut(track, clip)
+        else {
+            return;
+        };
+        let from = audio.fades();
+        if from != to {
+            audio.fade_in = to.fade_in;
+            audio.fade_out = to.fade_out;
+            self.edits.push(Edit::ClipFades {
+                track,
+                clip,
+                from,
+                to,
+            });
+        }
+    }
+
+    pub fn set_clip_name(&mut self, clip: ClipId, name: &str) {
+        let Some(track) = self.project.find_clip(clip).map(|(t, _)| t.id) else {
+            return;
+        };
+        if let Some(c) = self.clip_mut(track, clip)
+            && c.name != name
+        {
+            let from = std::mem::replace(&mut c.name, name.to_owned());
+            let to = name.to_owned();
+            self.edits.push(Edit::ClipName {
+                track,
+                clip,
+                from,
+                to,
+            });
+        }
+    }
+
+    /// A new locator with the next locator id, for
+    /// [`add_locator`](Self::add_locator): see [`Project::new_locator`].
+    pub fn new_locator(&mut self, name: impl Into<String>, at: Beats) -> Locator {
+        self.project.new_locator(name, at)
+    }
+
+    /// Puts `locator` at `index` in the project's locators, or at the end if
+    /// `index` is past them. A locator with the id of one the project has is
+    /// left out.
+    pub fn add_locator(&mut self, index: usize, locator: Locator) {
+        if self.project.locator(locator.id).is_some() {
+            return;
+        }
+        let index = index.min(self.project.locators.len());
+        self.project.locators.insert(index, locator.clone());
+        self.edits.push(Edit::AddLocator { index, locator });
+    }
+
+    pub fn remove_locator(&mut self, locator: LocatorId) -> Option<Locator> {
+        let index = self.project.locator_index(locator)?;
+        let locator = self.project.locators.remove(index);
+        self.edits.push(Edit::RemoveLocator {
+            index,
+            locator: locator.clone(),
+        });
+        Some(locator)
+    }
+
+    pub fn set_locator_at(&mut self, locator: LocatorId, at: Beats) {
+        if let Some(l) = self.project.locator_mut(locator)
+            && l.at != at
+        {
+            let from = std::mem::replace(&mut l.at, at);
+            self.edits.push(Edit::LocatorAt {
+                locator,
+                from,
+                to: at,
+            });
+        }
+    }
+
+    pub fn set_locator_name(&mut self, locator: LocatorId, name: &str) {
+        if let Some(l) = self.project.locator_mut(locator)
+            && l.name != name
+        {
+            let from = std::mem::replace(&mut l.name, name.to_owned());
+            let to = name.to_owned();
+            self.edits.push(Edit::LocatorName { locator, from, to });
+        }
+    }
+
+    fn clip_mut(&mut self, track: TrackId, clip: ClipId) -> Option<&mut Clip> {
+        self.project.track_mut(track)?.clip_mut(clip)
+    }
+
     /// Sets the field `field` picks of the track with id `track` to `value`,
     /// and returns what it was if that's different.
     fn replace<T: PartialEq>(
@@ -515,7 +740,28 @@ impl Transaction<'_> {
             Edit::MasterGain { to, .. } => self.set_master_gain(*to),
             Edit::MasterPan { to, .. } => self.set_master_pan(*to),
             Edit::MasterClipType { to, .. } => self.set_master_clip_type(*to),
+            Edit::AddClip { track, index, clip } => self.add_clip(*track, *index, clip.clone()),
+            Edit::RemoveClip { clip, .. } => {
+                self.remove_clip(clip.id);
+            }
+            Edit::ClipTiming { clip, to, .. } => self.set_clip_timing(*clip, *to),
+            Edit::ClipFades { clip, to, .. } => self.set_clip_fades(*clip, *to),
+            Edit::ClipName { clip, to, .. } => self.set_clip_name(*clip, to),
+            Edit::AddLocator { index, locator } => self.add_locator(*index, locator.clone()),
+            Edit::RemoveLocator { locator, .. } => {
+                self.remove_locator(locator.id);
+            }
+            Edit::LocatorAt { locator, to, .. } => self.set_locator_at(*locator, *to),
+            Edit::LocatorName { locator, to, .. } => self.set_locator_name(*locator, to),
         }
+    }
+}
+
+/// An audio clip's fades. MIDI clips have none.
+fn fades_of(clip: &Clip) -> Option<Fades> {
+    match &clip.content {
+        ClipContent::Audio(audio) => Some(audio.fades()),
+        ClipContent::Midi(_) => None,
     }
 }
 
@@ -633,6 +879,59 @@ pub enum Edit {
         from: ClipType,
         to: ClipType,
     },
+    /// `clip` went in at `index` in the clips of the track with id `track`.
+    AddClip {
+        track: TrackId,
+        index: usize,
+        clip: Clip,
+    },
+    /// `clip`, which was at `index` in the track's clips, went.
+    RemoveClip {
+        track: TrackId,
+        index: usize,
+        clip: Clip,
+    },
+    /// The clip with id `clip`, on the track with id `track`, moved or was
+    /// trimmed.
+    ClipTiming {
+        track: TrackId,
+        clip: ClipId,
+        from: Timing,
+        to: Timing,
+    },
+    ClipFades {
+        track: TrackId,
+        clip: ClipId,
+        from: Fades,
+        to: Fades,
+    },
+    ClipName {
+        track: TrackId,
+        clip: ClipId,
+        from: String,
+        to: String,
+    },
+    /// `locator` went in at `index` in the project's locators.
+    AddLocator {
+        index: usize,
+        locator: Locator,
+    },
+    /// `locator`, which was at `index` in the project's locators, went.
+    RemoveLocator {
+        index: usize,
+        locator: Locator,
+    },
+    /// The locator with id `locator` moved.
+    LocatorAt {
+        locator: LocatorId,
+        from: Beats,
+        to: Beats,
+    },
+    LocatorName {
+        locator: LocatorId,
+        from: String,
+        to: String,
+    },
 }
 
 impl Edit {
@@ -717,6 +1016,53 @@ impl Edit {
             Edit::MasterGain { from, to } => Edit::MasterGain { from: to, to: from },
             Edit::MasterPan { from, to } => Edit::MasterPan { from: to, to: from },
             Edit::MasterClipType { from, to } => Edit::MasterClipType { from: to, to: from },
+            Edit::AddClip { track, index, clip } => Edit::RemoveClip { track, index, clip },
+            Edit::RemoveClip { track, index, clip } => Edit::AddClip { track, index, clip },
+            Edit::ClipTiming {
+                track,
+                clip,
+                from,
+                to,
+            } => Edit::ClipTiming {
+                track,
+                clip,
+                from: to,
+                to: from,
+            },
+            Edit::ClipFades {
+                track,
+                clip,
+                from,
+                to,
+            } => Edit::ClipFades {
+                track,
+                clip,
+                from: to,
+                to: from,
+            },
+            Edit::ClipName {
+                track,
+                clip,
+                from,
+                to,
+            } => Edit::ClipName {
+                track,
+                clip,
+                from: to,
+                to: from,
+            },
+            Edit::AddLocator { index, locator } => Edit::RemoveLocator { index, locator },
+            Edit::RemoveLocator { index, locator } => Edit::AddLocator { index, locator },
+            Edit::LocatorAt { locator, from, to } => Edit::LocatorAt {
+                locator,
+                from: to,
+                to: from,
+            },
+            Edit::LocatorName { locator, from, to } => Edit::LocatorName {
+                locator,
+                from: to,
+                to: from,
+            },
         }
     }
 
@@ -827,6 +1173,46 @@ impl Edit {
             (Edit::MasterClipType { to, .. }, Edit::MasterClipType { to: next, .. }) => {
                 *to = *next;
             }
+            (
+                Edit::ClipTiming { clip, to, .. },
+                Edit::ClipTiming {
+                    clip: other,
+                    to: next,
+                    ..
+                },
+            ) if clip == other => *to = *next,
+            (
+                Edit::ClipFades { clip, to, .. },
+                Edit::ClipFades {
+                    clip: other,
+                    to: next,
+                    ..
+                },
+            ) if clip == other => *to = *next,
+            (
+                Edit::ClipName { clip, to, .. },
+                Edit::ClipName {
+                    clip: other,
+                    to: next,
+                    ..
+                },
+            ) if clip == other => to.clone_from(next),
+            (
+                Edit::LocatorAt { locator, to, .. },
+                Edit::LocatorAt {
+                    locator: other,
+                    to: next,
+                    ..
+                },
+            ) if locator == other => *to = *next,
+            (
+                Edit::LocatorName { locator, to, .. },
+                Edit::LocatorName {
+                    locator: other,
+                    to: next,
+                    ..
+                },
+            ) if locator == other => to.clone_from(next),
             // Adding and removing never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
@@ -850,7 +1236,16 @@ impl Edit {
                 | Edit::SendPreFader { .. }
                 | Edit::MasterGain { .. }
                 | Edit::MasterPan { .. }
-                | Edit::MasterClipType { .. },
+                | Edit::MasterClipType { .. }
+                | Edit::AddClip { .. }
+                | Edit::RemoveClip { .. }
+                | Edit::ClipTiming { .. }
+                | Edit::ClipFades { .. }
+                | Edit::ClipName { .. }
+                | Edit::AddLocator { .. }
+                | Edit::RemoveLocator { .. }
+                | Edit::LocatorAt { .. }
+                | Edit::LocatorName { .. },
                 _,
             ) => return false,
         }
@@ -867,7 +1262,11 @@ impl Edit {
             Edit::AddTrack { .. }
             | Edit::RemoveTrack { .. }
             | Edit::AddSend { .. }
-            | Edit::RemoveSend { .. } => false,
+            | Edit::RemoveSend { .. }
+            | Edit::AddClip { .. }
+            | Edit::RemoveClip { .. }
+            | Edit::AddLocator { .. }
+            | Edit::RemoveLocator { .. } => false,
             Edit::TrackName { from, to, .. } => from == to,
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
@@ -881,6 +1280,11 @@ impl Edit {
             | Edit::SendPreFader { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
+            Edit::ClipTiming { from, to, .. } => from == to,
+            Edit::ClipFades { from, to, .. } => from == to,
+            Edit::ClipName { from, to, .. }
+            | Edit::LocatorName { from, to, .. } => from == to,
+            Edit::LocatorAt { from, to, .. } => from == to,
         }
     }
 }

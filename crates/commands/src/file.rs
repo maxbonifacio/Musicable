@@ -39,24 +39,10 @@ pub fn register(registry: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use musicable_model::Project;
-    use musicable_model::time::Beats;
 
     use super::*;
-    use crate::{Context, Document, Keymap, Transport};
-
-    struct Stopped;
-
-    impl Transport for Stopped {
-        fn is_playing(&self) -> bool {
-            false
-        }
-
-        fn play(&mut self) {}
-
-        fn stop(&mut self) {}
-
-        fn locate(&mut self, _: Beats) {}
-    }
+    use crate::testing::StubTransport;
+    use crate::{Context, Document, Keymap};
 
     #[test]
     fn file_commands_ask_the_app() {
@@ -68,7 +54,7 @@ mod tests {
             assert_eq!(registry.get(&id).unwrap().title, title);
             let mut ctx = Context {
                 document: &mut document,
-                transport: &mut Stopped,
+                transport: &mut StubTransport::default(),
                 requests: &mut requests,
             };
             registry.run(&id, &mut ctx).unwrap();

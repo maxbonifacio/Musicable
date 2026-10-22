@@ -1,0 +1,599 @@
+//! What the arrangement edits besides the project: the selection, the start
+//! marker, the grid, the zoom and how the editing behaves.
+//!
+//! It lives with the [`Document`](crate::Document), outside the widgets, so
+//! commands read and change it just as the UI does, and so will extensions
+//! and agents. It isn't saved with the project, and undo leaves it alone.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use musicable_model::clip::{Clip, ClipId};
+use musicable_model::time::{BeatRange, Beats, TempoMap};
+use musicable_model::{Project, TrackId};
+
+/// The arrangement's editing state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Editor {
+    pub selection: Selection,
+    /// The track the detail panels show, such as its devices: the one whose
+    /// header, clip or mixer strip was clicked last, as Live's selected
+    /// track is. Always one of the project's tracks.
+    pub selected_track: Option<TrackId>,
+    /// Where Play/Stop starts playing from, unless the behaviour says
+    /// otherwise: Live's start marker. Clicking in the arrangement moves it.
+    pub start_marker: Beats,
+    pub grid: Grid,
+    pub viewport: Viewport,
+    /// Whether the arrangement scrolls to keep the playhead in sight while
+    /// the transport plays.
+    pub follow: bool,
+    /// The height of each track in the arrangement, in points, where it
+    /// isn't the theme's.
+    pub track_heights: BTreeMap<TrackId, f32>,
+    pub behaviour: Behaviour,
+    /// What the app has read about the audio files that clips play, by the
+    /// path the clips give.
+    pub files: BTreeMap<String, AudioFile>,
+    /// The engine's sample rate: an audio file that isn't in
+    /// [`files`](Self::files) yet is taken to have it.
+    pub sample_rate: u32,
+    /// What Cut and Copy took, for Paste.
+    pub clipboard: Option<Clipboard>,
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self {
+            selection: Selection::default(),
+            selected_track: None,
+            start_marker: Beats::ZERO,
+            grid: Grid::default(),
+            viewport: Viewport::default(),
+            follow: true,
+            track_heights: BTreeMap::new(),
+            behaviour: Behaviour::default(),
+            files: BTreeMap::new(),
+            sample_rate: 48_000,
+            clipboard: None,
+        }
+    }
+}
+
+impl Editor {
+    /// The sample rate of the audio file at `path`, as a clip names it.
+    pub fn sample_rate_of(&self, path: &str) -> u32 {
+        self.files
+            .get(path)
+            .map_or(self.sample_rate, |file| file.sample_rate)
+    }
+
+    /// The stretch of the song the selection covers: the time selection, or
+    /// else from the start of the first selected clip to the end of the
+    /// last.
+    pub fn selected_range(&self, project: &Project) -> Option<BeatRange> {
+        if let Some(time) = &self.selection.time {
+            return Some(time.range);
+        }
+        let selected = &self.selection.clips;
+        if selected.is_empty() {
+            return None;
+        }
+        let clips = project.tracks.iter().flat_map(|t| &t.clips);
+        clips
+            .filter(|clip| selected.contains(&clip.id))
+            .fold(None, |range: Option<BeatRange>, clip| {
+                Some(match range {
+                    Some(range) => {
+                        BeatRange::new(range.start.min(clip.start), range.end.max(clip.end()))
+                    }
+                    None => clip.range(),
+                })
+            })
+    }
+
+    /// Forgets what `project` doesn't have any more: selected clips and
+    /// tracks that went, and their heights.
+    pub fn prune(&mut self, project: &Project) {
+        let tracks: BTreeSet<TrackId> = project.tracks.iter().map(|t| t.id).collect();
+        let selection = &mut self.selection;
+        if !selection.clips.is_empty() {
+            let clips: BTreeSet<ClipId> = project
+                .tracks
+                .iter()
+                .flat_map(|t| &t.clips)
+                .map(|c| c.id)
+                .collect();
+            selection.clips.retain(|id| clips.contains(id));
+        }
+        selection.tracks.retain(|id| tracks.contains(id));
+        if let Some(time) = &mut selection.time {
+            time.tracks.retain(|id| tracks.contains(id));
+            if time.tracks.is_empty() {
+                selection.time = None;
+            }
+        }
+        if self.selected_track.is_some_and(|id| !tracks.contains(&id)) {
+            self.selected_track = None;
+        }
+        self.track_heights.retain(|id, _| tracks.contains(id));
+    }
+}
+
+/// What's selected in the arrangement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub clips: BTreeSet<ClipId>,
+    /// Tracks selected by their headers.
+    pub tracks: BTreeSet<TrackId>,
+    /// A stretch of time on some tracks, which Split, Delete, Duplicate and
+    /// Copy act on as they do on clips.
+    pub time: Option<TimeSelection>,
+}
+
+impl Selection {
+    pub fn is_empty(&self) -> bool {
+        self.clips.is_empty() && self.tracks.is_empty() && self.time.is_none()
+    }
+
+    /// Just the clips `clips`.
+    pub fn clips(clips: impl IntoIterator<Item = ClipId>) -> Self {
+        Self {
+            clips: clips.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+/// A stretch of time on some tracks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeSelection {
+    /// Never empty.
+    pub range: BeatRange,
+    pub tracks: BTreeSet<TrackId>,
+}
+
+/// The arrangement's horizontal zoom and where it's scrolled to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    /// The song position at the left edge of the timeline.
+    pub start: Beats,
+    /// How many points a beat takes.
+    pub zoom: f64,
+    /// How wide the timeline is, in points, as the arrangement last drew
+    /// it, for zooming to fit.
+    pub width: f32,
+    /// How far down the tracks are scrolled, in points.
+    pub top: f32,
+}
+
+impl Default for Viewport {
+    /// Sixteen bars of 4/4 across a timeline a thousand points wide.
+    fn default() -> Self {
+        Self {
+            start: Beats::ZERO,
+            zoom: 15.625,
+            width: 1000.0,
+            top: 0.0,
+        }
+    }
+}
+
+impl Viewport {
+    /// The furthest out the arrangement zooms: about an hour across a wide
+    /// window at 120 BPM.
+    pub const MIN_ZOOM: f64 = 0.2;
+    /// The furthest in: single samples, a few points apart.
+    pub const MAX_ZOOM: f64 = 50_000.0;
+
+    /// How far `at` is from the timeline's left edge, in points.
+    pub fn x_of(&self, at: Beats) -> f32 {
+        ((at - self.start).to_f64() * self.zoom) as f32
+    }
+
+    /// The song position `x` points from the timeline's left edge.
+    pub fn beats_at(&self, x: f32) -> Beats {
+        self.start + Beats::from_f64(f64::from(x) / self.zoom)
+    }
+
+    /// How long `points` points are.
+    pub fn beats_in(&self, points: f32) -> Beats {
+        Beats::from_f64(f64::from(points) / self.zoom)
+    }
+
+    /// The part of the song the timeline shows.
+    pub fn visible(&self) -> BeatRange {
+        BeatRange::new(self.start, self.beats_at(self.width))
+    }
+
+    /// Zooms by `factor`, keeping `at` where it is on screen.
+    pub fn zoom_around(&mut self, factor: f64, at: Beats) {
+        let x = self.x_of(at);
+        self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.start = at - Beats::from_f64(f64::from(x) / self.zoom);
+    }
+
+    /// Zooms and scrolls to show `range` across the timeline, with a little
+    /// room either side.
+    pub fn show(&mut self, range: BeatRange) {
+        let length = range.len().to_f64();
+        if length <= 0.0 {
+            return;
+        }
+        let margin = f64::from(self.width) / 20.0;
+        let room = (f64::from(self.width) - 2.0 * margin).max(1.0);
+        self.zoom = (room / length).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.start = range.start - Beats::from_f64(margin / self.zoom);
+    }
+
+    /// Scrolls so `at` is in sight, if it isn't: a page on, as Live's Follow
+    /// turns pages.
+    pub fn follow(&mut self, at: Beats) {
+        let visible = self.visible();
+        if at < visible.start || at >= visible.end {
+            self.start = at - self.beats_in(self.width / 20.0);
+        }
+    }
+}
+
+/// The arrangement's grid, which clips snap to.
+///
+/// Its lines step by whole bars, two, four or eight of them, or by note
+/// values within a bar, from a half note down to a 1/64. The adaptive grid
+/// picks the step from the zoom, so its lines stay
+/// [`MIN_SPACING`](Self::MIN_SPACING) apart. Lines within a bar start again
+/// at each bar line, so they fit any time signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid {
+    /// A step the grid keeps at any zoom, or `None` for the adaptive grid.
+    pub fixed: Option<Step>,
+    /// How much wider the adaptive grid's lines are: each one up doubles
+    /// the spacing. From -2, the narrowest, to 2, the widest, as Live's
+    /// five widths.
+    pub density: i8,
+    /// Whether steps within a bar are triplets: two-thirds as long.
+    pub triplet: bool,
+    /// Whether clips and the time selection snap to the lines.
+    pub snap: bool,
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self {
+            fixed: None,
+            density: 0,
+            triplet: false,
+            snap: true,
+        }
+    }
+}
+
+/// A grid step: 2ⁿ bars for n from 0 to 3, or a 1/2⁻ⁿ note for n from -1 (a
+/// half note) to -6 (a 1/64 note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Step(i8);
+
+impl Step {
+    pub const WIDEST: Step = Step(3);
+    pub const BAR: Step = Step(0);
+    pub const QUARTER: Step = Step(-2);
+    pub const SIXTEENTH: Step = Step(-4);
+    pub const NARROWEST: Step = Step(-6);
+
+    /// The step `n`, kept within the widest and the narrowest.
+    pub fn new(n: i8) -> Self {
+        Self(n.clamp(Self::NARROWEST.0, Self::WIDEST.0))
+    }
+
+    pub fn get(self) -> i8 {
+        self.0
+    }
+
+    /// The step's bars, if it's a whole number of them.
+    pub fn bars(self) -> Option<i64> {
+        (self.0 >= 0).then(|| 1 << self.0)
+    }
+
+    /// How long a step within a bar is, without triplets.
+    fn note(self) -> Beats {
+        // A whole note is four beats.
+        Beats::from_ratio(4, 1 << -self.0)
+    }
+
+    /// The step's name, as the arrangement shows it: "1 Bar", "1/16".
+    pub fn name(self, triplet: bool) -> String {
+        match self.bars() {
+            Some(1) => "1 Bar".to_owned(),
+            Some(bars) => format!("{bars} Bars"),
+            None if triplet => format!("1/{}T", 1 << -self.0),
+            None => format!("1/{}", 1 << -self.0),
+        }
+    }
+}
+
+impl Grid {
+    /// The closest the adaptive grid's lines get at density 0, in points.
+    pub const MIN_SPACING: f64 = 16.0;
+
+    /// The step at `zoom` points per beat, in a bar of `bar` beats.
+    pub fn step(&self, zoom: f64, bar: Beats) -> Step {
+        if let Some(step) = self.fixed {
+            return step;
+        }
+        let spacing = Self::MIN_SPACING * 2_f64.powi(i32::from(self.density.clamp(-2, 2)));
+        let mut step = Step::NARROWEST;
+        while step < Step::WIDEST && self.length(step, bar).to_f64() * zoom < spacing {
+            step = Step::new(step.0 + 1);
+        }
+        step
+    }
+
+    /// How long `step` is in a bar of `bar` beats.
+    fn length(&self, step: Step, bar: Beats) -> Beats {
+        match step.bars() {
+            Some(bars) => bar * bars,
+            None if self.triplet => Beats::from_ticks(step.note().ticks() * 2 / 3),
+            None => step.note(),
+        }
+    }
+
+    /// The grid's lines in `range` at `zoom`, in order.
+    pub fn lines(&self, tempo: &TempoMap, range: BeatRange, zoom: f64) -> Vec<Beats> {
+        let mut lines = Vec::new();
+        let mut bar = tempo.bar_at(range.start).bar;
+        loop {
+            let start = tempo.bar_start(bar);
+            if start >= range.end {
+                break;
+            }
+            let next = tempo.bar_start(bar + 1);
+            let step = self.step(zoom, next - start);
+            match step.bars() {
+                Some(bars) => {
+                    if bar.rem_euclid(bars) == 0 && start >= range.start {
+                        lines.push(start);
+                    }
+                }
+                None => {
+                    let length = self.length(step, next - start);
+                    let mut at = start;
+                    while at < next && at < range.end {
+                        if at >= range.start {
+                            lines.push(at);
+                        }
+                        at += length;
+                    }
+                }
+            }
+            bar += 1;
+        }
+        lines
+    }
+
+    /// The line nearest `at` at `zoom`, or `at` itself while snapping is off.
+    pub fn snap(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        if !self.snap {
+            return at;
+        }
+        self.nearest(tempo, at, zoom)
+    }
+
+    /// The line nearest `at` at `zoom`, whether snapping is on or not.
+    pub fn nearest(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        let bar = tempo.bar_at(at).bar;
+        let start = tempo.bar_start(bar);
+        let next = tempo.bar_start(bar + 1);
+        let step = self.step(zoom, next - start);
+        let (before, after) = match step.bars() {
+            // Steps of several bars count from bar 0.
+            Some(bars) => {
+                let first = bar - bar.rem_euclid(bars);
+                (tempo.bar_start(first), tempo.bar_start(first + bars))
+            }
+            // Steps within a bar count from its start, and the next bar
+            // line ends the last one.
+            None => {
+                let length = self.length(step, next - start).ticks();
+                let into = (at - start).ticks();
+                let before = start + Beats::from_ticks(into - into % length);
+                (before, (before + Beats::from_ticks(length)).min(next))
+            }
+        };
+        if at - before <= after - at {
+            before
+        } else {
+            after
+        }
+    }
+
+    /// How far apart the grid's lines are at `zoom`, in points, in a bar of
+    /// `bar` beats.
+    pub fn spacing(&self, zoom: f64, bar: Beats) -> f64 {
+        self.length(self.step(zoom, bar), bar).to_f64() * zoom
+    }
+}
+
+/// How editing behaves where people's habits differ. Kept as settings, not
+/// built in, so profiles can follow other DAWs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Behaviour {
+    /// Where Play/Stop starts playing from.
+    pub play_from: PlayFrom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayFrom {
+    /// The start marker, as in Live: playing again starts where the last
+    /// play did.
+    #[default]
+    StartMarker,
+    /// Wherever the playhead stopped.
+    Playhead,
+}
+
+/// What the app read in an audio file's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioFile {
+    pub sample_rate: u32,
+    pub frames: u64,
+    pub channels: usize,
+}
+
+/// Clips that Cut or Copy took.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clipboard {
+    /// Each clip, with how many tracks below the first track taken from it
+    /// was on.
+    pub clips: Vec<(usize, Clip)>,
+    /// The stretch of time taken. Paste puts its start at the start marker.
+    pub range: BeatRange,
+}
+
+#[cfg(test)]
+mod tests {
+    use musicable_model::TrackKind;
+    use musicable_model::clip::{ClipContent, MidiClip};
+    use musicable_model::time::TimeSignature;
+
+    use super::*;
+
+    #[test]
+    fn the_viewport_turns_positions_into_points_and_back() {
+        let mut viewport = Viewport {
+            start: Beats::new(4),
+            zoom: 10.0,
+            width: 400.0,
+            top: 0.0,
+        };
+        assert_eq!(viewport.x_of(Beats::new(6)), 20.0);
+        assert_eq!(viewport.beats_at(20.0), Beats::new(6));
+        assert_eq!(
+            viewport.visible(),
+            BeatRange::new(Beats::new(4), Beats::new(44))
+        );
+        // Zooming keeps the position under the pointer where it is.
+        viewport.zoom_around(2.0, Beats::new(6));
+        assert_eq!(viewport.x_of(Beats::new(6)), 20.0);
+        assert_eq!(viewport.zoom, 20.0);
+        viewport.zoom_around(1e9, Beats::new(6));
+        assert_eq!(viewport.zoom, Viewport::MAX_ZOOM);
+
+        viewport.show(BeatRange::new(Beats::new(16), Beats::new(32)));
+        let visible = viewport.visible();
+        assert!(visible.start < Beats::new(16) && visible.end > Beats::new(32));
+        assert!((viewport.x_of(Beats::new(16)) - 20.0).abs() < 0.01);
+
+        viewport.follow(Beats::new(100));
+        assert!(viewport.visible().contains(Beats::new(100)));
+    }
+
+    #[test]
+    fn the_adaptive_grid_keeps_its_lines_apart() {
+        let grid = Grid::default();
+        let bar = Beats::new(4);
+        // At 16 points a beat, a beat is the narrowest step that fits.
+        assert_eq!(grid.step(16.0, bar), Step::QUARTER);
+        assert_eq!(grid.step(64.0, bar), Step::SIXTEENTH);
+        assert_eq!(grid.step(4.0, bar), Step::BAR);
+        assert_eq!(grid.step(0.001, bar), Step::WIDEST);
+        let wide = Grid {
+            density: 2,
+            ..grid
+        };
+        assert_eq!(wide.step(64.0, bar), Step::QUARTER);
+        let fixed = Grid {
+            fixed: Some(Step::new(-3)),
+            ..grid
+        };
+        assert_eq!(fixed.step(0.001, bar), Step::new(-3));
+        assert_eq!(Step::new(-9), Step::NARROWEST);
+        let names: Vec<_> = [3, 1, 0, -2, -4].map(|n| Step::new(n).name(false)).into();
+        assert_eq!(names, ["8 Bars", "2 Bars", "1 Bar", "1/4", "1/16"]);
+        assert_eq!(Step::new(-3).name(true), "1/8T");
+    }
+
+    #[test]
+    fn grid_lines_start_again_at_each_bar() {
+        let mut tempo = TempoMap::default();
+        tempo.insert_signature(1, TimeSignature::new(7, 8).unwrap());
+        let grid = Grid::default();
+        // Quarter notes: four in the 4/4 bar, four in the bar of 7/8, the
+        // last one an eighth short.
+        let lines = grid.lines(&tempo, BeatRange::new(Beats::ZERO, Beats::new(8)), 16.0);
+        let beats = |n| Beats::from_ratio(n, 2);
+        assert_eq!(
+            lines,
+            [0, 2, 4, 6, 8, 10, 12, 14, 15].map(beats).to_vec()
+        );
+        assert_eq!(grid.snap(&tempo, beats(13), 16.0), beats(12));
+        // The bar's last step is an eighth short, so its bar line is nearer.
+        let near_the_end = Beats::from_ratio(73, 10);
+        assert_eq!(grid.snap(&tempo, near_the_end, 16.0), beats(15));
+        // Bar lines snap to themselves: the bars after are 7/8 too.
+        assert_eq!(grid.snap(&tempo, beats(29), 16.0), beats(29));
+        let off = Grid {
+            snap: false,
+            ..grid
+        };
+        assert_eq!(off.snap(&tempo, beats(13), 16.0), beats(13));
+        assert_eq!(off.nearest(&tempo, beats(13), 16.0), beats(12));
+
+        // Triplets, and steps of several bars.
+        let triplets = Grid {
+            triplet: true,
+            ..grid
+        };
+        let lines = triplets.lines(&TempoMap::default(), BeatRange::new(Beats::ZERO, Beats::new(2)), 24.0);
+        assert_eq!(lines, [0, 2, 4].map(|n| Beats::from_ratio(n, 3)).to_vec());
+        let bars = Grid {
+            fixed: Some(Step::new(1)),
+            ..grid
+        };
+        let tempo = TempoMap::default();
+        let lines = bars.lines(&tempo, BeatRange::new(Beats::new(1), Beats::new(20)), 16.0);
+        assert_eq!(lines, [Beats::new(8), Beats::new(16)]);
+        assert_eq!(bars.snap(&tempo, Beats::new(13), 16.0), Beats::new(16));
+        assert_eq!(bars.snap(&tempo, Beats::new(11), 16.0), Beats::new(8));
+    }
+
+    #[test]
+    fn pruning_forgets_what_went() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let gone = project.add_track("Gone", TrackKind::Midi);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+        let clip = project.new_clip("A", range, ClipContent::Midi(MidiClip::default()));
+        let kept = clip.id;
+        project.track_mut(keys).unwrap().clips.push(clip);
+        let mut editor = Editor {
+            selection: Selection {
+                clips: [kept, ClipId(9)].into(),
+                tracks: [keys, gone].into(),
+                time: Some(TimeSelection {
+                    range,
+                    tracks: [gone].into(),
+                }),
+            },
+            selected_track: Some(gone),
+            ..Editor::default()
+        };
+        editor.track_heights.insert(gone, 80.0);
+        project.tracks.retain(|t| t.id != gone);
+        editor.prune(&project);
+        assert_eq!(editor.selection.clips, [kept].into());
+        assert_eq!(editor.selection.tracks, [keys].into());
+        assert_eq!(editor.selection.time, None);
+        assert_eq!(editor.selected_track, None);
+        assert!(editor.track_heights.is_empty());
+
+        editor.files.insert(
+            "a.wav".into(),
+            AudioFile {
+                sample_rate: 44_100,
+                frames: 10,
+                channels: 2,
+            },
+        );
+        assert_eq!(editor.sample_rate_of("a.wav"), 44_100);
+        assert_eq!(editor.sample_rate_of("b.wav"), 48_000);
+    }
+}
