@@ -3,7 +3,7 @@
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
 use musicable_model::automation::{self, Lane};
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
@@ -52,9 +52,9 @@ fn mix() -> Project {
 }
 
 /// Clips: an audio track with a clip of a file, a MIDI track with a clip of
-/// two notes, the second with expression, played by a test instrument, and
-/// a group track. The tracks' ids are their places in the list, and the
-/// clips' ids are their tracks'.
+/// two notes, the second with expression, and the sustain pedal down for
+/// the first, played by a test instrument, and a group track. The tracks'
+/// ids are their places in the list, and the clips' ids are their tracks'.
 fn clips() -> Project {
     let mut project = Project::new();
     let audio = project.add_track("Audio", TrackKind::Audio);
@@ -74,6 +74,8 @@ fn clips() -> Project {
         Point::new(Beats::from_ratio(1, 2), 2.0),
     ];
     bent.expression.pressure = vec![Point::new(Beats::ZERO, 0.25)];
+    let pedal = vec![Point::new(Beats::ZERO, 1.0), Point::new(Beats::new(1), 0.0)];
+    notes.set_controller(Controller::SUSTAIN, pedal);
     let range = BeatRange::new(Beats::ZERO, Beats::new(4));
     let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
     let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
@@ -142,6 +144,14 @@ fn edited_audio(edit: impl FnOnce(&mut Value)) -> Value {
 fn edited_notes(edit: impl FnOnce(&mut Value)) -> Value {
     edited_from(&clips(), |f| {
         edit(&mut f["tracks"][1]["clips"][0]["content"]["midi"]["notes"]);
+    })
+}
+
+/// [`clips`]'s file, changed by `edit`, which gets the MIDI clip's
+/// controller curves.
+fn edited_controllers(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&clips(), |f| {
+        edit(&mut f["tracks"][1]["clips"][0]["content"]["midi"]["controllers"]);
     })
 }
 
@@ -807,6 +817,21 @@ fn clips_and_notes_have_every_field_and_no_others() {
     );
     refused(
         &edited_from(&clips(), |f| {
+            f["tracks"][1]["clips"][0]["content"]["midi"]
+                .as_object_mut()
+                .unwrap()
+                .remove("controllers");
+        }),
+        MIDI,
+        "missing field `controllers`",
+    );
+    refused(
+        &edited_controllers(|c| c[0]["channel"] = json!(0)),
+        &format!("{MIDI}.controllers[0].channel"),
+        "unknown field",
+    );
+    refused(
+        &edited_from(&clips(), |f| {
             f["tracks"][1]["devices"][0]["kind"]["test_instrument"] = json!({});
         }),
         "tracks[1].devices[0].kind.test_instrument",
@@ -1311,6 +1336,78 @@ fn expression_points_go_in_order_within_range() {
 }
 
 #[test]
+fn controllers_are_midi_s_each_moved_once_with_points_in_order() {
+    let cases = [
+        (
+            json!([{"controller": 120, "points": [[0, 1.0]]}]),
+            "controllers[0].controller",
+            "must be from 0 to 119",
+        ),
+        (
+            json!([
+                {"controller": 64, "points": [[0, 1.0]]},
+                {"controller": 64, "points": [[0, 0.0]]},
+            ]),
+            "controllers[1].controller",
+            "the clip moves controller 64 twice",
+        ),
+        (
+            json!([{"controller": 1, "points": []}]),
+            "controllers[0].points",
+            "must have a point",
+        ),
+        (
+            json!([{"controller": 1, "points": [[10, 0.0], [5, 1.0]]}]),
+            "controllers[0].points[1][0]",
+            "must be at or after the point before it",
+        ),
+        (
+            json!([{"controller": 1, "points": [[0, 1.5]]}]),
+            "controllers[0].points[0][1]",
+            "must be from 0 to 1",
+        ),
+        (
+            json!([{"controller": 1, "points": [[-MAX_TICKS - 1, 0.0]]}]),
+            "controllers[0].points[0][0]",
+            "within",
+        ),
+    ];
+    for (controllers, path, message) in cases {
+        refused(
+            &edited_controllers(|c| *c = controllers),
+            &format!("{MIDI}.{path}"),
+            message,
+        );
+    }
+    // Points can be before the clip's own time starts, as notes can, and
+    // on the same tick, where the later one wins. Curves can come in any
+    // order.
+    let file = edited_controllers(|c| {
+        *c = json!([
+            {"controller": 64, "points": [[-MAX_TICKS, 0.0], [0, 0.0], [0, 1.0]]},
+            {"controller": 0, "points": [[MAX_TICKS, 0.5]]},
+        ]);
+    });
+    let project = load(&file).unwrap();
+    let ClipContent::Midi(midi) = &project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    assert_eq!(
+        midi.controller_at(Controller::SUSTAIN, Beats::ZERO),
+        Some(1.0)
+    );
+    let lowest = Controller::new(0).unwrap();
+    assert_eq!(
+        midi.controller(lowest),
+        [Point::new(Beats::from_ticks(MAX_TICKS), 0.5)]
+    );
+    assert_eq!(
+        midi.controllers.keys().copied().collect::<Vec<_>>(),
+        [lowest, Controller::SUSTAIN]
+    );
+}
+
+#[test]
 fn saving_refuses_what_loading_would() {
     let mut project = sample();
     project.tracks[1].gain = f32::NAN;
@@ -1419,6 +1516,27 @@ fn saving_refuses_what_loading_would() {
         &project,
         &format!("{MIDI}.notes[1].expression.pressure[0][1]"),
         "must be from 0 to 1",
+    );
+
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.controllers.get_mut(&Controller::SUSTAIN).unwrap()[1].value = f32::NAN;
+    refused_saving(
+        &project,
+        &format!("{MIDI}.controllers[0].points[1][1]"),
+        "must be from 0 to 1",
+    );
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.controllers.insert(Controller::MOD_WHEEL, Vec::new());
+    refused_saving(
+        &project,
+        &format!("{MIDI}.controllers[0].points"),
+        "must have a point",
     );
 
     let mut project = clips();

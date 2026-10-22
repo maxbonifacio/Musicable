@@ -15,12 +15,8 @@ use super::{
     AutoRow, Envelope, HeaderButton, Hit, LaneButton, Plan, Row, Scene, Side, TakeRow, find,
 };
 use crate::mixer::{meter_colour, meter_height};
+use crate::timeline::{self, Timeline};
 
-/// The closest the grid's lines are drawn, in points. A fixed grid finer
-/// than this at the zoom is drawn as the adaptive grid.
-const MIN_LINE_SPACING: f64 = 3.0;
-/// The closest the ruler's ticks are drawn, in points.
-const MIN_TICK_SPACING: f32 = 6.0;
 /// The fewest keys a MIDI clip's notes are spread over, so a clip of a few
 /// notes doesn't fill its height with them.
 const MIN_KEYS: u8 = 12;
@@ -64,7 +60,7 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let shade = Rect::from_x_y_ranges(x, tracks.y_range());
         painter.rect_filled(shade, 0.0, theme.loop_shade);
     }
-    grid(painter, scene, tracks);
+    timeline::grid(painter, theme, &self::timeline(scene), editor.grid, tracks);
     let bottoms = (layout.visible_rows().map(Row::bottom))
         .chain(layout.visible_takes().map(TakeRow::bottom))
         .chain(layout.visible_automation().map(AutoRow::bottom));
@@ -89,42 +85,24 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
 }
 
-/// Where the playhead is drawn: while it plays, or where it stopped if
-/// that isn't the start marker.
+/// Where the playhead is drawn, if it is.
 fn playhead(scene: &Scene<'_>) -> Option<f32> {
-    let playback = scene.view.playback;
-    let shown = playback.playing || playback.playhead != scene.editor().start_marker;
-    shown.then(|| scene.layout.x_of(playback.playhead))
+    let at = timeline::playhead(&scene.view.playback, scene.editor().start_marker)?;
+    Some(scene.layout.x_of(at))
+}
+
+/// The song positions across the lanes.
+fn timeline<'s>(scene: &'s Scene<'_>) -> Timeline<'s> {
+    Timeline {
+        tempo: &scene.project().tempo,
+        viewport: scene.layout.viewport,
+        left: scene.layout.lanes.left(),
+    }
 }
 
 /// The lane of the track in `row`, across the timeline.
 fn lane(scene: &Scene<'_>, row: &Row) -> Rect {
     Rect::from_x_y_ranges(scene.layout.lanes.x_range(), row.top..=row.bottom())
-}
-
-/// The grid's lines over `area`: brightest at bars, then at beats.
-fn grid(painter: &Painter, scene: &Scene<'_>, area: Rect) {
-    let theme = scene.theme;
-    let layout = &scene.layout;
-    let tempo = &scene.project().tempo;
-    let zoom = layout.viewport.zoom;
-    let visible = layout.viewport.visible();
-    let bar = tempo.bar_at(visible.start).bar;
-    let length = tempo.bar_start(bar + 1) - tempo.bar_start(bar);
-    let mut grid = scene.editor().grid;
-    if grid.spacing(zoom, length) < MIN_LINE_SPACING {
-        grid.fixed = None;
-    }
-    for at in grid.lines(tempo, visible, zoom) {
-        let position = tempo.bar_at(at);
-        let colour = match (position.offset == Beats::ZERO, position.beat) {
-            (true, 0) => theme.grid_bar,
-            (true, _) => theme.grid_beat,
-            _ => theme.grid_step,
-        };
-        let x = painter.round_to_pixel_center(layout.x_of(at));
-        painter.vline(x, area.y_range(), Stroke::new(1.0, colour));
-    }
 }
 
 /// The time selection, over the clips on its tracks.
@@ -604,7 +582,13 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         strip.center().y..=strip.bottom() - 1.0,
     );
     painter.rect_filled(brace, theme.corner, colour);
-    bars(painter, scene);
+    timeline::bars(
+        painter,
+        theme,
+        &self::timeline(scene),
+        ruler,
+        strip.bottom(),
+    );
     for locator in &project.locators {
         let at = match plan {
             Some(&Plan::Locator { locator: id, at }) if id == locator.id => at,
@@ -631,17 +615,7 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         );
     }
     let x = layout.x_of(scene.editor().start_marker);
-    let marker = theme.marker;
-    let points = vec![
-        pos2(x - marker, ruler.bottom() - marker),
-        pos2(x + marker, ruler.bottom() - marker),
-        pos2(x, ruler.bottom()),
-    ];
-    painter.add(Shape::convex_polygon(
-        points,
-        theme.start_marker,
-        Stroke::NONE,
-    ));
+    timeline::start_marker(painter, theme, x, ruler);
     if let Some(x) = playhead(scene) {
         let x = painter.round_to_pixel_center(x);
         let below = strip.bottom()..=ruler.bottom();
@@ -649,49 +623,6 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
     let y = painter.round_to_pixel_center(ruler.bottom() - 0.5);
     painter.hline(ruler.x_range(), y, Stroke::new(1.0, theme.divider));
-}
-
-/// The ruler's bar numbers, every bar or every few so they don't crowd,
-/// with ticks at the bars and at the beats when there's room.
-fn bars(painter: &Painter, scene: &Scene<'_>) {
-    let theme = scene.theme;
-    let layout = &scene.layout;
-    let tempo = &scene.project().tempo;
-    let zoom = layout.viewport.zoom;
-    let visible = layout.viewport.visible();
-    let ruler = layout.ruler;
-    let below = layout.strip.bottom();
-    let first = tempo.bar_at(visible.start).bar;
-    let last = tempo.bar_at(visible.end).bar;
-    let width = |bar: i64| (tempo.bar_start(bar + 1) - tempo.bar_start(bar)).to_f64() * zoom;
-    // A label every bar, or every 2, 4, 8... bars.
-    let mut every: i64 = 1;
-    while (width(first) * every as f64) < f64::from(theme.label_spacing) && every < 1 << 20 {
-        every *= 2;
-    }
-    let tick = Stroke::new(1.0, theme.grid_bar);
-    let mut bar = first - first.rem_euclid(every);
-    while bar <= last {
-        let x = painter.round_to_pixel_center(layout.x_of(tempo.bar_start(bar)));
-        painter.vline(x, below..=ruler.bottom(), tick);
-        painter.text(
-            pos2(x + theme.padding, below),
-            Align2::LEFT_TOP,
-            (bar + 1).to_string(),
-            FontId::proportional(theme.text),
-            theme.ruler_text,
-        );
-        bar += every;
-    }
-    let beat = tempo.signature_at(visible.start).beat_length().to_f64() * zoom;
-    if beat as f32 >= MIN_TICK_SPACING {
-        let short = ruler.bottom() - (ruler.bottom() - below) / 4.0;
-        let tick = Stroke::new(1.0, theme.grid_beat);
-        for at in tempo.beats_in(visible).filter(|beat| beat.beat != 0) {
-            let x = painter.round_to_pixel_center(layout.x_of(at.at));
-            painter.vline(x, short..=ruler.bottom(), tick);
-        }
-    }
 }
 
 /// The tracks' headers: each track's name, colour and meter, with a line

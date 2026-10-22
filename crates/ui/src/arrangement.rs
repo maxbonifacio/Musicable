@@ -31,13 +31,13 @@ use egui::{
 use musicable_commands::editor::Viewport;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, param_text,
+    Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views,
 };
 use musicable_model::automation::Point;
 use musicable_model::clip::{Clip, ClipContent, ClipId};
 use musicable_model::param::{ParamAddress, ParamSpec, Scale};
-use musicable_model::time::Beats;
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, DeviceKind, LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use crate::devices::describe;
@@ -985,7 +985,7 @@ impl Scene<'_> {
     }
 
     /// The step of the grid `at` is in.
-    fn cell(&self, at: Beats) -> (Beats, Beats) {
+    fn cell(&self, at: Beats) -> BeatRange {
         let zoom = self.layout.viewport.zoom;
         self.editor().grid.cell(&self.project().tempo, at, zoom)
     }
@@ -1026,13 +1026,13 @@ impl Scene<'_> {
             let end = beats(right);
             let mut at = beats(left);
             loop {
-                let (start, next) = self.cell(at);
-                let middle = (layout.x_of(start) + layout.x_of(next)) / 2.0;
-                values.insert(start, value(middle.clamp(left, right)));
-                if next > end || next <= at {
+                let cell = self.cell(at);
+                let middle = (layout.x_of(cell.start) + layout.x_of(cell.end)) / 2.0;
+                values.insert(cell.start, value(middle.clamp(left, right)));
+                if cell.end > end || cell.end <= at {
                     break;
                 }
-                at = next;
+                at = cell.end;
             }
         } else {
             // What was drawn between goes, so going back draws over it.
@@ -1051,7 +1051,7 @@ impl Scene<'_> {
     fn drawn_points(&self, param: ParamAddress, drawn: &Drawn, steps: bool) -> Option<Vec<Point>> {
         let (&start, _) = drawn.values.first_key_value()?;
         let (&last, _) = drawn.values.last_key_value()?;
-        let end = if steps { self.cell(last).1 } else { last };
+        let end = if steps { self.cell(last).end } else { last };
         let project = self.project();
         let scale = self.spec(param).scale;
         let lane = project.lane(param);
@@ -1771,6 +1771,15 @@ impl Arrangement {
             }
             (MouseAction::Rename, Hit::Clip { clip, .. }) => {
                 run(actions, edit::RENAME, Args::new().with("clip", clip));
+            }
+            // MIDI clips open in the piano roll.
+            (MouseAction::Open, Hit::Clip { clip, .. }) => {
+                let midi = find(project, clip)
+                    .is_some_and(|(_, c)| matches!(c.content, ClipContent::Midi(_)));
+                if !midi {
+                    return false;
+                }
+                run(actions, notes::OPEN, Args::new().with("clip", clip));
             }
             (MouseAction::Rename, Hit::Header(track)) => {
                 run(actions, edit::RENAME, Args::new().with("track", track));

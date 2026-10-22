@@ -254,7 +254,8 @@
                         "timbre": []
                       }
                     }
-                  ]
+                  ],
+                  "controllers": []
                 }
               }
             }
@@ -315,6 +316,5 @@
     "clip_type": "off",
     "console": {}
   },
-  "locators": [],
-  "automation": []
+  "locators": []
 }

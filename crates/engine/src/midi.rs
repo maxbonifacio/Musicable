@@ -6,10 +6,12 @@
 //! Notes from MIDI carry their expression as the engine's notes do, a note
 //! at a time: a channel's pitch bend, pressure and slide belong to the
 //! notes sounding on it, as MPE has it. A keyboard that plays every note on
-//! one channel bends them all together.
+//! one channel bends them all together. Other controllers, such as the mod
+//! wheel and the sustain pedal, move for every note, as clips' controllers
+//! do ([`Played::Controller`]).
 
 use musicable_model::Monitor;
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 
 use crate::compile::MidiSource;
 use crate::{
@@ -102,6 +104,65 @@ fn unit(value: u8) -> f32 {
     f32::from(value) / 127.0
 }
 
+/// What a MIDI input plays, as [`MidiNotes`] reads it: a note starting,
+/// changing or ending, or a controller moving for every note, as
+/// [`NodeEventKind::Controller`] has it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Played {
+    Note(NoteEvent),
+    /// `value` is from 0.0 to 1.0.
+    Controller {
+        controller: Controller,
+        value: f32,
+    },
+}
+
+/// The controller a control change moves, or `None` for those MIDI uses
+/// to say something else: slide (74), a note's own expression; registered
+/// and non-registered parameters and their data entry (6, 38 and 96 to
+/// 101); and the channel mode messages, from 120 up.
+fn moved(controller: u8) -> Option<Controller> {
+    match controller {
+        6 | 38 | 74 | 96..=101 => None,
+        number => Controller::new(number),
+    }
+}
+
+/// What each controller holds, as it last moved, for those that have.
+#[derive(Debug, Clone, Copy)]
+struct Held([Option<f32>; Controller::MAX as usize + 1]);
+
+impl Held {
+    const NONE: Self = Self([None; Controller::MAX as usize + 1]);
+
+    fn set(&mut self, controller: Controller, value: f32) {
+        self.0[usize::from(controller.number())] = Some(value);
+    }
+
+    /// The controllers that have moved, and what they hold, in order.
+    fn moved(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
+        Controller::all().filter_map(|c| Some((c, self.0[usize::from(c.number())]?)))
+    }
+
+    /// The switches held on, such as the sustain pedal when it's down.
+    fn switches_on(&self) -> impl Iterator<Item = Controller> + '_ {
+        self.moved()
+            .filter(|&(c, value)| c.is_switch() && Controller::is_on(value))
+            .map(|(c, _)| c)
+    }
+
+    /// Lets go of the switches held on, giving each to `emit`.
+    fn let_go(&mut self, mut emit: impl FnMut(Controller)) {
+        for c in Controller::all().filter(|c| c.is_switch()) {
+            let held = &mut self.0[usize::from(c.number())];
+            if held.is_some_and(Controller::is_on) {
+                *held = Some(0.0);
+                emit(c);
+            }
+        }
+    }
+}
+
 /// What a channel holds for the notes on it.
 #[derive(Debug, Clone, Copy)]
 struct Channel {
@@ -148,9 +209,12 @@ impl Channel {
 /// bends every note in its zone as well as its own. Taking one channel, it
 /// reads that channel alone, as a keyboard plays it.
 ///
-/// Other controllers, such as the sustain pedal, play no part in notes yet.
-/// All Sound Off and All Notes Off (CC 120 and 123) end a channel's notes,
-/// and Reset All Controllers (CC 121) takes its expression back to rest.
+/// Other controllers, such as the mod wheel and the sustain pedal, move for
+/// every note, from any channel it takes ([`Played::Controller`]), except
+/// those that say something else: slide (74), and data entry and parameter
+/// numbers (6, 38 and 96 to 101). All Sound Off and All Notes Off (CC 120 and 123)
+/// end a channel's notes, and Reset All Controllers (CC 121) takes its
+/// expression back to rest and lets go of the switches held on.
 ///
 /// Real-time safe once made.
 pub struct MidiNotes {
@@ -162,6 +226,8 @@ pub struct MidiNotes {
     masters: [Option<u8>; 16],
     /// The notes sounding, by channel and key.
     sounding: Box<[[Option<NoteId>; 128]; 16]>,
+    /// What the controllers hold, as the input last moved them.
+    controllers: Held,
 }
 
 impl MidiNotes {
@@ -174,6 +240,7 @@ impl MidiNotes {
             channels: [Channel::new(); 16],
             masters: [None; 16],
             sounding: Box::new([[None; 128]; 16]),
+            controllers: Held::NONE,
         };
         if channel.is_none() {
             notes.set_zone(0, 15);
@@ -186,16 +253,30 @@ impl MidiNotes {
         self.channel
     }
 
-    /// Reads one message, and gives `emit` what it does to notes, in order.
+    /// The controllers the input has moved, and what they hold now, in
+    /// order.
+    pub fn controllers(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
+        self.controllers.moved()
+    }
+
+    /// Reads one message, and gives `emit` what it plays, in order.
     /// Messages on a channel it doesn't take, and anything but channel
     /// messages, do nothing.
-    pub fn take(&mut self, bytes: [u8; 3], mut emit: impl FnMut(NoteEvent)) {
+    pub fn take(&mut self, bytes: [u8; 3], mut emit: impl FnMut(Played)) {
         let Some((channel, voice)) = parse(bytes) else {
             return;
         };
         if self.channel.is_some_and(|c| c != channel) {
             return;
         }
+        self.play(channel, voice, &mut |note| emit(Played::Note(note)));
+        if let Voice::Control { controller, value } = voice {
+            self.move_controller(controller, value, &mut emit);
+        }
+    }
+
+    /// What `voice` on `channel` does to notes.
+    fn play(&mut self, channel: u8, voice: Voice, emit: &mut impl FnMut(NoteEvent)) {
         let c = usize::from(channel);
         match voice {
             Voice::On { key, velocity } => {
@@ -250,27 +331,54 @@ impl MidiNotes {
             }
             Voice::Pressure(value) => {
                 self.channels[c].pressure = unit(value);
-                self.express(channel, Dimension::Pressure, &mut emit);
+                self.express(channel, Dimension::Pressure, emit);
             }
             Voice::Bend(value) => {
                 self.channels[c].bend = f32::from(value) / if value < 0 { 8192.0 } else { 8191.0 };
-                self.bend(channel, &mut emit);
+                self.bend(channel, emit);
             }
             Voice::Control { controller, value } => {
-                self.control(channel, controller, value, &mut emit);
+                self.control(channel, controller, value, emit);
             }
         }
     }
 
-    /// Ends every note sounding, as if let go at no particular speed.
-    pub fn release_all(&mut self, mut emit: impl FnMut(NoteEvent)) {
+    /// Moves the controller a control change moves, if it's one that moves
+    /// for every note. Reset All Controllers lets go of the switches held
+    /// on.
+    fn move_controller(&mut self, controller: u8, value: u8, emit: &mut impl FnMut(Played)) {
+        if controller == 121 {
+            self.controllers.let_go(|controller| {
+                emit(Played::Controller {
+                    controller,
+                    value: 0.0,
+                });
+            });
+        } else if let Some(controller) = moved(controller) {
+            let value = unit(value);
+            self.controllers.set(controller, value);
+            emit(Played::Controller { controller, value });
+        }
+    }
+
+    /// Ends every note sounding, as if let go at no particular speed, and
+    /// lets go of the switches held on, such as the sustain pedal, where
+    /// they played. It still knows the switches are held, for when they
+    /// next move.
+    pub fn release_all(&mut self, mut emit: impl FnMut(Played)) {
         for slot in self.sounding.iter_mut().flatten() {
             if let Some(note) = slot.take() {
-                emit(NoteEvent::Off {
+                emit(Played::Note(NoteEvent::Off {
                     note,
                     velocity: RELEASE,
-                });
+                }));
             }
+        }
+        for controller in self.controllers.switches_on() {
+            emit(Played::Controller {
+                controller,
+                value: 0.0,
+            });
         }
     }
 
@@ -454,6 +562,12 @@ const MAX_CLIP_NOTES: usize = 1024;
 /// played the block's notes, so they change what plays from the next
 /// block.
 ///
+/// Controllers, such as the sustain pedal, go on from whichever of the two
+/// plays, as their notes do. When one stops playing, the switches it held
+/// on are let go, so no notes ring on. When the clips play again, their
+/// controllers go back to what the clips hold, as the clip player chases
+/// them where playback starts.
+///
 /// The input's messages come from the MIDI inputs its [`MidiSource`] says,
 /// turned into notes by [`MidiNotes`], in the blocks the stream places them
 /// in ([`ProcessContext::midi`]).
@@ -470,8 +584,13 @@ pub struct MidiMonitor {
     retiring: bool,
     /// The clips' notes it sent on that sound now.
     clip_notes: Vec<NoteId>,
+    /// What the clips' controllers hold, as the clips last moved them,
+    /// whether they played or not.
+    clip_controllers: Held,
     /// Whether it played the input in the last block.
     playing_input: bool,
+    /// Whether it played the clips in the last block.
+    playing_clips: bool,
 }
 
 impl MidiMonitor {
@@ -493,7 +612,9 @@ impl MidiMonitor {
             retired: MidiNotes::new(None, LIVE_NOTES),
             retiring: false,
             clip_notes: Vec::with_capacity(MAX_CLIP_NOTES),
+            clip_controllers: Held::NONE,
             playing_input: false,
+            playing_clips: true,
         }
     }
 
@@ -543,7 +664,9 @@ impl Node for MidiMonitor {
             return;
         };
         std::mem::swap(&mut self.clip_notes, &mut previous.clip_notes);
+        self.clip_controllers = previous.clip_controllers;
         self.playing_input = previous.playing_input;
+        self.playing_clips = previous.playing_clips;
         // Notes still to end from before the last swap, if no block has
         // played since. Then the monitor it took over from has held
         // nothing on its own input.
@@ -597,9 +720,7 @@ impl Node for MidiMonitor {
         let (input, clips) = self.plays(&ctx.transport);
         if std::mem::take(&mut self.retiring) {
             match self.playing_input {
-                true => self.retired.release_all(|off| {
-                    notes.send(0, off);
-                }),
+                true => self.retired.release_all(|played| send(notes, 0, played)),
                 false => self.retired.forget_notes(),
             }
         }
@@ -614,10 +735,22 @@ impl Node for MidiMonitor {
                 );
             }
         }
+        match (self.playing_clips, clips) {
+            (true, false) => {
+                for controller in self.clip_controllers.switches_on() {
+                    notes.send_controller(0, controller, 0.0);
+                }
+            }
+            (false, true) => {
+                for (controller, value) in self.clip_controllers.moved() {
+                    notes.send_controller(0, controller, value);
+                }
+            }
+            _ => {}
+        }
+        self.playing_clips = clips;
         match (self.playing_input, input) {
-            (true, false) => self.notes.release_all(|off| {
-                notes.send(0, off);
-            }),
+            (true, false) => self.notes.release_all(|played| send(notes, 0, played)),
             // What's held now never played.
             (false, true) => self.notes.forget_notes(),
             _ => {}
@@ -632,29 +765,44 @@ impl Node for MidiMonitor {
             .filter(|m| source.is_some_and(|s| s.input.is_none_or(|i| i == m.input)))
             .peekable();
         let last = ctx.frames.saturating_sub(1);
-        for event in ctx.events {
-            let NodeEventKind::Note(note) = event.kind else {
-                continue;
-            };
+        for event in ctx.events.iter().filter(|e| e.kind.is_played()) {
             while let Some(message) = messages.next_if(|m| offset(ctx, m) < event.offset) {
                 let at = offset(ctx, message).min(last);
-                self.notes.take(message.bytes, |note| {
+                self.notes.take(message.bytes, |played| {
                     if input {
-                        notes.send(at, note);
+                        send(notes, at, played);
                     }
                 });
             }
-            self.clip_note(event.offset, note, clips, notes);
+            match event.kind {
+                NodeEventKind::Note(note) => self.clip_note(event.offset, note, clips, notes),
+                NodeEventKind::Controller { controller, value } => {
+                    self.clip_controllers.set(controller, value);
+                    if clips {
+                        notes.send_controller(event.offset, controller, value);
+                    }
+                }
+                _ => {}
+            }
         }
         for message in messages {
             let at = offset(ctx, message).min(last);
-            self.notes.take(message.bytes, |note| {
+            self.notes.take(message.bytes, |played| {
                 if input {
-                    notes.send(at, note);
+                    send(notes, at, played);
                 }
             });
         }
     }
+}
+
+/// Sends what an input played on to where `notes` go, `at` frames into the
+/// block.
+fn send(notes: &mut Notes<'_>, at: usize, played: Played) {
+    match played {
+        Played::Note(note) => notes.send(at, note),
+        Played::Controller { controller, value } => notes.send_controller(at, controller, value),
+    };
 }
 
 /// Where in `ctx`'s block `message` plays.

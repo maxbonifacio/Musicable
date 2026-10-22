@@ -108,12 +108,35 @@ store values by id.
 
 ## Notes and the transport
 
-Notes go to the plugin's first note input. A plugin that takes CLAP's own
-notes gets note ids and per-note expression: pitch bend as tuning, in
-semitones, pressure as pressure, and timbre as brightness. One that only
-takes MIDI gets note on and note off on channel 1, without per-note
-expression until MPE MIDI comes. Up to 512 notes can sound on a plugin at
-once.
+Notes go to the plugin's first note input, in the first of its note
+dialects that Musicable speaks: CLAP's own, then MPE MIDI, then MIDI. Up to
+512 notes can sound on a plugin at once.
+
+- **CLAP's own notes** carry note ids and per-note expression: pitch bend
+  as tuning, in semitones, pressure as pressure, and timbre as brightness.
+- **MPE MIDI** puts each note on a channel of its own, in MPE's lower zone:
+  channel 1 is the master, and channels 2 to 16 the members, with each
+  note's pitch bend, pressure and timbre on its own channel as pitch bend
+  (48 semitones either way, MPE's default), channel pressure and CC 74
+  (MPE's slide). As the plugin activates, it hears the zone set up: MPE's
+  configuration message for 15 members, then a bend range of 48 on each.
+  A note's bend, pressure and slide go before its note on, at rest if the
+  note doesn't move them (slide rests at 64), so it never starts with the
+  last note's. A new note gets the member channel that's been free
+  longest, and with all 15 busy, shares the one used longest ago.
+- **MIDI** puts every note on channel 1, bending 2 semitones either way,
+  MIDI's default, with pressure as each key's own (poly pressure). Pitch
+  bend and slide are the channel's, so the last note to move them wins.
+- MIDI notes start at velocity 1 or more, as a note on at 0 is a note off.
+  `crate::midi` writes MIDI as the engine reads it from MIDI inputs, so a
+  performance recorded from MIDI plays back as it was played.
+
+**Controllers**, such as the mod wheel and the sustain pedal
+([engine.md](engine.md#notes)), go as MIDI control changes on channel 1,
+MPE's master channel, to a plugin that takes MIDI, whatever its notes go
+as. A CLAP plugin that only takes CLAP's own notes doesn't get them, as
+CLAP has no event of its own for them. A VST3 plugin gets them as
+parameters ([below](#vst3)).
 
 A plugin's voice for a note can ring on well after the note is let go, so
 the node keeps track of each voice until the plugin says it ended (CLAP's
@@ -192,6 +215,15 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   semitones down to 120 up; pressure is poly pressure, and timbre is
   brightness. The transport is VST3's process context, with the frames
   since the plugin was activated.
+- **Controllers.** VST3 has plugins take MIDI controllers as parameters:
+  as it activates, the instance asks the plugin's MIDI mapping
+  (`IMidiMapping`) which parameter each controller moves, on MIDI's first
+  channel of its first event input. A controller's move is then a change of
+  that parameter, at its frame, and the controller hears of it too, so the
+  plugin's window shows it. It doesn't come back from `poll`, so the
+  project keeps the parameter's own value. A plugin without a mapping
+  doesn't get controllers. A plugin without note expression doesn't get
+  per-note pitch bend: VST3 has no MPE MIDI to fall back on.
 - **State** is a `.vstpreset` file: the plugin's class id, the component's
   state, and the controller's if it's an object of its own. Loading checks
   the class id.
@@ -308,7 +340,11 @@ multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Test Synth plays each note as a
 sine shaped by its note expression, as loud as its Level, which can be
 modulated for each note's voice, says when each voice ends, and can render
-its voices on the host's thread pool, noting which threads run them. Both
+its voices on the host's thread pool, noting which threads run them. It
+takes notes as CLAP's own or as MIDI, holds them with the sustain pedal,
+and keeps a log of the MIDI it gets. A copy whose name starts with `mpe`
+takes only MPE MIDI, so tests can check that an MPE performance sounds as
+it does through CLAP's note expression. Both
 check which thread the host calls each function on, and in which state, and
 count every breach. Tests drive them through hooks the library exports:
 turning a knob in the pretend window, changing state that isn't a
@@ -318,7 +354,8 @@ The library is also a VST3 module with the same two plugins. There, Test
 Gain is a component with a controller of its own, which tells the
 component about state that isn't a parameter in a message, asks to restart
 for a new latency, and has a meter, Peak, which the processor sets. Test
-Synth is one object, and plays notes with VST3's note expression. Both
+Synth is one object, plays notes with VST3's note expression, and maps
+CC 7 to its Level through its MIDI mapping. Both
 check VST3's rules, in the same count: what's called on which thread and in
 which state, and that the host connects, terminates and lets go of each
 object, in order, before the module exits.
@@ -355,10 +392,11 @@ VST3 plugin on a track and opens its window.
   its window as it processes. If the audio device stops, they wait until
   it plays again, or until the project is saved, which saves the plugin's
   state.
-- Audio ports beyond the main ones (sidechains), 64-bit processing, MPE
-  MIDI, notes a plugin plays, and letting a quiet plugin sleep.
+- Audio ports beyond the main ones (sidechains), 64-bit processing, notes
+  a plugin plays, and letting a quiet plugin sleep.
+- Per-note pitch bend, pressure and timbre for a CLAP plugin that takes
+  only plain MIDI, without MPE, and for a VST3 plugin without note
+  expression: the first get the channel's, the last none.
 - VST3 windows in the app on macOS, which needs an `NSView` of Musicable's
   to put them in, and on Linux, which needs the host's run loop too.
-- VST3's MIDI mapping, so MIDI controllers reach plugins that only take
-  them as parameters.
 - ARA 2.

@@ -145,12 +145,104 @@ fn readings_are_never_torn() {
     assert!(seen.load(Ordering::Relaxed) >= 10_000);
 }
 
+/// What a device that reports its position `step` frames at a time says it
+/// has played at `time` (ns), at 44.1 kHz: the RME HDSPe in shared mode.
+fn stepped(time: f64, step: u64) -> u64 {
+    let heard = (time / 1e9 * 44_100.0) as u64;
+    heard / step * step
+}
+
+#[test]
+fn a_clock_that_moves_in_steps_is_smoothed_to_the_frame_heard() {
+    // Wake-ups every 441 frames, a little late at random, and the position
+    // a step behind at worst: readings up to 255 frames off.
+    let mut smoother = Smoother::new(44_100);
+    let mut jitter = Lcg(3);
+    let (mut first, mut raw, mut worst, mut total, mut n) = (None, 0.0f64, 0.0f64, 0.0, 0.0);
+    for wakeup in 1..6_000u64 {
+        let time = wakeup as f64 * 10e6 + 300e3 * (jitter.next() + 1.0);
+        let played = stepped(time, 256);
+        let heard = time / 1e9 * 44_100.0;
+        raw = raw.max(heard - played as f64);
+        if let Some(smoothed) = smoother.smooth(played, time as u64) {
+            first.get_or_insert(wakeup);
+            worst = worst.max((heard - smoothed).abs());
+            total += (heard - smoothed).abs();
+            n += 1.0;
+        }
+    }
+    // A few seconds to settle, then mostly within a frame of the truth.
+    assert!(matches!(first, Some(200..=300)), "{first:?}");
+    assert!(raw > 250.0, "{raw}");
+    assert!(total / n < 1.5 && worst < 8.0, "{} {worst}", total / n);
+}
+
+#[test]
+fn a_clock_that_keeps_time_comes_through_as_it_is() {
+    let mut smoother = Smoother::new(48_000);
+    for wakeup in 1..1_000u64 {
+        let played = wakeup * 480;
+        let smoothed = smoother.smooth(played, wakeup * 10_000_000);
+        // A third of a second to settle.
+        assert_eq!(smoothed.is_some(), wakeup >= 32, "{wakeup}");
+        if let Some(smoothed) = smoothed {
+            assert!((smoothed - played as f64).abs() < 1e-6, "{wakeup}");
+        }
+    }
+}
+
+#[test]
+fn a_clock_that_moves_for_good_is_followed_after_three_readings() {
+    // How far the smoothed reading is from the reading, at 48 kHz with
+    // wake-ups every 10 ms.
+    fn off(smoother: &mut Smoother, wakeup: u64, played: u64) -> f64 {
+        let smoothed = smoother.smooth(played, wakeup * 10_000_000);
+        smoothed.unwrap_or(f64::NAN) - played as f64
+    }
+    let mut smoother = Smoother::new(48_000);
+    for wakeup in 1..300 {
+        off(&mut smoother, wakeup, wakeup * 480);
+    }
+    // One wild reading is ignored.
+    assert!((off(&mut smoother, 300, 300 * 480 + 5_000) + 5_000.0).abs() < 1e-6);
+    assert!(off(&mut smoother, 301, 301 * 480).abs() < 1e-6);
+    // The clock jumps 1,000 frames ahead, for good: two readings say so
+    // and are held back, and the third is believed.
+    for wakeup in 302..305 {
+        let expected = if wakeup < 304 { -1_000.0 } else { 0.0 };
+        let got = off(&mut smoother, wakeup, wakeup * 480 + 1_000);
+        assert!((got - expected).abs() < 1e-6, "{wakeup}: {got}");
+    }
+    // Settled again, it falls 1,500 behind that.
+    for wakeup in 305..600 {
+        off(&mut smoother, wakeup, wakeup * 480 + 1_000);
+    }
+    for wakeup in 600..603 {
+        let expected = if wakeup < 602 { 1_500.0 } else { 0.0 };
+        let got = off(&mut smoother, wakeup, wakeup * 480 - 500);
+        assert!((got - expected).abs() < 1e-6, "{wakeup}: {got}");
+    }
+}
+
+#[test]
+fn smoothed_readings_publish_their_fraction_as_an_earlier_time() {
+    let clock = Playback::default();
+    clock.publish_fractional(1_000.25, 1_000_000_000, 48_000);
+    let reading = clock.reading().unwrap();
+    assert_eq!(reading.frame, 1_000);
+    assert!((reading.frame_at(1_000_000_000) - 1_000.25).abs() < 1e-3);
+}
+
 /// An output and an input, simulated: the output wakes every period and
 /// publishes which frame it's playing; the input delivers packets.
 struct Simulation {
     /// The output's rate, exact.
     out_rate: u32,
     out_period: u64,
+    /// How the output's device reports its position: in steps of this many
+    /// frames, read when it wakes and smoothed as on WASAPI, or 0 for
+    /// exactly.
+    out_step: u64,
     /// The input's nominal rate, and how much faster its clock really runs.
     in_rate: u32,
     in_drift: f64,
@@ -192,6 +284,7 @@ impl Simulation {
             counters.clone(),
         );
         let mut jitter = Lcg(7);
+        let mut smoother = Smoother::new(self.out_rate);
         let end = seconds * 1e9;
         let mut wakeup = 0u64;
         let mut packet = 0u64;
@@ -209,10 +302,26 @@ impl Simulation {
                 break;
             }
             if wakeup_at <= packet_at {
-                // The output reads its clock: the frame playing now.
-                let frame = wakeup * self.out_period;
-                let time = wakeup_at + self.jitter * jitter.next();
-                clock.publish(frame, time.max(0.0) as u64, self.out_rate);
+                let off = jitter.next();
+                match self.out_step {
+                    0 => {
+                        // The output reads its clock: the frame playing now.
+                        let frame = wakeup * self.out_period;
+                        let time = wakeup_at + self.jitter * off;
+                        clock.publish(frame, time.max(0.0) as u64, self.out_rate);
+                    }
+                    step => {
+                        // Read as it wakes, a little late, from the last step.
+                        let time = (wakeup_at + self.jitter * (off + 1.0)) as u64;
+                        let heard = time as f64 / 1e9 * f64::from(self.out_rate);
+                        let played = heard as u64 / step * step;
+                        if played > 0
+                            && let Some(played) = smoother.smooth(played, time)
+                        {
+                            clock.publish_fractional(played, time, self.out_rate);
+                        }
+                    }
+                }
                 wakeup += 1;
             } else {
                 for (i, sample) in samples.iter_mut().enumerate() {
@@ -241,6 +350,11 @@ fn count(t: f64) -> f32 {
     (t * 48_000.0).round() as f32
 }
 
+/// The same at 44.1 kHz.
+fn count_44k(t: f64) -> f32 {
+    (t * 44_100.0).round() as f32
+}
+
 fn tone(t: f64) -> f32 {
     (TAU * 1_000.0 * t).sin() as f32 * 0.5
 }
@@ -250,6 +364,7 @@ fn inputs_on_the_output_clock_line_up_exactly() {
     let sim = Simulation {
         out_rate: 48_000,
         out_period: 480,
+        out_step: 0,
         in_rate: 48_000,
         in_drift: 0.0,
         in_period: 480,
@@ -283,6 +398,39 @@ fn inputs_on_the_output_clock_line_up_exactly() {
         out.iter()
             .enumerate()
             .all(|(i, &s)| s == (96_000 + i) as f32)
+    );
+}
+
+#[test]
+fn inputs_line_up_with_an_output_whose_clock_moves_in_steps() {
+    // As on the RME HDSPe in shared mode: the output's position moves 256
+    // frames at a time, read every 441 frames. Smoothed, the input still
+    // lands on one frame, within two of the one heard with it.
+    let sim = Simulation {
+        out_rate: 44_100,
+        out_period: 441,
+        out_step: 256,
+        in_rate: 44_100,
+        in_drift: 0.0,
+        in_period: 441,
+        // 529.2 frames.
+        in_start: -12.0e6,
+        jitter: 20_000.0,
+        signal: count_44k,
+    };
+    let (buffer, counters) = sim.run(30.0, true);
+    let stats = counters.snapshot();
+    assert_eq!((stats.slips, stats.lost), (0, 0));
+    assert_eq!(stats.clock, InputClock::Output);
+    let from = 4 * 44_100;
+    let mut out = vec![0.0; 25 * 44_100];
+    buffer.read_channel(from, 0, &mut out).unwrap();
+    let off = out[0] - from as f32;
+    assert!(off.abs() <= 2.0, "off by {off}");
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &s)| s - (from + i as u64) as f32 == off)
     );
 }
 
@@ -387,6 +535,7 @@ fn inputs_on_another_clock_follow_its_drift() {
         let sim = Simulation {
             out_rate: 48_000,
             out_period: 441,
+            out_step: 0,
             in_rate,
             in_drift: drift,
             in_period: 480,
@@ -420,6 +569,7 @@ fn jittery_timings_never_make_a_resampled_input_jump() {
     let sim = Simulation {
         out_rate: 48_000,
         out_period: 480,
+        out_step: 0,
         in_rate: 44_100,
         in_drift: 40e-6,
         in_period: 441,
@@ -449,6 +599,7 @@ fn an_input_that_drifts_after_all_goes_over_to_resampling() {
     let sim = Simulation {
         out_rate: 48_000,
         out_period: 480,
+        out_step: 0,
         in_rate: 48_000,
         in_drift: 20e-6,
         in_period: 480,

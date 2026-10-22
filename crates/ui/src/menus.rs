@@ -1,20 +1,25 @@
 //! The menus that list the commands, and how commands are named in them and
 //! in the command palette.
 
+use egui::{Button, Ui};
 use musicable_commands::{
-    Command, CommandId, Registry, arrange, automation, edit, file, locator, options, track,
-    transport, view,
+    Args, Command, CommandId, Registry, arrange, automation, controllers, edit, file, locator,
+    notes, options, track, transport, view,
 };
+
+use crate::shell::{Action, View, toggled, with_keys};
 
 /// A menu's title, the area of commands it lists, and its commands in order.
 /// `None` is a separator.
 type MenuSpec = (&'static str, &'static str, &'static [Option<CommandId>]);
 
-/// The menus that come first, before those for other areas. A command missing
-/// from its area's menu goes at the end of it, and an area of commands
-/// without a menu gets one after these, so every command can be reached.
-/// Commands that need arguments, which menus can't give, are left out.
-const MENUS: [MenuSpec; 7] = [
+/// The menus that come first, before those for other areas. A menu can list
+/// commands of other areas too. A command missing from its area's menu goes
+/// at the end of it, and an area of commands without a menu gets one after
+/// these, unless its commands are all in other menus, so every command can be
+/// reached. Commands that need arguments, which menus can't give, are left
+/// out.
+const MENUS: [MenuSpec; 8] = [
     (
         "File",
         "file",
@@ -64,6 +69,31 @@ const MENUS: [MenuSpec; 7] = [
     ),
     ("Clip", "clip", &[Some(arrange::INSERT_MIDI_CLIP)]),
     (
+        "Notes",
+        "notes",
+        &[
+            Some(notes::TOGGLE_DRAW),
+            None,
+            Some(notes::QUANTIZE),
+            None,
+            Some(notes::TRANSPOSE_UP),
+            Some(notes::TRANSPOSE_DOWN),
+            Some(notes::OCTAVE_UP),
+            Some(notes::OCTAVE_DOWN),
+            None,
+            Some(notes::NUDGE_LEFT),
+            Some(notes::NUDGE_RIGHT),
+            Some(notes::LENGTHEN),
+            Some(notes::SHORTEN),
+            None,
+            Some(notes::VELOCITY_UP),
+            Some(notes::VELOCITY_DOWN),
+            None,
+            Some(controllers::SHOW_VELOCITIES),
+            Some(controllers::CLEAR),
+        ],
+    ),
+    (
         "Automation",
         "automation",
         &[Some(automation::SHOW), Some(automation::RE_ENABLE)],
@@ -107,6 +137,8 @@ const LAST_MENUS: [MenuSpec; 2] = [
         &[
             Some(view::TOGGLE_MIXER),
             Some(view::TOGGLE_DEVICES),
+            Some(view::TOGGLE_PIANO_ROLL),
+            Some(view::SWITCH_DEVICES_PIANO_ROLL),
             Some(view::TOGGLE_BROWSER),
             None,
             Some(view::ZOOM_IN),
@@ -147,9 +179,12 @@ pub(crate) struct Menu<'a> {
 /// Every command in `commands` that runs without arguments, in the menus
 /// the menu bar shows. A menu without commands is left out.
 pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
-    let listed = |area: &str| MENUS.iter().chain(&LAST_MENUS).any(|m| m.1 == area);
+    let specs = || MENUS.iter().chain(&LAST_MENUS);
+    let listed = |area: &str| specs().any(|m| m.1 == area);
+    let in_a_menu = |id: &CommandId| specs().any(|m| m.2.contains(&Some(id.clone())));
     let offered = || commands.iter().filter(|c| !c.needs_arguments());
     let mut others: Vec<&str> = offered()
+        .filter(|c| !in_a_menu(&c.id))
         .map(|c| area_of(&c.id))
         .filter(|area| !listed(area))
         .collect();
@@ -157,7 +192,7 @@ pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
     let others = others.into_iter().map(|area| Menu {
         title: capitalized(area),
         items: offered()
-            .filter(|c| area_of(&c.id) == area)
+            .filter(|c| area_of(&c.id) == area && !in_a_menu(&c.id))
             .map(Some)
             .collect(),
     });
@@ -196,6 +231,49 @@ fn menu<'a>(commands: &'a Registry, &(title, area, items): &MenuSpec) -> Menu<'a
     Menu {
         title: title.to_owned(),
         items: tidy,
+    }
+}
+
+/// Shows a context menu's `entries` in `ui`: commands with the arguments
+/// they take from where the menu was opened, and `None` for separators. A
+/// command is greyed out when it takes no arguments and doesn't apply.
+pub(crate) fn context_menu(
+    ui: &mut Ui,
+    view: &View<'_>,
+    entries: &[Option<(&Command, Args)>],
+    actions: &mut Vec<Action>,
+) {
+    // No separator first, last, or after another.
+    let mut previous_was_command = false;
+    let shown = entries.iter().enumerate().filter(|(i, entry)| {
+        let keep = match entry {
+            Some(_) => true,
+            None => previous_was_command && entries[i + 1..].iter().any(Option::is_some),
+        };
+        if keep {
+            previous_was_command = entry.is_some();
+        }
+        keep
+    });
+    for (_, entry) in shown {
+        let Some((command, args)) = entry else {
+            ui.separator();
+            continue;
+        };
+        let id = &command.id;
+        let enabled = !args.is_empty() || command.when.applies(view.project, view.editor);
+        let mut button = with_keys(Button::new(command.title.as_str()), view.keymap, id);
+        if let Some(on) = toggled(view, id) {
+            button = button.selected(on);
+        }
+        if ui.add_enabled(enabled, button).clicked() {
+            actions.push(if args.is_empty() {
+                Action::Run(id.clone())
+            } else {
+                Action::RunWith(id.clone(), args.clone())
+            });
+            ui.close();
+        }
     }
 }
 
@@ -243,6 +321,7 @@ mod tests {
                 "Edit",
                 "Track",
                 "Clip",
+                "Notes",
                 "Automation",
                 "Locator",
                 "Transport",
@@ -263,7 +342,7 @@ mod tests {
         }
         assert!(!listed.contains(&arrange::MOVE));
         // A command missing from its menu goes at its end.
-        let transport = &menus[6].items;
+        let transport = &menus.iter().find(|m| m.title == "Transport").unwrap().items;
         assert_eq!(transport[transport.len() - 2], None);
         assert_eq!(
             transport.last().unwrap().unwrap().id,

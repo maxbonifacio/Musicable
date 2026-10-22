@@ -137,7 +137,8 @@
             "midi": {
               "offset": 0,
               "next_note_id": 0,
-              "notes": []
+              "notes": [],
+              "controllers": []
             }
           }
         },
@@ -238,7 +239,8 @@
                     "timbre": []
                   }
                 }
-              ]
+              ],
+              "controllers": []
             }
           }
         }
@@ -265,6 +267,5 @@
     "clip_type": "off",
     "console": {}
   },
-  "locators": [],
-  "automation": []
+  "locators": []
 }

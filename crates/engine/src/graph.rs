@@ -3,6 +3,8 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use musicable_model::clip::Controller;
+
 use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef};
 use crate::engine::EVENT_CAPACITY;
@@ -509,6 +511,10 @@ impl Notes<'_> {
     /// [`CAPACITY`](Self::CAPACITY) are dropped, and counted in
     /// [`Stats::events_dropped`](crate::Stats::events_dropped).
     pub fn send(&mut self, offset: usize, note: NoteEvent) -> bool {
+        self.send_kind(offset, NodeEventKind::Note(note))
+    }
+
+    fn send_kind(&mut self, offset: usize, kind: NodeEventKind) -> bool {
         debug_assert!(offset < self.frames, "notes are sent within the block");
         if self.room == 0 {
             self.dropped += 1;
@@ -520,13 +526,17 @@ impl Notes<'_> {
             self.routed.push(Routed {
                 node,
                 order,
-                event: NodeEvent {
-                    offset,
-                    kind: NodeEventKind::Note(note),
-                },
+                event: NodeEvent { offset, kind },
             });
         }
         true
+    }
+
+    /// Sends a controller's move to where this node's notes go, `offset`
+    /// frames into the block, in order with its notes. It takes room as a
+    /// note does, and returns whether there was some.
+    pub fn send_controller(&mut self, offset: usize, controller: Controller, value: f32) -> bool {
+        self.send_kind(offset, NodeEventKind::Controller { controller, value })
     }
 
     /// The block's length: notes are sent at offsets below it.
@@ -641,7 +651,7 @@ impl PreparedGraph {
             inbox_events,
             ..
         } = self;
-        let is_note = |r: &Routed| matches!(r.event.kind, NodeEventKind::Note(_));
+        let is_played = |r: &Routed| r.event.kind.is_played();
         let mut dropped = 0;
         for player in players.iter() {
             // The notes sent to it so far, which is all of them: the engine
@@ -650,7 +660,7 @@ impl PreparedGraph {
             inbox.clear();
             let sent = routed
                 .iter()
-                .filter(|r| r.node == player.node && is_note(r));
+                .filter(|r| r.node == player.node && is_played(r));
             inbox.extend(sent);
             inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
             inbox_events.clear();
@@ -668,7 +678,7 @@ impl PreparedGraph {
         }
         // The players have had theirs.
         if !players.is_empty() {
-            routed.retain(|r| !(plays_notes[r.node.0] && is_note(r)));
+            routed.retain(|r| !(plays_notes[r.node.0] && is_played(r)));
         }
         dropped
     }

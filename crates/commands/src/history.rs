@@ -159,8 +159,11 @@ fn compact(edits: &mut Vec<Edit>) {
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::automation::{Lane, Point};
-    use musicable_model::clip::{AudioClip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing};
+    use musicable_model::automation::{self, Lane};
+    use musicable_model::clip::{
+        AudioClip, ClipContent, ClipId, Controller, Expression, Fades, MidiClip, Note, NoteId,
+        Offset, Point, Timing,
+    };
     use musicable_model::mixer::Bus;
     use musicable_model::param::ParamAddress;
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
@@ -190,10 +193,10 @@ mod tests {
 
     /// The project the edits in `one_of_each` change: a track of each kind,
     /// two with a send, and a spare one that nothing refers to; two audio
-    /// clips, one with fades, and a MIDI clip; two takes of an audio clip on
-    /// the audio track; two locators; a plugin on the audio track and a
-    /// test device on the master; and lanes that automate the audio track's
-    /// volume and the master's pan.
+    /// clips, one with fades, and a MIDI clip with two notes; two takes of
+    /// an audio clip on the audio track; two locators; a plugin on the audio
+    /// track and a test device on the master; and lanes that automate the
+    /// audio track's volume and the master's pan.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -209,14 +212,15 @@ mod tests {
         let mut faded = AudioClip::new("a.wav");
         faded.fade_in = Beats::new(1);
         faded.fade_out = Beats::new(1);
+        let mut bass = MidiClip::default();
+        bass.add_note(Beats::ZERO, Beats::new(1), 36, 0.75);
+        bass.add_note(Beats::new(1), Beats::new(1), 43, 0.5);
+        bass.set_controller(Controller::SUSTAIN, vec![Point::new(Beats::ZERO, 1.0)]);
+        // As if a third note had been added and deleted.
+        bass.new_note_id();
         let clips = [
             (audio, "Faded", range(0, 8), ClipContent::Audio(faded)),
-            (
-                midi,
-                "Bass",
-                range(4, 8),
-                ClipContent::Midi(MidiClip::default()),
-            ),
+            (midi, "Bass", range(4, 8), ClipContent::Midi(bass)),
             (
                 audio,
                 "Take",
@@ -253,12 +257,12 @@ mod tests {
         project
     }
 
-    fn point(at: i64, value: f64) -> Point {
-        Point::new(Beats::new(at), value)
+    fn point(at: i64, value: f64) -> automation::Point {
+        automation::Point::new(Beats::new(at), value)
     }
 
     /// The points of the lane on the audio track's volume in [`base`].
-    fn fade() -> Vec<Point> {
+    fn fade() -> Vec<automation::Point> {
         vec![point(0, 1.0), point(8, 0.5)]
     }
 
@@ -280,7 +284,24 @@ mod tests {
         let mut new_take = project.new_take("Take 1");
         let played = ClipContent::Midi(MidiClip::default());
         new_take.clips.push(project.new_clip("MIDI", range, played));
-        let bass_timing = project.find_clip(bass).unwrap().1.timing();
+        let (_, bass_clip) = project.find_clip(bass).unwrap();
+        let bass_timing = bass_clip.timing();
+        let ClipContent::Midi(bass_notes) = &bass_clip.content else {
+            unreachable!("Bass is a MIDI clip");
+        };
+        let removed_note = bass_notes.notes[1].clone();
+        let new_note = Note {
+            id: NoteId(2),
+            start: Beats::new(2),
+            length: Beats::new(2),
+            key: 48,
+            velocity: 1.0,
+            release_velocity: Note::RELEASE_VELOCITY,
+            expression: Expression {
+                pitch_bend: vec![Point::new(Beats::ZERO, 0.0), Point::new(Beats::new(1), 2.0)],
+                ..Expression::default()
+            },
+        };
         let synth = project.new_device(plugin(true));
         let effect = DeviceId(0);
         let effect_settings = project
@@ -453,6 +474,46 @@ mod tests {
                 from: "Bass".into(),
                 to: "Lead".into(),
             },
+            Edit::AddNote {
+                track: midi,
+                clip: bass,
+                index: 2,
+                note: new_note,
+            },
+            Edit::RemoveNote {
+                track: midi,
+                clip: bass,
+                index: 1,
+                note: removed_note,
+            },
+            Edit::NoteTiming {
+                track: midi,
+                clip: bass,
+                note: NoteId(0),
+                from: BeatRange::new(Beats::ZERO, Beats::new(1)),
+                to: BeatRange::new(Beats::from_ratio(1, 2), Beats::new(3)),
+            },
+            Edit::NoteKey {
+                track: midi,
+                clip: bass,
+                note: NoteId(0),
+                from: 36,
+                to: 38,
+            },
+            Edit::NoteVelocity {
+                track: midi,
+                clip: bass,
+                note: NoteId(0),
+                from: 0.75,
+                to: 0.25,
+            },
+            Edit::Controller {
+                track: midi,
+                clip: bass,
+                controller: Controller::SUSTAIN,
+                from: vec![Point::new(Beats::ZERO, 1.0)],
+                to: vec![Point::new(Beats::ZERO, 1.0), Point::new(Beats::new(1), 0.0)],
+            },
             Edit::AddTake {
                 track: midi,
                 index: 0,
@@ -537,7 +598,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 46;
+    const KINDS: usize = 52;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -585,10 +646,16 @@ mod tests {
             Edit::AddTake { .. } => 39,
             Edit::RemoveTake { .. } => 40,
             Edit::TakeName { .. } => 41,
-            Edit::AddLane { .. } => 42,
-            Edit::RemoveLane { .. } => 43,
-            Edit::LanePoints { .. } => 44,
-            Edit::LaneOverridden { .. } => 45,
+            Edit::AddNote { .. } => 42,
+            Edit::RemoveNote { .. } => 43,
+            Edit::NoteTiming { .. } => 44,
+            Edit::NoteKey { .. } => 45,
+            Edit::NoteVelocity { .. } => 46,
+            Edit::Controller { .. } => 47,
+            Edit::AddLane { .. } => 48,
+            Edit::RemoveLane { .. } => 49,
+            Edit::LanePoints { .. } => 50,
+            Edit::LaneOverridden { .. } => 51,
         }
     }
 

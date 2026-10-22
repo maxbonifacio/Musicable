@@ -16,7 +16,7 @@ bass's send to the reverb swells up to it:
 ```json
 {
   "format": "musicable-project",
-  "version": 7,
+  "version": 8,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -167,6 +167,15 @@ bass's send to the reverb swells up to it:
                     "pressure": [],
                     "timbre": []
                   }
+                }
+              ],
+              "controllers": [
+                {
+                  "controller": 64,
+                  "points": [
+                    [0, 1.0],
+                    [967680, 0.0]
+                  ]
                 }
               ]
             }
@@ -401,13 +410,15 @@ at another sample rate than the audio device's is resampled.
 Fades are equal-power quarter sines, so two clips whose fades overlap by
 the same length crossfade at constant power.
 
-A **MIDI clip** plays notes:
+A **MIDI clip** plays notes, and moves MIDI controllers such as the sustain
+pedal:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `offset` | position | Where in the clip's own time it starts playing: a note at `offset` plays at the clip's start. Notes that start before it, or at or after `offset` plus the clip's length, don't play, and a note still sounding when the clip ends stops there. |
 | `next_note_id` | whole number | The id the next new note in the clip gets, above every note's id in the clip, like `next_track_id`. |
 | `notes` | array of notes | In any order. Notes on the same key can overlap: they sound as two notes. |
+| `controllers` | array of controller curves | In order of controller number, at most one for each. A controller the clip doesn't move has none. |
 
 A **note**:
 
@@ -435,6 +446,21 @@ points leaves the instrument to start the dimension at rest.
 | `pitch_bend` | −120 to 120 | Semitones from the note's key. |
 | `pressure` | 0 to 1 | Pressure on the key after it went down (aftertouch). |
 | `timbre` | 0 to 1 | MPE's third dimension, usually moving a finger up and down the key (CC 74, "slide"). |
+
+A **controller curve** says how the clip moves one MIDI controller:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `controller` | whole number | MIDI's control change number, from 0 to 119: 1 is the mod wheel, 7 volume, 11 expression and 64 the sustain pedal. 120 to 127 are MIDI's channel mode messages, which aren't controllers. |
+| `points` | array of points | At least one point `[at, value]`, where `at` is a position in the clip's own time, as a note's `start` is, and `value` is from 0 to 1: a MIDI value from 0 to 127 is that over 127. In order of `at`. |
+
+A point's value holds until the next point's, and of two points on the same
+tick the later one wins, as in an expression curve. The clip leaves the
+controller alone before its first point. Wherever playback starts, the
+controller starts at what the clips before then left it at, so a song
+played from its middle sounds as it does played from the start. Controllers
+64 to 69 are switches, such as the sustain pedal, on from 0.5: one that's on
+when its clip ends, or when playback stops, is let go there, as notes are.
 
 A **send** feeds some of the track's signal to a return track:
 
@@ -566,7 +592,8 @@ Signal flows from tracks to buses without loops:
 | 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
 | 5 | 2026-10-22 | Plugin devices, with their state and parameters. Version 4 files have none. |
 | 6 | 2026-10-22 | Recording: each track's input and monitoring, takes, and punching in and out. Version 5 audio tracks record from the default input's first two channels, MIDI tracks from every MIDI input, all with `"auto"` monitoring and no takes, and punching in and out is off. |
-| 7 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 6 files have none. |
+| 7 | 2026-10-22 | Controllers in MIDI clips, such as the mod wheel and the sustain pedal. Version 6 MIDI clips move none. |
+| 8 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 7 files have none. |
 
 ## Changing the format
 
