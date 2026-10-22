@@ -86,6 +86,17 @@ impl Param {
         self.modulated(self.base.value())
     }
 
+    /// The value set, without its ramp or its modulation: where it's
+    /// heading.
+    pub fn target(&self) -> f32 {
+        self.base.target()
+    }
+
+    /// The modulation for every voice: 0.0 for none.
+    pub fn modulation(&self) -> f32 {
+        self.modulation
+    }
+
     fn modulated(&self, base: f32) -> f32 {
         if self.modulation == 0.0 {
             return base;
@@ -129,6 +140,8 @@ impl Params {
         self.values = Values {
             data: vec![0.0; self.params.len() * config.max_block],
             steady: vec![true; self.params.len()],
+            targets: vec![0.0; self.params.len()],
+            modulations: vec![0.0; self.params.len()],
             stride: config.max_block,
             len: 0,
         };
@@ -179,6 +192,8 @@ impl Params {
         for (i, param) in self.params.iter_mut().enumerate() {
             let slot = &mut values.data[i * values.stride..][..frames.len()];
             values.steady[i] = param.render(ctx, frames.clone(), slot);
+            values.targets[i] = param.target();
+            values.modulations[i] = param.modulation();
         }
         render(Span {
             event,
@@ -229,6 +244,10 @@ pub struct Values {
     /// span's.
     data: Vec<f32>,
     steady: Vec<bool>,
+    /// Each parameter's value set and its modulation, which hold over a
+    /// span: only an event changes them.
+    targets: Vec<f32>,
+    modulations: Vec<f32>,
     stride: usize,
     len: usize,
 }
@@ -247,6 +266,19 @@ impl Values {
     /// Whether it holds one value over the span.
     pub fn steady(&self, param: usize) -> bool {
         self.steady[param]
+    }
+
+    /// The value it's set to, without its ramp or its modulation: where it
+    /// is heading. For what a device can't take halfway, such as a choice,
+    /// or would rather move its own way, such as a delay's time.
+    pub fn target(&self, param: usize) -> f32 {
+        self.targets[param]
+    }
+
+    /// Its modulation for every voice over the span, in its units: 0.0 for
+    /// none. Its frames' values have it added already.
+    pub fn modulation(&self, param: usize) -> f32 {
+        self.modulations[param]
     }
 }
 
@@ -357,6 +389,25 @@ mod tests {
         let values = &next.last().unwrap().2;
         assert!((values[0] - (-0.5 + 0.05)).abs() < 1e-6, "{}", values[0]);
         assert!((values[20] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spans_know_the_value_set_and_the_modulation() {
+        let mut params = prepared(NativeKind::Utility);
+        let pan = utility::PAN;
+        spans(&mut params, &[param_event(0, pan, 0.5)], pan);
+        let events = [param_event(0, pan, -0.5), modulation(4, pan, 0.25)];
+        let mut seen = Vec::new();
+        params.run(&context(32, &events), |span| {
+            let values = span.values;
+            seen.push((
+                values.target(pan),
+                values.modulation(pan),
+                values.steady(pan),
+            ));
+        });
+        // Ramping to -0.5 all the while, modulated by 0.25 from frame 4.
+        assert_eq!(seen, [(-0.5, 0.0, false), (-0.5, 0.25, false)]);
     }
 
     #[test]

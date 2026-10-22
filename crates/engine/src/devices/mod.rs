@@ -12,33 +12,39 @@
 //! A kind whose DSP isn't built yet has no node, so it passes the signal
 //! through unchanged. [`BUILT`] lists the kinds that have one.
 
+mod delay;
 mod eq;
 mod params;
+mod reverb;
 mod svf;
 mod utility;
 
 use musicable_model::native::{NativeDevice, NativeKind};
 
+pub use delay::Delay;
 pub use eq::Equalizer;
 pub use params::{Param, Params, Span, Values};
+pub use reverb::Reverb;
 pub use utility::Utility;
 
 use crate::Node;
 
 /// The kinds with DSP so far, in the browser's order.
-pub const BUILT: &[NativeKind] = &[NativeKind::Eq, NativeKind::Utility];
+pub const BUILT: &[NativeKind] = &[
+    NativeKind::Eq,
+    NativeKind::Delay,
+    NativeKind::Reverb,
+    NativeKind::Utility,
+];
 
 /// The node that plays `device`, if its kind has DSP.
 pub fn node(device: &NativeDevice) -> Option<Box<dyn Node>> {
     match device.kind {
         NativeKind::Eq => Some(Box::new(Equalizer::new(device))),
+        NativeKind::Delay => Some(Box::new(Delay::new(device))),
+        NativeKind::Reverb => Some(Box::new(Reverb::new(device))),
         NativeKind::Utility => Some(Box::new(Utility::new(device))),
-        NativeKind::Compressor
-        | NativeKind::Gate
-        | NativeKind::Delay
-        | NativeKind::Reverb
-        | NativeKind::Sampler
-        | NativeKind::Synth => None,
+        NativeKind::Compressor | NativeKind::Gate | NativeKind::Sampler | NativeKind::Synth => None,
     }
 }
 
@@ -50,7 +56,9 @@ pub(crate) mod testing {
     use musicable_model::time::{TempoMap, TimeSignature};
 
     use crate::event::{NodeEvent, NodeEventKind, ParamId};
-    use crate::{AudioBuffer, AudioRef, EngineConfig, Inputs, Node, ProcessContext, rt};
+    use crate::{
+        AudioBuffer, AudioRef, EngineConfig, Inputs, Node, ProcessContext, TransportState, rt,
+    };
 
     /// 120 bpm in 4/4.
     pub(crate) fn tempo() -> &'static TempoMap {
@@ -69,6 +77,23 @@ pub(crate) mod testing {
             events,
             input: AudioRef::empty(frames),
         }
+    }
+
+    /// The gain of `impulse` at `freq` Hz, as a linear magnitude: its
+    /// discrete-time Fourier transform there.
+    pub(crate) fn gain_at(impulse: &[f32], freq: f64, sample_rate: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * freq / sample_rate;
+        let (mut re, mut im) = (0.0, 0.0);
+        for (n, &h) in impulse.iter().enumerate() {
+            let phase = w * n as f64;
+            re += f64::from(h) * phase.cos();
+            im -= f64::from(h) * phase.sin();
+        }
+        re.hypot(im)
+    }
+
+    pub(crate) fn db(gain: f64) -> f64 {
+        20.0 * gain.log10()
     }
 
     /// Sets parameter `param` to `value` on frame `at` of a [`Run`].
@@ -100,19 +125,39 @@ pub(crate) mod testing {
         node: Box<dyn Node>,
         sample_rate: u32,
         block: usize,
+        tempo: TempoMap,
+        /// Whether the transport plays, from the start of the song.
+        playing: bool,
+        /// Frames rendered so far.
+        rendered: u64,
         /// Whether the node is prepared, which the first render does.
         prepared: bool,
     }
 
     impl Run {
-        /// At 48 kHz, in blocks of 512.
+        /// At 48 kHz, in blocks of 512, at 120 bpm with the transport
+        /// stopped at the start of the song.
         pub(crate) fn new(node: Box<dyn Node>) -> Self {
             Self {
                 node,
                 sample_rate: 48_000,
                 block: 512,
+                tempo: tempo().clone(),
+                playing: false,
+                rendered: 0,
                 prepared: false,
             }
+        }
+
+        pub(crate) fn with_tempo(mut self, tempo: TempoMap) -> Self {
+            self.tempo = tempo;
+            self
+        }
+
+        /// Plays the song from its start as the node renders.
+        pub(crate) fn playing(mut self) -> Self {
+            self.playing = true;
+            self
         }
 
         pub(crate) fn with_sample_rate(mut self, sample_rate: u32) -> Self {
@@ -173,6 +218,12 @@ pub(crate) mod testing {
                     frames: len,
                     sample_rate: self.sample_rate,
                     time: start as u64,
+                    transport: TransportState {
+                        playing: self.playing,
+                        position: if self.playing { self.rendered } else { 0 },
+                        ..TransportState::default()
+                    },
+                    tempo: &self.tempo,
                     events: &block_events,
                     ..context(len, &[])
                 };
@@ -189,6 +240,7 @@ pub(crate) mod testing {
                     channel.extend_from_slice(out.channel(c));
                 }
                 start += len;
+                self.rendered += len as u64;
             }
             output
         }

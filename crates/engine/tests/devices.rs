@@ -11,7 +11,8 @@ use musicable_engine::{
     AudioMut, Engine, EngineConfig, Event, ParallelOptions, ParallelRenderer, ReferenceRenderer,
     Renderer, TransportCommand, compile, rt,
 };
-use musicable_model::native::{NativeDevice, NativeKind, eq, utility};
+use musicable_model::native::{NativeDevice, NativeKind, delay, eq, utility};
+use musicable_model::time::{TempoMap, TimeSignature};
 use musicable_model::{Device, DeviceKind, Project, TestTone, TrackKind};
 
 #[global_allocator]
@@ -73,17 +74,16 @@ fn reference(project: &Project) -> Vec<f32> {
     play(project, Box::new(ReferenceRenderer), &[])
 }
 
+/// The built-in effects that leave the signal as it is at their defaults.
+/// The others, such as the reverb, are heard as soon as they're added.
+const TRANSPARENT: [NativeKind; 3] = [NativeKind::Eq, NativeKind::Gate, NativeKind::Utility];
+
 #[test]
 fn devices_without_dsp_yet_pass_the_signal_through() {
     let dry = reference(&project(|_| vec![]));
     for kind in NativeKind::ALL {
         let wet = reference(&project(|p| vec![native(p, kind, &[])]));
-        if BUILT.contains(&kind) {
-            // New built-in effects start transparent, too.
-            if !kind.is_instrument() {
-                assert_eq!(wet, dry, "{kind:?}");
-            }
-        } else {
+        if !BUILT.contains(&kind) || TRANSPARENT.contains(&kind) {
             assert_eq!(wet, dry, "{kind:?}");
         }
     }
@@ -137,6 +137,33 @@ fn parameter_changes_land_on_their_frames() {
     // Faded out over 10 ms from frame 1000.
     assert_ne!(wet[1000], dry[1000]);
     assert!(wet[1480..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn the_delay_keeps_time_with_the_song() {
+    let p = project(|p| {
+        let sixteenth = [
+            (delay::NOTE, 2.0),
+            (delay::FEEDBACK, 0.0),
+            (delay::MIX, 100.0),
+        ];
+        vec![native(p, NativeKind::Delay, &sixteenth)]
+    });
+    let (mut engine, mut handle) = Engine::with_renderer(CONFIG, Box::new(ReferenceRenderer));
+    handle
+        .set_tempo_map(TempoMap::new(90.0, TimeSignature::FOUR_FOUR))
+        .unwrap();
+    handle
+        .swap_graph(compile(&p).prepare(&CONFIG).unwrap())
+        .unwrap();
+    handle
+        .send(Event::Transport(TransportCommand::Play))
+        .unwrap();
+    let mut out = vec![0.0; 2 * 9000];
+    engine.process(&mut AudioMut::from_planar(&mut out, 2));
+    // Only the echoes, a sixteenth at 90 bpm behind the tone: 8000 frames.
+    let first = out[..9000].iter().position(|&s| s != 0.0).unwrap();
+    assert!((8000..8002).contains(&first), "{first}");
 }
 
 /// SplitMix64, seeded so a failure happens again on the next run.

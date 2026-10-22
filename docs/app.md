@@ -467,10 +467,11 @@ folder until it's opened again. MIDI recording isn't done yet.
 
 Musicable has devices of its own, which play without plugins: an EQ, a
 compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
-So far the EQ and the utility play; the others come in the next few
-changes, and until then the browser leaves them out. Each is a node in the
-engine ([engine.md](engine.md#built-in-devices)), and the project saves
-its settings ([project-format.md](project-format.md)).
+So far the EQ, the delay, the reverb and the utility play; the others
+come in the next few changes, and until then the browser leaves them
+out. Each is a node in the engine
+([engine.md](engine.md#built-in-devices)), and the project saves its
+settings ([project-format.md](project-format.md)).
 
 The plugin browser lists them under **Built-in**, above the plugins, and
 finds them by name; All, Instruments and Effects pick among them too. A
@@ -495,9 +496,10 @@ group's name:
 
 Every change is a step in the undo history named after the device, such
 as "Change EQ", and a whole drag is one. The engine hears each as it's
-made, and smooths it over 10 ms. Screen readers find each control by the
-device's name and the control's, such as "EQ Band 3 Freq", and can set a
-bar to a number.
+made, and smooths it over 10 ms, or moves it its device's own way: the
+delay fades in a new time over 50 ms, and the reverb glides to a new
+size. Screen readers find each control by the device's name and the
+control's, such as "EQ Band 3 Freq", and can set a bar to a number.
 
 ## Plugins
 

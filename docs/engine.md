@@ -553,8 +553,11 @@ parameters in `devices::Params`, which works each one out for every frame:
 - `Params::run` renders a block in spans that end where its events fall,
   and hands each span the values for each of its frames (`Values::frames`),
   and whether a parameter holds one value over the span
-  (`Values::steady`), for a fast path. An event applies before the span it
-  starts, which gets the event too, for a note or a note's modulation.
+  (`Values::steady`), for a fast path. A device that moves a value its own
+  way, as the delay fades to a new time, reads the value set and its
+  modulation apart instead (`Values::target`, `Values::modulation`). An
+  event applies before the span it starts, which gets the event too, for a
+  note or a note's modulation.
 
 So a change or a modulation lands on its frame, and a device renders the
 same samples however the blocks fall, and on any thread: the parallel
@@ -575,13 +578,49 @@ to within 0.001 dB of it from 20 Hz to 20 kHz at 44.1 and 96 kHz. A band
 retunes on every frame while its frequency, gain or Q moves, and fades in
 and out over 10 ms when it's switched on or off.
 
+**The delay** (`devices::Delay`): a line for each channel, long enough for
+the longest time, 5 s, read between frames by cubic (Catmull-Rom)
+interpolation, which is exact on a whole frame. A synced time is its
+note's length at the tempo where the playhead is (`ProcessContext::tempo`
+at the transport's position), and moves on the frame a tempo change
+plays. A new time, whether it's set, synced to a new note or tempo, or
+switched between the two, fades in over 50 ms from a second read of the
+line as the first fades out, a raised cosine; modulating the time moves
+both reads at once, which bends the echoes' pitch. What goes back into
+the lines goes through the cuts, the EQ's 12 dB cuts, and saturates
+softly above full scale only. `delay::repeat_response` in the model works
+out what each echo keeps of the last, and the reference test measures
+each echo of a click against it, to within 0.001 dB over the spectrum;
+the others check the times to the frame, across tempo changes too, that a
+new time never clicks, and that full feedback can't run away.
+
+**The reverb** (`devices::Reverb`): a feedback delay network of eight
+lines behind a diffuser, much as Geraint Luff builds one in "Let's Write a
+Reverb" (ADC 2021). Four steps of short delays, each step mixed by a
+Hadamard matrix, smear the low cut and pre-delayed signal into a dense
+wash, and the network's lines go round again through a Householder
+matrix. Both matrices are orthogonal, so the tail loses only what each
+line takes away on its way round: a gain for the decay, the same per
+second whatever the line's length, and a one-pole low pass that takes as
+much again at the damping frequency. The lines' lengths come to whole
+frames, and a new size glides them there by no more than a sixteenth of a
+frame a frame, bending the tail's pitch by about a semitone at most. The
+tail's level makes up for the size, so rooms of any size ring about as
+loud. The reference tests read the decay off the tail's energy decay
+curve (Schroeder's backward integral): to within 3% of the decay set in
+the octave around 250 Hz, from 0% to 100% size at 44.1 to 96 kHz, and to
+within 5% of half of it at the damping frequency. The low cut's effect on
+the tail matches its design to within 0.001 dB.
+
 **Adding a kind.** Write its node in a file of its own in `devices/`, make
 it in `devices::node`, and add it to `BUILT`. Its parameters are in its
 table already, and the format and commands handle them. Test it with
 `devices::testing::Run`, which renders a node over a signal in blocks of
-any length with events on given frames, under the real-time checks, and
-measure it against what it's meant to do, as the EQ's test does: a
-reference test, not a snapshot of what it happens to do.
+any length with events on given frames, under the real-time checks, at a
+given tempo and with the transport playing if it follows the song
+(`Run::with_tempo`, `Run::playing`), and measure it against what it's
+meant to do, as the EQ's test does: a reference test, not a snapshot of
+what it happens to do.
 
 ## Parallel rendering
 

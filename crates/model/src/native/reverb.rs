@@ -1,10 +1,14 @@
 //! The reverb: a room, a hall or a cave behind the signal.
 //!
-//! The dry signal goes through `low_cut` into a pre-delay, then a network
-//! of delay lines whose lengths grow with `size`, feeding back so the
-//! tail falls by 60 dB over `decay` seconds, and faster above `damping`.
-//! `width` spreads the tail from mono to the full stereo of the network,
-//! and `mix` blends it with the dry signal as the delay's does.
+//! The dry signal goes through `low_cut` (the EQ's Low Cut 12) into a
+//! pre-delay, then a network of delay lines whose lengths grow with `size`
+//! ([`room_seconds`]), feeding back so the tail falls by 60 dB over `decay`
+//! seconds, whatever the size, and faster above `damping`: at the damping
+//! frequency it falls twice as fast, and faster still above it. A new size
+//! glides there, bending the tail's pitch by about a semitone at most, so
+//! it never clicks. `width` spreads the tail from mono to the full stereo
+//! of the network, and `mix` blends it with the dry signal as the delay's
+//! does ([`mix_levels`](super::delay::mix_levels)).
 
 use super::Scale::{Fader, Linear, Log};
 use super::Unit::{Hertz, Milliseconds, Percent, Seconds};
@@ -36,3 +40,25 @@ pub(super) const PARAMS: [ParamInfo; 7] = [
     param("width", "Width", "", [0.0, 100.0, 100.0], Percent, Linear),
     param("mix", "Mix", "", [0.0, 100.0, 25.0], Percent, Linear),
 ];
+
+/// The shortest of the network's delay lines at `size` percent, in
+/// seconds: 5 ms at 0%, a small room, growing evenly in ratio to 100 ms at
+/// 100%, a cave. The longest is nearly twice as long, and the diffusion in
+/// front of them spreads the signal over about as long again.
+pub fn room_seconds(size: f64) -> f64 {
+    0.005 * 20_f64.powf(size.clamp(0.0, 100.0) / 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rooms_grow_with_size() {
+        assert!((room_seconds(0.0) - 0.005).abs() < 1e-12);
+        assert!((room_seconds(100.0) - 0.1).abs() < 1e-12);
+        let half = room_seconds(50.0);
+        assert!((half * half - 0.005 * 0.1).abs() < 1e-12);
+        assert_eq!(room_seconds(-5.0), room_seconds(0.0));
+    }
+}

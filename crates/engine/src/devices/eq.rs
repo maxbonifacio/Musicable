@@ -222,7 +222,7 @@ mod tests {
     use musicable_model::native::eq::response;
 
     use super::*;
-    use crate::devices::testing::{Run, modulation, param};
+    use crate::devices::testing::{Run, db, gain_at, modulation, param};
 
     fn shape(shape: Shape) -> f64 {
         Shape::ALL.iter().position(|&s| s == shape).unwrap() as f64
@@ -251,23 +251,6 @@ mod tests {
         input[0] = 1.0;
         let mut run = Run::new(Box::new(Equalizer::new(device))).with_sample_rate(sample_rate);
         run.render(&[input.clone(), input], &[]).swap_remove(0)
-    }
-
-    /// The gain of `impulse` at `freq` Hz, as a linear magnitude: its
-    /// discrete-time Fourier transform there.
-    fn gain_at(impulse: &[f32], freq: f64, sample_rate: f64) -> f64 {
-        let w = 2.0 * PI * freq / sample_rate;
-        let (mut re, mut im) = (0.0, 0.0);
-        for (n, &h) in impulse.iter().enumerate() {
-            let phase = w * n as f64;
-            re += f64::from(h) * phase.cos();
-            im -= f64::from(h) * phase.sin();
-        }
-        re.hypot(im)
-    }
-
-    fn db(gain: f64) -> f64 {
-        20.0 * gain.log10()
     }
 
     /// The reference test: the EQ's measured response matches its design
