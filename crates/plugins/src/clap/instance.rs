@@ -386,6 +386,12 @@ impl Instance {
     /// its nodes can process it. An active plugin is deactivated first.
     pub fn activate(&mut self, config: EngineConfig) -> Result<(), Error> {
         self.deactivate()?;
+        // This is the restart the plugin asked for, if it asked for one,
+        // such as when it was given a latency before it was first active,
+        // and its ports are read afresh.
+        let requests = &self.shared.requests;
+        requests.restart.store(false, Ordering::Release);
+        requests.ports_rescan.store(false, Ordering::Release);
         let inputs = self.audio_ports(true);
         let outputs = self.audio_ports(false);
         let note_port = self.note_port();

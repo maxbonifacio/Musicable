@@ -18,7 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-# Built for its plugin library, which the tests load. Nothing links to it.
+# Built for its plugin library, which the tests load, and for the hooks into
+# it.
 musicable-test-plugins = { path = "../test-plugins" }
 
 [lints]

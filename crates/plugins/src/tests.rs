@@ -326,6 +326,22 @@ fn a_latency_change_restarts_the_plugin() {
 }
 
 #[test]
+fn a_latency_set_before_the_plugin_activates_needs_no_restart() {
+    // The test gain asks for a restart when it's given another latency,
+    // even while it's inactive, which activating it does anyway.
+    let plugins = TestPlugins::new("latency-first");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, 100.0);
+    instance.activate(CONFIG).unwrap();
+    assert_eq!(instance.latency(), 100);
+    let mut node = instance.node_source().node();
+    play(&mut node, &ramp(64), &Block::default());
+    assert_eq!(instance.poll(), []);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
 fn delay_compensation_lines_a_latent_plugin_up_with_a_dry_path() {
     let plugins = TestPlugins::new("compensation");
     let mut instance = plugins.gain();

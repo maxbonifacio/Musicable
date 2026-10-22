@@ -1896,6 +1896,7 @@ dependencies = [
  "musicable-io",
  "musicable-model",
  "musicable-plugins",
+ "musicable-test-plugins",
  "musicable-ui",
  "raw-window-handle",
  "rfd",

@@ -30,6 +30,9 @@ toml.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }
+# Built for its plugin library, which the tests load, and for the hooks into
+# it.
+musicable-test-plugins = { path = "../test-plugins" }
 
 [target.'cfg(windows)'.dependencies]
 # The main window's HWND, which plugin windows stay in front of.
