@@ -307,20 +307,21 @@ mod tests {
 
     #[test]
     fn clips_name_files_in_the_projects_folder_relative_to_it() {
-        let folder = Path::new("/music/song");
-        let name = |path: &str| clip_path(Path::new(path), Some(folder));
-        assert_eq!(name("/music/song/kick.wav"), "kick.wav");
-        assert_eq!(name("/music/song/Samples/snare.wav"), "Samples/snare.wav");
-        assert_eq!(name("/music/other/hat.wav"), "/music/other/hat.wav");
-        assert_eq!(
-            clip_path(Path::new("/music/song/kick.wav"), None),
-            "/music/song/kick.wav"
-        );
-        assert_eq!(
-            locate("kick.wav", Some(folder)),
-            Some(folder.join("kick.wav"))
-        );
-        assert_eq!(locate("/a/b.wav", None), Some(PathBuf::from("/a/b.wav")));
+        // Absolute on every system: on Windows, "/music" is on whichever
+        // drive is current.
+        let music = std::env::temp_dir().join("music");
+        let folder = music.join("song");
+        let name = |path: &Path| clip_path(path, Some(&folder));
+        let kick = folder.join("kick.wav");
+        let snare = folder.join("Samples").join("snare.wav");
+        let hat = music.join("other").join("hat.wav");
+        let absolute = |path: &Path| path.to_string_lossy().into_owned();
+        assert_eq!(name(&kick), "kick.wav");
+        assert_eq!(name(&snare), "Samples/snare.wav");
+        assert_eq!(name(&hat), absolute(&hat));
+        assert_eq!(clip_path(&kick, None), absolute(&kick));
+        assert_eq!(locate("kick.wav", Some(&folder)), Some(kick));
+        assert_eq!(locate(&absolute(&hat), None), Some(hat));
         assert_eq!(locate("kick.wav", None), None);
     }
 
