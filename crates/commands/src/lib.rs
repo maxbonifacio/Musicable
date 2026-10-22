@@ -210,6 +210,8 @@ pub enum Request {
     /// Ask for audio files, read them, and insert them with
     /// [`arrange::INSERT_AUDIO`].
     ImportAudio,
+    /// Show the export window, to render the song to audio files.
+    ExportAudio,
     /// Show the command palette.
     CommandPalette,
     /// Show the audio settings.

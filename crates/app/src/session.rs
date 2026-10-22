@@ -16,11 +16,11 @@ use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
     NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
-    compile_with_inputs,
+    compile_with_inputs, compile_with_stems,
 };
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::{DeviceId, Input, Monitor, Project, TrackKind};
+use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::media::MediaPool;
@@ -126,6 +126,38 @@ impl Session {
             media,
             Arc::new(compile_with_inputs),
         )
+    }
+
+    /// Like [`offline`](Self::offline), for an export: the plugins of
+    /// `project` load from `installed` before it plays, and the graphs tap
+    /// the tracks in `stems`, in that order, for the engine's
+    /// [`process_with_taps`](musicable_engine::Engine::process_with_taps)
+    /// (see [`compile_with_stems`]). Key presses do nothing.
+    pub fn exporting(
+        project: Project,
+        folder: Option<&Path>,
+        handle: EngineHandle,
+        installed: Vec<PluginInfo>,
+        stems: Vec<TrackId>,
+    ) -> Self {
+        let build = move |project: &Project,
+                          meters: &Meters,
+                          media: &Media,
+                          devices: &Devices,
+                          inputs: &InputLayout| {
+            compile_with_stems(project, meters, media, devices, inputs, &stems)
+        };
+        let media = MediaPool::new(true);
+        let mut session = Self::building(
+            project,
+            folder,
+            Keymap::new(),
+            handle,
+            media,
+            Arc::new(build),
+        );
+        session.set_installed_plugins(installed);
+        session
     }
 
     /// Like [`new`](Self::new), for a project without a folder, with `build`
@@ -711,6 +743,22 @@ impl Session {
         self.engine.received < self.engine.asked
     }
 
+    /// Whether the engine has everything the session has sent it: no graph
+    /// is compiling, and nothing waits for one or for room in the engine's
+    /// queue. Call [`tick`](Self::tick) to get there.
+    pub fn is_caught_up(&self) -> bool {
+        !self.compiling() && self.engine.outbox.is_empty()
+    }
+
+    /// Stops the transport at engine time `time` (see [`Stats::time`]), to
+    /// the frame: for an offline render that knows when it ends, such as an
+    /// export. Like everything sent, it waits for the graph.
+    pub fn stop_at(&mut self, time: u64) {
+        let event = Event::Transport(TransportCommand::Stop);
+        self.engine.push(Message::EventAt { time, event });
+        self.engine.flush();
+    }
+
     /// Waits for the graphs the session asked for, and sends them on, with
     /// what waited for them. For offline playing, such as tests and the null
     /// test, where nothing should start before the graph.
@@ -939,6 +987,11 @@ struct EngineLink {
 /// Something for the engine, in the order it was sent.
 enum Message {
     Event(Event),
+    /// An event for engine time `time`.
+    EventAt {
+        time: u64,
+        event: Event,
+    },
     Tempo(TempoMap),
     Graph(Box<PreparedGraph>),
     /// Holds back everything after it until the graph of this job, or of a
@@ -1073,6 +1126,10 @@ impl EngineLink {
                 .handle
                 .send(event)
                 .map_err(|QueueFull(event)| Message::Event(event)),
+            Message::EventAt { time, event } => self
+                .handle
+                .send_at(time, event)
+                .map_err(|QueueFull(event)| Message::EventAt { time, event }),
             Message::Tempo(tempo) => self
                 .handle
                 .set_tempo_map(tempo)

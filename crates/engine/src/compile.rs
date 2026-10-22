@@ -34,7 +34,7 @@ use std::thread::{self, JoinHandle};
 use musicable_model::mixer::Bus;
 use musicable_model::{
     AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, MidiInput,
-    Project, Track, TrackKind,
+    Project, Track, TrackId, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
@@ -314,6 +314,22 @@ pub fn compile_with_inputs(
     compile_with(project, meters, media, devices, inputs, native_stage)
 }
 
+/// Like [`compile_with_inputs`], with a tap ([`Graph::add_tap`]) on each
+/// track in `stems`, in that order, for an export's stems: the track as it
+/// feeds its bus, after its fader and its slots, and before its output
+/// stage, where mute and solo would cut it. Tracks the project hasn't got
+/// have no tap, so the taps after them move up.
+pub fn compile_with_stems(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+    inputs: &InputLayout,
+    stems: &[TrackId],
+) -> Graph {
+    build(project, meters, media, devices, inputs, stems, native_stage)
+}
+
 /// Where the audio inputs tracks take are among the engine's device inputs
 /// ([`ProcessContext::input`](crate::ProcessContext::input)), and which of
 /// the stream's MIDI inputs MIDI tracks take
@@ -491,6 +507,20 @@ pub(crate) fn compile_with(
     media: &Media,
     devices: &Devices,
     inputs: &InputLayout,
+    stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
+) -> Graph {
+    build(project, meters, media, devices, inputs, &[], stages)
+}
+
+/// [`compile_with`], tapping the tracks in `stems` as
+/// [`compile_with_stems`] does.
+fn build(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+    inputs: &InputLayout,
+    stems: &[TrackId],
     mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -516,6 +546,7 @@ pub(crate) fn compile_with(
     }
 
     let silenced = project.silenced();
+    let mut tapped = HashMap::new();
     for track in &project.tracks {
         let player = clip_player(track, media).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
@@ -573,6 +604,9 @@ pub(crate) fn compile_with(
                     .expect("the nodes were just added");
             }
         }
+        if stems.contains(&track.id) {
+            tapped.insert(track.id, strip.tail.expect("the strip has its fader"));
+        }
         // Mute and solo cut the output here, after the sends take their
         // signal, so they can cut each path on its own.
         let meter = meters.track(track.id).cloned().unwrap_or_default();
@@ -615,6 +649,11 @@ pub(crate) fn compile_with(
     let output = strip.tail.expect("the master's strip has its output stage");
     graph.set_output(output).expect("the output was just added");
     graph.set_cue(cue).expect("the cue bus was just added");
+    for node in stems.iter().filter_map(|track| tapped.get(track)) {
+        graph
+            .add_tap(*node)
+            .expect("the stems' nodes were just added");
+    }
 
     // A parameter whose node isn't in the graph, such as a missing
     // plugin's, has nothing to automate.
@@ -1534,6 +1573,51 @@ mod tests {
         assert_ne!(all, drums_only);
         assert!(drums_only.iter().any(|&s| s != 0.0));
         assert!(none.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn stems_are_tracks_as_they_feed_the_mix_before_mute_and_solo() {
+        // Muting the bass, or soloing the drums, leaves the drums alone in
+        // the mix, and the bass in its stem.
+        for solo in [false, true] {
+            let mut p = project();
+            let (drums, bass) = (p.tracks[0].id, p.tracks[1].id);
+            match solo {
+                true => p.track_mut(drums).unwrap().solo = true,
+                false => p.track_mut(bass).unwrap().muted = true,
+            }
+            let stems = [bass, TrackId(999), drums];
+            let graph = compile_with_stems(
+                &p,
+                &Meters::new(),
+                &Media::new(),
+                &Devices::new(),
+                &InputLayout::new(),
+                &stems,
+            )
+            .prepare(&CONFIG)
+            .unwrap();
+            assert_eq!(graph.taps(), 2, "no tap for a track the project hasn't got");
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(graph).unwrap();
+            handle
+                .send(Event::Transport(TransportCommand::Play))
+                .unwrap();
+            let frames = 500;
+            let mut mix = vec![0.0; 2 * frames];
+            let mut taps = [vec![0.0; 2 * frames], vec![0.0; 2 * frames]];
+            let [bass_stem, drums_stem] = &mut taps;
+            engine.process_with_taps(
+                &mut AudioMut::from_planar(&mut mix, 2),
+                &mut [
+                    AudioMut::from_planar(bass_stem, 2),
+                    AudioMut::from_planar(drums_stem, 2),
+                ],
+            );
+            assert!(bass_stem.iter().any(|&s| s != 0.0), "{solo}");
+            assert_ne!(bass_stem, drums_stem);
+            assert_eq!(mix, *drums_stem, "{solo}");
+        }
     }
 
     #[test]

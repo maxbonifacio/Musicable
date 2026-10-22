@@ -11,8 +11,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::timeline::{Segment, Timeline, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
-    AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent,
-    NodeEventKind, NodeKey, ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
+    AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent, NodeEventKind, NodeKey,
+    ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
 /// Messages the control thread can have in flight.
@@ -141,8 +141,6 @@ pub struct Engine {
     garbage: Producer<Garbage>,
     /// Events not yet due, by time and then in arrival order.
     pending: Vec<Pending>,
-    /// What plays before the first graph arrives.
-    silence: AudioBuffer,
     counters: Arc<Counters>,
     timeline: TimelineWriter,
 }
@@ -179,7 +177,6 @@ impl Engine {
             messages: message_rx,
             garbage: garbage_tx,
             pending: Vec::with_capacity(EVENT_CAPACITY),
-            silence: AudioBuffer::new(1, config.max_block),
             counters: counters.clone(),
             timeline,
         };
@@ -240,13 +237,58 @@ impl Engine {
         output: &mut AudioMut<'_>,
     ) {
         rt::scope(|| {
-            self.run(input, midi, output.frames(), |start, block, cue| {
-                let mut part = output.range_mut(start..start + block.frames());
-                part.copy_from(block);
-                if let Some(cue) = cue {
+            self.run(input, midi, output.frames(), |start, frames, graph| {
+                let mut part = output.range_mut(start..start + frames);
+                let Some(graph) = graph else {
+                    part.clear();
+                    return;
+                };
+                part.copy_from(graph.output(frames));
+                if let Some(cue) = graph.cue(frames) {
                     part.add_from(cue);
                 }
             });
+        });
+    }
+
+    /// Renders `output.frames()` frames for an offline render, such as an
+    /// export: the graph's output into `output`, without its cue output, and
+    /// each of its taps into the buffer of `taps` with the same number (see
+    /// [`Graph::add_tap`](crate::Graph::add_tap)). Taps the graph hasn't
+    /// got, and everything before the first graph arrives, are silent.
+    /// Real-time safe.
+    ///
+    /// # Panics
+    ///
+    /// If a buffer in `taps` isn't as long as `output`.
+    pub fn process_with_taps(&mut self, output: &mut AudioMut<'_>, taps: &mut [AudioMut<'_>]) {
+        let frames = output.frames();
+        assert!(
+            taps.iter().all(|tap| tap.frames() == frames),
+            "the taps aren't all {frames} frames long"
+        );
+        rt::scope(|| {
+            self.run(
+                AudioRef::empty(frames),
+                &[],
+                frames,
+                |start, frames, graph| {
+                    let range = start..start + frames;
+                    match graph {
+                        Some(graph) => output
+                            .range_mut(range.clone())
+                            .copy_from(graph.output(frames)),
+                        None => output.range_mut(range.clone()).clear(),
+                    }
+                    for (n, tap) in taps.iter_mut().enumerate() {
+                        let mut part = tap.range_mut(range.clone());
+                        match graph.and_then(|graph| graph.tap(n, frames)) {
+                            Some(source) => part.copy_from(source),
+                            None => part.clear(),
+                        }
+                    }
+                },
+            );
         });
     }
 
@@ -284,25 +326,35 @@ impl Engine {
             output.len()
         );
         rt::scope(|| {
-            self.run(input, midi, output.len() / channels, |start, block, cue| {
-                let part = &mut output[start * channels..(start + block.frames()) * channels];
-                block.write_interleaved(part, channels);
-                if let Some(cue) = cue {
-                    cue.add_interleaved(part, channels);
-                }
-            });
+            self.run(
+                input,
+                midi,
+                output.len() / channels,
+                |start, frames, graph| {
+                    let part = &mut output[start * channels..(start + frames) * channels];
+                    let Some(graph) = graph else {
+                        part.fill(0.0);
+                        return;
+                    };
+                    graph.output(frames).write_interleaved(part, channels);
+                    if let Some(cue) = graph.cue(frames) {
+                        cue.add_interleaved(part, channels);
+                    }
+                },
+            );
         });
     }
 
     /// Renders `frames` frames block by block, with `input` holding the
     /// device inputs for them and `midi` the MIDI inputs' messages, handing
-    /// each block's offset, output and cue output to `write`.
+    /// each block's offset and length to `write`, with the graph that
+    /// rendered it, if there is one yet.
     fn run(
         &mut self,
         input: AudioRef<'_>,
         mut midi: &[MidiMessage],
         frames: usize,
-        mut write: impl FnMut(usize, AudioRef<'_>, Option<AudioRef<'_>>),
+        mut write: impl FnMut(usize, usize, Option<&PreparedGraph>),
     ) {
         assert_eq!(
             input.frames(),
@@ -314,10 +366,7 @@ impl Engine {
         let mut done = 0;
         while done < frames {
             let block = self.render(input, &mut midi, done, frames - done);
-            match &self.graph {
-                Some(graph) => write(done, graph.output(block), graph.cue(block)),
-                None => write(done, self.silence.view(block), None),
-            }
+            write(done, block, self.graph.as_deref());
             done += block;
         }
         let transport = self.transport.state();
@@ -882,6 +931,45 @@ mod tests {
         engine.process_interleaved(&mut out, 2);
         assert!(out.iter().all(|&s| s == 0.0));
         assert_eq!(handle.stats().time, 300);
+    }
+
+    #[test]
+    fn offline_renders_take_the_taps_and_leave_the_cue_out() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let mut g = Graph::new();
+        let counter = g.add(NodeKey(0), Counter(0.0));
+        let half = g.add(NodeKey(1), Level(0.5));
+        let click = g.add(NodeKey(2), Constant::new(1000.0).with_channels(1));
+        g.connect(counter, half).unwrap();
+        g.set_output(half).unwrap();
+        g.set_cue(click).unwrap();
+        g.add_tap(counter).unwrap();
+        let frames = 300;
+        let mut output = vec![-1.0; frames];
+        let mut taps = [vec![-1.0; frames], vec![-1.0; frames]];
+        let render = |engine: &mut Engine, output: &mut [f32], taps: &mut [Vec<f32>; 2]| {
+            let [first, second] = taps;
+            let mut taps = [
+                AudioMut::from_planar(first, 1),
+                AudioMut::from_planar(second, 1),
+            ];
+            engine.process_with_taps(&mut AudioMut::from_planar(output, 1), &mut taps);
+        };
+        // Silence, before the graph.
+        render(&mut engine, &mut output, &mut taps);
+        assert!(
+            output
+                .iter()
+                .chain(taps.iter().flatten())
+                .all(|&s| s == 0.0)
+        );
+        handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+        render(&mut engine, &mut output, &mut taps);
+        // The counter counts from the graph's first frame.
+        let count = |scale: f32| -> Vec<f32> { (0..300).map(|i| i as f32 * scale).collect() };
+        assert_eq!(output, count(0.5), "without the cue");
+        assert_eq!(taps[0], count(1.0));
+        assert!(taps[1].iter().all(|&s| s == 0.0), "no second tap");
     }
 
     #[test]
