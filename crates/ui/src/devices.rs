@@ -4,12 +4,14 @@
 //! to the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use egui::{
     Align, Button, Frame, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit, Ui,
     WidgetInfo, vec2,
 };
 use musicable_commands::{Args, device};
+use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
 use crate::search::score;
@@ -34,7 +36,7 @@ pub struct PluginEntry {
 }
 
 /// How a plugin device's plugin is doing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginStatus {
     /// Its plugin loaded, and plays.
     pub loaded: bool,
@@ -44,6 +46,18 @@ pub struct PluginStatus {
     pub window_open: bool,
     /// Why it plays nothing, if it doesn't.
     pub problem: Option<String>,
+    /// The parameters automation can move, in the plugin's order, once it's
+    /// loaded: those it neither hides nor keeps to itself.
+    pub params: Arc<[PluginParam]>,
+}
+
+/// A plugin's parameter, for automation lanes to show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginParam {
+    /// The plugin's id for it.
+    pub id: u32,
+    /// Its name, its range and its default. Its values spread evenly.
+    pub spec: ParamSpec,
 }
 
 /// The plugins, as the browser and the devices panel show them.
@@ -265,7 +279,7 @@ fn plugin_status(
 }
 
 /// A device's name, and what kind of device it is.
-fn describe(device: &Device) -> (&str, String) {
+pub(crate) fn describe(device: &Device) -> (&str, String) {
     match &device.kind {
         DeviceKind::Plugin(plugin) => {
             let name = match plugin.name.trim() {

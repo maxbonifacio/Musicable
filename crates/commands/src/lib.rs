@@ -20,6 +20,7 @@ use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
+pub mod automation;
 pub mod device;
 mod document;
 pub mod edit;
@@ -38,7 +39,7 @@ pub mod track;
 pub mod transport;
 pub mod view;
 
-pub use args::{Args, CommandError, FromValue, Param, Type, Value};
+pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use document::{Committed, Document, Edit, Transaction};
 pub use editor::Editor;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
@@ -139,6 +140,8 @@ pub enum When {
     CanRename,
     /// The project has locators.
     HasLocators,
+    /// Someone overrode automation, which can be re-enabled.
+    AutomationOverridden,
 }
 
 impl When {
@@ -153,6 +156,7 @@ impl When {
             When::CanPaste => editor.clipboard.is_some(),
             When::CanRename => selection.clips.len() == 1 || editor.selected_track.is_some(),
             When::HasLocators => !project.locators.is_empty(),
+            When::AutomationOverridden => project.automation.iter().any(|l| l.overridden),
         }
     }
 }
@@ -338,6 +342,7 @@ pub fn register_all(registry: &mut Registry) {
     device::register(registry);
     mixer::register(registry);
     take::register(registry);
+    automation::register(registry);
     view::register(registry);
     options::register(registry);
 }

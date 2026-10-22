@@ -16,13 +16,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
+use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::param::{ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{
-    AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
-    Track, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
+    TestTone, Track, TrackId, TrackKind,
 };
 
 fn fixtures() -> Vec<(&'static str, Project)> {
@@ -36,6 +38,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("locators", locators()),
         ("plugins", plugins()),
         ("recording", recording()),
+        ("automation", automation()),
     ]
 }
 
@@ -504,6 +507,78 @@ fn recording() -> Project {
     track.input = None;
     track.armed = true;
     project.track_mut(reverb).unwrap().monitor = Monitor::In;
+    project
+}
+
+/// Automation, from version 7: lanes on a track's volume and pan, the
+/// master's volume and pan, a send, a test device's parameter and a
+/// plugin's, with ramps, steps, a lane of one point, one that starts into
+/// the song, values a float can only just hold, and an overridden lane.
+fn automation() -> Project {
+    let mut project = Project::new();
+    project.tempo.set_tempo(90.0);
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    let synth = project.add_track("Synth", TrackKind::Midi);
+    let reverb = project.add_track("Reverb", TrackKind::Return);
+    let send = project.new_send(reverb);
+    let send_id = send.id;
+    project.track_mut(bass).unwrap().sends.push(send);
+    let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+    let gain_id = gain.id;
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.8 });
+    let filter = DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "com.example.filter".into(),
+        name: "Filter".into(),
+        instrument: false,
+        settings: PluginSettings::default(),
+    });
+    let filter = project.new_device(filter);
+    let filter_id = filter.id;
+    project.track_mut(bass).unwrap().devices = vec![gain];
+    project.track_mut(synth).unwrap().devices = vec![instrument, filter];
+
+    let lane = |param, points: &[(f64, f64)]| {
+        let points = points
+            .iter()
+            .map(|&(at, value)| automation::Point::new(Beats::from_f64(at), value))
+            .collect();
+        Lane::new(param, points)
+    };
+    let mut overridden = lane(
+        ParamAddress::Pan(Chain::Track(bass)),
+        &[(0.0, -0.5), (8.0, 0.5)],
+    );
+    overridden.overridden = true;
+    project.track_mut(bass).unwrap().pan = 0.125;
+    project.automation = vec![
+        // A fade in, a step down at bar 3 and a ramp back up.
+        lane(
+            ParamAddress::Volume(Chain::Track(bass)),
+            &[
+                (0.0, 0.0),
+                (4.0, 1.0),
+                (8.0, 1.0),
+                (8.0, 0.25),
+                (15.5, ParamSpec::VOLUME_MAX),
+            ],
+        ),
+        overridden,
+        lane(ParamAddress::Send(send_id), &[(2.0 / 3.0, 0.1)]),
+        lane(ParamAddress::Volume(Chain::Master), &[(0.0, 0.8)]),
+        lane(
+            ParamAddress::Pan(Chain::Master),
+            &[(4.0, -1.0), (4.0, 1.0), (12.0, -0.0)],
+        ),
+        lane(
+            ParamAddress::Device(gain_id, 0),
+            &[(0.0, f64::from_bits(1)), (1.0, -2.0)],
+        ),
+        lane(
+            ParamAddress::Device(filter_id, 4_294_967_295),
+            &[(0.25, 1e300), (0.5, -1e-300), (0.75, 20_000.0)],
+        ),
+    ];
     project
 }
 

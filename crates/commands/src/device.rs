@@ -2,6 +2,7 @@
 //! master's, setting their parameters, showing and closing their windows,
 //! and deleting devices.
 
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::{Chain, DeviceId, DeviceKind, PluginFormat, TrackId};
 
@@ -104,8 +105,11 @@ pub fn register(registry: &mut Registry) {
                 .map_err(|_| CommandError::invalid("a parameter's id is from 0 to 4294967295"))?;
             let value = args.opt("value")?;
             let name = format!("Change {}", plugin_name(plugin(ctx, device)?));
-            ctx.document
-                .transact(&name, |tx| tx.set_plugin_param(device, param, value));
+            ctx.document.transact(&name, |tx| {
+                // As if by hand: automation stops moving it.
+                tx.override_automation(ParamAddress::Device(device, param));
+                tx.set_plugin_param(device, param, value);
+            });
             Ok(Value::None)
         },
     );

@@ -17,7 +17,8 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins, recording];
+const STEPS: [Step; VERSION as usize - 1] =
+    [mixer, clips, locators, plugins, recording, automation];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -123,6 +124,11 @@ fn recording(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         add(track, &path, "takes", json!([]))?;
     }
     Ok(())
+}
+
+/// Version 7 added automation. Version 6 files have none.
+fn automation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "automation", json!([]))
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.
@@ -295,6 +301,19 @@ mod tests {
             run(&STEPS[..5], &mut file, 5).unwrap_err().path,
             "tracks[0].takes",
             "takes in a version 5 file"
+        );
+    }
+
+    #[test]
+    fn version_6_files_have_no_automation() {
+        let mut file = json!({"version": 6, "tracks": []});
+        run(&STEPS[..6], &mut file, 6).unwrap();
+        assert_eq!(file, json!({"version": 7, "tracks": [], "automation": []}));
+        let mut file = json!({"version": 6, "automation": [{}]});
+        assert_eq!(
+            run(&STEPS[..6], &mut file, 6).unwrap_err().path,
+            "automation",
+            "automation in a version 6 file"
         );
     }
 

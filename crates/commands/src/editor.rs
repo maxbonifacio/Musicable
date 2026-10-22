@@ -8,8 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use musicable_model::clip::{Clip, ClipId};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{Project, TrackId};
+use musicable_model::{Chain, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
 /// The arrangement's editing state.
@@ -42,6 +43,10 @@ pub struct Editor {
     pub clipboard: Option<Clipboard>,
     /// The tracks whose takes the arrangement shows in lanes under them.
     pub take_lanes: BTreeSet<TrackId>,
+    /// The channels whose automation the arrangement shows, each with the
+    /// parameters it shows lanes for under the channel, top to bottom:
+    /// at least one each, whether or not they're automated yet.
+    pub automation: BTreeMap<Chain, Vec<ParamAddress>>,
 }
 
 impl Default for Editor {
@@ -59,6 +64,7 @@ impl Default for Editor {
             sample_rate: 48_000,
             clipboard: None,
             take_lanes: BTreeSet::new(),
+            automation: BTreeMap::new(),
         }
     }
 }
@@ -122,6 +128,10 @@ impl Editor {
         }
         self.track_heights.retain(|id, _| tracks.contains(id));
         self.take_lanes.retain(|id| tracks.contains(id));
+        self.automation.retain(|&chain, params| {
+            params.retain(|&param| project.param_chain(param) == Some(chain));
+            !params.is_empty()
+        });
     }
 }
 
@@ -387,11 +397,23 @@ impl Grid {
 
     /// The line nearest `at` at `zoom`, whether snapping is on or not.
     pub fn nearest(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
+        let (before, after) = self.cell(tempo, at, zoom);
+        if at - before <= after - at {
+            before
+        } else {
+            after
+        }
+    }
+
+    /// The lines either side of `at` at `zoom`: the one at or before it,
+    /// and the next one. Drawing automation sets a value for each of these
+    /// steps.
+    pub fn cell(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> (Beats, Beats) {
         let bar = tempo.bar_at(at).bar;
         let start = tempo.bar_start(bar);
         let next = tempo.bar_start(bar + 1);
         let step = self.step(zoom, next - start);
-        let (before, after) = match step.bars() {
+        match step.bars() {
             // Steps of several bars count from bar 0.
             Some(bars) => {
                 let first = bar - bar.rem_euclid(bars);
@@ -405,11 +427,6 @@ impl Grid {
                 let before = start + Beats::from_ticks(into - into % length);
                 (before, (before + Beats::from_ticks(length)).min(next))
             }
-        };
-        if at - before <= after - at {
-            before
-        } else {
-            after
         }
     }
 
@@ -541,6 +558,13 @@ mod tests {
         };
         assert_eq!(off.snap(&tempo, beats(13), 16.0), beats(13));
         assert_eq!(off.nearest(&tempo, beats(13), 16.0), beats(12));
+        // The step a place is in, which the bar line ends.
+        assert_eq!(grid.cell(&tempo, beats(13), 16.0), (beats(12), beats(14)));
+        assert_eq!(
+            grid.cell(&tempo, near_the_end, 16.0),
+            (beats(14), beats(15))
+        );
+        assert_eq!(grid.cell(&tempo, beats(15), 16.0), (beats(15), beats(17)));
 
         // Triplets, and steps of several bars.
         let triplets = Grid {

@@ -1,7 +1,8 @@
 //! Plugins on tracks, through the app's session, with the test plugins
 //! (`crates/test-plugins`), CLAP and VST3 alike. A plugin loads once a scan
 //! says it's installed, plays, and comes back from the project's file as it
-//! was saved. Changes made in its window are steps in the undo history. A
+//! was saved. Changes made in its window are steps in the undo history. Its
+//! parameters follow their automation until someone turns them by hand. A
 //! missing plugin lets the sound through and says why. Delay compensation
 //! lines a latent plugin up with a dry track to the sample, also after the
 //! plugin's latency changes. And the app's binary scans each library in a
@@ -13,11 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use musicable_app::{SCAN_PLUGIN, Session};
-use musicable_commands::{Keymap, edit, transport};
+use musicable_commands::{Args, Keymap, automation, edit, transport};
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
 use musicable_model::clip::{AudioClip, ClipContent};
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
@@ -362,6 +364,65 @@ fn changes_in_its_window_are_steps_in_the_undo_history(format: PluginFormat) {
     assert_eq!(rig.session.undo_name(), None);
     rig.session.run(&edit::REDO).unwrap();
     near(rig.peaks(), half);
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_clap_plugins_parameter_follows_its_automation() {
+    follows_its_automation(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_plugins_parameter_follows_its_automation() {
+    follows_its_automation(PluginFormat::Vst3);
+}
+
+fn follows_its_automation(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "automation");
+    let (song, device) = tone_with(|p| plugins.gain(p, PluginSettings::default()));
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    near(rig.peaks(), TONE);
+
+    // The gain's lane holds it at a quarter. The parameter's own value
+    // stays as it was, under the automation.
+    let gain = ParamAddress::Device(device.id, GAIN);
+    let args = Args::new()
+        .with("param", gain)
+        .with("at", vec![Beats::ZERO])
+        .with("values", vec![plugins.factor(0.25)]);
+    rig.session
+        .run_with(&automation::SET_POINTS, &args)
+        .unwrap();
+    rig.session.wait_for_graph();
+    let quarter = times(TONE, 0.25);
+    near(rig.peaks(), quarter);
+    assert_eq!(rig.settings(device.id).param(GAIN), None);
+
+    // Someone turns the knob in the plugin's window, which overrides the
+    // automation: the knob's value plays.
+    let instance = rig.session.plugin(device.id).unwrap();
+    plugins.gui(instance, gui::BEGIN, GAIN, 0.0);
+    plugins.gui(instance, gui::VALUE, GAIN, plugins.factor(0.5));
+    plugins.gui(instance, gui::END, GAIN, 0.0);
+    let half = times(TONE, 0.5);
+    near(rig.peaks(), half);
+    assert!(!rig.session.project().is_automated(gain));
+    assert_eq!(
+        rig.settings(device.id).param(GAIN),
+        Some(plugins.factor(0.5))
+    );
+
+    // Undo takes the turn back, so the automation plays again. Redo turns
+    // it again, and re-enabling the automation has it play once more.
+    rig.session.run(&edit::UNDO).unwrap();
+    near(rig.peaks(), quarter);
+    assert!(rig.session.project().is_automated(gain));
+    rig.session.run(&edit::REDO).unwrap();
+    near(rig.peaks(), half);
+    rig.session.run(&automation::RE_ENABLE).unwrap();
+    near(rig.peaks(), quarter);
     drop(rig);
     plugins.assert_alright();
 }

@@ -6,13 +6,15 @@ use std::sync::Arc;
 
 use musicable_model::clip::Dimension;
 use musicable_model::mixer::pan_gains;
+use musicable_model::param::ParamSpec;
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{ClipType, Monitor};
 
+use crate::automation::Param;
 use crate::meter::Meter;
 use crate::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId,
-    ProcessContext, TransportState,
+    AudioMut, Automation, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId,
+    ParamId, ProcessContext, TransportState,
 };
 
 /// Sums its inputs. Used for buses and the master.
@@ -329,6 +331,15 @@ impl Smoothed {
         self.frame = self.frames;
     }
 
+    /// Jumps to `value` and holds it there, as if it had ramped there: for
+    /// carrying on from where something else, such as automation, left a
+    /// parameter.
+    pub fn hold(&mut self, value: f32) {
+        self.from = value;
+        self.target = value;
+        self.frame = self.frames;
+    }
+
     /// Carries on from where `previous`, the same parameter in the node this
     /// one replaces, has got to: from its value, ramping on to this one's
     /// target. Call it from [`Node::adopt`].
@@ -348,48 +359,53 @@ impl Smoothed {
 /// channel's output stage. It can measure its output into a [`Meter`].
 ///
 /// Gain, mute and balance changes ramp ([`Smoothed`]), so they don't click.
+/// The gain and the balance can follow automation and take modulation
+/// ([`Param`]).
 #[derive(Debug, Clone)]
 pub struct Gain {
-    gain: f32,
-    muted: bool,
-    /// What the output is multiplied by: `gain`, or 0 while muted.
-    level: Smoothed,
+    gain: Param,
+    /// What the output is multiplied by on top of the gain: 1.0, or 0.0
+    /// while muted.
+    mute: Smoothed,
     /// The balance, from -1.0 to 1.0.
-    pan: Smoothed,
+    pan: Param,
     channels: usize,
     meter: Option<Arc<Meter>>,
 }
 
 impl Gain {
-    /// Linear gain, 1.0 is unity.
+    /// Linear gain, 1.0 is unity. Automatable, and modulation keeps it from
+    /// 0.0 to +6 dB.
     pub const GAIN: ParamId = ParamId(0);
     /// 1.0 mutes, 0.0 unmutes.
     pub const MUTE: ParamId = ParamId(1);
     /// Balance, from -1.0 (left) to 1.0 (right), by
     /// [`pan_gains`](musicable_model::mixer::pan_gains). Only stereo gain
     /// stages have it. At 0.0, the default, it changes nothing.
+    /// Automatable, and modulation keeps it within its range.
     pub const PAN: ParamId = ParamId(2);
+
+    /// How many frames it works its parameters out for at a time.
+    const CHUNK: usize = 64;
 
     /// A stereo gain stage.
     pub fn new(gain: f32) -> Self {
         Self {
-            gain,
-            muted: false,
-            level: Smoothed::new(gain),
-            pan: Smoothed::new(0.0),
+            gain: Param::new(gain, 0.0, ParamSpec::VOLUME_MAX as f32),
+            mute: Smoothed::new(1.0),
+            pan: Param::new(0.0, -1.0, 1.0),
             channels: 2,
             meter: None,
         }
     }
 
     pub fn with_pan(mut self, pan: f32) -> Self {
-        self.pan = Smoothed::new(pan);
+        self.pan = Param::new(pan, -1.0, 1.0);
         self
     }
 
     pub fn with_muted(mut self, muted: bool) -> Self {
-        self.muted = muted;
-        self.level = Smoothed::new(self.level_target());
+        self.mute = Smoothed::new(if muted { 0.0 } else { 1.0 });
         self
     }
 
@@ -404,46 +420,66 @@ impl Gain {
         self
     }
 
-    fn level_target(&self) -> f32 {
-        if self.muted { 0.0 } else { self.gain }
-    }
-
     fn apply(&mut self, event: &NodeEvent) {
         match event.kind {
             NodeEventKind::Param {
                 param: Self::GAIN,
                 value,
-            } => self.gain = value as f32,
+            } => self.gain.set(value as f32),
             NodeEventKind::Param {
                 param: Self::MUTE,
                 value,
-            } => self.muted = value >= 0.5,
+            } => self.mute.set(if value >= 0.5 { 0.0 } else { 1.0 }),
             NodeEventKind::Param {
                 param: Self::PAN,
                 value,
-            } => {
-                self.pan.set(value as f32);
-                return;
-            }
-            _ => return,
+            } => self.pan.set(value as f32),
+            NodeEventKind::Modulation {
+                param: Self::GAIN,
+                amount,
+                note: None,
+            } => self.gain.modulate(amount as f32),
+            NodeEventKind::Modulation {
+                param: Self::PAN,
+                amount,
+                note: None,
+            } => self.pan.modulate(amount as f32),
+            _ => {}
         }
-        self.level.set(self.level_target());
     }
 
-    fn scale(&mut self, output: &mut AudioMut<'_>, frames: Range<usize>) {
+    fn scale(&mut self, ctx: &ProcessContext<'_>, output: &mut AudioMut<'_>, frames: Range<usize>) {
+        let mut start = frames.start;
+        while start < frames.end {
+            let end = frames.end.min(start + Self::CHUNK);
+            self.scale_chunk(ctx, output, start..end);
+            start = end;
+        }
+    }
+
+    fn scale_chunk(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        output: &mut AudioMut<'_>,
+        frames: Range<usize>,
+    ) {
         let len = frames.len();
+        let mut gains = [0.0; Self::CHUNK];
+        let mut pans = [0.0; Self::CHUNK];
+        let (gains, pans) = (&mut gains[..len], &mut pans[..len]);
+        let steady_gain = self.gain.render(ctx, frames.clone(), gains);
+        let steady_pan = self.pan.render(ctx, frames.clone(), pans);
         let mut part = output.range_mut(frames);
         // Mono stages have no balance.
         let stereo = self.channels == 2;
-        if self.level.is_settled() && (self.pan.is_settled() || !stereo) {
-            let level = self.level.value();
+        if steady_gain && (steady_pan || !stereo) && self.mute.is_settled() {
+            let level = gains[0] * self.mute.value();
             let balance = if stereo {
-                pan_gains(self.pan.value())
+                pan_gains(pans[0])
             } else {
                 [1.0, 1.0]
             };
-            self.level.skip(len);
-            self.pan.skip(len);
+            self.mute.skip(len);
             for (c, channel) in part.channels_mut().enumerate() {
                 // Exactly the level at the centre, so centred channels sound
                 // as they did before there was a balance control.
@@ -460,16 +496,14 @@ impl Gain {
         }
         // Each channel ramps through the same values.
         for (c, channel) in part.channels_mut().enumerate() {
-            let (mut level, mut pan) = (self.level, self.pan);
-            for sample in channel {
-                let level = level.next_value();
-                let pan = pan.next_value();
-                let balance = if stereo { pan_gains(pan)[c] } else { 1.0 };
+            let mut mute = self.mute;
+            for (i, sample) in channel.iter_mut().enumerate() {
+                let level = gains[i] * mute.next_value();
+                let balance = if stereo { pan_gains(pans[i])[c] } else { 1.0 };
                 *sample *= level * balance;
             }
         }
-        self.level.skip(len);
-        self.pan.skip(len);
+        self.mute.skip(len);
     }
 }
 
@@ -479,13 +513,24 @@ impl Node for Gain {
     }
 
     fn prepare(&mut self, config: &EngineConfig) {
-        self.level.prepare(config.sample_rate);
+        self.gain.prepare(config.sample_rate);
+        self.mute.prepare(config.sample_rate);
         self.pan.prepare(config.sample_rate);
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        match param {
+            Self::GAIN => self.gain.automate(automation),
+            Self::PAN => self.pan.automate(automation),
+            _ => return Some(automation),
+        }
+        None
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Gain>() {
-            self.level.take_over(&previous.level);
+            self.gain.take_over(&previous.gain);
+            self.mute.take_over(&previous.mute);
             self.pan.take_over(&previous.pan);
         }
     }
@@ -497,11 +542,11 @@ impl Node for Gain {
         }
         let mut start = 0;
         for event in ctx.events {
-            self.scale(output, start..event.offset);
+            self.scale(ctx, output, start..event.offset);
             self.apply(event);
             start = event.offset;
         }
-        self.scale(output, start..ctx.frames);
+        self.scale(ctx, output, start..ctx.frames);
         if let Some(meter) = &self.meter {
             meter.measure(output.view(), ctx.sample_rate);
         }

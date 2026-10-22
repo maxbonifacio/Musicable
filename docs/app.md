@@ -104,7 +104,7 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Locator, Transport, View and Options. Undo and Redo name the
+  Track, Clip, Automation, Locator, Transport, View and Options. Undo and Redo name the
   change they would make, as in "Undo Set Tempo", and are greyed out when
   there's nothing to undo or redo, as is any command that doesn't apply
   now, such as Split with nothing selected. Toggles, such as Follow and
@@ -173,6 +173,19 @@ undo history and the engine rebuilds its graph once.
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).
+- **Automation** shows in lanes under a track's lanes after the A button in
+  its header, **Automation > Show/Hide Automation** (A), or the same in the
+  header's menu: a lane for each parameter the track automates, or else
+  one for its volume. The master's lanes go under the last track; the
+  master strip's controls show them, in the mixer. A lane's header names
+  the parameter, with its value at the playhead, or "Overridden" once
+  someone moved its control by hand, and has three buttons: ▾ chooses the
+  parameter the lane shows (the track's volume, pan and sends, then each
+  device's parameters, a submenu for each device, the automated ones in
+  red), + adds a lane for the next parameter, and × hides the lane. The
+  line through a lane's points is red, or grey while its automation is
+  overridden; a lane without automation shows the parameter's own value as
+  a dashed line ([commands.md](commands.md#automation)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
@@ -199,6 +212,11 @@ The mouse does what it does in Live:
 | A track's bottom edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
+| An automation lane | Click; double-click | Selects the track and puts the start marker there; adds a point there |
+| | Drag; Alt-drag | Draws a value for each step of the grid crossed, as Live's Draw Mode does; draws freely, off the grid, as it does with Snap to Grid off |
+| An automation lane's line | Click; drag | Adds a point on the line, on the grid; moves that stretch of the line, with its points, up or down |
+| An automation point | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
+| An automation lane's header | Click | Selects the track |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
@@ -206,8 +224,10 @@ Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
 header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
-locator, and Comp, Rename, Delete Take and Show/Hide Take Lanes on a take. Each shows its keys, and takes its arguments from where the
-menu was opened: the clip, the track, or the position. Rename, from a menu,
+locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
+and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
+automation lane. Each shows its keys, and takes its arguments from where
+the menu was opened: the clip, the track, the parameter, or the position. Rename, from a menu,
 a key or a double-click, opens a box for the new name.
 
 Audio files dropped on the window become clips, one after another, where
@@ -349,6 +369,13 @@ arrangement's do. Double-click a fader for 0 dB, a send to silence it, or
 the pan to centre it. A whole drag is one step in the undo history. The
 faders, sends, pans, buttons, menus and meters are named for screen readers,
 such as "Lead Volume", which is how the tests drive them.
+
+**Automation.** A fader, a send or a pan with automation follows it, showing
+its value at the playhead, and has a red dot at its top left; the dot is
+grey once the control is moved by hand, which overrides the automation
+until it's re-enabled, as in Live. Right-clicking one of them has **Show
+Automation**, which shows its lane in the arrangement, **Re-Enable
+Automation** and **Clear Automation**.
 
 **Meters.** Each strip's meter shows its channel's output, after mute and
 solo, left and right: the peak in a light shade, and the RMS level, averaged
@@ -804,6 +831,11 @@ Windows build runs under Wine with `WGPU_BACKEND=vulkan` (Wine's Direct3D 12
 can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
+
+- Automation: selecting points to move or delete several at once, curves
+  between points, automation moving and copying with its clips, and a
+  "Back to Arrangement" button in the transport bar, as Live has (for now
+  **Automation > Re-Enable Automation** re-enables every overridden lane).
 
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.

@@ -11,12 +11,13 @@ use musicable_audio::InputKind;
 use musicable_commands::{Args, CommandError, Request, arrange};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
+use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
-use musicable_plugins::{PluginInfo, Waker};
+use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
     Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, Playback, PluginEntry,
-    PluginStatus, Plugins, SaveChoice, Shell, View,
+    PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
@@ -49,6 +50,8 @@ pub struct App {
     plugin_entries: Vec<PluginEntry>,
     /// How each plugin device's plugin is doing, as of this frame.
     plugin_status: BTreeMap<DeviceId, PluginStatus>,
+    /// The parameters automation can move, for each loaded plugin.
+    plugin_params: BTreeMap<DeviceId, Listed>,
     output: Output,
     /// The output's stream whose inputs the session has.
     inputs_started: u64,
@@ -149,6 +152,7 @@ impl App {
             plugin_scan,
             plugin_entries: Vec::new(),
             plugin_status: BTreeMap::new(),
+            plugin_params: BTreeMap::new(),
             output,
             inputs_started: 0,
             input_choices: Vec::new(),
@@ -201,7 +205,8 @@ impl App {
         self.session.set_installed_plugins(installed);
     }
 
-    /// How each plugin device's plugin is doing, for the devices panel.
+    /// How each plugin device's plugin is doing, for the devices panel, and
+    /// its parameters, for automation lanes.
     fn update_plugin_status(&mut self) {
         self.plugin_status.clear();
         let devices = self
@@ -211,14 +216,33 @@ impl App {
             .flat_map(|(_, devices)| devices);
         for device in devices.filter(|d| d.kind.plugin().is_some()) {
             let instance = self.session.plugin(device.id);
+            let params = match instance {
+                Some(instance) => {
+                    let list = instance.params();
+                    let from = (list.as_ptr() as usize, list.len());
+                    let listed = self.plugin_params.entry(device.id).or_default();
+                    if listed.from != from {
+                        *listed = Listed {
+                            from,
+                            params: automatable(list),
+                        };
+                    }
+                    listed.params.clone()
+                }
+                None => Arc::default(),
+            };
             let status = PluginStatus {
                 loaded: instance.is_some(),
                 has_window: instance.is_some_and(|i| i.has_window()),
                 window_open: self.plugin_windows.is_open(device.id),
                 problem: self.session.plugin_problem(device.id).map(str::to_owned),
+                params,
             };
             self.plugin_status.insert(device.id, status);
         }
+        let status = &self.plugin_status;
+        self.plugin_params
+            .retain(|device, _| status.get(device).is_some_and(|status| status.loaded));
     }
 
     /// The project's name: its file's name without the extension.
@@ -733,6 +757,34 @@ impl eframe::App for App {
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
     }
+}
+
+/// A plugin's parameters that automation can move, as last listed.
+#[derive(Default)]
+struct Listed {
+    /// Where the plugin kept the list they came from, and how long it was,
+    /// to know when the plugin describes them again.
+    from: (usize, usize),
+    params: Arc<[PluginParam]>,
+}
+
+/// The parameters of `params` automation can move: those the plugin
+/// neither hides nor keeps to itself.
+fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
+    params
+        .iter()
+        .filter(|param| param.automatable && !param.hidden && !param.read_only)
+        .map(|param| PluginParam {
+            id: param.id,
+            spec: ParamSpec {
+                name: param.name.clone(),
+                min: param.min,
+                max: param.max,
+                default: param.default,
+                scale: Scale::Linear,
+            },
+        })
+        .collect()
 }
 
 /// The readings of the meters of `project`'s channels, for the mixer.

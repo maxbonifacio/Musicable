@@ -277,6 +277,7 @@ impl Shell {
                         view.project,
                         view.levels,
                         view.inputs,
+                        view.playback.playhead,
                         theme,
                         &self.mouse,
                         &mut actions,

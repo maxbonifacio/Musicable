@@ -18,6 +18,10 @@
 //!
 //! Plugins process outside the engine, in plugin instances the app holds:
 //! [`Devices`] has the app's [`NodeMaker`] for each plugin device.
+//!
+//! Each lane of automation that isn't overridden goes to the node with its
+//! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
+//! song plays.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -35,7 +39,7 @@ use crate::clips::{AudioClips, MidiClips};
 use crate::media::Media;
 use crate::meter::Meters;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
-use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
+use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
 ///
@@ -50,10 +54,12 @@ use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGrap
 /// role 9 for sends and 10 for devices. Keys with role 0 belong to no
 /// channel.
 pub mod keys {
-    use musicable_model::{DeviceId, SendId, TrackId};
+    use musicable_model::param::ParamAddress;
+    use musicable_model::{Chain, DeviceId, SendId, TrackId};
 
     use super::Slot;
-    use crate::NodeKey;
+    use crate::nodes::Gain;
+    use crate::{NodeKey, ParamId};
 
     /// The master bus, where the tracks that don't feed a group sum.
     pub const MASTER: NodeKey = NodeKey(0);
@@ -140,6 +146,23 @@ pub mod keys {
     /// output.
     pub fn master_output() -> NodeKey {
         track_output(MASTER_STRIP)
+    }
+
+    /// The node with the parameter at `address`, and the parameter: a
+    /// channel's fader's [`Gain::GAIN`] for its volume and [`Gain::PAN`] for
+    /// its pan, a send's [`Gain::GAIN`], and a device's parameter `n` as
+    /// `ParamId(n)`.
+    pub fn param(address: ParamAddress) -> (NodeKey, ParamId) {
+        let fader = |chain| match chain {
+            Chain::Track(track) => track_gain(track),
+            Chain::Master => master_gain(),
+        };
+        match address {
+            ParamAddress::Volume(chain) => (fader(chain), Gain::GAIN),
+            ParamAddress::Pan(chain) => (fader(chain), Gain::PAN),
+            ParamAddress::Send(send) => (self::send(send), Gain::GAIN),
+            ParamAddress::Device(device, n) => (self::device(device), ParamId(n)),
+        }
     }
 
     fn track_key(role: u64, track: TrackId) -> NodeKey {
@@ -521,6 +544,20 @@ pub(crate) fn compile_with(
     let output = strip.tail.expect("the master's strip has its output stage");
     graph.set_output(output).expect("the output was just added");
     graph.set_cue(cue).expect("the cue bus was just added");
+
+    // A parameter whose node isn't in the graph, such as a missing
+    // plugin's, has nothing to automate.
+    for lane in project.automation.iter().filter(|lane| !lane.overridden) {
+        let (key, param) = keys::param(lane.param);
+        let scale = project.param_scale(lane.param);
+        if let (Some(node), Some(automation)) =
+            (graph.find(key), Automation::new(&lane.points, scale))
+        {
+            graph
+                .automate(node, param, automation)
+                .expect("the node was found");
+        }
+    }
     graph
 }
 

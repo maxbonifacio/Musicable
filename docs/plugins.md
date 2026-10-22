@@ -240,6 +240,16 @@ open project, on a track or on the master:
   has everything the plugins keep, and `params` is usually empty there.
 - **Another engine**, for another sample rate or buffer size, activates
   every plugin again for it.
+- **Automation.** A plugin's parameters can be automated like the mixer's,
+  by id ([commands.md](commands.md#automation)). The arrangement offers
+  those the plugin calls automatable and neither hides nor keeps
+  read-only, with values in its own units: CLAP's range, VST3's normalized
+  values. The graph sends the values to the plugin as parameter events
+  ([engine.md](engine.md#automation)). Turning an automated parameter in
+  the plugin's window overrides its automation, as moving a mixer control
+  does, until it's re-enabled; while it follows its automation the project
+  keeps the value it was last set to, and the plugin's window shows the
+  automation's.
 
 The app scans for plugins in the background as it starts, in CLAP's
 places and VST3's ([Scanning](#scanning)). What the last

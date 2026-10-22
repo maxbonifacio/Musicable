@@ -21,6 +21,7 @@ use std::any::Any;
 
 use musicable_model::time::TempoMap;
 
+pub mod automation;
 pub mod buffer;
 pub mod clips;
 pub mod compile;
@@ -38,6 +39,7 @@ pub mod tasks;
 pub mod timeline;
 mod transport;
 
+pub use automation::Automation;
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
     Compiled, Compiler, Devices, InputChannels, InputLayout, NodeMaker, compile, compile_metered,
@@ -94,6 +96,23 @@ pub trait Node: Any + Send {
     /// latency changes needs a new graph to change it.
     fn latency(&self) -> usize {
         0
+    }
+
+    /// Has the node follow `automation` for its parameter `param`, read at
+    /// the song position, in place of the value set, for as long as it's in
+    /// this graph. Called off the audio thread as the graph is built
+    /// ([`Graph::automate`]), before [`prepare`](Node::prepare).
+    ///
+    /// A node that reads its automation itself, frame by frame with an
+    /// [`automation::Param`], keeps it and returns `None`. By default the
+    /// node hands it back, and the graph sends the node the automation's
+    /// values as [`Param`](NodeEventKind::Param) events instead: on the
+    /// frame of each point, every 32 frames of engine time in between, and
+    /// on the first frame after the playhead jumps, whenever the value
+    /// changed. Plugins get theirs that way, and smooth their parameters
+    /// themselves.
+    fn automate(&mut self, _param: ParamId, automation: Automation) -> Option<Automation> {
+        Some(automation)
     }
 
     /// Called on the audio thread when a new graph replaces the running one,

@@ -159,8 +159,10 @@ fn compact(edits: &mut Vec<Edit>) {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::automation::{Lane, Point};
     use musicable_model::clip::{AudioClip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing};
     use musicable_model::mixer::Bus;
+    use musicable_model::param::ParamAddress;
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
     use musicable_model::{
@@ -189,8 +191,9 @@ mod tests {
     /// The project the edits in `one_of_each` change: a track of each kind,
     /// two with a send, and a spare one that nothing refers to; two audio
     /// clips, one with fades, and a MIDI clip; two takes of an audio clip on
-    /// the audio track; two locators; and a plugin on the audio track and a
-    /// test device on the master.
+    /// the audio track; two locators; a plugin on the audio track and a
+    /// test device on the master; and lanes that automate the audio track's
+    /// volume and the master's pan.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -240,7 +243,23 @@ mod tests {
         project.track_mut(audio).unwrap().devices.push(effect);
         let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
         project.master.devices.push(gain);
+        let lanes = [
+            (ParamAddress::Volume(Chain::Track(audio)), fade()),
+            (ParamAddress::Pan(Chain::Master), vec![point(0, -0.5)]),
+        ];
+        for (param, points) in lanes {
+            project.automation.push(Lane::new(param, points));
+        }
         project
+    }
+
+    fn point(at: i64, value: f64) -> Point {
+        Point::new(Beats::new(at), value)
+    }
+
+    /// The points of the lane on the audio track's volume in [`base`].
+    fn fade() -> Vec<Point> {
+        vec![point(0, 1.0), point(8, 0.5)]
     }
 
     /// One edit of each kind, each changing the [`base`] project.
@@ -492,6 +511,24 @@ mod tests {
                 from: None,
                 to: Some(-3.5),
             },
+            Edit::LanePoints {
+                param: ParamAddress::Volume(Chain::Track(audio)),
+                from: fade(),
+                to: vec![point(0, 1.0), point(4, 0.25), point(8, 0.5)],
+            },
+            Edit::LaneOverridden {
+                param: ParamAddress::Volume(Chain::Track(audio)),
+                from: false,
+                to: true,
+            },
+            Edit::AddLane {
+                index: 2,
+                lane: Lane::new(ParamAddress::Send(SendId(0)), vec![point(4, 0.25)]),
+            },
+            Edit::RemoveLane {
+                index: 1,
+                lane: project.automation[1].clone(),
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -500,7 +537,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 42;
+    const KINDS: usize = 46;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -548,6 +585,10 @@ mod tests {
             Edit::AddTake { .. } => 39,
             Edit::RemoveTake { .. } => 40,
             Edit::TakeName { .. } => 41,
+            Edit::AddLane { .. } => 42,
+            Edit::RemoveLane { .. } => 43,
+            Edit::LanePoints { .. } => 44,
+            Edit::LaneOverridden { .. } => 45,
         }
     }
 

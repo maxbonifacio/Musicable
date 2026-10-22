@@ -54,6 +54,10 @@ version = 1
 "view.toggle_devices" = ["Ctrl+Alt+L"]
 "view.toggle_browser" = ["Ctrl+Alt+B"]
 
+# Live's A shows every track's automation in Automation Mode. Here it shows
+# the selected track's automation lanes, or hides them.
+"automation.show" = ["A"]
+
 # Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
 # groups the selected tracks, which needs a selection.
 "track.new_audio_track" = ["Ctrl+T"]

@@ -314,6 +314,53 @@ tone's level, ramp this way.
   (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
   of a fade doesn't jump.
 
+## Automation
+
+A parameter's automation is compiled into the graph and read at the song
+position, never sent through the message queue, so it loops, locates and
+follows tempo changes as clips do.
+
+- `compile()` makes an `automation::Automation` for each lane that isn't
+  overridden: its points, in beats, and its `Scale`. `keys::param` says
+  which node has the parameter and which `ParamId` it is: a channel's
+  fader, a `Gain`, for its volume (`Gain::GAIN`) and its pan
+  (`Gain::PAN`), a send's `Gain` for its level, and a device's node for its
+  parameter `n` (`ParamId(n)`). `Graph::automate` gives it to the node.
+- Whoever reads it places the points through the block's tempo map
+  (`ProcessContext::tempo`), each on the frame `TempoMap::frame_at` gives.
+  Between two points the value moves in a straight line in the lane's
+  scale: in the fourth root of the gain for faders and sends, as their
+  faders spread, in ratios on a log scale, and evenly otherwise. Two points
+  at the same place make a step, and on its frame the value is the one
+  after it.
+- **A node that reads its own** keeps it (`Node::automate` returns `None`)
+  and works the value out frame by frame with an `automation::Param`, as
+  `Gain` does for its gain and pan. A `Param` follows its automation in
+  place of the value set, which ramps over 10 ms as `Smoothed` does and
+  applies again once the automation goes. Between points it follows the
+  line exactly. Wherever the automation jumps, at a step, where the
+  playhead locates or loops, or where a new graph brings automation the
+  old one hadn't, the value glides there over 10 ms instead, so it doesn't
+  click. Modulation (`Param::modulate`, for Tier 2's modulators) is added
+  after the ramp and the glide, unsmoothed, and the sum kept within the
+  parameter's range, so automation, modulation, MIDI mapping and
+  extensions can all address the same parameter.
+- **Other nodes** hand their automation back, and the graph sends them its
+  values as `Param` events (`automation::Feed`): on the frame of each point
+  (up to 16 a block), every 32 frames of engine time between them, and on
+  a block's first frame when the playhead has jumped or the graph is new,
+  each only when the value changed. They come after the engine's own
+  events on the same frame, so they win. Plugins get theirs this way, and
+  smooth their parameters themselves: a CLAP plugin gets values in its own
+  range, a VST3 plugin its normalized ones.
+- The events fall on the same frames however the blocks fall, so the
+  renderers stay bit-identical with automation at any block size
+  (`crates/engine/tests/automation.rs`).
+- Moving an automated control by hand overrides its lane
+  ([commands.md](commands.md#automation)), and the next graph leaves the
+  lane out, so the parameter ramps from where the automation left it to
+  the value set.
+
 ## The mixer
 
 `compile()` builds every track as a channel strip, and the master too, with

@@ -9,28 +9,39 @@
 //! one command when it ends, so it's one step in the undo history and the
 //! engine rebuilds its graph once. Context menus list commands from the
 //! registry, with their arguments taken from what was clicked.
+//!
+//! A track can show automation lanes under its lanes, and the master's go
+//! under the tracks. Their points are added, moved and deleted as Live's
+//! breakpoints are, and a drag draws over them a step of the grid at a
+//! time, as Live's Draw Mode does. Each edit sets the lane's points with
+//! one command.
 
 mod menu;
 mod paint;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{
-    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Pos2, Rect, Response, Role, Sense, Ui,
-    WidgetInfo, pos2, vec2,
+    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rect, Response, RichText,
+    Role, ScrollArea, Sense, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, CommandId, Editor, Modifiers, arrange, edit, locator, take as takes, transport,
-    view as views,
+    Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, param_text,
+    take as takes, transport, view as views,
 };
+use musicable_model::automation::Point;
 use musicable_model::clip::{Clip, ClipContent, ClipId};
+use musicable_model::param::{ParamAddress, ParamSpec, Scale};
 use musicable_model::time::Beats;
-use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
+use musicable_model::{Chain, DeviceKind, LocatorId, Project, TakeId, TrackId, TrackKind};
 
+use crate::devices::describe;
+use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -40,6 +51,9 @@ use crate::widgets::{Face, paint_toggle};
 /// zooms: the zoom changes by `e` to the power of this many points.
 const ZOOM_SPEED: f32 = 0.005;
 const SCRUB_ZOOM_SPEED: f32 = 0.01;
+/// The most points an automation lane names for screen readers, of those
+/// in sight. A lane drawn freely can have thousands.
+const MAX_NAMED_POINTS: usize = 64;
 
 /// The arrangement's own state: the gesture in progress, and the menu open.
 #[derive(Debug, Default)]
@@ -89,6 +103,18 @@ enum Hit {
         track: TrackId,
         take: TakeId,
     },
+    /// An automation lane: on one of its points, near the line through
+    /// them, or neither.
+    Automation {
+        chain: Chain,
+        param: ParamAddress,
+        part: Envelope,
+    },
+    /// The header beside an automation lane.
+    AutomationHeader {
+        chain: Chain,
+        param: ParamAddress,
+    },
 }
 
 impl Hit {
@@ -111,6 +137,12 @@ impl Hit {
             Hit::TrackEdge(_) => Target::TrackEdge,
             Hit::Take { .. } => Target::TakeLane,
             Hit::TakeHeader { .. } => Target::TakeHeader,
+            Hit::Automation { part, .. } => match part {
+                Envelope::Point(_) => Target::AutomationPoint,
+                Envelope::Line { .. } => Target::AutomationLine,
+                Envelope::Lane => Target::AutomationLane,
+            },
+            Hit::AutomationHeader { .. } => Target::AutomationHeader,
         }
     }
 
@@ -122,10 +154,40 @@ impl Hit {
             | Hit::Header(track)
             | Hit::TrackEdge(track)
             | Hit::Take { track, .. }
-            | Hit::TakeHeader { track, .. } => Some(track),
+            | Hit::TakeHeader { track, .. }
+            | Hit::Automation {
+                chain: Chain::Track(track),
+                ..
+            }
+            | Hit::AutomationHeader {
+                chain: Chain::Track(track),
+                ..
+            } => Some(track),
             _ => None,
         }
     }
+
+    /// The automation lane it's on, if it's on one.
+    fn lane(self) -> Option<ParamAddress> {
+        match self {
+            Hit::Automation { param, .. } | Hit::AutomationHeader { param, .. } => Some(param),
+            _ => None,
+        }
+    }
+}
+
+/// A part of an automation lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Envelope {
+    /// The point at this place in the lane's points.
+    Point(usize),
+    /// Near the line through the points at these places, next to each
+    /// other: or the same point twice, for the level line before the first
+    /// point or after the last. A lane without points has a level line at
+    /// its parameter's own value, if that's known, with no points to move.
+    Line { from: usize, to: usize },
+    /// Neither.
+    Lane,
 }
 
 /// A part of a clip.
@@ -161,6 +223,18 @@ struct Drag {
     height: f32,
     /// What the drag last asked for, for those that ask while they last.
     sent: Option<Plan>,
+    /// What a drag that draws automation drew so far.
+    drawn: Drawn,
+}
+
+/// What a drag drew on an automation lane: a value for each step of the
+/// grid it crossed, by where the step starts, or drawn freely, a value for
+/// each place the pointer was.
+#[derive(Debug, Clone, Default)]
+struct Drawn {
+    values: BTreeMap<Beats, f64>,
+    /// Where the pointer was when it last drew.
+    last: Option<Pos2>,
 }
 
 /// What a drag would do if it ended now.
@@ -212,6 +286,11 @@ enum Plan {
         start: Beats,
         end: Beats,
     },
+    /// Sets the points of a parameter's automation.
+    Points {
+        param: ParamAddress,
+        points: Vec<Point>,
+    },
 }
 
 /// Where a context menu was opened, and what on.
@@ -257,6 +336,50 @@ impl TakeRow {
     }
 }
 
+/// An automation lane, under its track's lanes, or under the tracks for
+/// the master's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AutoRow {
+    /// Its track's place in the project's tracks: `None` for the master's.
+    track_index: Option<usize>,
+    chain: Chain,
+    param: ParamAddress,
+    top: f32,
+    height: f32,
+}
+
+impl AutoRow {
+    fn bottom(&self) -> f32 {
+        self.top + self.height
+    }
+
+    /// The y coordinates its line goes between, from the parameter's least
+    /// value to its greatest: clear of the lane's edges, so the points at
+    /// either end show whole.
+    fn travel(&self, theme: &Theme) -> (f32, f32) {
+        let margin = (theme.point + 2.0).min(self.height / 2.0);
+        (self.bottom() - margin, self.top + margin)
+    }
+
+    /// The y coordinate `unit` of the way up the travel.
+    fn y_of(&self, theme: &Theme, unit: f64) -> f32 {
+        let (bottom, top) = self.travel(theme);
+        bottom + (top - bottom) * unit as f32
+    }
+
+    /// How far up the travel `y` is, from 0.0 to 1.0.
+    fn unit_at(&self, theme: &Theme, y: f32) -> f64 {
+        let (bottom, top) = self.travel(theme);
+        f64::from((bottom - y) / (bottom - top).max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// How much of the travel `dy` points up is.
+    fn units_in(&self, theme: &Theme, dy: f32) -> f64 {
+        let (bottom, top) = self.travel(theme);
+        f64::from(dy / (bottom - top).max(1.0))
+    }
+}
+
 /// Where the arrangement's parts are this frame.
 #[derive(Debug, Clone)]
 struct Layout {
@@ -273,7 +396,10 @@ struct Layout {
     rows: Vec<Row>,
     /// The lanes of the takes of the tracks that show them, top to bottom.
     takes: Vec<TakeRow>,
-    /// How tall the tracks and their take lanes are together.
+    /// The automation lanes shown, top to bottom.
+    automation: Vec<AutoRow>,
+    /// How tall the tracks and their take and automation lanes are
+    /// together.
     content: f32,
 }
 
@@ -297,7 +423,20 @@ impl Layout {
         let corner = Rect::from_min_max(pos2(split, rect.top()), pos2(rect.right(), ruler_bottom));
         let mut rows = Vec::with_capacity(project.tracks.len());
         let mut takes = Vec::new();
+        let mut automation = Vec::new();
         let mut y = 0.0;
+        let mut lanes_of = |chain: Chain, track_index: Option<usize>, y: &mut f32| {
+            for &param in editor.automation.get(&chain).into_iter().flatten() {
+                automation.push(AutoRow {
+                    track_index,
+                    chain,
+                    param,
+                    top: *y,
+                    height: theme.automation_height,
+                });
+                *y += theme.automation_height;
+            }
+        };
         for (index, track) in project.tracks.iter().enumerate() {
             let height = editor
                 .track_heights
@@ -311,21 +450,22 @@ impl Layout {
                 height,
             });
             y += height;
-            if !editor.take_lanes.contains(&track.id) {
-                continue;
+            if editor.take_lanes.contains(&track.id) {
+                for (take_index, take) in track.takes.iter().enumerate() {
+                    takes.push(TakeRow {
+                        track_index: index,
+                        index: take_index,
+                        track: track.id,
+                        take: take.id,
+                        top: y,
+                        height: theme.take_height,
+                    });
+                    y += theme.take_height;
+                }
             }
-            for (take_index, take) in track.takes.iter().enumerate() {
-                takes.push(TakeRow {
-                    track_index: index,
-                    index: take_index,
-                    track: track.id,
-                    take: take.id,
-                    top: y,
-                    height: theme.take_height,
-                });
-                y += theme.take_height;
-            }
+            lanes_of(Chain::Track(track.id), Some(index), &mut y);
         }
+        lanes_of(Chain::Master, None, &mut y);
         let viewport = Viewport {
             width: lanes.width(),
             top: viewport.top.clamp(0.0, lowest_top(y, theme, lanes)),
@@ -337,6 +477,9 @@ impl Layout {
         for take in &mut takes {
             take.top += lanes.top() - viewport.top;
         }
+        for lane in &mut automation {
+            lane.top += lanes.top() - viewport.top;
+        }
         Self {
             ruler,
             strip,
@@ -346,11 +489,12 @@ impl Layout {
             viewport,
             rows,
             takes,
+            automation,
             content: y,
         }
     }
 
-    /// Where the last track, or its last take lane, ends.
+    /// Where the last track, or the last lane under it, ends.
     fn bottom(&self) -> f32 {
         self.lanes.top() - self.viewport.top + self.content
     }
@@ -390,6 +534,27 @@ impl Layout {
         self.takes[first..]
             .iter()
             .take_while(|take| take.top < self.lanes.bottom())
+    }
+
+    /// The automation lane at `y`, if there's one there.
+    fn automation_at(&self, y: f32) -> Option<&AutoRow> {
+        let i = self.automation.partition_point(|lane| lane.bottom() <= y);
+        self.automation.get(i).filter(|lane| lane.top <= y)
+    }
+
+    /// The automation lanes in sight, top to bottom.
+    fn visible_automation(&self) -> impl Iterator<Item = &AutoRow> {
+        let first = self
+            .automation
+            .partition_point(|lane| lane.bottom() <= self.lanes.top());
+        self.automation[first..]
+            .iter()
+            .take_while(|lane| lane.top < self.lanes.bottom())
+    }
+
+    /// The automation lane of `param`, if it's shown.
+    fn automation_lane(&self, param: ParamAddress) -> Option<&AutoRow> {
+        self.automation.iter().find(|lane| lane.param == param)
     }
 
     fn row(&self, id: TrackId) -> Option<&Row> {
@@ -516,7 +681,13 @@ impl Scene<'_> {
                         track: lane.track,
                         take: lane.take,
                     },
-                    None => Hit::Empty,
+                    None => match self.layout.automation_at(pos.y) {
+                        Some(lane) => Hit::AutomationHeader {
+                            chain: lane.chain,
+                            param: lane.param,
+                        },
+                        None => Hit::Empty,
+                    },
                 },
             },
         }
@@ -534,6 +705,13 @@ impl Scene<'_> {
                 track: lane.track,
                 take: lane.take,
                 clip: clip.map(|clip| clip.id),
+            };
+        }
+        if let Some(lane) = self.layout.automation_at(pos.y) {
+            return Hit::Automation {
+                chain: lane.chain,
+                param: lane.param,
+                part: self.envelope_part(lane, pos),
             };
         }
         let Some(row) = self.layout.row_at(pos.y) else {
@@ -598,6 +776,302 @@ impl Scene<'_> {
         } else {
             Hit::Strip
         }
+    }
+
+    /// What's under `pos` on the automation lane `lane`: one of its points,
+    /// the line through them, or neither.
+    fn envelope_part(&self, lane: &AutoRow, pos: Pos2) -> Envelope {
+        let layout = &self.layout;
+        let grab = self.theme.point_grab;
+        let spec = self.spec(lane.param);
+        let y = |value: f64| lane.y_of(self.theme, spec.scale.to_unit(value, spec.min, spec.max));
+        let project = self.project();
+        let Some(automated) = project.lane(lane.param) else {
+            let own = project.param_value(lane.param);
+            return match own.is_some_and(|own| (y(own) - pos.y).abs() <= grab) {
+                true => Envelope::Line { from: 0, to: 0 },
+                false => Envelope::Lane,
+            };
+        };
+        let points = &automated.points;
+        let at = |point: &Point| pos2(layout.x_of(point.at), y(point.value));
+        // The points within reach across, and the nearest of them that's
+        // within reach.
+        let first = points.partition_point(|p| layout.x_of(p.at) < pos.x - grab);
+        let last = points.partition_point(|p| layout.x_of(p.at) <= pos.x + grab);
+        let nearest = (first..last)
+            .map(|i| (at(&points[i]).distance(pos), i))
+            .filter(|&(distance, _)| distance <= grab)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, i)) = nearest {
+            return Envelope::Point(i);
+        }
+        let Some(end) = points.len().checked_sub(1) else {
+            return Envelope::Lane;
+        };
+        // The lines from the point before those to the one after, and the
+        // level lines before the first point and after the last.
+        let mut lines = Vec::new();
+        if first == 0 {
+            let start = pos2(layout.lanes.left(), y(points[0].value));
+            lines.push((start, at(&points[0]), 0, 0));
+        }
+        for i in first.saturating_sub(1)..last.min(end) {
+            lines.push((at(&points[i]), at(&points[i + 1]), i, i + 1));
+        }
+        if last > end {
+            let finish = pos2(layout.lanes.right(), y(points[end].value));
+            lines.push((at(&points[end]), finish, end, end));
+        }
+        lines
+            .into_iter()
+            .map(|(a, b, from, to)| (distance_to_segment(pos, a, b), from, to))
+            .filter(|&(distance, ..)| distance <= grab)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(Envelope::Lane, |(_, from, to)| Envelope::Line { from, to })
+    }
+
+    /// What the parameter at `param` is: as the project knows it, or as
+    /// its plugin says, or else a parameter from 0 to 1.
+    fn spec(&self, param: ParamAddress) -> ParamSpec {
+        if let Some(spec) = self.project().param_spec(param) {
+            return spec;
+        }
+        let listed = match param {
+            ParamAddress::Device(device, n) => (self.view.plugins.status.get(&device))
+                .and_then(|status| status.params.iter().find(|p| p.id == n)),
+            _ => None,
+        };
+        match (listed, param) {
+            (Some(listed), _) => listed.spec.clone(),
+            (None, ParamAddress::Device(_, n)) => unknown(format!("Parameter {n}")),
+            (None, param) => unknown(param_text(param)),
+        }
+    }
+
+    /// What the automation lane of `param` is called: the parameter's name,
+    /// after its device's for a device's.
+    fn lane_name(&self, param: ParamAddress) -> String {
+        let name = self.spec(param).name;
+        let device = match param {
+            ParamAddress::Device(device, _) => self.project().find_device(device),
+            _ => None,
+        };
+        match device {
+            Some((_, _, device)) => format!("{}: {name}", describe(device).0),
+            None => name,
+        }
+    }
+
+    /// An automation lane's name, with its channel's: "Volume of Drums".
+    fn lane_label(&self, lane: &AutoRow) -> String {
+        let channel = match lane.chain {
+            Chain::Track(id) => self.project().track(id).map_or("", |t| t.name.as_str()),
+            Chain::Master => "Master",
+        };
+        format!("{} of {channel}", self.lane_name(lane.param))
+    }
+
+    /// Where the line of the automation lane of `param` is at `at`: on its
+    /// points, even where someone overrode it, or else at the parameter's
+    /// own value, if that's known.
+    fn line_value(&self, param: ParamAddress, at: Beats) -> Option<f64> {
+        let project = self.project();
+        match project.lane(param) {
+            Some(lane) => lane.value_at(at, self.spec(param).scale),
+            None => project.param_value(param),
+        }
+    }
+
+    /// The value of `param` at the playhead, as its control would show it:
+    /// what its automation gives it, unless someone overrode that, or else
+    /// its own, if that's known.
+    fn value_text(&self, param: ParamAddress) -> Option<String> {
+        let project = self.project();
+        let spec = self.spec(param);
+        let value = match project.lane(param) {
+            Some(lane) if !lane.overridden => {
+                lane.value_at(self.view.playback.playhead, spec.scale)
+            }
+            _ => project.param_value(param),
+        }?;
+        Some(match param {
+            ParamAddress::Pan(_) => pan_text(value as f32),
+            _ if spec.scale == Scale::Fader => decibels(value as f32),
+            _ => format!("{value:.2}"),
+        })
+    }
+
+    /// What the header of the automation lane of `param` says of it: its
+    /// value at the playhead, or that someone overrode its automation.
+    fn header_value(&self, param: ParamAddress) -> Option<String> {
+        match self
+            .project()
+            .lane(param)
+            .is_some_and(|lane| lane.overridden)
+        {
+            true => Some("Overridden".to_owned()),
+            false => self.value_text(param),
+        }
+    }
+
+    /// The parameters on `chain` an automation lane can show, with their
+    /// names: the channel's volume, pan and sends, then each device's
+    /// parameters, by device.
+    #[allow(clippy::type_complexity)]
+    fn chain_params(
+        &self,
+        chain: Chain,
+    ) -> (
+        Vec<(ParamAddress, String)>,
+        Vec<(String, Vec<(ParamAddress, String)>)>,
+    ) {
+        let project = self.project();
+        let mut own = vec![
+            (ParamAddress::Volume(chain), "Volume".to_owned()),
+            (ParamAddress::Pan(chain), "Pan".to_owned()),
+        ];
+        if let Chain::Track(id) = chain
+            && let Some(track) = project.track(id)
+        {
+            for send in &track.sends {
+                let param = ParamAddress::Send(send.id);
+                own.push((param, self.spec(param).name));
+            }
+        }
+        let devices = project.devices(chain).unwrap_or_default();
+        let devices = devices.iter().map(|device| {
+            let params = match &device.kind {
+                DeviceKind::Plugin(_) => {
+                    let status = self.view.plugins.status.get(&device.id);
+                    let listed = status.map_or(&[][..], |status| &status.params[..]);
+                    let mut params: Vec<(ParamAddress, String)> = (listed.iter())
+                        .map(|p| (ParamAddress::Device(device.id, p.id), p.spec.name.clone()))
+                        .collect();
+                    // Lanes of parameters it doesn't list, as before it
+                    // loads.
+                    for lane in &project.automation {
+                        if let ParamAddress::Device(on, _) = lane.param
+                            && on == device.id
+                            && !params.iter().any(|&(param, _)| param == lane.param)
+                        {
+                            params.push((lane.param, self.spec(lane.param).name));
+                        }
+                    }
+                    params
+                }
+                _ => {
+                    let param = ParamAddress::Device(device.id, 0);
+                    vec![(param, self.spec(param).name)]
+                }
+            };
+            (describe(device).0.to_owned(), params)
+        });
+        (own, devices.collect())
+    }
+
+    /// The parameter a new lane under `chain` shows: the first automated
+    /// one without a lane in sight, or else the first without one.
+    fn next_param(&self, chain: Chain) -> Option<ParamAddress> {
+        let shown = self.editor().automation.get(&chain);
+        let (own, devices) = self.chain_params(chain);
+        let hidden: Vec<ParamAddress> = (own.into_iter())
+            .chain(devices.into_iter().flat_map(|(_, params)| params))
+            .map(|(param, _)| param)
+            .filter(|param| shown.is_none_or(|shown| !shown.contains(param)))
+            .collect();
+        let automated = hidden.iter().find(|&&p| self.project().lane(p).is_some());
+        automated.or(hidden.first()).copied()
+    }
+
+    /// The step of the grid `at` is in.
+    fn cell(&self, at: Beats) -> (Beats, Beats) {
+        let zoom = self.layout.viewport.zoom;
+        self.editor().grid.cell(&self.project().tempo, at, zoom)
+    }
+
+    /// Whether `drag` draws a step of the grid at a time.
+    fn draws_steps(&self, drag: &Drag) -> bool {
+        drag.action == MouseAction::Draw && self.editor().grid.snap
+    }
+
+    /// Draws on the automation lane `drag` started on, from where the
+    /// pointer last drew to where it is now.
+    fn draw(&self, drag: &mut Drag) {
+        let Hit::Automation { param, .. } = drag.hit else {
+            return;
+        };
+        let Some(lane) = self.layout.automation_lane(param) else {
+            return;
+        };
+        let layout = &self.layout;
+        let spec = self.spec(param);
+        let (from, to) = (drag.drawn.last.unwrap_or(drag.to), drag.to);
+        // The value along the way from `from` to `to`, at `x`.
+        let value = |x: f32| {
+            let along = match to.x - from.x {
+                0.0 => 1.0,
+                across => ((x - from.x) / across).clamp(0.0, 1.0),
+            };
+            let y = from.y + (to.y - from.y) * along;
+            (spec.scale).from_unit(lane.unit_at(self.theme, y), spec.min, spec.max)
+        };
+        let beats = |x: f32| layout.beats_at(x).max(Beats::ZERO);
+        let (left, right) = (from.x.min(to.x), from.x.max(to.x));
+        let steps = self.draws_steps(drag);
+        let values = &mut drag.drawn.values;
+        if steps {
+            // Each step crossed takes the value where the pointer crossed
+            // its middle, or came nearest it.
+            let end = beats(right);
+            let mut at = beats(left);
+            loop {
+                let (start, next) = self.cell(at);
+                let middle = (layout.x_of(start) + layout.x_of(next)) / 2.0;
+                values.insert(start, value(middle.clamp(left, right)));
+                if next > end || next <= at {
+                    break;
+                }
+                at = next;
+            }
+        } else {
+            // What was drawn between goes, so going back draws over it.
+            let (start, end) = (beats(left), beats(right));
+            values.retain(|&at, _| at <= start || at >= end);
+            values.insert(beats(from.x), value(from.x));
+            values.insert(beats(to.x), value(to.x));
+        }
+        drag.drawn.last = Some(to);
+    }
+
+    /// The points of the automation of `param` once what `drawn` drew
+    /// takes the place of what was there: a step at either end of it, from
+    /// the line as it was, or the parameter's own value, to what was drawn
+    /// and back.
+    fn drawn_points(&self, param: ParamAddress, drawn: &Drawn, steps: bool) -> Option<Vec<Point>> {
+        let (&start, _) = drawn.values.first_key_value()?;
+        let (&last, _) = drawn.values.last_key_value()?;
+        let end = if steps { self.cell(last).1 } else { last };
+        let project = self.project();
+        let scale = self.spec(param).scale;
+        let lane = project.lane(param);
+        let own = project.param_value(param);
+        let before = lane.map_or(own, |lane| lane.value_before(start, scale));
+        let after = lane.map_or(own, |lane| lane.value_at(end, scale));
+        let old = lane.map_or(&[][..], |lane| &lane.points[..]);
+        let mut points: Vec<Point> = old.iter().filter(|p| p.at < start).copied().collect();
+        points.extend(before.map(|value| Point::new(start, value)));
+        let mut values = drawn.values.iter().peekable();
+        while let Some((&at, &value)) = values.next() {
+            points.push(Point::new(at, value));
+            if steps {
+                let next = values.peek().map_or(end, |&(&next, _)| next);
+                points.push(Point::new(next, value));
+            }
+        }
+        points.extend(after.map(|value| Point::new(end, value)));
+        points.extend(old.iter().filter(|p| p.at > end));
+        Some(simplified(points))
     }
 
     /// What `drag` would do if it ended now.
@@ -768,9 +1242,102 @@ impl Scene<'_> {
                     end: start.max(end),
                 })
             }
+            (
+                MouseAction::MovePoint | MouseAction::MovePointFree,
+                Hit::Automation {
+                    param,
+                    part: Envelope::Point(i),
+                    ..
+                },
+            ) => {
+                let lane = layout.automation_lane(param)?;
+                let old = &project.lane(param)?.points;
+                let point = *old.get(i)?;
+                let spec = self.spec(param);
+                // It stays between the points either side.
+                let free = drag.action == MouseAction::MovePointFree;
+                let earliest = i
+                    .checked_sub(1)
+                    .map_or(Beats::ZERO, |before| old[before].at);
+                let mut at = self.snap(point.at + moved, free).max(earliest);
+                if let Some(next) = old.get(i + 1) {
+                    at = at.min(next.at);
+                }
+                let unit = spec.scale.to_unit(point.value, spec.min, spec.max)
+                    + lane.units_in(self.theme, drag.from.y - drag.to.y);
+                let mut points = old.clone();
+                points[i] = Point::new(at, spec.scale.from_unit(unit, spec.min, spec.max));
+                (points != *old).then_some(Plan::Points { param, points })
+            }
+            (
+                MouseAction::MoveSegment,
+                Hit::Automation {
+                    param,
+                    part: Envelope::Line { from, to },
+                    ..
+                },
+            ) => {
+                let lane = layout.automation_lane(param)?;
+                let old = &project.lane(param)?.points;
+                let spec = self.spec(param);
+                let up = lane.units_in(self.theme, drag.from.y - drag.to.y);
+                let mut points = old.clone();
+                for point in points.get_mut(from..=to)? {
+                    let unit = spec.scale.to_unit(point.value, spec.min, spec.max) + up;
+                    point.value = spec.scale.from_unit(unit, spec.min, spec.max);
+                }
+                (points != *old).then_some(Plan::Points { param, points })
+            }
+            (MouseAction::Draw | MouseAction::DrawFree, Hit::Automation { param, .. }) => {
+                let points = self.drawn_points(param, &drag.drawn, self.draws_steps(drag))?;
+                let old = project.lane(param).map(|lane| &lane.points);
+                (old != Some(&points)).then_some(Plan::Points { param, points })
+            }
             _ => None,
         }
     }
+}
+
+/// A parameter called `name`, from 0 to 1, for a lane whose parameter is
+/// unknown, such as a plugin's before the plugin loads.
+fn unknown(name: String) -> ParamSpec {
+    ParamSpec {
+        name,
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        scale: Scale::Linear,
+    }
+}
+
+/// How far `pos` is from the line from `a` to `b`.
+fn distance_to_segment(pos: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let along = b - a;
+    let length = along.length_sq();
+    let t = match length {
+        0.0 => 0.0,
+        _ => ((pos - a).dot(along) / length).clamp(0.0, 1.0),
+    };
+    (a + along * t).distance(pos)
+}
+
+/// `points` without those that change nothing: one just like the one
+/// before it, and one in a level stretch between two of the same value.
+fn simplified(points: Vec<Point>) -> Vec<Point> {
+    let mut kept: Vec<Point> = Vec::with_capacity(points.len());
+    for point in points {
+        if kept.last() == Some(&point) {
+            continue;
+        }
+        if let [.., before, middle] = kept[..]
+            && before.value == middle.value
+            && middle.value == point.value
+        {
+            kept.pop();
+        }
+        kept.push(point);
+    }
+    kept
 }
 
 /// The index of the track with the clip with id `id`, and the clip.
@@ -854,6 +1421,15 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
                 .with("start", *start)
                 .with("end", *end);
             run(actions, takes::COMP, args);
+        }
+        Plan::Points { param, points } => {
+            let at: Vec<Beats> = points.iter().map(|point| point.at).collect();
+            let values: Vec<f64> = points.iter().map(|point| point.value).collect();
+            let args = Args::new()
+                .with("param", *param)
+                .with("at", at)
+                .with("values", values);
+            run(actions, automation::SET_POINTS, args);
         }
     }
 }
@@ -1005,6 +1581,9 @@ impl Arrangement {
             if let Some(pos) = response.interact_pointer_pos() {
                 drag.to = pos;
             }
+            if matches!(drag.action, MouseAction::Draw | MouseAction::DrawFree) {
+                scene.draw(drag);
+            }
             // Holding Ctrl or Alt part of the way through a drag of clips
             // copies them or stops snapping.
             if let Hit::Clip {
@@ -1114,6 +1693,66 @@ impl Arrangement {
                 select_time(actions, Vec::new());
                 marker(actions);
             }
+            (MouseAction::PlaceMarker, Hit::Automation { chain, .. }) => {
+                let tracks = match chain {
+                    Chain::Track(track) => vec![track],
+                    Chain::Master => Vec::new(),
+                };
+                select_time(actions, tracks);
+                marker(actions);
+            }
+            (
+                MouseAction::Select,
+                Hit::AutomationHeader {
+                    chain: Chain::Track(track),
+                    ..
+                },
+            ) => {
+                let args = Args::new().with("tracks", vec![track]);
+                run(actions, edit::SELECT_TRACKS, args);
+            }
+            (MouseAction::AddPoint, Hit::Automation { param, part, .. }) => {
+                let Some(lane) = scene.layout.automation_lane(param) else {
+                    return false;
+                };
+                // On the line, a point on it, which changes nothing until
+                // it's moved.
+                let on_line = match part {
+                    Envelope::Line { .. } => scene.line_value(param, at),
+                    _ => None,
+                };
+                let spec = scene.spec(param);
+                let value = on_line.unwrap_or_else(|| {
+                    let unit = lane.unit_at(scene.theme, pos.y);
+                    spec.scale.from_unit(unit, spec.min, spec.max)
+                });
+                let args = Args::new()
+                    .with("param", param)
+                    .with("at", at)
+                    .with("value", value);
+                run(actions, automation::ADD_POINT, args);
+            }
+            (
+                MouseAction::DeletePoint,
+                Hit::Automation {
+                    param,
+                    part: Envelope::Point(i),
+                    ..
+                },
+            ) => {
+                let Some(lane) = project.lane(param).filter(|lane| i < lane.points.len()) else {
+                    return false;
+                };
+                let mut points = lane.points.clone();
+                points.remove(i);
+                // Without points, the parameter keeps the value it had at
+                // the playhead.
+                if points.is_empty() {
+                    run(actions, automation::CLEAR, Args::new().with("param", param));
+                } else {
+                    send(actions, &Plan::Points { param, points });
+                }
+            }
             (MouseAction::Locate, Hit::Locator(id)) => {
                 let at = project.locator(id).map_or(at, |locator| locator.at);
                 run(actions, transport::LOCATE, Args::new().with("at", at));
@@ -1193,6 +1832,7 @@ impl Arrangement {
             viewport: scene.layout.viewport,
             height: 0.0,
             sent: None,
+            drawn: Drawn::default(),
         };
         match (action, hit) {
             (
@@ -1215,6 +1855,7 @@ impl Arrangement {
             (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => {
                 drag.height = scene.layout.row(track).map_or(0.0, |row| row.height);
             }
+            (MouseAction::Draw | MouseAction::DrawFree, _) => scene.draw(&mut drag),
             _ => {}
         }
         self.drag = Some(drag);
@@ -1282,6 +1923,15 @@ impl Arrangement {
                         theme.arm,
                         format!("Arm track {name}"),
                     ),
+                    HeaderButton::Automation => (
+                        Face::Text("A"),
+                        scene
+                            .editor()
+                            .automation
+                            .contains_key(&Chain::Track(track.id)),
+                        theme.automation,
+                        format!("Show automation of track {name}"),
+                    ),
                 };
                 let id = Id::unique(("header button", track.id, button));
                 let response = ui.interact(rect, id, Sense::click());
@@ -1298,6 +1948,11 @@ impl Arrangement {
                     continue;
                 }
                 let change = match button {
+                    HeaderButton::Automation => {
+                        let args = Args::new().with("track", track.id);
+                        run(actions, automation::SHOW, args);
+                        continue;
+                    }
                     HeaderButton::Mute => Change::Muted(track.id, !on),
                     HeaderButton::Arm => Change::Armed(track.id, !on),
                     HeaderButton::Solo => {
@@ -1310,6 +1965,42 @@ impl Arrangement {
                     }
                 };
                 actions.push(Action::Mixer(change));
+            }
+        }
+        for lane in scene.layout.visible_automation() {
+            let name = scene.lane_label(lane);
+            for (button, rect) in paint::lane_buttons(scene, lane) {
+                let (face, label) = match button {
+                    LaneButton::Choose => (Face::Menu, format!("Choose the parameter of {name}")),
+                    LaneButton::Add => (Face::Text("+"), format!("Add a lane under {name}")),
+                    LaneButton::Hide => (Face::Text("\u{d7}"), format!("Hide {name}")),
+                };
+                let id = Id::unique(("lane button", lane.param, button));
+                let response = ui.interact(rect, id, Sense::click());
+                response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+                let param = Args::new().with("param", lane.param);
+                match button {
+                    LaneButton::Choose => {
+                        Popup::menu(&response).show(|ui| choose_param(ui, scene, lane, actions));
+                    }
+                    LaneButton::Add if response.clicked() => {
+                        if let Some(next) = scene.next_param(lane.chain) {
+                            let args = Args::new().with("param", next);
+                            run(actions, automation::SHOW_LANE, args);
+                        }
+                    }
+                    LaneButton::Hide if response.clicked() => {
+                        run(actions, automation::HIDE_LANE, param);
+                    }
+                    _ => {}
+                }
+                buttons.push(Button {
+                    rect,
+                    response,
+                    face,
+                    on: false,
+                    colour: theme.automation,
+                });
             }
         }
         buttons
@@ -1406,12 +2097,21 @@ impl Arrangement {
             (_, Some(MouseAction::Move | MouseAction::MoveFree | MouseAction::MoveLocator)) => {
                 Some(CursorIcon::Grab)
             }
-            (_, Some(MouseAction::MoveLoop)) => Some(CursorIcon::Grab),
+            (_, Some(MouseAction::MoveLoop | MouseAction::MovePoint)) => Some(CursorIcon::Grab),
+            (_, Some(MouseAction::MovePointFree)) => Some(CursorIcon::Grab),
+            (_, Some(MouseAction::MoveSegment)) => Some(CursorIcon::ResizeVertical),
+            (_, Some(MouseAction::Draw | MouseAction::DrawFree)) => Some(CursorIcon::Crosshair),
             _ => None,
         };
         let shown = match &self.drag {
             Some(drag) => match (drag.action, plan) {
-                (MouseAction::Move | MouseAction::MoveFree, _) => Some(CursorIcon::Grabbing),
+                (
+                    MouseAction::Move
+                    | MouseAction::MoveFree
+                    | MouseAction::MovePoint
+                    | MouseAction::MovePointFree,
+                    _,
+                ) => Some(CursorIcon::Grabbing),
                 (MouseAction::Copy, _) => Some(CursorIcon::Copy),
                 (action, _) => icon(drag.hit, Some(action)),
             },
@@ -1471,9 +2171,57 @@ impl Arrangement {
 /// The buttons in a track's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum HeaderButton {
+    /// Shows the track's automation lanes, or hides them.
+    Automation,
     Mute,
     Solo,
     Arm,
+}
+
+/// The buttons in an automation lane's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LaneButton {
+    /// Picks the parameter the lane shows.
+    Choose,
+    /// Shows another lane under the channel.
+    Add,
+    Hide,
+}
+
+/// The parameters `lane` can show, to pick from: its channel's own, then
+/// each device's, with those that have automation in its colour.
+fn choose_param(ui: &mut Ui, scene: &Scene<'_>, lane: &AutoRow, actions: &mut Vec<Action>) {
+    let (own, devices) = scene.chain_params(lane.chain);
+    let mut item = |ui: &mut Ui, param: ParamAddress, name: &str| {
+        let mut text = RichText::new(name);
+        if scene.project().lane(param).is_some() {
+            text = text.color(scene.theme.automation);
+        }
+        if ui
+            .add(egui::Button::selectable(param == lane.param, text))
+            .clicked()
+        {
+            if param != lane.param {
+                let args = Args::new()
+                    .with("param", param)
+                    .with("instead_of", lane.param);
+                run(actions, automation::SHOW_LANE, args);
+            }
+            ui.close();
+        }
+    };
+    for (param, name) in &own {
+        item(ui, *param, name);
+    }
+    for (device, params) in &devices {
+        ui.menu_button(device.as_str(), |ui| {
+            ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for (param, name) in params {
+                    item(ui, *param, name);
+                }
+            });
+        });
+    }
 }
 
 /// A header's button, to be drawn once the headers are.
@@ -1577,6 +2325,44 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
         response.widget_info(|| {
             WidgetInfo::labeled(Role::Row, true, format!("{} of {}", take.name, track.name))
         });
+    }
+    for lane in layout.visible_automation() {
+        let name = scene.lane_label(lane);
+        let header = Rect::from_x_y_ranges(layout.headers.x_range(), lane.top..=lane.bottom());
+        let response = ui.interact(
+            header.intersect(layout.headers),
+            id.with(("automation", lane.param)),
+            Sense::hover(),
+        );
+        let value = scene.header_value(lane.param);
+        response.widget_info(|| WidgetInfo {
+            current_text_value: value.clone(),
+            ..WidgetInfo::labeled(Role::Row, true, &name)
+        });
+        // Its points in sight, while there are few enough to name.
+        let Some(automated) = project.lane(lane.param) else {
+            continue;
+        };
+        let points = &automated.points;
+        let first = points.partition_point(|p| p.at < visible.start);
+        let last = points.partition_point(|p| p.at <= visible.end);
+        if last - first > MAX_NAMED_POINTS {
+            continue;
+        }
+        let spec = scene.spec(lane.param);
+        for (i, point) in points.iter().enumerate().take(last).skip(first) {
+            let unit = spec.scale.to_unit(point.value, spec.min, spec.max);
+            let at = pos2(layout.x_of(point.at), lane.y_of(scene.theme, unit));
+            let rect = Rect::from_center_size(at, vec2(2.0, 2.0) * scene.theme.point);
+            let response = ui.interact(
+                rect.intersect(layout.lanes),
+                id.with(("point", lane.param, i)),
+                Sense::hover(),
+            );
+            response.widget_info(|| {
+                WidgetInfo::labeled(Role::Button, true, format!("Point {} of {name}", i + 1))
+            });
+        }
     }
     for locator in &project.locators {
         if !visible.contains(locator.at) {

@@ -10,12 +10,13 @@ tools can read and write projects too. `crates/io` implements it, in
 A project with a bass track playing a recording and sending to a reverb on
 a return track, and a keys track playing a note through the test
 instrument, bending it up a tone. It loops the first four bars, with the
-master's soft clip stage on, and a locator marks the chorus at bar 3:
+master's soft clip stage on, a locator marks the chorus at bar 3, and the
+bass's send to the reverb swells up to it:
 
 ```json
 {
   "format": "musicable-project",
-  "version": 6,
+  "version": 7,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -200,6 +201,18 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
       "name": "Chorus",
       "at": 2580480
     }
+  ],
+  "automation": [
+    {
+      "param": {
+        "send": 0
+      },
+      "points": [
+        [1290240, 0.5],
+        [2580480, 1.0]
+      ],
+      "overridden": false
+    }
   ]
 }
 ```
@@ -246,7 +259,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 6 for this page. |
+| `version` | whole number | The format version: 7 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -263,6 +276,7 @@ in version control shows only what really changed.
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
 | `locators` | array of locators | Named places in the song, in any order. |
+| `automation` | array of lanes | The automated parameters, a lane for each, in any order. |
 
 ### Tempo map
 
@@ -493,6 +507,42 @@ the parts of a song and jumping between them.
 | `name` | string | Any text, empty included. |
 | `at` | position | Where it is. Two locators can be at the same place. |
 
+### Lane
+
+A lane of automation moves a parameter as the song plays, in place of the
+parameter's own value.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `param` | parameter | The parameter it moves. No two lanes move the same one. |
+| `points` | array of points | Where the parameter goes: at least one point, in order of position. |
+| `overridden` | boolean | Whether someone moved the parameter by hand since, so it keeps its own value until they re-enable automation. The lane stays as it is meanwhile. |
+
+A **parameter** is an object with one field, saying whose it is:
+
+| Parameter | Meaning |
+|---|---|
+| `{"volume": channel}` | A channel's fader, its `gain`. |
+| `{"pan": channel}` | A channel's `pan`. |
+| `{"send": id}` | The `level` of the send with that id. |
+| `{"device": {"id": id, "param": n}}` | Parameter `n` of the device with that id. For a plugin, `n` is the plugin's id for the parameter, as in its `params`, up to 4,294,967,295. A test device has only parameter 0: its `gain` or `level`. |
+
+A **channel** is `{"track": id}`, the track with that id, or `"master"`.
+
+A **point** is a pair `[at, value]`. `at` is a position, 0 or after, and
+`value` a float in the parameter's own units, the ones its own field uses:
+linear gain for a fader, a send or a test gain, −1.0 to 1.0 for a pan, and a
+plugin's own values for its parameters.
+
+Between two points the value moves in a straight line, for faders, sends and
+the test devices' settings on the fader's scale, where a gain's position is
+its fourth root, and for pans and plugins' parameters in their own units.
+Two points at the same position make a step: the value jumps there from the
+first's to the second's, so no more than two share a position. Before the
+first point the lane holds the first point's value, and after the last the
+last point's. Playback glides over steps and jumps in 10 ms, so they don't
+click.
+
 ### Routing
 
 Signal flows from tracks to buses without loops:
@@ -516,6 +566,7 @@ Signal flows from tracks to buses without loops:
 | 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
 | 5 | 2026-10-22 | Plugin devices, with their state and parameters. Version 4 files have none. |
 | 6 | 2026-10-22 | Recording: each track's input and monitoring, takes, and punching in and out. Version 5 audio tracks record from the default input's first two channels, MIDI tracks from every MIDI input, all with `"auto"` monitoring and no takes, and punching in and out is off. |
+| 7 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 6 files have none. |
 
 ## Changing the format
 

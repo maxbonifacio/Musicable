@@ -125,7 +125,7 @@ Tier 1 has to keep these. The tests check most of them.
   that depends on time, such as the test tone's phase or the metronome's
   clicks, works it out from the block's song position and the tempo map. So
   loops, locates and any block size give the same samples. Clip players and
-  automation should work the same way.
+  automation work the same way.
 - **What would click when it jumps ramps instead**, with
   `nodes::Smoothed`, as gain stages do. A ramp counts frames from its
   event, never blocks, so it lands on the same samples however the blocks
@@ -202,13 +202,15 @@ built yet, except where it says so.
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
   peak and RMS meters in atomics, shown in the app's mixer
   ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)).
-- **Automation.** Parameter events are already sample-accurate, but a lane
-  belongs in the graph, not in the message queue, which holds 1,024
-  messages. Compile each lane into its node, or into an automation node, and
-  read it at the song position, so it loops and locates like everything
-  else. A lane can give its node a value per frame, which needs no
-  smoothing; values that arrive as events ramp over 10 ms
-  (`nodes::Smoothed`).
+- **Automation.** Built: each lane is compiled into the node with its
+  parameter, not sent through the message queue, and read at the song
+  position, so it loops and locates like everything else. The mixer's
+  `Gain` reads its lanes frame by frame with an `automation::Param`, which
+  glides over jumps and adds modulation after its smoothing, and plugins
+  get theirs as parameter events on the points' frames and on a 32-frame
+  grid. Moving a control by hand overrides its lane until it's re-enabled
+  ([engine.md](engine.md#automation), [commands.md](commands.md#automation),
+  [app.md](app.md#the-arrangement)). Tempo automation is Tier 2.
 - **Recording.** Built for audio: the backend captures inputs, system
   loopback on Windows among them, lined up with the output frame for frame
   ([audio.md](audio.md#inputs)); each audio track monitors its input

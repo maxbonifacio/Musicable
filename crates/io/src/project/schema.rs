@@ -12,10 +12,12 @@ use std::collections::HashMap;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use musicable_model::automation;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{self, Beats};
-use musicable_model::{self as model, DeviceId, LocatorId, SendId, TakeId, TrackId};
+use musicable_model::{self as model, Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
 use serde::{Deserialize, Serialize};
 
 use super::{FORMAT, Invalid, MAX_TICKS, VERSION};
@@ -42,6 +44,7 @@ pub(super) struct File {
     tracks: Vec<Track>,
     master: Master,
     locators: Vec<Locator>,
+    automation: Vec<Lane>,
 }
 
 /// A named place in the song.
@@ -297,6 +300,40 @@ enum ClipType {
 #[serde(deny_unknown_fields)]
 struct ConsoleSettings {}
 
+/// A parameter's automation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Lane {
+    param: Param,
+    /// `[at, value]` pairs, `at` in ticks, in order.
+    points: Vec<(i64, f64)>,
+    overridden: bool,
+}
+
+/// Externally tagged, `{"volume": "master"}` or `{"send": 3}`, for the
+/// reason [`DeviceKind`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Param {
+    Volume(Channel),
+    Pan(Channel),
+    /// A send's id.
+    Send(u32),
+    /// A device's id, and the device's number for the parameter.
+    Device {
+        id: u32,
+        param: u32,
+    },
+}
+
+/// A track by id, `{"track": 3}`, or `"master"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Channel {
+    Track(u32),
+    Master,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Master {
@@ -319,6 +356,7 @@ impl From<&model::Project> for File {
             master,
             tracks,
             locators,
+            automation,
             next_track_id,
             next_send_id,
             next_device_id,
@@ -345,6 +383,7 @@ impl From<&model::Project> for File {
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
+            automation: automation.iter().map(Lane::from).collect(),
         }
     }
 }
@@ -372,6 +411,7 @@ impl File {
             tracks,
             master,
             locators,
+            automation,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
             let message = format!("must be {}", Beats::TICKS_PER_BEAT);
@@ -426,6 +466,21 @@ impl File {
             model_locators.push(locator.to_model(&path)?);
         }
         locator_ids.check_next()?;
+        let params = Params {
+            tracks: &kinds,
+            sends: &send_ids,
+            devices: &device_ids,
+        };
+        let mut automated: HashMap<Param, usize> = HashMap::new();
+        let mut model_lanes = Vec::with_capacity(automation.len());
+        for (i, lane) in automation.iter().enumerate() {
+            let path = format!("automation[{i}]");
+            if let Some(first) = automated.insert(lane.param, i) {
+                let message = format!("automation[{first}] automates it too");
+                return Err(Invalid::new(format!("{path}.param"), message));
+            }
+            model_lanes.push(lane.to_model(&path, &params)?);
+        }
         let project = model::Project {
             tempo,
             loop_region,
@@ -436,6 +491,7 @@ impl File {
             master: master.to_model()?,
             tracks: model_tracks,
             locators: model_locators,
+            automation: model_lanes,
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
@@ -444,6 +500,18 @@ impl File {
             next_take_id: *next_take_id,
         };
         check_loops(&project)?;
+        // Which parameters a device has depends on its kind.
+        for (i, lane) in project.automation.iter().enumerate() {
+            if let ParamAddress::Device(device, n) = lane.param
+                && !project.has_param(lane.param)
+            {
+                let message = format!(
+                    "names parameter {n} of device {}, which has only parameter 0",
+                    device.0
+                );
+                return Err(Invalid::new(format!("automation[{i}].param"), message));
+            }
+        }
         Ok(project)
     }
 }
@@ -1463,6 +1531,110 @@ impl Locator {
             id: LocatorId(*id),
             name: name.clone(),
             at: position(*at, || format!("{path}.at"))?,
+        })
+    }
+}
+
+/// What a lane's parameter can belong to: the file's tracks, sends and
+/// devices.
+struct Params<'a> {
+    tracks: &'a HashMap<u32, TrackKind>,
+    sends: &'a Ids,
+    devices: &'a Ids,
+}
+
+impl From<&automation::Lane> for Lane {
+    fn from(lane: &automation::Lane) -> Self {
+        let automation::Lane {
+            param,
+            points,
+            overridden,
+        } = lane;
+        let channel = |chain| match chain {
+            Chain::Track(track) => Channel::Track(track.0),
+            Chain::Master => Channel::Master,
+        };
+        Self {
+            param: match *param {
+                ParamAddress::Volume(chain) => Param::Volume(channel(chain)),
+                ParamAddress::Pan(chain) => Param::Pan(channel(chain)),
+                ParamAddress::Send(send) => Param::Send(send.0),
+                ParamAddress::Device(device, param) => Param::Device {
+                    id: device.0,
+                    param,
+                },
+            },
+            points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
+            overridden: *overridden,
+        }
+    }
+}
+
+impl Lane {
+    fn to_model(&self, path: &str, params: &Params<'_>) -> Result<automation::Lane, Invalid> {
+        let Self {
+            param,
+            points,
+            overridden,
+        } = self;
+        let channel = |channel| match channel {
+            Channel::Master => Ok(Chain::Master),
+            Channel::Track(id) if params.tracks.contains_key(&id) => Ok(Chain::Track(TrackId(id))),
+            Channel::Track(id) => {
+                let message = format!("names track {id}, which the file hasn't");
+                Err(Invalid::new(format!("{path}.param"), message))
+            }
+        };
+        let missing = |what: &str, id: u32| {
+            let message = format!("names {what} {id}, which the file hasn't");
+            Invalid::new(format!("{path}.param"), message)
+        };
+        let param = match *param {
+            Param::Volume(on) => ParamAddress::Volume(channel(on)?),
+            Param::Pan(on) => ParamAddress::Pan(channel(on)?),
+            Param::Send(id) if params.sends.seen.contains_key(&id) => {
+                ParamAddress::Send(SendId(id))
+            }
+            Param::Send(id) => return Err(missing("send", id)),
+            Param::Device { id, param } if params.devices.seen.contains_key(&id) => {
+                ParamAddress::Device(DeviceId(id), param)
+            }
+            Param::Device { id, .. } => return Err(missing("device", id)),
+        };
+        if points.is_empty() {
+            let message = "needs at least one point: a parameter without automation has no lane";
+            return Err(Invalid::new(format!("{path}.points"), message));
+        }
+        let mut model_points: Vec<automation::Point> = Vec::with_capacity(points.len());
+        for (j, &(at, value)) in points.iter().enumerate() {
+            let path = format!("{path}.points[{j}]");
+            let at = position(at, || format!("{path}[0]"))?;
+            if at < Beats::ZERO {
+                let message = "can't be before the start of the song";
+                return Err(Invalid::new(format!("{path}[0]"), message));
+            }
+            let value = finite(value, || format!("{path}[1]"))?;
+            if matches!(param, ParamAddress::Pan(_)) && !(-1.0..=1.0).contains(&value) {
+                return Err(Invalid::new(format!("{path}[1]"), "must be from -1 to 1"));
+            }
+            let earlier = model_points.len().checked_sub(1).map(|k| model_points[k]);
+            if earlier.is_some_and(|p| p.at > at) {
+                let message = "must be at or after the point before it";
+                return Err(Invalid::new(format!("{path}[0]"), message));
+            }
+            let twice = model_points.len() >= 2
+                && model_points[model_points.len() - 2].at == at
+                && earlier.is_some_and(|p| p.at == at);
+            if twice {
+                let message = "makes three points at one place: a step needs two";
+                return Err(Invalid::new(format!("{path}[0]"), message));
+            }
+            model_points.push(automation::Point::new(at, value));
+        }
+        Ok(automation::Lane {
+            param,
+            points: model_points,
+            overridden: *overridden,
         })
     }
 }

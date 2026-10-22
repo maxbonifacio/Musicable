@@ -2,13 +2,15 @@
 //! is, what it accepts, and what saving refuses.
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
+use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::{
-    AudioInput, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId, TestTone,
-    TrackId, TrackKind,
+    AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
+    TestTone, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -1466,6 +1468,159 @@ fn saving_refuses_what_loading_would() {
     let plugin = project.tracks[0].devices[0].kind.plugin_mut().unwrap();
     plugin.id.clear();
     refused_saving(&project, &format!("{PLUGIN}.id"), "must not be empty");
+}
+
+/// [`mix`] with its fader, its send and its test gain automated, and the
+/// master's pan, in that order.
+fn automated() -> Project {
+    let mut project = mix();
+    let send = project.tracks[0].sends[0].id;
+    let gain = project.tracks[0].devices[0].id;
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    project.automation = vec![
+        Lane::new(
+            ParamAddress::Volume(Chain::Track(TrackId(0))),
+            vec![point(0, 1.0), point(4, 0.5), point(4, 0.25)],
+        ),
+        Lane::new(ParamAddress::Send(send), vec![point(2, 0.5)]),
+        Lane::new(ParamAddress::Device(gain, 0), vec![point(0, -1.0)]),
+        Lane::new(ParamAddress::Pan(Chain::Master), vec![point(8, 1.0)]),
+    ];
+    project
+}
+
+#[test]
+fn lanes_automate_parameters_the_file_has_once_each() {
+    let file = edited_from(&automated(), |_| ());
+    assert_eq!(load(&file).unwrap(), automated());
+    let lane = |f: &mut Value, i: usize, param| f["automation"][i]["param"] = param;
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 1, json!({"volume": {"track": 0}}))
+        }),
+        "automation[1].param",
+        "automation[0] automates it too",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 0, json!({"pan": {"track": 9}}))),
+        "automation[0].param",
+        "names track 9, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 1, json!({"send": 4}))),
+        "automation[1].param",
+        "names send 4, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 2, json!({"device": {"id": 7, "param": 0}}));
+        }),
+        "automation[2].param",
+        "names device 7, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 2, json!({"device": {"id": 0, "param": 1}}));
+        }),
+        "automation[2].param",
+        "names parameter 1 of device 0, which has only parameter 0",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 3, json!({"pan": "left"}))),
+        "automation[3].param.pan",
+        "unknown variant `left`",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 3, json!({"width": "master"}))),
+        "automation[3].param",
+        "unknown variant `width`",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            f["automation"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("overridden");
+        }),
+        "automation[0]",
+        "missing field `overridden`",
+    );
+    // A plugin's parameters are the plugin's to say, so any will do.
+    let mut project = plugged();
+    let synth = project.tracks[0].devices[0].id;
+    let param = ParamAddress::Device(synth, u32::MAX);
+    let point = automation::Point::new(Beats::ZERO, 1e9);
+    project.automation = vec![Lane::new(param, vec![point])];
+    assert_eq!(load(&edited_from(&project, |_| ())).unwrap(), project);
+    // Saving checks the same.
+    let mut project = automated();
+    project.automation[1].param = ParamAddress::Volume(Chain::Track(TrackId(0)));
+    refused_saving(
+        &project,
+        "automation[1].param",
+        "automation[0] automates it too",
+    );
+}
+
+#[test]
+fn lane_points_are_in_order_from_the_start_of_the_song() {
+    let points = |f: &mut Value, i: usize, points| f["automation"][i]["points"] = points;
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([]))),
+        "automation[1].points",
+        "needs at least one point",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[-1, 0.5]]))),
+        "automation[1].points[0][0]",
+        "can't be before the start of the song",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            points(f, 1, json!([[MAX_TICKS + 1, 0.5]]));
+        }),
+        "automation[1].points[0][0]",
+        "within",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[8, 0.5], [4, 0.5]]))),
+        "automation[1].points[1][0]",
+        "must be at or after the point before it",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            points(f, 0, json!([[0, 1.0], [4, 0.5], [4, 0.25], [4, 0.0]]));
+        }),
+        "automation[0].points[3][0]",
+        "makes three points at one place",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 3, json!([[0, 1.5]]))),
+        "automation[3].points[0][1]",
+        "must be from -1 to 1",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[0, "loud"]]))),
+        "automation[1].points[0][1]",
+        "expected f64",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[0, 0.5, 1]]))),
+        "automation[1].points[0]",
+        "trailing",
+    );
+    // Faders, sends and test gains can go negative, inverting, as their
+    // own fields can.
+    let file = edited_from(&automated(), |f| points(f, 1, json!([[0, -2.0]])));
+    assert_eq!(load(&file).unwrap().automation[1].points[0].value, -2.0);
+    // Saving checks the same.
+    let mut project = automated();
+    project.automation[3].points[0].value = f64::INFINITY;
+    refused_saving(
+        &project,
+        "automation[3].points[0][1]",
+        "must be a finite number",
+    );
 }
 
 #[test]

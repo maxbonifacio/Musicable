@@ -5,8 +5,10 @@
 //! replaced, so everything that has to follow the project hooks in here: the
 //! engine and the undo history now, ARA change notifications in Tier 2.
 
+use musicable_model::automation::{self, Lane, Point};
 use musicable_model::clip::{Clip, ClipContent, ClipId, Fades, Timing};
 use musicable_model::mixer::Bus;
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
@@ -279,7 +281,11 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
+    /// The lanes that automate its parameters go first, each as an edit of
+    /// its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
+        self.project.find_device(device)?;
+        self.remove_lanes(|param| matches!(param, ParamAddress::Device(d, _) if d == device));
         let (chain, index, _) = self.project.find_device(device)?;
         let device = self.project.devices_mut(chain)?.remove(index);
         self.edits.push(Edit::RemoveDevice {
@@ -353,9 +359,10 @@ impl Transaction<'_> {
 
     /// Removes the track with id `id` and returns it. What refers to it goes
     /// first, each as an edit of its own: tracks feeding it feed the master
-    /// instead, and sends to it go.
+    /// instead, sends to it go, and so do the lanes that automate its
+    /// parameters, its sends' and its devices'.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
-        let index = self.project.track_index(id)?;
+        self.project.track(id)?;
         let feeding: Vec<TrackId> = self
             .project
             .tracks
@@ -375,6 +382,16 @@ impl Transaction<'_> {
         for (track, send) in sends {
             self.remove_send(track, send);
         }
+        let on_track = Some(Chain::Track(id));
+        let project = &*self.project;
+        let lanes: Vec<ParamAddress> = (project.automation.iter())
+            .map(|l| l.param)
+            .filter(|&param| project.param_chain(param) == on_track)
+            .collect();
+        for param in lanes {
+            self.remove_lane(param);
+        }
+        let index = self.project.track_index(id)?;
         let track = self.project.tracks.remove(index);
         self.edits.push(Edit::RemoveTrack {
             index,
@@ -549,7 +566,14 @@ impl Transaction<'_> {
         self.edits.push(Edit::AddSend { track, index, send });
     }
 
+    /// Removes the track's send with id `send`. The lane that automates its
+    /// level goes first, as an edit of its own.
     pub fn remove_send(&mut self, track: TrackId, send: SendId) {
+        let has = |t: &Track| t.sends.iter().any(|s| s.id == send);
+        if !self.project.track(track).is_some_and(has) {
+            return;
+        }
+        self.remove_lane(ParamAddress::Send(send));
         let Some(t) = self.project.track_mut(track) else {
             return;
         };
@@ -882,6 +906,129 @@ impl Transaction<'_> {
         }
     }
 
+    /// Puts `lane` at `index` in the project's lanes, or at the end if
+    /// `index` is past them, with its points tidied (see
+    /// [`automation::tidy`]). A lane left without points is left out, and
+    /// so is one for a parameter that has a lane already, or whose channel,
+    /// send or device the project hasn't.
+    pub fn add_lane(&mut self, index: usize, mut lane: Lane) {
+        automation::tidy(&mut lane.points);
+        let project = &*self.project;
+        if lane.points.is_empty()
+            || project.lane(lane.param).is_some()
+            || !project.has_param(lane.param)
+        {
+            return;
+        }
+        let index = index.min(self.project.automation.len());
+        self.project.automation.insert(index, lane.clone());
+        self.edits.push(Edit::AddLane { index, lane });
+    }
+
+    /// Removes the lane that automates `param`, and returns it. The
+    /// parameter keeps its own value from then on.
+    pub fn remove_lane(&mut self, param: ParamAddress) -> Option<Lane> {
+        let index = self.project.lane_index(param)?;
+        let lane = self.project.automation.remove(index);
+        self.edits.push(Edit::RemoveLane {
+            index,
+            lane: lane.clone(),
+        });
+        Some(lane)
+    }
+
+    /// Sets the points of the lane that automates `param`, tidied (see
+    /// [`automation::tidy`]). A parameter without a lane gets one, if the
+    /// project has the parameter, and a lane left without points goes.
+    pub fn set_lane_points(&mut self, param: ParamAddress, mut points: Vec<Point>) {
+        automation::tidy(&mut points);
+        let Some(lane) = self.project.lane_mut(param) else {
+            self.add_lane(usize::MAX, Lane::new(param, points));
+            return;
+        };
+        if points.is_empty() {
+            self.remove_lane(param);
+        } else if lane.points != points {
+            let from = std::mem::replace(&mut lane.points, points.clone());
+            self.edits.push(Edit::LanePoints {
+                param,
+                from,
+                to: points,
+            });
+        }
+    }
+
+    /// Overrides the automation of `param`, so the parameter keeps its own
+    /// value, or re-enables it with `false`. What moving an automated
+    /// parameter by hand does. A parameter without a lane is left alone.
+    pub fn set_lane_overridden(&mut self, param: ParamAddress, overridden: bool) {
+        if let Some(lane) = self.project.lane_mut(param)
+            && lane.overridden != overridden
+        {
+            lane.overridden = overridden;
+            self.edits.push(Edit::LaneOverridden {
+                param,
+                from: !overridden,
+                to: overridden,
+            });
+        }
+    }
+
+    /// Sets the own value of the parameter at `param`: the value it has
+    /// where automation doesn't move it. Values that aren't finite do
+    /// nothing, and so do parameters the project hasn't and the test
+    /// devices'.
+    pub fn set_param_value(&mut self, param: ParamAddress, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        // The mixer keeps its values as `f32`.
+        let narrow = value as f32;
+        match param {
+            ParamAddress::Volume(Chain::Track(track)) => self.set_track_gain(track, narrow),
+            ParamAddress::Volume(Chain::Master) => self.set_master_gain(narrow),
+            ParamAddress::Pan(Chain::Track(track)) => self.set_track_pan(track, narrow),
+            ParamAddress::Pan(Chain::Master) => self.set_master_pan(narrow),
+            ParamAddress::Send(send) => {
+                if let Some(Chain::Track(track)) = self.project.param_chain(param) {
+                    self.set_send_level(track, send, narrow);
+                }
+            }
+            ParamAddress::Device(device, n) => self.set_plugin_param(device, n, Some(value)),
+        }
+    }
+
+    /// Sets the parameter at `param` by hand, as a control does: automation
+    /// it follows is overridden first, so the value holds until automation
+    /// is re-enabled. Values that aren't finite do nothing.
+    pub fn set_param_by_hand(&mut self, param: ParamAddress, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        self.override_automation(param);
+        self.set_param_value(param, value);
+    }
+
+    /// Overrides the automation of `param`, if it follows some: what
+    /// touching an automated control does.
+    pub fn override_automation(&mut self, param: ParamAddress) {
+        if self.project.is_automated(param) {
+            self.set_lane_overridden(param, true);
+        }
+    }
+
+    /// Removes the lanes of the parameters `which` picks, each as an edit of
+    /// its own.
+    fn remove_lanes(&mut self, which: impl Fn(ParamAddress) -> bool) {
+        let params: Vec<ParamAddress> = (self.project.automation.iter())
+            .map(|l| l.param)
+            .filter(|&param| which(param))
+            .collect();
+        for param in params {
+            self.remove_lane(param);
+        }
+    }
+
     fn clip_mut(&mut self, track: TrackId, clip: ClipId) -> Option<&mut Clip> {
         self.project.track_mut(track)?.clip_mut(clip)
     }
@@ -983,6 +1130,12 @@ impl Transaction<'_> {
             Edit::PluginSettings { device, to, .. } => {
                 self.set_plugin_settings(*device, to.clone())
             }
+            Edit::AddLane { index, lane } => self.add_lane(*index, lane.clone()),
+            Edit::RemoveLane { lane, .. } => {
+                self.remove_lane(lane.param);
+            }
+            Edit::LanePoints { param, to, .. } => self.set_lane_points(*param, to.clone()),
+            Edit::LaneOverridden { param, to, .. } => self.set_lane_overridden(*param, *to),
         }
     }
 }
@@ -1225,6 +1378,29 @@ pub enum Edit {
         from: PluginSettings,
         to: PluginSettings,
     },
+    /// `lane` went in at `index` in the project's lanes: its parameter is
+    /// automated.
+    AddLane {
+        index: usize,
+        lane: Lane,
+    },
+    /// `lane`, which was at `index` in the project's lanes, went.
+    RemoveLane {
+        index: usize,
+        lane: Lane,
+    },
+    /// The points of the lane that automates `param` changed.
+    LanePoints {
+        param: ParamAddress,
+        from: Vec<Point>,
+        to: Vec<Point>,
+    },
+    /// The automation of `param` was overridden, or re-enabled.
+    LaneOverridden {
+        param: ParamAddress,
+        from: bool,
+        to: bool,
+    },
 }
 
 impl Edit {
@@ -1412,6 +1588,18 @@ impl Edit {
             },
             Edit::PluginSettings { device, from, to } => Edit::PluginSettings {
                 device,
+                from: to,
+                to: from,
+            },
+            Edit::AddLane { index, lane } => Edit::RemoveLane { index, lane },
+            Edit::RemoveLane { index, lane } => Edit::AddLane { index, lane },
+            Edit::LanePoints { param, from, to } => Edit::LanePoints {
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::LaneOverridden { param, from, to } => Edit::LaneOverridden {
+                param,
                 from: to,
                 to: from,
             },
@@ -1610,6 +1798,22 @@ impl Edit {
                     ..
                 },
             ) if device == other => to.clone_from(next),
+            (
+                Edit::LanePoints { param, to, .. },
+                Edit::LanePoints {
+                    param: other,
+                    to: next,
+                    ..
+                },
+            ) if param == other => to.clone_from(next),
+            (
+                Edit::LaneOverridden { param, to, .. },
+                Edit::LaneOverridden {
+                    param: other,
+                    to: next,
+                    ..
+                },
+            ) if param == other => *to = *next,
             // Adding and removing never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
@@ -1653,7 +1857,11 @@ impl Edit {
                 | Edit::AddDevice { .. }
                 | Edit::RemoveDevice { .. }
                 | Edit::PluginParam { .. }
-                | Edit::PluginSettings { .. },
+                | Edit::PluginSettings { .. }
+                | Edit::AddLane { .. }
+                | Edit::RemoveLane { .. }
+                | Edit::LanePoints { .. }
+                | Edit::LaneOverridden { .. },
                 _,
             ) => return false,
         }
@@ -1680,7 +1888,9 @@ impl Edit {
             | Edit::AddLocator { .. }
             | Edit::RemoveLocator { .. }
             | Edit::AddDevice { .. }
-            | Edit::RemoveDevice { .. } => false,
+            | Edit::RemoveDevice { .. }
+            | Edit::AddLane { .. }
+            | Edit::RemoveLane { .. } => false,
             Edit::TrackName { from, to, .. } => from == to,
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
@@ -1704,6 +1914,8 @@ impl Edit {
             Edit::LocatorAt { from, to, .. } => from == to,
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,
+            Edit::LanePoints { from, to, .. } => from == to,
+            Edit::LaneOverridden { from, to, .. } => from == to,
         }
     }
 }

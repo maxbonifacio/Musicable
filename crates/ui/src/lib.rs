@@ -26,7 +26,7 @@ mod theme;
 mod waveform;
 mod widgets;
 
-pub use devices::{BROWSER, DEVICES, PluginEntry, PluginStatus, Plugins};
+pub use devices::{BROWSER, DEVICES, PluginEntry, PluginParam, PluginStatus, Plugins};
 pub use keys::{KeyPresses, chord};
 pub use mixer::{InputChoice, Level, Levels};
 pub use mouse::{Gesture, MouseAction, MouseMap, Target};

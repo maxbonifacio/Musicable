@@ -2,7 +2,8 @@
 //! in the command palette.
 
 use musicable_commands::{
-    Command, CommandId, Registry, arrange, edit, file, locator, options, track, transport, view,
+    Command, CommandId, Registry, arrange, automation, edit, file, locator, options, track,
+    transport, view,
 };
 
 /// A menu's title, the area of commands it lists, and its commands in order.
@@ -13,7 +14,7 @@ type MenuSpec = (&'static str, &'static str, &'static [Option<CommandId>]);
 /// from its area's menu goes at the end of it, and an area of commands
 /// without a menu gets one after these, so every command can be reached.
 /// Commands that need arguments, which menus can't give, are left out.
-const MENUS: [MenuSpec; 6] = [
+const MENUS: [MenuSpec; 7] = [
     (
         "File",
         "file",
@@ -62,6 +63,11 @@ const MENUS: [MenuSpec; 6] = [
         ],
     ),
     ("Clip", "clip", &[Some(arrange::INSERT_MIDI_CLIP)]),
+    (
+        "Automation",
+        "automation",
+        &[Some(automation::SHOW), Some(automation::RE_ENABLE)],
+    ),
     (
         "Locator",
         "locator",
@@ -237,6 +243,7 @@ mod tests {
                 "Edit",
                 "Track",
                 "Clip",
+                "Automation",
                 "Locator",
                 "Transport",
                 "Macro",
@@ -256,7 +263,7 @@ mod tests {
         }
         assert!(!listed.contains(&arrange::MOVE));
         // A command missing from its menu goes at its end.
-        let transport = &menus[5].items;
+        let transport = &menus[6].items;
         assert_eq!(transport[transport.len() - 2], None);
         assert_eq!(
             transport.last().unwrap().unwrap().id,
