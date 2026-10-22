@@ -16,11 +16,14 @@
 //!   from anywhere in a file searches it for the frame to start from.
 //!
 //! [`write_wav`] and [`write_aiff`] write 16- and 24-bit integer and 32-bit
-//! float files. Writing FLAC comes with exporting.
+//! float files, and a [`WavWriter`] writes a 32-bit float WAV file as its
+//! samples come, as a recording does. Writing FLAC comes with exporting.
 
 mod aiff;
 mod flac;
 mod wav;
+
+pub use wav::WavWriter;
 
 use std::fmt;
 use std::fs::File;
