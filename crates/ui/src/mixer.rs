@@ -115,14 +115,27 @@ pub(crate) fn show(
             });
             return;
         }
-        ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.x = sizes.gap;
-                for track in &project.tracks {
-                    mixer.track_strip(ui, track, levels.track(track.id), actions);
-                }
+        ScrollArea::both()
+            .auto_shrink(false)
+            .show_viewport(ui, |ui, viewport| {
+                ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = sizes.gap;
+                    // Only the strips in sight are drawn, so a hundred tracks
+                    // cost no more than a screenful. The rest take their
+                    // room, and each strip's widgets keep their ids.
+                    let left = ui.cursor().min.x;
+                    for track in &project.tracks {
+                        let x = ui.cursor().min.x - left;
+                        if x + sizes.strip < viewport.min.x || x > viewport.max.x {
+                            ui.allocate_space(vec2(sizes.strip, 0.0));
+                            continue;
+                        }
+                        ui.push_id(track.id, |ui| {
+                            mixer.track_strip(ui, track, levels.track(track.id), actions);
+                        });
+                    }
+                });
             });
-        });
     });
 }
 

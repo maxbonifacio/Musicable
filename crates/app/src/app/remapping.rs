@@ -6,102 +6,15 @@
 //! It drives the app's window as eframe would, without an audio device.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use eframe::App as _;
-use eframe::egui::{self, Event, Key, Modifiers};
+use eframe::egui::Event;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_commands::{CommandId, KeyChord, Keymap, transport};
 
 use super::App;
-use crate::Output;
-use crate::settings::{KEYMAP_FILE, Settings};
-
-/// A config folder of its own for each test, removed when it ends.
-struct ConfigDir(PathBuf);
-
-impl ConfigDir {
-    fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("musicable-remapping-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        Self(dir)
-    }
-}
-
-impl Drop for ConfigDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// The app's window, with its settings and keymap in `config_dir`.
-fn window(config_dir: &Path) -> Harness<'static, App> {
-    let config_dir = config_dir.to_owned();
-    Harness::builder()
-        .with_size([1280.0, 800.0])
-        .build_eframe(move |_| {
-            let (output, handle) = Output::none();
-            let settings = Settings::default();
-            App::with_output(None, Some(config_dir), settings, output, handle, Vec::new())
-        })
-}
-
-/// Hands `events` to the app as eframe does: through its raw input hook,
-/// then to egui.
-fn send(harness: &mut Harness<'static, App>, events: Vec<Event>) {
-    let mut input = egui::RawInput {
-        events,
-        ..Default::default()
-    };
-    let ctx = harness.ctx.clone();
-    harness.state_mut().raw_input_hook(&ctx, &mut input);
-    for event in input.events {
-        harness.event(event);
-    }
-    harness.run();
-}
-
-/// Presses and lets go of `chord`.
-fn press(harness: &mut Harness<'static, App>, chord: KeyChord) {
-    let (key, modifiers) = egui_key(chord);
-    let key = |pressed| Event::Key {
-        key,
-        physical_key: Some(key),
-        pressed,
-        repeat: false,
-        modifiers,
-    };
-    let events = vec![
-        Event::ModifiersChanged(modifiers),
-        key(true),
-        key(false),
-        Event::ModifiersChanged(Modifiers::NONE),
-    ];
-    send(harness, events);
-}
-
-/// The egui key and modifiers that make `chord`, for the chords these tests
-/// press.
-fn egui_key(chord: KeyChord) -> (Key, Modifiers) {
-    let text = chord.to_string();
-    let name = text.rsplit('+').next().unwrap();
-    let key = Key::from_name(name).unwrap_or_else(|| panic!("no egui key for {text}"));
-    let mods = chord.mods;
-    let modifiers = Modifiers {
-        alt: mods.alt,
-        ctrl: mods.ctrl,
-        shift: mods.shift,
-        mac_cmd: mods.cmd,
-        command: mods.ctrl || mods.cmd,
-    };
-    (key, modifiers)
-}
-
-fn chord(text: &str) -> KeyChord {
-    text.parse().unwrap()
-}
+use super::testing::{TempDir, chord, press, send, window};
+use crate::settings::KEYMAP_FILE;
 
 /// Scrolls the widget called `label` into view, and clicks it.
 fn click(harness: &mut Harness<'static, App>, label: &str) {
@@ -149,8 +62,8 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
 
 #[test]
 fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
-    let config = ConfigDir::new("every-command");
-    let mut harness = window(&config.0);
+    let config = TempDir::new("remapping-every-command");
+    let mut harness = window(&config.0, None);
     // Keys can't give a command arguments, so the commands that need them,
     // such as Move Clips, have none.
     let ids: Vec<CommandId> = harness
@@ -210,7 +123,7 @@ fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
     drop(harness);
     let text = fs::read_to_string(config.0.join(KEYMAP_FILE)).unwrap();
     assert!(text.contains(&chords[0].to_string()), "{text}");
-    let mut harness = window(&config.0);
+    let mut harness = window(&config.0, None);
     assert_eq!(*harness.state().session.keymap(), expected);
     let metronome = ids.iter().position(|id| *id == transport::TOGGLE_METRONOME);
     press(&mut harness, chords[metronome.unwrap()]);
@@ -222,8 +135,8 @@ fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
 
 #[test]
 fn keys_that_run_commands_can_be_given_to_others() {
-    let config = ConfigDir::new("reassign");
-    let mut harness = window(&config.0);
+    let config = TempDir::new("remapping-reassign");
+    let mut harness = window(&config.0, None);
     press(&mut harness, chord("Ctrl+K"));
     // Escape and Enter can be pressed as keys too: the window waits for
     // them, and they run nothing.

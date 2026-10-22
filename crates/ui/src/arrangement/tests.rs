@@ -553,6 +553,42 @@ fn locators_move_and_a_double_click_renames_them() {
 }
 
 #[test]
+fn only_what_is_in_sight_is_laid_out() {
+    // A hundred tracks of clips, as the arrangement has to stay smooth with.
+    let mut project = Project::new();
+    for t in 0..100 {
+        let track = project.add_track(format!("T{t}"), TrackKind::Midi);
+        for c in 0..20 {
+            let range = BeatRange::new(Beats::new(8 * c), Beats::new(8 * c + 8));
+            let content = ClipContent::Midi(MidiClip::default());
+            let clip = project.new_clip(format!("C{t}.{c}"), range, content);
+            project.track_mut(track).unwrap().clips.push(clip);
+        }
+    }
+    let mut harness = harness(project);
+    for name in ["Track T0", "Clip C0.0", "Clip C3.2"] {
+        harness.get_by_label(name);
+    }
+    for name in ["Track T99", "Clip C99.0", "Clip C0.19"] {
+        assert!(harness.query_by_label(name).is_none(), "{name}");
+    }
+    // Scrolled to the bottom, the last tracks are there instead.
+    let at = in_lane(&harness, "T0", 4.0);
+    harness.hover_at(at);
+    harness.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -10_000.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run();
+    harness.get_by_label("Track T99");
+    harness.get_by_label("Clip C99.0");
+    assert!(harness.query_by_label("Track T0").is_none());
+}
+
+#[test]
 fn the_wheel_scrolls_and_ctrl_wheel_zooms_around_the_pointer() {
     let (project, ids) = project();
     let mut harness = harness(project);

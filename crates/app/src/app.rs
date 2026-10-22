@@ -579,7 +579,11 @@ fn with_extension(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(test)]
+mod arranging;
+#[cfg(test)]
 mod remapping;
+#[cfg(test)]
+mod testing;
 
 #[cfg(test)]
 mod tests {
