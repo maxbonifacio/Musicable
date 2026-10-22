@@ -444,6 +444,7 @@ impl Session {
             let output = crate::wasapi::Output {
                 id: session.info.device.id.clone(),
                 container: None,
+                adapter: None,
                 rate,
                 exclusive: false,
                 clock: playback.clone(),

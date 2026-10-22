@@ -245,11 +245,13 @@ captured (scaled by the two rates).
   of 64, to the nearest frame. Its frames are copied as they are. That's the
   output device's own loopback, and an input in the same physical device as
   the output: the same container id, which Windows gives every endpoint of a
-  device, leaving out the one all built-in endpoints share. Every 16 packets
-  the median is checked again. Moved by more than 4 frames twice in a row,
-  the input slips to it, which `slips` counts. A second slip the same way
-  means the clocks drift apart after all, and the input goes over to being
-  resampled, without a gap.
+  device, leaving out the one all built-in endpoints share. For those, such
+  as a sound card's, it's the same adapter: the device their topology
+  connects to, whose input and output filters share its clock. Every 16
+  packets the median is checked again. Moved by more than 4 frames twice in a
+  row, the input slips to it, which `slips` counts. A second slip the same
+  way means the clocks drift apart after all, and the input goes over to
+  being resampled, without a gap.
 - Any other input is resampled with the engine's resampler, following the
   offsets with a phase-locked loop: wide at first to line up within a second,
   then narrower, so jitter in the timings doesn't come through as wow. Its

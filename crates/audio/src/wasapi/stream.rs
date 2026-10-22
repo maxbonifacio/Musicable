@@ -117,7 +117,7 @@ fn audio_thread(
     };
     // First, so the period check runs at the priority the stream will.
     let mmcss = Mmcss::join();
-    let (client, mut info, container) = match open_device(request, mmcss.is_some()) {
+    let (client, mut info, (container, adapter)) = match open_device(request, mmcss.is_some()) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = opened.send(Err(error));
@@ -130,6 +130,7 @@ fn audio_thread(
     let output = Output {
         id: info.device.id.clone(),
         container,
+        adapter,
         rate: info.sample_rate,
         exclusive: client.exclusive(),
         clock: playback.clone(),
@@ -178,17 +179,26 @@ fn audio_thread(
     }
 }
 
-/// Opens the output, and says which physical device it belongs to.
+/// The physical device and the adapter an output belongs to, if Windows
+/// says.
+type Hardware = (Option<windows::core::GUID>, Option<String>);
+
+/// Opens the output, and says which physical device and adapter it
+/// belongs to.
 fn open_device(
     request: &StreamRequest,
     realtime: bool,
-) -> Result<(Client, StreamInfo, Option<windows::core::GUID>), Error> {
+) -> Result<(Client, StreamInfo, Hardware), Error> {
     let enumerator = device::enumerator()?;
     let endpoint = device::find(&enumerator, request.device.as_deref())?;
     let described = device::describe(&endpoint, device::default_id(&enumerator).as_deref())?;
     let client = client::open(&endpoint, request)?;
     let info = client.info(described, realtime);
-    Ok((client, info, device::container_id(&endpoint)))
+    let hardware = (
+        device::container_id(&endpoint),
+        device::adapter_id(&endpoint),
+    );
+    Ok((client, info, hardware))
 }
 
 /// The stream, as the audio thread runs it.
