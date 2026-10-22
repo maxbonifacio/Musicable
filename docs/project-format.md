@@ -15,7 +15,7 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
 ```json
 {
   "format": "musicable-project",
-  "version": 4,
+  "version": 5,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -221,7 +221,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 4 for this page. |
+| `version` | whole number | The format version: 5 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -378,16 +378,36 @@ A **device** processes the signal on its way through the channel:
 | `id` | whole number | Below `next_device_id`, and no other device in the project has it, on a track or on the master. |
 | `kind` | object | What the device is, as an object with one field: the kind's name, holding the kind's settings. |
 
-There are two kinds of device so far, test devices that real ones will
-join:
+There are three kinds of device so far: plugins, and test devices that
+Musicable's own devices will join.
 
 | Kind | Settings | Meaning |
 |---|---|---|
+| `plugin` | plugin | A CLAP or VST3 plugin, as below. |
 | `test_gain` | `gain`: float | Multiplies the signal by `gain`, linear like the fader. |
-| `test_instrument` | `level`: float | Plays the notes of the track's MIDI clips with a plain tone, added to the signal coming in: a sine at each note's pitch, bent by its pitch bend, brighter with its timbre, and louder with velocity and pressure, peaking at `level` at full velocity. On a MIDI track, the first instrument gets the notes. |
+| `test_instrument` | `level`: float | Plays the notes of the track's MIDI clips with a plain tone, added to the signal coming in: a sine at each note's pitch, bent by its pitch bend, brighter with its timbre, and louder with velocity and pressure, peaking at `level` at full velocity. |
 
 So a test device that halves the signal is
-`{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`.
+`{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`. On a MIDI track, the
+first instrument gets the notes: the first test instrument or plugin that
+plays notes.
+
+A **plugin**'s settings say which plugin it is and how it's set:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `format` | string | `"clap"` or `"vst3"`. |
+| `id` | string | The plugin's id in its format, which finds the plugin when the project opens: a CLAP plugin's id, such as `"org.surge-synth-team.surge-xt"`, or a VST3 plugin's class id. Not empty. |
+| `name` | string | The plugin's name when it was added, to show while it's missing. Any text, empty included. |
+| `instrument` | boolean | Whether it plays notes. |
+| `state` | string or `null` | The state the plugin last saved, in its own format, as base64 with padding (RFC 4648). `null` for a plugin as it starts, new. |
+| `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
+
+Opening the project gives the plugin its state, then the parameter values.
+Musicable saves a fresh state from each plugin it has open, so `params` is
+usually empty in a file it writes. A plugin that isn't on the computer
+passes the signal through unchanged, and keeps its settings as they are, so
+the project still has them when it opens where the plugin is.
 
 ### Master
 
@@ -434,6 +454,7 @@ Signal flows from tracks to buses without loops:
 | 2 | 2026-10-21 | The mixer: each track's pan, solo, solo-safe, arm, output and sends, devices on tracks and on the master, the master channel, and the `"hard"` and `"soft"` clip types. Version 1 tracks open centred, feeding the master with no sends or devices, return tracks solo-safe, and the master at unity. |
 | 3 | 2026-10-21 | Clips: audio clips that play files, MIDI clips of notes with per-note expression, and the test instrument. Version 2 tracks have no clips. |
 | 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
+| 5 | 2026-10-22 | Plugin devices, with their state and parameters. Version 4 files have none. |
 
 ## Changing the format
 

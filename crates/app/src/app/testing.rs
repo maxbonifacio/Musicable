@@ -41,7 +41,7 @@ pub(super) fn window(config_dir: &Path, project: Option<PathBuf>) -> Harness<'st
         .with_size([1280.0, 800.0])
         .with_step_dt(1.0 / 60.0)
         .with_max_steps(40)
-        .build_eframe(move |_| {
+        .build_eframe(move |cc| {
             let (output, handle) = Output::none();
             let settings = Settings::default();
             App::with_output(
@@ -51,6 +51,7 @@ pub(super) fn window(config_dir: &Path, project: Option<PathBuf>) -> Harness<'st
                 output,
                 handle,
                 Vec::new(),
+                &cc.egui_ctx,
             )
         })
 }

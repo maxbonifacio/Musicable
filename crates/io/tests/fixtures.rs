@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{ClipType, DeviceKind, Project, TestTone, Track, TrackId, TrackKind};
+use musicable_model::{
+    ClipType, DeviceKind, PluginFormat, Project, TestTone, Track, TrackId, TrackKind,
+};
 
 fn fixtures() -> Vec<(&'static str, Project)> {
     vec![
@@ -30,6 +33,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("mixer", mixer()),
         ("clips", clips()),
         ("locators", locators()),
+        ("plugins", plugins()),
     ]
 }
 
@@ -326,6 +330,87 @@ fn locators() -> Project {
     }
     project.locators.retain(|locator| locator.name != "Deleted");
     project.add_track("Audio", TrackKind::Audio);
+    project
+}
+
+/// Plugins, from version 5: a CLAP instrument with a state and parameters
+/// set after it, a VST3 effect as it starts, one with parameters but no
+/// state, one on the master, a state of every byte, parameter values at the
+/// edges of their range, names JSON has to escape, and a gap in the device
+/// ids where one was deleted.
+fn plugins() -> Project {
+    let mut project = Project::new();
+    let synth = project.add_track("Synth", TrackKind::Midi);
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let plugin = |format, id: &str, name: &str, instrument, settings| {
+        DeviceKind::Plugin(PluginDevice {
+            format,
+            id: id.into(),
+            name: name.into(),
+            instrument,
+            settings,
+        })
+    };
+    let params = |values: &[(u32, f64)]| {
+        values
+            .iter()
+            .map(|&(id, value)| PluginParam { id, value })
+            .collect()
+    };
+
+    let surge = plugin(
+        PluginFormat::Clap,
+        "org.surge-synth-team.surge-xt",
+        "Surge XT",
+        true,
+        PluginSettings {
+            state: Some(PluginState::new((0..=255).collect::<Vec<u8>>())),
+            params: params(&[(0, 0.5), (17, -0.0), (4_294_967_295, f64::MAX)]),
+        },
+    );
+    let surge = project.new_device(surge);
+    let gone = plugin(
+        PluginFormat::Clap,
+        "org.example.gone",
+        "Deleted",
+        false,
+        PluginSettings::default(),
+    );
+    project.new_device(gone);
+    let eq = plugin(
+        PluginFormat::Vst3,
+        "ABCDEF019182FAEB4D6574612D457131",
+        "EQ \"8\"\t\u{1f39b}\u{fe0f}",
+        false,
+        PluginSettings::default(),
+    );
+    let eq = project.new_device(eq);
+    let gate = plugin(
+        PluginFormat::Clap,
+        "com.example.gate",
+        "",
+        false,
+        PluginSettings {
+            state: None,
+            params: params(&[(3, f64::MIN), (9, f64::from_bits(1)), (12, 1.0 / 3.0)]),
+        },
+    );
+    let gate = project.new_device(gate);
+    let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+    let limiter = plugin(
+        PluginFormat::Clap,
+        "com.example.limiter",
+        "Limiter",
+        false,
+        PluginSettings {
+            state: Some(PluginState::new(*b"{\"ceiling\": -0.3}")),
+            params: Vec::new(),
+        },
+    );
+    let limiter = project.new_device(limiter);
+    project.track_mut(synth).unwrap().devices = vec![surge, gain];
+    project.track_mut(vocal).unwrap().devices = vec![gate, eq];
+    project.master.devices = vec![limiter];
     project
 }
 

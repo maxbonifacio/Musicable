@@ -1,0 +1,247 @@
+{
+  "format": "musicable-project",
+  "version": 5,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 96.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "next_track_id": 2,
+  "next_send_id": 0,
+  "next_device_id": 1,
+  "next_clip_id": 7,
+  "next_locator_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Drums",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 1,
+          "name": "Take 1",
+          "start": 0,
+          "length": 2580480,
+          "content": {
+            "audio": {
+              "file": "Audio/Drums take 1.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 322560
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Take 2",
+          "start": 2257920,
+          "length": 2903040,
+          "content": {
+            "audio": {
+              "file": "Audio/Drums take 2.flac",
+              "offset": 48000,
+              "gain": 0.5,
+              "fade_in": 322560,
+              "fade_out": 107520
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "Hit",
+          "start": 5160960,
+          "length": 322560,
+          "content": {
+            "audio": {
+              "file": "C:/Samples/Hit.aiff",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0
+            }
+          }
+        }
+      ],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Keys",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 5,
+          "name": "",
+          "start": 2580480,
+          "length": 322560,
+          "content": {
+            "midi": {
+              "offset": 0,
+              "next_note_id": 0,
+              "notes": []
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "Chords",
+          "start": 0,
+          "length": 2580480,
+          "content": {
+            "midi": {
+              "offset": -161280,
+              "next_note_id": 7,
+              "notes": [
+                {
+                  "id": 0,
+                  "start": 0,
+                  "length": 1290240,
+                  "key": 60,
+                  "velocity": 0.5,
+                  "release_velocity": 0.25,
+                  "expression": {
+                    "pitch_bend": [],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                },
+                {
+                  "id": 1,
+                  "start": 0,
+                  "length": 1290240,
+                  "key": 64,
+                  "velocity": 0.625,
+                  "release_velocity": 0.25,
+                  "expression": {
+                    "pitch_bend": [],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                },
+                {
+                  "id": 2,
+                  "start": 0,
+                  "length": 1290240,
+                  "key": 67,
+                  "velocity": 0.75,
+                  "release_velocity": 0.25,
+                  "expression": {
+                    "pitch_bend": [],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                },
+                {
+                  "id": 3,
+                  "start": 1290240,
+                  "length": 645120,
+                  "key": 72,
+                  "velocity": 1.0,
+                  "release_velocity": 0.5,
+                  "expression": {
+                    "pitch_bend": [
+                      [0, 0.0],
+                      [161280, 2.0],
+                      [322560, -120.0]
+                    ],
+                    "pressure": [
+                      [80640, 0.3],
+                      [80640, 0.9]
+                    ],
+                    "timbre": [
+                      [967680, 1.0]
+                    ]
+                  }
+                },
+                {
+                  "id": 4,
+                  "start": 1935360,
+                  "length": 322560,
+                  "key": 0,
+                  "velocity": 0.0,
+                  "release_velocity": 0.5,
+                  "expression": {
+                    "pitch_bend": [],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                },
+                {
+                  "id": 5,
+                  "start": 1935360,
+                  "length": 322560,
+                  "key": 0,
+                  "velocity": 0.0,
+                  "release_velocity": 0.5,
+                  "expression": {
+                    "pitch_bend": [],
+                    "pressure": [],
+                    "timbre": []
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "devices": [
+        {
+          "id": 0,
+          "kind": {
+            "test_instrument": {
+              "level": 0.25
+            }
+          }
+        }
+      ],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": []
+}

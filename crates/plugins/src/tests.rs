@@ -2,7 +2,6 @@
 //! which count every time the host breaks one of CLAP's rules.
 
 use std::f64::consts::TAU;
-use std::ffi::{CStr, CString, c_char};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +15,6 @@ use clap_sys::events::{
     CLAP_TRANSPORT_IS_PLAYING,
 };
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
-use clap_sys::plugin::clap_plugin;
 use musicable_engine::nodes::Sum;
 use musicable_engine::{
     AudioMut, AudioRef, Engine, EngineConfig, Graph, Inputs, Node, NodeEvent, NodeEventKind,
@@ -24,6 +22,7 @@ use musicable_engine::{
 };
 use musicable_model::clip::Dimension;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
+use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
 
 use crate::scan::{self, Outcome};
@@ -47,166 +46,79 @@ pub(crate) fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// A copy of the test plugins' library, named `name.clap`, so each test
-/// gets the library's statics to itself.
-fn copy_library(name: &str) -> PathBuf {
-    let file = format!(
-        "{}musicable_test_plugins{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let exe = std::env::current_exe().unwrap();
-    let deps = exe.parent().unwrap();
-    let built = [deps.join(&file), deps.parent().unwrap().join(&file)]
-        .into_iter()
-        .find(|path| path.exists())
-        .expect("Cargo builds the test plugins before the tests");
-    let copy = temp_dir(name).join(format!("{name}.clap"));
-    fs::copy(built, &copy).unwrap();
-    copy
-}
-
 /// A copy of the test plugins, with the hooks tests drive them with.
 struct TestPlugins {
     path: PathBuf,
-    hooks: libloading::Library,
+    library: Library,
 }
 
 impl TestPlugins {
+    /// A copy of the library named `name.clap`, so the test gets the
+    /// library's statics to itself.
     fn new(name: &str) -> Self {
-        let path = copy_library(name);
-        // The same path the host loads it by, so it's the same library.
-        let canonical = crate::clap::canonical(&path).unwrap();
-        // SAFETY: loading runs no plugin code: CLAP's starts with the
-        // entry's init, which the host calls.
-        let hooks = unsafe { libloading::Library::new(&canonical) }.unwrap();
-        Self { path, hooks }
-    }
-
-    fn hook<T: Copy>(&self, name: &str) -> T {
-        let name = CString::new(name).unwrap();
-        // SAFETY: each hook is asked for with its type.
-        *unsafe { self.hooks.get::<T>(name.as_bytes_with_nul()) }.unwrap()
-    }
-
-    fn violations(&self) -> u32 {
-        self.hook::<extern "C" fn() -> u32>("musicable_test_violations")()
-    }
-
-    fn first_violation(&self) -> String {
-        let first = self.hook::<unsafe extern "C" fn(*mut c_char, u32) -> bool>(
-            "musicable_test_first_violation",
-        );
-        let mut buffer = [0 as c_char; 512];
-        // SAFETY: the buffer holds as much as it says.
-        if unsafe { first(buffer.as_mut_ptr(), buffer.len() as u32) } {
-            // SAFETY: the hook nul-terminates it.
-            unsafe { CStr::from_ptr(buffer.as_ptr()) }
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            String::new()
+        let library = Library::copy(&temp_dir(name), name);
+        Self {
+            path: library.path().to_owned(),
+            library,
         }
     }
 
-    fn alive(&self) -> u32 {
-        self.hook::<extern "C" fn() -> u32>("musicable_test_alive")()
+    fn assert_alright(&self) {
+        self.library.assert_alright();
     }
 
-    /// Checks that the host kept CLAP's rules, and destroyed every plugin
-    /// it made.
-    fn assert_alright(&self) {
-        assert_eq!(self.violations(), 0, "{}", self.first_violation());
-        assert_eq!(self.alive(), 0, "plugins left alive");
-    }
+    // SAFETY, for the hooks below: each takes the instance's plugin, which
+    // lives as long as the instance, on its main thread.
 
     fn gui(&self, instance: &Instance, action: u32, param: u32, value: f64) {
-        let gui = self
-            .hook::<unsafe extern "C" fn(*const clap_plugin, u32, u32, f64)>("musicable_test_gui");
-        // SAFETY: the instance's plugin, on its main thread.
-        unsafe { gui(instance.raw(), action, param, value) };
+        // SAFETY: as above.
+        unsafe { self.library.gui(instance.raw(), action, param, value) };
     }
 
     fn set_label(&self, instance: &Instance, label: &str) {
-        let set = self.hook::<unsafe extern "C" fn(*const clap_plugin, *const c_char)>(
-            "musicable_test_set_label",
-        );
-        let label = CString::new(label).unwrap();
         // SAFETY: as above.
-        unsafe { set(instance.raw(), label.as_ptr()) };
+        unsafe { self.library.set_label(instance.raw(), label) };
     }
 
     fn label(&self, instance: &Instance) -> String {
-        let get = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut c_char, u32)>(
-            "musicable_test_label",
-        );
-        let mut buffer = [0 as c_char; 256];
-        // SAFETY: as above, and the buffer holds as much as it says.
-        unsafe {
-            get(instance.raw(), buffer.as_mut_ptr(), buffer.len() as u32);
-            CStr::from_ptr(buffer.as_ptr())
-                .to_string_lossy()
-                .into_owned()
-        }
+        // SAFETY: as above.
+        unsafe { self.library.label(instance.raw()) }
     }
 
     fn request_callback(&self, instance: &Instance) {
-        let request = self
-            .hook::<unsafe extern "C" fn(*const clap_plugin)>("musicable_test_request_callback");
         // SAFETY: as above.
-        unsafe { request(instance.raw()) };
+        unsafe { self.library.request_callback(instance.raw()) };
     }
 
     fn main_thread_calls(&self, instance: &Instance) -> u32 {
-        let calls = self.hook::<unsafe extern "C" fn(*const clap_plugin) -> u32>(
-            "musicable_test_main_thread_calls",
-        );
         // SAFETY: as above.
-        unsafe { calls(instance.raw()) }
+        unsafe { self.library.main_thread_calls(instance.raw()) }
     }
 
     /// The pretend window: -1 for none, 0 hidden, 1 showing, and its
     /// parent.
     fn window(&self, instance: &Instance) -> (i32, usize) {
-        let window = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut usize) -> i32>(
-            "musicable_test_window",
-        );
-        let mut parent = 0;
         // SAFETY: as above.
-        let state = unsafe { window(instance.raw(), &mut parent) };
-        (state, parent)
+        unsafe { self.library.window(instance.raw()) }
     }
 
     fn request_resize(&self, instance: &Instance, width: u32, height: u32) -> bool {
-        let resize = self.hook::<unsafe extern "C" fn(*const clap_plugin, u32, u32) -> bool>(
-            "musicable_test_request_resize",
-        );
         // SAFETY: as above.
-        unsafe { resize(instance.raw(), width, height) }
+        unsafe { self.library.request_resize(instance.raw(), width, height) }
     }
 
     /// How many times the plugin had the host run its tasks, and on how
     /// many threads they ran.
     fn pool_use(&self, instance: &Instance) -> (u32, u32) {
-        let pool = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut u32, *mut u32)>(
-            "musicable_test_pool_use",
-        );
-        let (mut requests, mut threads) = (0, 0);
         // SAFETY: as above.
-        unsafe { pool(instance.raw(), &mut requests, &mut threads) };
-        (requests, threads)
+        unsafe { self.library.pool_use(instance.raw()) }
     }
 
     /// The transport's flags, position in beats and tempo, as the plugin
     /// last saw them.
     fn transport(&self, instance: &Instance) -> Option<(u32, i64, f64)> {
-        type Transport =
-            unsafe extern "C" fn(*const clap_plugin, *mut u32, *mut i64, *mut f64) -> bool;
-        let transport = self.hook::<Transport>("musicable_test_transport");
-        let (mut flags, mut beats, mut tempo) = (0, 0, 0.0);
         // SAFETY: as above.
-        unsafe { transport(instance.raw(), &mut flags, &mut beats, &mut tempo) }
-            .then_some((flags, beats, tempo))
+        unsafe { self.library.transport(instance.raw()) }
     }
 
     fn gain(&self) -> Instance {
@@ -377,10 +289,45 @@ fn changes_to_an_inactive_plugin_apply_at_once() {
     instance.activate(CONFIG).unwrap();
     assert_eq!(instance.latency(), 32);
     // Changes waiting for a node when the plugin deactivates get to it.
+    let mut node = instance.node_source().node();
+    play(&mut node, &ramp(16), &Block::default());
     instance.set_param(GAIN, 0.75);
     instance.deactivate().unwrap();
     assert_eq!(instance.param_value(GAIN), Some(0.75));
-    drop(instance);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn an_active_plugin_no_node_processes_trades_changes_at_once() {
+    // As when there's no audio device: active, and never processed.
+    let plugins = TestPlugins::new("unprocessed");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    instance.set_param(GAIN, 0.5);
+    assert_eq!(instance.param_value(GAIN), Some(0.5));
+    plugins.gui(&instance, gui::BEGIN, GAIN, 0.0);
+    plugins.gui(&instance, gui::VALUE, GAIN, 0.25);
+    plugins.gui(&instance, gui::END, GAIN, 0.0);
+    assert_eq!(
+        instance.poll(),
+        [
+            PluginEvent::GestureBegin { param: GAIN },
+            PluginEvent::ParamChanged {
+                param: GAIN,
+                value: 0.25
+            },
+            PluginEvent::GestureEnd { param: GAIN },
+        ]
+    );
+    // A node that starts it later plays it as it is.
+    let mut node = instance.node_source().node();
+    let input = ramp(16);
+    assert_eq!(
+        play(&mut node, &input, &Block::default())[0],
+        scaled(&input, 0.25)
+    );
+    drop((node, instance));
     plugins.assert_alright();
 }
 
@@ -409,6 +356,22 @@ fn a_latency_change_restarts_the_plugin() {
         .filter(|(_, s)| **s != 0.0)
         .collect();
     assert_eq!(peaks, [(100, &1.0)]);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_latency_set_before_the_plugin_activates_needs_no_restart() {
+    // The test gain asks for a restart when it's given another latency,
+    // even while it's inactive, which activating it does anyway.
+    let plugins = TestPlugins::new("latency-first");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, 100.0);
+    instance.activate(CONFIG).unwrap();
+    assert_eq!(instance.latency(), 100);
+    let mut node = instance.node_source().node();
+    play(&mut node, &ramp(64), &Block::default());
+    assert_eq!(instance.poll(), []);
     drop((node, instance));
     plugins.assert_alright();
 }
@@ -504,9 +467,10 @@ fn changes_in_the_plugins_window_come_back() {
             PluginEvent::GestureEnd { param: GAIN },
         ]
     );
-    // Active, the changes come out of processing.
+    // Processed, the changes come out of processing.
     instance.activate(CONFIG).unwrap();
     let mut node = instance.node_source().node();
+    play(&mut node, &ramp(16), &Block::default());
     plugins.gui(&instance, gui::VALUE, GAIN, 1.5);
     assert_eq!(instance.poll(), []);
     play(&mut node, &ramp(16), &Block::default());
@@ -744,7 +708,7 @@ fn scan_child() {
 const SCAN_CHILD: &str = "MUSICABLE_SCAN_CHILD";
 
 fn scan_copy(name: &str, timeout: Duration) -> Outcome {
-    let path = copy_library(name);
+    let path = testing::copy(&temp_dir(name), name);
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", "tests::scan_child", "--test-threads", "1"])

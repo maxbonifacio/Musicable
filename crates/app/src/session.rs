@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use musicable_commands::{
     Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
@@ -12,17 +13,19 @@ use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
 use musicable_engine::nodes::{Gain, Metronome};
 use musicable_engine::{
-    Compiled, Compiler, EngineConfig, EngineHandle, Event, Graph, Meters, NodeKey, ParamId,
-    PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_with_media,
+    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, Meters, NodeKey,
+    ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_with_devices,
 };
-use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
+use musicable_model::{DeviceId, Project};
+use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::media::MediaPool;
+use crate::plugins::{Change, Plugins};
 
-/// Builds the graph for a project, with its meters and its audio files, on
-/// the compiler's thread.
-type Build = Arc<dyn Fn(&Project, &Meters, &Media) -> Graph + Send + Sync>;
+/// Builds the graph for a project, with its meters, its audio files and its
+/// plugins' nodes, on the compiler's thread.
+type Build = Arc<dyn Fn(&Project, &Meters, &Media, &Devices) -> Graph + Send + Sync>;
 
 /// The open project, the commands that change it, and the engine that plays
 /// it.
@@ -36,11 +39,21 @@ type Build = Arc<dyn Fn(&Project, &Meters, &Media) -> Graph + Send + Sync>;
 /// Audio clips play files from the folder the project's file is in, which
 /// the session is told when it opens a project. They load as graphs build:
 /// short files whole, and longer ones streaming from disk.
+///
+/// Plugin devices play through instances of their plugins, which the
+/// session loads from the plugins it's told are installed, and keeps in
+/// step with the project. What changes in a plugin's own window comes back
+/// into the project, so undo covers it.
 pub struct Session {
     document: Document,
     commands: Registry,
     keymap: Keymap,
     engine: EngineLink,
+    plugins: Plugins,
+    /// What the plugins' windows asked for, oldest first.
+    window_events: Vec<(DeviceId, PluginEvent)>,
+    /// What went wrong with plugins as they played.
+    problems: Vec<String>,
     /// What commands asked of the app, oldest first.
     requests: Vec<Request>,
     /// Counts the project's changes.
@@ -69,7 +82,7 @@ impl Session {
             keymap,
             handle,
             media,
-            Arc::new(compile_with_media),
+            Arc::new(compile_with_devices),
         )
     }
 
@@ -90,21 +103,22 @@ impl Session {
             keymap,
             handle,
             media,
-            Arc::new(compile_with_media),
+            Arc::new(compile_with_devices),
         )
     }
 
     /// Like [`new`](Self::new), for a project without a folder, with `build`
-    /// building the project's graphs in place of [`compile_with_media`]: for
-    /// tests, such as one with a node that's slow to prepare. The session's
-    /// meters read nothing, and audio clips are silent.
+    /// building the project's graphs in place of [`compile_with_devices`]:
+    /// for tests, such as one with a node that's slow to prepare. The
+    /// session's meters read nothing, and audio clips and plugins are
+    /// silent.
     pub fn with_compiler(
         project: Project,
         keymap: Keymap,
         handle: EngineHandle,
         build: impl Fn(&Project) -> Graph + Send + Sync + 'static,
     ) -> Self {
-        let build = move |project: &Project, _: &Meters, _: &Media| build(project);
+        let build = move |project: &Project, _: &Meters, _: &Media, _: &Devices| build(project);
         let media = MediaPool::new(false);
         Self::building(project, None, keymap, handle, media, Arc::new(build))
     }
@@ -117,6 +131,7 @@ impl Session {
         media: MediaPool,
         build: Build,
     ) -> Self {
+        let plugins = Plugins::new(handle.config());
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             tempo: project.tempo.clone(),
@@ -125,6 +140,7 @@ impl Session {
             build,
             media: Arc::new(media),
             folder: folder.map(Path::to_owned),
+            devices: Devices::new(),
             asked: 0,
             received: 0,
             floor: 0,
@@ -141,6 +157,9 @@ impl Session {
             commands: crate::commands(),
             keymap,
             engine,
+            plugins,
+            window_events: Vec::new(),
+            problems: Vec::new(),
             requests: Vec::new(),
             revision: 0,
         }
@@ -162,6 +181,10 @@ impl Session {
         self.engine.media.forget();
         self.engine.stop();
         self.engine.locate(Beats::ZERO);
+        self.plugins.clear();
+        self.window_events.clear();
+        self.plugins.sync(&project);
+        self.engine.devices = self.plugins.devices();
         self.engine.set_up(&project);
         self.engine.flush();
         // How editing behaves is the user's, not the project's.
@@ -188,6 +211,7 @@ impl Session {
         self.engine.outbox.clear();
         self.engine.gates.clear();
         self.engine.playing = false;
+        self.plugins.set_config(self.engine.handle.config());
         self.engine.set_up(self.document.project());
         self.engine.locate(at);
         if playing {
@@ -371,19 +395,116 @@ impl Session {
         &self.engine.meters
     }
 
-    /// What went wrong reading the project's audio files since the last
-    /// call, such as a file that's missing, for the app to show. Each file's
-    /// problem comes once.
+    /// What went wrong reading the project's audio files and loading its
+    /// plugins since the last call, such as a file or a plugin that's
+    /// missing, for the app to show. Each file's problem comes once.
     pub fn take_problems(&mut self) -> Vec<String> {
-        self.engine.media.take_problems()
+        let mut problems = self.engine.media.take_problems();
+        problems.extend(self.plugins.take_problems());
+        problems.append(&mut self.problems);
+        problems
     }
 
-    /// Call regularly, such as once per UI frame. Sends the graphs the
-    /// compiler has finished and what the engine had no room for earlier,
-    /// and drops the graphs and tempo maps the engine has replaced.
+    /// Finds the project's plugins among `installed` from now on, such as
+    /// when a scan finds new ones, and loads the plugins of the devices that
+    /// have none yet. Until it's first called, plugin devices play nothing.
+    pub fn set_installed_plugins(&mut self, installed: Vec<PluginInfo>) {
+        self.plugins.set_installed(installed);
+        if self.plugins.sync(self.document.project()) {
+            self.rebuild();
+        }
+        self.engine.flush();
+    }
+
+    /// The plugins the session finds the project's plugins among.
+    pub fn installed_plugins(&self) -> &[PluginInfo] {
+        self.plugins.installed()
+    }
+
+    /// Plugins loaded from now on call `waker`, from any thread but an
+    /// audio thread, when they need [`tick`](Self::tick) called.
+    pub fn set_plugin_waker(&mut self, waker: Waker) {
+        self.plugins.set_waker(waker);
+    }
+
+    /// The instance of the plugin device `device`'s plugin, if it loaded,
+    /// for its window.
+    pub fn plugin(&self, device: DeviceId) -> Option<&Instance> {
+        self.plugins.instance(device)
+    }
+
+    pub fn plugin_mut(&mut self, device: DeviceId) -> Option<&mut Instance> {
+        self.plugins.instance_mut(device)
+    }
+
+    /// Why the plugin device `device`'s plugin didn't load, if it didn't.
+    pub fn plugin_problem(&self, device: DeviceId) -> Option<&str> {
+        self.plugins.problem(device)
+    }
+
+    /// What the plugins' windows asked for since the last call, oldest
+    /// first: to be another size, or to close.
+    pub fn take_window_events(&mut self) -> Vec<(DeviceId, PluginEvent)> {
+        std::mem::take(&mut self.window_events)
+    }
+
+    /// When [`tick`](Self::tick) is next due for a timer a plugin set.
+    pub fn next_plugin_timer(&self) -> Option<Instant> {
+        self.plugins.next_timer()
+    }
+
+    /// The project as it's saved to a file: with each plugin's state saved
+    /// afresh, so it has whatever the plugin keeps that its parameters
+    /// don't say.
+    pub fn saved_project(&mut self) -> Project {
+        self.plugins.saved(self.document.project())
+    }
+
+    /// Call regularly, such as once per UI frame, and when a plugin's waker
+    /// says so. Carries out what the plugins asked for and takes in what
+    /// changed in them, sends the graphs the compiler has finished and what
+    /// the engine had no room for earlier, and drops the graphs and tempo
+    /// maps the engine has replaced.
     pub fn tick(&mut self) {
+        let changes = self.plugins.poll();
+        if !changes.is_empty() {
+            self.follow_plugins(changes);
+        }
         self.engine.handle.collect_garbage();
         self.engine.flush();
+    }
+
+    /// Makes what changed in the plugins changes to the project, as
+    /// transactions named after each plugin, so undo takes them back.
+    fn follow_plugins(&mut self, changes: Vec<(DeviceId, Change)>) {
+        let mut latency = false;
+        for (device, change) in changes {
+            let name = format!("Change {}", self.plugins.name(device).unwrap_or("Plugin"));
+            match change {
+                Change::GestureBegin => self.document.begin_gesture(),
+                Change::GestureEnd => self.document.end_gesture(),
+                Change::Param { param, value } => self.document.transact(&name, |tx| {
+                    tx.set_plugin_param(device, param, Some(value));
+                }),
+                Change::Settings(settings) => self.document.transact(&name, |tx| {
+                    tx.set_plugin_settings(device, settings);
+                }),
+                Change::Latency => latency = true,
+                Change::Window(event) => self.window_events.push((device, event)),
+                Change::Failed(problem) => self.problems.push(problem),
+            }
+        }
+        if latency {
+            self.rebuild();
+        }
+        self.sync();
+    }
+
+    /// Compiles a new graph for the project, with the plugins' nodes as
+    /// they are now.
+    fn rebuild(&mut self) {
+        self.engine.devices = self.plugins.devices();
+        self.engine.recompile(self.document.project());
     }
 
     /// Whether a graph the session asked for is still compiling. While one
@@ -417,7 +538,8 @@ impl Session {
         let mut gates_changed = false;
         let mut recompile = false;
         let committed = self.document.take_committed();
-        if !committed.is_empty() {
+        let changed = !committed.is_empty();
+        if changed {
             self.revision += 1;
         }
         for committed in committed {
@@ -463,6 +585,9 @@ impl Session {
                     | Edit::RemoveLocator { .. }
                     | Edit::LocatorAt { .. }
                     | Edit::LocatorName { .. } => {}
+                    // The plugins have their settings, not the engine: the
+                    // plugins follow below.
+                    Edit::PluginParam { .. } | Edit::PluginSettings { .. } => {}
                     // Clips are compiled into the graph.
                     Edit::AddTrack { .. }
                     | Edit::RemoveTrack { .. }
@@ -475,9 +600,16 @@ impl Session {
                     | Edit::AddClip { .. }
                     | Edit::RemoveClip { .. }
                     | Edit::ClipTiming { .. }
-                    | Edit::ClipFades { .. } => recompile = true,
+                    | Edit::ClipFades { .. }
+                    | Edit::AddDevice { .. }
+                    | Edit::RemoveDevice { .. } => recompile = true,
                 }
             }
+        }
+        // Plugins load for new devices, and go with the ones that went, in
+        // tracks too, and take in their settings.
+        if changed && self.plugins.sync(self.document.project()) {
+            recompile = true;
         }
         if let Some(tempo) = tempo {
             self.engine.push(Message::Tempo(tempo));
@@ -489,7 +621,7 @@ impl Session {
             self.engine.push(Message::Event(event));
         }
         if recompile {
-            self.engine.recompile(self.document.project());
+            self.rebuild();
         } else if gates_changed {
             self.engine.set_gates(self.document.project(), false);
         }
@@ -513,6 +645,8 @@ struct EngineLink {
     /// The folder of the project's file, which audio clips' relative paths
     /// start from.
     folder: Option<PathBuf>,
+    /// The nodes of the plugins the graphs play.
+    devices: Devices,
     /// The newest compiler job asked for.
     asked: u64,
     /// The newest job whose graph has come back.
@@ -569,11 +703,12 @@ impl EngineLink {
         let meters = self.meters.clone();
         let media = self.media.clone();
         let folder = self.folder.clone();
+        let devices = self.devices.clone();
         let project = project.clone();
         self.asked = self.compiler.compile(self.handle.config(), move || {
             // Files load here, on the compiler's thread, with the graph.
             let media = media.media(&project, folder.as_deref());
-            build(&project, &meters, &media)
+            build(&project, &meters, &media, &devices)
         });
         self.asked
     }

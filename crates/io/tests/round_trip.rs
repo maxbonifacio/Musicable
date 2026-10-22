@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
 use musicable_model::clip::{AudioClip, Clip, ClipContent, Dimension, MidiClip, Point};
+use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{ClipType, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
 
 /// SplitMix64, for making test projects. Seeded, so a failure happens again
@@ -80,6 +81,33 @@ impl Random {
 
     fn clip_type(&mut self) -> ClipType {
         self.pick(&[ClipType::Off, ClipType::Hard, ClipType::Soft])
+    }
+
+    /// A plugin, as new or with a state of any bytes, and with parameters
+    /// set to any finite values.
+    fn plugin(&mut self) -> DeviceKind {
+        let state = (!self.one_in(3)).then(|| {
+            let bytes: Vec<u8> = (0..self.below(70)).map(|_| self.next() as u8).collect();
+            PluginState::new(bytes)
+        });
+        let mut id = 0;
+        let params = (0..self.below(5))
+            .map(|_| {
+                id += 1 + self.below(1_000) as u32;
+                let value = match self.one_in(2) {
+                    true => self.f64(),
+                    false => self.below(101) as f64 / 100.0,
+                };
+                PluginParam { id, value }
+            })
+            .collect();
+        DeviceKind::Plugin(PluginDevice {
+            format: self.pick(&[PluginFormat::Clap, PluginFormat::Vst3]),
+            id: format!("org.example.{}", self.below(100)),
+            name: self.name(),
+            instrument: self.one_in(2),
+            settings: PluginSettings { state, params },
+        })
     }
 
     fn bpm(&mut self) -> f64 {
@@ -274,11 +302,12 @@ fn random_project(random: &mut Random) -> Project {
         let kind = project.track(id).unwrap().kind;
         let devices = (0..random.below(3))
             .map(|_| {
-                let kind = match random.one_in(3) {
-                    true => DeviceKind::TestInstrument {
+                let kind = match random.below(3) {
+                    0 => DeviceKind::TestInstrument {
                         level: random.gain(),
                     },
-                    false => DeviceKind::TestGain {
+                    1 => random.plugin(),
+                    _ => DeviceKind::TestGain {
                         gain: random.gain(),
                     },
                 };
@@ -305,8 +334,13 @@ fn random_project(random: &mut Random) -> Project {
     project.master.gain = random.gain();
     project.master.pan = random.pan();
     for _ in 0..random.below(3) {
-        let gain = random.gain();
-        let device = project.new_device(DeviceKind::TestGain { gain });
+        let kind = match random.one_in(2) {
+            true => random.plugin(),
+            false => DeviceKind::TestGain {
+                gain: random.gain(),
+            },
+        };
+        let device = project.new_device(kind);
         project.master.devices.push(device);
     }
     project.master.clip_type = random.clip_type();
@@ -366,9 +400,11 @@ fn floats_load_bit_for_bit() {
         assert_eq!(loaded_tone.level.to_bits(), tone.level.to_bits());
         let level = |track: &musicable_model::Track| track.sends[0].level.to_bits();
         assert_eq!(level(loaded), level(saved));
-        let gain = |track: &musicable_model::Track| match track.devices[0].kind {
+        let gain = |track: &musicable_model::Track| match &track.devices[0].kind {
             DeviceKind::TestGain { gain } => gain.to_bits(),
-            DeviceKind::TestInstrument { .. } => unreachable!("only test gains"),
+            DeviceKind::TestInstrument { .. } | DeviceKind::Plugin(_) => {
+                unreachable!("only test gains")
+            }
         };
         assert_eq!(gain(loaded), gain(saved));
     }

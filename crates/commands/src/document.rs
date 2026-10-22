@@ -7,10 +7,11 @@
 
 use musicable_model::clip::{Clip, ClipContent, ClipId, Fades, Timing};
 use musicable_model::mixer::Bus;
+use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
-    ClipType, Device, DeviceKind, Locator, LocatorId, Project, Send, SendId, Track, TrackId,
-    TrackKind,
+    Chain, ClipType, Device, DeviceId, DeviceKind, Locator, LocatorId, Project, Send, SendId,
+    Track, TrackId, TrackKind,
 };
 
 use crate::editor::Editor;
@@ -237,9 +238,92 @@ impl Transaction<'_> {
         self.project.new_send(to)
     }
 
-    /// A new device, with the next device id: see [`Project::new_device`].
+    /// A new device, with the next device id, for
+    /// [`add_device`](Self::add_device): see [`Project::new_device`].
     pub fn new_device(&mut self, kind: DeviceKind) -> Device {
         self.project.new_device(kind)
+    }
+
+    /// Puts `device` at `index` in `chain`, or at the end if `index` is past
+    /// it. It's left out if the chain's track isn't there, if the project
+    /// has a device with its id, or if a file couldn't hold its settings.
+    pub fn add_device(&mut self, chain: Chain, index: usize, device: Device) {
+        let fits = device.kind.plugin().is_none_or(|p| p.settings.is_valid());
+        if !fits || self.project.find_device(device.id).is_some() {
+            return;
+        }
+        let Some(devices) = self.project.devices_mut(chain) else {
+            return;
+        };
+        let index = index.min(devices.len());
+        devices.insert(index, device.clone());
+        self.edits.push(Edit::AddDevice {
+            chain,
+            index,
+            device,
+        });
+    }
+
+    /// Removes the device with id `device` from its chain, and returns it.
+    pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
+        let (chain, index, _) = self.project.find_device(device)?;
+        let device = self.project.devices_mut(chain)?.remove(index);
+        self.edits.push(Edit::RemoveDevice {
+            chain,
+            index,
+            device: device.clone(),
+        });
+        Some(device)
+    }
+
+    /// Sets the parameter `param` of the plugin device with id `device` to
+    /// `value`, in the plugin's own units, or leaves it to the plugin's
+    /// state with `None`. A value that isn't a finite number does nothing,
+    /// and so does a device that isn't a plugin.
+    pub fn set_plugin_param(&mut self, device: DeviceId, param: u32, value: Option<f64>) {
+        if value.is_some_and(|v| !v.is_finite()) {
+            return;
+        }
+        let Some(plugin) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.plugin_mut())
+        else {
+            return;
+        };
+        if plugin.settings.param(param) != value {
+            let from = plugin.settings.set_param(param, value);
+            self.edits.push(Edit::PluginParam {
+                device,
+                param,
+                from,
+                to: value,
+            });
+        }
+    }
+
+    /// Sets the settings of the plugin device with id `device` as a whole,
+    /// as when the plugin saves a new state. Settings a file couldn't hold
+    /// do nothing, and so does a device that isn't a plugin.
+    pub fn set_plugin_settings(&mut self, device: DeviceId, settings: PluginSettings) {
+        if !settings.is_valid() {
+            return;
+        }
+        let Some(plugin) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.plugin_mut())
+        else {
+            return;
+        };
+        if plugin.settings != settings {
+            let from = std::mem::replace(&mut plugin.settings, settings.clone());
+            self.edits.push(Edit::PluginSettings {
+                device,
+                from,
+                to: settings,
+            });
+        }
     }
 
     /// Puts `track` at `index` in the track list, or at the end if `index`
@@ -753,6 +837,20 @@ impl Transaction<'_> {
             }
             Edit::LocatorAt { locator, to, .. } => self.set_locator_at(*locator, *to),
             Edit::LocatorName { locator, to, .. } => self.set_locator_name(*locator, to),
+            Edit::AddDevice {
+                chain,
+                index,
+                device,
+            } => self.add_device(*chain, *index, device.clone()),
+            Edit::RemoveDevice { device, .. } => {
+                self.remove_device(device.id);
+            }
+            Edit::PluginParam {
+                device, param, to, ..
+            } => self.set_plugin_param(*device, *param, *to),
+            Edit::PluginSettings { device, to, .. } => {
+                self.set_plugin_settings(*device, to.clone())
+            }
         }
     }
 }
@@ -932,6 +1030,33 @@ pub enum Edit {
         from: String,
         to: String,
     },
+    /// `device` went in at `index` in `chain`.
+    AddDevice {
+        chain: Chain,
+        index: usize,
+        device: Device,
+    },
+    /// `device`, which was at `index` in `chain`, went.
+    RemoveDevice {
+        chain: Chain,
+        index: usize,
+        device: Device,
+    },
+    /// A parameter of the plugin device with id `device` changed. `None` is
+    /// the value in the plugin's state.
+    PluginParam {
+        device: DeviceId,
+        param: u32,
+        from: Option<f64>,
+        to: Option<f64>,
+    },
+    /// The settings of the plugin device with id `device` changed as a
+    /// whole.
+    PluginSettings {
+        device: DeviceId,
+        from: PluginSettings,
+        to: PluginSettings,
+    },
 }
 
 impl Edit {
@@ -1060,6 +1185,40 @@ impl Edit {
             },
             Edit::LocatorName { locator, from, to } => Edit::LocatorName {
                 locator,
+                from: to,
+                to: from,
+            },
+            Edit::AddDevice {
+                chain,
+                index,
+                device,
+            } => Edit::RemoveDevice {
+                chain,
+                index,
+                device,
+            },
+            Edit::RemoveDevice {
+                chain,
+                index,
+                device,
+            } => Edit::AddDevice {
+                chain,
+                index,
+                device,
+            },
+            Edit::PluginParam {
+                device,
+                param,
+                from,
+                to,
+            } => Edit::PluginParam {
+                device,
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::PluginSettings { device, from, to } => Edit::PluginSettings {
+                device,
                 from: to,
                 to: from,
             },
@@ -1213,6 +1372,25 @@ impl Edit {
                     ..
                 },
             ) if locator == other => to.clone_from(next),
+            (
+                Edit::PluginParam {
+                    device, param, to, ..
+                },
+                Edit::PluginParam {
+                    device: other,
+                    param: other_param,
+                    to: next,
+                    ..
+                },
+            ) if device == other && param == other_param => *to = *next,
+            (
+                Edit::PluginSettings { device, to, .. },
+                Edit::PluginSettings {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => to.clone_from(next),
             // Adding and removing never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
@@ -1245,7 +1423,11 @@ impl Edit {
                 | Edit::AddLocator { .. }
                 | Edit::RemoveLocator { .. }
                 | Edit::LocatorAt { .. }
-                | Edit::LocatorName { .. },
+                | Edit::LocatorName { .. }
+                | Edit::AddDevice { .. }
+                | Edit::RemoveDevice { .. }
+                | Edit::PluginParam { .. }
+                | Edit::PluginSettings { .. },
                 _,
             ) => return false,
         }
@@ -1266,7 +1448,9 @@ impl Edit {
             | Edit::AddClip { .. }
             | Edit::RemoveClip { .. }
             | Edit::AddLocator { .. }
-            | Edit::RemoveLocator { .. } => false,
+            | Edit::RemoveLocator { .. }
+            | Edit::AddDevice { .. }
+            | Edit::RemoveDevice { .. } => false,
             Edit::TrackName { from, to, .. } => from == to,
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
@@ -1284,6 +1468,8 @@ impl Edit {
             Edit::ClipFades { from, to, .. } => from == to,
             Edit::ClipName { from, to, .. } | Edit::LocatorName { from, to, .. } => from == to,
             Edit::LocatorAt { from, to, .. } => from == to,
+            Edit::PluginParam { from, to, .. } => from == to,
+            Edit::PluginSettings { from, to, .. } => from == to,
         }
     }
 }
@@ -1300,7 +1486,9 @@ pub struct Committed {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::plugin::{PluginDevice, PluginParam, PluginState};
     use musicable_model::time::Beats;
+    use musicable_model::{PluginFormat, TrackKind};
 
     use super::*;
 
@@ -1381,5 +1569,64 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn devices_go_in_once_with_settings_a_file_can_hold() {
+        let mut project = Project::new();
+        let track = project.add_track("Synth", TrackKind::Midi);
+        let mut doc = Document::new(project);
+        let synth = DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.synth".into(),
+            name: "Synth".into(),
+            instrument: true,
+            settings: PluginSettings {
+                state: Some(PluginState::new(*b"state")),
+                params: Vec::new(),
+            },
+        });
+        let (synth, gain) = doc.transact("Add Devices", |tx| {
+            let synth = tx.new_device(synth);
+            tx.add_device(Chain::Track(track), 9, synth.clone());
+            // Once only, and on a track that's there.
+            tx.add_device(Chain::Master, 0, synth.clone());
+            let gain = tx.new_device(DeviceKind::TestGain { gain: 0.5 });
+            tx.add_device(Chain::Track(TrackId(7)), 0, gain.clone());
+            tx.add_device(Chain::Master, 0, gain.clone());
+            (synth.id, gain.id)
+        });
+        let project = doc.project();
+        assert_eq!(project.tracks[0].devices[0].id, synth);
+        assert_eq!(project.master.devices[0].id, gain);
+        assert_eq!(project.find_device(synth).unwrap().0, Chain::Track(track));
+
+        doc.transact("Change Synth", |tx| {
+            tx.set_plugin_param(synth, 4, Some(0.25));
+            tx.set_plugin_param(synth, 4, Some(f64::NAN));
+            tx.set_plugin_param(synth, 2, Some(1.0));
+            tx.set_plugin_param(synth, 2, None);
+            // Not a plugin.
+            tx.set_plugin_param(gain, 1, Some(1.0));
+            let unordered = PluginSettings {
+                state: None,
+                params: vec![
+                    PluginParam { id: 2, value: 0.0 },
+                    PluginParam { id: 1, value: 0.0 },
+                ],
+            };
+            tx.set_plugin_settings(synth, unordered);
+        });
+        let edits = &doc.take_committed()[1].edits;
+        assert_eq!(edits.len(), 3, "{edits:?}");
+        let plugin = doc.project().tracks[0].devices[0].kind.plugin().unwrap();
+        assert_eq!(plugin.settings.params, [PluginParam { id: 4, value: 0.25 }]);
+
+        let removed = doc.transact("Delete Synth", |tx| tx.remove_device(synth));
+        assert_eq!(removed.map(|d| d.id), Some(synth));
+        assert!(doc.project().tracks[0].devices.is_empty());
+        assert!(doc.undo());
+        let plugin = doc.project().tracks[0].devices[0].kind.plugin().unwrap();
+        assert_eq!(plugin.settings.params, [PluginParam { id: 4, value: 0.25 }]);
     }
 }

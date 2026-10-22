@@ -1,6 +1,7 @@
 //! The app shell: the menu bar, the transport bar, the arrangement with the
-//! mixer under it, and a status bar, with the keyboard shortcuts window, the
-//! command palette, and the box that renames things.
+//! mixer and the devices under it and the plugin browser beside it, and a
+//! status bar, with the keyboard shortcuts window, the command palette, and
+//! the box that renames things.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use musicable_model::time::{Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
 use crate::arrangement::Arrangement;
+use crate::devices::{BROWSER, Browser, DEVICES, DevicesPanel, Plugins};
 use crate::menus::menus;
 use crate::mixer::{self, Levels};
 use crate::mouse::MouseMap;
@@ -58,6 +60,8 @@ pub struct View<'a> {
     pub keymap_file: KeymapStatus<'a>,
     /// Errors and notices for the user, oldest first.
     pub messages: &'a [String],
+    /// The plugins installed, and how the project's are doing.
+    pub plugins: Plugins<'a>,
 }
 
 /// The transport, as the engine last reported it.
@@ -163,9 +167,11 @@ pub struct Shell {
     shortcuts: Shortcuts,
     palette: Palette,
     arrangement: Arrangement,
+    devices: DevicesPanel,
+    browser: Browser,
     theme: Theme,
     mouse: MouseMap,
-    /// The panels the user hid, by id.
+    /// The panels hidden, by id.
     hidden: BTreeSet<&'static str>,
     /// What's being renamed, and the name typed so far.
     rename: Option<Rename>,
@@ -177,9 +183,12 @@ impl Default for Shell {
             shortcuts: Shortcuts::default(),
             palette: Palette::default(),
             arrangement: Arrangement::default(),
+            devices: DevicesPanel::default(),
+            browser: Browser::default(),
             theme: Theme::default(),
             mouse: MouseMap::live(),
-            hidden: BTreeSet::new(),
+            // The plugin browser waits to be asked for.
+            hidden: BTreeSet::from([BROWSER]),
             rename: None,
         }
     }
@@ -216,6 +225,30 @@ impl Shell {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
         });
+        let chain = self.devices.chain(view.project, view.editor.selected_track);
+        if !self.hidden.contains(BROWSER) {
+            egui::Panel::left(BROWSER)
+                .resizable(true)
+                .default_size(theme.devices.browser)
+                .min_size(theme.devices.browser / 2.0)
+                .show(ui, |ui| {
+                    self.browser.show(ui, view, chain, theme, &mut actions);
+                });
+        }
+        // Under the mixer, as Live's Detail View is.
+        if !self.hidden.contains(DEVICES) {
+            let browse = egui::Panel::bottom(DEVICES)
+                .resizable(true)
+                .default_size(theme.devices.panel)
+                .min_size(theme.devices.panel / 2.0)
+                .show(ui, |ui| {
+                    self.devices.show(ui, view, chain, theme, &mut actions)
+                })
+                .inner;
+            if browse && self.hidden.remove(BROWSER) {
+                ui.ctx().request_repaint();
+            }
+        }
         if !self.hidden.contains(MIXER) {
             egui::Panel::bottom(MIXER)
                 .resizable(true)
@@ -449,6 +482,8 @@ fn command_button(
     let mut button = with_keys(Button::new(title), view.keymap, id);
     let on = match id {
         id if *id == view::TOGGLE_MIXER => Some(!hidden.contains(MIXER)),
+        id if *id == view::TOGGLE_DEVICES => Some(!hidden.contains(DEVICES)),
+        id if *id == view::TOGGLE_BROWSER => Some(!hidden.contains(BROWSER)),
         id => toggled(view, id),
     };
     if let Some(on) = on {

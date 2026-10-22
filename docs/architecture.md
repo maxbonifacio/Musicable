@@ -177,15 +177,16 @@ built yet, except where it says so.
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
-  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. So far
-  there are a test gain and a test instrument. CLAP hosting is built in
-  `crates/plugins` ([plugins.md](plugins.md)): an `Instance` lives on the
+  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There
+  are plugins, and a test gain and a test instrument. CLAP hosting is built
+  in `crates/plugins` ([plugins.md](plugins.md)): an `Instance` lives on the
   main thread, where CLAP wants everything but processing done, and makes
   the `Node`s that process it, so every graph's node plays the same plugin.
-  A plugin's changes in its own window come back from `Instance::poll`, for
-  the session to make transactions of, so undo covers them. Scanning runs
-  in a process of its own, so a plugin that crashes doesn't take the app
-  with it. Plugin devices in projects and the app are next, then VST3.
+  The session's `Plugins` holds an instance for each plugin device, hands
+  the compiler their nodes, and makes transactions of the changes made in
+  their windows, so undo covers them. Scanning runs in a process of its
+  own, so a plugin that crashes doesn't take the app with it. VST3 is
+  next.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) can check
   plugin code for what our allocation checker can't see.
 - **Plugin delay compensation.** Built: nodes report their latency

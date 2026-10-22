@@ -13,7 +13,7 @@ use std::fmt;
 
 use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
-use musicable_model::{LocatorId, TrackId};
+use musicable_model::{DeviceId, LocatorId, TrackId};
 
 use crate::CommandId;
 
@@ -32,6 +32,7 @@ pub enum Value {
     Track(TrackId),
     Clip(ClipId),
     Locator(LocatorId),
+    Device(DeviceId),
     List(Vec<Value>),
 }
 
@@ -46,6 +47,7 @@ pub enum Type {
     Track,
     Clip,
     Locator,
+    Device,
     List(&'static Type),
 }
 
@@ -68,6 +70,7 @@ impl Type {
             Type::Track => TrackId::from_value(value).is_some(),
             Type::Clip => ClipId::from_value(value).is_some(),
             Type::Locator => LocatorId::from_value(value).is_some(),
+            Type::Device => DeviceId::from_value(value).is_some(),
             Type::List(item) => {
                 matches!(value, Value::List(values) if values.iter().all(|v| item.accepts(v)))
             }
@@ -86,6 +89,7 @@ impl fmt::Display for Type {
             Type::Track => f.write_str("a track"),
             Type::Clip => f.write_str("a clip"),
             Type::Locator => f.write_str("a locator"),
+            Type::Device => f.write_str("a device"),
             Type::List(item) => write!(f, "a list, each {item}"),
         }
     }
@@ -295,6 +299,7 @@ macro_rules! id_from_value {
 id_from_value!(TrackId, Track);
 id_from_value!(ClipId, Clip);
 id_from_value!(LocatorId, Locator);
+id_from_value!(DeviceId, Device);
 
 impl<T: FromValue> FromValue for Vec<T> {
     const TYPE: Type = Type::List(&T::TYPE);

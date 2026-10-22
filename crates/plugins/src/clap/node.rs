@@ -19,7 +19,8 @@ use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::id::clap_id;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NoteEvent, NoteId, ProcessContext,
+    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, NoteId,
+    ProcessContext,
 };
 use musicable_model::clip::Dimension;
 use musicable_model::time::Beats;
@@ -264,6 +265,14 @@ impl NodeSource {
             _library: Arc::clone(&self.library),
             transport: transport(None),
         }
+    }
+}
+
+/// The compiler makes a plugin device's node with it: see
+/// [`Devices`](musicable_engine::Devices).
+impl NodeMaker for NodeSource {
+    fn make(&self) -> Box<dyn Node> {
+        Box::new(self.node())
     }
 }
 

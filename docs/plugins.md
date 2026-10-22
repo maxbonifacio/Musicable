@@ -1,9 +1,9 @@
 # Plugins
 
-How Musicable hosts plugins: CLAP so far, in `crates/plugins`. VST3 comes
-next on the same pieces, then ARA 2 on top of VST3. Plugin devices in
-projects, the device panel, the plugin browser and plugin windows in the
-app come with the next part of N5; this page grows with them.
+How Musicable hosts plugins: CLAP so far, in `crates/plugins`, and how the
+app puts them on tracks, in `crates/app`. VST3 comes next on the same
+pieces, then ARA 2 on top of VST3. [app.md](app.md#plugins) says how
+plugins look and work in the app's window.
 
 ## The pieces
 
@@ -13,6 +13,9 @@ app come with the next part of N5; this page grows with them.
 | `NodeSource`, `ClapNode` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
 | `scan` | A process of its own | Lists the plugins in a library, so one that crashes or hangs as it loads takes only the scanner down; `ScanCache` remembers what was found |
 | `crates/test-plugins` | Tests | A gain and a synth that check the host keeps CLAP's rules, and libraries that crash, hang or fail to load |
+| `Plugins` | The app's main thread | An instance for each plugin device in the open project, kept in step with it both ways (`crates/app/src/plugins.rs`) |
+| `PluginScan` | A thread of the app's | Scans in the background, each library in a process of its own, and keeps what it found (`crates/app/src/plugin_scan.rs`) |
+| `PluginWindows` | The app's main thread | The plugins' own windows, and Musicable's windows they go inside (`crates/app/src/plugin_windows.rs`) |
 
 ## Threads
 
@@ -55,7 +58,10 @@ shorter block, plays silence.
 - **Restarting.** A plugin that changes its latency or its ports asks to
   restart. `poll` deactivates and activates it again, and says so with
   `PluginEvent::Restarted`. If the latency changed, the graph needs
-  rebuilding, so delay compensation takes the new latency.
+  rebuilding, so delay compensation takes the new latency. Activating is
+  the restart a plugin asked for until then, so a plugin given another
+  latency before it first activates, as a saved project's plugins are,
+  doesn't restart again once it's playing.
 - **Failing.** A plugin that fails to start processing is deactivated on
   the next `poll`, which says why.
 - **Destroying.** Dropping the `Instance` closes the plugin's window,
@@ -69,16 +75,20 @@ any more: every instance and every node holds it.
 ## Parameters
 
 - **From the app**, `Instance::set_param` queues the change for the
-  plugin's next block, at its first frame. An inactive plugin gets it at
-  once, through its `flush`. Plugin parameters don't go through the
-  engine's message queue: a graph swap there resends every remembered
-  parameter, and plugins have thousands.
+  plugin's next block, at its first frame. A plugin that no node
+  processes, inactive or not started yet, as when there's no audio device,
+  gets it at once, through its `flush`: on the main thread, which is its
+  audio thread while it's active, holding the busy flag. Plugin parameters
+  don't go through the engine's message queue: a graph swap there resends
+  every remembered parameter, and plugins have thousands.
 - **From the graph**, a node's `NodeEventKind::Param` events reach the
   plugin at their offsets, and `NodeEventKind::Modulation` as CLAP's
   parameter modulation, which offsets the value without changing it.
 - **From the plugin**, a change someone makes in its window, or one it makes
   itself, comes back from `poll` as `GestureBegin`, `ParamChanged` and
-  `GestureEnd`. These become transactions, so undo covers them.
+  `GestureEnd`. These become transactions, so undo covers them. A plugin
+  that no node processes is flushed when it asks, so its changes come back
+  without an audio device too.
 
 `Instance::params` describes the parameters: id, name, module, range,
 default, and whether each is stepped, hidden, read-only, a bypass,
@@ -101,7 +111,8 @@ started, whether it's playing, and the loop.
 ## State
 
 `save_state` asks the plugin for its state, in its own format, and
-`load_state` gives it back. Projects will store it as it is.
+`load_state` gives it back. A project keeps it as it is, in base64
+([project-format.md](project-format.md#track)).
 
 ## Windows
 
@@ -110,6 +121,59 @@ started, whether it's playing, and the loop.
 new size. A plugin that can't go inside another window gets one of its own
 (`open_floating_window`). When the plugin asks for a new size or to close,
 `poll` says so.
+
+## Plugins on tracks
+
+A plugin device names its plugin by format and id, with the name it had
+when it was added, and keeps its settings: the state the plugin last saved,
+and the parameters set since ([project-format.md](project-format.md#track)).
+The session's `Plugins` holds an `Instance` for each plugin device in the
+open project, on a track or on the master:
+
+- **Loading.** A device's plugin loads once the app knows it's installed
+  (`Session::set_installed_plugins`, from a scan), and gets the device's
+  settings: its state, then the parameters. It's activated for the engine,
+  and the compiler builds its nodes into the graph
+  (`compile_with_devices`, with a `NodeMaker` for each device). Until it
+  loads, and if it never does, the device passes the signal through. A
+  plugin that isn't installed, a VST3 plugin, or one that fails to load or
+  start says why, in the status bar and on its device, as in "Old Reverb
+  isn't installed, or Musicable hasn't found it: it plays nothing", and
+  isn't tried again until the next scan.
+- **Following the project.** Adding or deleting a device, or undoing that,
+  loads or drops its instance: a device that comes back loads afresh, with
+  its settings. A change to the settings, from `device.set_param` or undo,
+  goes to the plugin as far as it differs from what the plugin has: a new
+  state through `load_state`, then the parameters through `set_param`.
+- **Following the plugin.** `Session::tick` polls the plugins every frame.
+  A parameter someone turns in the plugin's window is set in the project
+  in a transaction named after the plugin, such as "Change Test Gain", and
+  a whole gesture is one step in the undo history. When the plugin says its
+  state changed, as when someone picks a preset in its window, the session
+  saves the state into the project, as a step of its own, or at the end of
+  the gesture it's in. A plugin without a state has its parameters read
+  instead. A plugin that restarts with another latency gets a new graph,
+  which compensates for it.
+- **Saving.** `Session::saved_project` is the project with a fresh state
+  from each plugin that has one, which is what the app writes. So the file
+  has everything the plugins keep, and `params` is usually empty there.
+- **Another engine**, for another sample rate or buffer size, activates
+  every plugin again for it.
+
+The app scans for plugins in the background as it starts. What the last
+scan found is kept in `plugins.json` in the config folder, so the plugins
+are there at once, and the scan only loads the libraries that are new or
+changed since. It runs Musicable's own binary for each, as
+`musicable scan-plugin LIBRARY` (`scan::child`).
+
+**Windows.** `PluginWindows` shows a plugin's window when the devices panel
+asks. On Windows the plugin's window goes inside a window of Musicable's,
+which the main window owns, so it stays in front of the main window and
+minimizes with it. It's as big as the plugin says, and follows the plugin
+when it asks for another size; it doesn't resize by its border. Elsewhere,
+and for a plugin that can't go inside another window, the plugin opens a
+window of its own. Closing the window, or deleting the device, closes the
+plugin's window first, then Musicable's.
 
 ## Scanning
 
@@ -155,11 +219,21 @@ scanning process (`tests::scan_child`).
 The node is checked for allocations like every node. The plugin's own code
 isn't: its allocations go through its own allocator. RTSan will check that.
 
+The app's tests use the same plugins:
+[`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays them
+through the session, saves and opens them again, undoes changes made in
+their windows, plays a missing plugin, lines a latent plugin up with a dry
+track to the sample, also after its latency changes, and runs the app's
+binary as the scanner.
+[`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
+does it all in the app's window, with the mouse and the keys.
+
 ## Not done yet
 
-- Plugin devices in projects, the commands that add, remove and change
-  them with undo, the compiler's plugin nodes, and the app's device panel,
-  plugin browser and plugin windows: the next part of N5.
+- A plugin that a node has started processing hands back changes made in
+  its window as it processes. If the audio device stops, they wait until
+  it plays again, or until the project is saved, which saves the plugin's
+  state.
 - The thread pool runs a plugin's tasks one after another on the thread
   processing it, which CLAP allows. Sharing the renderer's workers is next.
 - Audio ports beyond the main ones (sidechains), 64-bit processing, MPE

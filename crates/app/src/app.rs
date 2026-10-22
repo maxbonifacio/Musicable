@@ -1,22 +1,28 @@
 //! The window: the UI crate's shell, wired to the session, the audio device
 //! and the project's file.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_commands::{Args, CommandError, Request, arrange};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_model::time::Beats;
-use musicable_model::{Project, TrackId};
+use musicable_model::{DeviceId, Project, TrackId};
+use musicable_plugins::{PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, KeyPresses, KeymapStatus, Level, Levels, Playback, SaveChoice, Shell, View,
+    Action, Audio, KeyPresses, KeymapStatus, Level, Levels, Playback, PluginEntry, PluginStatus,
+    Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::audio_window::AudioWindow;
 use crate::keymap_file::UserKeymap;
+use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
+use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
 use crate::{Output, Session, capital};
 
@@ -34,6 +40,14 @@ const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"
 /// The app's window, and everything it drives.
 pub struct App {
     session: Session,
+    /// The plugins' own windows. After the session, so the plugins close
+    /// their windows before the windows they're in go.
+    plugin_windows: PluginWindows,
+    plugin_scan: PluginScan,
+    /// The plugins installed, as the browser lists them.
+    plugin_entries: Vec<PluginEntry>,
+    /// How each plugin device's plugin is doing, as of this frame.
+    plugin_status: BTreeMap<DeviceId, PluginStatus>,
     output: Output,
     shell: Shell,
     /// The headers and the waveforms of the project's audio files.
@@ -66,8 +80,9 @@ pub struct App {
 }
 
 impl App {
-    /// Opens the audio device and the project at `path`, or a new project.
-    pub fn new(path: Option<PathBuf>) -> Self {
+    /// Opens the audio device and the project at `path`, or a new project,
+    /// in the window whose egui context is `ctx`.
+    pub fn new(path: Option<PathBuf>, ctx: &egui::Context) -> Self {
         let mut messages = Vec::new();
         let config_dir = settings::config_dir();
         let settings = match &config_dir {
@@ -81,7 +96,9 @@ impl App {
             None => Settings::default(),
         };
         let (output, handle) = Output::open(settings.audio.request(), &mut messages);
-        Self::with_output(path, config_dir, settings, output, handle, messages)
+        let mut app = Self::with_output(path, config_dir, settings, output, handle, messages, ctx);
+        app.scan_plugins(false, ctx);
+        app
     }
 
     /// Opens the project at `path`, or a new project, playing through
@@ -94,6 +111,7 @@ impl App {
         output: Output,
         handle: EngineHandle,
         mut messages: Vec<String>,
+        ctx: &egui::Context,
     ) -> Self {
         let (keymap_file, keymap) =
             UserKeymap::read(config_dir.as_ref().map(|dir| dir.join(KEYMAP_FILE)));
@@ -115,8 +133,17 @@ impl App {
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
         session.editor_mut().behaviour = settings.behaviour;
-        Self {
+        session.set_plugin_waker(waker(ctx));
+        let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
+        // What the last scan found, while the next one runs. Before the
+        // first, plugin devices wait for it.
+        let known = plugin_scan.known();
+        let mut app = Self {
             session,
+            plugin_windows: PluginWindows::default(),
+            plugin_scan,
+            plugin_entries: Vec::new(),
+            plugin_status: BTreeMap::new(),
             output,
             shell: Shell::new(),
             audio_files: AudioFiles::new(),
@@ -133,6 +160,56 @@ impl App {
             pending: None,
             closing: false,
             title: String::new(),
+        };
+        if let Some(known) = known {
+            app.set_installed_plugins(known);
+        }
+        app
+    }
+
+    /// Scans for plugins in the background, unless a scan is running.
+    /// Libraries left out as bad are loaded again only if `retry_bad`.
+    fn scan_plugins(&mut self, retry_bad: bool, ctx: &egui::Context) {
+        if let Err(error) = self.plugin_scan.start(retry_bad, waker(ctx)) {
+            self.messages.push(capital(&format!("{error}.")));
+        }
+    }
+
+    /// Finds the project's plugins among `installed` from now on, and lists
+    /// them in the browser.
+    fn set_installed_plugins(&mut self, installed: Vec<PluginInfo>) {
+        let mut entries: Vec<PluginEntry> = installed
+            .iter()
+            .map(|plugin| PluginEntry {
+                format: plugin.format,
+                id: plugin.id.clone(),
+                name: plugin.name.clone(),
+                vendor: plugin.vendor.clone(),
+                instrument: plugin.is_instrument(),
+            })
+            .collect();
+        entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.vendor.clone()));
+        self.plugin_entries = entries;
+        self.session.set_installed_plugins(installed);
+    }
+
+    /// How each plugin device's plugin is doing, for the devices panel.
+    fn update_plugin_status(&mut self) {
+        self.plugin_status.clear();
+        let devices = self
+            .session
+            .project()
+            .chains()
+            .flat_map(|(_, devices)| devices);
+        for device in devices.filter(|d| d.kind.plugin().is_some()) {
+            let instance = self.session.plugin(device.id);
+            let status = PluginStatus {
+                loaded: instance.is_some(),
+                has_window: instance.is_some_and(|i| i.has_window()),
+                window_open: self.plugin_windows.is_open(device.id),
+                problem: self.session.plugin_problem(device.id).map(str::to_owned),
+            };
+            self.plugin_status.insert(device.id, status);
         }
     }
 
@@ -242,6 +319,32 @@ impl App {
             }
             Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
             Request::Rename(named) => self.shell.rename(named),
+            Request::PluginWindow { device, show: true } => {
+                self.show_plugin_window(device, ctx, frame);
+            }
+            Request::PluginWindow {
+                device,
+                show: false,
+            } => self.plugin_windows.hide(&mut self.session, device),
+            Request::RescanPlugins => self.scan_plugins(true, ctx),
+        }
+    }
+
+    /// Shows the device `device`'s plugin's own window, in front of the
+    /// app's.
+    fn show_plugin_window(&mut self, device: DeviceId, ctx: &egui::Context, frame: &eframe::Frame) {
+        // The display's scale, without egui's zoom, which the plugin
+        // doesn't know of.
+        let scale = ctx.native_pixels_per_point().unwrap_or(1.0);
+        let shown = self.plugin_windows.show(
+            &mut self.session,
+            device,
+            owner(frame),
+            f64::from(scale),
+            waker(ctx),
+        );
+        if let Err(error) = shown {
+            self.messages.push(capital(&format!("{error}.")));
         }
     }
 
@@ -331,7 +434,7 @@ impl App {
                 }
             }
         };
-        match project::save(&path, self.session.project()) {
+        match project::save(&path, &self.session.saved_project()) {
             Ok(()) => {
                 self.session.mark_saved();
                 self.set_path(Some(path));
@@ -465,7 +568,12 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(scanned) = self.plugin_scan.receive() {
+            self.messages.extend(scanned.problems);
+            self.set_installed_plugins(scanned.plugins);
+        }
         self.session.tick();
+        self.plugin_windows.tick(&mut self.session);
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         let close = ctx.input(|i| i.viewport().close_requested());
@@ -480,20 +588,31 @@ impl eframe::App for App {
         let metering = self.output.info().is_some() && self.levels.moving();
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
-        let frame = if self.session.compiling() {
+        let mut frame = if self.session.compiling() {
             COMPILING_FRAME
         } else if self.session.stats().playing || metering {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
         };
+        // A plugin's timer.
+        if let Some(due) = self.session.next_plugin_timer() {
+            frame = frame.min(due.saturating_duration_since(Instant::now()));
+        }
         ctx.request_repaint_after(frame);
+    }
+
+    /// The plugins close their windows while the app's window is still
+    /// there.
+    fn on_exit(&mut self) {
+        self.plugin_windows.close_all(&mut self.session);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // Commands that keys ran before this frame.
         self.handle_requests(&ctx, frame);
+        self.update_plugin_status();
 
         let stats = self.session.stats();
         let heard = self.session.heard_position(self.output.latency());
@@ -532,6 +651,11 @@ impl eframe::App for App {
                 notice: self.keymap_file.notice(),
             },
             messages: &self.messages,
+            plugins: Plugins {
+                installed: &self.plugin_entries,
+                scanning: self.plugin_scan.is_running(),
+                status: &self.plugin_status,
+            },
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -566,6 +690,29 @@ fn levels(meters: &Meters, project: &Project) -> Levels {
     }
 }
 
+/// Wakes the window whose context is `ctx`, from any thread, so a frame
+/// carries out what a plugin asked for.
+fn waker(ctx: &egui::Context) -> Waker {
+    let ctx = ctx.clone();
+    Arc::new(move || ctx.request_repaint())
+}
+
+/// The app's main window, as Win32's `HWND`, for plugin windows to stay in
+/// front of.
+#[cfg(windows)]
+fn owner(frame: &eframe::Frame) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match frame.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn owner(_frame: &eframe::Frame) -> Option<isize> {
+    None
+}
+
 /// `path`, with the project file extension added unless it has it.
 fn with_extension(path: PathBuf) -> PathBuf {
     if path.extension().is_some_and(|ext| ext == EXTENSION) {
@@ -580,6 +727,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod arranging;
+#[cfg(test)]
+mod plugins_on_tracks;
 #[cfg(test)]
 mod remapping;
 #[cfg(test)]

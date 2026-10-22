@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators];
+const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -88,6 +88,12 @@ fn clips(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 fn locators(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     add(file, "", "next_locator_id", json!(0))?;
     add(file, "", "locators", json!([]))
+}
+
+/// Version 5 added plugin devices. Version 4 files have none, so they need
+/// nothing.
+fn plugins(_: &mut Map<String, Value>) -> Result<(), Invalid> {
+    Ok(())
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.

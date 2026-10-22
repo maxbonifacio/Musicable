@@ -36,8 +36,9 @@ version = 1
 "edit.rename" = ["Ctrl+R"]
 "clip.insert_midi_clip" = ["Ctrl+Shift+M"]
 
-# Live's keys for the arrangement's zoom, the grid and Follow, and for
-# showing the mixer under the arrangement.
+# Live's keys for the arrangement's zoom, the grid and Follow, for showing
+# the mixer and the devices (Live's Detail View) under the arrangement, and
+# for showing the browser.
 "view.zoom_in" = ["Equals", "NumpadAdd"]
 "view.zoom_out" = ["Minus", "NumpadSubtract"]
 "view.zoom_to_selection" = ["Z"]
@@ -48,6 +49,8 @@ version = 1
 "view.fixed_grid" = ["Ctrl+5"]
 "view.toggle_follow" = ["Ctrl+Shift+F"]
 "view.toggle_mixer" = ["Ctrl+Alt+M"]
+"view.toggle_devices" = ["Ctrl+Alt+L"]
+"view.toggle_browser" = ["Ctrl+Alt+B"]
 
 # Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
 # groups the selected tracks, which needs a selection.

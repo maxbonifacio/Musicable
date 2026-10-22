@@ -16,10 +16,11 @@ use std::fmt;
 
 use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
-use musicable_model::{LocatorId, Project, TrackId};
+use musicable_model::{DeviceId, LocatorId, Project, TrackId};
 
 mod args;
 pub mod arrange;
+pub mod device;
 mod document;
 pub mod edit;
 pub mod editor;
@@ -178,6 +179,13 @@ pub enum Request {
     TogglePanel(&'static str),
     /// Let the user type a new name for this.
     Rename(Named),
+    /// Show this plugin's own window, or close it.
+    PluginWindow {
+        device: DeviceId,
+        show: bool,
+    },
+    /// Scan for plugins again, loading the libraries that were bad too.
+    RescanPlugins,
 }
 
 /// Something in the project with a name the user can change.
@@ -319,6 +327,7 @@ pub fn register_all(registry: &mut Registry) {
     track::register(registry);
     arrange::register(registry);
     locator::register(registry);
+    device::register(registry);
     mixer::register(registry);
     view::register(registry);
     options::register(registry);

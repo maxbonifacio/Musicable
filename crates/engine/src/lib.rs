@@ -37,7 +37,10 @@ pub mod rt;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
-pub use compile::{Compiled, Compiler, compile, compile_metered, compile_with_media};
+pub use compile::{
+    Compiled, Compiler, Devices, NodeMaker, compile, compile_metered, compile_with_devices,
+    compile_with_media,
+};
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,

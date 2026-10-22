@@ -161,16 +161,35 @@ fn compact(edits: &mut Vec<Edit>) {
 mod tests {
     use musicable_model::clip::{AudioClip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing};
     use musicable_model::mixer::Bus;
+    use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
-    use musicable_model::{ClipType, LocatorId, Project, Send, SendId, TrackId, TrackKind};
+    use musicable_model::{
+        Chain, ClipType, DeviceId, DeviceKind, LocatorId, PluginFormat, Project, Send, SendId,
+        TrackId, TrackKind,
+    };
     use proptest::prelude::*;
 
     use super::*;
     use crate::{Committed, Document, Transaction};
 
+    /// A plugin device's kind, with a state and a parameter set after it.
+    fn plugin(instrument: bool) -> DeviceKind {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.plugin".into(),
+            name: "Plugin".into(),
+            instrument,
+            settings: PluginSettings {
+                state: Some(PluginState::new(*b"state")),
+                params: vec![PluginParam { id: 1, value: 0.5 }],
+            },
+        })
+    }
+
     /// The project the edits in `one_of_each` change: a track of each kind,
     /// two with a send, and a spare one that nothing refers to; two audio
-    /// clips, one with fades, and a MIDI clip; and two locators.
+    /// clips, one with fades, and a MIDI clip; two locators; and a plugin
+    /// on the audio track and a test device on the master.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -209,6 +228,10 @@ mod tests {
             let locator = project.new_locator(name, Beats::new(at));
             project.locators.push(locator);
         }
+        let effect = project.new_device(plugin(false));
+        project.track_mut(audio).unwrap().devices.push(effect);
+        let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+        project.master.devices.push(gain);
         project
     }
 
@@ -228,6 +251,16 @@ mod tests {
         let new_clip = project.new_clip("New", range, ClipContent::Midi(MidiClip::default()));
         let new_locator = project.new_locator("Bridge", Beats::new(32));
         let bass_timing = project.find_clip(bass).unwrap().1.timing();
+        let synth = project.new_device(plugin(true));
+        let effect = DeviceId(0);
+        let effect_settings = project
+            .find_device(effect)
+            .unwrap()
+            .2
+            .kind
+            .plugin()
+            .unwrap();
+        let effect_settings = effect_settings.settings.clone();
         let edits = vec![
             Edit::Tempo {
                 from: project.tempo.clone(),
@@ -385,6 +418,30 @@ mod tests {
                 from: "Verse".into(),
                 to: "Intro".into(),
             },
+            Edit::AddDevice {
+                chain: Chain::Track(midi),
+                index: 0,
+                device: synth,
+            },
+            Edit::RemoveDevice {
+                chain: Chain::Master,
+                index: 0,
+                device: project.master.devices[0].clone(),
+            },
+            Edit::PluginSettings {
+                device: effect,
+                from: effect_settings,
+                to: PluginSettings {
+                    state: Some(PluginState::new(*b"preset")),
+                    params: Vec::new(),
+                },
+            },
+            Edit::PluginParam {
+                device: effect,
+                param: 7,
+                from: None,
+                to: Some(-3.5),
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -393,7 +450,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 31;
+    const KINDS: usize = 35;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -430,6 +487,10 @@ mod tests {
             Edit::RemoveLocator { .. } => 28,
             Edit::LocatorAt { .. } => 29,
             Edit::LocatorName { .. } => 30,
+            Edit::AddDevice { .. } => 31,
+            Edit::RemoveDevice { .. } => 32,
+            Edit::PluginSettings { .. } => 33,
+            Edit::PluginParam { .. } => 34,
         }
     }
 

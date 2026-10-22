@@ -297,9 +297,16 @@ source → [before device 0] → device 0 → … → [pre-fader] → fader → 
   what breaks the rules, so even a hand-edited file compiles.
 - **Devices** (`Track::devices`, `Master::devices`) sit between the source
   and the pre-fader slot, in order, each keyed by its `DeviceId`
-  (`keys::device`), so a device keeps its state when it moves. Until plugin
-  hosting, there are two kinds, for tests: `DeviceKind::TestGain`, and
-  `DeviceKind::TestInstrument` (see [Clips](#clips)).
+  (`keys::device`), so a device keeps its state when it moves. Plugins
+  (`DeviceKind::Plugin`) process outside the engine, in plugin instances
+  the app holds: `compile_with_devices` takes `Devices`, a `NodeMaker` for
+  each plugin device, and a plugin device it has none for, such as one
+  whose plugin isn't installed, passes its signal through
+  ([plugins.md](plugins.md#plugins-on-tracks)). Two more kinds are for
+  tests: `DeviceKind::TestGain`, and `DeviceKind::TestInstrument` (see
+  [Clips](#clips)). On a MIDI track, the first device that plays notes
+  gets them, even one without a node, so they don't go to another
+  instrument after it.
 
 **Slots.** The slots (`compile::Slot`) belong to the channel, not to its
 device list: one in front of each device, then pre-fader, post-fader and bus

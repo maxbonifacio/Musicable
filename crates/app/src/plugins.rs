@@ -1,0 +1,414 @@
+//! The open project's plugins: an instance of the plugin each plugin device
+//! names, kept in step with the project, and the changes made in the
+//! plugins, which go back into the project.
+//!
+//! The project holds each plugin's settings: the state it last saved, and
+//! the parameters set after it. [`Plugins::sync`] brings every instance in
+//! line with them after each change to the project, undo and redo included,
+//! giving a plugin only what changed. What a plugin changes itself, as when
+//! someone turns a knob in its window, comes back from [`Plugins::poll`]
+//! for the session to make into transactions, so undo covers it. The
+//! plugin has those changes already, so they aren't sent back to it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::Instant;
+
+use musicable_engine::{Devices, EngineConfig, NodeMaker};
+use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
+use musicable_model::{DeviceId, PluginFormat, Project};
+use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
+
+/// A change a plugin made itself, for the project to follow.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Change {
+    /// Someone started changing the plugin's parameters in its window. Its
+    /// changes up to [`GestureEnd`](Self::GestureEnd) are one step in the
+    /// undo history.
+    GestureBegin,
+    /// One of the plugin's parameters changed.
+    Param {
+        param: u32,
+        value: f64,
+    },
+    GestureEnd,
+    /// The plugin's settings as a whole, as it saved them after a change its
+    /// parameters don't say, such as someone picking a preset.
+    Settings(PluginSettings),
+    /// The plugin restarted with another latency, so the graph needs
+    /// building again for delay compensation.
+    Latency,
+    /// The plugin's window asks to be another size, or closed.
+    Window(PluginEvent),
+    /// Something went wrong with the plugin.
+    Failed(String),
+}
+
+/// The instances of the open project's plugins.
+pub(crate) struct Plugins {
+    /// The plugins installed, as the last scan found them: `None` until the
+    /// app says, and no plugin loads before then.
+    installed: Option<Vec<PluginInfo>>,
+    hosted: BTreeMap<DeviceId, Hosted>,
+    /// Plugin devices whose plugin didn't load, and why. They're tried
+    /// again when the installed plugins change.
+    failed: BTreeMap<DeviceId, String>,
+    config: EngineConfig,
+    waker: Option<Waker>,
+    /// What went wrong since the last [`take_problems`](Self::take_problems).
+    problems: Vec<String>,
+}
+
+/// A plugin device's instance, and what it has of the device's settings.
+struct Hosted {
+    instance: Instance,
+    nodes: Arc<dyn NodeMaker>,
+    /// What the Edit menu calls the plugin.
+    name: String,
+    /// The settings the plugin has: the device's, as last given to it, with
+    /// the changes the plugin made since.
+    applied: PluginSettings,
+    /// Each parameter's value in the state the plugin last loaded, or as it
+    /// started.
+    base: BTreeMap<u32, f64>,
+    /// The plugin's state as it started, which a state of `None` stands
+    /// for. `None` for a plugin without state.
+    fresh: Option<PluginState>,
+    /// How many gestures are open in the plugin's window.
+    gestures: u32,
+    /// The plugin's state changed in a way its parameters don't say, and
+    /// goes into the project once no gesture is open.
+    dirty: bool,
+}
+
+impl Plugins {
+    /// Plugins activated for `config`, with none installed yet.
+    pub fn new(config: EngineConfig) -> Self {
+        Self {
+            installed: None,
+            hosted: BTreeMap::new(),
+            failed: BTreeMap::new(),
+            config,
+            waker: None,
+            problems: Vec::new(),
+        }
+    }
+
+    /// Finds plugins among `installed` from now on. Devices whose plugin
+    /// didn't load are tried again on the next [`sync`](Self::sync).
+    pub fn set_installed(&mut self, installed: Vec<PluginInfo>) {
+        self.installed = Some(installed);
+        self.failed.clear();
+    }
+
+    pub fn installed(&self) -> &[PluginInfo] {
+        self.installed.as_deref().unwrap_or_default()
+    }
+
+    /// Plugins loaded from now on call `waker` when they need
+    /// [`poll`](Self::poll) called.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// Brings the instances in line with `project`'s plugin devices: loads
+    /// the plugins of new ones, drops the instances of ones that went, and
+    /// gives each plugin the settings that changed. Returns whether a device
+    /// gained or lost its instance, which needs a new graph.
+    pub fn sync(&mut self, project: &Project) -> bool {
+        let devices: BTreeMap<DeviceId, &PluginDevice> = project
+            .chains()
+            .flat_map(|(_, devices)| devices)
+            .filter_map(|d| Some((d.id, d.kind.plugin()?)))
+            .collect();
+        let before = self.hosted.len();
+        self.hosted.retain(|id, _| devices.contains_key(id));
+        self.failed.retain(|id, _| devices.contains_key(id));
+        let mut changed = self.hosted.len() != before;
+        for (&id, &plugin) in &devices {
+            if let Some(hosted) = self.hosted.get_mut(&id) {
+                if let Err(problem) = hosted.apply(&plugin.settings) {
+                    self.problems.push(problem);
+                }
+            } else if self.installed.is_some() && !self.failed.contains_key(&id) {
+                match self.load(plugin) {
+                    Ok(hosted) => {
+                        self.hosted.insert(id, hosted);
+                        changed = true;
+                    }
+                    Err(problem) => {
+                        self.problems.push(problem.clone());
+                        self.failed.insert(id, problem);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Loads `plugin` and gives it its settings.
+    fn load(&mut self, plugin: &PluginDevice) -> Result<Hosted, String> {
+        let name = display_name(plugin);
+        let Some(info) = self
+            .installed()
+            .iter()
+            .find(|p| p.format == plugin.format && p.id == plugin.id)
+        else {
+            return Err(format!(
+                "{name} isn't installed, or Musicable hasn't found it: it plays nothing"
+            ));
+        };
+        if plugin.format == PluginFormat::Vst3 {
+            return Err(format!(
+                "{name} is a VST3 plugin, which Musicable can't load yet"
+            ));
+        }
+        let instance = Instance::new(&info.path, &info.id, self.waker.clone())
+            .map_err(|e| format!("{name} didn't load: {e}"))?;
+        let fresh = match instance.has_state() {
+            true => instance.save_state().ok().map(PluginState::new),
+            false => None,
+        };
+        let mut hosted = Hosted {
+            nodes: Arc::new(instance.node_source()),
+            base: values(&instance),
+            instance,
+            name,
+            applied: PluginSettings::default(),
+            fresh,
+            gestures: 0,
+            dirty: false,
+        };
+        if let Err(problem) = hosted.apply(&plugin.settings) {
+            self.problems.push(problem);
+        }
+        if let Err(e) = hosted.instance.activate(self.config) {
+            self.problems.push(format!("{e}: it plays nothing"));
+        }
+        Ok(hosted)
+    }
+
+    /// The nodes the compiler makes for the plugin devices.
+    pub fn devices(&self) -> Devices {
+        let mut devices = Devices::new();
+        for (&id, hosted) in &self.hosted {
+            devices.insert(id, Arc::clone(&hosted.nodes));
+        }
+        devices
+    }
+
+    /// Activates every plugin for `config`, as when the audio device
+    /// changes.
+    pub fn set_config(&mut self, config: EngineConfig) {
+        self.config = config;
+        for hosted in self.hosted.values_mut() {
+            if let Err(e) = hosted.instance.activate(config) {
+                self.problems.push(format!("{e}: it plays nothing"));
+            }
+        }
+    }
+
+    /// Drops every instance, as when another project opens.
+    pub fn clear(&mut self) {
+        self.hosted.clear();
+        self.failed.clear();
+    }
+
+    /// Carries out what the plugins asked for, and hands back the changes
+    /// they made themselves, oldest first, for the project to follow.
+    pub fn poll(&mut self) -> Vec<(DeviceId, Change)> {
+        let mut changes = Vec::new();
+        for (&id, hosted) in &mut self.hosted {
+            for change in hosted.poll() {
+                changes.push((id, change));
+            }
+        }
+        changes
+    }
+
+    /// When a plugin next needs [`poll`](Self::poll), for a timer it set.
+    pub fn next_timer(&self) -> Option<Instant> {
+        self.hosted
+            .values()
+            .filter_map(|h| h.instance.next_timer())
+            .min()
+    }
+
+    /// `project` with each plugin's state saved afresh, for saving the
+    /// project to a file: the state has whatever the plugin keeps that its
+    /// parameters don't say.
+    pub fn saved(&mut self, project: &Project) -> Project {
+        let mut saved = project.clone();
+        for (&id, hosted) in &self.hosted {
+            if hosted.fresh.is_none() {
+                continue;
+            }
+            let Some(plugin) = saved.device_mut(id).and_then(|d| d.kind.plugin_mut()) else {
+                continue;
+            };
+            match hosted.instance.save_state() {
+                // The parameters set since too, in case some haven't
+                // reached the plugin yet: it gets them as it next plays.
+                Ok(state) => plugin.settings.state = Some(PluginState::new(state)),
+                Err(e) => self
+                    .problems
+                    .push(format!("{e}, so the project has its state from before")),
+            }
+        }
+        saved
+    }
+
+    /// The instance of the device `id`'s plugin, if it loaded.
+    pub fn instance(&self, id: DeviceId) -> Option<&Instance> {
+        self.hosted.get(&id).map(|h| &h.instance)
+    }
+
+    pub fn instance_mut(&mut self, id: DeviceId) -> Option<&mut Instance> {
+        self.hosted.get_mut(&id).map(|h| &mut h.instance)
+    }
+
+    /// Why the device `id`'s plugin didn't load, if it didn't.
+    pub fn problem(&self, id: DeviceId) -> Option<&str> {
+        self.failed.get(&id).map(String::as_str)
+    }
+
+    /// What the Edit menu calls the device `id`'s plugin.
+    pub fn name(&self, id: DeviceId) -> Option<&str> {
+        self.hosted.get(&id).map(|h| h.name.as_str())
+    }
+
+    /// What went wrong since the last call, for the app to show.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.problems)
+    }
+}
+
+impl Hosted {
+    /// Gives the plugin `settings`, as far as they differ from what it has.
+    fn apply(&mut self, settings: &PluginSettings) -> Result<(), String> {
+        let mut result = Ok(());
+        if settings.state != self.applied.state {
+            if let Some(state) = settings.state.as_ref().or(self.fresh.as_ref())
+                && let Err(e) = self.instance.load_state(state.bytes())
+            {
+                result = Err(e.to_string());
+            }
+            // Either way, so a state the plugin can't load isn't tried
+            // again with every change.
+            self.applied = PluginSettings {
+                state: settings.state.clone(),
+                params: Vec::new(),
+            };
+            self.base = values(&self.instance);
+        }
+        let ids: BTreeSet<u32> = (settings.params.iter())
+            .chain(&self.applied.params)
+            .map(|p| p.id)
+            .collect();
+        for id in ids {
+            let base = self.base.get(&id).copied();
+            let wanted = settings.param(id).or(base);
+            let had = self.applied.param(id).or(base);
+            if let Some(value) = wanted
+                && wanted != had
+            {
+                self.instance.set_param(id, value);
+            }
+        }
+        self.applied.params.clone_from(&settings.params);
+        result
+    }
+
+    /// Polls the plugin, and turns what it says into changes for the
+    /// project.
+    fn poll(&mut self) -> Vec<Change> {
+        let mut changes = Vec::new();
+        for event in self.instance.poll() {
+            match event {
+                PluginEvent::GestureBegin { .. } => {
+                    self.gestures += 1;
+                    if self.gestures == 1 {
+                        changes.push(Change::GestureBegin);
+                    }
+                }
+                PluginEvent::ParamChanged { param, value } => {
+                    let had = self.applied.param(param).or(self.base.get(&param).copied());
+                    // A plugin can echo a value the host set.
+                    if had != Some(value) {
+                        self.applied.set_param(param, Some(value));
+                        changes.push(Change::Param { param, value });
+                    }
+                }
+                PluginEvent::GestureEnd { .. } if self.gestures > 0 => {
+                    self.gestures -= 1;
+                    if self.gestures == 0 {
+                        self.capture(&mut changes);
+                        changes.push(Change::GestureEnd);
+                    }
+                }
+                PluginEvent::GestureEnd { .. } => {}
+                PluginEvent::StateChanged | PluginEvent::ParamsChanged => self.dirty = true,
+                PluginEvent::Restarted { latency_changed } => {
+                    if latency_changed {
+                        changes.push(Change::Latency);
+                    }
+                }
+                PluginEvent::WindowResize { .. } | PluginEvent::WindowClosed => {
+                    changes.push(Change::Window(event));
+                }
+                PluginEvent::Failed(message) => changes.push(Change::Failed(message)),
+            }
+        }
+        if self.gestures == 0 {
+            self.capture(&mut changes);
+        }
+        changes
+    }
+
+    /// Takes in the change the plugin said its state had, if it said so.
+    /// A plugin with a state saves it; one without has only its parameters
+    /// to read.
+    fn capture(&mut self, changes: &mut Vec<Change>) {
+        if !std::mem::take(&mut self.dirty) {
+            return;
+        }
+        if self.fresh.is_none() {
+            for (id, value) in values(&self.instance) {
+                let had = self.applied.param(id).or(self.base.get(&id).copied());
+                if had != Some(value) {
+                    self.applied.set_param(id, Some(value));
+                    changes.push(Change::Param { param: id, value });
+                }
+            }
+            return;
+        }
+        match self.instance.save_state() {
+            Ok(state) => {
+                self.applied = PluginSettings {
+                    state: Some(PluginState::new(state)),
+                    params: Vec::new(),
+                };
+                self.base = values(&self.instance);
+                changes.push(Change::Settings(self.applied.clone()));
+            }
+            Err(e) => changes.push(Change::Failed(e.to_string())),
+        }
+    }
+}
+
+/// Each of the plugin's parameters, with its value as the plugin has it.
+fn values(instance: &Instance) -> BTreeMap<u32, f64> {
+    instance
+        .params()
+        .iter()
+        .filter_map(|p| Some((p.id, instance.param_value(p.id)?)))
+        .collect()
+}
+
+/// What a plugin device is called: its name, or its id if it has none.
+fn display_name(plugin: &PluginDevice) -> String {
+    match plugin.name.trim() {
+        "" => plugin.id.clone(),
+        name => name.to_owned(),
+    }
+}

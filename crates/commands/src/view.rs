@@ -17,6 +17,11 @@ use crate::{
 pub const COMMAND_PALETTE: CommandId = CommandId::new("view.command_palette");
 /// Shows or hides the mixer, under the arrangement.
 pub const TOGGLE_MIXER: CommandId = CommandId::new("view.toggle_mixer");
+/// Shows or hides the devices of the selected track, or the master's, under
+/// the arrangement: Live's Detail View.
+pub const TOGGLE_DEVICES: CommandId = CommandId::new("view.toggle_devices");
+/// Shows or hides the plugin browser, beside the arrangement.
+pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
 /// Zooms the arrangement in, around the start marker.
 pub const ZOOM_IN: CommandId = CommandId::new("view.zoom_in");
 /// Zooms the arrangement out, around the start marker.
@@ -84,13 +89,19 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 2] = [
+const REQUESTS: [(CommandId, &str, Request); 4] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
         Request::CommandPalette,
     ),
     (TOGGLE_MIXER, "Mixer", Request::TogglePanel("mixer")),
+    (TOGGLE_DEVICES, "Devices", Request::TogglePanel("devices")),
+    (
+        TOGGLE_BROWSER,
+        "Plugin Browser",
+        Request::TogglePanel("browser"),
+    ),
 ];
 
 /// Registers the view commands.
@@ -305,6 +316,15 @@ mod tests {
         setup.run(&TOGGLE_FOLLOW);
         assert!(!setup.document.editor().follow);
         setup.run(&TOGGLE_MIXER);
-        assert_eq!(setup.requests, [Request::TogglePanel("mixer")]);
+        setup.run(&TOGGLE_DEVICES);
+        setup.run(&TOGGLE_BROWSER);
+        assert_eq!(
+            setup.requests,
+            [
+                Request::TogglePanel("mixer"),
+                Request::TogglePanel("devices"),
+                Request::TogglePanel("browser")
+            ]
+        );
     }
 }

@@ -191,6 +191,27 @@ before the first return track, so the returns stay together, as in Live.
 Return tracks start solo-safe. Live's Ctrl+G groups the selected tracks,
 which needs a selection, so New Group Track has no key yet.
 
+### Device
+
+Devices go on a track or on the master, in the order the signal goes
+through them. The devices panel and the plugin browser run these, with the
+device's id as `device`.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
+| `device.set_param` | Set Plugin Parameter | Sets the parameter `param` of the plugin `device` to `value`, or leaves it to the plugin's state without one | none | none |
+| `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
+| `device.hide_window` | Hide Plugin Window | Closes it | none | Ctrl+Alt+P |
+| `device.delete` | Delete Device | Deletes a device | none | Delete, with the device selected |
+
+Adding, changing and deleting are transactions named after the plugin, such
+as "Add Surge XT", "Change Surge XT" and "Delete Surge XT", so undo covers
+them. The window commands ask the app, with `Request::PluginWindow`; a
+plugin that isn't playing has no window to show, and the status bar says
+why. A new device starts with the plugin's own defaults. Its settings fill
+in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
+
 ### The mixer's controls
 
 The mixer's faders, pan, sends, buttons and menus hand back a
@@ -234,6 +255,9 @@ other. They push a `Request`, as the file commands do.
 | `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the keys, where they're changed | Ctrl+K | Ctrl+K (Key Map Mode) |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
+| `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
+| `view.toggle_browser` | Plugin Browser | Shows or hides the plugin browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
+| `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
 | `view.zoom_in` | Zoom In | Zooms the arrangement in, around the start marker | Equals, NumpadAdd | + |
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
 | `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement | Z | Z |
@@ -298,8 +322,9 @@ ctx.document.transact("Toggle Metronome", |tx| {
 A `Transaction` has a setter for each part of the project that commands
 change: the tempo map, the loop region, looping and the metronome; adding
 and removing tracks and sends; each mixer setting of a track, a send and the
-master; adding and removing clips, and their timing, fades and names; and
-adding, moving, naming and removing locators. `Transaction::editor` reads
+master; adding and removing clips, and their timing, fades and names;
+adding, moving, naming and removing locators; and adding and removing
+devices, and a plugin's parameters and settings. `Transaction::editor` reads
 the editor's state, such as the files' sample rates.
 Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
@@ -376,6 +401,8 @@ stops the transport at the start of the song. Then:
   | Mute, solo, solo-safe | `Gain::MUTE` for each output stage and send whose mute changed |
   | Adding or removing a track or a send, an output, pre/post, a clip type | A new graph, which the compiler's thread builds |
   | Adding or removing a clip, its timing, its fades | A new graph |
+  | Adding or removing a device | A new graph, after its plugin loads or goes |
+  | A plugin's parameters and settings | Nothing: the plugin gets them ([plugins.md](plugins.md#plugins-on-tracks)) |
   | Track and clip names, arm, locators | Nothing yet |
 
   Play, stop and go to start send their `TransportCommand` as they run.
@@ -400,7 +427,15 @@ stops the transport at the start of the song. Then:
   full, as when the audio device has stopped, the session holds on to what
   doesn't fit, and `tick` sends it, in order, once there is room. It also
   sends the graphs the compiler has finished, and drops the graphs and
-  tempo maps the engine is done with.
+  tempo maps the engine is done with. And it polls the plugins: what they
+  ask for, and the changes made in their windows, which it makes
+  transactions of.
+- **Plugins.** `Session::set_installed_plugins` says which plugins are
+  installed, from a scan, and loads the plugins of the project's devices
+  among them. `Session::plugin` is a device's plugin instance, once it has
+  loaded, `plugin_problem` why it hasn't, and `take_problems` what went
+  wrong since. `Session::saved_project` is the project with each plugin's
+  state saved afresh, for writing to a file.
 - **Waiting for the graph.** A newly opened project's tempo map and loop,
   and whatever follows them, such as Play, wait for its graph: until it
   comes, the engine plays silence and doesn't start. The project in the
@@ -423,6 +458,9 @@ what the app shell asks of the session,
 mixer's changes reach the engine and the meters move, and
 [`crates/app/tests/slow_graphs.rs`](../crates/app/tests/slow_graphs.rs)
 checks that a node that's slow to prepare doesn't hold up the session.
+[`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) puts the
+test plugins on tracks, and checks that changes made in their windows
+undo and redo.
 
 ## Key chords
 

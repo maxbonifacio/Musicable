@@ -6,7 +6,7 @@
 //! [`mixer`] has the mixer's rules: where tracks can send their signal, and
 //! what mute and solo silence. [`clip`] has what tracks play: audio clips,
 //! and MIDI clips of notes with per-note expression. [`Locator`]s name
-//! places in the song.
+//! places in the song. [`plugin`] has plugins in device chains.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -14,10 +14,12 @@
 
 pub mod clip;
 pub mod mixer;
+pub mod plugin;
 pub mod time;
 
 use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
+use plugin::PluginDevice;
 use time::{BeatRange, Beats, TempoMap};
 
 /// Stable identifier for a track within a project.
@@ -84,26 +86,52 @@ pub struct Device {
     pub kind: DeviceKind,
 }
 
-/// What a device is. Only test devices exist so far: plugins and the
-/// built-in devices come later.
+/// What a device is: a plugin, or a test device. Musicable's own devices
+/// come later.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceKind {
     /// Multiplies the signal by a linear gain, 1.0 = unity. It stands in for
-    /// real devices until there are some.
+    /// Musicable's own devices until there are some.
     TestGain { gain: f32 },
     /// Plays the notes of its track's MIDI clips with a plain tone, added to
-    /// what comes into it: a test instrument, standing in for instruments
-    /// until there are plugins. `level` is the linear amplitude of a note
-    /// at full velocity.
+    /// what comes into it: a test instrument. `level` is the linear
+    /// amplitude of a note at full velocity.
     TestInstrument { level: f32 },
+    /// A CLAP or VST3 plugin.
+    Plugin(PluginDevice),
 }
 
 impl DeviceKind {
     /// Whether the device plays notes. A MIDI track's notes go to its first
     /// instrument.
     pub fn is_instrument(&self) -> bool {
-        matches!(self, Self::TestInstrument { .. })
+        match self {
+            Self::TestInstrument { .. } => true,
+            Self::Plugin(plugin) => plugin.instrument,
+            Self::TestGain { .. } => false,
+        }
     }
+
+    pub fn plugin(&self) -> Option<&PluginDevice> {
+        match self {
+            Self::Plugin(plugin) => Some(plugin),
+            Self::TestGain { .. } | Self::TestInstrument { .. } => None,
+        }
+    }
+
+    pub fn plugin_mut(&mut self) -> Option<&mut PluginDevice> {
+        match self {
+            Self::Plugin(plugin) => Some(plugin),
+            Self::TestGain { .. } | Self::TestInstrument { .. } => None,
+        }
+    }
+}
+
+/// Where a device chain is: on a track, or on the master.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Chain {
+    Track(TrackId),
+    Master,
 }
 
 /// A plugin format Musicable hosts.
@@ -382,6 +410,44 @@ impl Project {
         self.tracks.iter().position(|t| t.id == id)
     }
 
+    /// The devices of a chain, in signal order: `None` for a track the
+    /// project doesn't have.
+    pub fn devices(&self, chain: Chain) -> Option<&[Device]> {
+        match chain {
+            Chain::Track(id) => self.track(id).map(|t| t.devices.as_slice()),
+            Chain::Master => Some(&self.master.devices),
+        }
+    }
+
+    pub fn devices_mut(&mut self, chain: Chain) -> Option<&mut Vec<Device>> {
+        match chain {
+            Chain::Track(id) => self.track_mut(id).map(|t| &mut t.devices),
+            Chain::Master => Some(&mut self.master.devices),
+        }
+    }
+
+    /// Every device chain, the tracks' in order and then the master's.
+    pub fn chains(&self) -> impl Iterator<Item = (Chain, &[Device])> {
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|t| (Chain::Track(t.id), t.devices.as_slice()));
+        tracks.chain([(Chain::Master, self.master.devices.as_slice())])
+    }
+
+    /// The device with `id`, the chain it's in, and where it is in it.
+    pub fn find_device(&self, id: DeviceId) -> Option<(Chain, usize, &Device)> {
+        self.chains().find_map(|(chain, devices)| {
+            let index = devices.iter().position(|d| d.id == id)?;
+            Some((chain, index, &devices[index]))
+        })
+    }
+
+    pub fn device_mut(&mut self, id: DeviceId) -> Option<&mut Device> {
+        let tracks = self.tracks.iter_mut().flat_map(|t| &mut t.devices);
+        tracks.chain(&mut self.master.devices).find(|d| d.id == id)
+    }
+
     /// The clip with `id`, and the track it's on.
     pub fn find_clip(&self, id: ClipId) -> Option<(&Track, &Clip)> {
         self.tracks
@@ -519,6 +585,54 @@ mod tests {
         assert!(track.instrument().is_none());
         track.devices = vec![gain, first.clone(), second];
         assert_eq!(track.instrument(), Some(&first));
+    }
+
+    fn plugin(instrument: bool) -> DeviceKind {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.plugin".into(),
+            name: "Plugin".into(),
+            instrument,
+            settings: plugin::PluginSettings::default(),
+        })
+    }
+
+    #[test]
+    fn plugins_that_play_notes_are_instruments() {
+        assert!(plugin(true).is_instrument());
+        assert!(!plugin(false).is_instrument());
+        assert!(plugin(false).plugin().is_some());
+        assert!(DeviceKind::TestGain { gain: 1.0 }.plugin().is_none());
+    }
+
+    #[test]
+    fn devices_are_found_by_id_on_tracks_and_the_master() {
+        let mut p = Project::new();
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let synth = p.new_device(plugin(true));
+        let gain = p.new_device(DeviceKind::TestGain { gain: 0.5 });
+        let limiter = p.new_device(plugin(false));
+        let ids = (synth.id, gain.id, limiter.id);
+        p.track_mut(keys).unwrap().devices = vec![synth, gain];
+        p.master.devices.push(limiter);
+
+        assert_eq!(
+            p.find_device(ids.1).map(|(c, i, _)| (c, i)),
+            Some((Chain::Track(keys), 1))
+        );
+        assert_eq!(
+            p.find_device(ids.2).map(|(c, i, _)| (c, i)),
+            Some((Chain::Master, 0))
+        );
+        assert!(p.find_device(DeviceId(99)).is_none());
+        p.device_mut(ids.2).unwrap().kind = plugin(true);
+        assert!(p.master.devices[0].kind.is_instrument());
+        assert_eq!(p.devices(Chain::Track(keys)).map(<[Device]>::len), Some(2));
+        assert_eq!(p.devices(Chain::Track(TrackId(7))), None);
+        let chains: Vec<Chain> = p.chains().map(|(chain, _)| chain).collect();
+        assert_eq!(chains, [Chain::Track(keys), Chain::Master]);
+        p.devices_mut(Chain::Master).unwrap().clear();
+        assert!(p.find_device(ids.2).is_none());
     }
 
     #[test]

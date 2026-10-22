@@ -96,6 +96,8 @@ const LAST_MENUS: [MenuSpec; 2] = [
         "view",
         &[
             Some(view::TOGGLE_MIXER),
+            Some(view::TOGGLE_DEVICES),
+            Some(view::TOGGLE_BROWSER),
             None,
             Some(view::ZOOM_IN),
             Some(view::ZOOM_OUT),
@@ -117,6 +119,8 @@ const LAST_MENUS: [MenuSpec; 2] = [
         &[
             Some(options::AUDIO_SETTINGS),
             Some(options::KEYBOARD_SHORTCUTS),
+            None,
+            Some(options::RESCAN_PLUGINS),
         ],
     ),
 ];

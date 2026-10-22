@@ -19,11 +19,11 @@
 //! parameter. The plugins' windows are pretend ones that only record what
 //! the host asks of them.
 //!
-//! Tests copy the library to a `.clap` file of their own, and the file's
-//! name can make it misbehave as broken plugins do, for the scanner to catch:
-//! a name starting with `crash` makes it crash as the host initializes it,
-//! `hang` makes it never return from initializing, and `refuse` makes it
-//! fail to initialize.
+//! Tests copy the library to a `.clap` file of their own, with
+//! [`testing::Library`], and the file's name can make it misbehave as broken
+//! plugins do, for the scanner to catch: a name starting with `crash` makes
+//! it crash as the host initializes it, `hang` makes it never return from
+//! initializing, and `refuse` makes it fail to initialize.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
@@ -39,6 +39,7 @@ use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::version::CLAP_VERSION;
 
 mod plugin;
+pub mod testing;
 
 pub use plugin::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS};
 

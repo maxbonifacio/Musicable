@@ -1,13 +1,17 @@
 //! The shell as the UI's tests drive it, standing in for the app.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use egui_kittest::Harness;
+use egui_kittest::{Harness, HarnessBuilder};
 use musicable_commands::{Editor, Keymap, Problem, Registry, view};
-use musicable_model::Project;
 use musicable_model::time::Beats;
+use musicable_model::{DeviceId, Project};
 
-use crate::{Action, Audio, KeymapStatus, Levels, Playback, Shell, View, Waveforms};
+use crate::{
+    Action, Audio, KeymapStatus, Levels, Playback, PluginEntry, PluginStatus, Plugins, Shell, View,
+    Waveforms,
+};
 
 /// What the shell shows in the tests, and what it hands back.
 pub(crate) struct State {
@@ -27,6 +31,11 @@ pub(crate) struct State {
     pub redo: Option<&'static str>,
     /// What the meters read.
     pub levels: Levels,
+    /// The plugins installed, whether a scan is running, and how each
+    /// plugin device's plugin is doing.
+    pub plugins: Vec<PluginEntry>,
+    pub scanning: bool,
+    pub plugin_status: BTreeMap<DeviceId, PluginStatus>,
     pub actions: Vec<Action>,
 }
 
@@ -40,6 +49,19 @@ pub(crate) fn commands() -> Registry {
 /// The shell in a window, showing `project` with the app's commands and the
 /// default keymap.
 pub(crate) fn harness(project: Project) -> Harness<'static, State> {
+    build(Harness::builder(), project)
+}
+
+/// Like [`harness`], with frames as quick as a screen's, so two clicks make
+/// a double click.
+pub(crate) fn quick_harness(project: Project) -> Harness<'static, State> {
+    let builder = Harness::builder()
+        .with_step_dt(1.0 / 60.0)
+        .with_max_steps(40);
+    build(builder, project)
+}
+
+fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, State> {
     let state = State {
         shell: Shell::new(),
         project,
@@ -53,67 +75,73 @@ pub(crate) fn harness(project: Project) -> Harness<'static, State> {
         undo: None,
         redo: None,
         levels: Levels::default(),
+        plugins: Vec::new(),
+        scanning: false,
+        plugin_status: BTreeMap::new(),
         actions: Vec::new(),
     };
-    Harness::builder()
-        .with_size([1100.0, 720.0])
-        .build_ui_state(
-            |ui, state: &mut State| {
-                let view = View {
-                    project: &state.project,
-                    editor: &state.editor,
-                    waveforms: &state.waveforms,
-                    name: "Untitled",
-                    modified: false,
-                    commands: &state.commands,
-                    keymap: &state.keymap,
-                    default_keymap: &state.default_keymap,
-                    undo: state.undo,
-                    redo: state.redo,
-                    playback: Playback {
-                        playing: false,
-                        playhead: Beats::ZERO,
-                        seconds: 0.0,
-                    },
-                    levels: &state.levels,
-                    audio: Audio {
-                        summary: "48 kHz · 128 samples · 5.3 ms",
-                        running: true,
-                        load: Some(0.25),
-                        dropouts: 0,
-                        details: "",
-                    },
-                    keymap_file: KeymapStatus {
-                        path: state.keymap_path.as_deref(),
-                        problems: &state.keymap_problems,
-                        error: None,
-                        notice: None,
-                    },
-                    messages: &[],
-                };
-                let mut actions = state.shell.show(ui, &view);
-                for action in &actions {
-                    if let Action::SetKeymap(keymap) = action {
-                        state.keymap = keymap.clone();
-                        state.keymap_problems.clear();
-                    }
+    builder.with_size([1100.0, 720.0]).build_ui_state(
+        |ui, state: &mut State| {
+            let view = View {
+                project: &state.project,
+                editor: &state.editor,
+                waveforms: &state.waveforms,
+                name: "Untitled",
+                modified: false,
+                commands: &state.commands,
+                keymap: &state.keymap,
+                default_keymap: &state.default_keymap,
+                undo: state.undo,
+                redo: state.redo,
+                playback: Playback {
+                    playing: false,
+                    playhead: Beats::ZERO,
+                    seconds: 0.0,
+                },
+                levels: &state.levels,
+                audio: Audio {
+                    summary: "48 kHz · 128 samples · 5.3 ms",
+                    running: true,
+                    load: Some(0.25),
+                    dropouts: 0,
+                    details: "",
+                },
+                keymap_file: KeymapStatus {
+                    path: state.keymap_path.as_deref(),
+                    problems: &state.keymap_problems,
+                    error: None,
+                    notice: None,
+                },
+                messages: &[],
+                plugins: Plugins {
+                    installed: &state.plugins,
+                    scanning: state.scanning,
+                    status: &state.plugin_status,
+                },
+            };
+            let mut actions = state.shell.show(ui, &view);
+            for action in &actions {
+                if let Action::SetKeymap(keymap) = action {
+                    state.keymap = keymap.clone();
+                    state.keymap_problems.clear();
                 }
-                // As the app would, keep the zoom and scrolling the
-                // arrangement asks for, as the tests don't look for them.
-                actions.retain(|action| match action {
-                    Action::RunWith(id, args) if *id == view::SET_VIEWPORT => {
-                        let number = |name| args.get::<f64>(name).unwrap_or_default();
-                        let viewport = &mut state.editor.viewport;
-                        viewport.start = args.get("start").unwrap_or_default();
-                        viewport.zoom = number("zoom");
-                        viewport.top = number("top") as f32;
-                        viewport.width = number("width") as f32;
-                        false
-                    }
-                    _ => true,
-                });
-                state.actions.extend(actions);
-            },
-            state,
-        )
+            }
+            // As the app would, keep the zoom and scrolling the
+            // arrangement asks for, as the tests don't look for them.
+            actions.retain(|action| match action {
+                Action::RunWith(id, args) if *id == view::SET_VIEWPORT => {
+                    let number = |name| args.get::<f64>(name).unwrap_or_default();
+                    let viewport = &mut state.editor.viewport;
+                    viewport.start = args.get("start").unwrap_or_default();
+                    viewport.zoom = number("zoom");
+                    viewport.top = number("top") as f32;
+                    viewport.width = number("width") as f32;
+                    false
+                }
+                _ => true,
+            });
+            state.actions.extend(actions);
+        },
+        state,
+    )
 }

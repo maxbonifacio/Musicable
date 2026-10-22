@@ -19,10 +19,12 @@ use musicable_model::Project;
 static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
 
 const USAGE: &str = "\
-usage: musicable [PROJECT]             open the app, with PROJECT if given
-       musicable keymap [FILE]         print the keys, with the changes in the keymap FILE
-       musicable null-test [PROJECT]   check that the parallel scheduler plays PROJECT, or
-                                       the demo, exactly as the reference renderer does";
+usage: musicable [PROJECT]                open the app, with PROJECT if given
+       musicable keymap [FILE]            print the keys, with the changes in the keymap FILE
+       musicable null-test [PROJECT]      check that the parallel scheduler plays PROJECT, or
+                                          the demo, exactly as the reference renderer does
+       musicable scan-plugin LIBRARY      list the plugins in the plugin library LIBRARY, as
+                                          the app's plugin scan does in a process of its own";
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -36,6 +38,9 @@ fn main() -> ExitCode {
             attach_console();
             null_test(args)
         }
+        // The app runs it, and reads what it prints through a pipe, so it
+        // doesn't attach to a console.
+        Some(musicable_app::SCAN_PLUGIN) => scan_plugin(args.next()),
         Some("-h" | "--help") => {
             attach_console();
             println!("{USAGE}");
@@ -70,7 +75,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
     let result = eframe::run_native(
         "Musicable",
         options,
-        Box::new(|_| Ok(Box::new(App::new(path)))),
+        Box::new(|cc| Ok(Box::new(App::new(path, &cc.egui_ctx)))),
     );
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -86,6 +91,19 @@ fn run(path: Option<PathBuf>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `musicable scan-plugin LIBRARY`: lists the plugins in the plugin library
+/// at `LIBRARY`, for the app's plugin scan, which runs it in a process of
+/// its own so a plugin that crashes or hangs takes only this down.
+fn scan_plugin(library: Option<OsString>) -> ExitCode {
+    let Some(library) = library else {
+        attach_console();
+        eprintln!("scan-plugin needs the plugin library to scan\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    musicable_plugins::scan::child(Path::new(&library));
+    ExitCode::SUCCESS
 }
 
 /// `musicable keymap [FILE]`: prints the key bindings of the default keymap,

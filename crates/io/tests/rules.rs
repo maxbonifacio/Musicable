@@ -4,8 +4,9 @@
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::{DeviceKind, LocatorId, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TestTone, TrackId, TrackKind};
 use serde_json::{Value, json};
 
 /// A small project with two tempos, two time signatures and two tracks.
@@ -75,6 +76,47 @@ fn clips() -> Project {
     track.clips.push(clip);
     track.devices.push(instrument);
     project
+}
+
+/// Plugins: a MIDI track with a CLAP instrument, set by a state and two
+/// parameters after it, and a VST3 effect as it starts on the master.
+fn plugged() -> Project {
+    let mut project = Project::new();
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    let synth = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "org.example.synth".into(),
+        name: "Synth".into(),
+        instrument: true,
+        settings: PluginSettings {
+            state: Some(PluginState::new(*b"preset")),
+            params: vec![
+                PluginParam { id: 2, value: 0.5 },
+                PluginParam { id: 9, value: -3.0 },
+            ],
+        },
+    }));
+    project.track_mut(midi).unwrap().devices.push(synth);
+    let effect = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Vst3,
+        id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        name: "Effect".into(),
+        instrument: false,
+        settings: PluginSettings::default(),
+    }));
+    project.master.devices.push(effect);
+    project
+}
+
+/// Where the instrument's settings are in [`plugged`]'s file.
+const PLUGIN: &str = "tracks[0].devices[0].kind.plugin";
+
+/// [`plugged`]'s file, changed by `edit`, which gets the instrument's
+/// settings.
+fn edited_plugin(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&plugged(), |f| {
+        edit(&mut f["tracks"][0]["devices"][0]["kind"]["plugin"]);
+    })
 }
 
 /// Where the audio clip's fields are in [`clips`]'s file.
@@ -301,10 +343,10 @@ fn values_must_have_the_right_type() {
     );
     refused(
         &edited_from(&mix(), |f| {
-            f["tracks"][0]["devices"][0]["kind"] = json!({"plugin": {}});
+            f["tracks"][0]["devices"][0]["kind"] = json!({"vst2": {}});
         }),
         "tracks[0].devices[0].kind",
-        "unknown variant `plugin`",
+        "unknown variant `vst2`",
     );
     refused(
         &edited_from(&mix(), |f| {
@@ -614,6 +656,84 @@ fn device_ids_are_unique_across_tracks_and_the_master() {
         "next_device_id",
         "a device has id 1",
     );
+}
+
+#[test]
+fn plugins_name_their_plugin_and_keep_its_settings_in_order() {
+    assert_eq!(load(&edited_plugin(|_| {})).unwrap(), plugged());
+    let at = |field: &str| format!("{PLUGIN}.{field}");
+    refused(
+        &edited_plugin(|p| p["format"] = json!("au")),
+        &at("format"),
+        "unknown variant `au`",
+    );
+    refused(
+        &edited_plugin(|p| p["id"] = json!("")),
+        &at("id"),
+        "must not be empty",
+    );
+    refused(
+        &edited_plugin(|p| p["instrument"] = json!("yes")),
+        &at("instrument"),
+        "expected a boolean",
+    );
+    refused(
+        &edited_plugin(|p| p["state"] = json!("not base64!")),
+        &at("state"),
+        "must be base64",
+    );
+    refused(
+        &edited_plugin(|p| p["state"] = json!([1, 2, 3])),
+        &at("state"),
+        "expected a string",
+    );
+    refused(
+        &edited_plugin(|p| p["bypassed"] = json!(true)),
+        &at("bypassed"),
+        "unknown field",
+    );
+    // Even the state, which can be null.
+    refused(
+        &edited_plugin(|p| {
+            p.as_object_mut().unwrap().remove("state");
+        }),
+        PLUGIN,
+        "missing field `state`",
+    );
+    for params in [json!([[5, 0.5], [5, 0.25]]), json!([[5, 0.5], [2, 0.25]])] {
+        refused(
+            &edited_plugin(|p| p["params"] = params),
+            &at("params[1][0]"),
+            "must be after the parameter before it: in order of id, once each",
+        );
+    }
+    refused(
+        &edited_plugin(|p| p["params"] = json!([[4_294_967_296_u64, 0.5]])),
+        &at("params[0][0]"),
+        "expected u32",
+    );
+    refused(
+        &edited_plugin(|p| p["params"] = json!([[1, "loud"]])),
+        &at("params[0][1]"),
+        "expected f64",
+    );
+    refused(
+        &edited_plugin(|p| p["params"] = json!([[1]])),
+        &at("params[0]"),
+        "invalid length 1",
+    );
+
+    // Any name, and a state of no bytes.
+    let file = edited_plugin(|p| {
+        p["name"] = json!("");
+        p["state"] = json!("");
+    });
+    let project = load(&file).unwrap();
+    let Some(plugin) = project.tracks[0].devices[0].kind.plugin() else {
+        panic!("a plugin");
+    };
+    assert_eq!(plugin.name, "");
+    assert_eq!(plugin.settings.state, Some(PluginState::new([])));
 }
 
 #[test]
@@ -1177,6 +1297,34 @@ fn saving_refuses_what_loading_would() {
     let mut project = clips();
     project.next_clip_id = 0;
     refused_saving(&project, "next_clip_id", "a clip has id 1");
+
+    fn settings(project: &mut Project) -> &mut PluginSettings {
+        &mut project.tracks[0].devices[0]
+            .kind
+            .plugin_mut()
+            .unwrap()
+            .settings
+    }
+    let mut project = plugged();
+    settings(&mut project).params[1].value = f64::NAN;
+    refused_saving(
+        &project,
+        &format!("{PLUGIN}.params[1][1]"),
+        "must be a finite number",
+    );
+
+    let mut project = plugged();
+    settings(&mut project).params.swap(0, 1);
+    refused_saving(
+        &project,
+        &format!("{PLUGIN}.params[1][0]"),
+        "in order of id",
+    );
+
+    let mut project = plugged();
+    let plugin = project.tracks[0].devices[0].kind.plugin_mut().unwrap();
+    plugin.id.clear();
+    refused_saving(&project, &format!("{PLUGIN}.id"), "must not be empty");
 }
 
 #[test]
