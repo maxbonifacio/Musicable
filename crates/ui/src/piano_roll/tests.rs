@@ -218,6 +218,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
                         plugins: Plugins::default(),
+                        native: &[],
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state.piano_roll.show(ui, &view, theme, mouse, &mut actions);

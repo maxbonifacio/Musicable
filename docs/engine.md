@@ -597,6 +597,64 @@ in by its timbre, and louder with velocity and pressure. A note rises over
 down, notes let go sound on until it comes up. It adds what it plays to
 what comes into it.
 
+## Built-in devices
+
+Musicable's own devices (`DeviceKind::Native`) are nodes in
+`crates/engine/src/devices/`, one file for each kind. The model holds what
+each kind is (`musicable_model::native`): its parameter table, with each
+parameter's key, range, default, unit and scale, and what it does.
+`devices::node` makes a device's node from the device as the project has
+it, and `compile()` puts it where the device sits in its chain, as it does
+a plugin. `devices::BUILT` lists the kinds that have a node, which the
+browser offers; a kind without one passes the signal through, so a project
+that has one still plays.
+
+**Parameters.** A device's node takes `NodeEventKind::Param` with
+`ParamId(n)`, where `n` is the parameter's place in its kind's table, and
+the app sends one for each change (`Edit::NativeParam`). The node keeps its
+parameters in `devices::Params`, which works each one out for every frame:
+
+- The value set ramps to each new one over 10 ms, as `Smoothed` does
+  ([Parameter smoothing](#parameter-smoothing)), and a new node carries on
+  the ramps of the node it replaces (`Params::take_over`).
+- A parameter the table marks `modulated` takes `NodeEventKind::Modulation`
+  without a note: an amount in the parameter's units, added to the value
+  set on every frame from the event on, and kept in the parameter's range.
+  It applies at once, without a ramp, since a modulator moves smoothly by
+  itself. Modulation for one note is the instruments' to handle.
+- `Params::run` renders a block in spans that end where its events fall,
+  and hands each span the values for each of its frames (`Values::frames`),
+  and whether a parameter holds one value over the span
+  (`Values::steady`), for a fast path. An event applies before the span it
+  starts, which gets the event too, for a note or a note's modulation.
+
+So a change or a modulation lands on its frame, and a device renders the
+same samples however the blocks fall, and on any thread: the parallel
+renderer stays bit-identical (`tests/devices.rs` checks it).
+
+**The utility** (`devices::Utility`): a DC filter (a one-pole high-pass at
+5 Hz), each side's polarity, the width (mid and side, exact at 100%), the
+pan (the mixer's pan law) and the gain, in that order, with the mute
+fading over the 10 ms ramp. Its tests check each stage exactly.
+
+**The EQ** (`devices::Equalizer`): eight bands of state-variable filters
+(Simper's trapezoidal SVF), whose responses equal the analog prototypes'
+of the RBJ cookbook under the bilinear transform, matched at each band's
+frequency; 24 and 48 dB cuts are Butterworth cascades of two and four
+sections. `musicable_model::native::eq::response` works out the design's
+response, and the test measures the node's, from its impulse response,
+to within 0.001 dB of it from 20 Hz to 20 kHz at 44.1 and 96 kHz. A band
+retunes on every frame while its frequency, gain or Q moves, and fades in
+and out over 10 ms when it's switched on or off.
+
+**Adding a kind.** Write its node in a file of its own in `devices/`, make
+it in `devices::node`, and add it to `BUILT`. Its parameters are in its
+table already, and the format and commands handle them. Test it with
+`devices::testing::Run`, which renders a node over a signal in blocks of
+any length with events on given frames, under the real-time checks, and
+measure it against what it's meant to do, as the EQ's test does: a
+reference test, not a snapshot of what it happens to do.
+
 ## Parallel rendering
 
 `ParallelRenderer` runs each block's nodes on a pool of worker threads and

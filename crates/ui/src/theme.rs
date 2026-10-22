@@ -16,6 +16,8 @@ pub struct Theme {
     pub arm: Color32,
     /// Input monitoring's buttons, when they're on.
     pub monitor: Color32,
+    /// Built-in devices' switches, when they're on.
+    pub switch: Color32,
     pub ink: Color32,
     /// The meters' colours, from quiet to loud to over full scale.
     pub meter_quiet: Color32,
@@ -196,8 +198,10 @@ pub struct MixerSizes {
 pub struct DeviceSizes {
     /// The devices panel's height until the user drags its edge.
     pub panel: f32,
-    /// A device's box's width.
+    /// A plugin device's box's width.
     pub device: f32,
+    /// The width of a built-in device's controls, and of their columns.
+    pub control: f32,
     /// The space around what's in a device's box, and between the boxes.
     pub margin: f32,
     pub gap: f32,
@@ -220,6 +224,7 @@ impl Default for Theme {
             solo: Color32::from_rgb(80, 160, 235),
             arm: Color32::from_rgb(230, 75, 65),
             monitor: Color32::from_rgb(95, 190, 160),
+            switch: Color32::from_rgb(236, 190, 60),
             ink: Color32::from_gray(24),
             meter_quiet: Color32::from_rgb(90, 190, 110),
             meter_loud: Color32::from_rgb(230, 200, 70),
@@ -318,8 +323,9 @@ impl Default for Theme {
                 scale_text: 9.0,
             },
             devices: DeviceSizes {
-                panel: 130.0,
+                panel: 190.0,
                 device: 170.0,
+                control: 96.0,
                 margin: 4.0,
                 gap: 6.0,
                 browser: 220.0,

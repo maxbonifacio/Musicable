@@ -1,7 +1,8 @@
 //! The devices panel, under the arrangement: the devices of the selected
-//! track, or the master's, in the order they play. And the plugin browser,
-//! beside the arrangement, which lists the plugins installed and adds them
-//! to the devices the panel shows.
+//! track, or the master's, in the order they play, with the controls of
+//! Musicable's own. And the plugin browser, beside the arrangement, which
+//! lists Musicable's own devices and the plugins installed, and adds them to
+//! the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,8 +11,11 @@ use egui::{
     WidgetInfo, vec2,
 };
 use musicable_commands::{Args, device};
+use musicable_model::native::NativeKind;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
+use crate::mouse::MouseMap;
+use crate::native;
 use crate::search::score;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -72,7 +76,8 @@ impl Default for Plugins<'_> {
 /// What the devices panel shows without a chain to show.
 const NO_TRACK: &str = "Select a track to see its devices, or pick Master.";
 /// What it shows for a chain without devices.
-const NO_DEVICES: &str = "No devices. Double-click a plugin in the plugin browser to add it here.";
+const NO_DEVICES: &str =
+    "No devices. Double-click a device or a plugin in the browser to add it here.";
 
 /// The devices panel's own state.
 #[derive(Debug, Default)]
@@ -107,6 +112,7 @@ impl DevicesPanel {
         view: &View<'_>,
         chain: Option<Chain>,
         theme: &Theme,
+        mouse: &MouseMap,
         actions: &mut Vec<Action>,
     ) -> bool {
         let project = view.project;
@@ -124,8 +130,8 @@ impl DevicesPanel {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 browse = ui
-                    .button("Add Plugin...")
-                    .on_hover_text("Shows the plugin browser")
+                    .button("Add Device...")
+                    .on_hover_text("Shows the browser")
                     .clicked();
             });
         });
@@ -148,7 +154,7 @@ impl DevicesPanel {
                 ui.spacing_mut().item_spacing.x = theme.devices.gap;
                 for device in devices {
                     ui.push_id(device.id, |ui| {
-                        device_box(ui, device, view, theme, actions);
+                        device_box(ui, device, view, theme, mouse, actions);
                     });
                 }
             });
@@ -166,29 +172,43 @@ fn chain_button(ui: &mut Ui, on: bool, name: &str) -> bool {
     response.clicked()
 }
 
-/// A device: its name, its kind, and how its plugin is doing.
+/// A device: its name, and a built-in device's controls, or a plugin's
+/// kind and how its plugin is doing.
 fn device_box(
     ui: &mut Ui,
     device: &Device,
     view: &View<'_>,
     theme: &Theme,
+    mouse: &MouseMap,
     actions: &mut Vec<Action>,
 ) {
     let sizes = &theme.devices;
     let (name, kind) = describe(device);
+    let width = match device.kind.native() {
+        Some(native) => native::width(native, theme),
+        None => sizes.device - 2.0 * sizes.margin,
+    };
     Frame::new()
         .fill(theme.device)
         .stroke(Stroke::new(1.0, theme.divider))
         .corner_radius(theme.corner)
         .inner_margin(sizes.margin)
         .show(ui, |ui| {
-            ui.set_width(sizes.device - 2.0 * sizes.margin);
+            ui.set_width(width);
             // Top to bottom, whatever the row of boxes around it does.
             ui.vertical(|ui| {
                 title_row(ui, device, name, theme, actions);
-                ui.label(RichText::new(kind).size(theme.small_text).weak());
-                if device.kind.plugin().is_some() {
-                    plugin_status(ui, device.id, name, view, theme, actions);
+                match device.kind {
+                    DeviceKind::Native(ref native) => {
+                        native::controls(ui, device.id, name, native, theme, mouse, actions);
+                    }
+                    DeviceKind::Plugin(_) => {
+                        ui.label(RichText::new(kind).size(theme.small_text).weak());
+                        plugin_status(ui, device.id, name, view, theme, actions);
+                    }
+                    _ => {
+                        ui.label(RichText::new(kind).size(theme.small_text).weak());
+                    }
                 }
             });
         });
@@ -207,7 +227,10 @@ fn title_row(ui: &mut Ui, device: &Device, name: &str, theme: &Theme, actions: &
                 .truncate()
                 .selectable(false)
                 .sense(Sense::click());
-            let title = ui.add(title);
+            // On the left, in the room the button leaves.
+            let title = ui
+                .with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(title))
+                .inner;
             let label = format!("Device {name}");
             title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
             let args = Args::new().with("device", device.id);
@@ -279,10 +302,23 @@ fn describe(device: &Device) -> (&str, String) {
             };
             (name, format!("{role} · {}", format_name(plugin.format)))
         }
+        DeviceKind::Native(native) => (
+            native.kind.name(),
+            format!("{} · Built in", role(native.kind)),
+        ),
         DeviceKind::TestGain { .. } => ("Test Gain", "Effect · Built in".to_owned()),
         DeviceKind::TestInstrument { .. } => {
             ("Test Instrument", "Instrument · Built in".to_owned())
         }
+    }
+}
+
+/// What a built-in device of kind `kind` is for.
+fn role(kind: NativeKind) -> &'static str {
+    if kind.is_instrument() {
+        "Instrument"
+    } else {
+        "Effect"
     }
 }
 
@@ -311,8 +347,9 @@ pub(crate) struct Browser {
 }
 
 impl Browser {
-    /// Lists the plugins installed, and adds the one the user picks to
-    /// `chain`'s devices: the selected track's without a chain.
+    /// Lists Musicable's own devices that play and the plugins installed,
+    /// and adds the one the user picks to `chain`'s devices: the selected
+    /// track's without a chain.
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -323,7 +360,6 @@ impl Browser {
     ) {
         let plugins = view.plugins;
         ui.add_space(theme.devices.margin);
-        ui.label(RichText::new("Plugins").strong());
         ui.add(
             TextEdit::singleline(&mut self.search)
                 .hint_text("Search")
@@ -341,18 +377,25 @@ impl Browser {
             }
         });
         ui.separator();
+        let filter = self.filter;
+        let wanted = |instrument: bool| match filter {
+            Filter::All => true,
+            Filter::Instruments => instrument,
+            Filter::Effects => !instrument,
+        };
+        let mut built_in: Vec<(u32, NativeKind)> = (view.native.iter())
+            .filter(|kind| wanted(kind.is_instrument()))
+            .filter_map(|&kind| Some((score(&self.search, kind.name(), kind.key(), &[])?, kind)))
+            .collect();
         let mut found: Vec<(u32, &PluginEntry)> = (plugins.installed.iter())
-            .filter(|p| match self.filter {
-                Filter::All => true,
-                Filter::Instruments => p.instrument,
-                Filter::Effects => !p.instrument,
-            })
+            .filter(|p| wanted(p.instrument))
             .filter_map(|p| {
                 let label = format!("{} {}", p.name, p.vendor);
                 Some((score(&self.search, &label, &p.id, &[])?, p))
             })
             .collect();
         // The best matches first, and otherwise in the order given.
+        built_in.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
         found.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
         // A plugin installed in more than one format is listed in each, with
         // the format after its name.
@@ -377,6 +420,27 @@ impl Browser {
             .auto_shrink(false)
             .max_height((ui.available_height() - footer).max(0.0))
             .show(ui, |ui| {
+                if !built_in.is_empty() {
+                    ui.label(RichText::new("Built-in").strong());
+                    for &(_, kind) in &built_in {
+                        let row = ui
+                            .add(
+                                Button::selectable(false, kind.name())
+                                    .min_size(vec2(ui.available_width(), 0.0)),
+                            )
+                            .on_hover_text(format!(
+                                "{}\n{} · Built in\nDouble-click to add it to {to}.",
+                                kind.name(),
+                                role(kind),
+                            ));
+                        if row.double_clicked() {
+                            let args = Args::new().with("kind", kind.key());
+                            actions.push(Action::RunWith(device::ADD, onto(args, chain)));
+                        }
+                    }
+                    ui.add_space(theme.devices.margin);
+                }
+                ui.label(RichText::new("Plugins").strong());
                 if found.is_empty() {
                     let empty = match (plugins.installed.is_empty(), plugins.scanning) {
                         (true, true) => "Looking for plugins...",
@@ -453,6 +517,11 @@ fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
         .with("plugin", plugin.id.as_str())
         .with("name", plugin.name.as_str())
         .with("instrument", plugin.instrument);
+    onto(args, chain)
+}
+
+/// `args`, adding a device to `chain`, or to the selected track.
+fn onto(args: Args, chain: Option<Chain>) -> Args {
     match chain {
         Some(Chain::Master) => args.with("master", true),
         Some(Chain::Track(track)) => args.with("track", track),
@@ -463,11 +532,12 @@ fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
 #[cfg(test)]
 mod tests {
     use egui::accesskit::Toggled;
-    use egui::{Event, Modifiers, PointerButton, Pos2};
+    use egui::{Event, Key, Modifiers, PointerButton, Pos2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use musicable_commands::{options, view};
     use musicable_model::TrackKind;
+    use musicable_model::native::{NativeDevice, eq, synth, utility};
     use musicable_model::plugin::{PluginDevice, PluginSettings};
 
     use super::*;
@@ -527,6 +597,27 @@ mod tests {
 
     fn actions(harness: &mut Harness<'static, State>) -> Vec<Action> {
         std::mem::take(&mut harness.state_mut().actions)
+    }
+
+    fn native(project: &mut Project, kind: NativeKind) -> Device {
+        project.new_device(DeviceKind::Native(NativeDevice::new(kind)))
+    }
+
+    /// Sets parameter `param` of `device` to `value`.
+    fn set(device: &Device, param: usize, value: f64) -> Action {
+        let args = on(device).with("param", param as i64).with("value", value);
+        Action::RunWith(device::SET_PARAM, args)
+    }
+
+    /// The harness, showing `devices` on a track of their own.
+    fn showing(devices: Vec<Device>, project: Project) -> Harness<'static, State> {
+        let mut project = project;
+        let track = project.add_track("Keys", TrackKind::Midi);
+        project.track_mut(track).unwrap().devices = devices;
+        let mut harness = harness(project);
+        harness.state_mut().editor.selected_track = Some(track);
+        harness.run();
+        harness
     }
 
     #[test]
@@ -602,10 +693,10 @@ mod tests {
         harness.run();
         harness.get_by_label(NO_DEVICES);
 
-        // Add Plugin shows the browser.
+        // Add Device shows the browser.
         harness.state_mut().scanning = false;
         assert!(harness.query_by_label("Plugins").is_none());
-        click(&mut harness, "Add Plugin...");
+        click(&mut harness, "Add Device...");
         harness.get_by_label("Plugins");
         assert!(actions(&mut harness).is_empty());
     }
@@ -747,5 +838,170 @@ mod tests {
         harness.state_mut().shell.toggle_panel(DEVICES);
         harness.run();
         assert!(harness.query_by_label(NO_TRACK).is_none());
+    }
+
+    #[test]
+    fn built_in_devices_have_a_control_for_each_parameter() {
+        let mut project = Project::new();
+        let mut utility = native(&mut project, NativeKind::Utility);
+        utility.kind.native_mut().unwrap().values[utility::GAIN] = 0.5;
+        let eq = native(&mut project, NativeKind::Eq);
+        let mut harness = showing(vec![utility.clone(), eq.clone()], project);
+        // Named for screen readers after the device and the parameter, in
+        // columns under their groups' names.
+        for info in NativeKind::Eq.params() {
+            harness.get_by_label(&format!("EQ {}", info.full_name()));
+        }
+        harness.get_by_label("Band 8");
+        let left =
+            |harness: &Harness<'static, State>, label| harness.get_by_label(label).rect().left();
+        assert!(left(&harness, "EQ Band 1 Freq") < left(&harness, "EQ Band 2 Freq"));
+        let freq = harness.get_by_role_and_label(Role::Slider, "EQ Band 3 Freq");
+        assert_eq!(freq.accesskit_node().numeric_value(), Some(250.0));
+        let on = harness
+            .get_by_label("EQ Band 1 On")
+            .accesskit_node()
+            .toggled();
+        assert_eq!(on, Some(Toggled::False));
+
+        // Switches turn on and off, menus pick a choice, and screen readers
+        // set a number.
+        click(&mut harness, "EQ Band 1 On");
+        click(&mut harness, "Utility Mute");
+        harness
+            .get_by_role_and_label(Role::ComboBox, "EQ Band 3 Shape")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Notch").click();
+        harness.run();
+        let freq = harness.get_by_role_and_label(Role::Slider, "EQ Band 3 Freq");
+        freq.set_value_accesskit(1000.0);
+        harness.run();
+        // A double-click gives the default.
+        let at = harness.get_by_label("Utility Gain").rect().center();
+        double_click(&mut harness, at);
+        // Typing a value, in the right-click menu.
+        harness
+            .get_by_role_and_label(Role::Slider, "EQ Band 2 Freq")
+            .click_secondary();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("1.2k");
+        harness.run();
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert!(harness.query_by_role(Role::TextInput).is_none());
+        let band = |band: usize, param: usize| band * eq::PER_BAND + param;
+        assert_eq!(
+            actions(&mut harness),
+            [
+                set(&eq, eq::ON, 1.0),
+                set(&utility, utility::MUTE, 1.0),
+                set(&eq, band(2, eq::SHAPE), 5.0),
+                set(&eq, band(2, eq::FREQ), 1000.0),
+                set(&utility, utility::GAIN, 1.0),
+                set(&eq, band(1, eq::FREQ), 1200.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn dragging_a_control_is_one_gesture_in_whole_steps_where_it_has_them() {
+        let mut project = Project::new();
+        let synth = native(&mut project, NativeKind::Synth);
+        let mut harness = showing(vec![synth.clone()], project);
+        let voices = harness.get_by_role_and_label(Role::Slider, "Synth Voices");
+        let at = voices.rect().left_center() + egui::vec2(4.0, 0.0);
+        harness.hover_at(at);
+        harness.run();
+        harness.drag_at(at);
+        harness.run();
+        // Each move is less than a step from the one before: they add up.
+        for x in 1..=10 {
+            harness.hover_at(at + egui::vec2(3.0 * x as f32, 0.0));
+            harness.run();
+        }
+        harness.drop_at(at + egui::vec2(30.0, 0.0));
+        harness.run();
+        let actions = actions(&mut harness);
+        assert_eq!(actions.first(), Some(&Action::BeginGesture));
+        assert_eq!(actions.last(), Some(&Action::EndGesture));
+        let values: Vec<f64> = actions[1..actions.len() - 1]
+            .iter()
+            .map(|action| match action {
+                Action::RunWith(id, args) if *id == device::SET_PARAM => {
+                    assert_eq!(args.get::<i64>("param"), Ok(synth::VOICES as i64));
+                    args.get("value").unwrap()
+                }
+                other => panic!("{other:?} in the middle of a drag"),
+            })
+            .collect();
+        assert!(
+            values.iter().all(|value| value.fract() == 0.0),
+            "{values:?}"
+        );
+        let last = *values.last().unwrap();
+        // The synth starts at eight voices, and the drag moved it a third
+        // of the way along.
+        assert!(
+            values.len() > 3 && (16.0..=20.0).contains(&last),
+            "{values:?}"
+        );
+    }
+
+    #[test]
+    fn the_browser_lists_the_built_in_devices_that_play_first() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut harness = harness(project);
+        let state = harness.state_mut();
+        state.native = vec![NativeKind::Eq, NativeKind::Utility, NativeKind::Synth];
+        state.plugins = vec![entry("Vital", "Vital Audio", true)];
+        state.editor.selected_track = Some(keys);
+        state.shell.toggle_panel(BROWSER);
+        harness.run();
+        let top =
+            |harness: &Harness<'static, State>, label| harness.get_by_label(label).rect().top();
+        assert!(top(&harness, "Built-in") < top(&harness, "EQ"));
+        assert!(top(&harness, "EQ") < top(&harness, "Synth"));
+        assert!(top(&harness, "Synth") < top(&harness, "Plugins"));
+        assert!(top(&harness, "Plugins") < top(&harness, "Vital"));
+        assert!(harness.query_by_label("Compressor").is_none());
+
+        let listed = |harness: &Harness<'static, State>| -> Vec<&str> {
+            (["Built-in", "EQ", "Utility", "Synth", "Vital"].into_iter())
+                .filter(|name| harness.query_by_label(name).is_some())
+                .collect()
+        };
+        click(&mut harness, "Instruments");
+        assert_eq!(listed(&harness), ["Built-in", "Synth", "Vital"]);
+        click(&mut harness, "Effects");
+        assert_eq!(listed(&harness), ["Built-in", "EQ", "Utility"]);
+        click(&mut harness, "All");
+        harness.get_by_role(Role::TextInput).click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("vit");
+        harness.run();
+        assert_eq!(listed(&harness), ["Vital"]);
+        for _ in 0.."vit".len() {
+            harness.key_press(Key::Backspace);
+            harness.run();
+        }
+        harness.get_by_role(Role::TextInput).type_text("til");
+        harness.run();
+        assert_eq!(listed(&harness), ["Built-in", "Utility"]);
+
+        // A double-click adds it to the selected track, or to the master.
+        let at = harness.get_by_label("Utility").rect().center();
+        double_click(&mut harness, at);
+        click(&mut harness, "Devices of Master");
+        double_click(&mut harness, at);
+        let add = Args::new().with("kind", "utility");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                Action::RunWith(device::ADD, add.clone().with("track", keys)),
+                Action::RunWith(device::ADD, add.with("master", true)),
+            ]
+        );
     }
 }

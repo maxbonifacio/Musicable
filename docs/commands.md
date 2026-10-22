@@ -317,15 +317,17 @@ device's id as `device`.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
+| `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, with every parameter at its default. Returns the new device | none | Double-click in the browser |
 | `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
-| `device.set_param` | Set Plugin Parameter | Sets the parameter `param` of the plugin `device` to `value`, or leaves it to the plugin's state without one | none | none |
+| `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
 | `device.hide_window` | Hide Plugin Window | Closes it | none | Ctrl+Alt+P |
 | `device.delete` | Delete Device | Deletes a device | none | Delete, with the device selected |
 
-Adding, changing and deleting are transactions named after the plugin, such
-as "Add Surge XT", "Change Surge XT" and "Delete Surge XT", so undo covers
-them. The window commands ask the app, with `Request::PluginWindow`; a
+Adding, changing and deleting are transactions named after the device:
+a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
+plugin by its name, such as "Delete Surge XT". So undo covers them, and
+dragging a control is one gesture, which one undo takes back. The window commands ask the app, with `Request::PluginWindow`; a
 plugin that isn't playing has no window to show, and the status bar says
 why. A new device starts with the plugin's own defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
