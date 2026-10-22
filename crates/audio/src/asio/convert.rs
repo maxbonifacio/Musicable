@@ -1,4 +1,5 @@
-//! Writing the engine's samples in an ASIO channel's sample type.
+//! Writing the engine's samples in an ASIO channel's sample type, and
+//! reading an input's.
 
 use super::sys::{Long, sample_type as types};
 use crate::SampleFormat;
@@ -96,6 +97,50 @@ impl Encoding {
     }
 }
 
+impl Encoding {
+    /// Reads samples in this encoding from `bytes` into `out`, as floats
+    /// from -1.0 to 1.0: integers are divided by 2 to the power of one less
+    /// than their bits. Real-time safe.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` isn't exactly `out.len() * self.bytes()` bytes long.
+    pub fn read(self, bytes: &[u8], out: &mut [f32]) {
+        assert_eq!(bytes.len(), out.len() * self.bytes(), "ASIO buffer size");
+        let big_endian = self.big_endian;
+        for (out, bytes) in out.iter_mut().zip(bytes.chunks_exact(self.bytes())) {
+            *out = match self.kind {
+                Kind::Int16 => {
+                    let value = i16::from_le_bytes(take(bytes, big_endian));
+                    f32::from(value) / 32_768.0
+                }
+                Kind::Int24 => {
+                    let [a, b, c] = take::<3>(bytes, big_endian);
+                    // Into the top three bytes, and shifted back down with
+                    // the sign.
+                    (i32::from_le_bytes([0, a, b, c]) >> 8) as f32 / 8_388_608.0
+                }
+                Kind::Int32 { bits } => {
+                    let value = i32::from_le_bytes(take(bytes, big_endian));
+                    // The sample sits in the low bits, sign-extended.
+                    (f64::from(value) / (1_u64 << (bits - 1)) as f64) as f32
+                }
+                Kind::Float32 => f32::from_le_bytes(take(bytes, big_endian)),
+                Kind::Float64 => f64::from_le_bytes(take(bytes, big_endian)) as f32,
+            };
+        }
+    }
+}
+
+/// A sample's bytes, little-endian first.
+fn take<const N: usize>(bytes: &[u8], big_endian: bool) -> [u8; N] {
+    let mut out: [u8; N] = bytes.try_into().expect("a sample's bytes");
+    if big_endian {
+        out.reverse();
+    }
+    out
+}
+
 /// Writes a sample's little-endian bytes, reversed for big-endian.
 fn put(out: &mut [u8], little_endian: &[u8], big_endian: bool) {
     if big_endian {
@@ -174,6 +219,42 @@ mod tests {
         assert_eq!(encoding(types::FLOAT64_MSB).format(), SampleFormat::F64);
         assert_eq!(encoding(types::FLOAT64_MSB).bytes(), 8);
         assert_eq!(encoding(types::INT24_LSB).bytes(), 3);
+    }
+
+    #[test]
+    fn reading_gives_what_was_written() {
+        let samples = [0.0, 0.5, -0.5, 0.25, -1.0, 0.999];
+        for sample_type in [
+            types::INT16_LSB,
+            types::INT24_LSB,
+            types::INT32_LSB,
+            types::FLOAT32_LSB,
+            types::FLOAT64_LSB,
+            types::INT32_LSB16,
+            types::INT32_LSB24,
+            types::INT16_MSB,
+            types::INT24_MSB,
+            types::INT32_MSB,
+            types::FLOAT32_MSB,
+            types::FLOAT64_MSB,
+            types::INT32_MSB20,
+        ] {
+            let encoding = Encoding::from_type(sample_type).unwrap();
+            let bytes = written(sample_type, &samples);
+            let mut back = [0.0; 6];
+            musicable_engine::rt::scope(|| encoding.read(&bytes, &mut back));
+            for (a, b) in samples.iter().zip(back) {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "type {sample_type}: {a} came back as {b}"
+                );
+            }
+        }
+        // The most negative integer is -1.0.
+        let encoding = Encoding::from_type(types::INT32_LSB24).unwrap();
+        let mut back = [0.0];
+        encoding.read(&(-(1_i32 << 23)).to_le_bytes(), &mut back);
+        assert_eq!(back, [-1.0]);
     }
 
     #[test]

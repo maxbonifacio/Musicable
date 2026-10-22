@@ -702,7 +702,9 @@ mod tests {
         ) {
             assert_eq!(ctx.input.frames(), ctx.frames);
             match ctx.input.channels() > self.0 {
-                true => output.channel_mut(0).copy_from_slice(ctx.input.channel(self.0)),
+                true => output
+                    .channel_mut(0)
+                    .copy_from_slice(ctx.input.channel(self.0)),
                 false => output.clear(),
             }
         }

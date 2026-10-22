@@ -36,6 +36,42 @@ impl SampleFormat {
     }
 }
 
+impl SampleFormat {
+    /// Reads little-endian samples of this format from `bytes` into `out`,
+    /// as floats from -1.0 to 1.0: integers are divided by 2 to the power of
+    /// one less than their bits. Real-time safe.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` isn't exactly `out.len() * self.bytes()` bytes long.
+    #[cfg(any(windows, test))]
+    pub(crate) fn read(self, bytes: &[u8], out: &mut [f32]) {
+        assert_eq!(bytes.len(), out.len() * self.bytes(), "device buffer size");
+        let pairs = out.iter_mut().zip(bytes.chunks_exact(self.bytes()));
+        match self {
+            Self::F32 => pairs.for_each(|(o, b)| {
+                *o = f32::from_le_bytes(b.try_into().expect("four bytes"));
+            }),
+            Self::F64 => pairs.for_each(|(o, b)| {
+                *o = f64::from_le_bytes(b.try_into().expect("eight bytes")) as f32;
+            }),
+            Self::I32 => pairs.for_each(|(o, b)| {
+                let value = i32::from_le_bytes(b.try_into().expect("four bytes"));
+                *o = (f64::from(value) / 2_147_483_648.0) as f32;
+            }),
+            Self::I24 => pairs.for_each(|(o, b)| {
+                // Into the top three bytes, and shifted back down with the
+                // sign.
+                let value = i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8;
+                *o = value as f32 / 8_388_608.0;
+            }),
+            Self::I16 => pairs.for_each(|(o, b)| {
+                *o = f32::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0;
+            }),
+        }
+    }
+}
+
 // Full scale is the largest positive value, so +1.0 and -1.0 stay
 // symmetrical. A NaN becomes zero: `as` saturates and maps NaN to 0.
 
@@ -102,6 +138,31 @@ mod tests {
         assert_eq!(out[3..6], [0x01, 0x00, 0x80]);
         // 0.5 * (2^23 - 1) rounds to 2^22.
         assert_eq!(out[6..], [0x00, 0x00, 0x40]);
+    }
+
+    #[test]
+    fn reading_gives_what_was_written() {
+        let samples = [0.0, 0.5, -0.5, 0.25, -1.0, 0.999];
+        for format in [
+            SampleFormat::F32,
+            SampleFormat::F64,
+            SampleFormat::I32,
+            SampleFormat::I24,
+            SampleFormat::I16,
+        ] {
+            let bytes = written(format, &samples);
+            let mut back = [0.0; 6];
+            musicable_engine::rt::scope(|| format.read(&bytes, &mut back));
+            for (a, b) in samples.iter().zip(back) {
+                assert!((a - b).abs() < 1e-4, "{format:?}: {a} came back as {b}");
+            }
+        }
+        // The most negative integer is -1.0.
+        let mut back = [0.0];
+        SampleFormat::I16.read(&i16::MIN.to_le_bytes(), &mut back);
+        assert_eq!(back, [-1.0]);
+        SampleFormat::I24.read(&[0x00, 0x00, 0x80], &mut back);
+        assert_eq!(back, [-1.0]);
     }
 
     #[test]

@@ -54,6 +54,9 @@ pub(super) struct Shared {
     rate: AtomicU32,
     /// The output latency the driver reports, in frames.
     latency: AtomicU32,
+    /// The input latency the driver reports, in frames: how old the first
+    /// frame of an input half is at its buffer switch. A buffer at least.
+    input_latency: AtomicU32,
     wake: Wake,
 }
 
@@ -65,6 +68,7 @@ impl Shared {
             reported: AtomicU32::new(0),
             rate: AtomicU32::new(0),
             latency: AtomicU32::new(0),
+            input_latency: AtomicU32::new(0),
             wake: Wake::new()?,
         })
     }
@@ -98,6 +102,16 @@ impl Shared {
     /// Real-time safe.
     pub fn latency(&self) -> u32 {
         self.latency.load(Ordering::Relaxed)
+    }
+
+    /// The input latency the driver reports, in frames, for the callbacks.
+    pub fn set_input_latency(&self, frames: u32) {
+        self.input_latency.store(frames, Ordering::Relaxed);
+    }
+
+    /// Real-time safe.
+    pub fn input_latency(&self) -> u32 {
+        self.input_latency.load(Ordering::Relaxed)
     }
 
     /// Waits up to `timeout` for a request.

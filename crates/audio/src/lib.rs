@@ -1,4 +1,4 @@
-//! Audio device output for the engine.
+//! Audio device output and input for the engine.
 //!
 //! On Windows this is our own WASAPI backend. Shared mode runs at the
 //! smallest period the driver offers through IAudioClient3, or at the audio
@@ -21,6 +21,13 @@
 //! [`Engine::record_xrun`]. When the device goes away the stream ends by
 //! itself, and [`Stream::stop`] hands back the engine and says why.
 //!
+//! A stream can record too: [`StreamRequest::inputs`] names the inputs to
+//! open with it, from [`input_devices`]. Each input's audio lines up with
+//! the output in an [`InputBuffer`], where frame `w` is what the input
+//! captured as the output's engine frame `w` was heard: that's where a
+//! recording of it belongs. The engine gets the inputs a fixed delay later,
+//! to monitor them.
+//!
 //! `docs/audio.md` describes how it works.
 
 use std::fmt;
@@ -30,6 +37,7 @@ use musicable_engine::{Engine, EngineConfig};
 
 #[cfg(any(windows, test))]
 mod format;
+mod input;
 #[cfg(any(windows, test))]
 mod period;
 mod stats;
@@ -50,6 +58,11 @@ use cpal_host as backend;
 #[cfg(all(feature = "asio", any(windows, test)))]
 mod asio;
 
+use input::StreamInput;
+pub use input::{
+    InputBuffer, InputClock, InputDevice, InputInfo, InputKind, InputStats, ReadError, loopback_id,
+    loopback_of,
+};
 pub use stats::StreamStats;
 
 #[cfg(test)]
@@ -115,6 +128,17 @@ pub fn output_devices() -> Result<Vec<Device>, Error> {
     Ok(devices)
 }
 
+/// The inputs a stream can record from: the input devices that are plugged
+/// in and enabled, then on Windows a loopback of each output device, and in
+/// builds with ASIO, each ASIO driver's inputs, which open only with the
+/// driver's own output.
+pub fn input_devices() -> Result<Vec<InputDevice>, Error> {
+    let devices = backend::input_devices()?;
+    #[cfg(all(windows, feature = "asio"))]
+    let devices = devices.into_iter().chain(asio::input_devices()).collect();
+    Ok(devices)
+}
+
 /// What a device supports, for offering choices before opening it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
@@ -159,6 +183,9 @@ pub struct AsioCapabilities {
     /// Whether the driver finds dropouts itself and reports each one. A
     /// stream then counts only those, as ASIO asks of hosts.
     pub reports_dropouts: bool,
+    /// The driver's input channels, up to 64: what a stream on it records
+    /// when it opens the driver's inputs.
+    pub inputs: u16,
 }
 
 /// What `device` supports, or the default output's if it's `None`. For an
@@ -197,6 +224,13 @@ pub struct StreamRequest {
     /// round it, and some ignore it: [`StreamInfo::period`] says what the
     /// stream got.
     pub period: Option<u32>,
+    /// The inputs to open with the output, to record from and monitor:
+    /// [`InputDevice::id`]s from [`input_devices`]. The engine gets their
+    /// channels in
+    /// [`ProcessContext::input`](musicable_engine::ProcessContext::input),
+    /// one input after another. An input that doesn't open doesn't stop the
+    /// stream: [`StreamInfo::inputs`] says why.
+    pub inputs: Vec<String>,
 }
 
 /// What drives a stream.
@@ -269,6 +303,9 @@ pub struct StreamInfo {
     /// Audio" on Windows. ASIO renders on the driver's own thread, which
     /// ASIO has drivers run at that priority.
     pub realtime: bool,
+    /// The inputs requested, in order: how each one opened, or why it
+    /// didn't.
+    pub inputs: Vec<InputInfo>,
 }
 
 impl StreamInfo {
@@ -302,23 +339,26 @@ pub fn open(request: &StreamRequest) -> Result<OpenStream, Error> {
     if let Some(id) = request.device.as_deref()
         && DriverType::of(id) == DriverType::Asio
     {
-        let (info, inner) = asio::open(id, request)?;
+        let (info, inputs, inner) = asio::open(id, request)?;
         return Ok(OpenStream {
             info,
+            inputs,
             inner: OpenInner::Asio(inner),
         });
     }
-    let (info, inner) = backend::open(request)?;
+    let (info, inputs, inner) = backend::open(request)?;
     Ok(OpenStream {
         info,
+        inputs,
         inner: OpenInner::System(inner),
     })
 }
 
 /// A device opened for output, not playing yet. Dropping it closes the
-/// device.
+/// device, and its inputs.
 pub struct OpenStream {
     info: StreamInfo,
+    inputs: Vec<StreamInput>,
     inner: OpenInner,
 }
 
@@ -339,6 +379,12 @@ enum StreamInner {
 impl OpenStream {
     pub fn info(&self) -> &StreamInfo {
         &self.info
+    }
+
+    /// The inputs' buffers, in the order requested: `None` for an input
+    /// that didn't open. See [`Stream::input_buffers`].
+    pub fn input_buffers(&self) -> Vec<Option<InputBuffer>> {
+        input_buffers(&self.inputs)
     }
 
     /// Starts playing what `engine` renders. The engine must run at the
@@ -362,9 +408,14 @@ impl OpenStream {
         };
         Ok(Stream {
             info: self.info,
+            inputs: self.inputs,
             inner,
         })
     }
+}
+
+fn input_buffers(inputs: &[StreamInput]) -> Vec<Option<InputBuffer>> {
+    inputs.iter().map(|input| input.buffer.clone()).collect()
 }
 
 /// Why a stream didn't start, with the engine it was given.
@@ -393,12 +444,30 @@ impl std::error::Error for StartError {}
 /// Dropping it stops it too, and drops the engine on the dropping thread.
 pub struct Stream {
     info: StreamInfo,
+    inputs: Vec<StreamInput>,
     inner: StreamInner,
 }
 
 impl Stream {
     pub fn info(&self) -> &StreamInfo {
         &self.info
+    }
+
+    /// The inputs' buffers, in the order requested: `None` for an input
+    /// that didn't open. Each holds what its input captured, lined up with
+    /// the output, from a fraction of a second after the stream starts, and
+    /// can be read from any thread. Recordings read them. They keep what was
+    /// captured after the stream stops, until dropped.
+    pub fn input_buffers(&self) -> Vec<Option<InputBuffer>> {
+        input_buffers(&self.inputs)
+    }
+
+    /// Each input's counters, in the order requested.
+    pub fn input_stats(&self) -> Vec<InputStats> {
+        self.inputs
+            .iter()
+            .map(|input| input.counters.snapshot())
+            .collect()
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -478,6 +547,10 @@ pub enum Error {
     /// The ASIO driver asked to be reset, as after a change in its own
     /// settings, or its sample rate changed. Open the stream again.
     DriverReset,
+    /// The system won't let us record from the device. On Windows, apps
+    /// need to be allowed the microphone in Settings, under Privacy &
+    /// security, Microphone, which covers every input device.
+    AccessDenied,
     /// Anything else the system reported: the call that failed, and why.
     Os { call: &'static str, message: String },
 }
@@ -509,6 +582,10 @@ impl fmt::Display for Error {
             Self::Timeout => f.write_str("the device stopped asking for audio"),
             Self::DriverReset => f.write_str(
                 "the ASIO driver asked to be reset, after a change in its settings or rate",
+            ),
+            Self::AccessDenied => f.write_str(
+                "the system won't let Musicable record: on Windows, allow desktop apps to \
+                 use the microphone in Settings, Privacy & security, Microphone",
             ),
             Self::Os { call, message } => write!(f, "{call} failed: {message}"),
         }

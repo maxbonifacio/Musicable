@@ -117,6 +117,9 @@ pub(crate) struct Detector {
     peak: i64,
     /// Shared mode: how far behind the audio engine the device plays.
     downstream: Downstream,
+    /// Exclusive mode: frames the device skipped ahead by for good, over
+    /// all dropouts. Its position counts them, but they weren't ours.
+    shift: u64,
 }
 
 impl Detector {
@@ -133,7 +136,17 @@ impl Detector {
             floor: 0,
             peak: 0,
             downstream: Downstream::new(),
+            shift: 0,
         }
+    }
+
+    /// Frames the device's position has counted that weren't ours: what it
+    /// played again during dropouts in exclusive mode, which moved the
+    /// stream's audio later for good. Our frame playing at position `p` is
+    /// `p - shift`. Always 0 in shared mode, where the position stops while
+    /// the device has nothing of ours.
+    pub fn shift(&self) -> u64 {
+        self.shift
     }
 
     /// Forgets the last reading, so the next one starts the comparison
@@ -279,6 +292,7 @@ impl Detector {
             && self.floor > -period + period / 8
         {
             *offset += self.floor + period;
+            self.shift += (self.floor + period) as u64;
         }
     }
 }
@@ -798,6 +812,8 @@ mod tests {
             underruns += u64::from(free_running(&mut detector, n * PERIOD + 5, n + 1).underrun);
         }
         assert_eq!(underruns, 0);
+        // It caught up: its position still counts only our frames.
+        assert_eq!(detector.shift(), 0);
     }
 
     #[test]
@@ -814,6 +830,8 @@ mod tests {
             later += u64::from(free_running(&mut detector, n * PERIOD + 5, n).underrun);
         }
         assert_eq!(later, 0);
+        // Its position counts the buffer it played twice.
+        assert_eq!(detector.shift(), PERIOD);
         // A later dropout still shows.
         assert!(free_running(&mut detector, 200 * PERIOD + 300, 200).underrun);
     }

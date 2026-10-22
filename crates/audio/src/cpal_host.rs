@@ -11,6 +11,7 @@ use cpal::{BufferSize, ErrorKind, FromSample, SizedSample, SupportedBufferSize};
 use musicable_engine::Engine;
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::input::{InputDevice, StreamInput};
 use crate::stats::Counters;
 use crate::{
     Api, Capabilities, Device, DriverType, Error, Mode, SampleFormat, StartError, Stopped,
@@ -29,6 +30,10 @@ pub(crate) fn output_devices() -> Result<Vec<Device>, Error> {
     Ok(devices
         .filter_map(|device| describe(&device, default.as_ref()).ok())
         .collect())
+}
+
+pub(crate) fn input_devices() -> Result<Vec<InputDevice>, Error> {
+    Ok(Vec::new())
 }
 
 pub(crate) fn capabilities(id: Option<&str>) -> Result<Capabilities, Error> {
@@ -189,7 +194,9 @@ impl Shared {
     }
 }
 
-pub(crate) fn open(request: &StreamRequest) -> Result<(StreamInfo, OpenStream), Error> {
+pub(crate) fn open(
+    request: &StreamRequest,
+) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     if request.mode == Mode::Exclusive {
         return Err(Error::ExclusiveNotAllowed);
     }
@@ -252,9 +259,16 @@ pub(crate) fn open(request: &StreamRequest) -> Result<(StreamInfo, OpenStream), 
         // CoreAudio runs its I/O threads at real-time priority; cpal's ALSA
         // thread doesn't ask for it.
         realtime: cfg!(target_os = "macos"),
+        inputs: Vec::new(),
     };
+    let inputs = request
+        .inputs
+        .iter()
+        .map(|_| StreamInput::failed("inputs aren't supported here yet".into()))
+        .collect();
     Ok((
         info,
+        inputs,
         OpenStream {
             stream,
             engines,

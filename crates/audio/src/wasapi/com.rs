@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::thread;
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_NOT_FOUND, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, ERROR_NOT_FOUND, HANDLE};
 use windows::Win32::Media::Audio::{
     AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_ENDPOINT_CREATE_FAILED,
     AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_RESOURCES_INVALIDATED,
@@ -219,6 +219,8 @@ pub(super) fn os(call: &'static str, error: windows::core::Error) -> Error {
         Error::UnsupportedFormat
     } else if code == ERROR_NOT_FOUND.to_hresult() {
         Error::DeviceNotFound
+    } else if code == E_ACCESSDENIED {
+        Error::AccessDenied
     } else {
         Error::Os {
             call,
