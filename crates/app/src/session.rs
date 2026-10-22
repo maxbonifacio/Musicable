@@ -767,6 +767,16 @@ impl Session {
                     // The plugins have their settings, not the engine: the
                     // plugins follow below.
                     Edit::PluginParam { .. } | Edit::PluginSettings { .. } => {}
+                    // A built-in device's node has its parameters.
+                    Edit::NativeParam {
+                        device, param, to, ..
+                    } => self.engine.push(Message::Event(Event::Param {
+                        node: keys::device(device),
+                        param: ParamId(param),
+                        value: to,
+                    })),
+                    // A sampler reads its sample as the graph is built.
+                    Edit::NativeSample { .. } => recompile = true,
                     // Tracks and their inputs are compiled into the graph,
                     // and the recorder records the armed ones.
                     Edit::AddTrack { .. } | Edit::RemoveTrack { .. } | Edit::TrackInput { .. } => {

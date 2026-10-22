@@ -562,12 +562,13 @@ fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
 }
 
 /// A device's node, if it has one: a plugin `devices` has nothing for has
-/// none.
+/// none, and nor has a built-in device whose DSP isn't built yet.
 fn device_node(device: &Device, devices: &Devices) -> Option<Box<dyn Node>> {
     match device.kind {
         DeviceKind::TestGain { gain } => Some(Box::new(Gain::new(gain))),
         DeviceKind::TestInstrument { level } => Some(Box::new(TestInstrument::new(level))),
         DeviceKind::Plugin(_) => devices.get(device.id).map(NodeMaker::make),
+        DeviceKind::Native(ref native) => crate::devices::node(native),
     }
 }
 

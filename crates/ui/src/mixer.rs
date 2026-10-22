@@ -1110,7 +1110,7 @@ fn clip_hint(clip_type: ClipType) -> &'static str {
 
 /// Names the slider `response` for screen readers, and tells them its
 /// value in `range`. Returns the value one asked it to take.
-fn slider_info(
+pub(crate) fn slider_info(
     ui: &Ui,
     response: &Response,
     label: &str,
@@ -1140,7 +1140,7 @@ fn slider_info(
 }
 
 /// Names the combo box `response` for screen readers, showing `value`.
-fn name_menu(response: &Response, label: String, value: &str) {
+pub(crate) fn name_menu(response: &Response, label: String, value: &str) {
     response.widget_info(|| WidgetInfo {
         current_text_value: Some(value.to_owned()),
         ..WidgetInfo::labeled(Role::ComboBox, true, &label)

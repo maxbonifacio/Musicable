@@ -24,6 +24,7 @@ use musicable_model::time::TempoMap;
 pub mod buffer;
 pub mod clips;
 pub mod compile;
+pub mod devices;
 mod engine;
 pub mod event;
 pub mod graph;

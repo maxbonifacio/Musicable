@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
 use musicable_model::clip::{AudioClip, Clip, ClipContent, Dimension, MidiClip, Point};
+use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{
@@ -111,6 +112,32 @@ impl Random {
             instrument: self.one_in(2),
             settings: PluginSettings { state, params },
         })
+    }
+
+    /// A built-in device of any kind, some of its parameters set anywhere in
+    /// their range, and a sample on some samplers.
+    fn native(&mut self) -> DeviceKind {
+        let kind = self.pick(&NativeKind::ALL);
+        let mut device = NativeDevice::new(kind);
+        for (i, param) in kind.params().iter().enumerate() {
+            let value = match self.below(4) {
+                0 => continue,
+                1 => self.pick(&[param.min, param.max, param.default]),
+                // Any value in range, every bit pattern as likely.
+                2 if !param.stepped => loop {
+                    let value = self.f64();
+                    if param.is_valid(value) {
+                        break value;
+                    }
+                },
+                _ => param.from_unit((self.next() >> 11) as f64 / (1_u64 << 53) as f64),
+            };
+            device.values[i] = value;
+        }
+        if kind == NativeKind::Sampler && self.one_in(2) {
+            device.sample = Some(format!("Samples/{}.wav", self.name()));
+        }
+        DeviceKind::Native(device)
     }
 
     fn bpm(&mut self) -> f64 {
@@ -305,11 +332,12 @@ fn random_project(random: &mut Random) -> Project {
         let kind = project.track(id).unwrap().kind;
         let devices = (0..random.below(3))
             .map(|_| {
-                let kind = match random.below(3) {
+                let kind = match random.below(4) {
                     0 => DeviceKind::TestInstrument {
                         level: random.gain(),
                     },
                     1 => random.plugin(),
+                    2 => random.native(),
                     _ => DeviceKind::TestGain {
                         gain: random.gain(),
                     },
@@ -365,9 +393,10 @@ fn random_project(random: &mut Random) -> Project {
     project.master.gain = random.gain();
     project.master.pan = random.pan();
     for _ in 0..random.below(3) {
-        let kind = match random.one_in(2) {
-            true => random.plugin(),
-            false => DeviceKind::TestGain {
+        let kind = match random.below(3) {
+            0 => random.plugin(),
+            1 => random.native(),
+            _ => DeviceKind::TestGain {
                 gain: random.gain(),
             },
         };
@@ -436,9 +465,7 @@ fn floats_load_bit_for_bit() {
         assert_eq!(level(loaded), level(saved));
         let gain = |track: &musicable_model::Track| match &track.devices[0].kind {
             DeviceKind::TestGain { gain } => gain.to_bits(),
-            DeviceKind::TestInstrument { .. } | DeviceKind::Plugin(_) => {
-                unreachable!("only test gains")
-            }
+            _ => unreachable!("only test gains"),
         };
         assert_eq!(gain(loaded), gain(saved));
     }

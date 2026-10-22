@@ -12,6 +12,7 @@ use musicable_commands::{
     Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
     edit, locator, options, take, track, transport, view,
 };
+use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
@@ -67,6 +68,9 @@ pub struct View<'a> {
     pub messages: &'a [String],
     /// The plugins installed, and how the project's are doing.
     pub plugins: Plugins<'a>,
+    /// Musicable's own devices that play, which the browser lists: the
+    /// engine's `devices::BUILT`. The others wait for their sound.
+    pub native: &'a [NativeKind],
 }
 
 /// The transport, as the engine last reported it.
@@ -259,7 +263,9 @@ impl Shell {
                 .default_size(theme.devices.panel)
                 .min_size(theme.devices.panel / 2.0)
                 .show(ui, |ui| {
-                    self.devices.show(ui, view, chain, theme, &mut actions)
+                    let mouse = &self.mouse;
+                    self.devices
+                        .show(ui, view, chain, theme, mouse, &mut actions)
                 })
                 .inner;
             if browse && self.hidden.remove(BROWSER) {

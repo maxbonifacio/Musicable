@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins, recording];
+const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins, recording, native];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -122,6 +122,12 @@ fn recording(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         add(track, &path, "monitor", json!("auto"))?;
         add(track, &path, "takes", json!([]))?;
     }
+    Ok(())
+}
+
+/// Version 7 added Musicable's own devices. Version 6 files have none, so
+/// they need nothing.
+fn native(_: &mut Map<String, Value>) -> Result<(), Invalid> {
     Ok(())
 }
 

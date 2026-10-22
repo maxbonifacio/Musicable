@@ -228,6 +228,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
                         plugins: Plugins::default(),
+                        native: &[],
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state

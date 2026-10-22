@@ -15,7 +15,7 @@ master's soft clip stage on, and a locator marks the chorus at bar 3:
 ```json
 {
   "format": "musicable-project",
-  "version": 6,
+  "version": 7,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -438,19 +438,198 @@ A **device** processes the signal on its way through the channel:
 | `id` | whole number | Below `next_device_id`, and no other device in the project has it, on a track or on the master. |
 | `kind` | object | What the device is, as an object with one field: the kind's name, holding the kind's settings. |
 
-There are three kinds of device so far: plugins, and test devices that
-Musicable's own devices will join.
+There are four kinds of device: Musicable's own, plugins, and two test
+devices.
 
 | Kind | Settings | Meaning |
 |---|---|---|
+| `native` | native device | One of Musicable's own devices, as below. |
 | `plugin` | plugin | A CLAP or VST3 plugin, as below. |
 | `test_gain` | `gain`: float | Multiplies the signal by `gain`, linear like the fader. |
 | `test_instrument` | `level`: float | Plays the notes of the track's MIDI clips with a plain tone, added to the signal coming in: a sine at each note's pitch, bent by its pitch bend, brighter with its timbre, and louder with velocity and pressure, peaking at `level` at full velocity. |
 
 So a test device that halves the signal is
 `{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`. On a MIDI track, the
-first instrument gets the notes: the first test instrument or plugin that
-plays notes.
+first instrument gets the notes: the first device that plays notes, which
+is a sampler, a synth, a test instrument or a plugin instrument.
+
+A **native device**'s settings say which of Musicable's own devices it is
+and how it's set:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string | `"eq"`, `"compressor"`, `"gate"`, `"delay"`, `"reverb"`, `"utility"`, `"sampler"` or `"synth"`. |
+| `sample` | string or `null` | A sampler's sample: the file's path, as an audio clip's `file` has it. Not empty. `null` for a sampler without one, and for every other kind. |
+| `params` | object | Each parameter's value, under its key, as the tables below list them: a float within the parameter's range, and a whole number for switches, choices, notes and counts. Each key at most once. |
+
+A parameter missing from `params` takes its default, so a kind can gain
+parameters, at the end of its table, without a new version of the format.
+Musicable writes every parameter, in the table's order. A kind's parameters
+are numbered by their place in its table, from 0, as the `#` column shows,
+and `device.set_param` and automation point at them by number. Parameters
+are only ever added at the end, so the numbers stay. What each parameter
+does is in the kind's file in `crates/model/src/native/`.
+
+**EQ** (`"eq"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `band1_on` | Band 1 On | 0 off, 1 on | 0 |
+| 1 | `band1_shape` | Band 1 Shape | 0 Low Cut 12, 1 Low Cut 24, 2 Low Cut 48, 3 Low Shelf, 4 Bell, 5 Notch, 6 High Shelf, 7 High Cut 12, 8 High Cut 24, 9 High Cut 48 | 1 |
+| 2 | `band1_freq` | Band 1 Freq | 10 to 22000 Hz | 30 |
+| 3 | `band1_gain` | Band 1 Gain | -24 to 24 dB | 0 |
+| 4 | `band1_q` | Band 1 Q | 0.1 to 18 | 0.7071067811865476 |
+| 5 | `band2_on` | Band 2 On | 0 off, 1 on | 1 |
+| 6 | `band2_shape` | Band 2 Shape | as `band1_shape` | 3 |
+| 7 | `band2_freq` | Band 2 Freq | 10 to 22000 Hz | 100 |
+| 8 | `band2_gain` | Band 2 Gain | -24 to 24 dB | 0 |
+| 9 | `band2_q` | Band 2 Q | 0.1 to 18 | 0.7071067811865476 |
+| 10 | `band3_on` | Band 3 On | 0 off, 1 on | 1 |
+| 11 | `band3_shape` | Band 3 Shape | as `band1_shape` | 4 |
+| 12 | `band3_freq` | Band 3 Freq | 10 to 22000 Hz | 250 |
+| 13 | `band3_gain` | Band 3 Gain | -24 to 24 dB | 0 |
+| 14 | `band3_q` | Band 3 Q | 0.1 to 18 | 0.7071067811865476 |
+| 15 | `band4_on` | Band 4 On | 0 off, 1 on | 1 |
+| 16 | `band4_shape` | Band 4 Shape | as `band1_shape` | 4 |
+| 17 | `band4_freq` | Band 4 Freq | 10 to 22000 Hz | 800 |
+| 18 | `band4_gain` | Band 4 Gain | -24 to 24 dB | 0 |
+| 19 | `band4_q` | Band 4 Q | 0.1 to 18 | 0.7071067811865476 |
+| 20 | `band5_on` | Band 5 On | 0 off, 1 on | 1 |
+| 21 | `band5_shape` | Band 5 Shape | as `band1_shape` | 4 |
+| 22 | `band5_freq` | Band 5 Freq | 10 to 22000 Hz | 2500 |
+| 23 | `band5_gain` | Band 5 Gain | -24 to 24 dB | 0 |
+| 24 | `band5_q` | Band 5 Q | 0.1 to 18 | 0.7071067811865476 |
+| 25 | `band6_on` | Band 6 On | 0 off, 1 on | 1 |
+| 26 | `band6_shape` | Band 6 Shape | as `band1_shape` | 4 |
+| 27 | `band6_freq` | Band 6 Freq | 10 to 22000 Hz | 6000 |
+| 28 | `band6_gain` | Band 6 Gain | -24 to 24 dB | 0 |
+| 29 | `band6_q` | Band 6 Q | 0.1 to 18 | 0.7071067811865476 |
+| 30 | `band7_on` | Band 7 On | 0 off, 1 on | 1 |
+| 31 | `band7_shape` | Band 7 Shape | as `band1_shape` | 6 |
+| 32 | `band7_freq` | Band 7 Freq | 10 to 22000 Hz | 10000 |
+| 33 | `band7_gain` | Band 7 Gain | -24 to 24 dB | 0 |
+| 34 | `band7_q` | Band 7 Q | 0.1 to 18 | 0.7071067811865476 |
+| 35 | `band8_on` | Band 8 On | 0 off, 1 on | 0 |
+| 36 | `band8_shape` | Band 8 Shape | as `band1_shape` | 8 |
+| 37 | `band8_freq` | Band 8 Freq | 10 to 22000 Hz | 18000 |
+| 38 | `band8_gain` | Band 8 Gain | -24 to 24 dB | 0 |
+| 39 | `band8_q` | Band 8 Q | 0.1 to 18 | 0.7071067811865476 |
+| 40 | `output` | Output | -24 to 24 dB | 0 |
+
+**Compressor** (`"compressor"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `threshold` | Threshold | -60 to 0 dB | -18 |
+| 1 | `ratio` | Ratio | 1 to 20, a ratio to 1 | 4 |
+| 2 | `attack` | Attack | 0.1 to 200 ms | 10 |
+| 3 | `release` | Release | 1 to 3000 ms | 100 |
+| 4 | `knee` | Knee | 0 to 24 dB | 6 |
+| 5 | `output` | Output | -24 to 24 dB | 0 |
+| 6 | `mix` | Mix | 0 to 100 % | 100 |
+| 7 | `detector` | Detector | 0 Peak, 1 RMS | 0 |
+
+**Gate** (`"gate"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `threshold` | Threshold | -80 to 0 dB | -40 |
+| 1 | `return` | Return | 0 to 24 dB | 3 |
+| 2 | `attack` | Attack | 0.02 to 100 ms | 0.5 |
+| 3 | `hold` | Hold | 0 to 1000 ms | 10 |
+| 4 | `release` | Release | 1 to 3000 ms | 100 |
+| 5 | `floor` | Floor | -80 to 0 dB | -80 |
+
+**Delay** (`"delay"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `sync` | Time Sync | 0 off, 1 on | 1 |
+| 1 | `time` | Time Time | 1 to 5000 ms | 250 |
+| 2 | `note` | Time Note | 0 1/32, 1 1/16T, 2 1/16, 3 1/16D, 4 1/8T, 5 1/8, 6 1/8D, 7 1/4T, 8 1/4, 9 1/4D, 10 1/2T, 11 1/2, 12 1/2D, 13 1/1 | 6 |
+| 3 | `feedback` | Feedback | 0 to 100 % | 40 |
+| 4 | `ping_pong` | Ping Pong | 0 off, 1 on | 0 |
+| 5 | `low_cut` | Filter Low Cut | 20 to 20000 Hz | 100 |
+| 6 | `high_cut` | Filter High Cut | 20 to 20000 Hz | 8000 |
+| 7 | `mix` | Mix | 0 to 100 % | 30 |
+
+**Reverb** (`"reverb"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `predelay` | Pre-Delay | 0 to 250 ms | 10 |
+| 1 | `size` | Size | 0 to 100 % | 50 |
+| 2 | `decay` | Decay | 0.1 to 30 s | 2 |
+| 3 | `damping` | Damping | 1000 to 20000 Hz | 6000 |
+| 4 | `low_cut` | Low Cut | 20 to 1000 Hz | 80 |
+| 5 | `width` | Width | 0 to 100 % | 100 |
+| 6 | `mix` | Mix | 0 to 100 % | 25 |
+
+**Utility** (`"utility"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `gain` | Gain | 0 to 15.848931924611133, linear gain | 1 |
+| 1 | `pan` | Pan | -1 to 1, left to right | 0 |
+| 2 | `width` | Width | 0 to 200 % | 100 |
+| 3 | `invert_left` | Invert L | 0 off, 1 on | 0 |
+| 4 | `invert_right` | Invert R | 0 off, 1 on | 0 |
+| 5 | `mute` | Mute | 0 off, 1 on | 0 |
+| 6 | `dc` | DC Filter | 0 off, 1 on | 0 |
+
+**Sampler** (`"sampler"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `root` | Sample Root | 0 to 127, a MIDI note | 60 |
+| 1 | `transpose` | Sample Transpose | -48 to 48 semitones, whole | 0 |
+| 2 | `detune` | Sample Detune | -50 to 50 cents | 0 |
+| 3 | `start` | Sample Start | 0 to 100 % | 0 |
+| 4 | `end` | Sample End | 0 to 100 % | 100 |
+| 5 | `loop` | Sample Loop | 0 off, 1 on | 0 |
+| 6 | `loop_start` | Sample Loop Start | 0 to 100 % | 0 |
+| 7 | `mode` | Sample Mode | 0 Classic, 1 One-Shot | 0 |
+| 8 | `attack` | Amp Attack | 0.1 to 20000 ms | 1 |
+| 9 | `decay` | Amp Decay | 1 to 20000 ms | 600 |
+| 10 | `sustain` | Amp Sustain | 0 to 100 % | 100 |
+| 11 | `release` | Amp Release | 1 to 20000 ms | 50 |
+| 12 | `velocity` | Amp Velocity | 0 to 100 % | 50 |
+| 13 | `volume` | Amp Volume | -48 to 12 dB | 0 |
+| 14 | `filter` | Filter Type | 0 Off, 1 Low Pass, 2 High Pass, 3 Band Pass | 0 |
+| 15 | `cutoff` | Filter Cutoff | 20 to 20000 Hz | 2000 |
+| 16 | `resonance` | Filter Resonance | 0 to 100 % | 0 |
+| 17 | `voices` | Voices | 1 to 32, whole | 8 |
+
+**Synth** (`"synth"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `osc1_wave` | Osc 1 Wave | 0 Sine, 1 Triangle, 2 Saw, 3 Square | 2 |
+| 1 | `osc1_octave` | Osc 1 Octave | -3 to 3, whole | 0 |
+| 2 | `osc1_level` | Osc 1 Level | 0 to 100 % | 100 |
+| 3 | `osc2_wave` | Osc 2 Wave | as `osc1_wave` | 2 |
+| 4 | `osc2_pitch` | Osc 2 Pitch | -24 to 24 semitones, whole | 0 |
+| 5 | `osc2_detune` | Osc 2 Detune | -100 to 100 cents | 0 |
+| 6 | `osc2_level` | Osc 2 Level | 0 to 100 % | 0 |
+| 7 | `noise` | Noise Level | 0 to 100 % | 0 |
+| 8 | `filter` | Filter Type | 0 Low Pass 12, 1 Low Pass 24, 2 High Pass 12, 3 Band Pass 12 | 1 |
+| 9 | `cutoff` | Filter Cutoff | 20 to 20000 Hz | 2000 |
+| 10 | `resonance` | Filter Resonance | 0 to 100 % | 10 |
+| 11 | `filter_env` | Filter Envelope | -96 to 96 semitones | 24 |
+| 12 | `key_track` | Filter Key Track | 0 to 100 % | 50 |
+| 13 | `filter_attack` | Filter Env Attack | 0.1 to 20000 ms | 1 |
+| 14 | `filter_decay` | Filter Env Decay | 1 to 20000 ms | 400 |
+| 15 | `filter_sustain` | Filter Env Sustain | 0 to 100 % | 30 |
+| 16 | `filter_release` | Filter Env Release | 1 to 20000 ms | 200 |
+| 17 | `amp_attack` | Amp Env Attack | 0.1 to 20000 ms | 1 |
+| 18 | `amp_decay` | Amp Env Decay | 1 to 20000 ms | 600 |
+| 19 | `amp_sustain` | Amp Env Sustain | 0 to 100 % | 80 |
+| 20 | `amp_release` | Amp Env Release | 1 to 20000 ms | 150 |
+| 21 | `volume` | Volume | -48 to 12 dB | -6 |
+| 22 | `velocity` | Velocity | 0 to 100 % | 50 |
+| 23 | `voices` | Voices | 1 to 32, whole | 8 |
+| 24 | `glide` | Glide | 0 to 2000 ms | 0 |
+
 
 A **plugin**'s settings say which plugin it is and how it's set:
 
@@ -516,11 +695,14 @@ Signal flows from tracks to buses without loops:
 | 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
 | 5 | 2026-10-22 | Plugin devices, with their state and parameters. Version 4 files have none. |
 | 6 | 2026-10-22 | Recording: each track's input and monitoring, takes, and punching in and out. Version 5 audio tracks record from the default input's first two channels, MIDI tracks from every MIDI input, all with `"auto"` monitoring and no takes, and punching in and out is off. |
+| 7 | 2026-10-22 | Musicable's own devices: an EQ, a compressor, a gate, a delay, a reverb, a utility, a sampler and a synth. Version 6 files have none. |
 
 ## Changing the format
 
 Any change to what a project file holds is a new version: a new field, a
-renamed one, a new value for a field, or a new rule. To make one:
+renamed one, a new value for a field, or a new rule. The one exception is a
+new parameter at the end of a built-in device's table, since files without
+it take its default. To make a new version:
 
 1. Raise `VERSION` in `crates/io/src/project.rs`. It won't compile until the
    next step is done.

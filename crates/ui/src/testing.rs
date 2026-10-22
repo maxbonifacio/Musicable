@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use egui_kittest::{Harness, HarnessBuilder};
 use musicable_commands::{Editor, Keymap, Problem, Registry, view};
+use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project};
 
@@ -36,6 +37,8 @@ pub(crate) struct State {
     pub plugins: Vec<PluginEntry>,
     pub scanning: bool,
     pub plugin_status: BTreeMap<DeviceId, PluginStatus>,
+    /// The built-in devices the browser lists: all of them.
+    pub native: Vec<NativeKind>,
     pub actions: Vec<Action>,
 }
 
@@ -78,6 +81,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         plugins: Vec::new(),
         scanning: false,
         plugin_status: BTreeMap::new(),
+        native: NativeKind::ALL.to_vec(),
         actions: Vec::new(),
     };
     builder.with_size([1100.0, 720.0]).build_ui_state(
@@ -121,6 +125,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                     scanning: state.scanning,
                     status: &state.plugin_status,
                 },
+                native: &state.native,
             };
             let mut actions = state.shell.show(ui, &view);
             for action in &actions {

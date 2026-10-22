@@ -722,6 +722,7 @@ impl eframe::App for App {
                 scanning: self.plugin_scan.is_running(),
                 status: &self.plugin_status,
             },
+            native: musicable_engine::devices::BUILT,
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -808,6 +809,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod arranging;
+#[cfg(test)]
+mod built_in_devices;
 #[cfg(test)]
 mod plugins_on_tracks;
 #[cfg(test)]

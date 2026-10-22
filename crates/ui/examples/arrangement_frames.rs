@@ -244,6 +244,7 @@ impl Bench {
                 },
                 messages: &[],
                 plugins: Plugins::default(),
+                native: &[],
             };
             actions = self.shell.show(ui, &view);
         });

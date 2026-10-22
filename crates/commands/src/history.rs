@@ -161,6 +161,7 @@ fn compact(edits: &mut Vec<Edit>) {
 mod tests {
     use musicable_model::clip::{AudioClip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing};
     use musicable_model::mixer::Bus;
+    use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
     use musicable_model::{
@@ -189,8 +190,8 @@ mod tests {
     /// The project the edits in `one_of_each` change: a track of each kind,
     /// two with a send, and a spare one that nothing refers to; two audio
     /// clips, one with fades, and a MIDI clip; two takes of an audio clip on
-    /// the audio track; two locators; and a plugin on the audio track and a
-    /// test device on the master.
+    /// the audio track; two locators; and a plugin on the audio track, a
+    /// test device on the master and a sampler on the MIDI track.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -240,6 +241,9 @@ mod tests {
         project.track_mut(audio).unwrap().devices.push(effect);
         let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
         project.master.devices.push(gain);
+        let sampler = NativeDevice::new(NativeKind::Sampler);
+        let sampler = project.new_device(DeviceKind::Native(sampler));
+        project.track_mut(midi).unwrap().devices.push(sampler);
         project
     }
 
@@ -264,6 +268,7 @@ mod tests {
         let bass_timing = project.find_clip(bass).unwrap().1.timing();
         let synth = project.new_device(plugin(true));
         let effect = DeviceId(0);
+        let kick = DeviceId(2);
         let effect_settings = project
             .find_device(effect)
             .unwrap()
@@ -492,6 +497,17 @@ mod tests {
                 from: None,
                 to: Some(-3.5),
             },
+            Edit::NativeParam {
+                device: kick,
+                param: sampler::ROOT as u32,
+                from: 60.0,
+                to: 36.0,
+            },
+            Edit::NativeSample {
+                device: kick,
+                from: None,
+                to: Some("Samples/Kick.wav".into()),
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -500,7 +516,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 42;
+    const KINDS: usize = 44;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -548,6 +564,8 @@ mod tests {
             Edit::AddTake { .. } => 39,
             Edit::RemoveTake { .. } => 40,
             Edit::TakeName { .. } => 41,
+            Edit::NativeParam { .. } => 42,
+            Edit::NativeSample { .. } => 43,
         }
     }
 

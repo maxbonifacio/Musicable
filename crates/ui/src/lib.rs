@@ -16,6 +16,7 @@ mod keys;
 mod menus;
 mod mixer;
 mod mouse;
+mod native;
 mod palette;
 mod search;
 mod shell;
