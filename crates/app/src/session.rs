@@ -481,6 +481,14 @@ impl Session {
         self.engine.beats_at(position)
     }
 
+    /// Whether the keymap binds `chord` to a command that applies now, so a
+    /// press of it runs one. Other keys can go elsewhere.
+    pub fn takes_key(&self, chord: KeyChord) -> bool {
+        self.keymap
+            .lookup(chord)
+            .is_some_and(|id| self.commands.applies(id, &self.document))
+    }
+
     /// Runs the command the keymap binds to `chord`. Returns `false` if there
     /// is none, so the key can go elsewhere.
     pub fn key_pressed(&mut self, chord: KeyChord) -> bool {
@@ -802,7 +810,8 @@ impl Session {
                         recompile = true;
                         armed_changed = true;
                     }
-                    // Clips are compiled into the graph.
+                    // Clips are compiled into the graph, notes and all. A
+                    // note edited while it sounds is let go.
                     Edit::TrackOutput { .. }
                     | Edit::TrackClipType { .. }
                     | Edit::AddSend { .. }
@@ -813,6 +822,12 @@ impl Session {
                     | Edit::RemoveClip { .. }
                     | Edit::ClipTiming { .. }
                     | Edit::ClipFades { .. }
+                    | Edit::AddNote { .. }
+                    | Edit::RemoveNote { .. }
+                    | Edit::NoteTiming { .. }
+                    | Edit::NoteKey { .. }
+                    | Edit::NoteVelocity { .. }
+                    | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. } => recompile = true,
                 }

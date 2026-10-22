@@ -14,11 +14,13 @@ use clap_sys::events::{
     CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING, clap_event_header,
     clap_event_transport,
 };
-use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, clap_note_dialect};
+use clap_sys::ext::note_ports::{
+    CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI_MPE, clap_note_dialect,
+};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, NoteId,
+    AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NodeMaker, NoteEvent, NoteId,
     ProcessContext,
 };
 use musicable_model::clip::Dimension;
@@ -27,6 +29,7 @@ use super::events::{self, Event, InputEvents, OutEvent};
 use super::host::Shared;
 use super::library::Library;
 use super::voices::{VOICE_CAPACITY, Voices};
+use crate::midi::{Layout, MidiOut};
 use crate::process::{Channels, ParamChange, Sounding, SoundingNote, Transport};
 use crate::threads::{ACTIVE, AudioThread, FAILED, PROCESSING};
 
@@ -47,6 +50,8 @@ pub(crate) struct Audio {
     pub(crate) events: InputEvents,
     pub(crate) sounding: Sounding,
     pub(crate) voices: Voices,
+    /// Notes and controllers as MIDI, for a plugin that takes MIDI.
+    pub(crate) midi: MidiOut,
     /// Frames processed since the plugin was activated.
     pub(crate) steady_time: i64,
     pub(crate) from_main: rtrb::Consumer<ParamChange>,
@@ -66,6 +71,7 @@ impl Audio {
             events: InputEvents::with_capacity(EVENT_CAPACITY),
             sounding: Sounding::new(),
             voices: Voices::new(),
+            midi: MidiOut::new(Layout::Channel),
             steady_time: 0,
             from_main,
             to_main,
@@ -88,6 +94,9 @@ impl Audio {
         self.events.clear();
         self.sounding.clear();
         self.voices.clear();
+        let mpe = note_port.is_some_and(|p| p.dialect == CLAP_NOTE_DIALECT_MIDI_MPE);
+        self.midi
+            .reset(if mpe { Layout::Mpe } else { Layout::Channel });
         self.steady_time = 0;
     }
 }
@@ -103,8 +112,10 @@ pub(crate) struct PortInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NotePort {
     pub(crate) index: u16,
-    /// CLAP's own note events, or MIDI.
+    /// CLAP's own note events, MIDI with MPE, or MIDI.
     pub(crate) dialect: clap_note_dialect,
+    /// Whether it takes MIDI, as controllers go, whatever notes go as.
+    pub(crate) midi: bool,
 }
 
 /// The buffers for one side of a plugin's audio ports.
@@ -327,7 +338,16 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
         };
         audio.events.push(Event::param(0, change.id, change.value));
     }
-    for event in ctx.events {
+    // A plugin that takes notes as MIDI hears how its channels are laid out
+    // before anything else.
+    if let Some(port) = audio
+        .note_port
+        .filter(|p| p.dialect != CLAP_NOTE_DIALECT_CLAP)
+    {
+        let Audio { midi, events, .. } = audio;
+        midi.start(&mut |bytes| events.push(Event::midi(0, port.index, bytes)));
+    }
+    for (i, event) in ctx.events.iter().enumerate() {
         let time = event.offset as u32;
         match event.kind {
             NodeEventKind::Param { param, value } => {
@@ -346,7 +366,8 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
                 note: Some(note),
             } => {
                 // The voice the plugin plays the note with, while it sounds,
-                // by its note id, or by its key for a plugin that takes MIDI.
+                // by its note id, or by its channel and key for a plugin that
+                // takes MIDI.
                 let (Some(port), Some(voice)) = (audio.note_port, audio.voices.find(note)) else {
                     continue;
                 };
@@ -361,39 +382,76 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
                     amount,
                     id,
                     port.index as i16,
+                    voice.channel,
                     voice.key,
                 ));
             }
-            NodeEventKind::Note(note) => note_events(audio, time, note),
+            NodeEventKind::Note(note) => {
+                note_events(audio, event.offset, note, &ctx.events[i + 1..])
+            }
+            // Controllers go as MIDI, to a plugin that takes it.
+            NodeEventKind::Controller { controller, value } => {
+                if let Some(port) = audio.note_port.filter(|p| p.midi) {
+                    let Audio { midi, events, .. } = audio;
+                    let mut emit = |bytes| events.push(Event::midi(time, port.index, bytes));
+                    midi.controller(controller, value, &mut emit);
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// The events that play `note` on the plugin, in its note dialect.
-fn note_events(audio: &mut Audio, time: u32, note: NoteEvent) {
+/// The events that play `note` on the plugin, in its note dialect: `after`
+/// is the block's events after it.
+fn note_events(audio: &mut Audio, offset: usize, note: NoteEvent, after: &[NodeEvent]) {
     let Some(port) = audio.note_port else {
         return;
     };
-    let clap = port.dialect == CLAP_NOTE_DIALECT_CLAP;
+    if port.dialect == CLAP_NOTE_DIALECT_CLAP {
+        clap_note_events(audio, port, offset as u32, note);
+        return;
+    }
+    let time = offset as u32;
+    let Audio {
+        midi,
+        events,
+        sounding,
+        voices,
+        ..
+    } = audio;
+    let mut emit = |bytes| events.push(Event::midi(time, port.index, bytes));
+    midi.note(note, offset, after, &mut emit);
+    match note {
+        NoteEvent::On { note, key, .. } => {
+            sounding.end(note);
+            // The voice, on the channel it went to, for modulation.
+            if let (Some(mut voice), Some((channel, _))) =
+                (sounding.start(note, key.min(127)), midi.find(note))
+            {
+                voice.channel = channel.into();
+                voices.start(voice);
+            }
+        }
+        NoteEvent::Off { note, .. } => {
+            sounding.end(note);
+        }
+        NoteEvent::Expression { .. } => {}
+    }
+}
+
+/// The events that play `note` on a plugin that takes CLAP's own.
+fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEvent) {
     let index = port.index as i16;
     let end = |audio: &mut Audio, sounding: SoundingNote, velocity: f32| {
-        audio.events.push(if clap {
-            Event::note(
-                CLAP_EVENT_NOTE_OFF,
-                time,
-                sounding.id,
-                index,
-                sounding.key,
-                velocity.into(),
-            )
-        } else {
-            Event::midi(
-                time,
-                port.index,
-                [0x80, sounding.key as u8, midi_velocity(velocity, 0)],
-            )
-        });
+        audio.events.push(Event::note(
+            CLAP_EVENT_NOTE_OFF,
+            time,
+            sounding.id,
+            index,
+            sounding.key,
+            velocity.into(),
+        ));
     };
     match note {
         NoteEvent::On {
@@ -409,30 +467,21 @@ fn note_events(audio: &mut Audio, time: u32, note: NoteEvent) {
                 return;
             };
             audio.voices.start(sounding);
-            audio.events.push(if clap {
-                Event::note(
-                    CLAP_EVENT_NOTE_ON,
-                    time,
-                    sounding.id,
-                    index,
-                    sounding.key,
-                    velocity.into(),
-                )
-            } else {
-                Event::midi(
-                    time,
-                    port.index,
-                    [0x90, sounding.key as u8, midi_velocity(velocity, 1)],
-                )
-            });
+            audio.events.push(Event::note(
+                CLAP_EVENT_NOTE_ON,
+                time,
+                sounding.id,
+                index,
+                sounding.key,
+                velocity.into(),
+            ));
         }
         NoteEvent::Expression {
             note,
             dimension,
             value,
         } => {
-            // MIDI has no way to change one note's expression without MPE.
-            let Some(sounding) = audio.sounding.find(note).filter(|_| clap) else {
+            let Some(sounding) = audio.sounding.find(note) else {
                 return;
             };
             let expression = match dimension {
@@ -455,11 +504,6 @@ fn note_events(audio: &mut Audio, time: u32, note: NoteEvent) {
             }
         }
     }
-}
-
-/// A velocity from 0.0 to 1.0 as MIDI's, no lower than `min`.
-fn midi_velocity(velocity: f32, min: u8) -> u8 {
-    ((velocity * 127.0).round() as i32).clamp(min.into(), 127) as u8
 }
 
 /// The transport as CLAP gives it, for the first frame of the block `ctx`

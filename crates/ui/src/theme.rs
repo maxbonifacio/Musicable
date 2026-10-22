@@ -89,6 +89,21 @@ pub struct Theme {
     /// The devices panel's boxes, one for each device.
     pub device: Color32,
 
+    // The piano roll's colours. Its notes take their track's colour, and
+    // its grid lines, start marker and playhead are the arrangement's.
+    /// The rows of the white keys and of the black keys, behind the notes.
+    pub white_row: Color32,
+    pub black_row: Color32,
+    /// The keyboard beside them, and the names of its Cs.
+    pub white_key: Color32,
+    pub black_key: Color32,
+    pub key_text: Color32,
+    /// Laid over the rows before the clip's start and after its end, where
+    /// notes don't play.
+    pub outside_clip: Color32,
+    /// The rectangle that selects the notes in it, while it's dragged.
+    pub area: Color32,
+
     // The arrangement's sizes, in points.
     /// The ruler over the tracks, and the strip at its top for the loop
     /// brace and the locators.
@@ -126,6 +141,25 @@ pub struct Theme {
 
     pub mixer: MixerSizes,
     pub devices: DeviceSizes,
+    pub piano_roll: PianoRollSizes,
+}
+
+/// The piano roll's sizes, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PianoRollSizes {
+    /// The piano roll panel's height until the user drags its edge.
+    pub panel: f32,
+    /// The keyboard's width, beside the rows of keys.
+    pub keys: f32,
+    /// The ruler over the rows.
+    pub ruler: f32,
+    /// The lane under the rows, of the notes' velocities or a controller.
+    pub lane: f32,
+    /// How near a note's start or end a drag trims it.
+    pub edge_grab: f32,
+    /// How far a drag up or down a note goes to change its velocity from
+    /// the softest to the hardest.
+    pub velocity_drag: f32,
 }
 
 /// The mixer's sizes, in points.
@@ -241,6 +275,14 @@ impl Default for Theme {
             divider: Color32::from_gray(24),
             device: Color32::from_gray(46),
 
+            white_row: Color32::from_gray(44),
+            black_row: Color32::from_gray(36),
+            white_key: Color32::from_gray(205),
+            black_key: Color32::from_gray(40),
+            key_text: Color32::from_gray(60),
+            outside_clip: Color32::from_rgba_unmultiplied(0, 0, 0, 90),
+            area: Color32::from_rgba_unmultiplied(150, 200, 255, 36),
+
             ruler_height: 40.0,
             ruler_strip: 18.0,
             header_width: 190.0,
@@ -281,6 +323,14 @@ impl Default for Theme {
                 margin: 4.0,
                 gap: 6.0,
                 browser: 220.0,
+            },
+            piano_roll: PianoRollSizes {
+                panel: 320.0,
+                keys: 56.0,
+                ruler: 22.0,
+                lane: 60.0,
+                edge_grab: 4.0,
+                velocity_drag: 127.0,
             },
         }
     }

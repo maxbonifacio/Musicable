@@ -310,6 +310,34 @@ impl Library {
             .then_some((flags, beats, tempo))
     }
 
+    /// Takes the MIDI messages the synth got since the last time, oldest
+    /// first: see [`musicable_test_midi`](crate::musicable_test_midi).
+    /// Panics if it got more than it keeps.
+    ///
+    /// # Safety
+    ///
+    /// As for [`gui`](Self::gui), and it must be called between blocks.
+    pub unsafe fn midi(&self, plugin: *const clap_plugin) -> Vec<[u8; 3]> {
+        let take = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut u32, u32) -> u32>(
+            "musicable_test_midi",
+        );
+        let mut buffer = vec![0u32; 4096];
+        // SAFETY: the caller's promise, and the buffer holds as much as it
+        // says.
+        let logged = unsafe { take(plugin, buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        assert!(
+            logged <= buffer.len(),
+            "the synth got more MIDI than it logs"
+        );
+        buffer[..logged]
+            .iter()
+            .map(|message| {
+                let [status, first, second, _] = message.to_le_bytes();
+                [status, first, second]
+            })
+            .collect()
+    }
+
     // The VST3 plugins' hooks. Each takes one of a plugin's objects, as the
     // host has it: Test Gain's component or its controller, or Test Synth,
     // which is both.

@@ -9,7 +9,9 @@
 //!   meter: the processor sets it to each block's peak.
 //! - **Test Synth** is one object, component and controller at once. It
 //!   plays each note as the CLAP synth does, shaped by VST3's tuning and
-//!   brightness note expressions and its poly pressure.
+//!   brightness note expressions and its poly pressure. Its MIDI mapping
+//!   has MIDI's volume controller, 7, move its Level, as VST3 plugins take
+//!   controllers.
 //!
 //! Both count each breach of VST3's rules as a violation, in the same count
 //! as the CLAP plugins: which thread calls what, and in which state. Their
@@ -44,15 +46,15 @@ use vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged;
 use vst3::Steinberg::Vst::SpeakerArr::kStereo;
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{
-    BusDirection, BusInfo, BusType, Event, IAttributeListTrait, IAudioProcessor,
+    BusDirection, BusInfo, BusType, CtrlNumber, Event, IAttributeListTrait, IAudioProcessor,
     IAudioProcessorTrait, IComponent, IComponentHandler, IComponentHandler2,
     IComponentHandler2Trait, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
     IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList, IEventListTrait,
-    IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait, IParamValueQueueTrait,
-    IParameterChanges, IParameterChangesTrait, IUnitInfo, IUnitInfoTrait, IoMode, MediaType,
-    NoteExpressionTypeID, ParamID, ParamValue, ParameterInfo, ProcessContext, ProcessData,
-    ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArrangement, String128,
-    TChar, UnitID, UnitInfo, kNoParentUnitId, kRootUnitId,
+    IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait, IMidiMapping,
+    IMidiMappingTrait, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, IUnitInfo,
+    IUnitInfoTrait, IoMode, MediaType, NoteExpressionTypeID, ParamID, ParamValue, ParameterInfo,
+    ProcessContext, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo,
+    SpeakerArrangement, String128, TChar, UnitID, UnitInfo, kNoParentUnitId, kRootUnitId,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView,
@@ -1428,7 +1430,7 @@ struct SynthAudio {
 struct SynthComponent(Arc<Synth>);
 
 impl Class for SynthComponent {
-    type Interfaces = (IComponent, IAudioProcessor, IEditController);
+    type Interfaces = (IComponent, IAudioProcessor, IEditController, IMidiMapping);
 }
 
 impl Synth {
@@ -1897,6 +1899,27 @@ impl IEditControllerTrait for SynthComponent {
         unsafe { create_view(&synth.view, name, 1.0) }
     }
 }
+
+impl IMidiMappingTrait for SynthComponent {
+    unsafe fn getMidiControllerAssignment(
+        &self,
+        bus: int32,
+        _channel: int16,
+        number: CtrlNumber,
+        id: *mut ParamID,
+    ) -> tresult {
+        self.0.checks.ui("getMidiControllerAssignment");
+        // SAFETY: the host passes somewhere to write, or null.
+        let (0, VOLUME, Some(id)) = (bus, number, unsafe { id.as_mut() }) else {
+            return kResultFalse;
+        };
+        *id = LEVEL;
+        kResultTrue
+    }
+}
+
+/// MIDI's volume controller, which moves the synth's level.
+const VOLUME: CtrlNumber = 7;
 
 // The pretend window.
 

@@ -9,55 +9,15 @@ use egui::{DroppedFile, Event, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::AudioFile;
-use musicable_commands::{
-    CommandError, Context, Document, Keymap, Named, Registry, Request, Transport,
-};
+use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
+use crate::testing::Player;
 use crate::{Levels, Plugins, Waveforms};
-
-/// A transport that plays along: locating moves its playhead.
-#[derive(Debug, Default)]
-struct Player {
-    playing: bool,
-    recording: bool,
-    playhead: Beats,
-}
-
-impl Transport for Player {
-    fn is_playing(&self) -> bool {
-        self.playing
-    }
-
-    fn play(&mut self) {
-        self.playing = true;
-    }
-
-    fn stop(&mut self) {
-        self.playing = false;
-        self.recording = false;
-    }
-
-    fn locate(&mut self, at: Beats) {
-        self.playhead = at;
-    }
-
-    fn playhead(&self) -> Beats {
-        self.playhead
-    }
-
-    fn is_recording(&self) -> bool {
-        self.recording
-    }
-
-    fn set_recording(&mut self, on: bool) {
-        self.recording = on;
-    }
-}
 
 struct State {
     arrangement: Arrangement,
@@ -565,6 +525,38 @@ fn locators_move_and_a_double_click_renames_them() {
     assert_eq!(harness.state().requests, [rename]);
     // A click on a locator jumps there.
     assert_eq!(harness.state().player.playhead, Beats::new(20));
+}
+
+#[test]
+fn a_double_click_opens_a_midi_clip_in_the_piano_roll() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let double_click = |harness: &mut Harness<'_, State>, at: Pos2| {
+        harness.run_steps(30);
+        harness.hover_at(at);
+        harness.run();
+        for pressed in [true, false, true, false] {
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+    };
+    let at = body(&harness, "Kick", 30.0);
+    double_click(&mut harness, at);
+    assert!(harness.state().requests.is_empty());
+    let at = body(&harness, "Chords", 30.0);
+    double_click(&mut harness, at);
+    assert_eq!(
+        harness.state().requests,
+        [Request::ShowPanel(crate::PIANO_ROLL)]
+    );
+    let editor = harness.state().editor();
+    assert_eq!(editor.piano_roll.clip, Some(ids.chords));
+    assert_eq!(editor.focus, musicable_commands::Focus::PianoRoll);
 }
 
 #[test]
