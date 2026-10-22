@@ -119,6 +119,16 @@ pub trait Node: Any + Send {
     /// so a MIDI effect can play them on, changed. They come here instead of
     /// with [`process`](Node::process), which gets the node's other events.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
+
+    /// The notes whose voices the node ended in the block it last rendered.
+    /// An instrument's voice can ring on well after its note is let go, so
+    /// this is for modulators that run a copy for each voice, which stop it
+    /// when the voice ends. Read on the audio thread, after the node
+    /// renders. Only CLAP plugins say when their voices end so far, and
+    /// nothing reads it yet.
+    fn ended_voices(&self) -> &[NoteId] {
+        &[]
+    }
 }
 
 impl dyn Node {

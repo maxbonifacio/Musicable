@@ -23,8 +23,8 @@ use clap_sys::ext::note_ports::{
 };
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_HIDDEN,
-    CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED, clap_param_info,
-    clap_plugin_params,
+    CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY,
+    CLAP_PARAM_IS_STEPPED, clap_param_info, clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::thread_pool::CLAP_EXT_THREAD_POOL;
@@ -265,6 +265,7 @@ impl Instance {
                     bypass: flag(CLAP_PARAM_IS_BYPASS),
                     automatable: flag(CLAP_PARAM_IS_AUTOMATABLE),
                     modulatable: flag(CLAP_PARAM_IS_MODULATABLE),
+                    modulatable_per_note: flag(CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID),
                 })
             })
             .collect()
@@ -376,7 +377,11 @@ impl Instance {
             audio.events.push(Event::param(0, change.id, change.value));
         }
         let in_events = audio.events.list();
-        let out_events = events::output_list(&mut audio.to_main);
+        let mut output = events::Output {
+            queue: &mut audio.to_main,
+            voices: None,
+        };
+        let out_events = events::output_list(&mut output);
         // SAFETY: on the main thread while inactive, or on the audio thread
         // while active and not processing, with lists that stay put for the
         // call.

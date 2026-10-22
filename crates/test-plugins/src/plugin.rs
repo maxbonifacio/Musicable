@@ -34,8 +34,9 @@ use clap_sys::ext::note_ports::{
     clap_plugin_note_ports,
 };
 use clap_sys::ext::params::{
-    CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_STEPPED,
-    clap_host_params, clap_param_info, clap_plugin_params,
+    CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_MODULATABLE,
+    CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_STEPPED, clap_host_params,
+    clap_param_info, clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
 use clap_sys::ext::thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check};
@@ -165,7 +166,9 @@ const SYNTH_PARAMS: [Param; 2] = [
         min: 0.0,
         max: 1.0,
         default: 0.5,
-        flags: CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_MODULATABLE,
+        flags: CLAP_PARAM_IS_AUTOMATABLE
+            | CLAP_PARAM_IS_MODULATABLE
+            | CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID,
     },
     Param {
         id: THREADS,
@@ -224,6 +227,9 @@ struct Voice {
     tuning: f64,
     pressure: f64,
     brightness: f64,
+    /// Modulation of the level for this voice alone, on top of the
+    /// modulation for every voice.
+    modulation: f64,
     /// In cycles.
     phase: f64,
 }
@@ -749,8 +755,26 @@ impl TestPlugin {
             CLAP_EVENT_PARAM_MOD => {
                 // SAFETY: as above.
                 let event = unsafe { &*event.cast::<clap_event_param_mod>() };
-                if Some(event.param_id) == self.params().first().map(|p| p.id) {
+                if Some(event.param_id) != self.params().first().map(|p| p.id) {
+                    return;
+                }
+                let target = (event.note_id, event.port_index, event.channel, event.key);
+                if target == (-1, -1, -1, -1) {
                     audio.modulation = event.amount;
+                    return;
+                }
+                // The synth's level can be modulated for each voice too.
+                for voice in audio.voices.iter_mut().filter(|v| {
+                    v.active
+                        && matches_note(
+                            v,
+                            event.note_id,
+                            event.port_index,
+                            event.channel,
+                            event.key,
+                        )
+                }) {
+                    voice.modulation = event.amount;
                 }
             }
             CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF | CLAP_EVENT_NOTE_CHOKE => {
@@ -942,7 +966,7 @@ impl TestPlugin {
             return;
         }
         let frequency = 440.0 * ((f64::from(v.key) + v.tuning - 69.0) / 12.0).exp2();
-        let amplitude = v.velocity * level * (1.0 + v.pressure);
+        let amplitude = v.velocity * (level + v.modulation) * (1.0 + v.pressure);
         for sample in &mut buffer[start..end] {
             let phase = v.phase * TAU;
             *sample = (amplitude * (phase.sin() + 0.5 * v.brightness * (2.0 * phase).sin())) as f32;
