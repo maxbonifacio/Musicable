@@ -1,7 +1,10 @@
 use std::fs;
 
 use musicable_audio::InputWriter;
+use musicable_commands::take::{NotePass, PlayedNote};
 use musicable_io::audio::Decoder;
+use musicable_model::MidiInput;
+use musicable_model::clip::{Dimension, Note};
 
 use super::*;
 
@@ -43,8 +46,16 @@ fn lead(offset: i64) -> Armed {
     Armed {
         track: TrackId(1),
         name: "Lead".to_owned(),
-        input: AudioInput::default(),
+        input: Input::Audio(AudioInput::default()),
         offset,
+    }
+}
+
+/// The buffers of a stream with the one input `buffer`.
+fn audio(buffer: InputBuffer) -> Buffers {
+    Buffers {
+        audio: vec![Some(buffer)],
+        midi: Vec::new(),
     }
 }
 
@@ -63,7 +74,7 @@ fn tape(folder: &Path, buffer: &InputBuffer, armed: Vec<Armed>) -> Tape {
     let mut layout = InputLayout::new();
     layout.add("mic", 0, 2);
     layout.set_default("mic");
-    tape.set_inputs(layout, vec![Some(buffer.clone())]);
+    tape.set_inputs(layout, audio(buffer.clone()));
     tape.set_tracks(RATE, armed, place(folder), 1);
     tape
 }
@@ -147,7 +158,7 @@ fn passes(file: &str, passes: &[(u64, u64, u64)]) -> Vec<Recorded> {
             offset,
         })
         .collect();
-    vec![Recorded {
+    vec![Recorded::Audio {
         track: TrackId(1),
         passes,
     }]
@@ -350,7 +361,7 @@ fn a_full_file_goes_on_in_another() {
             file: name.clone(),
             offset: 0,
         });
-    let expected = Recorded {
+    let expected = Recorded::Audio {
         track: TrackId(1),
         passes: passes.collect(),
     };
@@ -391,7 +402,7 @@ fn an_armed_track_whose_input_isnt_open_records_nothing() {
     // A layout without the default input.
     let mut layout = InputLayout::new();
     layout.add("mic", 0, 2);
-    tape.set_inputs(layout, vec![Some(buffer)]);
+    tape.set_inputs(layout, audio(buffer));
     let segments = [recording(0, 0, 0), stopped(100, 100)];
     let (finished, problems) = split(run(&mut tape, &segments, 150));
     assert!(finished.is_empty());
@@ -471,4 +482,305 @@ fn the_recorders_thread_stops_cleanly() {
     assert!(recorder.try_recv().is_none());
     assert!(recorder.live().is_empty());
     drop(recorder);
+}
+
+/// Keys, track 2, recording MIDI channel `channel` of the MIDI input
+/// `device`, or with `None` and `""`, every channel of every input. The
+/// input stamps what it plays `offset` frames late.
+fn keys(device: &str, channel: Option<u8>, offset: i64) -> Armed {
+    Armed {
+        track: TrackId(2),
+        name: "Keys".to_owned(),
+        input: Input::Midi(MidiInput {
+            device: device.to_owned(),
+            name: String::new(),
+            channel,
+        }),
+        offset,
+    }
+}
+
+/// A tape recording `armed` from the one MIDI input, Keystep, which has
+/// `buffer`.
+fn midi_tape(buffer: &MidiBuffer, armed: Vec<Armed>) -> Tape {
+    let mut tape = Tape::new();
+    let mut layout = InputLayout::new();
+    layout.add_midi("Keystep");
+    let buffers = Buffers {
+        audio: Vec::new(),
+        midi: vec![Some(buffer.clone())],
+    };
+    tape.set_inputs(layout, buffers);
+    tape.set_tracks(RATE, armed, None, 1);
+    tape
+}
+
+fn on(key: u8, velocity: u8) -> [u8; 3] {
+    [0x90, key, velocity]
+}
+
+fn off(key: u8) -> [u8; 3] {
+    [0x80, key, 64]
+}
+
+/// A note recorded from song position `start` to `end`, played at MIDI
+/// velocity `velocity` and let go with `off`.
+fn note(start: u64, end: u64, key: u8, velocity: u8) -> PlayedNote {
+    PlayedNote {
+        start,
+        end,
+        key,
+        velocity: f32::from(velocity) / 127.0,
+        release_velocity: 64.0 / 127.0,
+        expression: Vec::new(),
+    }
+}
+
+/// A note recorded as `note` is, but still held where its pass ended.
+fn held(note: PlayedNote) -> PlayedNote {
+    PlayedNote {
+        release_velocity: Note::RELEASE_VELOCITY,
+        ..note
+    }
+}
+
+fn pass(start: u64, frames: u64, notes: Vec<PlayedNote>) -> NotePass {
+    NotePass {
+        start,
+        frames,
+        notes,
+    }
+}
+
+/// Keys's passes.
+fn takes(passes: Vec<NotePass>) -> Vec<Recorded> {
+    vec![Recorded::Midi {
+        track: TrackId(2),
+        passes,
+    }]
+}
+
+#[test]
+fn notes_land_where_they_were_played() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 5)]);
+    // As in a_recording_lands_where_it_was_played: song positions 5,000 to
+    // 7,000 played from engine time 1,000 and were heard 64 frames later,
+    // and the input stamps what it plays 5 frames after that.
+    let heard = |position: u64| position - 5000 + 1000 + 64 + 5;
+    // A note played before recording started isn't recorded, and one held
+    // as it stops ends there.
+    writer.push(500, on(48, 90));
+    writer.push(600, off(48));
+    writer.push(heard(5100), on(60, 100));
+    writer.push(heard(5500), off(60));
+    writer.push(heard(6000), on(64, 80));
+    drop(writer);
+    let segments = [
+        stopped(0, 0),
+        recording(1000, 5000, 64),
+        stopped(3000, 7000),
+    ];
+    let (recorded, files) = finished(run(&mut tape, &segments, 3100));
+    let notes = vec![note(5100, 5500, 60, 100), held(note(6000, 7000, 64, 80))];
+    assert_eq!(recorded, takes(vec![pass(5000, 2000, notes)]));
+    assert!(files.is_empty());
+    assert!(tape.live().is_empty());
+}
+
+#[test]
+fn notes_held_round_a_loop_start_again_in_the_next_pass() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("", None, 0)]);
+    // Round a loop from 100 to 600, a note held from 500 to 200, the next
+    // time round.
+    writer.push(400, on(60, 100));
+    writer.push(600, off(60));
+    drop(writer);
+    let segments = [
+        recording(0, 100, 0),
+        recording(500, 100, 0),
+        stopped(900, 500),
+    ];
+    let (recorded, _) = finished(run(&mut tape, &segments, 1000));
+    let passes = vec![
+        pass(100, 500, vec![held(note(500, 600, 60, 100))]),
+        pass(100, 400, vec![note(100, 200, 60, 100)]),
+    ];
+    assert_eq!(recorded, takes(passes));
+}
+
+#[test]
+fn punching_in_records_the_notes_played_in_the_punch_range() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 0)]);
+    // Punching in at 300 and out at 600: a note held as it punches in isn't
+    // recorded, and one held as it punches out ends there.
+    writer.push(200, on(48, 90));
+    writer.push(350, on(60, 100));
+    writer.push(400, off(48));
+    writer.push(650, off(60));
+    drop(writer);
+    let segments = [
+        punched_out(0, 0),
+        recording(300, 300, 0),
+        punched_out(600, 600),
+        stopped(700, 700),
+    ];
+    let (recorded, _) = finished(run(&mut tape, &segments, 800));
+    let notes = vec![held(note(350, 600, 60, 100))];
+    assert_eq!(recorded, takes(vec![pass(300, 300, notes)]));
+}
+
+#[test]
+fn notes_are_recorded_with_their_expression_from_the_tracks_channel() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    // MIDI channel 1 alone, as a keyboard plays it.
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", Some(0), 0)]);
+    // Bent all the way up, 2 semitones, before the note starts.
+    writer.push(100, [0xE0, 0x7F, 0x7F]);
+    writer.push(200, on(60, 127));
+    writer.push(250, [0x91, 62, 100]);
+    // Channel pressure, then the bend back to rest.
+    writer.push(300, [0xD0, 127, 0]);
+    writer.push(400, [0xE0, 0x00, 0x40]);
+    writer.push(500, off(60));
+    writer.push(550, [0x81, 62, 64]);
+    drop(writer);
+    let segments = [recording(0, 0, 0), stopped(1000, 1000)];
+    let (recorded, _) = finished(run(&mut tape, &segments, 1100));
+    let expression = vec![
+        (200, Dimension::PitchBend, 2.0),
+        (300, Dimension::Pressure, 1.0),
+        (400, Dimension::PitchBend, 0.0),
+    ];
+    let bent = PlayedNote {
+        expression,
+        ..note(200, 500, 60, 127)
+    };
+    assert_eq!(recorded, takes(vec![pass(0, 1000, vec![bent])]));
+}
+
+#[test]
+fn a_midi_recording_waits_for_its_input_to_settle() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 0)]);
+    writer.push(100, on(60, 100));
+    let segments = [recording(0, 0, 0), stopped(1000, 1000)];
+    // Until the input says otherwise, a message from any frame may still
+    // be on its way.
+    assert!(run(&mut tape, &segments, 1100).is_empty());
+    assert!(tape.live().is_empty());
+    buffer.settle(500);
+    assert!(run(&mut tape, &[], 1100).is_empty());
+    let live = Recording {
+        track: TrackId(2),
+        start: 0,
+        frames: 500,
+    };
+    assert_eq!(tape.live(), [live]);
+    writer.push(700, off(60));
+    buffer.settle(1000);
+    let (recorded, _) = finished(run(&mut tape, &[], 1100));
+    let notes = vec![note(100, 700, 60, 100)];
+    assert_eq!(recorded, takes(vec![pass(0, 1000, notes)]));
+}
+
+#[test]
+fn a_midi_input_that_stalls_is_given_up_on() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 0)]);
+    writer.push(100, on(60, 100));
+    // It settles no further than frame 1,000, and doesn't end.
+    buffer.settle(1000);
+    let segments = [recording(0, 0, 0), stopped(2000, 2000)];
+    let patience = u64::from(RATE) * PATIENCE_SECONDS;
+    assert!(run(&mut tape, &segments, 1000 + patience).is_empty());
+    let (recorded, _) = finished(run(&mut tape, &[], 1001 + patience));
+    let notes = vec![held(note(100, 2000, 60, 100))];
+    assert_eq!(recorded, takes(vec![pass(0, 2000, notes)]));
+}
+
+#[test]
+fn a_midi_recording_without_notes_makes_no_take() {
+    let (buffer, writer) = MidiBuffer::new(64);
+    drop(writer);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 0)]);
+    let segments = [recording(0, 0, 0), stopped(1000, 1000)];
+    assert!(run(&mut tape, &segments, 1100).is_empty());
+    assert!(tape.live().is_empty(), "it finished");
+}
+
+#[test]
+fn messages_a_midi_recording_missed_are_reported() {
+    let (buffer, mut writer) = MidiBuffer::new(4);
+    let mut tape = midi_tape(&buffer, vec![keys("Keystep", None, 0)]);
+    let segments = [recording(0, 0, 0), stopped(1000, 1000)];
+    assert!(run(&mut tape, &segments, 1100).is_empty());
+    // Ten messages come in before the recorder reads any, more than the
+    // buffer holds.
+    for (frame, key) in (0..500).step_by(100).zip(60..) {
+        writer.push(frame, on(key, 100));
+        writer.push(frame + 50, off(key));
+    }
+    drop(writer);
+    let (mut finished, problems) = split(run(&mut tape, &[], 1100));
+    let missing = "6 MIDI messages of Keys's recording are missing: the recorder fell behind.";
+    assert_eq!(problems, [missing]);
+    let (recorded, _) = finished.remove(0);
+    let notes = vec![note(300, 350, 63, 100), note(400, 450, 64, 100)];
+    assert_eq!(recorded, takes(vec![pass(0, 1000, notes)]));
+}
+
+#[test]
+fn an_armed_midi_track_whose_input_isnt_open_records_nothing() {
+    let (buffer, _writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("Arturia", None, 0)]);
+    let segments = [recording(0, 0, 0), stopped(100, 100)];
+    let (finished, problems) = split(run(&mut tape, &segments, 150));
+    assert!(finished.is_empty());
+    let closed = "Keys records nothing: its MIDI input isn't open.";
+    assert_eq!(problems, [closed]);
+    // Nor, recording every input, when none opened.
+    let mut layout = InputLayout::new();
+    layout.add_midi("Keystep");
+    let buffers = Buffers {
+        audio: Vec::new(),
+        midi: vec![None],
+    };
+    tape.set_inputs(layout, buffers);
+    tape.set_tracks(RATE, vec![keys("", None, 0)], None, 1);
+    let segments = [recording(200, 0, 0), stopped(300, 100)];
+    let (finished, problems) = split(run(&mut tape, &segments, 350));
+    assert!(finished.is_empty());
+    assert_eq!(problems, [closed]);
+}
+
+#[test]
+fn audio_and_midi_tracks_record_together() {
+    let folder = folder("together");
+    let (audio, _audio_writer) = input(0, 1000);
+    let (midi, mut writer) = MidiBuffer::new(64);
+    writer.push(100, on(60, 100));
+    writer.push(200, off(60));
+    drop(writer);
+    let mut tape = Tape::new();
+    let mut layout = InputLayout::new();
+    layout.add("mic", 0, 2);
+    layout.set_default("mic");
+    layout.add_midi("Keystep");
+    let buffers = Buffers {
+        audio: vec![Some(audio)],
+        midi: vec![Some(midi)],
+    };
+    tape.set_inputs(layout, buffers);
+    let armed = vec![lead(0), keys("Keystep", None, 0)];
+    tape.set_tracks(RATE, armed, place(&folder), 1);
+    let segments = [recording(0, 0, 0), stopped(500, 500)];
+    let (recorded, files) = finished(run(&mut tape, &segments, 600));
+    let name = "Recordings/Lead 1.wav";
+    let mut expected = passes(name, &[(0, 500, 0)]);
+    expected.extend(takes(vec![pass(0, 500, vec![note(100, 200, 60, 100)])]));
+    assert_eq!(recorded, expected);
+    assert_eq!(files, stereo(name, 500));
 }

@@ -14,7 +14,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::input::{self, InputDevice, StreamInput};
 use crate::stats::Counters;
 use crate::{
-    Api, Capabilities, Device, DriverType, Error, Mode, SampleFormat, StartError, Stopped,
+    Api, Capabilities, Device, DriverType, Error, Feeds, Mode, SampleFormat, StartError, Stopped,
     StreamInfo, StreamRequest, StreamStats, frames_to_duration,
 };
 
@@ -194,8 +194,11 @@ impl Shared {
     }
 }
 
+/// Opens the device. Its inputs and MIDI inputs don't open, so it has no
+/// use for the `_feeds` that would line them up.
 pub(crate) fn open(
     request: &StreamRequest,
+    _feeds: Feeds,
 ) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     if request.mode == Mode::Exclusive {
         return Err(Error::ExclusiveNotAllowed);
@@ -260,6 +263,7 @@ pub(crate) fn open(
         // thread doesn't ask for it.
         realtime: cfg!(target_os = "macos"),
         inputs: Vec::new(),
+        midi_inputs: Vec::new(),
     };
     let opened = request
         .inputs

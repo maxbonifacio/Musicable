@@ -5,7 +5,7 @@ use windows::Win32::Devices::FunctionDiscovery::{
 };
 use windows::Win32::Foundation::{E_INVALIDARG, ERROR_NOT_FOUND};
 use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, EDataFlow, IMMDevice, IMMDeviceEnumerator, IMMEndpoint,
+    DEVICE_STATE_ACTIVE, EDataFlow, IDeviceTopology, IMMDevice, IMMDeviceEnumerator, IMMEndpoint,
     MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
@@ -114,6 +114,34 @@ pub(super) fn container_id(device: &IMMDevice) -> Option<GUID> {
     Some(*guid)
 }
 
+/// The adapter an endpoint belongs to, such as a sound card: the device
+/// its topology connects to, less the filter's interface and reference
+/// string, in lower case. A card's inputs and outputs share it, and with it
+/// their clock, where their container id can't say so: Windows gives every
+/// device built into the computer the same one.
+pub(super) fn adapter_id(device: &IMMDevice) -> Option<String> {
+    // SAFETY: on an MTA thread. An endpoint's topology has one connector,
+    // to its adapter. The string is COM's to free, once.
+    let topology: IDeviceTopology = client::activate(device).ok()?;
+    let connector = unsafe { topology.GetConnector(0) }.ok()?;
+    let id = unsafe { connector.GetDeviceIdConnectedTo() }.ok()?;
+    let _free = TaskMem(id.0);
+    let id = unsafe { id.to_string() }.ok()?;
+    Some(adapter_of(&id))
+}
+
+/// The adapter in a device id such as
+/// `{2}.\\?\pci#ven_10ee&dev_3fc6#4&2c&0&0008#{6994ad04-...}\analog12`:
+/// what comes before its interface class, which each of the adapter's
+/// filters shares.
+fn adapter_of(id: &str) -> String {
+    let id = id.to_lowercase();
+    match id.find("#{") {
+        Some(end) => id[..end].to_owned(),
+        None => id,
+    }
+}
+
 pub(crate) fn capabilities(id: Option<&str>) -> Result<Capabilities, Error> {
     in_mta(|| client::capabilities(&find(&enumerator()?, id)?))
 }
@@ -210,4 +238,18 @@ pub(super) fn friendly_name(device: &IMMDevice) -> Option<String> {
     // long as `value`.
     let name = unsafe { value.Anonymous.Anonymous.Anonymous.pwszVal.to_string() }.ok()?;
     Some(name).filter(|name| !name.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cards_filters_share_its_adapter() {
+        let output = r"{2}.\\?\pci#ven_10ee&dev_3fc6&subsys_3fc610ee#4&2c1a&0&0008#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\analog12";
+        let input = r"{2}.\\?\PCI#VEN_10EE&DEV_3FC6&SUBSYS_3FC610EE#4&2c1a&0&0008#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\Record12";
+        assert_eq!(adapter_of(output), adapter_of(input));
+        let onboard = r"{2}.\\?\hdaudio#func_01&ven_10ec&dev_0887#4&5a1&0&0001#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\elineouttopo";
+        assert_ne!(adapter_of(output), adapter_of(onboard));
+    }
 }
