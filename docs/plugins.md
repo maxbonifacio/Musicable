@@ -92,7 +92,8 @@ any more: every instance and every node holds it.
   every remembered parameter, and plugins have thousands.
 - **From the graph**, a node's `NodeEventKind::Param` events reach the
   plugin at their offsets, and `NodeEventKind::Modulation` as CLAP's
-  parameter modulation, which offsets the value without changing it.
+  parameter modulation, which offsets the value without changing it: for
+  every voice, or, with a note id, for that note's voice alone.
 - **From the plugin**, a change someone makes in its window, or one it makes
   itself, comes back from `poll` as `GestureBegin`, `ParamChanged` and
   `GestureEnd`. These become transactions, so undo covers them. A plugin
@@ -101,8 +102,9 @@ any more: every instance and every node holds it.
 
 `Instance::params` describes the parameters: id, name, module, range,
 default, and whether each is stepped, hidden, read-only, a bypass,
-automatable and modulatable. Ids stay the same from one version of a plugin
-to the next, so projects store values by id.
+automatable, modulatable, and modulatable for each note's voice on its own.
+Ids stay the same from one version of a plugin to the next, so projects
+store values by id.
 
 ## Notes and the transport
 
@@ -112,6 +114,14 @@ semitones, pressure as pressure, and timbre as brightness. One that only
 takes MIDI gets note on and note off on channel 1, without per-note
 expression until MPE MIDI comes. Up to 512 notes can sound on a plugin at
 once.
+
+A plugin's voice for a note can ring on well after the note is let go, so
+the node keeps track of each voice until the plugin says it ended (CLAP's
+note end): up to 1,024 voices, forgetting the oldest past that. Modulation
+for a note reaches its voice until then, by the note's id, or by its key
+for a plugin that takes MIDI. The node hands back the notes whose voices
+ended in each block (`Node::ended_voices`), for modulators that run a copy
+for each voice.
 
 Every block gives the plugin the transport at its first frame: the tempo,
 the position in beats and in seconds, the time signature and where the bar
@@ -153,7 +163,10 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
 - **Parameters** are normalized, from 0 to 1, whatever they stand for.
   `steps` is VST3's step count, and the module is the unit the parameter is
   in, with its parents', such as `Oscillators/Osc 1`. VST3 has no
-  modulation, so nodes drop modulation events.
+  modulation, so nodes drop modulation events. Modulators will send a VST3
+  plugin its value plus their modulation as ordinary changes instead,
+  which never come back from `poll` (see below), so the project keeps the
+  value without the modulation.
 - **Changes from the app** go to the controller at once, but VST3's
   processor only takes changes as it processes. So an active plugin gets
   them in its next block, and an inactive one as it's activated, in a block
@@ -273,6 +286,7 @@ CLAP asks.
 | Parameters a VST3 plugin reports in one block, such as meters | 256 | The rest are dropped. Each keeps its last value, which is what the controller shows |
 | Events a plugin sends back between two polls | 4,096 | The plugin is told the queue is full |
 | Notes sounding on a plugin | 512 | New notes are dropped |
+| Voices the node keeps track of on a CLAP plugin, held or ringing on | 1,024 | The oldest is forgotten: modulation for its note goes nowhere, and its end isn't handed back |
 | Latency | `Graph::MAX_LATENCY` | Delay compensation treats the plugin as that late |
 | A plugin's timers | 10 ms or slower | Faster ones fire every 10 ms |
 | Loading a library while scanning | 30 seconds | It counts as hung |
@@ -282,12 +296,13 @@ CLAP asks.
 `crates/test-plugins` builds a CLAP library with two plugins. Test Gain
 multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Test Synth plays each note as a
-sine shaped by its note expression, and can render its voices on the
-host's thread pool, noting which threads run them. Both check which thread
-the host calls each function on, and in which state, and count every
-breach. Tests drive them through
-hooks the library exports: turning a knob in the pretend window, changing
-state that isn't a parameter, asking for a callback or a resize.
+sine shaped by its note expression, as loud as its Level, which can be
+modulated for each note's voice, says when each voice ends, and can render
+its voices on the host's thread pool, noting which threads run them. Both
+check which thread the host calls each function on, and in which state, and
+count every breach. Tests drive them through hooks the library exports:
+turning a knob in the pretend window, changing state that isn't a
+parameter, asking for a callback or a resize.
 
 The library is also a VST3 module with the same two plugins. There, Test
 Gain is a component with a controller of its own, which tells the

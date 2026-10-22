@@ -190,6 +190,22 @@ pub(crate) fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
     }
 }
 
+pub(crate) fn modulation(
+    offset: usize,
+    param: u32,
+    amount: f64,
+    note: Option<NoteId>,
+) -> NodeEvent {
+    NodeEvent {
+        offset,
+        kind: NodeEventKind::Modulation {
+            param: ParamId(param),
+            amount,
+            note,
+        },
+    }
+}
+
 pub(crate) fn note(offset: usize, event: NoteEvent) -> NodeEvent {
     NodeEvent {
         offset,
@@ -227,6 +243,7 @@ fn the_gain_plugin_describes_its_parameters() {
         ("Gain", "Test", 0.0, 2.0, 1.0)
     );
     assert!(gain.automatable && gain.modulatable && gain.steps == 0);
+    assert!(!gain.modulatable_per_note);
     assert!(params[1].steps == 48_000 && !params[1].automatable);
     assert_eq!(instance.param_value(GAIN), Some(1.0));
     assert_eq!(instance.param_value(99), None);
@@ -279,6 +296,42 @@ fn the_gain_plugin_plays_its_input() {
     );
     instance.deactivate().unwrap();
     assert_eq!(play(&mut node, &input, &Block::default())[0], vec![0.0; 64]);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn modulation_offsets_a_parameter_and_leaves_its_value() {
+    let plugins = TestPlugins::new("modulation");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let input = ramp(64);
+    let block = |events| Block {
+        events,
+        ..Block::default()
+    };
+    let events = [modulation(16, GAIN, 0.5, None)];
+    let [left, _] = play(&mut node, &input, &block(&events));
+    assert_eq!(left[..16], input[..16]);
+    assert_eq!(left[16..], scaled(&input[16..], 1.5));
+
+    // It holds until the next modulation of the parameter, which replaces
+    // it, and the value stays as it was.
+    assert_eq!(play(&mut node, &input, &block(&[]))[0], scaled(&input, 1.5));
+    let events = [modulation(0, GAIN, -0.25, None)];
+    assert_eq!(
+        play(&mut node, &input, &block(&events))[0],
+        scaled(&input, 0.75)
+    );
+    assert_eq!(instance.param_value(GAIN), Some(1.0));
+
+    // An effect plays no notes, so modulation for a note goes nowhere.
+    let events = [modulation(0, GAIN, 1.0, Some(NoteId(1)))];
+    assert_eq!(
+        play(&mut node, &input, &block(&events))[0],
+        scaled(&input, 0.75)
+    );
     drop((node, instance));
     plugins.assert_alright();
 }
@@ -588,6 +641,107 @@ fn the_synth_plays_notes_with_their_expression() {
         },
     )];
     assert_eq!(play(&mut node, &silence, &block(&off))[0], silence);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+/// Two of the synth's notes on the same key, A at 440 Hz, from the block's
+/// first frame: `a` at velocity 1 and `b` at velocity 0.5. Only their ids
+/// tell them apart.
+fn two_notes(a: NoteId, b: NoteId) -> [NodeEvent; 2] {
+    let on = |note, velocity| {
+        self::note(
+            0,
+            NoteEvent::On {
+                note,
+                key: 69,
+                velocity,
+            },
+        )
+    };
+    [on(a, 1.0), on(b, 0.5)]
+}
+
+#[test]
+fn the_synth_modulates_each_notes_voice_on_its_own() {
+    let plugins = TestPlugins::new("voice modulation");
+    let mut instance = plugins.synth();
+    let level = &instance.params()[0];
+    assert_eq!(level.id, LEVEL);
+    assert!(level.modulatable && level.modulatable_per_note);
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let silence = vec![0.0; 128];
+    let block = |events| Block {
+        events,
+        ..Block::default()
+    };
+    // The voices play the same sine, each as loud as its velocity times the
+    // level, 0.5, and whatever modulates it.
+    let (a, b) = (NoteId(1), NoteId(2));
+    let [on_a, on_b] = two_notes(a, b);
+    let events = [on_a, on_b, modulation(0, LEVEL, 0.25, Some(a))];
+    let [left, _] = play(&mut node, &silence, &block(&events));
+    let (expected, phase) = sine(440.0, 0.75 + 0.25, 0.0, 128);
+    assert_close(&left, &expected);
+
+    // Modulation for every voice adds to each voice's own, and a note's
+    // next modulation replaces its last. A note that isn't playing gets
+    // none.
+    let events = [
+        modulation(0, LEVEL, 0.25, None),
+        modulation(0, LEVEL, -0.25, Some(b)),
+        modulation(0, LEVEL, 0.5, Some(NoteId(3))),
+    ];
+    let [left, _] = play(&mut node, &silence, &block(&events));
+    assert_close(&left, &sine(440.0, 1.0 + 0.25, phase, 128).0);
+    assert_eq!(instance.param_value(LEVEL), Some(0.5));
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn the_synth_says_which_notes_voices_ended() {
+    let plugins = TestPlugins::new("voices ending");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let silence = vec![0.0; 128];
+    let block = |events| Block {
+        events,
+        ..Block::default()
+    };
+    let (a, b) = (NoteId(1), NoteId(2));
+    let events = two_notes(a, b);
+    play(&mut node, &silence, &block(&events));
+    assert!(node.ended_voices().is_empty());
+
+    // The synth ends a voice as soon as its note is let go, and says which
+    // by the id the note got.
+    let off = |offset, note| {
+        self::note(
+            offset,
+            NoteEvent::Off {
+                note,
+                velocity: 0.0,
+            },
+        )
+    };
+    let events = [off(32, b)];
+    let [left, _] = play(&mut node, &silence, &block(&events));
+    assert_eq!(node.ended_voices(), [b]);
+    let (a_alone, _) = sine(440.0, 0.5, 0.0, 384);
+    assert_close(&left[32..], &a_alone[160..256]);
+
+    // Each block says what ended in it, and modulation for a note whose
+    // voice ended goes nowhere.
+    let events = [modulation(0, LEVEL, 0.5, Some(b))];
+    let [left, _] = play(&mut node, &silence, &block(&events));
+    assert!(node.ended_voices().is_empty());
+    assert_close(&left, &a_alone[256..]);
+    let events = [off(0, a)];
+    play(&mut node, &silence, &block(&events));
+    assert_eq!(node.ended_voices(), [a]);
     drop((node, instance));
     plugins.assert_alright();
 }

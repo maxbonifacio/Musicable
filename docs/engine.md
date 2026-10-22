@@ -76,8 +76,10 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
 - A node gets its events for a block in `ProcessContext::events`, in order,
   each with an `offset` into the block. It applies each from that frame on.
 - `NodeEventKind::Modulation` offsets a parameter from its value, as a
-  modulator does, and the next one for the parameter replaces it. CLAP
-  plugins get it as parameter modulation. Nothing sends it yet.
+  modulator does, and the next one for the parameter replaces it. With a
+  note id, it offsets the parameter for that note's voice alone, on top of
+  the offset for every voice. CLAP plugins get it as parameter modulation,
+  per note too. Nothing sends it yet.
 - `Event::Note` plays a note on a node from outside the graph, as live MIDI
   input will. Notes aren't sent again after a swap, as parameter values are
   (see [Notes](#notes)).
@@ -494,6 +496,11 @@ and CLAP allow.
   would make a loop is refused.
 - A node whose notes go nowhere, such as an instrument, gets the notes sent
   to it with its other events, in `process`.
+- An instrument's voice can ring on after its note is let go. A node says
+  which notes' voices it ended in the block it last rendered
+  (`Node::ended_voices`), for modulators that run a copy for each voice,
+  which stop it when the voice ends. CLAP plugins say when their voices
+  end. Nothing reads it yet.
 - A node can send `Notes::CAPACITY` (512) note events in a block. The rest
   are dropped, and counted in `Stats::events_dropped`.
 

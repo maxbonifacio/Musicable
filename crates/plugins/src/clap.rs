@@ -9,6 +9,7 @@ mod host;
 mod instance;
 mod library;
 mod node;
+mod voices;
 
 pub use instance::Instance;
 pub use node::{ClapNode, NodeSource};

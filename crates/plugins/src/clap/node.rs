@@ -18,13 +18,15 @@ use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, clap_note_dialect};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, ProcessContext,
+    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, NoteId,
+    ProcessContext,
 };
 use musicable_model::clip::Dimension;
 
 use super::events::{self, Event, InputEvents, OutEvent};
 use super::host::Shared;
 use super::library::Library;
+use super::voices::{VOICE_CAPACITY, Voices};
 use crate::process::{Channels, ParamChange, Sounding, SoundingNote, Transport};
 use crate::threads::{ACTIVE, AudioThread, FAILED, PROCESSING};
 
@@ -44,6 +46,7 @@ pub(crate) struct Audio {
     pub(crate) note_port: Option<NotePort>,
     pub(crate) events: InputEvents,
     pub(crate) sounding: Sounding,
+    pub(crate) voices: Voices,
     /// Frames processed since the plugin was activated.
     pub(crate) steady_time: i64,
     pub(crate) from_main: rtrb::Consumer<ParamChange>,
@@ -62,6 +65,7 @@ impl Audio {
             note_port: None,
             events: InputEvents::with_capacity(EVENT_CAPACITY),
             sounding: Sounding::new(),
+            voices: Voices::new(),
             steady_time: 0,
             from_main,
             to_main,
@@ -83,6 +87,7 @@ impl Audio {
         self.note_port = note_port;
         self.events.clear();
         self.sounding.clear();
+        self.voices.clear();
         self.steady_time = 0;
     }
 }
@@ -156,6 +161,7 @@ impl NodeSource {
             shared: Arc::clone(&self.shared),
             _library: Arc::clone(&self.library),
             transport: transport(None),
+            ended: Vec::with_capacity(VOICE_CAPACITY),
         }
     }
 }
@@ -188,6 +194,8 @@ pub struct ClapNode {
     _library: Arc<Library>,
     /// The transport for the block, where the plugin can see it.
     transport: clap_event_transport,
+    /// The notes whose voices the plugin ended in the last block.
+    ended: Vec<NoteId>,
 }
 
 impl fmt::Debug for ClapNode {
@@ -205,8 +213,12 @@ impl Node for ClapNode {
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
         let Self {
-            shared, transport, ..
+            shared,
+            transport,
+            ended,
+            ..
         } = self;
+        ended.clear();
         let Some(_busy) = shared.try_enter() else {
             output.clear();
             return;
@@ -216,6 +228,12 @@ impl Node for ClapNode {
         if !run(shared, transport, ctx, inputs, output, audio) {
             output.clear();
         }
+        // Both hold as many as there are voices, so this doesn't allocate.
+        ended.append(&mut audio.voices.ended);
+    }
+
+    fn ended_voices(&self) -> &[NoteId] {
+        &self.ended
     }
 }
 
@@ -265,7 +283,11 @@ fn run(
     *transport_event = transport(Some(ctx));
 
     let in_events = audio.events.list();
-    let out_events = events::output_list(&mut audio.to_main);
+    let mut out = events::Output {
+        queue: &mut audio.to_main,
+        voices: Some(&mut audio.voices),
+    };
+    let out_events = events::output_list(&mut out);
     let process = clap_process {
         steady_time: audio.steady_time,
         frames_count: frames as u32,
@@ -311,8 +333,36 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
             NodeEventKind::Param { param, value } => {
                 audio.events.push(Event::param(time, param.0, value));
             }
-            NodeEventKind::Modulation { param, amount } => {
+            NodeEventKind::Modulation {
+                param,
+                amount,
+                note: None,
+            } => {
                 audio.events.push(Event::modulation(time, param.0, amount));
+            }
+            NodeEventKind::Modulation {
+                param,
+                amount,
+                note: Some(note),
+            } => {
+                // The voice the plugin plays the note with, while it sounds,
+                // by its note id, or by its key for a plugin that takes MIDI.
+                let (Some(port), Some(voice)) = (audio.note_port, audio.voices.find(note)) else {
+                    continue;
+                };
+                let id = if port.dialect == CLAP_NOTE_DIALECT_CLAP {
+                    voice.id
+                } else {
+                    -1
+                };
+                audio.events.push(Event::note_modulation(
+                    time,
+                    param.0,
+                    amount,
+                    id,
+                    port.index as i16,
+                    voice.key,
+                ));
             }
             NodeEventKind::Note(note) => note_events(audio, time, note),
             _ => {}
@@ -358,6 +408,7 @@ fn note_events(audio: &mut Audio, time: u32, note: NoteEvent) {
                 audio.events.dropped += 1;
                 return;
             };
+            audio.voices.start(sounding);
             audio.events.push(if clap {
                 Event::note(
                     CLAP_EVENT_NOTE_ON,

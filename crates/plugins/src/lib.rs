@@ -112,6 +112,9 @@ pub struct ParamInfo {
     pub bypass: bool,
     pub automatable: bool,
     pub modulatable: bool,
+    /// Each note's voice can be modulated on its own: CLAP's modulatable
+    /// per note id.
+    pub modulatable_per_note: bool,
 }
 
 /// A native window to put a plugin's window in.

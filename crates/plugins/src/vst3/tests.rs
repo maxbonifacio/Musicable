@@ -172,6 +172,7 @@ fn the_gain_plugin_describes_itself_and_its_parameters() {
         ("Gain", "Levels", 0.0, 1.0, 0.5)
     );
     assert!(gain.automatable && !gain.modulatable && !gain.read_only && gain.steps == 0);
+    assert!(!gain.modulatable_per_note);
     let latency_param = &params[1];
     assert_eq!(
         (

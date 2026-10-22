@@ -104,9 +104,16 @@ pub enum NodeEventKind {
     /// units, from `offset` on: what a modulator does, as CLAP's parameter
     /// modulation does. The value itself stays as it was, so the offset never
     /// ends up in the project, and the next modulation of the parameter
-    /// replaces this one rather than adding to it. Nodes ignore it for
-    /// parameters they don't have or can't modulate.
-    Modulation { param: ParamId, amount: f64 },
+    /// replaces this one rather than adding to it. With a `note`, it offsets
+    /// the parameter for that note's voice alone, on top of the offset for
+    /// every voice, and replaces only the last one for that note, as CLAP's
+    /// per-note modulation does. Nodes ignore it for parameters they don't
+    /// have or can't modulate, and for notes they aren't playing.
+    Modulation {
+        param: ParamId,
+        amount: f64,
+        note: Option<NoteId>,
+    },
     /// A note starts, changes or ends. Nodes that don't play notes ignore
     /// it.
     Note(NoteEvent),

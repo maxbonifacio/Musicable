@@ -283,6 +283,7 @@ impl Instance {
                     automatable: flag(kCanAutomate),
                     // VST3 has no modulation.
                     modulatable: false,
+                    modulatable_per_note: false,
                 })
             })
             .collect()
