@@ -1,0 +1,55 @@
+name: RealtimeSanitizer
+
+# The engine's and the plugins' tests built with RealtimeSanitizer (RTSan),
+# whenever they change. RTSan stops at an allocation, a lock, a sleep, a
+# system call or I/O inside rt::scope, from any code: it sees what the
+# allocation checker can't, such as a plugin's C or C++ allocations.
+# See crates/engine/src/rt.rs. RTSan needs nightly Rust, so the job pins one
+# and a new nightly can't break it on its own. It runs on Linux, the cheapest
+# runner.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/engine/**"
+      - "crates/model/**"
+      - "crates/plugins/**"
+      - "crates/test-plugins/**"
+      - "Cargo.lock"
+      - ".github/workflows/rtsan.yml"
+  pull_request:
+    paths:
+      - "crates/engine/**"
+      - "crates/model/**"
+      - "crates/plugins/**"
+      - "crates/test-plugins/**"
+      - "Cargo.lock"
+      - ".github/workflows/rtsan.yml"
+  workflow_dispatch:
+
+# Read-only: the job only runs tests.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY: nightly-2026-10-22
+
+jobs:
+  rtsan:
+    name: RealtimeSanitizer (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@v2
+      # rust-toolchain.toml asks for stable, so the nightly is named here.
+      # `--tests` leaves out doctests, which rustdoc builds without RTSan.
+      - name: Test with RTSan
+        env:
+          RUSTFLAGS: -Zsanitizer=realtime --cfg musicable_rtsan -Clink-arg=-Wl,--export-dynamic-symbol=__rtsan_*
+        run: cargo "+$NIGHTLY" test -p musicable-engine -p musicable-plugins --tests --target x86_64-unknown-linux-gnu

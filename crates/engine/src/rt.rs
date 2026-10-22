@@ -20,6 +20,29 @@
 //! space, so there is nothing to intercept. Clippy bans lock types, sleeping
 //! and printing in this crate instead (`crates/engine/clippy.toml`).
 //!
+//! Nor can C or C++ code's allocations, such as a plugin's, which don't go
+//! through Rust's allocator. For those, a debug build made with
+//! [RealtimeSanitizer](https://clang.llvm.org/docs/RealtimeSanitizer.html)
+//! (RTSan) tells it about every scope, and RTSan stops the process at any
+//! call to the C library's allocator, a lock, a sleep, a system call or I/O
+//! inside one, from any code, though it can't see an uncontended Rust lock
+//! either. What real-time code does on purpose that RTSan stops at, such as
+//! waking a thread, runs in `allowed`. The RTSan workflow
+//! (`.github/workflows/rtsan.yml`) runs the engine's and the plugins' tests
+//! that way, with nightly Rust on Linux:
+//!
+//! ```sh
+//! RUSTFLAGS="-Zsanitizer=realtime --cfg musicable_rtsan \
+//!     -Clink-arg=-Wl,--export-dynamic-symbol=__rtsan_*" \
+//!     cargo +nightly test -p musicable-engine -p musicable-plugins --tests \
+//!     --target x86_64-unknown-linux-gnu
+//! ```
+//!
+//! `--tests` leaves out doctests, which rustdoc builds without RTSan, the
+//! `--target` leaves build scripts unsanitized, and the link argument lets
+//! the test plugins, built with RTSan too, find its runtime in the test
+//! that loads them.
+//!
 //! Nodes run with denormal floats flushed to zero ([`flush_denormals`]), as
 //! in every DAW: arithmetic on numbers that small is many times slower on
 //! most CPUs, and a decaying filter or reverb tail produces them for as long
@@ -86,6 +109,7 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
     struct Exit;
     impl Drop for Exit {
         fn drop(&mut self) {
+            rtsan::exit();
             DEPTH.set(DEPTH.get() - 1);
         }
     }
@@ -95,6 +119,7 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
         FIRST.take();
     }
     DEPTH.set(DEPTH.get() + 1);
+    rtsan::enter();
     let exit = Exit;
     let result = f();
     drop(exit);
@@ -102,6 +127,67 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
         report();
     }
     result
+}
+
+/// Runs `f`, which real-time code may do although RealtimeSanitizer stops
+/// at it. In builds made with RTSan, its checks are off while `f` runs;
+/// otherwise this just runs `f`. That's for waking a thread, and yielding
+/// to others while waiting for one, which are system calls that don't
+/// block; for Rust's allocations, which the checker records itself; and for
+/// the tests' nodes that panic on purpose.
+pub(crate) fn allowed<R>(f: impl FnOnce() -> R) -> R {
+    struct Enable;
+    impl Drop for Enable {
+        fn drop(&mut self) {
+            rtsan::enable();
+        }
+    }
+    rtsan::disable();
+    let _enable = Enable;
+    f()
+}
+
+/// Telling RealtimeSanitizer about real-time code, in builds made with it.
+#[cfg(musicable_rtsan)]
+mod rtsan {
+    unsafe extern "C" {
+        fn __rtsan_realtime_enter();
+        fn __rtsan_realtime_exit();
+        fn __rtsan_disable();
+        fn __rtsan_enable();
+    }
+
+    pub(super) fn enter() {
+        // SAFETY: the sanitizer's runtime is linked in, as it is in every
+        // build made with it, and each enter is followed by an exit.
+        unsafe { __rtsan_realtime_enter() }
+    }
+
+    pub(super) fn exit() {
+        // SAFETY: as above, after an enter on this thread.
+        unsafe { __rtsan_realtime_exit() }
+    }
+
+    pub(super) fn disable() {
+        // SAFETY: as above, and each disable is followed by an enable.
+        unsafe { __rtsan_disable() }
+    }
+
+    pub(super) fn enable() {
+        // SAFETY: as above, after a disable on this thread.
+        unsafe { __rtsan_enable() }
+    }
+}
+
+#[cfg(not(musicable_rtsan))]
+mod rtsan {
+    pub(super) fn enter() {}
+
+    pub(super) fn exit() {}
+
+    pub(super) fn disable() {}
+
+    pub(super) fn enable() {}
 }
 
 #[cold]
@@ -255,26 +341,35 @@ mod fp {
     pub(super) fn set(_: Mode) {}
 }
 
-// SAFETY: every call is forwarded unchanged to the system allocator.
+// SAFETY: every call is forwarded unchanged to the system allocator. Each
+// is `allowed`, as the checker records them itself.
 unsafe impl GlobalAlloc for CheckedAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        check(Call::Alloc(layout.size()));
-        unsafe { System.alloc(layout) }
+        allowed(|| {
+            check(Call::Alloc(layout.size()));
+            unsafe { System.alloc(layout) }
+        })
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        check(Call::Alloc(layout.size()));
-        unsafe { System.alloc_zeroed(layout) }
+        allowed(|| {
+            check(Call::Alloc(layout.size()));
+            unsafe { System.alloc_zeroed(layout) }
+        })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        check(Call::Free(layout.size()));
-        unsafe { System.dealloc(ptr, layout) }
+        allowed(|| {
+            check(Call::Free(layout.size()));
+            unsafe { System.dealloc(ptr, layout) }
+        });
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        check(Call::Realloc(new_size));
-        unsafe { System.realloc(ptr, layout, new_size) }
+        allowed(|| {
+            check(Call::Realloc(new_size));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        })
     }
 }
 

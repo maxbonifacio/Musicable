@@ -637,10 +637,11 @@ struct Gain {
     audio: Mutex<GainAudio>,
 }
 
-#[derive(Default)]
 struct GainAudio {
     delay: [Vec<f32>; 2],
     position: usize,
+    /// The block's parameter changes: see [`read_changes`].
+    changes: Vec<(ParamID, i32, f64)>,
 }
 
 struct GainComponent(Arc<Gain>);
@@ -659,7 +660,11 @@ impl Gain {
             label: Mutex::new(String::new()),
             peer: Mutex::new(None),
             transport: Mutex::new(None),
-            audio: Mutex::new(GainAudio::default()),
+            audio: Mutex::new(GainAudio {
+                delay: Default::default(),
+                position: 0,
+                changes: Vec::with_capacity(BLOCK_INPUTS),
+            }),
         });
         let wrapper = ComWrapper::new(GainComponent(Arc::clone(&gain)));
         register(
@@ -879,15 +884,17 @@ impl IAudioProcessorTrait for GainComponent {
             violation("process came on two threads at once");
             return kResultFalse;
         };
+        let audio = &mut *audio;
         // SAFETY: the host passes its context, or null.
         if let Some(context) = unsafe { data.processContext.as_ref() } {
             *lock(&gain.transport) = Some(Vst3Transport::of(context));
         }
         // SAFETY: the host passes its changes, or null.
-        let changes = unsafe { read_changes(data.inputParameterChanges, frames) };
+        unsafe { read_changes(data.inputParameterChanges, frames, &mut audio.changes) };
+        let changes = &audio.changes;
         if frames == 0 {
             // Only handing over parameter changes.
-            for &(id, _, value) in &changes {
+            for &(id, _, value) in changes {
                 gain.apply(id, value);
             }
             return kResultOk;
@@ -901,7 +908,6 @@ impl IAudioProcessorTrait for GainComponent {
             violation("process got buses that aren't the plugin's");
             return kResultFalse;
         };
-        let audio = &mut *audio;
         let mut next = 0;
         let mut peak = 0.0f32;
         for frame in 0..frames {
@@ -1407,8 +1413,16 @@ struct Synth {
     label: Mutex<String>,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     transport: Mutex<Option<Vst3Transport>>,
-    voices: Mutex<[Voice; VOICES]>,
+    audio: Mutex<SynthAudio>,
     view: Mutex<Weak<ViewState>>,
+}
+
+struct SynthAudio {
+    voices: [Voice; VOICES],
+    /// The block's parameter changes and events: see [`read_changes`] and
+    /// [`read_events`].
+    changes: Vec<(ParamID, i32, f64)>,
+    events: Vec<Event>,
 }
 
 struct SynthComponent(Arc<Synth>);
@@ -1427,7 +1441,11 @@ impl Synth {
             label: Mutex::new(String::new()),
             handler: Mutex::new(None),
             transport: Mutex::new(None),
-            voices: Mutex::new([Voice::default(); VOICES]),
+            audio: Mutex::new(SynthAudio {
+                voices: [Voice::default(); VOICES],
+                changes: Vec::with_capacity(BLOCK_INPUTS),
+                events: Vec::with_capacity(BLOCK_INPUTS),
+            }),
             view: Mutex::new(Weak::new()),
         });
         let wrapper = ComWrapper::new(SynthComponent(Arc::clone(&synth)));
@@ -1611,7 +1629,7 @@ impl IComponentTrait for SynthComponent {
     unsafe fn setActive(&self, state: TBool) -> tresult {
         let synth = &self.0;
         if synth.lifecycle.set_active(&synth.checks, state) {
-            *lock(&synth.voices) = [Voice::default(); VOICES];
+            lock(&synth.audio).voices = [Voice::default(); VOICES];
         }
         kResultOk
     }
@@ -1699,20 +1717,23 @@ impl IAudioProcessorTrait for SynthComponent {
         let Some((frames, sample_rate)) = synth.lifecycle.process(&synth.checks, data) else {
             return kResultFalse;
         };
-        let Ok(mut voices) = synth.voices.try_lock() else {
+        let Ok(mut audio) = synth.audio.try_lock() else {
             violation("process came on two threads at once");
             return kResultFalse;
         };
+        let audio = &mut *audio;
         // SAFETY: the host passes its context, or null.
         if let Some(context) = unsafe { data.processContext.as_ref() } {
             *lock(&synth.transport) = Some(Vst3Transport::of(context));
         }
-        // SAFETY: the host passes its changes, or null.
-        let changes = unsafe { read_changes(data.inputParameterChanges, frames) };
-        // SAFETY: the host passes its events, or null.
-        let events = unsafe { read_events(data.inputEvents, frames) };
+        // SAFETY: the host passes its changes and events, or null.
+        unsafe {
+            read_changes(data.inputParameterChanges, frames, &mut audio.changes);
+            read_events(data.inputEvents, frames, &mut audio.events);
+        }
+        let (changes, events) = (&audio.changes, &audio.events);
         if frames == 0 {
-            for &(_, _, value) in &changes {
+            for &(_, _, value) in changes {
                 synth.level.store(value.to_bits(), Ordering::SeqCst);
             }
             return kResultOk;
@@ -1741,12 +1762,12 @@ impl IAudioProcessorTrait for SynthComponent {
             while let Some(event) = events.get(next_event)
                 && event.sampleOffset as usize <= frame
             {
-                synth.play(&mut voices, event);
+                synth.play(&mut audio.voices, event);
                 next_event += 1;
             }
             let level = synth.level();
             let mut sample = 0.0;
-            for voice in voices.iter_mut().filter(|v| v.active) {
+            for voice in audio.voices.iter_mut().filter(|v| v.active) {
                 let frequency =
                     440.0 * ((f64::from(voice.pitch) + voice.tuning - 69.0) / 12.0).exp2();
                 let amplitude = voice.velocity * level * (1.0 + voice.pressure);
@@ -2303,31 +2324,41 @@ unsafe fn write_stream(stream: *mut IBStream, bytes: &[u8]) -> tresult {
     }
 }
 
-/// The parameter changes the host gives for a block `frames` long, as
-/// `(id, offset, value)`, by offset, each parameter's in its order.
+/// As many parameter changes as the host gives a plugin in a block, and as
+/// many events. The processors read them into buffers this long, made with
+/// the plugin, as a plugin mustn't allocate while it processes.
+const BLOCK_INPUTS: usize = 4096;
+
+/// Reads the parameter changes the host gives for a block `frames` long
+/// into `changes`, as `(id, offset, value)`, by offset, each parameter's in
+/// its order.
 ///
 /// # Safety
 ///
 /// `list` must be the host's list, or null.
-unsafe fn read_changes(list: *mut IParameterChanges, frames: usize) -> Vec<(ParamID, i32, f64)> {
+unsafe fn read_changes(
+    list: *mut IParameterChanges,
+    frames: usize,
+    changes: &mut Vec<(ParamID, i32, f64)>,
+) {
+    changes.clear();
     // SAFETY: the caller's promise.
     let Some(list) = (unsafe { ComRef::from_raw(list) }) else {
-        return Vec::new();
+        return;
     };
-    let mut changes = Vec::new();
-    let mut ids = Vec::new();
     // SAFETY: the host's list, and its queues, for the block: every call.
     unsafe {
+        let id_of =
+            |index| ComRef::from_raw(list.getParameterData(index)).map(|q| q.getParameterId());
         for index in 0..list.getParameterCount() {
             let Some(queue) = ComRef::from_raw(list.getParameterData(index)) else {
                 violation("the host's parameter changes are missing a parameter's");
                 continue;
             };
             let id = queue.getParameterId();
-            if ids.contains(&id) {
+            if (0..index).any(|other| id_of(other) == Some(id)) {
                 violation("the host gave one parameter two lists of changes");
             }
-            ids.push(id);
             let mut last = 0;
             for point in 0..queue.getPointCount() {
                 let (mut offset, mut value) = (0, 0.0);
@@ -2342,26 +2373,30 @@ unsafe fn read_changes(list: *mut IParameterChanges, frames: usize) -> Vec<(Para
                     violation("a parameter change is out of its range");
                 }
                 last = offset;
-                changes.push((id, offset, value));
+                if changes.len() == changes.capacity() {
+                    violation("a block came with more parameter changes than the host gives");
+                    return;
+                }
+                // After those at the same offset, which came first.
+                let at = changes.partition_point(|change| change.1 <= offset);
+                changes.insert(at, (id, offset, value));
             }
         }
     }
-    changes.sort_by_key(|change| change.1);
-    changes
 }
 
-/// The events the host gives for a block `frames` long, checking they're
-/// in order.
+/// Reads the events the host gives for a block `frames` long into
+/// `events`, checking they're in order.
 ///
 /// # Safety
 ///
 /// `list` must be the host's list, or null.
-unsafe fn read_events(list: *mut IEventList, frames: usize) -> Vec<Event> {
+unsafe fn read_events(list: *mut IEventList, frames: usize, events: &mut Vec<Event>) {
+    events.clear();
     // SAFETY: the caller's promise.
     let Some(list) = (unsafe { ComRef::from_raw(list) }) else {
-        return Vec::new();
+        return;
     };
-    let mut events = Vec::new();
     // SAFETY: the host's list, for the block: every call.
     unsafe {
         for index in 0..list.getEventCount() {
@@ -2374,10 +2409,13 @@ unsafe fn read_events(list: *mut IEventList, frames: usize) -> Vec<Event> {
             if event.sampleOffset < last || event.sampleOffset as usize >= frames.max(1) {
                 violation("an event is out of order, or outside the block");
             }
+            if events.len() == events.capacity() {
+                violation("a block came with more events than the host gives");
+                return;
+            }
             events.push(event);
         }
     }
-    events
 }
 
 /// A bus's two channels, if it's the only bus and stereo.

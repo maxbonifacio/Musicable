@@ -186,9 +186,27 @@ const VOICES: usize = 16;
 /// How many threads running thread pool tasks the synth tells apart.
 const POOL_THREADS: usize = 16;
 
-thread_local! {
-    /// Only its address matters: each thread's is its own.
-    static THREAD_MARK: u8 = const { 0 };
+/// A number of the calling thread's own, to tell threads apart. Not the
+/// address of a thread-local: a library loaded at run time may allocate a
+/// thread's copy of those the first time the thread touches one, as glibc
+/// does, and the threads that run tasks are real-time.
+fn thread_mark() -> usize {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            // A `pthread_t` is a pointer, or an integer as wide.
+            safe fn pthread_self() -> usize;
+        }
+        pthread_self()
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            safe fn GetCurrentThreadId() -> u32;
+        }
+        GetCurrentThreadId() as usize
+    }
 }
 
 /// The host's extensions, as the plugin found them in `init`.
@@ -976,7 +994,7 @@ impl TestPlugin {
 
     fn exec(&self, task: u32) {
         self.on_audio("thread_pool.exec");
-        let mark = THREAD_MARK.with(|mark| ptr::from_ref(mark) as usize);
+        let mark = thread_mark();
         for slot in &self.pool_threads {
             match slot.compare_exchange(0, mark, Ordering::SeqCst, Ordering::SeqCst) {
                 Ok(_) => break,

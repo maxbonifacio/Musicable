@@ -417,7 +417,7 @@ impl Lane {
         if self.sleeping.swap(false, SeqCst)
             && let Some(thread) = self.thread.get()
         {
-            thread.unpark();
+            rt::allowed(|| thread.unpark());
             return true;
         }
         false
@@ -939,7 +939,7 @@ impl Backoff {
             }
             self.0 += 1;
         } else {
-            thread::yield_now();
+            rt::allowed(thread::yield_now);
         }
     }
 }
