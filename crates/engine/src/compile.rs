@@ -273,8 +273,8 @@ pub fn compile(project: &Project) -> Graph {
     compile_metered(project, &Meters::new())
 }
 
-/// Builds the graph for `project`, without audio files: its audio clips are
-/// silent. See [`compile_with_media`].
+/// Builds the graph for `project`, without audio files: its audio clips and
+/// samplers are silent. See [`compile_with_media`].
 pub fn compile_metered(project: &Project, meters: &Meters) -> Graph {
     compile_with_media(project, meters, &Media::new())
 }
@@ -299,11 +299,11 @@ pub fn compile_with_devices(
 /// Builds the graph for `project`. Each channel's output stage measures
 /// into its meter in `meters`: call [`Meters::follow`] first, or channels
 /// without a meter there get one nobody reads. Audio clips play their audio
-/// from `media`, and clips it doesn't have are silent. Plugin devices
-/// process through the nodes `devices` makes for them, and the ones it has
-/// none for, such as a plugin that isn't installed, pass their signal
-/// through. Tracks monitor their inputs where `inputs` lays them out, and
-/// the ones it doesn't have are silent.
+/// from `media`, and samplers their samples, and the ones it doesn't have
+/// are silent. Plugin devices process through the nodes `devices` makes for
+/// them, and the ones it has none for, such as a plugin that isn't
+/// installed, pass their signal through. Tracks monitor their inputs where
+/// `inputs` lays them out, and the ones it doesn't have are silent.
 pub fn compile_with_inputs(
     project: &Project,
     meters: &Meters,
@@ -558,7 +558,7 @@ pub(crate) fn compile_with(
             graph: &mut graph,
             tail: head,
         };
-        let taps = strip.channel(Channel::Track(track), devices, &mut stages);
+        let taps = strip.channel(Channel::Track(track), devices, media, &mut stages);
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
         {
@@ -604,7 +604,12 @@ pub(crate) fn compile_with(
         graph: &mut graph,
         tail: Some(master),
     };
-    strip.channel(Channel::Master(&project.master), devices, &mut stages);
+    strip.channel(
+        Channel::Master(&project.master),
+        devices,
+        media,
+        &mut stages,
+    );
     let output = Gain::new(1.0).with_meter(meters.master().clone());
     strip.push(keys::master_output(), Box::new(output));
     let output = strip.tail.expect("the master's strip has its output stage");
@@ -665,13 +670,14 @@ fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
 }
 
 /// A device's node, if it has one: a plugin `devices` has nothing for has
-/// none, and nor has a built-in device whose DSP isn't built yet.
-fn device_node(device: &Device, devices: &Devices) -> Option<Box<dyn Node>> {
+/// none, and nor has a built-in device whose DSP isn't built yet. A sampler
+/// plays the sample `media` has for it.
+fn device_node(device: &Device, devices: &Devices, media: &Media) -> Option<Box<dyn Node>> {
     match device.kind {
         DeviceKind::TestGain { gain } => Some(Box::new(Gain::new(gain))),
         DeviceKind::TestInstrument { level } => Some(Box::new(TestInstrument::new(level))),
         DeviceKind::Plugin(_) => devices.get(device.id).map(NodeMaker::make),
-        DeviceKind::Native(ref native) => crate::devices::node(native),
+        DeviceKind::Native(ref native) => crate::devices::node(native, media.sample(device.id)),
     }
 }
 
@@ -711,6 +717,7 @@ impl Strip<'_> {
         &mut self,
         channel: Channel<'_>,
         devices: &Devices,
+        media: &Media,
         stages: &mut impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
     ) -> Taps {
         let mut slot = |strip: &mut Self, at: Slot| {
@@ -724,8 +731,8 @@ impl Strip<'_> {
             if let Ok(position) = u16::try_from(position) {
                 slot(self, Slot::BeforeDevice(position));
             }
-            let node =
-                device_node(device, devices).map(|node| self.push(keys::device(device.id), node));
+            let node = device_node(device, devices, media)
+                .map(|node| self.push(keys::device(device.id), node));
             if device.kind.is_instrument() && instrument.is_none() {
                 instrument = Some(node);
             }

@@ -232,6 +232,9 @@ pub enum Request {
     },
     /// Scan for plugins again, loading the libraries that were bad too.
     RescanPlugins,
+    /// Ask for an audio file, and give it to this sampler with
+    /// [`device::SET_SAMPLE`].
+    LoadSample(DeviceId),
 }
 
 /// Something in the project with a name the user can change.

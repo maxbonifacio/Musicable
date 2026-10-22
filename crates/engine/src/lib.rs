@@ -147,8 +147,8 @@ pub trait Node: Any + Send {
     /// An instrument's voice can ring on well after its note is let go, so
     /// this is for modulators that run a copy for each voice, which stop it
     /// when the voice ends. Read on the audio thread, after the node
-    /// renders. Only CLAP plugins say when their voices end so far, and
-    /// nothing reads it yet.
+    /// renders. CLAP plugins and the built-in instruments say when their
+    /// voices end, and nothing reads it yet.
     fn ended_voices(&self) -> &[NoteId] {
         &[]
     }

@@ -3,16 +3,20 @@
 //! A note plays the sample from `start` to `end`, sped up or slowed down
 //! by the note's distance from `root`, plus `transpose` and `detune`, and
 //! by the note's pitch bend. Looping, it plays on from `end` back to
-//! `loop_start` for as long as the note is held, then to `end` and stops
-//! once released. In "Classic" mode a note's amp envelope releases when the
-//! note is let go; "One-Shot" plays the whole sample however short the
-//! note, for drums. Each voice has an attack, decay, sustain and release
-//! envelope; velocity sets the level by `velocity` percent of the way from
-//! full; and an optional 12 dB state variable filter follows. A note past
-//! `voices` takes the oldest voice. Start, end and loop points are in
-//! percent of the sample's length.
+//! `loop_start` until its sound ends, and crossfades into each jump back
+//! over the last `loop_fade` ms before `end`, with as much of the sample
+//! before `loop_start`, so the loop doesn't click. In "Classic" mode a
+//! note's amp envelope releases when the note is let go, and the note ends
+//! at `end` if it doesn't loop; "One-Shot" plays from `start` to `end`
+//! however short the note, without looping, for drums. Each voice has an
+//! attack, decay, sustain and release envelope; velocity sets the level by
+//! `velocity` percent of the way from full; and an optional 12 dB state
+//! variable filter follows. A note past `voices` takes the place of the
+//! voice let go longest ago, or of the oldest if none is. Start, end and
+//! loop points are in percent of the sample's length, and fall on its
+//! frames.
 
-use super::Scale::{Linear, Log};
+use super::Scale::{Fader, Linear, Log};
 use super::Unit::{Cents, Decibels, Hertz, Milliseconds, Note, Number, Percent, Semitones};
 use super::{ParamInfo, choice, param, switch, whole};
 
@@ -52,12 +56,14 @@ pub const CUTOFF: usize = 15;
 pub const RESONANCE: usize = 16;
 /// How many notes can sound at once.
 pub const VOICES: usize = 17;
+/// How long a loop crossfades into its jump back, in ms of the sample.
+pub const LOOP_FADE: usize = 18;
 
 pub const MODES: [&str; 2] = ["Classic", "One-Shot"];
 pub const FILTERS: [&str; 4] = ["Off", "Low Pass", "High Pass", "Band Pass"];
 
 #[rustfmt::skip]
-pub(super) const PARAMS: [ParamInfo; 18] = [
+pub(super) const PARAMS: [ParamInfo; 19] = [
     whole("root", "Root", "Sample", [0.0, 127.0, 60.0], Note),
     whole("transpose", "Transpose", "Sample", [-48.0, 48.0, 0.0], Semitones),
     param("detune", "Detune", "Sample", [-50.0, 50.0, 0.0], Cents, Linear),
@@ -76,4 +82,5 @@ pub(super) const PARAMS: [ParamInfo; 18] = [
     param("cutoff", "Cutoff", "Filter", [20.0, 20_000.0, 2000.0], Hertz, Log),
     param("resonance", "Resonance", "Filter", [0.0, 100.0, 0.0], Percent, Linear),
     whole("voices", "Voices", "", [1.0, 32.0, 8.0], Number),
+    param("loop_fade", "Loop Fade", "Sample", [0.0, 1000.0, 10.0], Milliseconds, Fader),
 ];

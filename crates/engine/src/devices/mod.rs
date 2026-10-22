@@ -19,10 +19,15 @@ mod compressor;
 mod delay;
 mod eq;
 mod gate;
+mod instrument;
 mod params;
 mod reverb;
+mod sampler;
 mod svf;
+mod synth;
 mod utility;
+
+use std::sync::Arc;
 
 use musicable_model::native::{NativeDevice, NativeKind};
 
@@ -32,6 +37,8 @@ pub use eq::Equalizer;
 pub use gate::Gate;
 pub use params::{Params, Span, Values};
 pub use reverb::Reverb;
+pub use sampler::{Sample, Sampler};
+pub use synth::Synth;
 pub use utility::Utility;
 
 use crate::Node;
@@ -44,10 +51,13 @@ pub const BUILT: &[NativeKind] = &[
     NativeKind::Delay,
     NativeKind::Reverb,
     NativeKind::Utility,
+    NativeKind::Sampler,
+    NativeKind::Synth,
 ];
 
-/// The node that plays `device`, if its kind has DSP.
-pub fn node(device: &NativeDevice) -> Option<Box<dyn Node>> {
+/// The node that plays `device`, if its kind has DSP. A sampler plays
+/// `sample`, its sample loaded, if it has one.
+pub fn node(device: &NativeDevice, sample: Option<&Arc<Sample>>) -> Option<Box<dyn Node>> {
     match device.kind {
         NativeKind::Eq => Some(Box::new(Equalizer::new(device))),
         NativeKind::Compressor => Some(Box::new(Compressor::new(device))),
@@ -55,7 +65,8 @@ pub fn node(device: &NativeDevice) -> Option<Box<dyn Node>> {
         NativeKind::Delay => Some(Box::new(Delay::new(device))),
         NativeKind::Reverb => Some(Box::new(Reverb::new(device))),
         NativeKind::Utility => Some(Box::new(Utility::new(device))),
-        NativeKind::Sampler | NativeKind::Synth => None,
+        NativeKind::Sampler => Some(Box::new(Sampler::new(device, sample.cloned()))),
+        NativeKind::Synth => Some(Box::new(Synth::new(device))),
     }
 }
 
