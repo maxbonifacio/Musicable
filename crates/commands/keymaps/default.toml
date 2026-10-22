@@ -65,6 +65,7 @@ version = 1
 "file.open" = ["Ctrl+O"]
 "file.save" = ["Ctrl+S"]
 "file.save_as" = ["Ctrl+Shift+S"]
+"file.export_audio" = ["Ctrl+Shift+R"]
 "file.quit" = ["Ctrl+Q"]
 
 # The app's windows. Live opens its settings with Ctrl+Comma, and Ctrl+K is

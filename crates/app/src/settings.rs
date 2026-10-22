@@ -12,6 +12,15 @@
 //!
 //! [behaviour]
 //! play_from = "start_marker"
+//!
+//! [export]
+//! format = "wav"
+//! bits = 24
+//! dither = true
+//! normalize = false
+//! tail = true
+//! mixdown = true
+//! stems = false
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -25,6 +34,8 @@ use std::path::{Path, PathBuf};
 use musicable_audio::{Mode, StreamRequest};
 use musicable_commands::editor::Behaviour;
 use serde::{Deserialize, Serialize};
+
+use crate::export::ExportSettings;
 
 const FORMAT: &str = "musicable-settings";
 const VERSION: u32 = 1;
@@ -65,6 +76,9 @@ pub struct Settings {
     /// Play/Stop starts from: the start marker (`start_marker`), as in Live,
     /// or wherever the playhead stopped (`playhead`).
     pub behaviour: Behaviour,
+    /// How the export window writes files, as it was last used: see
+    /// [`ExportSettings`].
+    pub export: ExportSettings,
 }
 
 /// The audio device to play through, and how.
@@ -202,6 +216,7 @@ mod tests {
     use musicable_commands::editor::PlayFrom;
 
     use super::*;
+    use crate::export::{Bits, FileFormat};
 
     #[test]
     fn settings_survive_a_round_trip() {
@@ -214,6 +229,13 @@ mod tests {
             },
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
+            },
+            export: ExportSettings {
+                format: FileFormat::Aiff,
+                bits: Bits::Int16,
+                sample_rate: Some(44_100),
+                stems: true,
+                ..ExportSettings::default()
             },
         };
         let text = settings.to_toml();
@@ -238,6 +260,11 @@ mod tests {
                 ..StreamRequest::default()
             }
         );
+        let export = Settings::parse("[export]\nformat = \"flac\"\n")
+            .unwrap()
+            .export;
+        assert_eq!(export.format, FileFormat::Flac);
+        assert_eq!(export.bits, ExportSettings::default().bits);
     }
 
     #[test]

@@ -106,6 +106,7 @@ has run ([app.md](app.md#files)).
 | `file.save` | Save Project | Saves the project, asking where if it has no file yet | Ctrl+S |
 | `file.save_as` | Save Project As... | Asks where to save the project, and saves it there | Ctrl+Shift+S |
 | `file.import_audio` | Import Audio Files... | Asks for audio files, and puts them on the selected track | none |
+| `file.export_audio` | Export Audio... | Shows the export window, which renders the song to audio files ([app.md](app.md#exporting-audio)) | Ctrl+Shift+R |
 | `file.quit` | Quit | Closes Musicable | Ctrl+Q |
 
 New, New Demo, Open and Quit ask about unsaved changes first.

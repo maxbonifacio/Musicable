@@ -26,6 +26,7 @@ const MENUS: [MenuSpec; 6] = [
             Some(file::SAVE_AS),
             None,
             Some(file::IMPORT_AUDIO),
+            Some(file::EXPORT_AUDIO),
             None,
             Some(file::QUIT),
         ],

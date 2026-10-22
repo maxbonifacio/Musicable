@@ -2,16 +2,20 @@
 // attach to the console they were started from, if any.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use eframe::egui;
-use musicable_app::App;
+use musicable_app::export::{Bits, Export, ExportSettings, FileFormat, Job, Span};
 use musicable_app::null_test::{self, Player, Render};
-use musicable_commands::{Keymap, KeymapFile, Registry};
+use musicable_app::{App, PLUGINS_FILE};
+use musicable_commands::{Editor, Keymap, KeymapFile, Registry};
 use musicable_engine::{EngineConfig, ParallelOptions};
-use musicable_model::Project;
+use musicable_model::{Project, TrackId};
+use musicable_plugins::scan::ScanCache;
 
 // Debug builds catch heap use on the audio thread (see docs/engine.md).
 #[cfg(debug_assertions)]
@@ -23,6 +27,8 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
        musicable keymap [FILE]            print the keys, with the changes in the keymap FILE
        musicable null-test [PROJECT]      check that the parallel scheduler plays PROJECT, or
                                           the demo, exactly as the reference renderer does
+       musicable export PROJECT FILE      render PROJECT to the audio file FILE, as File >
+                                          Export Audio does
        musicable scan-plugin LIBRARY      list the plugins in the plugin library LIBRARY, as
                                           the app's plugin scan does in a process of its own";
 
@@ -37,6 +43,10 @@ fn main() -> ExitCode {
         Some("null-test") => {
             attach_console();
             null_test(args)
+        }
+        Some("export") => {
+            attach_console();
+            export(args)
         }
         // The app runs it, and reads what it prints through a pipe, so it
         // doesn't attach to a console.
@@ -342,6 +352,216 @@ fn null_test(args: impl Iterator<Item = OsString>) -> ExitCode {
         println!("\nFailed.");
         ExitCode::FAILURE
     }
+}
+
+const EXPORT_USAGE: &str = "\
+usage: musicable export PROJECT FILE [options]
+
+Renders PROJECT to the audio file FILE as File > Export Audio does, on a
+thread of its own, faster than real time: the song, from its start to the
+end of its last clip, with the plugins the app's last plugin scan found.
+
+  --loop              the loop region instead of the song
+  --format <format>   wav, aiff or flac (default: FILE's extension, or wav)
+  --bits <bits>       16, 24, or 32 for floats (default: 24)
+  --rate <hz>         the sample rate the song renders at (default: 48000)
+  --block <frames>    the most frames plugins get at once (default: 512)
+  --stems             each track on its own too, in files next to FILE
+  --no-mix            the stems without the mix
+  --normalize         raise or lower each file so its peak is at full scale
+  --no-dither         round integer samples without dither
+  --no-tail           stop at the end, without the tail";
+
+/// What `musicable export` renders, and how.
+struct ExportArgs {
+    project: PathBuf,
+    file: PathBuf,
+    span: Span,
+    settings: ExportSettings,
+    config: EngineConfig,
+}
+
+impl ExportArgs {
+    /// The options in `args`, or `None` if they ask for help.
+    fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Option<Self>, String> {
+        let mut paths = Vec::new();
+        let mut span = Span::Song;
+        let mut settings = ExportSettings::default();
+        let mut format = None;
+        let mut config = EngineConfig {
+            sample_rate: 48_000,
+            max_block: 512,
+        };
+        while let Some(arg) = args.next() {
+            let Some(option) = arg.to_str().filter(|arg| arg.starts_with('-')) else {
+                paths.push(PathBuf::from(arg));
+                continue;
+            };
+            let mut value = || {
+                args.next()
+                    .and_then(|value| value.into_string().ok())
+                    .ok_or_else(|| format!("{option} needs a value"))
+            };
+            match option {
+                "-h" | "--help" => return Ok(None),
+                "--loop" => span = Span::Loop,
+                "--format" => {
+                    let name = value()?;
+                    let found = FileFormat::ALL
+                        .into_iter()
+                        .find(|f| f.name().eq_ignore_ascii_case(&name));
+                    format = Some(found.ok_or(format!("there's no format \"{name}\""))?);
+                }
+                "--bits" => settings.bits = Bits::try_from(number::<u8>(option, &value()?)?)?,
+                "--rate" => config.sample_rate = number(option, &value()?)?,
+                "--block" => config.max_block = number(option, &value()?)?,
+                "--stems" => settings.stems = true,
+                "--no-mix" => settings.mixdown = false,
+                "--normalize" => settings.normalize = true,
+                "--no-dither" => settings.dither = false,
+                "--no-tail" => settings.tail = false,
+                _ => return Err(format!("unknown option \"{option}\"")),
+            }
+        }
+        let [project, file] = <[PathBuf; 2]>::try_from(paths)
+            .map_err(|_| "export takes a project and a file to write".to_owned())?;
+        if config.sample_rate == 0 || !(1..=65_536).contains(&config.max_block) {
+            return Err("the rate is more than 0, and the block from 1 to 65536".to_owned());
+        }
+        // The file's extension says, if it's one of the formats'.
+        let extension = file.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        settings.format = format.unwrap_or_else(|| {
+            let known = |f: &FileFormat| {
+                let mut extensions = f.extensions().iter();
+                extensions.any(|known| known.eq_ignore_ascii_case(extension))
+            };
+            FileFormat::ALL
+                .into_iter()
+                .find(known)
+                .unwrap_or(FileFormat::Wav)
+        });
+        Ok(Some(Self {
+            project,
+            file,
+            span,
+            settings,
+            config,
+        }))
+    }
+}
+
+/// `musicable export`: see [`EXPORT_USAGE`].
+fn export(args: impl Iterator<Item = OsString>) -> ExitCode {
+    let args = match ExportArgs::parse(args) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            println!("{EXPORT_USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}\n\n{EXPORT_USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let project = match musicable_io::project::load(&args.project) {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("{}: {error}", args.project.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(range) = args.span.range(&project, &Editor::default()) else {
+        eprintln!(
+            "There's nothing to export: the {} is empty.",
+            args.span.name().to_lowercase()
+        );
+        return ExitCode::FAILURE;
+    };
+    let installed = musicable_app::config_dir()
+        .map(|dir| dir.join(PLUGINS_FILE))
+        .filter(|file| file.exists())
+        .map_or(Vec::new(), |file| {
+            ScanCache::read(&file).plugins().cloned().collect()
+        });
+    if let Some(folder) = args
+        .file
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        && let Err(error) = std::fs::create_dir_all(folder)
+    {
+        eprintln!("Couldn't make the folder {}: {error}", folder.display());
+        return ExitCode::FAILURE;
+    }
+    let tracks: BTreeSet<TrackId> = project.tracks.iter().map(|track| track.id).collect();
+    let settings = args.settings;
+    let (mixdown, stems) =
+        musicable_app::export::files_for(&args.file, &project, &settings, &tracks);
+    let tempo = &project.tempo;
+    println!(
+        "Exporting {} from {} to {} at {} Hz",
+        args.project.display(),
+        musicable_ui::position(tempo, range.start),
+        musicable_ui::position(tempo, range.end),
+        args.config.sample_rate,
+    );
+    let job = Job {
+        project: project.clone(),
+        folder: args.project.parent().map(Path::to_owned),
+        range,
+        settings,
+        config: args.config,
+        installed,
+        waker: None,
+        mixdown,
+        stems,
+    };
+    let length = job.length();
+    let mut export = match Export::start(job) {
+        Ok(export) => export,
+        Err(error) => {
+            eprintln!("{}", capital(&error));
+            return ExitCode::FAILURE;
+        }
+    };
+    // Plugins that need the main thread get it here, every millisecond.
+    while !export.is_finished() {
+        export.tick();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let report = export.report().expect("it finished");
+    for problem in &report.problems {
+        println!("{problem}");
+    }
+    for file in &report.files {
+        let mut line = format!("Wrote {}: {}", file.path.display(), level(file.peak));
+        if let Some(gain) = file.gain {
+            line += &format!(", normalised by {:+.1} dB", 20.0 * gain.log10());
+        }
+        if file.over > 0 {
+            line += &format!(", {} samples over full scale", file.over);
+        }
+        println!("{line}");
+    }
+    if let Some(failed) = &report.failed {
+        eprintln!("The export stopped: {failed}.");
+        return ExitCode::FAILURE;
+    }
+    let seconds = length as f64 / f64::from(args.config.sample_rate);
+    let took = report.took.as_secs_f64();
+    println!(
+        "{seconds:.1} s of audio in {took:.2} s: {:.0}x real time.",
+        seconds / took.max(1e-9)
+    );
+    ExitCode::SUCCESS
+}
+
+/// `text` starting with a capital letter.
+fn capital(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// A peak level, in decibels relative to full scale.
