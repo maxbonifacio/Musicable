@@ -34,6 +34,7 @@ pub mod meter;
 pub mod midi;
 pub mod nodes;
 mod parallel;
+pub mod preview;
 mod render;
 pub mod resample;
 pub mod rt;
@@ -48,7 +49,7 @@ pub use compile::{
     compile_metered, compile_with_devices, compile_with_inputs, compile_with_media,
     compile_with_stems,
 };
-pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
+pub use engine::{Engine, EngineHandle, PreviewAt, QueueFull, Stats, SwapError};
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
 };
@@ -56,6 +57,7 @@ pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
 pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
+pub use preview::Preview;
 pub use render::{Block, ReferenceRenderer, Renderer};
 pub use timeline::{Segment, Timeline};
 
