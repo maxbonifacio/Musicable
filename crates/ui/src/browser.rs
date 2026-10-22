@@ -18,10 +18,11 @@ use egui::{
 };
 use musicable_commands::{Args, browser, device};
 use musicable_library::{FileId, Index, Preset, PresetKind, Record};
+use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
 use musicable_model::{Chain, PluginFormat, TrackId};
 
-use crate::devices::{self, PluginEntry};
+use crate::devices::{self, PluginEntry, onto};
 use crate::search::score;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -108,8 +109,13 @@ pub struct Preview<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Dragged {
     Sample(PathBuf),
+    /// One of Musicable's own devices.
+    Native(NativeKind),
     Plugin(PluginEntry),
-    Preset { path: PathBuf, name: String },
+    Preset {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 /// Where something dragged from the browser is let go.
@@ -133,6 +139,7 @@ impl Dragged {
     fn name(&self) -> String {
         match self {
             Self::Sample(path) => stem(path),
+            Self::Native(kind) => kind.name().to_owned(),
             Self::Plugin(plugin) => plugin.name.clone(),
             Self::Preset { name, .. } => name.clone(),
         }
@@ -151,6 +158,7 @@ impl Dragged {
                 let files = vec![file.clone()];
                 return Some(Action::DropFiles { files, track, at });
             }
+            Self::Native(kind) => (device::ADD, Args::new().with("kind", kind.key())),
             Self::Plugin(plugin) => (device::ADD_PLUGIN, devices::add(plugin, None)),
             Self::Preset { path, .. } => (device::ADD_PRESET, preset_args(path)),
         };
@@ -158,7 +166,7 @@ impl Dragged {
         let args = match *target {
             Destination::Track { track, .. } => args.with("track", track),
             Destination::NewTrack { .. } => args.with("new_track", true),
-            Destination::Chain(chain) => on_chain(args, chain),
+            Destination::Chain(chain) => onto(args, chain),
         };
         Some(Action::RunWith(command, args))
     }
@@ -227,7 +235,7 @@ enum Tab {
 pub(crate) struct BrowserPanel {
     tab: Tab,
     samples: Samples,
-    /// The plugins, under Devices.
+    /// Musicable's own devices and the plugins, under Devices.
     devices: devices::Browser,
     presets: Presets,
     /// Whether to put the keys in the search field of the list showing.
@@ -983,7 +991,7 @@ fn preset_row(
         name: preset.name.clone(),
     });
     if response.double_clicked() {
-        let args = on_chain(preset_args(&preset.path), chain);
+        let args = onto(preset_args(&preset.path), chain);
         actions.push(Action::RunWith(device::ADD_PRESET, args));
     }
     response.on_hover_text(format!(
@@ -1016,15 +1024,6 @@ fn device_of<'a>(preset: &'a Preset, installed: &'a [PluginEntry]) -> Option<&'a
 /// The arguments that add the preset at `path`.
 fn preset_args(path: &Path) -> Args {
     Args::new().with("preset", path.to_string_lossy().as_ref())
-}
-
-/// `args`, for a device that goes to `chain`, or to the selected track.
-fn on_chain(args: Args, chain: Option<Chain>) -> Args {
-    match chain {
-        Some(Chain::Master) => args.with("master", true),
-        Some(Chain::Track(track)) => args.with("track", track),
-        None => args,
-    }
 }
 
 /// A row of the browser's lists, `depth` steps in: an arrow first for a

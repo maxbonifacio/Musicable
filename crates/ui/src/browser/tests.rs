@@ -511,6 +511,11 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
             vital.with("new_track", true)
         )]
     );
+    // One of Musicable's own on a track goes on its devices.
+    let from = harness.get_by_label("EQ").rect().center();
+    drag(&mut harness, from, pos2(x + 2.0, drums_row.center().y));
+    let eq = Args::new().with("kind", "eq").with("track", drums);
+    assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, eq)]);
 
     // A preset in the devices panel goes in the chain it shows: the
     // selected track's.

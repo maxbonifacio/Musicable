@@ -549,16 +549,18 @@ impl Browser {
                 if !built_in.is_empty() {
                     ui.label(RichText::new("Built-in").strong());
                     for &(_, kind) in &built_in {
-                        let row = ui
-                            .add(
-                                Button::selectable(false, kind.name())
-                                    .min_size(vec2(ui.available_width(), 0.0)),
-                            )
-                            .on_hover_text(format!(
-                                "{}\n{} · Built in\nDouble-click to add it to {to}.",
-                                kind.name(),
-                                role(kind),
-                            ));
+                        let row = ui.add(
+                            Button::selectable(false, kind.name())
+                                .min_size(vec2(ui.available_width(), 0.0))
+                                .sense(Sense::click_and_drag()),
+                        );
+                        row.dnd_set_drag_payload(Dragged::Native(kind));
+                        let row = row.on_hover_text(format!(
+                            "{}\n{} · Built in\nDouble-click to add it to {to}, or drag it onto a \
+                             track.",
+                            kind.name(),
+                            role(kind),
+                        ));
                         if row.double_clicked() {
                             let args = Args::new().with("kind", kind.key());
                             actions.push(Action::RunWith(device::ADD, onto(args, chain)));
@@ -662,7 +664,7 @@ pub(crate) fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
 }
 
 /// `args`, adding a device to `chain`, or to the selected track.
-fn onto(args: Args, chain: Option<Chain>) -> Args {
+pub(crate) fn onto(args: Args, chain: Option<Chain>) -> Args {
     match chain {
         Some(Chain::Master) => args.with("master", true),
         Some(Chain::Track(track)) => args.with("track", track),

@@ -706,9 +706,9 @@ instruments or the effects. Hovering one shows its vendor, its
 kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
-best matches first. Double-click a plugin to put it at the end of the
-selected track's devices, or the master's while the devices panel shows
-those. Or drag it: into the devices panel, onto a track for the end of
+best matches first. Double-click a device or a plugin to put it at the end
+of the selected track's devices, or the master's while the devices panel
+shows those. Or drag it: into the devices panel, onto a track for the end of
 its devices, or below the tracks for a new track named after it, a MIDI
 track for an instrument and an audio track for an effect. The list's foot
 says how many plugins there are, and has Rescan, or says "Scanning..."
@@ -799,13 +799,13 @@ selected audio track at the start marker, or on a new audio track named
 after it, as an imported file goes
 ([Audio files](#audio-files)). Or drag it onto a track, where it starts
 at the grid line nearest where it's dropped, or below the tracks for a new
-track there. While a sample, a plugin or a preset is dragged, the place it
+track there. While a sample, a device or a preset is dragged, the place it
 would go is outlined, and "New track" shows below the tracks.
 
 ### Devices
 
-The Devices list is the plugins the scans found, which go on tracks as
-the samples do ([Plugins](#plugins)).
+The Devices list is Musicable's own devices and the plugins the scans
+found, which go on tracks as the samples do ([Plugins](#plugins)).
 
 ### Presets
 
