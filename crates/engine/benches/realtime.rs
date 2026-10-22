@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use common::{CONFIG, Project, Routing, cores, renderer};
 use musicable_engine::{
-    Block, ParallelOptions, ParallelRenderer, ParallelStats, PreparedGraph, ReferenceRenderer,
-    Renderer, TransportState,
+    AudioRef, Block, ParallelOptions, ParallelRenderer, ParallelStats, PreparedGraph,
+    ReferenceRenderer, Renderer, TransportState,
 };
 use musicable_model::time::TempoMap;
 
@@ -69,6 +69,7 @@ fn render(
             time: (i * FRAMES) as u64,
             transport: TransportState::default(),
             tempo: &tempo,
+            input: AudioRef::empty(FRAMES),
         };
         let started = Instant::now();
         renderer.render(graph, &block);

@@ -32,7 +32,7 @@ pub mod meter;
 pub mod nodes;
 mod parallel;
 mod render;
-mod resample;
+pub mod resample;
 pub mod rt;
 pub mod tasks;
 mod transport;
@@ -142,4 +142,11 @@ pub struct ProcessContext<'a> {
     /// This node's events for the block, in order, each with an offset below
     /// `frames`.
     pub events: &'a [NodeEvent],
+    /// The audio devices' inputs for the block, `frames` long: each input
+    /// device's channels, one device after another, as the audio backend
+    /// lays them out. No channels when the stream has no inputs. Frame `i`
+    /// is what the inputs captured a fixed time before the block's frame
+    /// `i` is heard: the input delay that monitoring adds, which the audio
+    /// backend reports.
+    pub input: AudioRef<'a>,
 }

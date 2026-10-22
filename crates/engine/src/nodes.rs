@@ -1128,6 +1128,7 @@ mod tests {
             },
             tempo,
             events,
+            input: AudioRef::empty(frames),
         }
     }
 

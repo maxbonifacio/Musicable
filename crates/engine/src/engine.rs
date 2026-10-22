@@ -201,12 +201,31 @@ impl Engine {
         self.counters.xruns.fetch_add(1, Relaxed);
     }
 
+    /// Frames rendered since the engine started: the engine time of the next
+    /// frame it renders. An audio backend lines its device inputs up with it.
+    pub fn time(&self) -> u64 {
+        self.time
+    }
+
     /// Renders `output.frames()` frames into `output`: the graph's output,
     /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)).
     /// Real-time safe.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
+        let frames = output.frames();
+        self.process_with_input(AudioRef::empty(frames), output);
+    }
+
+    /// [`process`](Self::process), with `input` holding the audio devices'
+    /// inputs for the same frames, which nodes find in
+    /// [`ProcessContext::input`](crate::ProcessContext::input). Real-time
+    /// safe.
+    ///
+    /// # Panics
+    ///
+    /// If `input` isn't as long as `output`.
+    pub fn process_with_input(&mut self, input: AudioRef<'_>, output: &mut AudioMut<'_>) {
         rt::scope(|| {
-            self.run(output.frames(), |start, block, cue| {
+            self.run(input, output.frames(), |start, block, cue| {
                 let mut part = output.range_mut(start..start + block.frames());
                 part.copy_from(block);
                 if let Some(cue) = cue {
@@ -223,13 +242,31 @@ impl Engine {
     ///
     /// If `output.len()` isn't a multiple of `channels`.
     pub fn process_interleaved(&mut self, output: &mut [f32], channels: usize) {
+        let frames = output.len() / channels.max(1);
+        self.process_interleaved_with_input(AudioRef::empty(frames), output, channels);
+    }
+
+    /// [`process_interleaved`](Self::process_interleaved), with `input`
+    /// holding the audio devices' inputs for the same frames. Real-time
+    /// safe.
+    ///
+    /// # Panics
+    ///
+    /// If `output.len()` isn't a multiple of `channels`, or `input` isn't
+    /// as many frames long as `output`.
+    pub fn process_interleaved_with_input(
+        &mut self,
+        input: AudioRef<'_>,
+        output: &mut [f32],
+        channels: usize,
+    ) {
         assert!(
             channels > 0 && output.len().is_multiple_of(channels),
             "{} samples don't split into {channels} channels",
             output.len()
         );
         rt::scope(|| {
-            self.run(output.len() / channels, |start, block, cue| {
+            self.run(input, output.len() / channels, |start, block, cue| {
                 let part = &mut output[start * channels..(start + block.frames()) * channels];
                 block.write_interleaved(part, channels);
                 if let Some(cue) = cue {
@@ -239,17 +276,25 @@ impl Engine {
         });
     }
 
-    /// Renders `frames` frames block by block, handing each block's offset,
-    /// output and cue output to `write`.
+    /// Renders `frames` frames block by block, with `input` holding the
+    /// device inputs for them, handing each block's offset, output and cue
+    /// output to `write`.
     fn run(
         &mut self,
+        input: AudioRef<'_>,
         frames: usize,
         mut write: impl FnMut(usize, AudioRef<'_>, Option<AudioRef<'_>>),
     ) {
+        assert_eq!(
+            input.frames(),
+            frames,
+            "the device inputs are {} frames long, the output {frames}",
+            input.frames()
+        );
         self.receive();
         let mut done = 0;
         while done < frames {
-            let block = self.render(frames - done);
+            let block = self.render(input, done, frames - done);
             match &self.graph {
                 Some(graph) => write(done, graph.output(block), graph.cue(block)),
                 None => write(done, self.silence.view(block), None),
@@ -315,8 +360,8 @@ impl Engine {
     }
 
     /// Renders the next block, of at most `max` frames, and returns its
-    /// length.
-    fn render(&mut self, max: usize) -> usize {
+    /// length. Its device inputs start at frame `offset` of `input`.
+    fn render(&mut self, input: AudioRef<'_>, offset: usize, max: usize) -> usize {
         let start = self.time;
         // Transport changes due by now apply before the block. The block ends
         // at the next change, and where the loop jumps back, so each block has
@@ -384,6 +429,7 @@ impl Engine {
                 time: start,
                 transport: self.transport.state(),
                 tempo: self.transport.tempo(),
+                input: input.range(offset..offset + frames),
             };
             let dropped = graph.play_notes(&block);
             if dropped > 0 {
@@ -640,6 +686,28 @@ mod tests {
         }
     }
 
+    /// Outputs the device inputs' channel `0`, or silence without one.
+    struct Echo(usize);
+
+    impl Node for Echo {
+        fn channels(&self) -> usize {
+            1
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            _inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            assert_eq!(ctx.input.frames(), ctx.frames);
+            match ctx.input.channels() > self.0 {
+                true => output.channel_mut(0).copy_from_slice(ctx.input.channel(self.0)),
+                false => output.clear(),
+            }
+        }
+    }
+
     /// Reports the thread it is dropped on.
     struct DropProbe(mpsc::Sender<ThreadId>);
 
@@ -720,6 +788,74 @@ mod tests {
                 "{sizes:?}"
             );
         }
+    }
+
+    #[test]
+    fn nodes_get_each_frame_of_the_device_inputs_with_its_own_frame() {
+        for sizes in [&[1][..], &[7, 64, 65, 200, 3], &[1000]] {
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(single(0, Echo(1))).unwrap();
+            // A loop splits blocks where it jumps back, at frames 12,000 and
+            // 24,000, wherever the callbacks fall.
+            handle
+                .send(looping(Beats::from_ratio(1, 2), Beats::new(1)))
+                .unwrap();
+            handle.send(play()).unwrap();
+            let frames = 40_000;
+            // Channel 1 counts frames, channel 0 is noise.
+            let mut input = vec![0.5; 2 * frames];
+            for (i, sample) in input[frames..].iter_mut().enumerate() {
+                *sample = i as f32;
+            }
+            let mut out = vec![0.0; frames];
+            let mut done = 0;
+            for &size in sizes.iter().cycle() {
+                let size = size.min(frames - done);
+                let planar: Vec<f32> = (0..2)
+                    .flat_map(|c| input[c * frames + done..][..size].iter().copied())
+                    .collect();
+                assert_eq!(engine.time(), done as u64);
+                engine.process_with_input(
+                    AudioRef::from_planar(&planar, 2),
+                    &mut AudioMut::from_planar(&mut out[done..done + size], 1),
+                );
+                done += size;
+                if done == frames {
+                    break;
+                }
+            }
+            assert!(
+                out.iter().enumerate().all(|(i, &s)| s == i as f32),
+                "{sizes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn interleaved_output_takes_device_inputs_too() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(single(0, Echo(0))).unwrap();
+        let input: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut out = vec![0.0; 2 * 100];
+        engine.process_interleaved_with_input(AudioRef::from_planar(&input, 1), &mut out, 2);
+        for (frame, samples) in out.chunks(2).enumerate() {
+            assert_eq!(samples, [frame as f32; 2]);
+        }
+        // Without inputs, nodes see none.
+        engine.process_interleaved(&mut out, 2);
+        assert!(out.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "the device inputs are 10 frames long, the output 20")]
+    fn device_inputs_cover_the_output_exactly() {
+        let (mut engine, _handle) = Engine::new(CONFIG);
+        let input = [0.0; 10];
+        let mut out = [0.0; 20];
+        engine.process_with_input(
+            AudioRef::from_planar(&input, 1),
+            &mut AudioMut::from_planar(&mut out, 1),
+        );
     }
 
     #[test]

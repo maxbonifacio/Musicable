@@ -1,5 +1,6 @@
 //! Sample-rate conversion for audio clips whose files aren't at the
-//! device's rate: windowed-sinc interpolation.
+//! device's rate, and for audio inputs on another clock than the output:
+//! windowed-sinc interpolation.
 //!
 //! Each output frame falls at a fractional position in the file, and is the
 //! sum of the file's frames around it, weighted by a Kaiser-windowed sinc
@@ -93,7 +94,7 @@ fn bessel_i0(x: f64) -> f64 {
 
 /// Converts from one sample rate to another.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Resampler {
+pub struct Resampler {
     kernel: &'static Kernel,
     /// File frames for each device frame: the file's rate over the device's.
     step: f64,
@@ -134,7 +135,10 @@ impl Resampler {
     }
 
     /// The weights of the file frames around position `x` into `weights`,
-    /// which holds `2 * reach` of them, and the first of those frames.
+    /// which holds `2 * reach` of them, and the first of those frames. The
+    /// position needn't fall on a [`step`](Self::step): any fractional
+    /// position works, as a resampler that follows a drifting clock needs.
+    /// Real-time safe.
     pub fn weights(&self, x: f64, weights: &mut [f32]) -> i64 {
         debug_assert_eq!(weights.len(), 2 * self.reach);
         let first = x.floor() as i64 - self.reach as i64 + 1;

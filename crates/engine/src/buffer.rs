@@ -163,6 +163,17 @@ pub struct AudioRef<'a> {
 }
 
 impl<'a> AudioRef<'a> {
+    /// No channels, `frames` long: the device inputs of a stream that has
+    /// none.
+    pub const fn empty(frames: usize) -> AudioRef<'static> {
+        AudioRef {
+            data: &[],
+            stride: 0,
+            channels: 0,
+            frames,
+        }
+    }
+
     /// Views `data` as `channels` channels stored one after another.
     ///
     /// # Panics

@@ -156,6 +156,7 @@ fn play(node: &mut ClapNode, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] 
         transport: block.transport,
         tempo: &block.tempo,
         events: block.events,
+        input: AudioRef::empty(frames),
     };
     {
         let views = [AudioRef::from_planar(&planar_in, 2)];

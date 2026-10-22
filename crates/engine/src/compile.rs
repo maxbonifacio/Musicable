@@ -1238,6 +1238,7 @@ mod tests {
                 ..TransportState::default()
             },
             tempo: &p.tempo,
+            input: crate::AudioRef::empty(64),
         };
         ReferenceRenderer.render(&mut graph, &block);
         // The downbeat's click is on the cue output, and not in the mix.
