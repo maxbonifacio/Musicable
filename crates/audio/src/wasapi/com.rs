@@ -222,9 +222,15 @@ pub(super) fn os(call: &'static str, error: windows::core::Error) -> Error {
     } else if code == E_ACCESSDENIED {
         Error::AccessDenied
     } else {
+        let code = format!("{:#010X}", code.0 as u32);
+        let text = error.message();
         Error::Os {
             call,
-            message: format!("{} ({:#010X})", error.message(), code.0 as u32),
+            // Some codes have no text: audio clients' own, under Wine.
+            message: match text.is_empty() {
+                true => code,
+                false => format!("{text} ({code})"),
+            },
         }
     }
 }

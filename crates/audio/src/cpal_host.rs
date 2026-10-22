@@ -11,7 +11,7 @@ use cpal::{BufferSize, ErrorKind, FromSample, SizedSample, SupportedBufferSize};
 use musicable_engine::Engine;
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::input::{InputDevice, StreamInput};
+use crate::input::{self, InputDevice, StreamInput};
 use crate::stats::Counters;
 use crate::{
     Api, Capabilities, Device, DriverType, Error, Mode, SampleFormat, StartError, Stopped,
@@ -261,11 +261,16 @@ pub(crate) fn open(
         realtime: cfg!(target_os = "macos"),
         inputs: Vec::new(),
     };
-    let inputs = request
+    let opened = request
         .inputs
         .iter()
-        .map(|_| StreamInput::failed("inputs aren't supported here yet".into()))
+        .map(|_| Err("only Windows records so far".to_owned()))
         .collect();
+    let (infos, inputs, _) = input::assemble(&request.inputs, opened);
+    let info = StreamInfo {
+        inputs: infos,
+        ..info
+    };
     Ok((
         info,
         inputs,

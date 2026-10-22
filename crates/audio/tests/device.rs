@@ -47,6 +47,82 @@ fn listing_devices_works_without_any() {
 }
 
 #[test]
+fn listing_inputs_works_without_any() {
+    match audio::input_devices() {
+        Ok(inputs) => {
+            assert!(inputs.iter().all(|input| !input.id.is_empty()));
+            assert!(inputs.iter().filter(|input| input.is_default).count() <= 1);
+        }
+        Err(error) => println!("listing failed: {error}"),
+    }
+}
+
+#[test]
+fn an_unknown_input_does_not_stop_the_stream_opening() {
+    // On a machine without an output device, opening fails before inputs
+    // matter: that's for the other tests.
+    let request = StreamRequest {
+        inputs: vec!["no such input".into()],
+        ..StreamRequest::default()
+    };
+    let Ok(open) = audio::open(&request) else {
+        return;
+    };
+    let inputs = &open.info().inputs;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].channels, 0);
+    assert!(inputs[0].error.is_some(), "{inputs:?}");
+    assert!(open.input_buffers()[0].is_none());
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "needs an input device"]
+fn records_from_the_default_input() {
+    let inputs = audio::input_devices().unwrap();
+    let input = inputs.iter().find(|input| input.is_default).unwrap();
+    record(&input.id);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "needs an output device"]
+fn records_the_default_outputs_loopback() {
+    let outputs = audio::output_devices().unwrap();
+    let output = outputs.iter().find(|output| output.is_default).unwrap();
+    record(&audio::loopback_id(&output.id));
+}
+
+/// Records from `input` for two seconds, with the default output.
+#[cfg(windows)]
+fn record(input: &str) {
+    let request = StreamRequest {
+        inputs: vec![input.to_owned()],
+        ..StreamRequest::default()
+    };
+    let open = audio::open(&request).unwrap();
+    let info = open.info().clone();
+    println!("{:#?}", info.inputs);
+    assert_eq!(info.inputs[0].error, None);
+    let buffer = open.input_buffers()[0].clone().unwrap();
+    let (engine, _handle) = Engine::new(info.engine_config());
+    let stream = open.start(engine).unwrap();
+    thread::sleep(Duration::from_secs(2));
+    let stats = stream.input_stats().remove(0);
+    let delay = stream.stats().input_delay;
+    let frames = buffer.frames();
+    drop(stream.stop());
+
+    println!("{stats:#?}, monitoring delay {delay} frames, frames {frames:?}");
+    assert!(stats.aligned && stats.error.is_none(), "{stats:?}");
+    assert_eq!((stats.lost, stats.slips), (0, 0), "{stats:?}");
+    // Lined up within half a second, and it kept up.
+    let rate = u64::from(info.sample_rate);
+    assert!(frames.end - frames.start > rate, "{frames:?}");
+    assert!(delay > 0 && delay < rate / 4, "delay {delay}");
+}
+
+#[test]
 #[ignore = "needs an output device"]
 fn the_default_output_is_listed() {
     let devices = audio::output_devices().unwrap();

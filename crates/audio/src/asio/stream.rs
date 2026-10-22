@@ -454,7 +454,7 @@ impl Session {
         #[cfg(not(windows))]
         let mut system_inputs = system
             .iter()
-            .map(|_| Err::<OpenedInput, _>("only Windows records through the system here".into()));
+            .map(|_| Err::<OpenedInput, _>("only Windows records so far".into()));
         let opened: Vec<Result<OpenedInput, String>> = request
             .inputs
             .iter()

@@ -1,7 +1,8 @@
 use std::f64::consts::TAU;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use musicable_engine::rt;
 
@@ -119,24 +120,29 @@ fn the_playback_clock_gives_the_frame_heard_at_any_time() {
 fn readings_are_never_torn() {
     let clock = Arc::new(Playback::default());
     let done = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicU64::new(0));
     let reader = {
-        let (clock, done) = (clock.clone(), done.clone());
+        let (clock, done, seen) = (clock.clone(), done.clone(), seen.clone());
         thread::spawn(move || {
-            let mut seen = 0;
             while !done.load(Ordering::Relaxed) {
                 if let Some(reading) = clock.reading() {
                     assert_eq!(reading.time, reading.frame * 1_000);
-                    seen += 1;
+                    seen.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            seen
         })
     };
-    for frame in 1..1_000_000 {
+    // Publishing until the reader has read a good many, however the
+    // threads get scheduled.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut frame = 1;
+    while seen.load(Ordering::Relaxed) < 10_000 && Instant::now() < deadline {
         clock.publish(frame, frame * 1_000, 48_000);
+        frame += 1;
     }
     done.store(true, Ordering::Relaxed);
-    assert!(reader.join().unwrap() > 0);
+    reader.join().unwrap();
+    assert!(seen.load(Ordering::Relaxed) >= 10_000);
 }
 
 /// An output and an input, simulated: the output wakes every period and
@@ -407,6 +413,36 @@ fn inputs_on_another_clock_follow_its_drift() {
 }
 
 #[test]
+fn jittery_timings_never_make_a_resampled_input_jump() {
+    // Timings off by up to 2 ms, as some drivers' are: the loop's
+    // corrections glide, so the tone changes as smoothly as a tone can,
+    // with no step anywhere.
+    let sim = Simulation {
+        out_rate: 48_000,
+        out_period: 480,
+        in_rate: 44_100,
+        in_drift: 40e-6,
+        in_period: 441,
+        in_start: -4.0e6,
+        jitter: 2_000_000.0,
+        signal: tone,
+    };
+    let (buffer, counters) = sim.run(20.0, false);
+    assert_eq!(counters.snapshot().slips, 0);
+    let range = buffer.frames();
+    let mut out = vec![0.0; (range.end - range.start) as usize];
+    buffer.read_channel(range.start, 0, &mut out).unwrap();
+    // How much a 1 kHz tone at 0.5 can change its slope from one frame to
+    // the next.
+    let limit = 4.0 * (std::f32::consts::PI * 1_000.0 / 48_000.0).sin().powi(2) * 0.5;
+    let worst = out
+        .windows(3)
+        .map(|w| (w[2] - 2.0 * w[1] + w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(worst < 1.5 * limit, "{worst} against {limit}");
+}
+
+#[test]
 fn an_input_that_drifts_after_all_goes_over_to_resampling() {
     // Said to be on the output's clock, but 20 ppm fast: it slips every
     // few seconds until it's resampled.
@@ -440,6 +476,55 @@ fn an_input_that_drifts_after_all_goes_over_to_resampling() {
         .filter(|w| w.iter().all(|&s| s == 0.0))
         .count();
     assert_eq!(silent, 0);
+}
+
+#[test]
+fn a_resampled_input_whose_timing_jumps_realigns() {
+    // An input on another clock that keeps time, until its timing jumps
+    // 12 ms later for good, 15 seconds in, losing no frames it can count:
+    // too little to start again at once, too much to slowly catch up.
+    let clock = Arc::new(Playback::default());
+    let counters = Arc::new(InputCounters::default());
+    let (buffer, writer) = InputBuffer::new(1, 1 << 21);
+    let mut conformer = Conformer::new(
+        writer,
+        48_000,
+        48_000,
+        false,
+        clock.clone(),
+        counters.clone(),
+    );
+    clock.publish(0, 0, 48_000);
+    let mut samples = [0.0; 480];
+    for packet in 0..2_000u64 {
+        let position = packet * 480;
+        let late = if packet >= 1_500 { 576 } else { 0 };
+        let time = (position + late) * 1_000_000_000 / 48_000;
+        for (i, sample) in samples.iter_mut().enumerate() {
+            let t = (position + late + i as u64) as f64 / 48_000.0;
+            *sample = tone(t);
+        }
+        rt::scope(|| {
+            conformer.push(Packet {
+                position,
+                time: Some(time),
+                frames: 480,
+                samples: Some(&samples),
+            })
+        });
+    }
+    let stats = counters.snapshot();
+    assert_eq!(stats.slips, 1, "{stats:?}");
+    // A second after the jump, the tone is where it was heard again.
+    let from = 16 * 48_000;
+    let mut out = vec![0.0; 4 * 48_000];
+    buffer.read_channel(from, 0, &mut out).unwrap();
+    let error = out
+        .iter()
+        .enumerate()
+        .map(|(i, &sample)| (sample - tone((from + i as u64) as f64 / 48_000.0)).abs())
+        .fold(0.0, f32::max);
+    assert!(error < 0.02, "off by {error}");
 }
 
 #[test]

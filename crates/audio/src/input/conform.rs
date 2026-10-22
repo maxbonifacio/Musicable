@@ -18,7 +18,9 @@
 //! - **Another clock**: the offset drifts by a few parts per million, so the
 //!   input is resampled, with a phase-locked loop following the offsets: a
 //!   fast one at first, which settles to a slow one so that jitter in the
-//!   timings doesn't come through as wow.
+//!   timings doesn't come through as wow. Should the loop end up far from
+//!   the median offset for good, as when the first offsets were off while
+//!   the device started, it starts again from the median.
 
 use std::f64::consts::TAU;
 use std::sync::Arc;
@@ -44,6 +46,10 @@ const HISTORY: usize = 16_384;
 /// How far off a resampled input's timing can be before it starts again
 /// rather than slowly catching up, in frames.
 const RESTART_LIMIT: f64 = 2_048.0;
+/// How far a resampled input's timing can be from the median offset before
+/// it counts, in seconds: well beyond what jitter in the timings moves it.
+/// Twice in a row, and it starts again from the median.
+const REALIGN_LIMIT: f64 = 0.005;
 /// The most a resampled input's rate can stray from its nominal one: half a
 /// percent, far beyond any clock's drift.
 const MAX_DRIFT: f64 = 0.005;
@@ -82,6 +88,8 @@ pub(crate) struct Conformer {
     /// For resampling: kept up to date on the output's clock too, in case
     /// the input turns out to drift.
     tracking: Box<Tracking>,
+    /// [`REALIGN_LIMIT`] in capture frames.
+    realign_limit: f64,
 }
 
 enum State {
@@ -99,7 +107,20 @@ enum State {
         slipped: i64,
     },
     /// On another clock, resampled.
-    Tracking,
+    Tracking {
+        /// Checks in a row that found the timing far from the median.
+        strikes: u32,
+        since_check: u32,
+    },
+}
+
+impl State {
+    fn tracking() -> State {
+        State::Tracking {
+            strikes: 0,
+            since_check: 0,
+        }
+    }
 }
 
 impl Conformer {
@@ -120,7 +141,7 @@ impl Conformer {
         let state = if locks {
             State::Acquiring
         } else {
-            State::Tracking
+            State::tracking()
         };
         counters.set_resampled(!locks);
         Conformer {
@@ -134,6 +155,7 @@ impl Conformer {
             offsets: Offsets::default(),
             state,
             tracking: Box::new(Tracking::new(channels, rate, engine_rate)),
+            realign_limit: f64::from(rate) * REALIGN_LIMIT,
         }
     }
 
@@ -169,8 +191,7 @@ impl Conformer {
             self.offsets.push(offset);
         }
 
-        let tracking = &mut self.tracking;
-        tracking.store(packet, gap, skip);
+        self.tracking.store(packet, gap, skip);
         match &mut self.state {
             State::Acquiring => {
                 if self.offsets.len() >= ACQUIRE {
@@ -189,7 +210,7 @@ impl Conformer {
             State::Locked { .. } => {
                 if offset.is_some() && self.check_lock() {
                     // Drifting: resampled from here on.
-                    self.state = State::Tracking;
+                    self.state = State::tracking();
                     self.counters.set_resampled(true);
                     let median = self.offsets.median();
                     self.tracking.resume(median, self.ratio, self.writer.end());
@@ -198,21 +219,26 @@ impl Conformer {
                     self.write_locked(packet, skip);
                 }
             }
-            State::Tracking => {
-                if !tracking.started {
+            State::Tracking { .. } => {
+                if !self.tracking.started {
                     if self.offsets.len() >= ACQUIRE {
-                        tracking.start(self.offsets.median(), self.ratio, &mut self.writer);
+                        let median = self.offsets.median();
+                        self.tracking.start(median, self.ratio, &mut self.writer);
                         self.counters.set_aligned(true);
                     }
-                } else if let (Some(w), Some(_)) = (observed, offset)
-                    && tracking.follow(w, packet.position, self.engine_rate)
-                {
-                    // Too far off to catch up: start again from here.
-                    self.counters.slip();
-                    self.offsets.clear();
-                    self.offsets.push(packet.position as f64 - w * self.ratio);
-                    tracking.restart(packet.position as f64 - w * self.ratio, self.ratio);
+                } else if let (Some(w), Some(offset)) = (observed, offset) {
+                    if self.tracking.follow(w, packet.position, self.engine_rate) {
+                        // Too far off to catch up: start again from here.
+                        self.counters.slip();
+                        self.offsets.clear();
+                        self.offsets.push(offset);
+                        self.tracking.restart(offset, self.ratio);
+                    } else if let Some(median) = self.check_tracking(w) {
+                        self.counters.slip();
+                        self.tracking.restart(median, self.ratio);
+                    }
                 }
+                let tracking = &mut self.tracking;
                 if tracking.started {
                     tracking.produce(&mut self.writer);
                     self.counters
@@ -264,6 +290,35 @@ impl Conformer {
         let drifting = *slipped == moved.signum();
         *slipped = moved.signum();
         drifting
+    }
+
+    /// Checks a resampled input's timing against the median offset, at
+    /// engine frame `w`. Returns the median if the timing has been far from
+    /// it twice in a row: to start again from.
+    fn check_tracking(&mut self, w: f64) -> Option<f64> {
+        let State::Tracking {
+            strikes,
+            since_check,
+        } = &mut self.state
+        else {
+            return None;
+        };
+        *since_check += 1;
+        if *since_check < CHECK_EVERY {
+            return None;
+        }
+        *since_check = 0;
+        let median = self.offsets.median();
+        if (median - self.tracking.offset_at(w, self.ratio)).abs() > self.realign_limit {
+            *strikes += 1;
+        } else {
+            *strikes = 0;
+        }
+        if *strikes < 2 {
+            return None;
+        }
+        *strikes = 0;
+        Some(median)
     }
 
     /// Writes a packet's frames from frame `skip` on, at the engine frames a
@@ -382,6 +437,11 @@ struct Tracking {
     step: f64,
     /// Device frames per engine frame, by the nominal rates.
     nominal: f64,
+    /// The loop's corrections still to make, spread over the frames to
+    /// come so the position glides rather than jumps: device frames per
+    /// engine frame, for `slew_frames` more engine frames.
+    slew: f64,
+    slew_frames: u64,
     /// Offsets followed since the start.
     followed: u64,
     /// The engine frame of the last offset followed.
@@ -406,6 +466,8 @@ impl Tracking {
             next_x: 0.0,
             step: resampler.step(),
             nominal: resampler.step(),
+            slew: 0.0,
+            slew_frames: 0,
             followed: 0,
             last_w: None,
             out: vec![0.0; CHUNK * channels].into_boxed_slice(),
@@ -478,16 +540,33 @@ impl Tracking {
         }
         self.next_x = offset + self.next_w as f64 * ratio;
         self.step = self.nominal;
+        self.slew_frames = 0;
         self.followed = 0;
         self.last_w = None;
         self.started = true;
     }
 
+    /// The offset the loop has at engine frame `w`: the device position it
+    /// puts there, less `ratio` × `w`.
+    fn offset_at(&self, w: f64, ratio: f64) -> f64 {
+        self.position_at(w) - w * ratio
+    }
+
+    /// The device position the loop puts at engine frame `w`, its
+    /// corrections made.
+    fn position_at(&self, w: f64) -> f64 {
+        self.next_x + self.correction() + (w - self.next_w as f64) * self.step
+    }
+
+    /// The corrections still to make, in device frames.
+    fn correction(&self) -> f64 {
+        self.slew * self.slew_frames as f64
+    }
+
     /// Follows the offset seen at engine frame `w`, where the device was at
     /// `position`. Returns `true` if it's too far off to follow.
     fn follow(&mut self, w: f64, position: u64, engine_rate: u32) -> bool {
-        let predicted = self.next_x + (w - self.next_w as f64) * self.step;
-        let error = position as f64 - predicted;
+        let error = position as f64 - self.position_at(w);
         if error.abs() > RESTART_LIMIT {
             return true;
         }
@@ -505,7 +584,11 @@ impl Tracking {
         };
         self.followed += 1;
         let omega = TAU * bandwidth * interval;
-        self.next_x += 2.0 * omega * error;
+        // The correction goes in over the next 10 ms or so, the time to the
+        // next offset for most devices.
+        let correction = self.correction() + 2.0 * omega * error;
+        self.slew_frames = (interval.max(0.01) * f64::from(engine_rate)).round() as u64;
+        self.slew = correction / self.slew_frames as f64;
         self.step += omega * omega / (interval * f64::from(engine_rate)) * error;
         let (low, high) = (
             self.nominal * (1.0 - MAX_DRIFT),
@@ -532,7 +615,8 @@ impl Tracking {
                 self.flush(writer);
                 writer.append_silence(frames);
                 self.next_w += frames;
-                self.next_x += frames as f64 * self.step;
+                self.next_x += frames as f64 * self.step + self.correction();
+                self.slew_frames = 0;
                 continue;
             }
             let first = self.resampler.weights(self.next_x, &mut self.weights);
@@ -548,6 +632,10 @@ impl Tracking {
             self.pending += 1;
             self.next_w += 1;
             self.next_x += self.step;
+            if self.slew_frames > 0 {
+                self.next_x += self.slew;
+                self.slew_frames -= 1;
+            }
             if self.pending == CHUNK {
                 self.flush(writer);
             }

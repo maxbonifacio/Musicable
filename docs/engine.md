@@ -30,7 +30,8 @@ of Musicable, and where Tier 1 work plugs in.
   several snapshots are waiting it compiles only the newest. A node that
   takes its time to prepare, as a plugin can, holds up this thread only.
 - The **audio thread** owns the `Engine` and calls `Engine::process` or
-  `Engine::process_interleaved` once per device callback.
+  `Engine::process_interleaved` once per device callback, or their
+  `_with_input` forms with the audio devices' inputs.
 - With the `ParallelRenderer`, **worker threads** help the audio thread
   render each block (see [Parallel rendering](#parallel-rendering)).
 - The **disk thread** (`musicable-disk`) reads the audio files that stream
@@ -84,6 +85,21 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   ends where the transport changes and where the loop jumps back,
   `ProcessContext::transport` holds for every frame of the block, and while
   playing, frame `i` is at song position `position + i`.
+- `ProcessContext::time` is the block's engine time, and `Engine::time` the
+  engine time the next callback starts at.
+
+**Device inputs.** `Engine::process_with_input` and
+`process_interleaved_with_input` take what the audio devices' inputs captured
+for the callback, planar, exactly as many frames as the output: each input
+device's channels, one device after another, as the audio backend lays them
+out. Every node gets the block's share in `ProcessContext::input`, whatever
+the blocks a callback splits into, and none when the stream has no inputs.
+The backend gives them a fixed delay behind the output, the monitoring
+latency it reports ([audio.md](audio.md#inputs)), so frame `i` of the block
+is what the inputs captured that long before frame `i` is heard. Recording
+doesn't go through the engine: it reads the inputs' buffers, which line up
+with the output exactly. The resampler (`musicable_engine::resample`) is
+public, for the backend's inputs on another clock.
 
 ## Musical time
 
