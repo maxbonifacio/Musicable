@@ -26,11 +26,15 @@
 //! the output in an [`InputBuffer`], where frame `w` is what the input
 //! captured as the output's engine frame `w` was heard: that's where a
 //! recording of it belongs. The engine gets the inputs a fixed delay later,
-//! to monitor them.
+//! to monitor them. MIDI inputs ([`StreamRequest::midi_inputs`], from
+//! [`midi_input_devices`]) work the same way: each message goes into a
+//! [`MidiBuffer`] with the engine frame heard as it came in, and the engine
+//! plays it a fixed delay later.
 //!
 //! `docs/audio.md` describes how it works.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use musicable_engine::{Engine, EngineConfig};
@@ -38,6 +42,7 @@ use musicable_engine::{Engine, EngineConfig};
 #[cfg(any(windows, test))]
 mod format;
 mod input;
+mod midi;
 #[cfg(any(windows, test))]
 mod period;
 mod stats;
@@ -58,11 +63,13 @@ use cpal_host as backend;
 #[cfg(all(feature = "asio", any(windows, test)))]
 mod asio;
 
-use input::StreamInput;
 pub use input::{
     InputBuffer, InputClock, InputDevice, InputInfo, InputKind, InputStats, InputWriter, ReadError,
     loopback_id, loopback_of,
 };
+use input::{Playback, StreamInput};
+pub use midi::{MidiBuffer, MidiEvent, MidiInputDevice, MidiInputInfo, MidiReader, MidiWriter};
+use midi::{MidiBus, MidiInputs};
 pub use stats::StreamStats;
 
 #[cfg(test)]
@@ -137,6 +144,13 @@ pub fn input_devices() -> Result<Vec<InputDevice>, Error> {
     #[cfg(all(windows, feature = "asio"))]
     let devices = devices.into_iter().chain(asio::input_devices()).collect();
     Ok(devices)
+}
+
+/// The MIDI inputs a stream can play and record from: the MIDI input
+/// devices that are plugged in. Windows only so far: elsewhere there are
+/// none.
+pub fn midi_input_devices() -> Result<Vec<MidiInputDevice>, Error> {
+    Ok(midi::input_devices())
 }
 
 /// What a device supports, for offering choices before opening it.
@@ -231,6 +245,13 @@ pub struct StreamRequest {
     /// one input after another. An input that doesn't open doesn't stop the
     /// stream: [`StreamInfo::inputs`] says why.
     pub inputs: Vec<String>,
+    /// The MIDI inputs to open with the output, to play and record from:
+    /// [`MidiInputDevice::id`]s from [`midi_input_devices`]. The engine gets
+    /// their messages in
+    /// [`ProcessContext::midi`](musicable_engine::ProcessContext::midi),
+    /// each with its input's place in this list. An input that doesn't open
+    /// doesn't stop the stream: [`StreamInfo::midi_inputs`] says why.
+    pub midi_inputs: Vec<String>,
 }
 
 /// What drives a stream.
@@ -306,6 +327,8 @@ pub struct StreamInfo {
     /// The inputs requested, in order: how each one opened, or why it
     /// didn't.
     pub inputs: Vec<InputInfo>,
+    /// The MIDI inputs requested, in order: whether each one opened.
+    pub midi_inputs: Vec<MidiInputInfo>,
 }
 
 impl StreamInfo {
@@ -335,23 +358,44 @@ pub(crate) fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
 /// Opens a device for output. It doesn't play until it's started with an
 /// engine.
 pub fn open(request: &StreamRequest) -> Result<OpenStream, Error> {
+    let playback = Arc::new(Playback::default());
+    let midi = MidiInputs::open(&request.midi_inputs, &playback);
+    let feeds = Feeds {
+        playback,
+        midi: midi.bus(),
+    };
     #[cfg(all(windows, feature = "asio"))]
     if let Some(id) = request.device.as_deref()
         && DriverType::of(id) == DriverType::Asio
     {
-        let (info, inputs, inner) = asio::open(id, request)?;
+        let (mut info, inputs, inner) = asio::open(id, request, feeds)?;
+        info.midi_inputs = midi.infos.clone();
         return Ok(OpenStream {
             info,
             inputs,
+            midi,
             inner: OpenInner::Asio(inner),
         });
     }
-    let (info, inputs, inner) = backend::open(request)?;
+    let (mut info, inputs, inner) = backend::open(request, feeds)?;
+    info.midi_inputs = midi.infos.clone();
     Ok(OpenStream {
         info,
         inputs,
+        midi,
         inner: OpenInner::System(inner),
     })
+}
+
+/// What a backend's stream takes besides the request: where its audio
+/// thread publishes when the output plays each engine frame, which the
+/// inputs on threads of their own line up by, and the MIDI inputs it plays
+/// through the engine.
+#[derive(Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct Feeds {
+    pub playback: Arc<Playback>,
+    pub midi: MidiBus,
 }
 
 /// A device opened for output, not playing yet. Dropping it closes the
@@ -359,6 +403,7 @@ pub fn open(request: &StreamRequest) -> Result<OpenStream, Error> {
 pub struct OpenStream {
     info: StreamInfo,
     inputs: Vec<StreamInput>,
+    midi: MidiInputs,
     inner: OpenInner,
 }
 
@@ -387,6 +432,12 @@ impl OpenStream {
         input_buffers(&self.inputs)
     }
 
+    /// The MIDI inputs' buffers, in the order requested: `None` for an
+    /// input that didn't open. See [`Stream::midi_buffers`].
+    pub fn midi_buffers(&self) -> Vec<Option<MidiBuffer>> {
+        self.midi.buffers.clone()
+    }
+
     /// Starts playing what `engine` renders. The engine must run at the
     /// stream's sample rate; [`StreamInfo::engine_config`] has the block size
     /// to create it with.
@@ -409,6 +460,7 @@ impl OpenStream {
         Ok(Stream {
             info: self.info,
             inputs: self.inputs,
+            midi: self.midi,
             inner,
         })
     }
@@ -445,6 +497,7 @@ impl std::error::Error for StartError {}
 pub struct Stream {
     info: StreamInfo,
     inputs: Vec<StreamInput>,
+    midi: MidiInputs,
     inner: StreamInner,
 }
 
@@ -460,6 +513,15 @@ impl Stream {
     /// captured after the stream stops, until dropped.
     pub fn input_buffers(&self) -> Vec<Option<InputBuffer>> {
         input_buffers(&self.inputs)
+    }
+
+    /// The MIDI inputs' buffers, in the order requested: `None` for an
+    /// input that didn't open. Each holds what its input brought, each
+    /// message with the engine frame heard as it came in, from when the
+    /// stream starts playing, and can be read from any thread. Recordings
+    /// read them. Once the stream stops, they end.
+    pub fn midi_buffers(&self) -> Vec<Option<MidiBuffer>> {
+        self.midi.buffers.clone()
     }
 
     /// Each input's counters, in the order requested.

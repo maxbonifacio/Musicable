@@ -218,6 +218,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         recordings: &[],
                         levels: &state.levels,
                         inputs: &[],
+                        midi_inputs: &[],
                         audio: Audio {
                             summary: "",
                             running: true,
