@@ -1,8 +1,8 @@
 # Plugins
 
 How Musicable hosts plugins, CLAP and VST3, in `crates/plugins`, and how
-the app puts them on tracks, in `crates/app`. The app has CLAP plugins so
-far, and VST3 comes to it next. ARA 2 comes after, on top of VST3.
+the app puts them on tracks, in `crates/app`. ARA 2 comes after, on top of
+VST3.
 [app.md](app.md#plugins) says how plugins look and work in the app's
 window.
 
@@ -13,7 +13,7 @@ says what's different there.
 
 | Piece | Where | What it does |
 |---|---|---|
-| `clap::Instance`, `vst3::Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else the format wants done on the main thread |
+| `Instance`: a `clap::Instance` or a `vst3::Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else the format wants done on the main thread. `Instance::new` takes the format, and the app holds every plugin as an `Instance` |
 | `NodeSource`, `ClapNode`, `Vst3Node` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
 | `scan` | A process of its own | Lists the plugins in a library, so one that crashes or hangs as it loads takes only the scanner down; `ScanCache` remembers what was found |
 | `crates/test-plugins` | Tests | A gain and a synth, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
@@ -204,8 +204,8 @@ open project, on a track or on the master:
   and the compiler builds its nodes into the graph
   (`compile_with_devices`, with a `NodeMaker` for each device). Until it
   loads, and if it never does, the device passes the signal through. A
-  plugin that isn't installed, a VST3 plugin, or one that fails to load or
-  start says why, in the status bar and on its device, as in "Old Reverb
+  plugin that isn't installed, or one that fails to load or start, says
+  why, in the status bar and on its device, as in "Old Reverb
   isn't installed, or Musicable hasn't found it: it plays nothing", and
   isn't tried again until the next scan.
 - **Following the project.** Adding or deleting a device, or undoing that,
@@ -228,7 +228,8 @@ open project, on a track or on the master:
 - **Another engine**, for another sample rate or buffer size, activates
   every plugin again for it.
 
-The app scans for plugins in the background as it starts. What the last
+The app scans for plugins in the background as it starts, in CLAP's
+places and VST3's ([Scanning](#scanning)). What the last
 scan found is kept in `plugins.json` in the config folder, so the plugins
 are there at once, and the scan only loads the libraries that are new or
 changed since. It runs Musicable's own binary for each, as
@@ -239,9 +240,11 @@ asks. On Windows the plugin's window goes inside a window of Musicable's,
 which the main window owns, so it stays in front of the main window and
 minimizes with it. It's as big as the plugin says, and follows the plugin
 when it asks for another size; it doesn't resize by its border. Elsewhere,
-and for a plugin that can't go inside another window, the plugin opens a
-window of its own. Closing the window, or deleting the device, closes the
-plugin's window first, then Musicable's.
+and for a CLAP plugin that can't go inside another window, the plugin opens
+a window of its own. A VST3 plugin's window only goes inside another, so
+it opens only on Windows so far; elsewhere the app says it can't open yet.
+Closing the window, or deleting the device, closes the plugin's window
+first, then Musicable's.
 
 ## Scanning
 
@@ -300,14 +303,15 @@ scanner's test runs the test binary itself as the scanning process
 The node is checked for allocations like every node. The plugin's own code
 isn't: its allocations go through its own allocator. RTSan will check that.
 
-The app's tests use the same plugins:
+The app's tests use the same plugins, in both formats:
 [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays them
 through the session, saves and opens them again, undoes changes made in
 their windows, plays a missing plugin, lines a latent plugin up with a dry
 track to the sample, also after its latency changes, and runs the app's
 binary as the scanner.
 [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
-does it all in the app's window, with the mouse and the keys.
+does it all in the app's window, with the mouse and the keys, and puts a
+VST3 plugin on a track and opens its window.
 
 ## Not done yet
 
@@ -317,10 +321,9 @@ does it all in the app's window, with the mouse and the keys.
   state.
 - Audio ports beyond the main ones (sidechains), 64-bit processing, MPE
   MIDI, notes a plugin plays, and letting a quiet plugin sleep.
-- VST3 in the app: scanning for VST3 modules, VST3 devices on tracks, and
-  their windows.
-- VST3 windows on Linux, which need the host's run loop, and VST3's MIDI
-  mapping, so MIDI controllers reach plugins that only take them as
-  parameters.
+- VST3 windows in the app on macOS, which needs an `NSView` of Musicable's
+  to put them in, and on Linux, which needs the host's run loop too.
+- VST3's MIDI mapping, so MIDI controllers reach plugins that only take
+  them as parameters.
 - ARA 2.
 - A CI job with [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html).

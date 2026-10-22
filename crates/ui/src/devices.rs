@@ -3,7 +3,7 @@
 //! beside the arrangement, which lists the plugins installed and adds them
 //! to the devices the panel shows.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{
     Align, Button, Frame, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit, Ui,
@@ -354,6 +354,16 @@ impl Browser {
             .collect();
         // The best matches first, and otherwise in the order given.
         found.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+        // A plugin installed in more than one format is listed in each, with
+        // the format after its name.
+        let mut formats = BTreeMap::new();
+        let mut twins = BTreeSet::new();
+        for p in plugins.installed {
+            let key = (p.name.as_str(), p.vendor.as_str());
+            if formats.insert(key, p.format).is_some_and(|f| f != p.format) {
+                twins.insert(key);
+            }
+        }
         let to = match chain {
             Some(Chain::Master) => "the master".to_owned(),
             Some(Chain::Track(id)) => match view.project.track(id) {
@@ -371,17 +381,22 @@ impl Browser {
                     let empty = match (plugins.installed.is_empty(), plugins.scanning) {
                         (true, true) => "Looking for plugins...",
                         (true, false) => {
-                            "No plugins found. Musicable looks for CLAP plugins \
-                                          where CLAP says they're installed."
+                            "No plugins found. Musicable looks for CLAP and VST3 \
+                                          plugins where each format says they're installed."
                         }
                         (false, _) => "No plugins match.",
                     };
                     ui.add(Label::new(RichText::new(empty).weak()).wrap());
                 }
                 for &(_, plugin) in &found {
+                    let name = if twins.contains(&(plugin.name.as_str(), plugin.vendor.as_str())) {
+                        format!("{} ({})", plugin.name, format_name(plugin.format))
+                    } else {
+                        plugin.name.clone()
+                    };
                     let row = ui
                         .add(
-                            Button::selectable(false, &plugin.name)
+                            Button::selectable(false, name)
                                 .min_size(vec2(ui.available_width(), 0.0)),
                         )
                         .on_hover_text(format!(
@@ -676,6 +691,44 @@ mod tests {
         harness.run();
         harness.get_by_label_contains("No plugins found.");
         harness.get_by_label("0 plugins");
+    }
+
+    #[test]
+    fn a_plugin_in_both_formats_is_listed_in_each_with_its_format() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut harness = harness(project);
+        let state = harness.state_mut();
+        let surge = entry("Surge XT", "Surge Synth Team", true);
+        state.plugins = vec![
+            surge.clone(),
+            PluginEntry {
+                format: PluginFormat::Vst3,
+                id: "D07A3E8BF8E64BB8A1A2B3C4D5E6F708".to_owned(),
+                ..surge
+            },
+            entry("Vital", "Vital Audio", true),
+        ];
+        state.editor.selected_track = Some(keys);
+        state.shell.toggle_panel(BROWSER);
+        harness.run();
+        harness.get_by_label("Surge XT (CLAP)");
+        harness.get_by_label("Vital");
+        harness.get_by_label("3 plugins");
+
+        // Each adds its own, by the name the plugin has.
+        let at = harness.get_by_label("Surge XT (VST3)").rect().center();
+        double_click(&mut harness, at);
+        let add = Args::new()
+            .with("format", "vst3")
+            .with("plugin", "D07A3E8BF8E64BB8A1A2B3C4D5E6F708")
+            .with("name", "Surge XT")
+            .with("instrument", true)
+            .with("track", keys);
+        assert_eq!(
+            actions(&mut harness),
+            [Action::RunWith(device::ADD_PLUGIN, add)]
+        );
     }
 
     #[test]

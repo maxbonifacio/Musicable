@@ -463,8 +463,9 @@ folder until it's opened again. MIDI recording isn't done yet.
 
 ## Plugins
 
-The app finds CLAP plugins in CLAP's usual places, and in the folders in
-`CLAP_PATH` ([plugins.md](plugins.md#scanning)). It scans in the background
+The app finds CLAP and VST3 plugins in each format's usual places, and in
+the folders in `CLAP_PATH` and `VST3_PATH`
+([plugins.md](plugins.md#scanning)). It scans in the background
 as it starts, with the plugins the last scan found ready at once, and
 loads only the libraries that are new or changed since. A library that
 crashes, hangs or fails as it loads is left out, and the status bar says
@@ -472,7 +473,9 @@ which; **Options > Rescan Plugins** tries those again too.
 
 **The plugin browser** lists the plugins found by name: all of them, or
 only the instruments or the effects. Hovering one shows its vendor, its
-kind and its format. The search field finds plugins by name or vendor, the
+kind and its format. A plugin installed in both formats is listed in each,
+with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
+The search field finds plugins by name or vendor, the
 best matches first. Double-click a plugin to put it at the end of the
 selected track's devices, or the master's while the devices panel shows
 those. The browser's foot says how many plugins there are, and has Rescan,
@@ -488,7 +491,8 @@ CLAP"), and:
   Double-clicking the device's name opens it too, as in Live. On Windows
   the plugin's window goes inside a window of Musicable's that stays in
   front of the main window and minimizes with it; elsewhere it's a window
-  of the plugin's own.
+  of the plugin's own. VST3 plugins have no windows of their own, so
+  theirs open only on Windows so far.
 - **×**, which deletes the device.
 - Why the plugin isn't playing, when it isn't: it isn't installed, it
   didn't load, or the scan that finds it hasn't finished. A device whose
@@ -761,7 +765,8 @@ for, since those builds are distributed under it.
   [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
   puts the test plugins on a track from the plugin browser, opens and
   closes a plugin's window from the devices panel, turns a knob in it,
-  undoes, deletes a device, saves, and opens the project again.
+  undoes, deletes a device, saves, and opens the project again. It also
+  puts a VST3 plugin on a track and opens its window.
   `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
@@ -789,10 +794,10 @@ for, since those builds are distributed under it.
   checks that every renderer plays it the same, and that a missing file is
   reported.
 - [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays the
-  test plugins on tracks through the session: saved and opened again,
-  undoing changes made in their windows, missing, and lined up with a dry
-  track by delay compensation. It also runs the app's binary as the plugin
-  scanner.
+  test plugins on tracks through the session, as CLAP and as VST3: saved
+  and opened again, undoing changes made in their windows, missing, and
+  lined up with a dry track by delay compensation. It also runs the app's
+  binary as the plugin scanner, on a CLAP library and a VST3 bundle.
 
 To see the window without Windows, a Linux build runs under Xvfb, and the
 Windows build runs under Wine with `WGPU_BACKEND=vulkan` (Wine's Direct3D 12
@@ -804,6 +809,7 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   devices in the mixer.
 - Dragging plugins from the browser onto tracks, moving devices along a
   chain, and a device's parameters in the devices panel.
+- VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would

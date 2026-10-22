@@ -1,7 +1,9 @@
 //! Plugins' own windows. On Windows, a plugin's window goes inside a window
 //! of Musicable's, which the main window owns, so it stays in front of it
-//! and minimizes with it. Elsewhere, and for a plugin that can't go inside
-//! another window, the plugin opens a window of its own.
+//! and minimizes with it. Elsewhere, and for a CLAP plugin that can't go
+//! inside another window, the plugin opens a window of its own. VST3
+//! plugins' windows only go inside another, so they open only on Windows
+//! so far.
 
 use std::collections::BTreeMap;
 
@@ -185,9 +187,13 @@ fn open(
             frame.show();
             Ok(Window::Embedded(frame))
         }
-        // A plugin that can't go inside another window has one of its own.
-        Err(_) => {
+        // A CLAP plugin that can't go inside another window has one of its
+        // own. A VST3 plugin's only goes inside.
+        Err(e) => {
             drop(frame);
+            if instance.as_vst3().is_some() {
+                return Err(e.to_string());
+            }
             instance
                 .open_floating_window(title)
                 .map_err(|e| e.to_string())?;
@@ -204,6 +210,12 @@ fn open(
     title: &str,
     _wake: Waker,
 ) -> Result<Window, String> {
+    if instance.as_vst3().is_some() {
+        return Err(format!(
+            "{}'s window can't open here yet: Musicable shows VST3 plugins' windows only on Windows so far",
+            instance.info().name
+        ));
+    }
     instance
         .open_floating_window(title)
         .map_err(|e| e.to_string())?;

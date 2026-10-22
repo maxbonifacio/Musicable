@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
 use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
-use musicable_model::{DeviceId, PluginFormat, Project};
+use musicable_model::{DeviceId, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 /// A change a plugin made itself, for the project to follow.
@@ -158,12 +158,7 @@ impl Plugins {
                 "{name} isn't installed, or Musicable hasn't found it: it plays nothing"
             ));
         };
-        if plugin.format == PluginFormat::Vst3 {
-            return Err(format!(
-                "{name} is a VST3 plugin, which Musicable can't load yet"
-            ));
-        }
-        let instance = Instance::new(&info.path, &info.id, self.waker.clone())
+        let instance = Instance::new(info.format, &info.path, &info.id, self.waker.clone())
             .map_err(|e| format!("{name} didn't load: {e}"))?;
         let fresh = match instance.has_state() {
             true => instance.save_state().ok().map(PluginState::new),
