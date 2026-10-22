@@ -34,28 +34,17 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use musicable_engine::{EngineConfig, Graph};
 
 use super::events::{self, Event, OutEvent};
-use super::host::{
-    ACTIVE, AudioThread, DESTROYED, FAILED, INACTIVE, NO_RESIZE, PROCESSING, Shared,
-};
+use super::host::{NO_RESIZE, Shared};
 use super::library::Library;
-use super::node::{Audio, EVENT_CAPACITY, NodeSource, NotePort, ParamChange, PortInfo};
-use crate::{Error, ParamInfo, PluginEvent, PluginInfo, Waker};
+use super::node::{Audio, EVENT_CAPACITY, NodeSource, NotePort, PortInfo};
+use crate::process::ParamChange;
+use crate::threads::{ACTIVE, AudioThread, DESTROYED, FAILED, INACTIVE, PROCESSING};
+use crate::{Error, ParamInfo, ParentWindow, PluginEvent, PluginInfo, Waker};
 
 /// How many parameter changes can wait for the plugin's next block.
 const PARAM_QUEUE: usize = 1024;
 /// How many events the plugin can send back between two polls.
 const OUT_QUEUE: usize = 4096;
-
-/// A native window to put a plugin's window in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentWindow {
-    /// A Win32 `HWND`.
-    Win32(*mut c_void),
-    /// A Cocoa `NSView`.
-    Cocoa(*mut c_void),
-    /// An X11 window.
-    X11(u64),
-}
 
 impl ParentWindow {
     fn clap(self) -> clap_window {
@@ -258,6 +247,7 @@ impl Instance {
                     get_info(plugin, index, info.as_mut_ptr()).then(|| info.assume_init())
                 }?;
                 let flag = |flag| info.flags & flag != 0;
+                let range = info.max_value - info.min_value;
                 Some(ParamInfo {
                     id: info.id,
                     name: fixed_string(&info.name),
@@ -265,7 +255,11 @@ impl Instance {
                     min: info.min_value,
                     max: info.max_value,
                     default: info.default_value,
-                    stepped: flag(CLAP_PARAM_IS_STEPPED),
+                    steps: if flag(CLAP_PARAM_IS_STEPPED) && range >= 1.0 {
+                        range.round().min(f64::from(u32::MAX)) as u32
+                    } else {
+                        0
+                    },
                     hidden: flag(CLAP_PARAM_IS_HIDDEN),
                     read_only: flag(CLAP_PARAM_IS_READONLY),
                     bypass: flag(CLAP_PARAM_IS_BYPASS),

@@ -12,6 +12,7 @@ use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::version::clap_version_is_compatible;
 use musicable_model::PluginFormat;
 
+use crate::bundle::{self, canonical};
 use crate::{Error, PluginInfo};
 
 /// A `.clap` file, loaded and initialized. It's deinitialized and unloaded
@@ -193,20 +194,6 @@ impl Drop for Library {
     }
 }
 
-/// The path a library is known by: absolute, with links resolved. On
-/// Windows, without the `\\?\` prefix that resolving adds, which plugins
-/// that work out paths from theirs don't expect.
-pub(crate) fn canonical(path: &Path) -> std::io::Result<PathBuf> {
-    let path = path.canonicalize()?;
-    if cfg!(windows)
-        && let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\"))
-        && rest.as_bytes().get(1) == Some(&b':')
-    {
-        return Ok(PathBuf::from(rest));
-    }
-    Ok(path)
-}
-
 /// A C string from the library, or empty if it's null.
 ///
 /// # Safety
@@ -228,44 +215,9 @@ fn path_cstring(path: &Path) -> Result<CString, Error> {
 /// The file to load for the plugin at `path`: on macOS, a `.clap` is a
 /// bundle, with its binary inside; elsewhere, the file itself.
 fn binary(path: &Path) -> Result<PathBuf, Error> {
-    if !path.is_dir() {
-        return Ok(path.to_owned());
-    }
-    let missing = || Error::new(format!("{} has no binary in it", path.display()));
-    let macos = path.join("Contents").join("MacOS");
-    let plist =
-        std::fs::read_to_string(path.join("Contents").join("Info.plist")).unwrap_or_default();
-    if let Some(name) = bundle_executable(&plist) {
-        return Ok(macos.join(name));
-    }
-    let mut files = std::fs::read_dir(&macos)
-        .map_err(|_| missing())?
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .filter(|path| path.is_file());
-    match (files.next(), files.next()) {
-        (Some(only), None) => Ok(only),
-        _ => Err(missing()),
-    }
-}
-
-/// `CFBundleExecutable` in an `Info.plist`.
-fn bundle_executable(plist: &str) -> Option<&str> {
-    let after = plist.split_once("<key>CFBundleExecutable</key>")?.1;
-    let value = after.trim_start().strip_prefix("<string>")?;
-    let name = value.split_once("</string>")?.0.trim();
-    (!name.is_empty() && !name.contains(['/', '\\'])).then_some(name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundles_name_their_binary() {
-        let plist = "<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>Surge XT</string>\n</dict>";
-        assert_eq!(bundle_executable(plist), Some("Surge XT"));
-        assert_eq!(bundle_executable("<dict></dict>"), None);
-        let escape = "<key>CFBundleExecutable</key><string>../evil</string>";
-        assert_eq!(bundle_executable(escape), None);
+    if path.is_dir() {
+        bundle::macos_binary(path)
+    } else {
+        Ok(path.to_owned())
     }
 }

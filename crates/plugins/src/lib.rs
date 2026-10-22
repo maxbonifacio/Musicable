@@ -25,6 +25,7 @@
 //! [`Node`]: musicable_engine::Node
 //! [`Node::adopt`]: musicable_engine::Node::adopt
 
+use std::ffi::c_void;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,16 +33,20 @@ use std::sync::Arc;
 use musicable_model::PluginFormat;
 use serde::{Deserialize, Serialize};
 
+mod bundle;
 pub mod clap;
+mod process;
 pub mod scan;
 #[cfg(test)]
 mod tests;
+mod threads;
+pub mod vst3;
 
 #[cfg(test)]
 #[global_allocator]
 static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
 
-pub use clap::{ClapNode, Instance, NodeSource, ParentWindow};
+pub use clap::{ClapNode, Instance, NodeSource};
 
 /// Tells the app that a plugin needs [`Instance::poll`] called, from
 /// whatever thread the plugin asks on, though never an audio thread.
@@ -54,14 +59,16 @@ pub struct PluginInfo {
     #[serde(with = "format_name")]
     pub format: PluginFormat,
     /// The plugin's id in its format, which projects name it by: CLAP's
-    /// reverse-domain id, such as `org.surge-synth-team.surge-xt`.
+    /// reverse-domain id, such as `org.surge-synth-team.surge-xt`, or
+    /// VST3's class id, as 32 hex digits.
     pub id: String,
     pub name: String,
     pub vendor: String,
     pub version: String,
     pub description: String,
     /// What the plugin says it is, in its format's words: CLAP's features,
-    /// such as `instrument`, `audio-effect` or `reverb`.
+    /// such as `instrument`, `audio-effect` or `reverb`, or VST3's
+    /// subcategories, such as `Instrument`, `Fx` or `Reverb`.
     pub features: Vec<String>,
     /// The library it's in.
     pub path: PathBuf,
@@ -70,11 +77,16 @@ pub struct PluginInfo {
 impl PluginInfo {
     /// Whether the plugin plays notes.
     pub fn is_instrument(&self) -> bool {
-        self.features.iter().any(|f| f == "instrument")
+        self.features
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("instrument"))
     }
 }
 
 /// A plugin parameter, as the plugin describes it.
+///
+/// Its values are the ones the plugin takes: CLAP's, from `min` to `max`,
+/// and VST3's normalized values, from 0 to 1, whatever they stand for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamInfo {
     /// The plugin's id for it, which stays the same from one version of the
@@ -86,8 +98,10 @@ pub struct ParamInfo {
     pub min: f64,
     pub max: f64,
     pub default: f64,
-    /// It takes whole numbers only.
-    pub stepped: bool,
+    /// How many steps its values take from `min` to `max`, evenly spaced:
+    /// whole numbers for CLAP's stepped parameters, and VST3's step count.
+    /// 0 for any value in between.
+    pub steps: u32,
     /// The plugin doesn't want it shown.
     pub hidden: bool,
     /// The host can read it but not change it.
@@ -96,6 +110,17 @@ pub struct ParamInfo {
     pub bypass: bool,
     pub automatable: bool,
     pub modulatable: bool,
+}
+
+/// A native window to put a plugin's window in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentWindow {
+    /// A Win32 `HWND`.
+    Win32(*mut c_void),
+    /// A Cocoa `NSView`.
+    Cocoa(*mut c_void),
+    /// An X11 window.
+    X11(u64),
 }
 
 /// Something that happened to a plugin, for the main thread to act on:

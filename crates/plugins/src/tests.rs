@@ -223,8 +223,8 @@ fn the_gain_plugin_describes_its_parameters() {
         ),
         ("Gain", "Test", 0.0, 2.0, 1.0)
     );
-    assert!(gain.automatable && gain.modulatable && !gain.stepped);
-    assert!(params[1].stepped && !params[1].automatable);
+    assert!(gain.automatable && gain.modulatable && gain.steps == 0);
+    assert!(params[1].steps == 48_000 && !params[1].automatable);
     assert_eq!(instance.param_value(GAIN), Some(1.0));
     assert_eq!(instance.param_value(99), None);
     assert_eq!(

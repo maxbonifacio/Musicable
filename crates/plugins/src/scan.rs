@@ -21,6 +21,7 @@ use musicable_model::PluginFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::clap::Library;
+use crate::vst3::Module;
 use crate::{Error, PluginInfo};
 
 /// How long a library gets to load before it counts as hung.
@@ -65,7 +66,7 @@ pub fn format_of(path: &Path) -> Option<PluginFormat> {
 pub fn scan_here(path: &Path) -> Result<Vec<PluginInfo>, Error> {
     match format_of(path) {
         Some(PluginFormat::Clap) => Ok(Library::load(path)?.plugins()),
-        Some(PluginFormat::Vst3) => Err(Error::new("VST3 plugins aren't supported yet")),
+        Some(PluginFormat::Vst3) => Ok(Module::load(path)?.plugins()),
         None => Err(Error::new(format!(
             "{} isn't a plugin library",
             path.display()
@@ -164,8 +165,30 @@ pub fn clap_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Where this platform's VST3 plugins are installed, as VST3 says: the
+/// directories in `VST3_PATH` first, which Musicable reads as it reads
+/// `CLAP_PATH`.
+pub fn vst3_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("VST3_PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    if cfg!(windows) {
+        dirs.extend(env("COMMONPROGRAMFILES").map(|d| d.join("VST3")));
+        dirs.extend(env("LOCALAPPDATA").map(|d| d.join("Programs").join("Common").join("VST3")));
+    } else if cfg!(target_os = "macos") {
+        dirs.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
+        dirs.extend(env("HOME").map(|d| d.join("Library/Audio/Plug-Ins/VST3")));
+    } else {
+        dirs.extend(env("HOME").map(|d| d.join(".vst3")));
+        dirs.push(PathBuf::from("/usr/lib/vst3"));
+        dirs.push(PathBuf::from("/usr/local/lib/vst3"));
+    }
+    dirs
+}
+
 /// The plugin libraries in `dirs` and the directories below them, sorted.
-/// A macOS bundle is a library, not a directory to look in.
+/// A bundle, such as a VST3 one, is a library, not a directory to look in.
 pub fn find_libraries(dirs: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: u32, found: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
