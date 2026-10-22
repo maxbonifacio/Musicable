@@ -27,8 +27,9 @@ use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
 
+use crate::clap::Instance;
 use crate::scan::{self, Outcome};
-use crate::{Instance, ParentWindow, PluginEvent};
+use crate::{ParentWindow, PluginEvent};
 
 pub(crate) const CONFIG: EngineConfig = EngineConfig {
     sample_rate: 48_000,

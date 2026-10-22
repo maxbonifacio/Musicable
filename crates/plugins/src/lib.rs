@@ -1,6 +1,5 @@
 //! Plugin hosting: CLAP ([`clap`]) and VST3 ([`vst3`]), then ARA 2 on top
-//! of VST3. The two work alike, and what's said here of CLAP's
-//! [`Instance`] holds for [`vst3::Instance`] too.
+//! of VST3. The two work alike, and an [`Instance`] is a plugin of either.
 //!
 //! [`Instance::new`] loads a plugin's library and makes an instance of the
 //! plugin. The instance lives on the thread that made it, the app's main
@@ -37,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 mod bundle;
 pub mod clap;
+mod instance;
 mod process;
 pub mod scan;
 #[cfg(test)]
@@ -48,7 +48,7 @@ pub mod vst3;
 #[global_allocator]
 static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
 
-pub use clap::{ClapNode, Instance, NodeSource};
+pub use instance::{Instance, NodeSource};
 
 /// Tells the app that a plugin needs [`Instance::poll`] called, from
 /// whatever thread the plugin asks on, though never an audio thread.
