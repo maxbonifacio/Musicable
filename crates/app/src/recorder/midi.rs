@@ -1,18 +1,22 @@
-//! What a MIDI track records: the notes its MIDI input plays, each message
-//! placed by the engine frame heard as it came in, as an audio input's
-//! frames are.
+//! What a MIDI track records: the notes its MIDI input plays and how it
+//! moves the controllers, such as the sustain pedal, each message placed
+//! by the engine frame heard as it came in, as an audio input's frames are.
 //!
 //! The track's input goes through the engine's own [`MidiNotes`], as it
 //! does to play, so the notes recorded are the notes heard: MPE included.
 //! What came in before the recording started goes through it too, without
-//! being recorded, so it knows the notes held and the pitch bend ranges
-//! set. A note held as recording punches in isn't recorded. A note held as
-//! a pass ends stops there, and if the next pass records on from it, as
-//! round a loop, starts again at its start.
+//! being recorded, so it knows the notes held, the pitch bend ranges set
+//! and where the controllers are. A note held as recording punches in isn't
+//! recorded. A note held as a pass ends stops there, and if the next pass
+//! records on from it, as round a loop, starts again at its start. Each
+//! pass starts with the controllers where they are, so a pedal held down
+//! as it starts holds the notes in the take as it did while recording.
+
+use std::ops::Range;
 
 use musicable_audio::{MidiBuffer, MidiEvent, MidiReader};
 use musicable_commands::take::{NotePass, PlayedNote};
-use musicable_engine::{MidiNotes, MidiSource, NoteEvent, NoteId, Segment};
+use musicable_engine::{MidiNotes, MidiSource, NoteEvent, NoteId, Played, Segment};
 use musicable_model::clip::{Dimension, Note};
 
 use super::Armed;
@@ -124,16 +128,24 @@ impl MidiTape {
         // Each input's are in order: a stable sort keeps them so.
         self.events.sort_by_key(|event| event.frame);
         let recording = segment.playing && segment.recording;
+        // What came in before the recording started goes first, and isn't
+        // recorded, so a pass starting now starts with the controllers
+        // where that left them.
+        let start = i128::from(self.start);
+        let early = (self.events).partition_point(|event| i128::from(event.frame) - lag < start);
+        self.play(0..early, segment, e..until, lag, false);
         if recording {
             let position = segment.position_at(e);
             let runs_on = self.open
                 && (self.passes.last()).is_some_and(|pass| pass.start + pass.frames == position);
             if !runs_on {
                 self.end_pass(true);
+                let controllers = self.notes.controllers();
                 self.passes.push(NotePass {
                     start: position,
                     frames: 0,
                     notes: Vec::new(),
+                    controllers: controllers.map(|(c, value)| (position, c, value)).collect(),
                 });
                 self.open = true;
                 self.start_held(position);
@@ -141,30 +153,46 @@ impl MidiTape {
         } else {
             self.end_pass(false);
         }
+        self.play(early..self.events.len(), segment, e..until, lag, recording);
+        if recording && let Some(pass) = self.passes.last_mut() {
+            pass.frames += until - e;
+        }
+        self.done = until;
+    }
+
+    /// Plays the stretch's messages in `range` through the input's notes,
+    /// at engine times in `times`, the messages' frames less `lag`, and
+    /// records what they play in the last pass if `recorded`.
+    fn play(
+        &mut self,
+        range: Range<usize>,
+        segment: &Segment,
+        times: Range<u64>,
+        lag: i128,
+        recorded: bool,
+    ) {
         let Self {
             notes,
             sounding,
             passes,
             events,
-            start,
             ..
         } = self;
-        for event in events.iter() {
-            let at = i128::from(event.frame) - lag;
-            let recorded = recording && at >= i128::from(*start);
+        for event in &events[range] {
             // One that came in late for the last stretch goes at the start
             // of this one.
-            let at = u64::try_from(at).unwrap_or(0).clamp(e, until - 1);
-            let position = segment.position_at(at);
+            let at = u64::try_from(i128::from(event.frame) - lag).unwrap_or(0);
+            let position = segment.position_at(at.clamp(times.start, times.end - 1));
             let mut pass = passes.last_mut().filter(|_| recorded);
-            notes.take(event.bytes, |note| {
-                follow(sounding, pass.as_deref_mut(), note, position);
+            notes.take(event.bytes, |played| match played {
+                Played::Note(note) => follow(sounding, pass.as_deref_mut(), note, position),
+                Played::Controller { controller, value } => {
+                    if let Some(pass) = pass.as_deref_mut() {
+                        pass.controllers.push((position, controller, value));
+                    }
+                }
             });
         }
-        if recording && let Some(pass) = self.passes.last_mut() {
-            pass.frames += until - e;
-        }
-        self.done = until;
     }
 
     /// What it recorded once the recording stopped: the passes with notes.

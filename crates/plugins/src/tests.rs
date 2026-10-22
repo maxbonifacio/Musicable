@@ -22,7 +22,7 @@ use musicable_engine::{
     NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId, ProcessContext,
     TransportState, rt,
 };
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
@@ -124,6 +124,12 @@ impl TestPlugins {
         unsafe { self.library.transport(instance.raw()) }
     }
 
+    /// The MIDI messages the synth got since this was last asked.
+    fn midi(&self, instance: &Instance) -> Vec<[u8; 3]> {
+        // SAFETY: as above, between blocks.
+        unsafe { self.library.midi(instance.raw()) }
+    }
+
     fn gain(&self) -> Instance {
         Instance::new(&self.path, GAIN_ID.to_str().unwrap(), None).unwrap()
     }
@@ -211,6 +217,13 @@ pub(crate) fn note(offset: usize, event: NoteEvent) -> NodeEvent {
     NodeEvent {
         offset,
         kind: NodeEventKind::Note(event),
+    }
+}
+
+pub(crate) fn controller(offset: usize, controller: Controller, value: f32) -> NodeEvent {
+    NodeEvent {
+        offset,
+        kind: NodeEventKind::Controller { controller, value },
     }
 }
 
@@ -820,6 +833,221 @@ fn the_synths_voices_run_on_the_renderers_threads() {
     assert!(block.iter().any(|s| *s != 0.0));
     drop((engine, handle));
     drop(instance);
+    plugins.assert_alright();
+}
+
+/// Note `note` on `key`, starting at `offset` with its expression: pitch
+/// bend, pressure and timbre.
+fn note_with(
+    offset: usize,
+    note: NoteId,
+    key: u8,
+    velocity: f32,
+    [bend, pressure, timbre]: [f32; 3],
+) -> [NodeEvent; 4] {
+    let express = |dimension, value| {
+        self::note(
+            offset,
+            NoteEvent::Expression {
+                note,
+                dimension,
+                value,
+            },
+        )
+    };
+    [
+        self::note(
+            offset,
+            NoteEvent::On {
+                note,
+                key,
+                velocity,
+            },
+        ),
+        express(Dimension::PitchBend, bend),
+        express(Dimension::Pressure, pressure),
+        express(Dimension::Timbre, timbre),
+    ]
+}
+
+fn express(offset: usize, note: NoteId, dimension: Dimension, value: f32) -> NodeEvent {
+    self::note(
+        offset,
+        NoteEvent::Expression {
+            note,
+            dimension,
+            value,
+        },
+    )
+}
+
+fn let_go(offset: usize, note: NoteId) -> NodeEvent {
+    self::note(
+        offset,
+        NoteEvent::Off {
+            note,
+            velocity: 0.0,
+        },
+    )
+}
+
+#[test]
+fn an_mpe_synth_gets_its_channels_set_up_and_each_note_on_a_channel_of_its_own() {
+    let plugins = TestPlugins::new("mpe synth");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let block = |events| Block {
+        events,
+        ..Block::default()
+    };
+    let (a, b) = (NoteId(1), NoteId(2));
+    let mut events = Vec::new();
+    events.extend(note_with(0, a, 60, 1.0, [12.0, 0.0, 0.5]));
+    events.extend(note_with(0, b, 60, 0.5, [0.0, 1.0, 0.0]));
+    play(&mut node, &[0.0; 64], &block(&events));
+    let midi = plugins.midi(&instance);
+    // MPE's configuration for a lower zone of 15 channels first, and each
+    // channel's bend range, 48 semitones.
+    assert_eq!(midi[..3], [[0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 15]]);
+    assert_eq!(midi[6..9], [[0xB1, 101, 0], [0xB1, 100, 0], [0xB1, 6, 48]]);
+    // Then the notes, each with its expression before it, on channels of
+    // their own though they share a key.
+    assert_eq!(
+        midi[96..],
+        [
+            [0xE1, 0, 80],
+            [0xD1, 0, 0],
+            [0xB1, 74, 64],
+            [0x91, 60, 127],
+            [0xE2, 0, 64],
+            [0xD2, 127, 0],
+            [0xB2, 74, 0],
+            [0x92, 60, 64],
+        ]
+    );
+    // The synth says which voice ended by channel and key, which the node
+    // knows the note by.
+    let off = [let_go(0, b)];
+    play(&mut node, &[0.0; 64], &block(&off));
+    assert_eq!(node.ended_voices(), [b]);
+    assert_eq!(plugins.midi(&instance), [[0x82, 60, 0]]);
+    let off = [let_go(0, a)];
+    play(&mut node, &[0.0; 64], &block(&off));
+    assert_eq!(node.ended_voices(), [a]);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn mpe_plays_each_notes_expression_as_note_expression_does() {
+    // The same performance, on a synth that takes CLAP's note expression and
+    // one that takes MPE, sounds the same: MPE carries each note's own
+    // pitch bend, pressure and timbre. These values go through MIDI as they
+    // are: bends in steps of 48 semitones over 8,192, the rest in 127ths.
+    let clap = TestPlugins::new("note expression synth");
+    let mpe = TestPlugins::new("mpe expression synth");
+    let mut instances = [clap.synth(), mpe.synth()];
+    let mut nodes = instances.each_mut().map(|instance| {
+        instance.activate(CONFIG).unwrap();
+        instance.node_source().node()
+    });
+    let (a, b) = (NoteId(1), NoteId(2));
+    let k = |n: f32| n / 127.0;
+    let mut first = Vec::new();
+    first.extend(note_with(0, a, 60, 1.0, [12.0, 0.0, k(32.0)]));
+    first.extend(note_with(40, b, 64, k(64.0), [-1.5, k(64.0), k(96.0)]));
+    let blocks: [Vec<NodeEvent>; 4] = [
+        first,
+        vec![
+            express(10, a, Dimension::PitchBend, -24.0),
+            express(10, a, Dimension::Pressure, 1.0),
+            express(20, b, Dimension::Timbre, 0.0),
+            express(30, b, Dimension::PitchBend, 0.75),
+        ],
+        vec![let_go(32, a), express(50, b, Dimension::Pressure, k(1.0))],
+        vec![let_go(64, b)],
+    ];
+    for (i, events) in blocks.iter().enumerate() {
+        let block = Block {
+            events,
+            ..Block::default()
+        };
+        let [heard, expected] = nodes
+            .each_mut()
+            .map(|node| play(node, &[0.0; 128], &block)[0].clone());
+        assert!(heard.iter().any(|s| *s != 0.0), "block {i}");
+        assert_close(&heard, &expected);
+        let [ended, expected] = nodes.each_ref().map(|node| node.ended_voices().to_vec());
+        assert_eq!(ended, expected, "block {i}");
+    }
+    drop((nodes, instances));
+    clap.assert_alright();
+    mpe.assert_alright();
+}
+
+#[test]
+fn the_sustain_pedal_holds_the_notes_let_go_until_it_comes_up() {
+    for name in ["sustained synth", "mpe sustained synth"] {
+        let plugins = TestPlugins::new(name);
+        let mut instance = plugins.synth();
+        instance.activate(CONFIG).unwrap();
+        let mut node = instance.node_source().node();
+        let silence = vec![0.0; 128];
+        let block = |events| Block {
+            events,
+            ..Block::default()
+        };
+        let a = NoteId(1);
+        // A timbre of none, as an MPE note at rest is half bright.
+        let mut on = vec![controller(0, Controller::SUSTAIN, 1.0)];
+        on.extend(note_with(0, a, 69, 1.0, [0.0, 0.0, 0.0]));
+        on.push(let_go(64, a));
+        // Let go, the note sounds on while the pedal is down.
+        let [left, _] = play(&mut node, &silence, &block(&on));
+        let (expected, _) = sine(440.0, 0.5, 0.0, 384);
+        assert_close(&left, &expected[..128]);
+        assert!(node.ended_voices().is_empty(), "{name}");
+        let up = [controller(32, Controller::SUSTAIN, 0.0)];
+        let [left, _] = play(&mut node, &silence, &block(&up));
+        assert_close(&left[..32], &expected[128..160]);
+        assert_eq!(left[32..], silence[32..], "{name}");
+        assert_eq!(node.ended_voices(), [a], "{name}");
+        // The pedal goes as MIDI's controller 64, on the first channel.
+        let midi = plugins.midi(&instance);
+        let pedal: Vec<_> = midi.iter().filter(|m| m[1] == 64 && m[0] == 0xB0).collect();
+        assert_eq!(pedal, [&[0xB0, 64, 127], &[0xB0, 64, 0]], "{name}");
+        drop((node, instance));
+        plugins.assert_alright();
+    }
+}
+
+#[test]
+fn controllers_go_as_midi_to_a_plugin_that_takes_notes_as_clap_s_own() {
+    let plugins = TestPlugins::new("controllers");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let events = [
+        controller(0, Controller::MOD_WHEEL, 64.0 / 127.0),
+        controller(10, Controller::new(3).unwrap(), 1.0),
+        note(
+            20,
+            NoteEvent::On {
+                note: NoteId(1),
+                key: 60,
+                velocity: 1.0,
+            },
+        ),
+    ];
+    let block = Block {
+        events: &events,
+        ..Block::default()
+    };
+    play(&mut node, &[0.0; 64], &block);
+    // Notes go as CLAP's own, so the only MIDI is the controllers'.
+    assert_eq!(plugins.midi(&instance), [[0xB0, 1, 64], [0xB0, 3, 127]]);
+    drop((node, instance));
     plugins.assert_alright();
 }
 

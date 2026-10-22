@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use musicable_model::clip::ClipId;
+use musicable_model::clip::{ClipId, NoteId};
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, LocatorId, TakeId, TrackId};
 
@@ -31,6 +31,8 @@ pub enum Value {
     Beats(Beats),
     Track(TrackId),
     Clip(ClipId),
+    /// A note, by its id in its clip.
+    Note(NoteId),
     Locator(LocatorId),
     Device(DeviceId),
     Take(TakeId),
@@ -47,6 +49,7 @@ pub enum Type {
     Beats,
     Track,
     Clip,
+    Note,
     Locator,
     Device,
     Take,
@@ -58,6 +61,8 @@ impl Type {
     pub const CLIPS: Type = Type::List(&Type::Clip);
     /// A list of tracks.
     pub const TRACKS: Type = Type::List(&Type::Track);
+    /// A list of notes.
+    pub const NOTES: Type = Type::List(&Type::Note);
 
     /// Whether `value` can be read as this type. Numbers stand in for
     /// positions in beats, and whole numbers for ids and for floats, as a
@@ -71,6 +76,7 @@ impl Type {
             Type::Beats => Beats::from_value(value).is_some(),
             Type::Track => TrackId::from_value(value).is_some(),
             Type::Clip => ClipId::from_value(value).is_some(),
+            Type::Note => NoteId::from_value(value).is_some(),
             Type::Locator => LocatorId::from_value(value).is_some(),
             Type::Device => DeviceId::from_value(value).is_some(),
             Type::Take => TakeId::from_value(value).is_some(),
@@ -91,6 +97,7 @@ impl fmt::Display for Type {
             Type::Beats => f.write_str("a position in beats"),
             Type::Track => f.write_str("a track"),
             Type::Clip => f.write_str("a clip"),
+            Type::Note => f.write_str("a note"),
             Type::Locator => f.write_str("a locator"),
             Type::Device => f.write_str("a device"),
             Type::Take => f.write_str("a take"),
@@ -302,6 +309,7 @@ macro_rules! id_from_value {
 
 id_from_value!(TrackId, Track);
 id_from_value!(ClipId, Clip);
+id_from_value!(NoteId, Note);
 id_from_value!(LocatorId, Locator);
 id_from_value!(DeviceId, Device);
 id_from_value!(TakeId, Take);

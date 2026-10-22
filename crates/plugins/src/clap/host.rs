@@ -18,8 +18,8 @@ use clap_sys::ext::log::{
     CLAP_LOG_PLUGIN_MISBEHAVING, CLAP_LOG_WARNING, clap_host_log, clap_log_severity,
 };
 use clap_sys::ext::note_ports::{
-    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI, clap_host_note_ports,
-    clap_note_dialect,
+    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI,
+    CLAP_NOTE_DIALECT_MIDI_MPE, clap_host_note_ports, clap_note_dialect,
 };
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_rescan_flags,
@@ -403,7 +403,7 @@ static NOTE_PORTS: clap_host_note_ports = clap_host_note_ports {
 };
 
 unsafe extern "C" fn note_dialects(_: *const clap_host) -> clap_note_dialect {
-    CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI
+    CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_MIDI_MPE
 }
 
 static GUI: clap_host_gui = clap_host_gui {

@@ -15,7 +15,7 @@ use super::capture::{self, Output};
 use super::client::{self, Client};
 use super::com::{Call, Com, Event, Failed, Mmcss, Qpc, device_gone, os};
 use super::device;
-use crate::input::{self, Bus, Playback, StreamInput};
+use crate::input::{self, Bus, Playback, Smoother, StreamInput};
 use crate::midi::MidiBus;
 use crate::period::frames_to_hns;
 use crate::stats::Counters;
@@ -211,6 +211,8 @@ struct Runner<'a> {
     midi: MidiBus,
     /// Where the inputs learn when each engine frame plays.
     playback: &'a Playback,
+    /// Smooths the device clock's readings for them.
+    smoother: Smoother,
     /// The engine frame the stream started with: the one the device's
     /// position 0 plays.
     first_frame: u64,
@@ -243,6 +245,7 @@ impl<'a> Runner<'a> {
             bus,
             midi,
             playback,
+            smoother: Smoother::new(format.rate),
             first_frame: 0,
             detector: Detector::new(client.exclusive(), client.period, format.rate),
             latency: Medians::default(),
@@ -359,10 +362,14 @@ impl<'a> Runner<'a> {
                 }
                 // The clock stands at zero until the device starts playing.
                 if played > 0 {
-                    let frame = (self.first_frame + played).saturating_sub(self.detector.shift());
                     // QPC times come in 100 ns units.
-                    let rate = self.client.format.rate;
-                    self.playback.publish(frame, qpc.saturating_mul(100), rate);
+                    let time = qpc.saturating_mul(100);
+                    if let Some(played) = self.smoother.smooth(played, time) {
+                        let shift = self.detector.shift() as f64;
+                        let frame = self.first_frame as f64 + played - shift;
+                        let rate = self.client.format.rate;
+                        self.playback.publish_fractional(frame, time, rate);
+                    }
                 }
                 Ok(())
             }

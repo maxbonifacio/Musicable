@@ -24,7 +24,7 @@ use egui::{
 use musicable_commands::editor::Viewport;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, CommandId, Editor, Modifiers, arrange, edit, locator, take as takes, transport,
+    Args, CommandId, Editor, Modifiers, arrange, edit, locator, notes, take as takes, transport,
     view as views,
 };
 use musicable_model::clip::{Clip, ClipContent, ClipId};
@@ -1132,6 +1132,15 @@ impl Arrangement {
             }
             (MouseAction::Rename, Hit::Clip { clip, .. }) => {
                 run(actions, edit::RENAME, Args::new().with("clip", clip));
+            }
+            // MIDI clips open in the piano roll.
+            (MouseAction::Open, Hit::Clip { clip, .. }) => {
+                let midi = find(project, clip)
+                    .is_some_and(|(_, c)| matches!(c.content, ClipContent::Midi(_)));
+                if !midi {
+                    return false;
+                }
+                run(actions, notes::OPEN, Args::new().with("clip", clip));
             }
             (MouseAction::Rename, Hit::Header(track)) => {
                 run(actions, edit::RENAME, Args::new().with("track", track));

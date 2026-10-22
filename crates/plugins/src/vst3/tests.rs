@@ -11,7 +11,7 @@ use std::time::Duration;
 use musicable_engine::nodes::Sum;
 use musicable_engine::{AudioMut, Engine, Graph, Node, NodeKey, NoteEvent, NoteId, TransportState};
 use musicable_model::PluginFormat;
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::vst3::{PEAK, VST3_GAIN_ID, VST3_SYNTH_ID, Vst3Transport};
@@ -29,8 +29,8 @@ use super::Instance;
 use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
-    Block, CONFIG, Impulse, assert_close, note, param, play, ramp, scaled, scan_path, sine,
-    temp_dir,
+    Block, CONFIG, Impulse, assert_close, controller, note, param, play, ramp, scaled, scan_path,
+    sine, temp_dir,
 };
 use crate::{ParentWindow, PluginEvent, Waker};
 
@@ -666,6 +666,40 @@ fn the_synth_plays_notes_with_their_expression() {
         },
     )];
     assert_eq!(play(&mut node, &silence, &block(&off))[0], silence);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn controllers_move_the_parameters_the_plugins_midi_mapping_says() {
+    let plugins = TestPlugins::new("midi mapping");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    // The synth maps the volume controller to its level, and nothing to
+    // the mod wheel.
+    let events = [
+        controller(0, Controller::VOLUME, 0.25),
+        controller(0, Controller::MOD_WHEEL, 1.0),
+        note(
+            0,
+            NoteEvent::On {
+                note: NoteId(1),
+                key: 69,
+                velocity: 1.0,
+            },
+        ),
+    ];
+    let block = Block {
+        events: &events,
+        ..Block::default()
+    };
+    let [left, _] = play(&mut node, &[0.0; 128], &block);
+    assert_close(&left, &sine(440.0, 0.25, 0.0, 128).0);
+    assert_eq!(plugins.processor_value(&instance, LEVEL), Some(0.25));
+    // The controller hears of it, as of automation, and it's no edit.
+    assert_eq!(instance.poll(), []);
+    assert_eq!(instance.param_value(LEVEL), Some(0.25));
     drop((node, instance));
     plugins.assert_alright();
 }

@@ -5,7 +5,9 @@
 //! replaced, so everything that has to follow the project hooks in here: the
 //! engine and the undo history now, ARA change notifications in Tier 2.
 
-use musicable_model::clip::{Clip, ClipContent, ClipId, Fades, Timing};
+use musicable_model::clip::{
+    Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId, Point, Timing,
+};
 use musicable_model::mixer::Bus;
 use musicable_model::native::NativeKind;
 use musicable_model::plugin::PluginSettings;
@@ -818,6 +820,146 @@ impl Transaction<'_> {
         }
     }
 
+    /// An id for a new note in the MIDI clip with id `clip`, for
+    /// [`add_note`](Self::add_note), or `None` if there's no MIDI clip on a
+    /// track with that id. Taking an id isn't an edit, since ids are never
+    /// used again in the clip, as with tracks.
+    pub fn new_note_id(&mut self, clip: ClipId) -> Option<NoteId> {
+        let (_, midi) = midi_mut(self.project, clip)?;
+        Some(midi.new_note_id())
+    }
+
+    /// Puts `note` at `index` in the notes of the MIDI clip with id `clip`,
+    /// or at the end if `index` is past them. It's left out if there's no
+    /// MIDI clip on a track with that id, if the clip has a note with the
+    /// note's id or never handed the id out (see
+    /// [`new_note_id`](Self::new_note_id)), or if a file couldn't hold the
+    /// note: see [`note_fits`].
+    pub fn add_note(&mut self, clip: ClipId, index: usize, note: Note) {
+        if !note_fits(&note) {
+            return;
+        }
+        let Some((track, midi)) = midi_mut(self.project, clip) else {
+            return;
+        };
+        if note.id.0 >= midi.next_note_id || midi.note(note.id).is_some() {
+            return;
+        }
+        let index = index.min(midi.notes.len());
+        midi.notes.insert(index, note.clone());
+        self.edits.push(Edit::AddNote {
+            track,
+            clip,
+            index,
+            note,
+        });
+    }
+
+    /// Removes the note with id `note` from the MIDI clip with id `clip`,
+    /// and returns it.
+    pub fn remove_note(&mut self, clip: ClipId, note: NoteId) -> Option<Note> {
+        let (track, midi) = midi_mut(self.project, clip)?;
+        let index = midi.notes.iter().position(|n| n.id == note)?;
+        let note = midi.notes.remove(index);
+        self.edits.push(Edit::RemoveNote {
+            track,
+            clip,
+            index,
+            note: note.clone(),
+        });
+        Some(note)
+    }
+
+    /// Moves a note, or changes its length: it sounds over `range`, in its
+    /// clip's own time, from now on. An empty range does nothing.
+    pub fn set_note_timing(&mut self, clip: ClipId, note: NoteId, range: BeatRange) {
+        if range.is_empty() {
+            return;
+        }
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        let from = n.range();
+        if from != range {
+            n.start = range.start;
+            n.length = range.len();
+            self.edits.push(Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from,
+                to: range,
+            });
+        }
+    }
+
+    /// Sets a note's key, its MIDI note number. A key past
+    /// [`Note::MAX_KEY`] does nothing.
+    pub fn set_note_key(&mut self, clip: ClipId, note: NoteId, key: u8) {
+        if key > Note::MAX_KEY {
+            return;
+        }
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        if n.key != key {
+            let from = std::mem::replace(&mut n.key, key);
+            self.edits.push(Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from,
+                to: key,
+            });
+        }
+    }
+
+    /// Sets how hard a note starts, from 0.0 to 1.0. Velocities beyond move
+    /// to the nearest end, and NaN does nothing.
+    pub fn set_note_velocity(&mut self, clip: ClipId, note: NoteId, velocity: f32) {
+        if velocity.is_nan() {
+            return;
+        }
+        let velocity = velocity.clamp(0.0, 1.0);
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        if n.velocity != velocity {
+            let from = std::mem::replace(&mut n.velocity, velocity);
+            self.edits.push(Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from,
+                to: velocity,
+            });
+        }
+    }
+
+    /// Sets how the MIDI clip with id `clip` moves `controller`: by
+    /// `points`, in the clip's own time, in order, with values from 0.0 to
+    /// 1.0. No points stops the clip moving it. Points out of order or with
+    /// values beyond do nothing.
+    pub fn set_controller(&mut self, clip: ClipId, controller: Controller, points: Vec<Point>) {
+        if !curve_fits(&points) {
+            return;
+        }
+        let Some((track, midi)) = midi_mut(self.project, clip) else {
+            return;
+        };
+        let from = midi.controller(controller).to_vec();
+        if from != points {
+            midi.set_controller(controller, points.clone());
+            self.edits.push(Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to: points,
+            });
+        }
+    }
+
     /// A new, empty take with the next take id, for
     /// [`add_take`](Self::add_take): see [`Project::new_take`].
     pub fn new_take(&mut self, name: impl Into<String>) -> Take {
@@ -1015,6 +1157,23 @@ impl Transaction<'_> {
             Edit::ClipTiming { clip, to, .. } => self.set_clip_timing(*clip, *to),
             Edit::ClipFades { clip, to, .. } => self.set_clip_fades(*clip, *to),
             Edit::ClipName { clip, to, .. } => self.set_clip_name(*clip, to),
+            Edit::AddNote {
+                clip, index, note, ..
+            } => self.add_note(*clip, *index, note.clone()),
+            Edit::RemoveNote { clip, note, .. } => {
+                self.remove_note(*clip, note.id);
+            }
+            Edit::NoteTiming { clip, note, to, .. } => self.set_note_timing(*clip, *note, *to),
+            Edit::NoteKey { clip, note, to, .. } => self.set_note_key(*clip, *note, *to),
+            Edit::NoteVelocity { clip, note, to, .. } => {
+                self.set_note_velocity(*clip, *note, *to);
+            }
+            Edit::Controller {
+                clip,
+                controller,
+                to,
+                ..
+            } => self.set_controller(*clip, *controller, to.clone()),
             Edit::AddTake { track, index, take } => self.add_take(*track, *index, take.clone()),
             Edit::RemoveTake { take, .. } => {
                 self.remove_take(take.id);
@@ -1054,6 +1213,48 @@ fn fades_of(clip: &Clip) -> Option<Fades> {
         ClipContent::Audio(audio) => Some(audio.fades()),
         ClipContent::Midi(_) => None,
     }
+}
+
+/// The notes of the MIDI clip with id `clip`, on one of the project's
+/// tracks, and the track's id.
+fn midi_mut(project: &mut Project, clip: ClipId) -> Option<(TrackId, &mut MidiClip)> {
+    let track = project.find_clip(clip)?.0.id;
+    match &mut project.track_mut(track)?.clip_mut(clip)?.content {
+        ClipContent::Midi(midi) => Some((track, midi)),
+        ClipContent::Audio(_) => None,
+    }
+}
+
+/// The note with id `note` in the MIDI clip with id `clip`, and the clip's
+/// track's id.
+fn note_mut(project: &mut Project, clip: ClipId, note: NoteId) -> Option<(TrackId, &mut Note)> {
+    let (track, midi) = midi_mut(project, clip)?;
+    Some((track, midi.note_mut(note)?))
+}
+
+/// Whether a file could hold `note`: it lasts more than zero, its key is a
+/// MIDI note number, its velocities are from 0 to 1, and each of its
+/// expression curves starts at the note's start or after, is in order, and
+/// keeps to its dimension's values.
+pub(crate) fn note_fits(note: &Note) -> bool {
+    let unit = |v: f32| (0.0..=1.0).contains(&v);
+    note.length > Beats::ZERO
+        && note.key <= Note::MAX_KEY
+        && unit(note.velocity)
+        && unit(note.release_velocity)
+        && Dimension::ALL.into_iter().all(|dimension| {
+            let curve = note.expression.curve(dimension);
+            let (low, high) = dimension.range();
+            curve.first().is_none_or(|p| p.at >= Beats::ZERO)
+                && curve.is_sorted_by_key(|p| p.at)
+                && curve.iter().all(|p| (low..=high).contains(&p.value))
+        })
+}
+
+/// Whether a file could hold a controller's curve: its points are in order,
+/// with values from 0 to 1.
+fn curve_fits(points: &[Point]) -> bool {
+    points.is_sorted_by_key(|p| p.at) && points.iter().all(|p| (0.0..=1.0).contains(&p.value))
 }
 
 /// One change to the project, with the value it replaced.
@@ -1219,6 +1420,53 @@ pub enum Edit {
         clip: ClipId,
         from: String,
         to: String,
+    },
+    /// `note` went in at `index` in the notes of the MIDI clip with id
+    /// `clip`, on the track with id `track`.
+    AddNote {
+        track: TrackId,
+        clip: ClipId,
+        index: usize,
+        note: Note,
+    },
+    /// `note`, which was at `index` in the clip's notes, went.
+    RemoveNote {
+        track: TrackId,
+        clip: ClipId,
+        index: usize,
+        note: Note,
+    },
+    /// The note with id `note`, in the clip with id `clip`, moved or changed
+    /// length: when it sounds, in the clip's own time.
+    NoteTiming {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: BeatRange,
+        to: BeatRange,
+    },
+    NoteKey {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: u8,
+        to: u8,
+    },
+    NoteVelocity {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: f32,
+        to: f32,
+    },
+    /// How the MIDI clip with id `clip` moves `controller` changed: its
+    /// curve's points, none for a controller it doesn't move.
+    Controller {
+        track: TrackId,
+        clip: ClipId,
+        controller: Controller,
+        from: Vec<Point>,
+        to: Vec<Point>,
     },
     /// `take` went in at `index` in the takes of the track with id `track`.
     AddTake {
@@ -1427,6 +1675,80 @@ impl Edit {
             } => Edit::ClipName {
                 track,
                 clip,
+                from: to,
+                to: from,
+            },
+            Edit::AddNote {
+                track,
+                clip,
+                index,
+                note,
+            } => Edit::RemoveNote {
+                track,
+                clip,
+                index,
+                note,
+            },
+            Edit::RemoveNote {
+                track,
+                clip,
+                index,
+                note,
+            } => Edit::AddNote {
+                track,
+                clip,
+                index,
+                note,
+            },
+            Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to,
+            } => Edit::Controller {
+                track,
+                clip,
+                controller,
                 from: to,
                 to: from,
             },
@@ -1658,6 +1980,47 @@ impl Edit {
                 },
             ) if clip == other => to.clone_from(next),
             (
+                Edit::NoteTiming { clip, note, to, .. },
+                Edit::NoteTiming {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::NoteKey { clip, note, to, .. },
+                Edit::NoteKey {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::NoteVelocity { clip, note, to, .. },
+                Edit::NoteVelocity {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::Controller {
+                    clip,
+                    controller,
+                    to,
+                    ..
+                },
+                Edit::Controller {
+                    clip: other,
+                    controller: other_controller,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && controller == other_controller => to.clone_from(next),
+            (
                 Edit::TakeName { take, to, .. },
                 Edit::TakeName {
                     take: other,
@@ -1752,6 +2115,12 @@ impl Edit {
                 | Edit::ClipTiming { .. }
                 | Edit::ClipFades { .. }
                 | Edit::ClipName { .. }
+                | Edit::AddNote { .. }
+                | Edit::RemoveNote { .. }
+                | Edit::NoteTiming { .. }
+                | Edit::NoteKey { .. }
+                | Edit::NoteVelocity { .. }
+                | Edit::Controller { .. }
                 | Edit::AddTake { .. }
                 | Edit::RemoveTake { .. }
                 | Edit::TakeName { .. }
@@ -1786,6 +2155,8 @@ impl Edit {
             | Edit::RemoveSend { .. }
             | Edit::AddClip { .. }
             | Edit::RemoveClip { .. }
+            | Edit::AddNote { .. }
+            | Edit::RemoveNote { .. }
             | Edit::AddTake { .. }
             | Edit::RemoveTake { .. }
             | Edit::AddLocator { .. }
@@ -1809,6 +2180,10 @@ impl Edit {
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
             Edit::ClipTiming { from, to, .. } => from == to,
             Edit::ClipFades { from, to, .. } => from == to,
+            Edit::NoteTiming { from, to, .. } => from == to,
+            Edit::NoteKey { from, to, .. } => from == to,
+            Edit::NoteVelocity { from, to, .. } => from == to,
+            Edit::Controller { from, to, .. } => from == to,
             Edit::ClipName { from, to, .. }
             | Edit::TakeName { from, to, .. }
             | Edit::LocatorName { from, to, .. } => from == to,
