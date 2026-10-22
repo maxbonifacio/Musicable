@@ -829,7 +829,9 @@ samples are found, and leaves out those for plugins that aren't
 installed, which its foot counts. Double-click a preset to add its device
 to the chain the devices panel shows, set as it was saved, or drag it
 there, onto a track, or below the tracks for a new track. Adding a preset
-is a step in the undo history named after it.
+is a step in the undo history named after it. A sampler's preset names its
+sample in full, so it plays in any project; added to a project whose folder
+has the sample, the sampler names it from there, as clips name their files.
 
 ### Behind the browser
 
@@ -1318,11 +1320,12 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   panel.
 - In the browser: analysis, which will tag sounds by how they sound and
   find similar ones by an embedding; previews in time with the song;
-  watching the library's folders, which are looked through at each start
-  and on Rescan; CLAP presets, which need the plugins' preset discovery;
-  renaming and deleting presets, and saving VST3 presets; and tags in the
-  undo history. Taking a folder out of the library forgets its files'
-  tags.
+  dragging a sample onto a sampler, as onto Live's Simpler (Load Sample...
+  gives it one for now); watching the library's folders, which are looked
+  through at each start and on Rescan; CLAP presets, which need the
+  plugins' preset discovery; renaming and deleting presets, and saving
+  VST3 presets; and tags in the undo history. Taking a folder out of the
+  library forgets its files' tags.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.

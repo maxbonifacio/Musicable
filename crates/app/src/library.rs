@@ -28,7 +28,7 @@ use musicable_model::{DeviceId, DeviceKind, PluginFormat};
 use musicable_plugins::Waker;
 use musicable_ui::Peaks;
 
-use crate::audio_files::waveform;
+use crate::audio_files::{clip_path, waveform};
 use crate::media::FileReader;
 use crate::plugins::Plugins;
 
@@ -860,6 +860,9 @@ pub fn presets_folder() -> Option<PathBuf> {
 pub(crate) struct LibraryLink<'a> {
     pub library: &'a mut Library,
     pub plugins: &'a mut Plugins,
+    /// The open project's folder, which a sampler's sample can be named
+    /// from.
+    pub folder: Option<PathBuf>,
 }
 
 impl musicable_commands::Library for LibraryLink<'_> {
@@ -895,10 +898,20 @@ impl musicable_commands::Library for LibraryLink<'_> {
         self.library.rescan(folder)
     }
 
+    /// A sampler's sample in the project's folder is named from there, as
+    /// one loaded into the sampler is.
     fn load_preset(&mut self, preset: &Path) -> Result<DeviceKind, String> {
-        self.library.load_preset(preset, self.plugins)
+        let mut device = self.library.load_preset(preset, self.plugins)?;
+        if let Some(sample) = sample_mut(&mut device)
+            && Path::new(sample.as_str()).is_absolute()
+        {
+            *sample = clip_path(Path::new(sample.as_str()), self.folder.as_deref());
+        }
+        Ok(device)
     }
 
+    /// A sampler's preset names its sample in full, where the project names
+    /// it from its folder, so it plays in any project.
     fn save_preset(
         &mut self,
         id: DeviceId,
@@ -906,9 +919,20 @@ impl musicable_commands::Library for LibraryLink<'_> {
         device_name: &str,
         name: Option<&str>,
     ) -> Result<PathBuf, String> {
+        let mut device = device.clone();
+        if let (Some(sample), Some(folder)) = (sample_mut(&mut device), &self.folder)
+            && Path::new(sample.as_str()).is_relative()
+        {
+            *sample = clip_path(&folder.join(sample.as_str()), None);
+        }
         self.library
-            .save_preset(id, device, device_name, name, self.plugins)
+            .save_preset(id, &device, device_name, name, self.plugins)
     }
+}
+
+/// The sample `device` plays, if it's a sampler with one.
+fn sample_mut(device: &mut DeviceKind) -> Option<&mut String> {
+    device.native_mut()?.sample.as_mut()
 }
 
 #[cfg(test)]

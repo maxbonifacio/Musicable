@@ -3,20 +3,22 @@
 //! field, picking a sample previews it through the engine at the volume the
 //! settings say, and a double-click puts it on a new track. The library
 //! keeps its folders and tags, and the browser its settings, when the app
-//! starts again.
+//! starts again. A sampler's preset finds its sample from any project.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::accesskit::Role;
 use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use musicable_commands::{Args, browser};
+use musicable_commands::{Args, Value, browser, device};
 use musicable_io::audio::{SampleFormat, save_wav};
-use musicable_model::TrackKind;
+use musicable_library::presets::{self, Loaded};
+use musicable_model::native::{NativeDevice, NativeKind};
+use musicable_model::{DeviceKind, Project, TrackKind};
 
 use super::App;
 use super::testing::{TempDir, chord, press, send, window};
@@ -183,4 +185,68 @@ fn samples_are_found_previewed_and_put_on_tracks_from_the_browser() {
         "{:?}",
         harness.state().messages
     );
+}
+
+#[test]
+fn a_samplers_preset_finds_its_sample_from_any_project() {
+    let dir = TempDir::new("sampler-preset");
+    let settings = Settings {
+        browser: BrowserSettings {
+            presets_folder: Some(dir.0.join("Presets")),
+            ..BrowserSettings::default()
+        },
+        ..Settings::default()
+    };
+    settings.write(&dir.0.join(SETTINGS_FILE)).unwrap();
+    let song = dir.0.join("Song");
+    let kick = song.join("Samples").join("Kick.wav");
+    wav(&kick);
+    let mut harness = window(&dir.0, None);
+    settle(&mut harness);
+
+    // The song names its sampler's sample from its folder, and the preset
+    // in full.
+    let mut project = Project::new();
+    let track = project.add_track("Drums", TrackKind::Midi);
+    let mut sampler = NativeDevice::new(NativeKind::Sampler);
+    sampler.sample = Some("Samples/Kick.wav".to_owned());
+    let sampler = project.new_device(DeviceKind::Native(sampler));
+    let args = Args::new().with("device", sampler.id).with("name", "Kick");
+    project.track_mut(track).unwrap().devices.push(sampler);
+    let session = &mut harness.state_mut().session;
+    session.open(project, Some(&song));
+    let saved = session.run_with(&device::SAVE_PRESET, &args).unwrap();
+    let Value::Text(preset) = saved else {
+        panic!("{saved:?}");
+    };
+    let Loaded::Device(kind) = presets::load(Path::new(&preset)).unwrap() else {
+        panic!("{preset} holds a device");
+    };
+    let sample = kind.native().and_then(|native| native.sample.as_deref());
+    assert_eq!(sample.map(Path::new), Some(kick.as_path()));
+
+    // Added to another project, it plays the same file, and added to the
+    // song again, it names it from the song's folder.
+    let other = dir.0.join("Other");
+    for (folder, named) in [
+        (other, kick.clone()),
+        (song, PathBuf::from("Samples/Kick.wav")),
+    ] {
+        let mut project = Project::new();
+        let track = project.add_track("Drums", TrackKind::Midi);
+        session.open(project, Some(&folder));
+        let args = Args::new()
+            .with("preset", preset.as_str())
+            .with("track", track);
+        let added = session.run_with(&device::ADD_PRESET, &args).unwrap();
+        let Value::Device(id) = added else {
+            panic!("{added:?}");
+        };
+        let (_, _, device) = session.project().find_device(id).unwrap();
+        let sample = device
+            .kind
+            .native()
+            .and_then(|native| native.sample.as_deref());
+        assert_eq!(sample.map(Path::new), Some(named.as_path()));
+    }
 }

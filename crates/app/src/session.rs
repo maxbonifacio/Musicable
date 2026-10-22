@@ -548,6 +548,7 @@ impl Session {
         let mut library = LibraryLink {
             library: &mut self.library,
             plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
         };
         let mut context = Context {
             document: &mut self.document,
@@ -567,6 +568,7 @@ impl Session {
         let mut library = LibraryLink {
             library: &mut self.library,
             plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
         };
         let mut context = Context {
             document: &mut self.document,
