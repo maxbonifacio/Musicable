@@ -24,11 +24,12 @@ use egui::{
 use musicable_commands::editor::Viewport;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, CommandId, Editor, Modifiers, arrange, edit, locator, transport, view as views,
+    Args, CommandId, Editor, Modifiers, arrange, edit, locator, take as takes, transport,
+    view as views,
 };
 use musicable_model::clip::{Clip, ClipContent, ClipId};
 use musicable_model::time::Beats;
-use musicable_model::{LocatorId, Project, TrackId, TrackKind};
+use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::{Action, View};
@@ -77,6 +78,17 @@ enum Hit {
     Locator(LocatorId),
     Header(TrackId),
     TrackEdge(TrackId),
+    /// A take's lane, on one of the take's clips or between them.
+    Take {
+        track: TrackId,
+        take: TakeId,
+        clip: Option<ClipId>,
+    },
+    /// The header beside a take's lane.
+    TakeHeader {
+        track: TrackId,
+        take: TakeId,
+    },
 }
 
 impl Hit {
@@ -97,6 +109,8 @@ impl Hit {
             Hit::Locator(_) => Target::Locator,
             Hit::Header(_) => Target::TrackHeader,
             Hit::TrackEdge(_) => Target::TrackEdge,
+            Hit::Take { .. } => Target::TakeLane,
+            Hit::TakeHeader { .. } => Target::TakeHeader,
         }
     }
 
@@ -106,7 +120,9 @@ impl Hit {
             Hit::Clip { track, .. }
             | Hit::Lane(track)
             | Hit::Header(track)
-            | Hit::TrackEdge(track) => Some(track),
+            | Hit::TrackEdge(track)
+            | Hit::Take { track, .. }
+            | Hit::TakeHeader { track, .. } => Some(track),
             _ => None,
         }
     }
@@ -189,6 +205,13 @@ enum Plan {
         track: TrackId,
         height: f32,
     },
+    /// Copies a stretch of a take to its track.
+    Comp {
+        track: TrackId,
+        take: TakeId,
+        start: Beats,
+        end: Beats,
+    },
 }
 
 /// Where a context menu was opened, and what on.
@@ -215,6 +238,25 @@ impl Row {
     }
 }
 
+/// A take's lane, under its track's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TakeRow {
+    /// Its track's place in the project's tracks, and its place in the
+    /// track's takes.
+    track_index: usize,
+    index: usize,
+    track: TrackId,
+    take: TakeId,
+    top: f32,
+    height: f32,
+}
+
+impl TakeRow {
+    fn bottom(&self) -> f32 {
+        self.top + self.height
+    }
+}
+
 /// Where the arrangement's parts are this frame.
 #[derive(Debug, Clone)]
 struct Layout {
@@ -229,6 +271,10 @@ struct Layout {
     viewport: Viewport,
     /// Every track's row, top to bottom.
     rows: Vec<Row>,
+    /// The lanes of the takes of the tracks that show them, top to bottom.
+    takes: Vec<TakeRow>,
+    /// How tall the tracks and their take lanes are together.
+    content: f32,
 }
 
 impl Layout {
@@ -250,6 +296,7 @@ impl Layout {
         let headers = Rect::from_min_max(pos2(split, ruler_bottom), rect.right_bottom());
         let corner = Rect::from_min_max(pos2(split, rect.top()), pos2(rect.right(), ruler_bottom));
         let mut rows = Vec::with_capacity(project.tracks.len());
+        let mut takes = Vec::new();
         let mut y = 0.0;
         for (index, track) in project.tracks.iter().enumerate() {
             let height = editor
@@ -264,16 +311,31 @@ impl Layout {
                 height,
             });
             y += height;
+            if !editor.take_lanes.contains(&track.id) {
+                continue;
+            }
+            for (take_index, take) in track.takes.iter().enumerate() {
+                takes.push(TakeRow {
+                    track_index: index,
+                    index: take_index,
+                    track: track.id,
+                    take: take.id,
+                    top: y,
+                    height: theme.take_height,
+                });
+                y += theme.take_height;
+            }
         }
-        // The tracks scroll until a track's height is left under the last.
-        let lowest = (y + theme.track_height - lanes.height()).max(0.0);
         let viewport = Viewport {
             width: lanes.width(),
-            top: viewport.top.clamp(0.0, lowest),
+            top: viewport.top.clamp(0.0, lowest_top(y, theme, lanes)),
             ..viewport
         };
         for row in &mut rows {
             row.top += lanes.top() - viewport.top;
+        }
+        for take in &mut takes {
+            take.top += lanes.top() - viewport.top;
         }
         Self {
             ruler,
@@ -283,7 +345,14 @@ impl Layout {
             corner,
             viewport,
             rows,
+            takes,
+            content: y,
         }
+    }
+
+    /// Where the last track, or its last take lane, ends.
+    fn bottom(&self) -> f32 {
+        self.lanes.top() - self.viewport.top + self.content
     }
 
     fn x_of(&self, at: Beats) -> f32 {
@@ -300,11 +369,27 @@ impl Layout {
         self.rows.get(i).filter(|row| row.top <= y)
     }
 
-    /// The index of the track at `y`, or of the nearest one above or below
-    /// the tracks. `None` without tracks.
+    /// The index of the track at `y`, or whose take lanes are there, or of
+    /// the nearest one above or below the tracks. `None` without tracks.
     fn nearest_index(&self, y: f32) -> Option<usize> {
-        let i = self.rows.partition_point(|row| row.bottom() <= y);
-        Some(i.min(self.rows.len().checked_sub(1)?))
+        let below = self.rows.partition_point(|row| row.top <= y);
+        Some(below.saturating_sub(1).min(self.rows.len().checked_sub(1)?))
+    }
+
+    /// The take lane at `y`, if there's one there.
+    fn take_at(&self, y: f32) -> Option<&TakeRow> {
+        let i = self.takes.partition_point(|take| take.bottom() <= y);
+        self.takes.get(i).filter(|take| take.top <= y)
+    }
+
+    /// The take lanes in sight, top to bottom.
+    fn visible_takes(&self) -> impl Iterator<Item = &TakeRow> {
+        let first = self
+            .takes
+            .partition_point(|take| take.bottom() <= self.lanes.top());
+        self.takes[first..]
+            .iter()
+            .take_while(|take| take.top < self.lanes.bottom())
     }
 
     fn row(&self, id: TrackId) -> Option<&Row> {
@@ -426,12 +511,31 @@ impl Scene<'_> {
                     Hit::TrackEdge(row.id)
                 }
                 Some(row) => Hit::Header(row.id),
-                None => Hit::Empty,
+                None => match self.layout.take_at(pos.y) {
+                    Some(lane) => Hit::TakeHeader {
+                        track: lane.track,
+                        take: lane.take,
+                    },
+                    None => Hit::Empty,
+                },
             },
         }
     }
 
     fn hit_lanes(&self, pos: Pos2) -> Hit {
+        if let Some(lane) = self.layout.take_at(pos.y) {
+            let take = &self.project().tracks[lane.track_index].takes[lane.index];
+            // The last drawn is on top.
+            let clip = take.clips.iter().rev().find(|clip| {
+                let x = self.layout.x_of(clip.start)..=self.layout.x_of(clip.end());
+                x.contains(&pos.x)
+            });
+            return Hit::Take {
+                track: lane.track,
+                take: lane.take,
+                clip: clip.map(|clip| clip.id),
+            };
+        }
         let Some(row) = self.layout.row_at(pos.y) else {
             return Hit::Empty;
         };
@@ -653,6 +757,17 @@ impl Scene<'_> {
                 height: (drag.height + drag.to.y - drag.from.y)
                     .clamp(views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT),
             }),
+            (MouseAction::Comp | MouseAction::CompFree, Hit::Take { track, take, .. }) => {
+                let free = drag.action == MouseAction::CompFree;
+                let at = |x| self.snap(layout.beats_at(x), free).max(Beats::ZERO);
+                let (start, end) = (at(drag.from.x), at(drag.to.x));
+                (start != end).then_some(Plan::Comp {
+                    track,
+                    take,
+                    start: start.min(end),
+                    end: start.max(end),
+                })
+            }
             _ => None,
         }
     }
@@ -730,6 +845,15 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
         Plan::Height { track, height } => {
             let args = Args::new().with("track", *track).with("height", *height);
             run(actions, views::SET_TRACK_HEIGHT, args);
+        }
+        Plan::Comp {
+            take, start, end, ..
+        } => {
+            let args = Args::new()
+                .with("take", *take)
+                .with("start", *start)
+                .with("end", *end);
+            run(actions, takes::COMP, args);
         }
     }
 }
@@ -1015,6 +1139,32 @@ impl Arrangement {
             (MouseAction::Rename, Hit::Locator(id)) => {
                 run(actions, edit::RENAME, Args::new().with("locator", id));
             }
+            (MouseAction::Rename, Hit::TakeHeader { take, .. }) => {
+                run(actions, edit::RENAME, Args::new().with("take", take));
+            }
+            // A click takes the whole clip.
+            (
+                MouseAction::Comp | MouseAction::CompFree,
+                Hit::Take {
+                    track,
+                    take,
+                    clip: Some(clip),
+                },
+            ) => {
+                let Some((_, t)) = project.find_take(take) else {
+                    return false;
+                };
+                let Some(clip) = t.clips.iter().find(|c| c.id == clip) else {
+                    return false;
+                };
+                let plan = Plan::Comp {
+                    track,
+                    take,
+                    start: clip.start,
+                    end: clip.end(),
+                };
+                send(actions, &plan);
+            }
             _ => return false,
         }
         true
@@ -1220,11 +1370,7 @@ impl Arrangement {
             }
         }
         viewport.start = viewport.start.max(Beats::ZERO);
-        let lowest = layout
-            .rows
-            .last()
-            .map_or(0.0, |row| row.bottom() + viewport.top - layout.lanes.top());
-        let lowest = (lowest + scene.theme.track_height - layout.lanes.height()).max(0.0);
+        let lowest = lowest_top(layout.content, scene.theme, layout.lanes);
         viewport.top = viewport.top.clamp(0.0, lowest);
         let sideways = viewport.start != before.start || viewport.zoom != before.zoom;
         if sideways && scene.view.playback.playing {
@@ -1339,6 +1485,12 @@ struct Button {
     colour: Color32,
 }
 
+/// How far down the tracks scroll, when they and their take lanes are
+/// `content` tall: until a track's height is left under the last.
+fn lowest_top(content: f32, theme: &Theme, lanes: Rect) -> f32 {
+    (content + theme.track_height - lanes.height()).max(0.0)
+}
+
 /// The ruler, the lanes and the headers together.
 fn rect_union(layout: &Layout) -> Rect {
     layout.ruler.union(layout.lanes).union(layout.headers)
@@ -1412,6 +1564,19 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
                 WidgetInfo::selected(Role::Button, true, selected, format!("Clip {}", clip.name))
             });
         }
+    }
+    for lane in layout.visible_takes() {
+        let track = &project.tracks[lane.track_index];
+        let take = &track.takes[lane.index];
+        let header = Rect::from_x_y_ranges(layout.headers.x_range(), lane.top..=lane.bottom());
+        let response = ui.interact(
+            header.intersect(layout.headers),
+            id.with(("take", take.id)),
+            Sense::hover(),
+        );
+        response.widget_info(|| {
+            WidgetInfo::labeled(Role::Row, true, format!("{} of {}", take.name, track.name))
+        });
     }
     for locator in &project.locators {
         if !visible.contains(locator.at) {

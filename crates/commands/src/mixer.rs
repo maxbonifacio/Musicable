@@ -1,12 +1,15 @@
-//! What the mixer's controls do: faders, pan, mute, solo, arm, routing,
-//! sends and clip types, for each track and the master.
+//! What the mixer's controls do: faders, pan, mute, solo, arm, inputs,
+//! monitoring, routing, sends and clip types, for each track and the
+//! master.
 //!
 //! A control sends a [`Change`], and the app runs the command it names (see
 //! [`Change::command`]), which makes it as a transaction with [`change`].
 //! Scripts and agents run the same commands.
 
 use musicable_model::mixer::Bus;
-use musicable_model::{ClipType, SendId, TrackId};
+use musicable_model::{
+    AudioInput, ClipType, Input, MidiInput, Monitor, Project, SendId, TrackId, TrackKind,
+};
 
 use crate::{
     Args, Command, CommandError, CommandId, Document, Param, Registry, Transaction, Type, Value,
@@ -25,6 +28,10 @@ pub const SET_SOLO: CommandId = CommandId::new("mixer.set_solo");
 pub const SET_SOLO_SAFE: CommandId = CommandId::new("mixer.set_solo_safe");
 /// Arms a track for recording, or disarms it.
 pub const SET_ARM: CommandId = CommandId::new("mixer.set_arm");
+/// Sets what a track records from.
+pub const SET_INPUT: CommandId = CommandId::new("mixer.set_input");
+/// Sets when a track plays its input: its monitoring.
+pub const SET_MONITOR: CommandId = CommandId::new("mixer.set_monitor");
 /// Sets where a track's output goes.
 pub const SET_OUTPUT: CommandId = CommandId::new("mixer.set_output");
 /// Sets a track's clip type.
@@ -48,16 +55,16 @@ const GAIN: Param = Param::required("gain", Type::Number, "The gain, linear: 1 i
 const PAN: Param = Param::required("pan", Type::Number, "The balance, from -1 (left) to 1.");
 const CLIP_TYPE: Param = Param::required("clip_type", Type::Text, "Off, Hard or Soft.");
 
-/// Reads a change from a command's arguments.
-type Build = fn(&Args) -> Result<Change, CommandError>;
+/// Reads a change to a project from a command's arguments.
+type Build = fn(&Args, &Project) -> Result<Change, CommandError>;
 
 /// The mixer's commands, with their titles, parameters and the change each
 /// makes.
-const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
-    (SET_VOLUME, "Set Volume", &[TRACK, GAIN], |args| {
+const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
+    (SET_VOLUME, "Set Volume", &[TRACK, GAIN], |args, _| {
         Ok(Change::Gain(args.get("track")?, number(args, "gain")?))
     }),
-    (SET_PAN, "Set Pan", &[TRACK, PAN], |args| {
+    (SET_PAN, "Set Pan", &[TRACK, PAN], |args, _| {
         Ok(Change::Pan(args.get("track")?, number(args, "pan")?))
     }),
     (
@@ -67,7 +74,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
             TRACK,
             Param::required("muted", Type::Bool, "Whether it's muted."),
         ],
-        |args| Ok(Change::Muted(args.get("track")?, args.get("muted")?)),
+        |args, _| Ok(Change::Muted(args.get("track")?, args.get("muted")?)),
     ),
     (
         SET_SOLO,
@@ -77,7 +84,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
             Param::required("solo", Type::Bool, "Whether it's soloed."),
             Param::optional("exclusive", Type::Bool, "Unsolos every other track."),
         ],
-        |args| {
+        |args, _| {
             Ok(Change::Solo {
                 track: args.get("track")?,
                 solo: args.get("solo")?,
@@ -96,7 +103,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
                 "Whether soloing others leaves it on.",
             ),
         ],
-        |args| Ok(Change::SoloSafe(args.get("track")?, args.get("solo_safe")?)),
+        |args, _| Ok(Change::SoloSafe(args.get("track")?, args.get("solo_safe")?)),
     ),
     (
         SET_ARM,
@@ -105,7 +112,42 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
             TRACK,
             Param::required("armed", Type::Bool, "Whether it's armed."),
         ],
-        |args| Ok(Change::Armed(args.get("track")?, args.get("armed")?)),
+        |args, _| Ok(Change::Armed(args.get("track")?, args.get("armed")?)),
+    ),
+    (
+        SET_INPUT,
+        "Set Input",
+        &[
+            TRACK,
+            Param::optional(
+                "device",
+                Type::Text,
+                "The input's id, as the audio settings list it: the default input without it.",
+            ),
+            Param::optional("name", Type::Text, "Its name, shown while it's missing."),
+            Param::optional(
+                "channel",
+                Type::Int,
+                "An audio input's first channel, from 0, or 0 without it. A MIDI input's one \
+                 channel, from 0 to 15, or every channel without it.",
+            ),
+            Param::optional(
+                "stereo",
+                Type::Bool,
+                "Whether an audio input takes two channels: true without it.",
+            ),
+            Param::optional("none", Type::Bool, "Whether it records from nothing."),
+        ],
+        |args, project| Ok(Change::Input(args.get("track")?, input(args, project)?)),
+    ),
+    (
+        SET_MONITOR,
+        "Set Monitor",
+        &[
+            TRACK,
+            Param::required("monitor", Type::Text, "In, Auto or Off."),
+        ],
+        |args, _| Ok(Change::Monitor(args.get("track")?, monitor(args)?)),
     ),
     (
         SET_OUTPUT,
@@ -118,7 +160,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
                 "The group track it feeds: the master without it.",
             ),
         ],
-        |args| {
+        |args, _| {
             let bus = args.opt("group")?.map_or(Bus::Master, Bus::Group);
             Ok(Change::Output(args.get("track")?, bus))
         },
@@ -127,7 +169,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
         SET_CLIP_TYPE,
         "Set Clip Type",
         &[TRACK, CLIP_TYPE],
-        |args| Ok(Change::ClipType(args.get("track")?, clip_type(args)?)),
+        |args, _| Ok(Change::ClipType(args.get("track")?, clip_type(args)?)),
     ),
     (
         SET_SEND_LEVEL,
@@ -137,7 +179,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
             TO,
             Param::required("level", Type::Number, "The level, linear."),
         ],
-        |args| {
+        |args, _| {
             Ok(Change::SendLevel {
                 track: args.get("track")?,
                 to: args.get("to")?,
@@ -157,7 +199,7 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
                 "Whether it takes the signal before the fader.",
             ),
         ],
-        |args| {
+        |args, _| {
             Ok(Change::SendPreFader {
                 track: args.get("track")?,
                 to: args.get("to")?,
@@ -165,23 +207,26 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
             })
         },
     ),
-    (REMOVE_SEND, "Remove Send", &[TRACK, TO], |args| {
+    (REMOVE_SEND, "Remove Send", &[TRACK, TO], |args, _| {
         Ok(Change::RemoveSend {
             track: args.get("track")?,
             to: args.get("to")?,
         })
     }),
-    (SET_MASTER_VOLUME, "Set Master Volume", &[GAIN], |args| {
-        Ok(Change::MasterGain(number(args, "gain")?))
-    }),
-    (SET_MASTER_PAN, "Set Master Pan", &[PAN], |args| {
+    (
+        SET_MASTER_VOLUME,
+        "Set Master Volume",
+        &[GAIN],
+        |args, _| Ok(Change::MasterGain(number(args, "gain")?)),
+    ),
+    (SET_MASTER_PAN, "Set Master Pan", &[PAN], |args, _| {
         Ok(Change::MasterPan(number(args, "pan")?))
     }),
     (
         SET_MASTER_CLIP_TYPE,
         "Set Master Clip Type",
         &[CLIP_TYPE],
-        |args| Ok(Change::MasterClipType(clip_type(args)?)),
+        |args, _| Ok(Change::MasterClipType(clip_type(args)?)),
     ),
 ];
 
@@ -191,7 +236,8 @@ pub fn register(registry: &mut Registry) {
         registry.add(
             Command::new(id, title).with_params(params),
             move |ctx, args| {
-                change(ctx.document, build(args)?);
+                let change = build(args, ctx.document.project())?;
+                self::change(ctx.document, change);
                 Ok(Value::None)
             },
         );
@@ -221,8 +267,64 @@ pub fn clip_type_name(clip_type: ClipType) -> &'static str {
     }
 }
 
+/// The input the arguments of [`SET_INPUT`] name: one of the kind the track
+/// records, or none.
+fn input(args: &Args, project: &Project) -> Result<Option<Input>, CommandError> {
+    if args.opt("none")?.unwrap_or(false) {
+        return Ok(None);
+    }
+    let device = args.opt("device")?.unwrap_or_default();
+    let name = args.opt("name")?.unwrap_or_default();
+    let channel: Option<i64> = args.opt("channel")?;
+    let track = project.track(args.get("track")?);
+    Ok(Some(match track.map(|t| t.kind) {
+        Some(TrackKind::Midi) => Input::Midi(MidiInput {
+            device,
+            name,
+            channel: channel
+                .map(|c| u8::try_from(c).ok().filter(|c| *c <= 15).ok_or(c))
+                .transpose()
+                .map_err(|c| {
+                    CommandError::invalid(format!(
+                        "there's no MIDI channel {c}: they go from 0 to 15"
+                    ))
+                })?,
+        }),
+        _ => Input::Audio(AudioInput {
+            device,
+            name,
+            channel: match channel {
+                None => 0,
+                Some(c) => u16::try_from(c)
+                    .ok()
+                    .filter(|c| *c < u16::MAX)
+                    .ok_or_else(|| CommandError::invalid(format!("there's no channel {c}")))?,
+            },
+            stereo: args.opt("stereo")?.unwrap_or(true),
+        }),
+    }))
+}
+
+/// The monitoring the argument `monitor` names.
+fn monitor(args: &Args) -> Result<Monitor, CommandError> {
+    let name: String = args.get("monitor")?;
+    [Monitor::In, Monitor::Auto, Monitor::Off]
+        .into_iter()
+        .find(|monitor| monitor_name(*monitor).eq_ignore_ascii_case(name.trim()))
+        .ok_or_else(|| CommandError::invalid(format!("there's no monitor mode called {name}")))
+}
+
+/// A track's monitoring, as the mixer's commands take it.
+pub fn monitor_name(monitor: Monitor) -> &'static str {
+    match monitor {
+        Monitor::In => "In",
+        Monitor::Auto => "Auto",
+        Monitor::Off => "Off",
+    }
+}
+
 /// A change one of the mixer's controls makes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     /// The track's fader, linear.
     Gain(TrackId, f32),
@@ -238,6 +340,10 @@ pub enum Change {
     },
     SoloSafe(TrackId, bool),
     Armed(TrackId, bool),
+    /// What the track records from. Inputs the track can't take are left
+    /// alone: see [`Transaction::set_track_input`].
+    Input(TrackId, Option<Input>),
+    Monitor(TrackId, Monitor),
     /// Where the track's output goes. Buses the track can't feed are left
     /// alone: see [`Project::can_feed`](musicable_model::Project::can_feed).
     Output(TrackId, Bus),
@@ -274,6 +380,33 @@ impl Change {
     pub fn command(&self) -> (CommandId, Args) {
         let on = |id, track: TrackId| (id, Args::new().with("track", track));
         match *self {
+            Self::Input(track, None) => {
+                let (id, args) = on(SET_INPUT, track);
+                (id, args.with("none", true))
+            }
+            Self::Input(track, Some(Input::Audio(ref input))) => {
+                let (id, args) = on(SET_INPUT, track);
+                let args = args
+                    .with("device", input.device.as_str())
+                    .with("name", input.name.as_str())
+                    .with("channel", i64::from(input.channel))
+                    .with("stereo", input.stereo);
+                (id, args)
+            }
+            Self::Input(track, Some(Input::Midi(ref input))) => {
+                let (id, args) = on(SET_INPUT, track);
+                let mut args = args
+                    .with("device", input.device.as_str())
+                    .with("name", input.name.as_str());
+                if let Some(channel) = input.channel {
+                    args.set("channel", i64::from(channel));
+                }
+                (id, args)
+            }
+            Self::Monitor(track, monitor) => {
+                let (id, args) = on(SET_MONITOR, track);
+                (id, args.with("monitor", monitor_name(monitor)))
+            }
             Self::Gain(track, gain) => {
                 let (id, args) = on(SET_VOLUME, track);
                 (id, args.with("gain", gain))
@@ -349,6 +482,8 @@ impl Change {
             Self::SoloSafe(..) => "Solo-Safe",
             Self::Armed(_, true) => "Arm",
             Self::Armed(_, false) => "Disarm",
+            Self::Input(..) => "Input",
+            Self::Monitor(..) => "Monitor",
             Self::Output(..) => "Output",
             Self::ClipType(..) | Self::MasterClipType(_) => "Clip Type",
             Self::SendLevel { .. } => "Send Level",
@@ -386,6 +521,8 @@ pub fn change(document: &mut Document, change: Change) {
         }
         Change::SoloSafe(track, solo_safe) => tx.set_track_solo_safe(track, solo_safe),
         Change::Armed(track, armed) => tx.set_track_armed(track, armed),
+        Change::Input(track, input) => tx.set_track_input(track, input),
+        Change::Monitor(track, monitor) => tx.set_track_monitor(track, monitor),
         Change::Output(track, output) => tx.set_track_output(track, output),
         Change::ClipType(track, clip_type) => tx.set_track_clip_type(track, clip_type),
         Change::SendLevel { track, to, level } => {
@@ -424,7 +561,7 @@ pub fn change(document: &mut Document, change: Change) {
 }
 
 /// The id of `track`'s send to the track `to`, if it has one.
-fn send_to(project: &musicable_model::Project, track: TrackId, to: TrackId) -> Option<SendId> {
+fn send_to(project: &Project, track: TrackId, to: TrackId) -> Option<SendId> {
     let track = project.track(track)?;
     track
         .sends
@@ -450,6 +587,7 @@ mod tests {
 
     use super::*;
     use crate::Edit;
+    use crate::testing::Setup;
 
     /// Drums feeding a group, and a return track.
     fn document() -> (Document, [TrackId; 3]) {
@@ -587,6 +725,79 @@ mod tests {
     }
 
     #[test]
+    fn tracks_take_inputs_of_the_kind_they_record() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let group = project.add_track("Group", TrackKind::Group);
+        let mut setup = crate::testing::Setup::new(project);
+        let set = |setup: &mut Setup, track: TrackId, args: Args| {
+            setup.run_with(&SET_INPUT, args.with("track", track))
+        };
+        let input =
+            |setup: &Setup, track| setup.document.project().track(track).unwrap().input.clone();
+        // The fourth channel of an interface, alone.
+        let mono = Args::new()
+            .with("device", "rme")
+            .with("name", "RME")
+            .with("channel", 3_i64)
+            .with("stereo", false);
+        set(&mut setup, vocal, mono).unwrap();
+        let expected = AudioInput {
+            device: "rme".into(),
+            name: "RME".into(),
+            channel: 3,
+            stereo: false,
+        };
+        assert_eq!(input(&setup, vocal), Some(Input::Audio(expected)));
+        // The default MIDI input's tenth channel, then all of them.
+        set(&mut setup, keys, Args::new().with("channel", 9_i64)).unwrap();
+        let tenth = MidiInput {
+            channel: Some(9),
+            ..MidiInput::default()
+        };
+        assert_eq!(input(&setup, keys), Some(Input::Midi(tenth)));
+        set(&mut setup, keys, Args::new()).unwrap();
+        assert_eq!(input(&setup, keys), Some(Input::Midi(MidiInput::default())));
+        set(&mut setup, vocal, Args::new().with("none", true)).unwrap();
+        assert_eq!(input(&setup, vocal), None);
+        // Buses record nothing.
+        set(&mut setup, group, Args::new()).unwrap();
+        assert_eq!(input(&setup, group), None);
+        assert_eq!(
+            setup.committed_names(),
+            ["Input", "Input", "Input", "Input"]
+        );
+
+        let channel = |c: i64| Args::new().with("channel", c);
+        assert_eq!(
+            set(&mut setup, keys, channel(16)),
+            Err(CommandError::invalid(
+                "there's no MIDI channel 16: they go from 0 to 15"
+            ))
+        );
+        for c in [-1, i64::from(u16::MAX)] {
+            assert_eq!(
+                set(&mut setup, vocal, channel(c)),
+                Err(CommandError::invalid(format!("there's no channel {c}")))
+            );
+        }
+
+        let monitor = |setup: &mut Setup, name: &str| {
+            let args = Args::new().with("track", vocal).with("monitor", name);
+            setup.run_with(&SET_MONITOR, args)
+        };
+        monitor(&mut setup, " in").unwrap();
+        assert_eq!(setup.document.project().tracks[0].monitor, Monitor::In);
+        assert_eq!(
+            monitor(&mut setup, "Sometimes"),
+            Err(CommandError::invalid(
+                "there's no monitor mode called Sometimes"
+            ))
+        );
+    }
+
+    #[test]
     fn deleting_a_bus_reroutes_what_fed_it_first() {
         let (mut doc, [drums, group, reverb]) = document();
         let send = Change::SendLevel {
@@ -643,6 +854,18 @@ mod tests {
             },
             Change::SoloSafe(drums, true),
             Change::Armed(drums, true),
+            Change::Input(
+                drums,
+                Some(Input::Audio(AudioInput {
+                    device: "rme".into(),
+                    name: "RME".into(),
+                    channel: 2,
+                    stereo: false,
+                })),
+            ),
+            Change::Input(drums, None),
+            Change::Input(drums, Some(Input::Audio(AudioInput::default()))),
+            Change::Monitor(drums, Monitor::Off),
             Change::Output(drums, Bus::Master),
             Change::ClipType(group, ClipType::Soft),
             Change::SendLevel {
@@ -670,7 +893,7 @@ mod tests {
             let (id, args) = change.command();
             assert!(!args.is_empty(), "{id}");
             setup.run_with(&id, args).unwrap();
-            super::change(&mut expected, change);
+            super::change(&mut expected, change.clone());
             assert_eq!(setup.document.project(), expected.project(), "{change:?}");
         }
         let names = setup.committed_names();

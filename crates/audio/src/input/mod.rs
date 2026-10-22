@@ -26,9 +26,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) use bus::{Bus, BusInput};
 pub(crate) use clock::Playback;
 pub(crate) use conform::{Conformer, Packet};
-#[cfg(feature = "asio")]
-pub(crate) use ring::InputWriter;
-pub use ring::{InputBuffer, ReadError};
+pub use ring::{InputBuffer, InputWriter, ReadError};
 
 /// How long an input's buffer holds what it captured, in seconds, at
 /// least: how far behind a recording can fall before it loses audio.

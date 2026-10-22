@@ -67,8 +67,10 @@ struct Ring {
 
 impl InputBuffer {
     /// A buffer of `channels` channels holding at least `frames` frames,
-    /// and its one writer. Allocates.
-    pub(crate) fn new(channels: usize, frames: u64) -> (InputBuffer, InputWriter) {
+    /// and its one writer. Allocates. Streams make their inputs' buffers:
+    /// this is for anything else that stands in for an input, such as a
+    /// recording's tests.
+    pub fn new(channels: usize, frames: u64) -> (InputBuffer, InputWriter) {
         let capacity = frames.max(1).next_power_of_two();
         let samples = (0..channels as u64 * capacity)
             .map(|_| AtomicU32::new(0))
@@ -103,9 +105,11 @@ impl InputBuffer {
     }
 
     /// Whether the input has stopped: nothing more will be written. What was
-    /// written can still be read, until the buffer is dropped.
+    /// written can still be read, until the buffer is dropped. Once it says
+    /// so, [`frames`](Self::frames) has every frame there will be.
     pub fn has_ended(&self) -> bool {
-        self.ring.ended.load(Relaxed)
+        // Pairs with the writer's drop.
+        self.ring.ended.load(Acquire)
     }
 
     /// The engine frames that can be read now, from the oldest the buffer
@@ -218,8 +222,8 @@ impl Ring {
 }
 
 /// The one thing that writes an [`InputBuffer`]: the newest frames, in
-/// order. Real-time safe once begun.
-pub(crate) struct InputWriter {
+/// order. Real-time safe once begun. Dropping it ends the buffer.
+pub struct InputWriter {
     ring: Arc<Ring>,
     /// Zeros, for writing silence.
     silence: Vec<f32>,
@@ -227,7 +231,8 @@ pub(crate) struct InputWriter {
 
 impl Drop for InputWriter {
     fn drop(&mut self) {
-        self.ring.ended.store(true, Relaxed);
+        // After every frame written.
+        self.ring.ended.store(true, Release);
     }
 }
 

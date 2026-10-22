@@ -3,15 +3,17 @@
 //!
 //! Each place has its list of commands. A command's title, keys and
 //! condition come from the registry, and each of its parameters that names
-//! a clip, a track, a locator or a position is filled in from where the
-//! menu was opened. A command that needs an argument the menu can't give is
-//! left out.
+//! a clip, a track, a locator, a take or a position is filled in from where
+//! the menu was opened. A command that needs an argument the menu can't give
+//! is left out.
 
 use egui::{Button, Ui};
 use musicable_commands::{
-    Args, Command, CommandId, Type, Value, arrange, edit, file, locator, track, transport, view,
+    Args, Command, CommandId, Type, Value, arrange, edit, file, locator, take, track, transport,
+    view,
 };
 use musicable_model::TrackKind;
+use musicable_model::time::Beats;
 
 use super::{Hit, Scene, Spot};
 use crate::shell::{Action, toggled, with_keys};
@@ -56,6 +58,8 @@ const HEADER: Items = &[
     Some(edit::RENAME),
     Some(track::DELETE),
     None,
+    Some(view::TOGGLE_TAKE_LANES),
+    None,
     Some(track::NEW_AUDIO_TRACK),
     Some(track::NEW_MIDI_TRACK),
     Some(track::NEW_RETURN_TRACK),
@@ -87,6 +91,17 @@ const LOCATOR: Items = &[
     Some(locator::DELETE),
 ];
 
+/// On a take's lane, Comp copies the clip the menu was opened on, and on
+/// its header, all of the take.
+const TAKE: Items = &[
+    Some(take::COMP),
+    None,
+    Some(edit::RENAME),
+    Some(take::DELETE),
+    None,
+    Some(view::TOGGLE_TAKE_LANES),
+];
+
 /// The commands of the context menu for `hit`.
 fn items(hit: Hit) -> Vec<Option<CommandId>> {
     let lists: &[Items] = match hit {
@@ -96,6 +111,7 @@ fn items(hit: Hit) -> Vec<Option<CommandId>> {
         Hit::Header(_) | Hit::TrackEdge(_) => &[HEADER],
         Hit::Ruler | Hit::Strip | Hit::LoopBrace | Hit::LoopEdge(_) => &[RULER],
         Hit::Locator(_) => &[LOCATOR],
+        Hit::Take { .. } | Hit::TakeHeader { .. } => &[TAKE],
     };
     lists
         .iter()
@@ -165,6 +181,18 @@ fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
     let mut args = Args::new();
     for param in &command.params {
         let value: Option<Value> = match (param.ty, spot.hit) {
+            (Type::Take, Hit::Take { take, .. } | Hit::TakeHeader { take, .. }) => {
+                Some(take.into())
+            }
+            // The stretch Comp copies.
+            (Type::Beats, Hit::Take { .. } | Hit::TakeHeader { .. }) => {
+                let (start, end) = comped(scene, spot.hit)?;
+                match param.name.as_ref() {
+                    "start" => Some(start.into()),
+                    "end" => Some(end.into()),
+                    _ => None,
+                }
+            }
             (Type::Clip, Hit::Clip { clip, .. }) => Some(clip.into()),
             // The selected clips, if the menu was opened on one of them.
             (Type::List(Type::Clip), Hit::Clip { clip, .. }) => {
@@ -197,8 +225,27 @@ fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
     Some(args)
 }
 
+/// What Comp copies from the take lane `hit` is on: the clip it's on, or
+/// on the take's header, all of the take. `None` between its clips.
+fn comped(scene: &Scene<'_>, hit: Hit) -> Option<(Beats, Beats)> {
+    let (take, clip) = match hit {
+        Hit::Take { take, clip, .. } => (take, Some(clip?)),
+        Hit::TakeHeader { take, .. } => (take, None),
+        _ => return None,
+    };
+    let (_, take) = scene.project().find_take(take)?;
+    let clips = take
+        .clips
+        .iter()
+        .filter(|c| clip.is_none_or(|clip| c.id == clip));
+    let start = clips.clone().map(|c| c.start).min()?;
+    let end = clips.map(|c| c.end()).max()?;
+    Some((start, end))
+}
+
 /// Whether `id` suits the track the menu was opened on: MIDI clips go on
-/// MIDI tracks, and audio files on audio tracks.
+/// MIDI tracks, audio files on audio tracks, and return and group tracks
+/// record nothing, so they have no takes.
 fn fits(id: &CommandId, scene: &Scene<'_>, spot: Spot) -> bool {
     let kind = spot
         .hit
@@ -208,6 +255,7 @@ fn fits(id: &CommandId, scene: &Scene<'_>, spot: Spot) -> bool {
     match id {
         id if *id == arrange::INSERT_MIDI_CLIP => kind == Some(TrackKind::Midi),
         id if *id == file::IMPORT_AUDIO => kind.is_none_or(|kind| kind == TrackKind::Audio),
+        id if *id == view::TOGGLE_TAKE_LANES => kind.is_some_and(|kind| !kind.is_bus()),
         _ => true,
     }
 }

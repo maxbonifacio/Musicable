@@ -64,6 +64,7 @@ The default keymap follows Ableton Live's shortcuts where Live has one.
 | `transport.play_stop` | Play/Stop | Plays from the start marker, or stops if playing | Space | Space |
 | `transport.play` | Play | Plays from the playhead: where playing stopped | Shift+Space | Shift+Space (continue from the stop point) |
 | `transport.stop` | Stop | Stops, leaving the playhead where it is | Ctrl+Period | none |
+| `transport.record` | Record | Records the armed tracks, playing from the start marker as Play/Stop does; while playing, turns recording on or off | F9 | F9 (Arrangement Record) |
 | `transport.go_to_start` | Go to Start | Moves the start marker and the playhead to the start of the song | Home | Home |
 | `transport.toggle_loop` | Toggle Loop | Loops the selection, or else turns looping over the loop region on or off | Ctrl+L | Ctrl+L |
 | `transport.toggle_metronome` | Toggle Metronome | Turns the metronome on or off | O | O |
@@ -84,6 +85,12 @@ where the last play did. The `play_from` setting
 ([app.md](app.md#settings-and-your-keymap)) has it play from wherever the
 playhead stopped instead. Live has no keys for stop and tempo; the ones
 chosen do nothing in Live outside its MIDI note editor.
+
+Stopping stops recording too. `transport.toggle_punch_in` and
+`transport.toggle_punch_out` (Toggle Punch In, Toggle Punch Out) have
+recording start at the loop region's start and stop at its end, as Live's
+punch-in and punch-out switches do. They change the project, so undo
+covers them and they're saved with it, and they have no keys, as in Live.
 
 ### File
 
@@ -120,7 +127,7 @@ tracks.
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
 | `edit.select_all` | Select All | Selects every clip | Ctrl+A | Ctrl+A |
-| `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track | Ctrl+R | Ctrl+R |
+| `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 
 And for the arrangement's clicks, scripts and agents:
 
@@ -173,6 +180,29 @@ is dropped or imported.
 
 A new locator is named with a number, counting the locators. Live has no
 keys for these either.
+
+### Take
+
+Recording keeps what each pass of the playhead recorded as a take, in a
+lane under its track: a loop recorded four times makes four takes. Each
+pass is comped onto its track as it's added, later passes over earlier
+ones, so the track plays the last pass, and comping picks other parts from
+there.
+
+| Command | Title | Arguments | What it does | Default key |
+|---|---|---|---|---|
+| `take.comp` | Comp | `take`, `start`, `end` | Copies a stretch of a take to its track, replacing what the track has there, even where the take has nothing; gives back the copies' ids | none |
+| `take.rename` | Rename Take | `take`, `name` | Names a take | none |
+| `take.delete` | Delete Take | `take` | Deletes a take | none |
+
+`take::add_recording` adds what the tracks recorded as one transaction,
+"Record", with a take for each pass, named "Take" and a number one past
+the track's highest, so one undo takes a whole recording back. A pass
+starts on the frame it was recorded at, whatever the tempo, and one that
+went on in another file, at WAV's 4 GB, is a take with a clip for each
+file. Comping copies
+the take's clips, so the take keeps them. `view.toggle_take_lanes` (see
+below) shows the takes.
 
 ### Track
 
@@ -229,6 +259,8 @@ Edit menu:
 | `Solo` | Solos or unsolos a track; `exclusive` unsolos the others | Solo, Unsolo |
 | `SoloSafe` | Leaves a track playing while others are soloed | Solo-Safe |
 | `Armed` | Arms a track for recording | Arm, Disarm |
+| `Input` | Sets what a track records from, or nothing | Input |
+| `Monitor` | Sets when a track plays its input instead of its clips: In, Auto or Off | Monitor |
 | `Output` | Sends a track's output to the master or a group it can feed | Output |
 | `ClipType`, `MasterClipType` | Sets a channel's clip stage | Clip Type |
 | `SendLevel` | Sets a send's level, adding the send if there isn't one | Send Level |
@@ -237,12 +269,20 @@ Edit menu:
 | `Delete` | Deletes a track; what fed it feeds the master, and sends to it go | Delete Track |
 
 The commands are `mixer.set_volume`, `set_pan`, `set_mute`, `set_solo`,
-`set_solo_safe`, `set_arm`, `set_output`, `set_clip_type`,
-`set_send_level`, `set_send_pre_fader`, `remove_send`,
+`set_solo_safe`, `set_arm`, `set_input`, `set_monitor`, `set_output`,
+`set_clip_type`, `set_send_level`, `set_send_pre_fader`, `remove_send`,
 `set_master_volume`, `set_master_pan` and `set_master_clip_type`; deleting a
 track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
 (left) to 1. A change the routing rules don't allow, such as an output that
 would make a loop, does nothing.
+
+`mixer.set_input` takes an input of the kind the track records: the input's
+`device` id, as the audio settings list it, or the default input without
+one, and its `name`, to show while it's missing. On an audio track,
+`channel` is the first channel, from 0, and `stereo` says whether it takes
+the next one too (it does without it). On a MIDI track, `channel` is the
+one MIDI channel to take, from 0 to 15, or every channel without it.
+`none` records from nothing. Buses take no input.
 
 ### Options and View
 
@@ -262,6 +302,7 @@ other. They push a `Request`, as the file commands do.
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
 | `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement | Z | Z |
 | `view.toggle_follow` | Follow | Scrolls the arrangement to keep the playhead in sight, or stops | Ctrl+Shift+F | Ctrl+Shift+F |
+| `view.toggle_take_lanes` | Show/Hide Take Lanes | Shows the takes of the selected tracks, or of the track the panels show, in lanes under them, or hides them; `tracks` names other tracks | Ctrl+Alt+U | Ctrl+Alt+U |
 | `view.narrow_grid` | Narrow Grid | Brings the grid's lines closer | Ctrl+1 | Ctrl+1 |
 | `view.widen_grid` | Widen Grid | Takes them further apart | Ctrl+2 | Ctrl+2 |
 | `view.triplet_grid` | Triplet Grid | Turns triplet lines on or off | Ctrl+3 | Ctrl+3 |
@@ -270,9 +311,9 @@ other. They push a `Request`, as the file commands do.
 
 `view.set_viewport` (`start`, `zoom`, `top`, `width`) and
 `view.set_track_height` (`track`, `height`) carry the arrangement's
-scrolling, zooming and track heights. They change the editor's state, not
-the project, so undo leaves them alone. Live has no command palette.
-Ctrl+Shift+P is the usual key for one in other apps.
+scrolling, zooming and track heights. They and the take lanes change the
+editor's state, not the project, so undo leaves them alone. Live has no
+command palette. Ctrl+Shift+P is the usual key for one in other apps.
 
 ## The editor's state
 
@@ -306,6 +347,7 @@ for the behaviour settings.
   ([app.md](app.md#audio-files)). Trimming keeps an audio clip inside its
   file, and positions inside a file count in the file's own frames.
 - **The clipboard**: what Cut and Copy took, for Paste.
+- **Take lanes**: the tracks whose takes show in lanes under them.
 
 ## Transactions
 
@@ -320,13 +362,14 @@ ctx.document.transact("Toggle Metronome", |tx| {
 ```
 
 A `Transaction` has a setter for each part of the project that commands
-change: the tempo map, the loop region, looping and the metronome; adding
-and removing tracks and sends; each mixer setting of a track, a send and the
-master; adding and removing clips, and their timing, fades and names;
-adding, moving, naming and removing locators; and adding and removing
-devices, and a plugin's parameters and settings. `Transaction::editor` reads
-the editor's state, such as the files' sample rates.
-Each setter records an `Edit` with the new value and the one it replaced. A
+change: the tempo map, the loop region, looping, punching in and out and
+the metronome; adding and removing tracks and sends; each mixer setting of
+a track, its input and monitoring among them, a send and the master; adding
+and removing clips, and their timing, fades and names; adding, naming and
+removing takes; adding, moving, naming and removing locators; and adding
+and removing devices, and a plugin's parameters and settings.
+`Transaction::editor` reads the editor's state, such as the files' sample
+rates. Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
 recorded leaves no trace. Any other is committed under its name, which the
 Edit menu shows, and becomes a step in the undo history (see below).

@@ -16,7 +16,7 @@ use std::fmt;
 
 use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
-use musicable_model::{DeviceId, LocatorId, Project, TrackId};
+use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
@@ -31,6 +31,7 @@ mod keymap;
 pub mod locator;
 pub mod mixer;
 pub mod options;
+pub mod take;
 #[cfg(test)]
 mod testing;
 pub mod track;
@@ -194,6 +195,7 @@ pub enum Named {
     Track(TrackId),
     Clip(ClipId),
     Locator(LocatorId),
+    Take(TakeId),
 }
 
 /// What a running command can reach.
@@ -224,6 +226,12 @@ pub trait Transport {
     fn locate(&mut self, at: Beats);
     /// Where the playhead is, as of the engine's last block.
     fn playhead(&self) -> Beats;
+    /// Whether recording is on, counting what was asked for but hasn't
+    /// reached the engine yet. While it is, playing records the armed
+    /// tracks, within the punch range if punching in or out is on.
+    fn is_recording(&self) -> bool;
+    /// Turns recording on or off. Stopping turns it off too.
+    fn set_recording(&mut self, on: bool);
 }
 
 type Run = Box<dyn Fn(&mut Context<'_>, &Args) -> Result<Value, CommandError>>;
@@ -329,6 +337,7 @@ pub fn register_all(registry: &mut Registry) {
     locator::register(registry);
     device::register(registry);
     mixer::register(registry);
+    take::register(registry);
     view::register(registry);
     options::register(registry);
 }

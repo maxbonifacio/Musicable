@@ -1,10 +1,11 @@
 //! The mixer: a channel strip for each track, in the project's order, and
 //! the master's on the right.
 //!
-//! A strip has, from the top: the track's name, where its output goes, a
-//! send to each return track, the pan, the fader beside the meter, the gain
-//! and the highest peak, mute, solo and arm, and the clip stage. Its
-//! controls hand back [`Change`]s for the app to make.
+//! A strip has, from the top: the track's name, where an audio track
+//! records from and when it plays its input, where its output goes, a send
+//! to each return track, the pan, the fader beside the meter, the gain and
+//! the highest peak, mute, solo and arm, and the clip stage. Its controls
+//! hand back [`Change`]s for the app to make.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -17,7 +18,7 @@ use egui::{
 };
 use musicable_commands::mixer::Change;
 use musicable_model::mixer::Bus;
-use musicable_model::{ClipType, Project, Track, TrackId, TrackKind};
+use musicable_model::{AudioInput, ClipType, Input, Monitor, Project, Track, TrackId, TrackKind};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::Action;
@@ -33,6 +34,16 @@ pub struct Level {
     pub rms: [f32; 2],
     /// The highest sample since the peaks were last cleared.
     pub highest: f32,
+}
+
+/// An audio input tracks can record from, as the input menus offer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputChoice {
+    /// What tracks name it by: see [`AudioInput::device`].
+    pub id: String,
+    pub name: String,
+    /// How many channels it has, or 0 when that's only known once it opens.
+    pub channels: u16,
 }
 
 /// The readings of the project's meters, as the engine last measured them.
@@ -78,12 +89,14 @@ const MARKS: [f32; 6] = [6.0, 0.0, -6.0, -12.0, -24.0, -48.0];
 const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and File > New Demo \
                          Project has a dozen test tones.";
 
-/// Shows the mixer for `project`, with the meters reading `levels`, and
-/// adds what the user changed to `actions`.
+/// Shows the mixer for `project`, with the meters reading `levels` and the
+/// input menus offering `inputs`, and adds what the user changed to
+/// `actions`.
 pub(crate) fn show(
     ui: &mut Ui,
     project: &Project,
     levels: &Levels,
+    inputs: &[InputChoice],
     theme: &Theme,
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
@@ -96,12 +109,13 @@ pub(crate) fn show(
         .collect();
     // Every strip has the same rows, so the faders line up, and the faders
     // take the height the rows leave.
-    let rows = 6 + returns.len();
+    let rows = 8 + returns.len();
     let fixed = rows as f32 * (sizes.row + sizes.gap) + 2.0 * sizes.margin + sizes.scroll_bar;
     let fader = (ui.available_height() - fixed).max(sizes.min_fader);
     let mixer = Mixer {
         project,
         returns,
+        inputs,
         fader,
         theme,
         mouse,
@@ -144,6 +158,8 @@ struct Mixer<'a> {
     project: &'a Project,
     /// The return tracks. Each strip has a row of sends with one for each.
     returns: Vec<&'a Track>,
+    /// The audio inputs the input menus offer.
+    inputs: &'a [InputChoice],
     /// How tall the faders are.
     fader: f32,
     theme: &'a Theme,
@@ -175,6 +191,8 @@ impl Mixer<'_> {
                         ui.close();
                     }
                 });
+            self.row(ui, |ui| self.input(ui, track, actions));
+            self.row(ui, |ui| self.monitor(ui, track, actions));
             self.row(ui, |ui| {
                 if let Some(bus) = self.output(ui, track) {
                     mix(actions, Change::Output(id, bus));
@@ -214,8 +232,8 @@ impl Mixer<'_> {
             self.row(ui, |ui| self.title(ui, "Master")).on_hover_text(
                 "The master: every track ends up here, and it plays out of the audio device.",
             );
-            // The master has no output to choose, and no sends.
-            for _ in 0..1 + self.returns.len() {
+            // The master has no input, no output to choose, and no sends.
+            for _ in 0..3 + self.returns.len() {
                 self.row(ui, |_| ());
             }
             self.row(ui, |ui| {
@@ -285,6 +303,165 @@ impl Mixer<'_> {
             Bus::Master => "Master",
             Bus::Group(id) => self.project.track(id).map_or("?", |t| t.name.as_str()),
         }
+    }
+
+    /// Where an audio track records from: a menu of the inputs, each a pair
+    /// of channels or a channel at a time, with the default input first.
+    fn input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        if track.kind != TrackKind::Audio {
+            return;
+        }
+        let current = match &track.input {
+            Some(Input::Audio(input)) => Some(input),
+            _ => None,
+        };
+        let text = current.map_or("No Input".to_owned(), |input| self.input_name(input));
+        let missing = current.is_some_and(|input| {
+            !input.device.is_empty() && !self.inputs.iter().any(|c| c.id == input.device)
+        });
+        let mut picked = None;
+        let shown = if missing {
+            RichText::new(&text).color(self.theme.warning)
+        } else {
+            RichText::new(&text)
+        };
+        let menu = ComboBox::from_id_salt(("input", track.id))
+            .width(self.sizes().inner())
+            .truncate()
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "No Input").clicked() {
+                    picked = Some(None);
+                }
+                let default = InputChoice {
+                    id: String::new(),
+                    name: DEFAULT_INPUT.to_owned(),
+                    channels: 2,
+                };
+                for choice in std::iter::once(&default).chain(self.inputs) {
+                    ui.separator();
+                    ui.label(RichText::new(&choice.name).weak());
+                    for input in channel_choices(choice) {
+                        let on = current.is_some_and(|c| same_channels(c, &input));
+                        let label = channels_name(&choice.name, &input);
+                        if ui.selectable_label(on, label).clicked() {
+                            picked = Some(Some(input));
+                        }
+                    }
+                }
+            });
+        if menu.response.clicked() {
+            actions.push(Action::ListInputs);
+        }
+        name_menu(&menu.response, format!("{} Input", track.name), &text);
+        let hint = if missing {
+            "Where the track records from. This input isn't there: it's not plugged in."
+        } else {
+            "Where the track records from"
+        };
+        menu.response.on_hover_text(hint);
+        let changed = match (&picked, current) {
+            (Some(None), None) => false,
+            (Some(Some(input)), Some(current)) => !same_channels(input, current),
+            (picked, _) => picked.is_some(),
+        };
+        if let Some(input) = picked.filter(|_| changed) {
+            mix(actions, Change::Input(track.id, input.map(Input::Audio)));
+        }
+    }
+
+    /// What an input menu calls `input`.
+    fn input_name(&self, input: &AudioInput) -> String {
+        let name = match input.device.as_str() {
+            "" => DEFAULT_INPUT,
+            id => self
+                .inputs
+                .iter()
+                .find(|choice| choice.id == id)
+                .map_or(input.name.as_str(), |choice| choice.name.as_str()),
+        };
+        channels_name(name, input)
+    }
+
+    /// When an audio track plays its input instead of its clips: In,
+    /// Auto, or Off.
+    fn monitor(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        if track.kind != TrackKind::Audio {
+            return;
+        }
+        let sizes = self.sizes();
+        let size = vec2((sizes.inner() - 2.0 * sizes.gap) / 3.0, sizes.row - 2.0);
+        let modes = [
+            (Monitor::In, "In", "Monitor: always plays the input"),
+            (
+                Monitor::Auto,
+                "Auto",
+                "Monitor: plays the input while the track is armed, and the transport is \
+                 stopped or recording",
+            ),
+            (
+                Monitor::Off,
+                "Off",
+                "Monitor: never plays the input, only records it",
+            ),
+        ];
+        for (monitor, face, hint) in modes {
+            let on = track.monitor == monitor;
+            let label = format!("{} Monitor {face}", track.name);
+            let button = toggle(
+                ui,
+                Face::Text(face),
+                on,
+                self.theme.monitor,
+                &label,
+                size,
+                self.theme,
+            )
+            .on_hover_text(hint);
+            if button.clicked() && !on {
+                mix(actions, Change::Monitor(track.id, monitor));
+            }
+        }
+    }
+}
+
+/// What the input menus call the default input.
+const DEFAULT_INPUT: &str = "Default";
+
+/// The ways a track can take `choice`'s channels: each pair, then each
+/// channel on its own. An input whose channels aren't known yet offers two.
+fn channel_choices(choice: &InputChoice) -> Vec<AudioInput> {
+    let channels = match choice.channels {
+        0 => 2,
+        channels => channels,
+    };
+    let input = |channel, stereo| AudioInput {
+        device: choice.id.clone(),
+        name: match choice.id.as_str() {
+            "" => String::new(),
+            _ => choice.name.clone(),
+        },
+        channel,
+        stereo,
+    };
+    let pairs = (0..channels / 2).map(|pair| input(pair * 2, true));
+    let singles = (0..channels).map(|channel| input(channel, false));
+    pairs.chain(singles).collect()
+}
+
+/// Whether `a` and `b` take the same channels of the same input, whatever
+/// names they have for it.
+fn same_channels(a: &AudioInput, b: &AudioInput) -> bool {
+    (&a.device, a.channel, a.stereo) == (&b.device, b.channel, b.stereo)
+}
+
+/// `name` with the channels `input` takes, counting from 1: "Default 1/2".
+fn channels_name(name: &str, input: &AudioInput) -> String {
+    let first = u32::from(input.channel) + 1;
+    if input.stereo {
+        format!("{name} {first}/{}", first + 1)
+    } else {
+        format!("{name} {first}")
     }
 }
 
@@ -1059,6 +1236,7 @@ mod tests {
     struct State {
         document: Document,
         levels: Levels,
+        inputs: Vec<InputChoice>,
         actions: Vec<Action>,
     }
 
@@ -1067,9 +1245,16 @@ mod tests {
     }
 
     fn harness_with(project: Project, levels: Levels) -> Harness<'static, State> {
+        // A four-channel interface.
+        let interface = InputChoice {
+            id: "interface".to_owned(),
+            name: "Interface".to_owned(),
+            channels: 4,
+        };
         let state = State {
             document: Document::new(project),
             levels,
+            inputs: vec![interface],
             actions: Vec::new(),
         };
         Harness::builder().with_size([900.0, 600.0]).build_ui_state(
@@ -1077,10 +1262,20 @@ mod tests {
                 let mut actions = Vec::new();
                 let (theme, mouse) = (Theme::default(), MouseMap::live());
                 let project = state.document.project();
-                show(ui, project, &state.levels, &theme, &mouse, &mut actions);
+                show(
+                    ui,
+                    project,
+                    &state.levels,
+                    &state.inputs,
+                    &theme,
+                    &mouse,
+                    &mut actions,
+                );
                 for action in &actions {
                     match action {
-                        Action::Mixer(change) => mixer::change(&mut state.document, *change),
+                        Action::Mixer(change) => {
+                            mixer::change(&mut state.document, change.clone());
+                        }
                         Action::BeginGesture => state.document.begin_gesture(),
                         Action::EndGesture => state.document.end_gesture(),
                         _ => {}
@@ -1112,7 +1307,7 @@ mod tests {
         let actions = harness.state().actions.iter();
         actions
             .filter_map(|action| match action {
-                Action::Mixer(change) => Some(*change),
+                Action::Mixer(change) => Some(change.clone()),
                 _ => None,
             })
             .collect()
@@ -1209,7 +1404,7 @@ mod tests {
         let [
             Change::Gain(id, gain),
             Change::Pan(pan_id, pan),
-            level,
+            ref level,
             Change::MasterGain(master),
         ] = changes[..4]
         else {
@@ -1223,7 +1418,7 @@ mod tests {
             to: reverb,
             level: 1.0,
         };
-        assert_eq!(level, full);
+        assert_eq!(*level, full);
         assert!((master - 1.995).abs() < 0.001, "{master}");
         let pre = Change::SendPreFader {
             track: lead,
@@ -1398,6 +1593,78 @@ mod tests {
         }
         assert_eq!(gain_at(1.0, SEND_TOP), 1.0);
         assert_eq!(gain_of(FLOOR), 0.0);
+    }
+
+    #[test]
+    fn audio_tracks_choose_their_input_and_monitoring() {
+        let (project, [lead, ..]) = project();
+        let mut harness = harness(project);
+        harness.run();
+        let input = |harness: &Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Lead Input")
+                .value()
+        };
+        // A new audio track takes the default input in stereo. Only audio
+        // tracks record audio.
+        assert_eq!(input(&harness).as_deref(), Some("Default 1/2"));
+        assert!(harness.query_by_label("Keys Input").is_none());
+        assert!(harness.query_by_label("Keys Monitor In").is_none());
+
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Lead Input")
+            .click();
+        harness.run();
+        // Opening the menu asks for the inputs again, in case one was
+        // plugged in.
+        assert!(harness.state().actions.contains(&Action::ListInputs));
+        // The interface's pairs, then its channels on their own.
+        for label in [
+            "Interface 1/2",
+            "Interface 3/4",
+            "Interface 1",
+            "Interface 4",
+        ] {
+            assert!(harness.query_by_label(label).is_some(), "{label}");
+        }
+        assert!(harness.query_by_label("Interface 5").is_none());
+        // The menu scrolls, as an interface's channels don't all fit.
+        harness.get_by_label("Interface 3").scroll_to_me();
+        harness.run();
+        harness.get_by_label("Interface 3").click();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("Interface 3"));
+        let mono = AudioInput {
+            device: "interface".to_owned(),
+            name: "Interface".to_owned(),
+            channel: 2,
+            stereo: false,
+        };
+
+        // Auto, the default, is on: clicking it changes nothing.
+        harness.get_by_label("Lead Monitor Auto").click();
+        harness.run();
+        harness.get_by_label("Lead Monitor In").click();
+        harness.run();
+        assert_eq!(
+            mixed(&harness),
+            [
+                Change::Input(lead, Some(Input::Audio(mono))),
+                Change::Monitor(lead, Monitor::In),
+            ]
+        );
+
+        // An input that isn't plugged in keeps its name.
+        harness.state_mut().inputs.clear();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("Interface 3"));
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Lead Input")
+            .click();
+        harness.run();
+        harness.get_by_label("No Input").click();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("No Input"));
     }
 
     #[test]

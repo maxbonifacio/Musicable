@@ -10,15 +10,15 @@ use egui::{Align, Button, DragValue, Id, Key, Layout, Modal, Modifiers, RichText
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
-    edit, locator, options, track, transport, view,
+    edit, locator, options, take, track, transport, view,
 };
-use musicable_model::time::{Beats, TempoMap};
+use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
 use crate::arrangement::Arrangement;
 use crate::devices::{BROWSER, Browser, DEVICES, DevicesPanel, Plugins};
 use crate::menus::menus;
-use crate::mixer::{self, Levels};
+use crate::mixer::{self, InputChoice, Levels};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::shortcuts::Shortcuts;
@@ -53,8 +53,13 @@ pub struct View<'a> {
     /// The name of the change Redo would make again.
     pub redo: Option<&'a str>,
     pub playback: Playback,
+    /// What the armed tracks have recorded so far, while they record.
+    pub recordings: &'a [Recording],
     /// The meters' readings, as the engine last measured them.
     pub levels: &'a Levels,
+    /// The audio inputs tracks can record from, for the mixer's input
+    /// menus.
+    pub inputs: &'a [InputChoice],
     pub audio: Audio<'a>,
     /// The user's keymap file.
     pub keymap_file: KeymapStatus<'a>,
@@ -68,11 +73,20 @@ pub struct View<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Playback {
     pub playing: bool,
+    /// Whether recording is on: whether playing records the armed tracks.
+    pub record: bool,
     /// Where the playhead is in the song: what's heard, so the latency of
     /// plugins and of the audio device is taken off where the engine is.
     pub playhead: Beats,
     /// The same, in seconds from the start of the song.
     pub seconds: f64,
+}
+
+/// A stretch of the song a track has recorded so far, while it records.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Recording {
+    pub track: TrackId,
+    pub range: BeatRange,
 }
 
 /// The audio device, as the corner of the transport bar shows it.
@@ -131,6 +145,9 @@ pub enum Action {
     EndGesture,
     /// Make a change from the mixer, such as moving a fader.
     Mixer(Change),
+    /// List the audio inputs again, for the mixer's input menus: the user
+    /// opened one, maybe after plugging a device in.
+    ListInputs,
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
     /// Use this keymap from now on, and save how it differs from the default
@@ -259,6 +276,7 @@ impl Shell {
                         ui,
                         view.project,
                         view.levels,
+                        view.inputs,
                         theme,
                         &self.mouse,
                         &mut actions,
@@ -312,8 +330,8 @@ impl Shell {
         self.mouse = mouse;
     }
 
-    /// The box that renames a track, a clip or a locator, while one is
-    /// renamed. Enter runs the command that renames it.
+    /// The box that renames a track, a clip, a locator or a take, while
+    /// one is renamed. Enter runs the command that renames it.
     fn show_rename(&mut self, ctx: &egui::Context, view: &View<'_>, actions: &mut Vec<Action>) {
         let Some(rename) = &mut self.rename else {
             return;
@@ -339,6 +357,13 @@ impl Shell {
                 project.locator(id).map(|l| l.name.clone()),
                 locator::RENAME,
                 "locator",
+                id.into(),
+            ),
+            Named::Take(id) => (
+                "Rename Take",
+                project.find_take(id).map(|(_, t)| t.name.clone()),
+                take::RENAME,
+                "take",
                 id.into(),
             ),
         };
@@ -501,6 +526,9 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
     let project = view.project;
     let editor = view.editor;
     let toggles = [
+        (transport::RECORD, view.playback.record),
+        (transport::TOGGLE_PUNCH_IN, project.punch_in),
+        (transport::TOGGLE_PUNCH_OUT, project.punch_out),
         (transport::TOGGLE_LOOP, project.looping),
         (transport::TOGGLE_METRONOME, project.metronome),
         (view::TOGGLE_FOLLOW, editor.follow),
@@ -531,19 +559,45 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, theme: &Theme, actions: &mut Vec<
         run(play, transport::PLAY, actions);
         let stop = icon_button(ui, Icon::Stop, false, theme);
         run(stop, transport::STOP, actions);
+        let record = icon_button(ui, Icon::Record, view.playback.record, theme);
+        run(record, transport::RECORD, actions);
         ui.separator();
 
+        // Punching in and out happens at the loop's ends.
         let region = project.loop_region;
-        let looping = ui
-            .add(Button::selectable(project.looping, "Loop"))
-            .on_hover_text(format!(
-                "{}\nLoops {} to {}",
-                hint(view, &transport::TOGGLE_LOOP),
+        let ends = |toggle: &CommandId, what: &str| {
+            format!(
+                "{}\n{what} {} to {}",
+                hint(view, toggle),
                 position(tempo, region.start),
                 position(tempo, region.end)
-            ));
+            )
+        };
+        let looping = ui
+            .add(Button::selectable(project.looping, "Loop"))
+            .on_hover_text(ends(&transport::TOGGLE_LOOP, "Loops"));
         if looping.clicked() {
             actions.push(Action::Run(transport::TOGGLE_LOOP));
+        }
+        let punch_in = ui
+            .add(Button::selectable(project.punch_in, "Punch In"))
+            .on_hover_text(format!(
+                "{}\nRecords from {} on",
+                hint(view, &transport::TOGGLE_PUNCH_IN),
+                position(tempo, region.start)
+            ));
+        if punch_in.clicked() {
+            actions.push(Action::Run(transport::TOGGLE_PUNCH_IN));
+        }
+        let punch_out = ui
+            .add(Button::selectable(project.punch_out, "Punch Out"))
+            .on_hover_text(format!(
+                "{}\nRecords up to {}",
+                hint(view, &transport::TOGGLE_PUNCH_OUT),
+                position(tempo, region.end)
+            ));
+        if punch_out.clicked() {
+            actions.push(Action::Run(transport::TOGGLE_PUNCH_OUT));
         }
         ui.separator();
 
@@ -732,7 +786,18 @@ mod tests {
     #[test]
     fn the_transport_bar_runs_commands() {
         let mut harness = harness(Project::new());
-        for label in ["Go to Start", "Play", "Stop", "Loop", "Metronome", "+"] {
+        let labels = [
+            "Go to Start",
+            "Play",
+            "Stop",
+            "Record",
+            "Loop",
+            "Punch In",
+            "Punch Out",
+            "Metronome",
+            "+",
+        ];
+        for label in labels {
             harness.get_by_label(label).click();
             harness.run();
         }
@@ -740,7 +805,10 @@ mod tests {
             transport::GO_TO_START,
             transport::PLAY,
             transport::STOP,
+            transport::RECORD,
             transport::TOGGLE_LOOP,
+            transport::TOGGLE_PUNCH_IN,
+            transport::TOGGLE_PUNCH_OUT,
             transport::TOGGLE_METRONOME,
             transport::TEMPO_UP,
         ];

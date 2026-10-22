@@ -1,31 +1,38 @@
 //! The open project, wired to the engine.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use musicable_audio::InputBuffer;
 use musicable_commands::{
     Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
-    Request, Transport, UnknownCommand, Value, mixer, transport,
+    Request, Transport, UnknownCommand, Value, mixer, take, transport,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
-use musicable_engine::nodes::{Gain, Metronome};
+use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::{
-    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, Meters, NodeKey,
-    ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand, compile_with_devices,
+    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
+    NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
+    compile_with_inputs,
 };
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::{DeviceId, Project};
+use musicable_model::{DeviceId, Input, Monitor, Project, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::media::MediaPool;
 use crate::plugins::{Change, Plugins};
+use crate::recorder::{self, Armed, Place, Recorder, Recording, Report};
 
-/// Builds the graph for a project, with its meters, its audio files and its
-/// plugins' nodes, on the compiler's thread.
-type Build = Arc<dyn Fn(&Project, &Meters, &Media, &Devices) -> Graph + Send + Sync>;
+/// Builds the graph for a project, with its meters, its audio files, its
+/// plugins' nodes and the audio inputs it monitors, on the compiler's
+/// thread.
+type Build = Arc<dyn Fn(&Project, &Meters, &Media, &Devices, &InputLayout) -> Graph + Send + Sync>;
+
+/// The folder recordings go in, in the folder of the project's file.
+const RECORDINGS: &str = "Recordings";
 
 /// The open project, the commands that change it, and the engine that plays
 /// it.
@@ -44,12 +51,24 @@ type Build = Arc<dyn Fn(&Project, &Meters, &Media, &Devices) -> Graph + Send + S
 /// session loads from the plugins it's told are installed, and keeps in
 /// step with the project. What changes in a plugin's own window comes back
 /// into the project, so undo covers it.
+///
+/// Armed audio tracks record from the audio inputs the session is told the
+/// stream opened ([`set_inputs`](Self::set_inputs)) while the transport
+/// records, into files in a `Recordings` folder by the project's file, or
+/// for a project that isn't saved, in the user's music folder. When
+/// recording stops, what each track recorded becomes takes, in one step of
+/// the undo history.
 pub struct Session {
     document: Document,
     commands: Registry,
     keymap: Keymap,
     engine: EngineLink,
     plugins: Plugins,
+    recorder: Recorder,
+    /// Where recordings of a project that isn't saved go.
+    unsaved_recordings: Option<PathBuf>,
+    /// Counts the projects opened, to tell a recording of an earlier one.
+    opened: u64,
     /// What the plugins' windows asked for, oldest first.
     window_events: Vec<(DeviceId, PluginEvent)>,
     /// What went wrong with plugins as they played.
@@ -82,7 +101,7 @@ impl Session {
             keymap,
             handle,
             media,
-            Arc::new(compile_with_devices),
+            Arc::new(compile_with_inputs),
         )
     }
 
@@ -103,22 +122,25 @@ impl Session {
             keymap,
             handle,
             media,
-            Arc::new(compile_with_devices),
+            Arc::new(compile_with_inputs),
         )
     }
 
     /// Like [`new`](Self::new), for a project without a folder, with `build`
-    /// building the project's graphs in place of [`compile_with_devices`]:
+    /// building the project's graphs in place of [`compile_with_inputs`]:
     /// for tests, such as one with a node that's slow to prepare. The
-    /// session's meters read nothing, and audio clips and plugins are
-    /// silent.
+    /// session's meters read nothing, and audio clips, plugins and inputs
+    /// are silent.
     pub fn with_compiler(
         project: Project,
         keymap: Keymap,
         handle: EngineHandle,
         build: impl Fn(&Project) -> Graph + Send + Sync + 'static,
     ) -> Self {
-        let build = move |project: &Project, _: &Meters, _: &Media, _: &Devices| build(project);
+        let build =
+            move |project: &Project, _: &Meters, _: &Media, _: &Devices, _: &InputLayout| {
+                build(project)
+            };
         let media = MediaPool::new(false);
         Self::building(project, None, keymap, handle, media, Arc::new(build))
     }
@@ -127,13 +149,18 @@ impl Session {
         project: Project,
         folder: Option<&Path>,
         keymap: Keymap,
-        handle: EngineHandle,
+        mut handle: EngineHandle,
         media: MediaPool,
         build: Build,
     ) -> Self {
         let plugins = Plugins::new(handle.config());
+        let recorder = Recorder::spawn();
+        if let Some(timeline) = handle.take_timeline() {
+            recorder.set_timeline(timeline);
+        }
         let mut engine = EngineLink {
             playing: handle.stats().playing,
+            recording: false,
             tempo: project.tempo.clone(),
             handle,
             compiler: Compiler::spawn(),
@@ -141,6 +168,7 @@ impl Session {
             media: Arc::new(media),
             folder: folder.map(Path::to_owned),
             devices: Devices::new(),
+            inputs: InputLayout::new(),
             asked: 0,
             received: 0,
             floor: 0,
@@ -152,17 +180,22 @@ impl Session {
         engine.flush();
         let mut document = Document::new(project);
         document.editor_mut().sample_rate = engine.handle.config().sample_rate;
-        Self {
+        let mut session = Self {
             document,
             commands: crate::commands(),
             keymap,
             engine,
             plugins,
+            recorder,
+            unsaved_recordings: recorder::unsaved_folder(),
+            opened: 0,
             window_events: Vec::new(),
             problems: Vec::new(),
             requests: Vec::new(),
             revision: 0,
-        }
+        };
+        session.arm();
+        session
     }
 
     /// Opens `project`, whose file is in `folder`, in place of the open one.
@@ -194,6 +227,8 @@ impl Session {
         editor.behaviour = behaviour;
         editor.sample_rate = self.engine.handle.config().sample_rate;
         self.revision += 1;
+        self.opened += 1;
+        self.arm();
     }
 
     /// Plays the project on the engine `handle` drives from now on, such as
@@ -204,13 +239,18 @@ impl Session {
     /// the same place in bars and beats, and it plays if the old one did,
     /// once the project's graph for it is ready. What the old engine hadn't
     /// received yet, it never will.
-    pub fn replace_engine(&mut self, handle: EngineHandle) -> EngineHandle {
+    pub fn replace_engine(&mut self, mut handle: EngineHandle) -> EngineHandle {
         let at = self.playhead();
         let playing = self.engine.playing;
+        // A recording stops where the old engine got to.
+        if let Some(timeline) = handle.take_timeline() {
+            self.recorder.set_timeline(timeline);
+        }
         let old = std::mem::replace(&mut self.engine.handle, handle);
         self.engine.outbox.clear();
         self.engine.gates.clear();
         self.engine.playing = false;
+        self.engine.recording = false;
         self.plugins.set_config(self.engine.handle.config());
         self.engine.set_up(self.document.project());
         self.engine.locate(at);
@@ -219,7 +259,92 @@ impl Session {
         }
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
+        self.arm();
         old
+    }
+
+    /// The audio inputs the stream opened are laid out among the engine's
+    /// device inputs as `layout` says, and capture into `buffers`, in the
+    /// same order: tracks monitor and record them from now on. Call it
+    /// whenever the stream opens. Until it's first called, tracks have no
+    /// inputs.
+    pub fn set_inputs(&mut self, layout: InputLayout, buffers: Vec<Option<InputBuffer>>) {
+        self.recorder.set_inputs(layout.clone(), buffers);
+        if self.engine.inputs != layout {
+            self.engine.inputs = layout;
+            self.rebuild();
+            self.engine.flush();
+        }
+    }
+
+    /// The audio inputs the project's tracks want open: those of armed
+    /// audio tracks, and of those that always monitor. `""` is the default
+    /// input.
+    pub fn wanted_inputs(&self) -> BTreeSet<String> {
+        self.document
+            .project()
+            .tracks
+            .iter()
+            .filter(|track| track.armed || track.monitor == Monitor::In)
+            .filter_map(|track| match &track.input {
+                Some(Input::Audio(input)) if track.kind == TrackKind::Audio => {
+                    Some(input.device.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether recording is on: whether playing records the armed tracks,
+    /// counting what hasn't reached the engine yet.
+    pub fn is_recording(&self) -> bool {
+        self.engine.recording
+    }
+
+    /// What the armed tracks have recorded so far, while they record, for
+    /// showing it: song positions in frames at the engine's rate.
+    pub fn recordings(&self) -> Vec<Recording> {
+        self.recorder.live()
+    }
+
+    /// Where recordings of projects that aren't saved go from now on, such
+    /// as a folder of a test's own. By default, a `Musicable` folder in the
+    /// user's music folder.
+    pub fn set_unsaved_recordings(&mut self, folder: Option<PathBuf>) {
+        self.unsaved_recordings = folder;
+        self.arm();
+    }
+
+    /// Tells the recorder which tracks to record from the next recording
+    /// on, and where.
+    fn arm(&mut self) {
+        let project = self.document.project();
+        let armed = project
+            .tracks
+            .iter()
+            .filter(|track| track.armed && track.kind == TrackKind::Audio)
+            .filter_map(|track| match &track.input {
+                Some(Input::Audio(input)) => Some(Armed {
+                    track: track.id,
+                    name: track.name.clone(),
+                    input: input.clone(),
+                    offset: 0,
+                }),
+                _ => None,
+            })
+            .collect();
+        let place = match &self.engine.folder {
+            Some(folder) => Some(Place {
+                folder: folder.join(RECORDINGS),
+                project: Some(folder.clone()),
+            }),
+            None => self.unsaved_recordings.clone().map(|folder| Place {
+                folder,
+                project: None,
+            }),
+        };
+        let rate = self.engine.handle.config().sample_rate;
+        self.recorder.set_tracks(rate, armed, place, self.opened);
     }
 
     pub fn project(&self) -> &Project {
@@ -462,16 +587,49 @@ impl Session {
 
     /// Call regularly, such as once per UI frame, and when a plugin's waker
     /// says so. Carries out what the plugins asked for and takes in what
-    /// changed in them, sends the graphs the compiler has finished and what
-    /// the engine had no room for earlier, and drops the graphs and tempo
-    /// maps the engine has replaced.
+    /// changed in them, adds what was recorded, sends the graphs the
+    /// compiler has finished and what the engine had no room for earlier,
+    /// and drops the graphs and tempo maps the engine has replaced.
     pub fn tick(&mut self) {
         let changes = self.plugins.poll();
         if !changes.is_empty() {
             self.follow_plugins(changes);
         }
+        self.take_recordings();
         self.engine.handle.collect_garbage();
         self.engine.flush();
+    }
+
+    /// Adds the recordings that have finished as takes, and passes on what
+    /// went wrong recording.
+    fn take_recordings(&mut self) {
+        let mut added = false;
+        while let Some(report) = self.recorder.try_recv() {
+            match report {
+                Report::Finished {
+                    project,
+                    rate,
+                    recorded,
+                    files,
+                } if project == self.opened => {
+                    let editor = self.document.editor_mut();
+                    editor.files.extend(files);
+                    take::add_recording(&mut self.document, rate, &recorded);
+                    added = true;
+                }
+                Report::Finished { files, .. } => {
+                    let files: Vec<_> = files.into_iter().map(|(name, _)| name).collect();
+                    self.problems.push(format!(
+                        "A recording finished after its project closed. Its files are {}.",
+                        files.join(", ")
+                    ));
+                }
+                Report::Problem(problem) => self.problems.push(problem),
+            }
+        }
+        if added {
+            self.sync();
+        }
     }
 
     /// Makes what changed in the plugins changes to the project, as
@@ -535,7 +693,9 @@ impl Session {
     fn sync(&mut self) {
         let mut tempo = None;
         let mut loop_changed = false;
+        let mut punch_changed = false;
         let mut gates_changed = false;
+        let mut armed_changed = false;
         let mut recompile = false;
         let committed = self.document.take_committed();
         let changed = !committed.is_empty();
@@ -557,7 +717,13 @@ impl Session {
                         self.engine.tempo = to.clone();
                         tempo = Some(to);
                     }
-                    Edit::LoopRegion { .. } | Edit::Looping { .. } => loop_changed = true,
+                    // Punching in and out happens at the loop's ends.
+                    Edit::LoopRegion { .. } => {
+                        loop_changed = true;
+                        punch_changed = true;
+                    }
+                    Edit::Looping { .. } => loop_changed = true,
+                    Edit::PunchIn { .. } | Edit::PunchOut { .. } => punch_changed = true,
                     Edit::Metronome { to, .. } => self.engine.push(Message::Event(Event::Param {
                         node: keys::METRONOME,
                         param: Metronome::ENABLED,
@@ -577,10 +743,23 @@ impl Session {
                     | Edit::TrackSoloSafe { .. } => {
                         gates_changed = true;
                     }
-                    // Nothing the engine plays, or nothing yet.
-                    Edit::TrackName { .. }
-                    | Edit::TrackArmed { .. }
-                    | Edit::ClipName { .. }
+                    Edit::TrackArmed { track, to, .. } => {
+                        let armed = if to { 1.0 } else { 0.0 };
+                        param(keys::track_input(track), InputMonitor::ARMED, armed);
+                        armed_changed = true;
+                    }
+                    Edit::TrackMonitor { track, to, .. } => {
+                        let monitor = InputMonitor::monitor_value(to) as f32;
+                        param(keys::track_input(track), InputMonitor::MONITOR, monitor);
+                    }
+                    // Recordings are named after their tracks.
+                    Edit::TrackName { .. } => armed_changed = true,
+                    // Nothing the engine plays, or nothing yet. Takes play
+                    // through the clips comping makes of them.
+                    Edit::ClipName { .. }
+                    | Edit::AddTake { .. }
+                    | Edit::RemoveTake { .. }
+                    | Edit::TakeName { .. }
                     | Edit::AddLocator { .. }
                     | Edit::RemoveLocator { .. }
                     | Edit::LocatorAt { .. }
@@ -588,10 +767,14 @@ impl Session {
                     // The plugins have their settings, not the engine: the
                     // plugins follow below.
                     Edit::PluginParam { .. } | Edit::PluginSettings { .. } => {}
+                    // Tracks and their inputs are compiled into the graph,
+                    // and the recorder records the armed ones.
+                    Edit::AddTrack { .. } | Edit::RemoveTrack { .. } | Edit::TrackInput { .. } => {
+                        recompile = true;
+                        armed_changed = true;
+                    }
                     // Clips are compiled into the graph.
-                    Edit::AddTrack { .. }
-                    | Edit::RemoveTrack { .. }
-                    | Edit::TrackOutput { .. }
+                    Edit::TrackOutput { .. }
                     | Edit::TrackClipType { .. }
                     | Edit::AddSend { .. }
                     | Edit::RemoveSend { .. }
@@ -620,6 +803,13 @@ impl Session {
             let event = loop_event(self.document.project());
             self.engine.push(Message::Event(event));
         }
+        if punch_changed {
+            let event = punch_event(self.document.project());
+            self.engine.push(Message::Event(event));
+        }
+        if armed_changed {
+            self.arm();
+        }
         if recompile {
             self.rebuild();
         } else if gates_changed {
@@ -635,6 +825,15 @@ fn loop_event(project: &Project) -> Event {
     Event::Transport(TransportCommand::Loop(region))
 }
 
+/// Sets the engine's punch range to the project's: recording punches in at
+/// the loop's start and out at its end, where punching in and out are on.
+fn punch_event(project: &Project) -> Event {
+    Event::Transport(TransportCommand::Punch {
+        start: project.punch_in.then_some(project.loop_region.start),
+        end: project.punch_out.then_some(project.loop_region.end),
+    })
+}
+
 /// The engine, as commands see it, and the compiler that builds its graphs.
 struct EngineLink {
     handle: EngineHandle,
@@ -647,6 +846,9 @@ struct EngineLink {
     folder: Option<PathBuf>,
     /// The nodes of the plugins the graphs play.
     devices: Devices,
+    /// Where the audio inputs the stream opened are among the engine's
+    /// device inputs, for the graphs to monitor them.
+    inputs: InputLayout,
     /// The newest compiler job asked for.
     asked: u64,
     /// The newest job whose graph has come back.
@@ -659,6 +861,9 @@ struct EngineLink {
     /// Whether the transport plays, counting what hasn't reached the engine
     /// yet.
     playing: bool,
+    /// Whether recording is on, counting what hasn't reached the engine
+    /// yet.
+    recording: bool,
     /// The project's tempo map, for the playhead in beats.
     tempo: TempoMap,
     /// The meters the graphs measure into.
@@ -704,18 +909,19 @@ impl EngineLink {
         let media = self.media.clone();
         let folder = self.folder.clone();
         let devices = self.devices.clone();
+        let inputs = self.inputs.clone();
         let project = project.clone();
         self.asked = self.compiler.compile(self.handle.config(), move || {
             // Files load here, on the compiler's thread, with the graph.
             let media = media.media(&project, folder.as_deref());
-            build(&project, &meters, &media, &devices)
+            build(&project, &meters, &media, &devices, &inputs)
         });
         self.asked
     }
 
     /// Sends what the engine needs to play `project`: its graph, its tempo
-    /// map and its loop. All of it, and whatever comes after, waits for the
-    /// graph.
+    /// map, its loop and its punch range. All of it, and whatever comes
+    /// after, waits for the graph.
     fn set_up(&mut self, project: &Project) {
         self.tempo = project.tempo.clone();
         let job = self.recompile(project);
@@ -725,6 +931,7 @@ impl EngineLink {
         self.push(Message::WaitForGraph(job));
         self.push(Message::Tempo(project.tempo.clone()));
         self.push(Message::Event(loop_event(project)));
+        self.push(Message::Event(punch_event(project)));
     }
 
     /// Sets the engine's mute gates, the output stages' and the sends', to
@@ -831,6 +1038,7 @@ impl Transport for EngineLink {
 
     fn stop(&mut self) {
         self.playing = false;
+        self.recording = false;
         self.push(Message::Event(Event::Transport(TransportCommand::Stop)));
     }
 
@@ -842,5 +1050,16 @@ impl Transport for EngineLink {
 
     fn playhead(&self) -> Beats {
         self.beats_at(self.handle.stats().position)
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+        self.push(Message::Event(Event::Transport(TransportCommand::Record(
+            on,
+        ))));
     }
 }

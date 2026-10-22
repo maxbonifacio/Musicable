@@ -1,6 +1,7 @@
-//! Drawing the arrangement: the lanes with their clips, the ruler over
-//! them, the tracks' headers, and the corner between the ruler and the
-//! headers. Only what's in sight is drawn.
+//! Drawing the arrangement: the lanes with their clips, and the takes'
+//! lanes under the tracks that show them, the ruler over them, the tracks'
+//! headers, and the corner between the ruler and the headers. Only what's
+//! in sight is drawn.
 
 use egui::{
     Align2, CornerRadius, FontId, Mesh, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
@@ -9,7 +10,7 @@ use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
 use musicable_model::time::Beats;
 use musicable_model::{Track, TrackKind};
 
-use super::{HeaderButton, Plan, Row, Scene, Side, find};
+use super::{HeaderButton, Plan, Row, Scene, Side, TakeRow, find};
 use crate::mixer::{meter_colour, meter_height};
 
 /// The closest the grid's lines are drawn, in points. A fixed grid finer
@@ -21,7 +22,8 @@ const MIN_TICK_SPACING: f32 = 6.0;
 /// notes doesn't fill its height with them.
 const MIN_KEYS: u8 = 12;
 
-/// The lanes: each track's clips over the grid, with the loop region, the
+/// The lanes: each track's clips over the grid, and its takes' under it if
+/// it shows them, with what the tracks are recording, the loop region, the
 /// time selection, the start marker and the playhead, and where `plan`
 /// would put things.
 pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
@@ -43,11 +45,11 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         };
         painter.rect_filled(lane(scene, row), 0.0, fill);
     }
-    let bottom = layout
-        .rows
-        .last()
-        .map_or(lanes.top(), |row| row.bottom())
-        .clamp(lanes.top(), lanes.bottom());
+    for take in layout.visible_takes() {
+        let rect = Rect::from_x_y_ranges(lanes.x_range(), take.top..=take.bottom());
+        painter.rect_filled(rect, 0.0, theme.take_lane);
+    }
+    let bottom = layout.bottom().clamp(lanes.top(), lanes.bottom());
     let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=bottom);
     if project.looping {
         let region = project.loop_region;
@@ -56,11 +58,14 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         painter.rect_filled(shade, 0.0, theme.loop_shade);
     }
     grid(painter, scene, tracks);
-    for row in layout.visible_rows() {
-        let y = painter.round_to_pixel_center(row.bottom() - 0.5);
+    let bottoms = layout.visible_rows().map(Row::bottom);
+    for bottom in bottoms.chain(layout.visible_takes().map(TakeRow::bottom)) {
+        let y = painter.round_to_pixel_center(bottom - 0.5);
         painter.hline(lanes.x_range(), y, Stroke::new(1.0, theme.divider));
     }
     clips(painter, scene);
+    takes(painter, scene);
+    recordings(painter, scene);
     time_selection(painter, scene);
     if let Some(plan) = plan {
         ghosts(painter, scene, plan);
@@ -191,6 +196,89 @@ fn clip(painter: &Painter, scene: &Scene<'_>, row: &Row, clip: &Clip) {
     if selected {
         let outline = Stroke::new(1.5, theme.clip_selected);
         painter.rect_stroke(at.rect, theme.corner, outline, StrokeKind::Inside);
+    }
+}
+
+/// The clips of the takes in sight, in their track's colour where the
+/// track plays them, and grey where it doesn't.
+fn takes(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let visible = layout.viewport.visible();
+    for lane in layout.visible_takes() {
+        let track = &scene.project().tracks[lane.track_index];
+        let take = &track.takes[lane.index];
+        for clip in &take.clips {
+            if clip.end() <= visible.start || clip.start >= visible.end {
+                continue;
+            }
+            let rect = Rect::from_x_y_ranges(
+                layout.x_of(clip.start)..=layout.x_of(clip.end()),
+                lane.top + 1.0..=lane.bottom() - 1.0,
+            );
+            painter.rect_filled(rect, theme.corner, theme.take_clip);
+            let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+            let colour = theme.clip(lane.track_index);
+            for (start, end) in played(scene, track, clip) {
+                let x = layout.x_of(start)..=layout.x_of(end);
+                painter.rect_filled(Rect::from_x_y_ranges(x, rect.y_range()), 0.0, colour);
+            }
+            if let ClipContent::Audio(audio) = &clip.content {
+                waveform(&painter, scene, rect, clip, audio);
+            }
+        }
+    }
+}
+
+/// Where `track` plays `clip`, one of its takes' clips: where its own clips
+/// play the same audio, lined up with it, as comping copies it.
+fn played(scene: &Scene<'_>, track: &Track, clip: &Clip) -> Vec<(Beats, Beats)> {
+    let ClipContent::Audio(audio) = &clip.content else {
+        return Vec::new();
+    };
+    let tempo = &scene.project().tempo;
+    let rate = scene.editor().sample_rate_of(&audio.file);
+    // The song's frame that the file's first frame plays on, by a clip.
+    let first = |c: &Clip, offset: u64| tempo.frame_at(c.start, rate) - offset as i64;
+    let take_first = first(clip, audio.offset);
+    track
+        .clips
+        .iter()
+        .filter_map(|own| {
+            let ClipContent::Audio(a) = &own.content else {
+                return None;
+            };
+            let start = own.start.max(clip.start);
+            let end = own.end().min(clip.end());
+            // A frame either way, as the clips' edges fall on ticks.
+            let lined_up = a.file == audio.file && (first(own, a.offset) - take_first).abs() <= 1;
+            (lined_up && start < end).then_some((start, end))
+        })
+        .collect()
+}
+
+/// What the armed tracks have recorded so far, while they record, over
+/// their lanes.
+fn recordings(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    for recording in scene.view.recordings {
+        let Some(row) = layout.row(recording.track) else {
+            continue;
+        };
+        let range = recording.range;
+        let rect = Rect::from_x_y_ranges(
+            layout.x_of(range.start)..=layout.x_of(range.end),
+            row.top + 1.0..=row.bottom() - 1.0,
+        );
+        let outline = Stroke::new(1.0, theme.arm);
+        painter.rect(
+            rect,
+            theme.corner,
+            theme.recording,
+            outline,
+            StrokeKind::Inside,
+        );
     }
 }
 
@@ -357,6 +445,24 @@ fn ghosts(painter: &Painter, scene: &Scene<'_>, plan: &Plan) {
             };
             painter.line_segment(line, Stroke::new(1.5, theme.clip_selected));
         }
+        Plan::Comp {
+            track,
+            take,
+            start,
+            end,
+        } => {
+            // On the take, and on the track where it'll go.
+            if let Some(lane) = layout.takes.iter().find(|lane| lane.take == *take) {
+                let x = layout.x_of(*start)..=layout.x_of(*end);
+                ghost(Rect::from_x_y_ranges(
+                    x,
+                    lane.top + 1.0..=lane.bottom() - 1.0,
+                ));
+            }
+            if let Some(row) = layout.row(*track) {
+                ghost(span(row, *start, *end));
+            }
+        }
         _ => {}
     }
 }
@@ -484,8 +590,8 @@ fn bars(painter: &Painter, scene: &Scene<'_>) {
 }
 
 /// The tracks' headers: each track's name, colour and meter, with a line
-/// between them. Mute, solo and arm are buttons, which the arrangement
-/// draws after this.
+/// between them, and the names of the takes in lanes under them. Mute, solo
+/// and arm are buttons, which the arrangement draws after this.
 pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -532,6 +638,29 @@ pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
                 theme.header_text,
             );
         let y = painter.round_to_pixel_center(row.bottom() - 0.5);
+        painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
+    }
+    for lane in layout.visible_takes() {
+        let take = &scene.project().tracks[lane.track_index].takes[lane.index];
+        let rect = Rect::from_x_y_ranges(headers.x_range(), lane.top..=lane.bottom());
+        painter.rect_filled(rect, 0.0, theme.take_lane);
+        let strip = Rect::from_min_size(rect.left_top(), vec2(theme.colour_strip, rect.height()));
+        painter.rect_filled(strip, 0.0, theme.clip(lane.track_index));
+        // Set in from the track's name, as it's the track's.
+        let name = Rect::from_min_max(
+            pos2(strip.right() + 3.0 * theme.padding, rect.top()),
+            pos2(rect.right() - theme.padding, rect.bottom()),
+        );
+        painter
+            .with_clip_rect(name.intersect(painter.clip_rect()))
+            .text(
+                pos2(name.left(), name.center().y),
+                Align2::LEFT_CENTER,
+                &take.name,
+                FontId::proportional(theme.small_text),
+                theme.header_text,
+            );
+        let y = painter.round_to_pixel_center(lane.bottom() - 0.5);
         painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
     }
     let x = painter.round_to_pixel_center(headers.left() + 0.5);

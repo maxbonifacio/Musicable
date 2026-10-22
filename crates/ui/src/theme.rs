@@ -14,6 +14,8 @@ pub struct Theme {
     pub mute: Color32,
     pub solo: Color32,
     pub arm: Color32,
+    /// Input monitoring's buttons, when they're on.
+    pub monitor: Color32,
     pub ink: Color32,
     /// The meters' colours, from quiet to loud to over full scale.
     pub meter_quiet: Color32,
@@ -72,6 +74,13 @@ pub struct Theme {
     pub fade: Color32,
     /// Where clips land while they're dragged.
     pub ghost: Color32,
+    /// The lanes of tracks' takes, under the tracks.
+    pub take_lane: Color32,
+    /// A take's clips where the track doesn't play them. Where it does,
+    /// they take the track's colour.
+    pub take_clip: Color32,
+    /// What the armed tracks have recorded so far, while they record.
+    pub recording: Color32,
     pub header: Color32,
     pub header_selected: Color32,
     pub header_text: Color32,
@@ -89,6 +98,8 @@ pub struct Theme {
     pub header_width: f32,
     /// A track's height until it's changed.
     pub track_height: f32,
+    /// A take lane's height.
+    pub take_height: f32,
     /// The bar with a clip's name, when the clip is tall enough for one.
     pub clip_title: f32,
     /// How near a clip's edge a drag trims it.
@@ -174,6 +185,7 @@ impl Default for Theme {
             mute: Color32::from_rgb(232, 165, 50),
             solo: Color32::from_rgb(80, 160, 235),
             arm: Color32::from_rgb(230, 75, 65),
+            monitor: Color32::from_rgb(95, 190, 160),
             ink: Color32::from_gray(24),
             meter_quiet: Color32::from_rgb(90, 190, 110),
             meter_loud: Color32::from_rgb(230, 200, 70),
@@ -220,6 +232,9 @@ impl Default for Theme {
             notes: Color32::from_rgba_unmultiplied(20, 20, 20, 190),
             fade: Color32::from_rgba_unmultiplied(20, 20, 20, 210),
             ghost: Color32::from_rgba_unmultiplied(250, 250, 250, 60),
+            take_lane: Color32::from_gray(33),
+            take_clip: Color32::from_gray(96),
+            recording: Color32::from_rgba_unmultiplied(230, 75, 65, 110),
             header: Color32::from_gray(46),
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),
@@ -230,6 +245,7 @@ impl Default for Theme {
             ruler_strip: 18.0,
             header_width: 190.0,
             track_height: 60.0,
+            take_height: 36.0,
             clip_title: 14.0,
             edge_grab: 6.0,
             fade_handle: 7.0,

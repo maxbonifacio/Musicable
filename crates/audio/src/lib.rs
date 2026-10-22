@@ -60,8 +60,8 @@ mod asio;
 
 use input::StreamInput;
 pub use input::{
-    InputBuffer, InputClock, InputDevice, InputInfo, InputKind, InputStats, ReadError, loopback_id,
-    loopback_of,
+    InputBuffer, InputClock, InputDevice, InputInfo, InputKind, InputStats, InputWriter, ReadError,
+    loopback_id, loopback_of,
 };
 pub use stats::StreamStats;
 

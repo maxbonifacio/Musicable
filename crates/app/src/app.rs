@@ -7,15 +7,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use musicable_audio::InputKind;
 use musicable_commands::{Args, CommandError, Request, arrange};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
-use musicable_model::time::Beats;
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, KeyPresses, KeymapStatus, Level, Levels, Playback, PluginEntry, PluginStatus,
-    Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, Playback, PluginEntry,
+    PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
@@ -49,6 +50,10 @@ pub struct App {
     /// How each plugin device's plugin is doing, as of this frame.
     plugin_status: BTreeMap<DeviceId, PluginStatus>,
     output: Output,
+    /// The output's stream whose inputs the session has.
+    inputs_started: u64,
+    /// The inputs the mixer's input menus offer, as last listed.
+    input_choices: Vec<InputChoice>,
     shell: Shell,
     /// The headers and the waveforms of the project's audio files.
     audio_files: AudioFiles,
@@ -145,6 +150,8 @@ impl App {
             plugin_entries: Vec::new(),
             plugin_status: BTreeMap::new(),
             output,
+            inputs_started: 0,
+            input_choices: Vec::new(),
             shell: Shell::new(),
             audio_files: AudioFiles::new(),
             files_found: None,
@@ -164,6 +171,7 @@ impl App {
         if let Some(known) = known {
             app.set_installed_plugins(known);
         }
+        app.list_inputs();
         app
     }
 
@@ -238,6 +246,7 @@ impl App {
             Action::BeginGesture => self.session.begin_gesture(),
             Action::EndGesture => self.session.end_gesture(),
             Action::Mixer(change) => self.session.change_mixer(change),
+            Action::ListInputs => self.list_inputs(),
             Action::ClearPeaks => self.session.meters().clear_highest(),
             Action::SetKeymap(keymap) => {
                 self.keymap_file.save(&keymap);
@@ -498,6 +507,58 @@ impl App {
         self.audio_window.applied(outcome);
     }
 
+    /// Opens the audio inputs the tracks want with the stream, unless that
+    /// would cut a recording short, and hands a new stream's inputs to the
+    /// session.
+    fn follow_inputs(&mut self) {
+        let recording = self.session.is_recording() && self.session.stats().playing;
+        if !recording {
+            let wanted = self.session.wanted_inputs();
+            self.output.want_inputs(&wanted, &mut self.session);
+        }
+        if self.output.started() != self.inputs_started {
+            self.inputs_started = self.output.started();
+            let layout = self.output.input_layout();
+            self.session.set_inputs(layout, self.output.input_buffers());
+            self.list_inputs();
+        }
+    }
+
+    /// Lists the inputs the mixer's input menus offer. An ASIO driver's
+    /// channels are only known once its stream opens.
+    fn list_inputs(&mut self) {
+        let devices = match musicable_audio::input_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                self.messages
+                    .push(format!("The audio inputs couldn't be listed: {error}."));
+                Vec::new()
+            }
+        };
+        let open = self.output.info().map_or(&[][..], |info| &info.inputs);
+        self.input_choices = devices
+            .into_iter()
+            .map(|device| {
+                let channels = match device.channels {
+                    0 => open
+                        .iter()
+                        .find(|input| input.id == device.id)
+                        .map_or(0, |input| input.channels),
+                    channels => channels,
+                };
+                let name = match device.kind {
+                    InputKind::Loopback => format!("Loopback: {}", device.name),
+                    _ => device.name,
+                };
+                InputChoice {
+                    id: device.id,
+                    name,
+                    channels,
+                }
+            })
+            .collect();
+    }
+
     fn save_settings(&mut self) {
         let Some(path) = self.config_dir.as_ref().map(|dir| dir.join(SETTINGS_FILE)) else {
             return;
@@ -576,6 +637,7 @@ impl eframe::App for App {
         self.plugin_windows.tick(&mut self.session);
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
+        self.follow_inputs();
         let close = ctx.input(|i| i.viewport().close_requested());
         if close && !self.closing && self.session.is_modified() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -620,6 +682,7 @@ impl eframe::App for App {
         let summary = self.output.summary();
         let details = self.output.details();
         let name = self.name();
+        let recordings = recordings(&self.session);
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -632,10 +695,13 @@ impl eframe::App for App {
             editor: self.session.editor(),
             playback: Playback {
                 playing: stats.playing,
+                record: self.session.is_recording(),
                 playhead: self.session.beats_at(heard),
                 seconds: heard as f64 / f64::from(rate),
             },
+            recordings: &recordings,
             levels: &self.levels,
+            inputs: &self.input_choices,
             waveforms: self.audio_files.waveforms(),
             audio: Audio {
                 summary: &summary,
@@ -688,6 +754,21 @@ fn levels(meters: &Meters, project: &Project) -> Levels {
         tracks,
         master: read(meters.master()),
     }
+}
+
+/// What the armed tracks have recorded so far, in the song's beats.
+fn recordings(session: &Session) -> Vec<musicable_ui::Recording> {
+    let recordings = session.recordings().into_iter();
+    recordings
+        .map(|recording| {
+            let start = session.beats_at(recording.start);
+            let end = session.beats_at(recording.start + recording.frames);
+            musicable_ui::Recording {
+                track: recording.track,
+                range: BeatRange::new(start, end),
+            }
+        })
+        .collect()
 }
 
 /// Wakes the window whose context is `ctx`, from any thread, so a frame

@@ -30,6 +30,8 @@ pub const ZOOM_OUT: CommandId = CommandId::new("view.zoom_out");
 pub const ZOOM_TO_SELECTION: CommandId = CommandId::new("view.zoom_to_selection");
 /// Turns on or off scrolling the arrangement to keep the playhead in sight.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
+/// Shows the selected tracks' takes in lanes under them, or hides them.
+pub const TOGGLE_TAKE_LANES: CommandId = CommandId::new("view.toggle_take_lanes");
 /// Brings the grid's lines closer together.
 pub const NARROW_GRID: CommandId = CommandId::new("view.narrow_grid");
 /// Takes the grid's lines further apart.
@@ -143,6 +145,40 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(TOGGLE_TAKE_LANES, "Show/Hide Take Lanes").with_params(&[Param::optional(
+            "tracks",
+            Type::TRACKS,
+            "The tracks: the selected tracks, or the track the panels show, without it.",
+        )]),
+        |ctx, args| {
+            let editor = ctx.document.editor();
+            let tracks: Vec<TrackId> = match args.opt("tracks")? {
+                Some(tracks) => tracks,
+                None if !editor.selection.tracks.is_empty() => {
+                    editor.selection.tracks.iter().copied().collect()
+                }
+                None => editor.selected_track.into_iter().collect(),
+            };
+            let project = ctx.document.project();
+            let tracks: Vec<TrackId> = tracks
+                .into_iter()
+                .filter(|&id| project.track(id).is_some_and(|t| !t.kind.is_bus()))
+                .collect();
+            let lanes = &mut ctx.document.editor_mut().take_lanes;
+            // All shown, or else none: the first track decides, as Live's
+            // track header buttons do for a selection.
+            let show = tracks.first().is_some_and(|id| !lanes.contains(id));
+            for track in tracks {
+                if show {
+                    lanes.insert(track);
+                } else {
+                    lanes.remove(&track);
+                }
+            }
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(SET_TRACK_HEIGHT, "Set Track Height").with_params(&[
             Param::required("track", Type::Track, "The track."),
             Param::required("height", Type::Number, "Its height, in points."),
@@ -210,13 +246,42 @@ fn fix_grid(ctx: &mut Context<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use musicable_model::clip::{ClipContent, MidiClip};
     use musicable_model::time::BeatRange;
     use musicable_model::{Project, TrackKind};
 
     use super::*;
-    use crate::Args;
     use crate::testing::Setup;
+    use crate::{Args, Key, KeyChord, Keymap, Modifiers};
+
+    #[test]
+    fn the_lanes_key_shows_and_hides_the_selected_tracks_takes() {
+        let keymap = Keymap::default_keymap();
+        let chord = KeyChord::new(Key::U, Modifiers::CTRL | Modifiers::ALT);
+        assert_eq!(keymap.lookup(chord), Some(&TOGGLE_TAKE_LANES));
+
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut setup = Setup::new(project);
+        setup.select_tracks(&[keys, vocal]);
+        setup.run(&TOGGLE_TAKE_LANES);
+        let lanes = |setup: &Setup| setup.document.editor().take_lanes.clone();
+        assert_eq!(lanes(&setup), BTreeSet::from([vocal, keys]));
+        setup.select_tracks(&[]);
+        setup.document.editor_mut().selected_track = Some(keys);
+        setup.run(&TOGGLE_TAKE_LANES);
+        assert_eq!(lanes(&setup), BTreeSet::from([vocal]));
+        // Showing them isn't a change to the project.
+        assert_eq!(setup.document.take_committed(), []);
+        // They go with their track.
+        setup.document.transact("Delete", |tx| {
+            tx.remove_track(vocal);
+        });
+        assert!(lanes(&setup).is_empty());
+    }
 
     #[test]
     fn zoom_keeps_the_start_marker_in_place() {

@@ -652,7 +652,7 @@ fn timing_over(
 /// Where `frames` frames from the song's frame `first`, at `rate`, have all
 /// played: the position of the frame after them, or just after it if that
 /// falls between ticks.
-fn after_frames(tempo: &TempoMap, rate: u32, first: i64, frames: u64) -> Beats {
+pub(crate) fn after_frames(tempo: &TempoMap, rate: u32, first: i64, frames: u64) -> Beats {
     let last = first + frames as i64;
     let mut end = Beats::from_f64(tempo.beats_at(last as f64, rate));
     while tempo.frame_at(end, rate) < last {

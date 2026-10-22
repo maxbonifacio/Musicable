@@ -10,8 +10,8 @@ use musicable_model::mixer::Bus;
 use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
-    Chain, ClipType, Device, DeviceId, DeviceKind, Locator, LocatorId, Project, Send, SendId,
-    Track, TrackId, TrackKind,
+    Chain, ClipType, Device, DeviceId, DeviceKind, Input, Locator, LocatorId, Monitor, Project,
+    Send, SendId, Take, TakeId, Track, TrackId, TrackKind,
 };
 
 use crate::editor::Editor;
@@ -222,6 +222,20 @@ impl Transaction<'_> {
         let from = std::mem::replace(&mut self.project.metronome, on);
         if from != on {
             self.edits.push(Edit::Metronome { from, to: on });
+        }
+    }
+
+    pub fn set_punch_in(&mut self, on: bool) {
+        let from = std::mem::replace(&mut self.project.punch_in, on);
+        if from != on {
+            self.edits.push(Edit::PunchIn { from, to: on });
+        }
+    }
+
+    pub fn set_punch_out(&mut self, on: bool) {
+        let from = std::mem::replace(&mut self.project.punch_out, on);
+        if from != on {
+            self.edits.push(Edit::PunchOut { from, to: on });
         }
     }
 
@@ -456,6 +470,45 @@ impl Transaction<'_> {
         }
     }
 
+    /// Sets what the track records from. An input of the other kind from
+    /// the track, any input on a bus, and one a file couldn't hold (a stereo
+    /// audio input from the last channel there can be, a MIDI channel past
+    /// 15) do nothing.
+    pub fn set_track_input(&mut self, track: TrackId, input: Option<Input>) {
+        let Some(kind) = self.project.track(track).map(|t| t.kind) else {
+            return;
+        };
+        let fits = match &input {
+            None => true,
+            Some(Input::Audio(audio)) => {
+                kind == TrackKind::Audio && !(audio.stereo && audio.channel == u16::MAX)
+            }
+            Some(Input::Midi(midi)) => {
+                kind == TrackKind::Midi && midi.channel.is_none_or(|channel| channel <= 15)
+            }
+        };
+        if !fits {
+            return;
+        }
+        if let Some(from) = self.replace(track, |t| &mut t.input, input.clone()) {
+            self.edits.push(Edit::TrackInput {
+                track,
+                from,
+                to: input,
+            });
+        }
+    }
+
+    pub fn set_track_monitor(&mut self, track: TrackId, monitor: Monitor) {
+        if let Some(from) = self.replace(track, |t| &mut t.monitor, monitor) {
+            self.edits.push(Edit::TrackMonitor {
+                track,
+                from,
+                to: monitor,
+            });
+        }
+    }
+
     /// Feeds the track's output to `output`, if the track can feed it: see
     /// [`Project::can_feed`]. Otherwise it does nothing.
     pub fn set_track_output(&mut self, track: TrackId, output: Bus) {
@@ -592,7 +645,7 @@ impl Transaction<'_> {
         let fits = clip.start >= Beats::ZERO
             && clip.length > Beats::ZERO
             && fades_of(&clip).is_none_or(|fades| fades.total() <= clip.length);
-        if !fits || self.project.find_clip(clip.id).is_some() {
+        if !fits || self.project.uses_clip_id(clip.id) {
             return;
         }
         let Some(t) = self.project.track_mut(track) else {
@@ -708,6 +761,76 @@ impl Transaction<'_> {
         }
     }
 
+    /// A new, empty take with the next take id, for
+    /// [`add_take`](Self::add_take): see [`Project::new_take`].
+    pub fn new_take(&mut self, name: impl Into<String>) -> Take {
+        self.project.new_take(name)
+    }
+
+    /// Puts `take` at `index` in the takes of the track with id `track`, or
+    /// at the end if `index` is past them. It's left out if the track is a
+    /// bus, if the project has a take with its id, or if one of its clips
+    /// couldn't go on the track (see [`add_clip`](Self::add_clip)).
+    pub fn add_take(&mut self, track: TrackId, index: usize, take: Take) {
+        if self.project.find_take(take.id).is_some() {
+            return;
+        }
+        let Some(t) = self.project.track(track) else {
+            return;
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        let fits = !t.kind.is_bus()
+            && take.clips.iter().all(|clip| {
+                t.holds(&clip.content)
+                    && clip.start >= Beats::ZERO
+                    && clip.length > Beats::ZERO
+                    && fades_of(clip).is_none_or(|fades| fades.total() <= clip.length)
+                    && !self.project.uses_clip_id(clip.id)
+                    && ids.insert(clip.id)
+            });
+        if !fits {
+            return;
+        }
+        let Some(t) = self.project.track_mut(track) else {
+            return;
+        };
+        let index = index.min(t.takes.len());
+        t.takes.insert(index, take.clone());
+        self.edits.push(Edit::AddTake { track, index, take });
+    }
+
+    /// Removes the take with id `take` from its track, and returns it.
+    pub fn remove_take(&mut self, take: TakeId) -> Option<Take> {
+        let track = self.project.find_take(take)?.0.id;
+        let t = self.project.track_mut(track)?;
+        let index = t.take_index(take)?;
+        let take = t.takes.remove(index);
+        self.edits.push(Edit::RemoveTake {
+            track,
+            index,
+            take: take.clone(),
+        });
+        Some(take)
+    }
+
+    pub fn set_take_name(&mut self, take: TakeId, name: &str) {
+        let Some(track) = self.project.find_take(take).map(|(t, _)| t.id) else {
+            return;
+        };
+        if let Some(t) = self.project.track_mut(track).and_then(|t| t.take_mut(take))
+            && t.name != name
+        {
+            let from = std::mem::replace(&mut t.name, name.to_owned());
+            let to = name.to_owned();
+            self.edits.push(Edit::TakeName {
+                track,
+                take,
+                from,
+                to,
+            });
+        }
+    }
+
     /// A new locator with the next locator id, for
     /// [`add_locator`](Self::add_locator): see [`Project::new_locator`].
     pub fn new_locator(&mut self, name: impl Into<String>, at: Beats) -> Locator {
@@ -797,6 +920,8 @@ impl Transaction<'_> {
             Edit::LoopRegion { to, .. } => self.set_loop_region(*to),
             Edit::Looping { to, .. } => self.set_looping(*to),
             Edit::Metronome { to, .. } => self.set_metronome(*to),
+            Edit::PunchIn { to, .. } => self.set_punch_in(*to),
+            Edit::PunchOut { to, .. } => self.set_punch_out(*to),
             Edit::AddTrack { index, track } => self.add_track(*index, track.clone()),
             // Undo and redo take back or make again what referred to the
             // track as edits of their own, before this one, so there's
@@ -811,6 +936,8 @@ impl Transaction<'_> {
             Edit::TrackSolo { track, to, .. } => self.set_track_solo(*track, *to),
             Edit::TrackSoloSafe { track, to, .. } => self.set_track_solo_safe(*track, *to),
             Edit::TrackArmed { track, to, .. } => self.set_track_armed(*track, *to),
+            Edit::TrackInput { track, to, .. } => self.set_track_input(*track, to.clone()),
+            Edit::TrackMonitor { track, to, .. } => self.set_track_monitor(*track, *to),
             Edit::TrackOutput { track, to, .. } => self.set_track_output(*track, *to),
             Edit::TrackClipType { track, to, .. } => self.set_track_clip_type(*track, *to),
             Edit::AddSend { track, index, send } => self.add_send(*track, *index, *send),
@@ -831,6 +958,11 @@ impl Transaction<'_> {
             Edit::ClipTiming { clip, to, .. } => self.set_clip_timing(*clip, *to),
             Edit::ClipFades { clip, to, .. } => self.set_clip_fades(*clip, *to),
             Edit::ClipName { clip, to, .. } => self.set_clip_name(*clip, to),
+            Edit::AddTake { track, index, take } => self.add_take(*track, *index, take.clone()),
+            Edit::RemoveTake { take, .. } => {
+                self.remove_take(take.id);
+            }
+            Edit::TakeName { take, to, .. } => self.set_take_name(*take, to),
             Edit::AddLocator { index, locator } => self.add_locator(*index, locator.clone()),
             Edit::RemoveLocator { locator, .. } => {
                 self.remove_locator(locator.id);
@@ -886,6 +1018,14 @@ pub enum Edit {
         from: bool,
         to: bool,
     },
+    PunchIn {
+        from: bool,
+        to: bool,
+    },
+    PunchOut {
+        from: bool,
+        to: bool,
+    },
     /// `track` went in at `index` in the track list.
     AddTrack {
         index: usize,
@@ -930,6 +1070,16 @@ pub enum Edit {
         track: TrackId,
         from: bool,
         to: bool,
+    },
+    TrackInput {
+        track: TrackId,
+        from: Option<Input>,
+        to: Option<Input>,
+    },
+    TrackMonitor {
+        track: TrackId,
+        from: Monitor,
+        to: Monitor,
     },
     TrackOutput {
         track: TrackId,
@@ -1009,6 +1159,24 @@ pub enum Edit {
         from: String,
         to: String,
     },
+    /// `take` went in at `index` in the takes of the track with id `track`.
+    AddTake {
+        track: TrackId,
+        index: usize,
+        take: Take,
+    },
+    /// `take`, which was at `index` in the track's takes, went.
+    RemoveTake {
+        track: TrackId,
+        index: usize,
+        take: Take,
+    },
+    TakeName {
+        track: TrackId,
+        take: TakeId,
+        from: String,
+        to: String,
+    },
     /// `locator` went in at `index` in the project's locators.
     AddLocator {
         index: usize,
@@ -1067,6 +1235,8 @@ impl Edit {
             Edit::LoopRegion { from, to } => Edit::LoopRegion { from: to, to: from },
             Edit::Looping { from, to } => Edit::Looping { from: to, to: from },
             Edit::Metronome { from, to } => Edit::Metronome { from: to, to: from },
+            Edit::PunchIn { from, to } => Edit::PunchIn { from: to, to: from },
+            Edit::PunchOut { from, to } => Edit::PunchOut { from: to, to: from },
             Edit::AddTrack { index, track } => Edit::RemoveTrack { index, track },
             Edit::RemoveTrack { index, track } => Edit::AddTrack { index, track },
             Edit::TrackName { track, from, to } => Edit::TrackName {
@@ -1100,6 +1270,16 @@ impl Edit {
                 to: from,
             },
             Edit::TrackArmed { track, from, to } => Edit::TrackArmed {
+                track,
+                from: to,
+                to: from,
+            },
+            Edit::TrackInput { track, from, to } => Edit::TrackInput {
+                track,
+                from: to,
+                to: from,
+            },
+            Edit::TrackMonitor { track, from, to } => Edit::TrackMonitor {
                 track,
                 from: to,
                 to: from,
@@ -1176,6 +1356,19 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::AddTake { track, index, take } => Edit::RemoveTake { track, index, take },
+            Edit::RemoveTake { track, index, take } => Edit::AddTake { track, index, take },
+            Edit::TakeName {
+                track,
+                take,
+                from,
+                to,
+            } => Edit::TakeName {
+                track,
+                take,
+                from: to,
+                to: from,
+            },
             Edit::AddLocator { index, locator } => Edit::RemoveLocator { index, locator },
             Edit::RemoveLocator { index, locator } => Edit::AddLocator { index, locator },
             Edit::LocatorAt { locator, from, to } => Edit::LocatorAt {
@@ -1232,7 +1425,9 @@ impl Edit {
             (Edit::Tempo { to, .. }, Edit::Tempo { to: next, .. }) => to.clone_from(next),
             (Edit::LoopRegion { to, .. }, Edit::LoopRegion { to: next, .. }) => *to = *next,
             (Edit::Looping { to, .. }, Edit::Looping { to: next, .. }) => *to = *next,
-            (Edit::Metronome { to, .. }, Edit::Metronome { to: next, .. }) => *to = *next,
+            (Edit::Metronome { to, .. }, Edit::Metronome { to: next, .. })
+            | (Edit::PunchIn { to, .. }, Edit::PunchIn { to: next, .. })
+            | (Edit::PunchOut { to, .. }, Edit::PunchOut { to: next, .. }) => *to = *next,
             (
                 Edit::TrackName { track, to, .. },
                 Edit::TrackName {
@@ -1284,6 +1479,22 @@ impl Edit {
             | (
                 Edit::TrackArmed { track, to, .. },
                 Edit::TrackArmed {
+                    track: other,
+                    to: next,
+                    ..
+                },
+            ) if track == other => *to = *next,
+            (
+                Edit::TrackInput { track, to, .. },
+                Edit::TrackInput {
+                    track: other,
+                    to: next,
+                    ..
+                },
+            ) if track == other => to.clone_from(next),
+            (
+                Edit::TrackMonitor { track, to, .. },
+                Edit::TrackMonitor {
                     track: other,
                     to: next,
                     ..
@@ -1357,6 +1568,14 @@ impl Edit {
                 },
             ) if clip == other => to.clone_from(next),
             (
+                Edit::TakeName { take, to, .. },
+                Edit::TakeName {
+                    take: other,
+                    to: next,
+                    ..
+                },
+            ) if take == other => to.clone_from(next),
+            (
                 Edit::LocatorAt { locator, to, .. },
                 Edit::LocatorAt {
                     locator: other,
@@ -1397,6 +1616,8 @@ impl Edit {
                 | Edit::LoopRegion { .. }
                 | Edit::Looping { .. }
                 | Edit::Metronome { .. }
+                | Edit::PunchIn { .. }
+                | Edit::PunchOut { .. }
                 | Edit::AddTrack { .. }
                 | Edit::RemoveTrack { .. }
                 | Edit::TrackName { .. }
@@ -1406,6 +1627,8 @@ impl Edit {
                 | Edit::TrackSolo { .. }
                 | Edit::TrackSoloSafe { .. }
                 | Edit::TrackArmed { .. }
+                | Edit::TrackInput { .. }
+                | Edit::TrackMonitor { .. }
                 | Edit::TrackOutput { .. }
                 | Edit::TrackClipType { .. }
                 | Edit::AddSend { .. }
@@ -1420,6 +1643,9 @@ impl Edit {
                 | Edit::ClipTiming { .. }
                 | Edit::ClipFades { .. }
                 | Edit::ClipName { .. }
+                | Edit::AddTake { .. }
+                | Edit::RemoveTake { .. }
+                | Edit::TakeName { .. }
                 | Edit::AddLocator { .. }
                 | Edit::RemoveLocator { .. }
                 | Edit::LocatorAt { .. }
@@ -1440,13 +1666,17 @@ impl Edit {
             Edit::Tempo { from, to } => from == to,
             Edit::LoopRegion { from, to } => from == to,
             Edit::Looping { from, to } => from == to,
-            Edit::Metronome { from, to } => from == to,
+            Edit::Metronome { from, to }
+            | Edit::PunchIn { from, to }
+            | Edit::PunchOut { from, to } => from == to,
             Edit::AddTrack { .. }
             | Edit::RemoveTrack { .. }
             | Edit::AddSend { .. }
             | Edit::RemoveSend { .. }
             | Edit::AddClip { .. }
             | Edit::RemoveClip { .. }
+            | Edit::AddTake { .. }
+            | Edit::RemoveTake { .. }
             | Edit::AddLocator { .. }
             | Edit::RemoveLocator { .. }
             | Edit::AddDevice { .. }
@@ -1463,10 +1693,14 @@ impl Edit {
             | Edit::TrackArmed { from, to, .. }
             | Edit::SendPreFader { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
+            Edit::TrackInput { from, to, .. } => from == to,
+            Edit::TrackMonitor { from, to, .. } => from == to,
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
             Edit::ClipTiming { from, to, .. } => from == to,
             Edit::ClipFades { from, to, .. } => from == to,
-            Edit::ClipName { from, to, .. } | Edit::LocatorName { from, to, .. } => from == to,
+            Edit::ClipName { from, to, .. }
+            | Edit::TakeName { from, to, .. }
+            | Edit::LocatorName { from, to, .. } => from == to,
             Edit::LocatorAt { from, to, .. } => from == to,
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,

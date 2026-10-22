@@ -511,8 +511,8 @@ Debian and Ubuntu).
   through a loopback, and whether that stays put from one stream to the next.
   What WASAPI's capture times mean for a loopback, mixed or played, isn't
   known yet.
-- Calibrating inputs by what the round trip measures, and recording itself:
-  takes, punching in and out, and MIDI.
+- Calibrating inputs by what the round trip measures, and MIDI inputs.
+  Recording itself is the app's ([app.md](app.md#recording)).
 - Inputs on macOS and Linux.
 - A resampled input follows its device's timings, so timings that jitter by a
   millisecond leave it wandering by a few frames. A loop that learned the
