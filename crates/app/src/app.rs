@@ -20,7 +20,7 @@ use musicable_ui::{
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
-use crate::audio_window::AudioWindow;
+use crate::audio_window::{AudioWindow, Change};
 use crate::keymap_file::UserKeymap;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
@@ -512,6 +512,17 @@ impl App {
         self.audio_window.applied(outcome);
     }
 
+    /// Sets how late recordings through the device playing land, and keeps
+    /// it in the settings.
+    fn set_recording_offset(&mut self, frames: i64) {
+        let Some(info) = self.output.info() else {
+            return;
+        };
+        self.settings.recording.set_offset_for(info, frames);
+        self.session.set_recording_offset(frames);
+        self.save_settings();
+    }
+
     /// Opens the audio and MIDI inputs the tracks want with the stream,
     /// unless that would cut a recording short, and hands a new stream's
     /// inputs to the session.
@@ -661,6 +672,10 @@ impl eframe::App for App {
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         self.follow_inputs();
+        // Recordings through the device playing make up for its offset.
+        let info = self.output.info();
+        let offset = info.map_or(0, |info| self.settings.recording.offset_for(info));
+        self.session.set_recording_offset(offset);
         let close = ctx.input(|i| i.viewport().close_requested());
         if close && !self.closing && self.session.is_modified() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -751,8 +766,11 @@ impl eframe::App for App {
         for action in actions {
             self.act(action, &ctx, frame);
         }
-        if let Some(request) = self.audio_window.show(&ctx, &self.output) {
-            self.apply_audio(request);
+        let offset = self.session.recording_offset();
+        match self.audio_window.show(&ctx, &self.output, offset) {
+            Some(Change::Stream(request)) => self.apply_audio(request),
+            Some(Change::RecordingOffset(frames)) => self.set_recording_offset(frames),
+            None => {}
         }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);

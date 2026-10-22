@@ -1,6 +1,7 @@
 //! Recording through the app: an armed track records its input while the
 //! transport records, and plays it as it does, and the recording becomes a
-//! take on the track, which undo takes back. An armed MIDI track records
+//! take on the track, which undo takes back. A recording offset makes up
+//! for an input later than its driver says. An armed MIDI track records
 //! the notes its MIDI input plays the same way. Capture makes what armed
 //! tracks, and those monitoring In, played without recording into takes,
 //! audio and MIDI.
@@ -169,6 +170,38 @@ fn armed_tracks_record_takes_where_they_were_played() {
     studio.session.run(&edit::UNDO).unwrap();
     let track = studio.session.project().track(lead).unwrap();
     assert!(track.takes.is_empty() && track.clips.is_empty());
+    let _ = fs::remove_dir_all(&studio.folder);
+}
+
+#[test]
+fn a_recording_offset_makes_up_for_a_late_input() {
+    // The input's buffer has each frame 100 frames after it was heard, as
+    // through a device that doesn't report that much of its latency.
+    let mut studio = Studio::new("offset");
+    studio.session.set_recording_offset(100);
+    assert_eq!(studio.session.recording_offset(), 100);
+    studio.session.run(&transport::RECORD).unwrap();
+    studio.session.wait_for_graph();
+    while studio.time < 48_000 {
+        studio.play();
+    }
+    studio.session.run(&transport::STOP).unwrap();
+    let lead = studio.lead;
+    studio.play_until("take", |s| {
+        !s.project().track(lead).unwrap().takes.is_empty()
+    });
+    assert_eq!(studio.session.take_problems(), Vec::<String>::new());
+    // The take starts 100 frames into what the input captured.
+    let path = studio.folder.join("Lead 1.wav");
+    let channels = Decoder::open(&path).unwrap().read_all().unwrap();
+    for (c, channel) in channels.iter().enumerate() {
+        assert_eq!(channel.len(), 48_000);
+        let expected: Vec<f32> = (100..48_100).map(|w| captured(w, c)).collect();
+        assert!(
+            *channel == expected,
+            "channel {c} isn't the input, 100 later"
+        );
+    }
     let _ = fs::remove_dir_all(&studio.folder);
 }
 

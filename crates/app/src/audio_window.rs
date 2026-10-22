@@ -1,6 +1,7 @@
-//! The audio settings window: which device to play through, and how.
+//! The audio settings window: which device to play through, and how, and
+//! how late recordings through it land.
 
-use eframe::egui::{self, Button, ComboBox, Grid, RadioButton, RichText, Ui};
+use eframe::egui::{self, Button, ComboBox, DragValue, Grid, RadioButton, RichText, Ui};
 use musicable_audio::{
     self as audio, AsioCapabilities, Capabilities, Device, DriverType, Mode, StreamRequest,
 };
@@ -10,6 +11,17 @@ use crate::output::{kilohertz, millis};
 
 /// The buffer sizes on offer, where the device takes them.
 const BUFFER_SIZES: [u32; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
+/// The furthest a recording offset goes either way, in frames.
+const MAX_OFFSET: i64 = 100_000;
+
+/// What the user changed in the window.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    /// The settings to apply, all at once, which reopens the device.
+    Stream(StreamRequest),
+    /// How many frames late recordings through the device playing land.
+    RecordingOffset(i64),
+}
 
 /// The audio settings window. The settings change when the user applies
 /// them, all at once, since each change reopens the device.
@@ -32,6 +44,8 @@ pub struct AudioWindow {
     playing: Option<(String, u32, u32)>,
     /// How the last Apply went.
     outcome: Option<Result<String, String>>,
+    /// The recording offset as the user drags it, until they let go.
+    offset_drag: Option<i64>,
 }
 
 impl AudioWindow {
@@ -49,11 +63,13 @@ impl AudioWindow {
         self.refresh();
     }
 
-    /// Shows the window, if it's open. Returns the settings to apply, when
-    /// the user applies them.
-    pub fn show(&mut self, ctx: &egui::Context, output: &Output) -> Option<StreamRequest> {
+    /// Shows the window, if it's open, with the device playing's recording
+    /// `offset`. Returns what the user changed: the settings to apply, when
+    /// the user applies them, or a new recording offset, once they've let
+    /// go of it.
+    pub fn show(&mut self, ctx: &egui::Context, output: &Output, offset: i64) -> Option<Change> {
         let mut open = self.open;
-        let mut apply = None;
+        let mut change = None;
         if self.open && playing(output) != self.playing {
             self.playing = playing(output);
             self.load_capabilities();
@@ -91,7 +107,7 @@ impl AudioWindow {
                         .add_enabled(changed && picked, Button::new("Apply"))
                         .clicked()
                     {
-                        apply = Some(self.draft.clone());
+                        change = Some(Change::Stream(self.draft.clone()));
                     }
                     if ui.add_enabled(changed, Button::new("Revert")).clicked() {
                         self.draft = output.request().clone();
@@ -111,18 +127,57 @@ impl AudioWindow {
                 ui.separator();
                 ui.label(RichText::new("Now playing").strong());
                 ui.label(output.details());
+                if let Some(info) = output.info()
+                    && let Some(frames) = self.offset_row(ui, offset, info.sample_rate)
+                {
+                    change = Some(Change::RecordingOffset(frames));
+                }
                 if audio::driver_types().contains(&DriverType::Asio) {
                     ui.separator();
                     gpl_notice(ui);
                 }
             });
         self.open = open;
-        apply
+        change
     }
 
     /// Says how applying the settings went.
     pub fn applied(&mut self, outcome: Result<String, String>) {
         self.outcome = Some(outcome);
+    }
+
+    /// The device playing's recording offset, `offset` frames at `rate`.
+    /// Returns a new one, once the user has typed it, or let go of it.
+    fn offset_row(&mut self, ui: &mut Ui, offset: i64, rate: u32) -> Option<i64> {
+        let mut frames = self.offset_drag.unwrap_or(offset);
+        let mut set = None;
+        ui.horizontal(|ui| {
+            ui.label("Recording offset");
+            let field = ui
+                .add(
+                    DragValue::new(&mut frames)
+                        .range(-MAX_OFFSET..=MAX_OFFSET)
+                        .suffix(" frames")
+                        // A typed offset applies on Enter, not at each digit.
+                        .update_while_editing(false),
+                )
+                .on_hover_text(
+                    "How late recordings through this device land, in this mode and at this \
+                     rate, beyond the latency its driver reports: what a cable from one of its \
+                     outputs to one of its inputs measures. Every audio take starts that much \
+                     later in what its input captured. The record round trip example measures \
+                     it.",
+                );
+            if field.dragged() {
+                self.offset_drag = Some(frames);
+            } else if field.changed() || field.drag_stopped() {
+                self.offset_drag = None;
+                set = (frames != offset).then_some(frames);
+            }
+            let ms = frames as f64 * 1000.0 / f64::from(rate);
+            ui.label(format!("{ms:.2} ms"));
+        });
+        set
     }
 
     fn driver_type_row(&mut self, ui: &mut Ui) {

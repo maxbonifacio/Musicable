@@ -422,10 +422,15 @@ delay late ([audio.md](audio.md#midi-inputs)).
 position was heard, so it lands where it was played: the audio backend
 lines the inputs' buffers up with the output, frame for frame, and the
 engine's timeline says which song position each frame played, and how late
-the plugins' latency made it ([engine.md](engine.md#recording)). A delay in
-an interface's converters that its driver doesn't report isn't made up for
-yet. A MIDI message lands the same way: the backend stamps each with the
-frame heard as it came in.
+the plugins' latency made it ([engine.md](engine.md#recording)). Latency
+the driver doesn't report, such as an interface's converters', is made up
+for by the device's **recording offset**: each audio take starts that many
+frames later in what its input captured. **Options > Audio Settings** sets
+it for the device playing, under Now playing, and the
+[settings](#settings-and-your-keymap) keep one for each device, mode and
+sample rate. The record round trip example below measures it. A MIDI
+message lands the same way as audio, without the offset: the backend stamps
+each with the frame heard as it came in.
 
 **Notes.** A MIDI track records the notes played, with their velocities,
 their release velocities and their expression: pitch bend, pressure and
@@ -482,7 +487,10 @@ landed, to a fraction of a frame, then comps the take and undoes that and
 the recording. With `--minutes`, it records for that long and checks that
 nothing was lost. Through a loopback, a click lands on the frame it played;
 through a cable, late by the converters' latency that the drivers don't
-report, the same every time.
+report, the same every time: that's the recording offset to set for the
+device, in that mode and at that rate. It doesn't use the offsets in the
+settings. In WASAPI's shared mode it can differ by a few frames each time
+the device opens.
 
 ```sh
 cargo run --release -p musicable-app --example record_round_trip -- --loopback
@@ -758,7 +766,8 @@ backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, how editing behaves, and how long Capture holds the inputs:
+ones, how editing behaves, how long Capture holds the inputs, and the
+devices' recording offsets:
 
 ```toml
 format = "musicable-settings"
@@ -774,6 +783,12 @@ play_from = "start_marker"
 
 [recording]
 capture_minutes = 5
+
+[[recording.offsets]]
+device = "{0.0.0.00000000}.{a1b2c3d4-...}"
+exclusive = true
+sample_rate = 44100
+frames = 878
 ```
 
 Every setting is optional: no device is the default output, no
@@ -783,7 +798,11 @@ is where Space plays from: the start marker (`start_marker`), as in Live, or
 wherever the playhead stopped (`playhead`). `capture_minutes` is how long
 [Capture](#capture) holds the inputs, 5 minutes if it's left out; 0 turns
 Capture off. The app reads it at startup;
-there's no window for it yet. Fields this version doesn't know are ignored.
+there's no window for it yet. Each of `recording.offsets` is the
+[recording offset](#recording), in `frames`, of a `device`, by its id, in
+exclusive mode or not (`exclusive`, false if it's left out), at a
+`sample_rate`. Audio Settings writes them; an offset of 0 isn't kept.
+Fields this version doesn't know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
@@ -814,7 +833,10 @@ The audio settings window lists the devices (Refresh lists them again after
 plugging one in), offers exclusive mode where the device does, the device's
 rates in exclusive mode, and buffer sizes from the smallest the device
 supports. Drivers round the buffer size, and some ignore it, so "Now playing"
-says what the stream got.
+says what the stream got. Below that, **Recording offset** is the device's
+[recording offset](#recording) in its mode and at its rate, in frames and
+milliseconds: drag it, or type it and press Enter, and the next recording
+uses it, as does Capture.
 
 Windows builds with the `asio` feature ([audio.md](audio.md#asio)) add a
 driver type, WASAPI or ASIO, above the device. For ASIO it lists the
