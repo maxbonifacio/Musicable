@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 pub(crate) use bus::{Bus, BusInput};
-pub(crate) use clock::Playback;
+pub(crate) use clock::{Playback, Smoother};
 pub(crate) use conform::{Conformer, Packet};
 pub use ring::{InputBuffer, InputWriter, ReadError};
 

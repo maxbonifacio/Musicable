@@ -1,6 +1,6 @@
 //! What the control thread sends the engine, and what nodes receive.
 
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::graph::NodeKey;
@@ -117,6 +117,20 @@ pub enum NodeEventKind {
     /// A note starts, changes or ends. Nodes that don't play notes ignore
     /// it.
     Note(NoteEvent),
+    /// A MIDI controller moves, for every note the node plays, to `value`,
+    /// from 0.0 to 1.0, as a MIDI control change does: the mod wheel, the
+    /// sustain pedal. It goes where notes go, from a clip player to its
+    /// instrument, and holds until it moves again. Nodes that don't play
+    /// notes ignore it.
+    Controller { controller: Controller, value: f32 },
+}
+
+impl NodeEventKind {
+    /// Whether it's played as notes are, going where notes go: a note or a
+    /// controller.
+    pub fn is_played(&self) -> bool {
+        matches!(self, Self::Note(_) | Self::Controller { .. })
+    }
 }
 
 /// Identifies a sounding note to the instrument playing it, from the note's

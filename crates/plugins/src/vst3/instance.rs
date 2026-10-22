@@ -27,8 +27,8 @@ use vst3::Steinberg::Vst::ViewType::kEditor;
 use vst3::Steinberg::Vst::{
     BusDirection, BusInfo as Bus, BusType, IAudioProcessor, IAudioProcessorTrait, IComponent,
     IComponentHandler, IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
-    IEditControllerTrait, IUnitInfo, IUnitInfoTrait, MediaType, ParameterInfo, ProcessSetup,
-    String128, TChar, UnitInfo, kNoParentUnitId, kRootUnitId,
+    IEditControllerTrait, IMidiMapping, IMidiMappingTrait, IUnitInfo, IUnitInfoTrait, MediaType,
+    ParamID, ParameterInfo, ProcessSetup, String128, TChar, UnitInfo, kNoParentUnitId, kRootUnitId,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IPlugFrame, IPlugView, IPlugViewContentScaleSupport,
@@ -40,7 +40,7 @@ use vst3::{ComPtr, ComWrapper};
 use super::com::{ComponentHandler, HostApplication, PlugFrame, Stream, rect_size};
 use super::host::{Edit, NO_RESIZE, Shared};
 use super::module::{Module, parse_class_id, utf16};
-use super::node::{self, Audio, BusInfo, NodeSource};
+use super::node::{self, Audio, BusInfo, Controllers, NodeSource};
 use super::preset::{self, Preset};
 use crate::process::ParamChange;
 use crate::threads::{DESTROYED, INACTIVE, PROCESSING};
@@ -426,6 +426,7 @@ impl Instance {
         let inputs = self.buses(kInput as BusDirection);
         let outputs = self.buses(kOutput as BusDirection);
         let takes_notes = self.activate_buses(&inputs, &outputs);
+        let controllers = self.midi_mapping();
         let mut setup = ProcessSetup {
             processMode: kRealtime as int32,
             symbolicSampleSize: kSample32 as int32,
@@ -441,7 +442,7 @@ impl Instance {
         let busy = self.shared.enter()?;
         // SAFETY: `busy` is held.
         let audio = unsafe { &mut *self.shared.audio.get() };
-        audio.prepare(config, &inputs, &outputs, takes_notes);
+        audio.prepare(config, &inputs, &outputs, takes_notes, controllers);
         // SAFETY: as above.
         if unsafe { parts.component.setActive(1) } != kResultOk {
             audio.config = None;
@@ -546,6 +547,26 @@ impl Instance {
             buses.main = Some(0);
         }
         buses
+    }
+
+    /// The parameter each MIDI controller moves, by number, as the
+    /// plugin's MIDI mapping says, for MIDI's first channel on its first
+    /// event input: VST3 has plugins take controllers as parameters.
+    fn midi_mapping(&self) -> Controllers {
+        let mut mapping = [None; node::CONTROLLERS];
+        let Some(midi) = (self.parts.controller.as_ref()).and_then(|c| c.cast::<IMidiMapping>())
+        else {
+            return mapping;
+        };
+        for (number, slot) in mapping.iter_mut().enumerate() {
+            let mut id: ParamID = 0;
+            // SAFETY: on the main thread, with somewhere to write.
+            let mapped = unsafe { midi.getMidiControllerAssignment(0, 0, number as i16, &mut id) };
+            if mapped == kResultTrue {
+                *slot = Some(id);
+            }
+        }
+        mapping
     }
 
     /// Turns on the buses the nodes use: the main audio ones, and the first

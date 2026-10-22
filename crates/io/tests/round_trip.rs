@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
-use musicable_model::clip::{AudioClip, Clip, ClipContent, Dimension, MidiClip, Point};
+use musicable_model::clip::{AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Point};
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -238,6 +238,16 @@ impl Random {
                 // Some deleted, leaving gaps in the ids.
                 midi.notes.retain(|_| !self.one_in(4));
                 midi.next_note_id += self.below(3) as u32;
+                for _ in 0..self.below(4) {
+                    let controller = Controller::new(self.below(120) as u8).unwrap();
+                    let mut at = self.signed_ticks().min(MAX_TICKS - 1);
+                    let mut points = Vec::new();
+                    for _ in 0..=self.below(4) {
+                        points.push(Point::new(Beats::from_ticks(at), self.within(0.0, 1.0)));
+                        at = (at + self.below(Beats::new(2).ticks() as u64) as i64).min(MAX_TICKS);
+                    }
+                    midi.set_controller(controller, points);
+                }
                 ClipContent::Midi(midi)
             }
         };

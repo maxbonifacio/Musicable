@@ -38,9 +38,10 @@ const WINDOW: usize = 64;
 /// How often a locked input checks its offset, in packets.
 const CHECK_EVERY: u32 = 16;
 /// How far the median offset can move from a locked one before it counts,
-/// in frames: well beyond what jitter in the timings moves it. Twice in a
-/// row, and the input slips.
-const SLIP_LIMIT: f64 = 4.0;
+/// in frames: well beyond what jitter in the timings moves it, which on
+/// real devices, with each timing up to 8 frames off, is up to 5. Twice in
+/// a row, and the input slips.
+const SLIP_LIMIT: f64 = 8.0;
 /// Frames of an input on another clock kept for resampling.
 const HISTORY: usize = 16_384;
 /// How far off a resampled input's timing can be before it starts again

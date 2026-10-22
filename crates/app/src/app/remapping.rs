@@ -44,7 +44,9 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
     let defaults = Keymap::default_keymap();
     let letters = ('A'..='Z').map(|letter| format!("Ctrl+Alt+Shift+{letter}"));
     let digits = (0..=9).map(|n| format!("Ctrl+Alt+Shift+{n}"));
-    let functions = (1..=24).map(|n| format!("Ctrl+Alt+Shift+F{n}"));
+    let functions = ["Ctrl+Alt+Shift", "Ctrl+Shift", "Alt+Shift"]
+        .into_iter()
+        .flat_map(|mods| (1..=24).map(move |n| format!("{mods}+F{n}")));
     let chords: Vec<_> = letters
         .chain(digits)
         .chain(functions)

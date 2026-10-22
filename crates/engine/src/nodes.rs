@@ -4,7 +4,7 @@ use std::f64::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
 
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::mixer::pan_gains;
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{ClipType, Monitor};
@@ -1044,13 +1044,16 @@ impl Node for Metronome {
 /// its second harmonic blended in by its timbre, and louder with velocity
 /// and pressure: at full velocity and no pressure it peaks at the
 /// instrument's level, and pressure can double that. A note rises over
-/// 2 ms and rings out over 30 ms once let go, transport or not. It plays
-/// [`VOICES`](Self::VOICES) notes at once, and a note beyond them takes the
-/// place of the one that started longest ago.
+/// 2 ms and rings out over 30 ms once let go, transport or not, and while
+/// the sustain pedal is down, notes let go sound on until it's let go. It
+/// plays [`VOICES`](Self::VOICES) notes at once, and a note beyond them
+/// takes the place of the one that started longest ago.
 #[derive(Debug, Clone)]
 pub struct TestInstrument {
     level: Smoothed,
     voices: [Voice; TestInstrument::VOICES],
+    /// Whether the sustain pedal is down.
+    sustain: bool,
     /// Notes started so far, to tell which voice is oldest.
     started: u64,
     channels: usize,
@@ -1064,6 +1067,8 @@ pub struct TestInstrument {
 struct Voice {
     active: bool,
     released: bool,
+    /// Let go while the sustain pedal was down, so still sounding.
+    held: bool,
     note: NoteId,
     /// Which note it was, counting from the first.
     started: u64,
@@ -1094,6 +1099,7 @@ impl TestInstrument {
         Self {
             level: Smoothed::new(level),
             voices: [Voice::default(); Self::VOICES],
+            sustain: false,
             started: 0,
             channels: 2,
             sample_rate: 48_000.0,
@@ -1164,6 +1170,19 @@ impl TestInstrument {
             NodeEventKind::Note(NoteEvent::Off { note, .. }) => {
                 for voice in &mut self.voices {
                     if voice.active && voice.note == note {
+                        voice.held = self.sustain;
+                        voice.released = !self.sustain;
+                    }
+                }
+            }
+            NodeEventKind::Controller {
+                controller: Controller::SUSTAIN,
+                value,
+            } => {
+                self.sustain = Controller::is_on(value);
+                if !self.sustain {
+                    for voice in self.voices.iter_mut().filter(|v| v.held) {
+                        voice.held = false;
                         voice.released = true;
                     }
                 }
@@ -1230,6 +1249,7 @@ impl Node for TestInstrument {
         if let Some(previous) = previous.downcast_mut::<TestInstrument>() {
             self.level.take_over(&previous.level);
             self.voices = previous.voices;
+            self.sustain = previous.sustain;
             self.started = previous.started;
         }
     }
@@ -1990,6 +2010,42 @@ mod tests {
         let mut keys = instrument();
         let out = play(&mut keys, 1000, 64, &[on(0, 1, 60, 1.0), off(10, 2)]);
         assert!(out[900..].iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn the_sustain_pedal_holds_notes_let_go_until_it_comes_up() {
+        let pedal = |offset, down: bool| NodeEvent {
+            offset,
+            kind: NodeEventKind::Controller {
+                controller: Controller::SUSTAIN,
+                value: if down { 1.0 } else { 0.0 },
+            },
+        };
+        let mut keys = instrument();
+        let events = [
+            pedal(0, true),
+            on(0, 1, 60, 1.0),
+            off(1000, 1),
+            // Other controllers don't hold notes.
+            NodeEvent {
+                offset: 2000,
+                kind: NodeEventKind::Controller {
+                    controller: Controller::MOD_WHEEL,
+                    value: 0.0,
+                },
+            },
+            pedal(3000, false),
+        ];
+        let out = play(&mut keys, 6000, 64, &events);
+        assert!(out[2900..3000].iter().any(|&s| s != 0.0), "held");
+        // Then it rings out over 30 ms.
+        assert!(out[4440..].iter().all(|&s| s == 0.0));
+        assert_eq!(keys.sounding(), 0);
+        // Notes let go with the pedal up ring out at once.
+        let mut keys = instrument();
+        let events = [pedal(0, false), on(0, 1, 60, 1.0), off(1000, 1)];
+        let out = play(&mut keys, 3000, 64, &events);
+        assert!(out[2440..].iter().all(|&s| s == 0.0));
     }
 
     #[test]

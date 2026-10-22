@@ -50,13 +50,16 @@ impl Voices {
     }
 
     /// The plugin ended the voice it played for the note it got with `id`,
-    /// or, when `id` is -1, CLAP's none, the oldest voice on `key`. Its
-    /// note goes in `ended`, if the node knows the voice.
-    pub(crate) fn end(&mut self, id: i32, key: i16) {
+    /// or, when `id` is -1, CLAP's none, the oldest voice on `channel` and
+    /// `key`, any channel if that's -1 too. Its note goes in `ended`, if the
+    /// node knows the voice.
+    pub(crate) fn end(&mut self, id: i32, channel: i16, key: i16) {
         let index = if id >= 0 {
             self.voices.iter().position(|voice| voice.id == id)
         } else {
-            self.voices.iter().position(|voice| voice.key == key)
+            self.voices
+                .iter()
+                .position(|voice| voice.key == key && (channel < 0 || voice.channel == channel))
         };
         let Some(index) = index else {
             return;
@@ -77,6 +80,16 @@ mod tests {
             note: NoteId(note),
             id,
             key,
+            channel: 0,
+        }
+    }
+
+    fn on_channel(note: u64, channel: i16, key: i16) -> SoundingNote {
+        SoundingNote {
+            note: NoteId(note),
+            id: -1,
+            key,
+            channel,
         }
     }
 
@@ -86,19 +99,33 @@ mod tests {
         voices.start(voice(1, 0, 60));
         voices.start(voice(2, 1, 60));
         assert_eq!(voices.find(NoteId(1)), Some(voice(1, 0, 60)));
-        voices.end(1, 60);
+        voices.end(1, 0, 60);
         assert_eq!(voices.ended, [NoteId(2)]);
         assert_eq!(voices.find(NoteId(2)), None);
 
         // Without an id, the oldest voice on the key ends.
         voices.start(voice(3, 2, 60));
-        voices.end(-1, 60);
+        voices.end(-1, -1, 60);
         assert_eq!(voices.ended, [NoteId(2), NoteId(1)]);
         assert_eq!(voices.find(NoteId(3)), Some(voice(3, 2, 60)));
 
         // Voices the node doesn't know end without a note.
-        voices.end(7, 60);
-        voices.end(-1, 61);
+        voices.end(7, 0, 60);
+        voices.end(-1, -1, 61);
+        assert_eq!(voices.ended, [NoteId(2), NoteId(1)]);
+    }
+
+    #[test]
+    fn a_voice_without_an_id_ends_by_its_channel_and_key() {
+        // As MPE plays them: the same key on channels of their own.
+        let mut voices = Voices::new();
+        voices.start(on_channel(1, 1, 60));
+        voices.start(on_channel(2, 2, 60));
+        voices.end(-1, 2, 60);
+        assert_eq!(voices.ended, [NoteId(2)]);
+        voices.end(-1, 2, 60);
+        assert_eq!(voices.ended, [NoteId(2)]);
+        voices.end(-1, 1, 60);
         assert_eq!(voices.ended, [NoteId(2), NoteId(1)]);
     }
 
@@ -108,9 +135,9 @@ mod tests {
         voices.start(voice(1, 0, 60));
         voices.start(voice(1, 1, 62));
         assert_eq!(voices.find(NoteId(1)), Some(voice(1, 1, 62)));
-        voices.end(0, 60);
+        voices.end(0, 0, 60);
         assert!(voices.ended.is_empty());
-        voices.end(1, 62);
+        voices.end(1, 0, 62);
         assert_eq!(voices.ended, [NoteId(1)]);
     }
 
