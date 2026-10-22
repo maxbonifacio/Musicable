@@ -418,6 +418,7 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         sample_rate: options.rate,
         period: options.period,
         inputs: Vec::new(),
+        midi_inputs: Vec::new(),
     };
     let mut notices = Vec::new();
     let (out, handle) = Output::open(request, &mut notices);

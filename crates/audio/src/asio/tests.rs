@@ -17,9 +17,10 @@ use super::stream::{self, OpenStream, Stream};
 use super::sys::{self, Long, message, sample_type};
 use crate::format::to_int;
 use crate::input::{InputClock, InputInfo, StreamInput};
+use crate::midi::{MidiBuffer, MidiBus};
 use crate::{
-    Api, AsioCapabilities, Capabilities, Device, DriverType, Error, SampleFormat, StreamInfo,
-    StreamRequest,
+    Api, AsioCapabilities, Capabilities, Device, DriverType, Error, Feeds, SampleFormat,
+    StreamInfo, StreamRequest,
 };
 
 /// The tests share the process's one ASIO stream, so they take turns.
@@ -41,7 +42,8 @@ fn device() -> Device {
 }
 
 fn open(fake: &Arc<Fake>, request: &StreamRequest) -> Result<(StreamInfo, OpenStream), Error> {
-    stream::open(request, device(), fake.loader()).map(|(info, _, open)| (info, open))
+    stream::open(request, device(), fake.loader(), Feeds::default())
+        .map(|(info, _, open)| (info, open))
 }
 
 /// An engine for `info` that renders `value` in every channel.
@@ -452,8 +454,14 @@ fn gives_up_on_a_driver_that_stops_calling_back() {
     let _turn = turn();
     let fake = Fake::new(Settings::default());
     let give_up = Duration::from_millis(100);
-    let (info, _, open) =
-        stream::open_with(&StreamRequest::default(), device(), fake.loader(), give_up).unwrap();
+    let (info, _, open) = stream::open_with(
+        &StreamRequest::default(),
+        device(),
+        fake.loader(),
+        Feeds::default(),
+        give_up,
+    )
+    .unwrap();
     let (engine, _handle) = engine(&info, 0.0);
     let stream = open.start(engine).unwrap();
     switch(&fake, 2);
@@ -701,7 +709,8 @@ fn record(
         inputs: inputs.iter().map(|&id| id.to_owned()).collect(),
         ..StreamRequest::default()
     };
-    let (info, inputs, open) = stream::open(&request, device(), fake.loader()).unwrap();
+    let (info, inputs, open) =
+        stream::open(&request, device(), fake.loader(), Feeds::default()).unwrap();
     let config = info.engine_config();
     let (engine, mut handle) = Engine::new(config);
     let mut graph = Graph::new();
@@ -817,4 +826,66 @@ fn inputs_it_cannot_open_are_silent_and_say_why() {
     switch(&fake, 4);
     // The engine sees the driver's two channels, and only those.
     assert!(ints(&fake.output(0, 1)).iter().all(|&s| s == 0));
+}
+
+/// Plays each MIDI message's note number over 128 on its frame, or on the
+/// block's first if it came too late for it.
+struct Blips;
+
+impl Node for Blips {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn process(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        _inputs: Inputs<'_>,
+        output: &mut AudioMut<'_>,
+    ) {
+        output.clear();
+        let out = output.channel_mut(0);
+        for message in ctx.midi {
+            let at = message.time.saturating_sub(ctx.time) as usize;
+            out[at.min(ctx.frames - 1)] += f32::from(message.bytes[1]) / 128.0;
+        }
+    }
+}
+
+#[test]
+fn plays_midi_input_a_fixed_delay_after_it_was_heard() {
+    let _turn = turn();
+    let fake = Fake::new(Settings::default());
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let feeds = Feeds {
+        playback: Arc::default(),
+        midi: MidiBus::new(vec![(0, buffer)]),
+    };
+    // As heard while engine frames 100 and 700 were.
+    writer.push(100, [0x90, 64, 100]);
+    writer.push(700, [0x80, 32, 0]);
+    let request = StreamRequest::default();
+    let (info, _, open) = stream::open(&request, device(), fake.loader(), feeds).unwrap();
+    let config = info.engine_config();
+    let (engine, mut handle) = Engine::new(config);
+    let mut graph = Graph::new();
+    let node = graph.add(NodeKey(1), Blips);
+    graph.set_output(node).unwrap();
+    handle.swap_graph(graph.prepare(&config).unwrap()).unwrap();
+    let stream = open.start(engine).unwrap();
+    let mut played = Vec::new();
+    for _ in 0..6 {
+        let index = fake.record().next_index;
+        switch(&fake, 1);
+        played.extend(ints(&fake.output(0, index as usize)));
+    }
+    // A callback renders a period of 256 frames, which play the output
+    // latency of 300 after it: each message plays 556 frames after it was
+    // heard, however the callbacks fall.
+    let blips: Vec<(usize, i32)> = (played.iter().copied().enumerate())
+        .filter(|&(_, sample)| sample != 0)
+        .collect();
+    assert_eq!(blips, [(656, to_int(0.5, 32)), (1256, to_int(0.25, 32))]);
+    let stats = stream.stats();
+    assert_eq!((stats.midi_delay, stats.midi_late), (556, 0));
 }

@@ -22,11 +22,9 @@ use super::driver::{BufferSizes, Driver};
 use super::platform::{self, Apartment};
 use super::render::{Inputs, Output, Render};
 use super::sys::{BufferInfo, Long};
-use crate::input::{
-    self, Bus, InputBuffer, InputClock, InputCounters, OpenedInput, Playback, StreamInput,
-};
+use crate::input::{self, Bus, InputBuffer, InputClock, InputCounters, OpenedInput, StreamInput};
 use crate::{
-    Api, AsioCapabilities, Capabilities, Device, DriverType, Error, StartError, Stopped,
+    Api, AsioCapabilities, Capabilities, Device, DriverType, Error, Feeds, StartError, Stopped,
     StreamInfo, StreamRequest, StreamStats,
 };
 
@@ -141,8 +139,9 @@ pub(super) fn open(
     request: &StreamRequest,
     device: Device,
     load: Loader,
+    feeds: Feeds,
 ) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
-    open_with(request, device, load, GIVE_UP)
+    open_with(request, device, load, feeds, GIVE_UP)
 }
 
 /// [`open`], giving up on a driver that stops calling back after `give_up`.
@@ -150,6 +149,7 @@ pub(super) fn open_with(
     request: &StreamRequest,
     device: Device,
     load: Loader,
+    feeds: Feeds,
     give_up: Duration,
 ) -> Result<(StreamInfo, Vec<StreamInput>, OpenStream), Error> {
     let claim = Claim::take()?;
@@ -161,6 +161,7 @@ pub(super) fn open_with(
         request: request.clone(),
         device,
         load,
+        feeds,
         shared: shared.clone(),
         give_up,
         opened: opened_tx,
@@ -212,6 +213,7 @@ struct HostThread {
     request: StreamRequest,
     device: Device,
     load: Loader,
+    feeds: Feeds,
     shared: Arc<Shared>,
     give_up: Duration,
     opened: SyncSender<Result<Opened, Error>>,
@@ -230,7 +232,13 @@ impl HostThread {
         };
         let opened = {
             let _loading = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
-            Session::open(&self.request, self.device, self.load, &self.shared)
+            Session::open(
+                &self.request,
+                self.device,
+                self.load,
+                self.feeds,
+                &self.shared,
+            )
         };
         let (mut session, inputs) = match opened {
             Ok(opened) => opened,
@@ -290,6 +298,7 @@ impl Session {
         request: &StreamRequest,
         device: Device,
         load: Loader,
+        feeds: Feeds,
         shared: &Arc<Shared>,
     ) -> Result<(Session, Vec<StreamInput>), Error> {
         let driver = load()?;
@@ -356,6 +365,7 @@ impl Session {
                 // real-time priority.
                 realtime: true,
                 inputs: Vec::new(),
+                midi_inputs: Vec::new(),
             },
             published: Some(published),
             driver,
@@ -428,7 +438,7 @@ impl Session {
             .filter(|id| DriverType::of(id) == DriverType::System)
             .cloned()
             .collect();
-        let playback = (!system.is_empty()).then(|| Arc::new(Playback::default()));
+        let Feeds { playback, midi } = feeds;
         #[cfg(windows)]
         let mut system_inputs = {
             let output = crate::wasapi::Output {
@@ -436,7 +446,7 @@ impl Session {
                 container: None,
                 rate,
                 exclusive: false,
-                clock: playback.clone().unwrap_or_default(),
+                clock: playback.clone(),
             };
             session.captures = crate::wasapi::open_inputs(&system, &output);
             session
@@ -494,7 +504,7 @@ impl Session {
             output_ready,
             driver_reports,
         )
-        .with_inputs(driver_input, bus, playback);
+        .with_inputs(driver_input, bus, midi, playback);
         *session.context().render.lock() = Some(render);
         *PLAYING.lock().unwrap_or_else(PoisonError::into_inner) =
             Some((session.info.device.id.clone(), capabilities));

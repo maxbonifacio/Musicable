@@ -2,8 +2,8 @@
 
 How `crates/audio` gets the engine's output to a device, and what the device's
 inputs capture back to the engine: the backends, opening a stream, periods and
-latency, counting dropouts, what happens when a device goes away, inputs, and
-ASIO.
+latency, counting dropouts, what happens when a device goes away, inputs, MIDI
+inputs, and ASIO.
 
 ## Backends
 
@@ -286,6 +286,80 @@ to allow it.
 **Elsewhere.** On macOS and Linux, inputs don't open yet: each says so in
 `StreamInfo::inputs`.
 
+## MIDI inputs
+
+A stream plays and records from the MIDI inputs `StreamRequest::midi_inputs`
+lists, lined up with the output like its audio inputs: each message comes
+with the engine frame heard as it came in, the frame a player heard as they
+played it, which is where a recording of it belongs. The engine plays it a
+fixed delay later, to monitor it.
+
+```rust
+let request = StreamRequest {
+    midi_inputs: musicable_audio::midi_input_devices()?
+        .into_iter()
+        .map(|device| device.id)
+        .collect(),
+    ..StreamRequest::default()
+};
+let open = musicable_audio::open(&request)?;
+let buffers = open.midi_buffers(); // Some(MidiBuffer) for each MIDI input that opened
+let stream = open.start(engine)?;
+// On any thread, each message with the engine frame heard as it came in.
+let mut reader = buffers[0].as_ref().unwrap().reader();
+while let Some(MidiEvent { frame, bytes }) = reader.next_before(u64::MAX) {}
+```
+
+- `midi_input_devices` lists the MIDI inputs that are plugged in. An input's
+  id is its name, with ` #2`, ` #3` and so on for the second and later with
+  the same name, so it stays the same across runs while the same devices are
+  plugged in.
+- `StreamInfo::midi_inputs` says whether each requested input opened, or why
+  not: for one, when another app has it and its driver serves one app at a
+  time. One that doesn't open doesn't stop the stream.
+- `Stream::midi_buffers` hands out each input's `MidiBuffer`, which any
+  thread reads without locks, each with a `MidiReader` of its own. It holds
+  the newest 16,384 messages; a reader that falls further behind loses the
+  oldest, which `MidiReader::lost` counts. `MidiBuffer::settled` says the
+  frame below which every message is in, so a reader that has read up to it
+  has them all: the stream settles each input 5 ms behind the frame heard at
+  each callback, since an input stamps a message as it comes in and writes
+  it a moment later. Once the stream stops, the buffers end and every
+  message is in.
+- Only channel messages come through: notes, aftertouch, controllers,
+  program changes, channel pressure and pitch bend, three bytes each, as
+  `MidiEvent::bytes`. MIDI clock, active sensing and SysEx don't.
+
+**Timing.** On Windows, the inputs come through WinMM, which every MIDI
+driver serves, including Windows MIDI Services'. WinMM calls back with each
+message as it comes in, on a thread of its own. The callback reads the
+performance counter and takes the engine frame heard then from the output's
+latest clock reading, the one audio inputs line up by
+([Inputs](#inputs)), extended at the output's rate. WinMM's own time stamps
+count whole milliseconds from when the input started, so they go unused. A
+message that comes before the output plays is dropped: there's no frame to
+place it on yet.
+
+**Monitoring.** The engine plays each message its frame plus a fixed delay
+later: how far ahead of what's heard a callback renders, at most, which is
+the output latency and a period. Messages heard during one period play
+spread over the next, the time between them as it was played, wherever the
+wake-ups fall. The delay is set at the first callback once the output
+plays, grows if a callback ever renders further ahead, as after a late
+wake-up, and never shrinks, so monitoring never goes back in time. A message
+that comes too late for its frame plays at the start of the callback, and
+`StreamStats::midi_late` counts it; `midi_delay` has the delay. A callback
+takes 1,024 messages at most and leaves the rest for the next. The engine
+gets them in `ProcessContext::midi` ([engine.md](engine.md#time-and-events)),
+with each one's input as its place among the stream's MIDI inputs.
+
+ASIO streams take MIDI inputs the same way: the driver's callback publishes
+the output's clock reading, and the messages play the driver's output
+latency and a period after they were heard.
+
+**Elsewhere.** On macOS and Linux, MIDI inputs don't open yet: each says so
+in `StreamInfo::midi_inputs`.
+
 ## The audio thread
 
 Each WASAPI stream has its own thread, named `musicable-audio`. It joins COM's
@@ -303,6 +377,9 @@ and into a buffer of its own to convert from when it takes integers.
 Each WASAPI input captures on a thread of its own, `musicable-input`, the same
 way: in the multithreaded apartment and the "Pro Audio" task, with its WASAPI
 calls on it and its work on each packet inside `rt::scope`.
+
+MIDI inputs come in on WinMM's own thread, whose callback only stamps each
+message and writes it to the input's buffer, without allocating or waiting.
 
 ASIO streams render on the driver's own thread instead ([ASIO](#asio)).
 
@@ -492,6 +569,16 @@ cargo run --release -p musicable-audio --example round_trip -- --input RME --soa
 Under Wine, its capture timings are a packet or two out, so a resampled input
 wanders by a few milliseconds there. That says nothing of Windows.
 
+The MIDI inputs example plays a click for each note played on every MIDI
+input, or those `--input` names, so the monitoring delay can be heard, and
+prints each message as it comes in, with the engine frame heard then and the
+time since the one before. It ends with the MIDI delay and what came late.
+
+```sh
+cargo run --release -p musicable-audio --example midi_inputs -- --list
+cargo run --release -p musicable-audio --example midi_inputs -- --seconds 60
+```
+
 The tests in `crates/audio/tests/device.rs` that play need an output device,
 so they're ignored by default:
 
@@ -511,8 +598,12 @@ Debian and Ubuntu).
   through a loopback, and whether that stays put from one stream to the next.
   What WASAPI's capture times mean for a loopback, mixed or played, isn't
   known yet.
-- Calibrating inputs by what the round trip measures, and MIDI inputs.
-  Recording itself is the app's ([app.md](app.md#recording)).
+- Calibrating inputs by what the round trip measures. Recording itself is
+  the app's ([app.md](app.md#recording)).
+- MIDI inputs measured on real hardware: how far WinMM's callback runs
+  behind a key press, and how much that varies.
+- MIDI inputs on macOS and Linux, Windows MIDI Services' own API (MIDI 2.0
+  and its time stamps), SysEx, and MIDI outputs.
 - Inputs on macOS and Linux.
 - A resampled input follows its device's timings, so timings that jitter by a
   millisecond leave it wandering by a few frames. A loop that learned the

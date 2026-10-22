@@ -629,6 +629,7 @@ mod tests {
             latency: 128,
             realtime: true,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
         };
         let mut stats = StreamStats::default();
         assert_eq!(millis(latency(&info, &stats)), "2.7 ms");
