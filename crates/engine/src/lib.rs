@@ -79,6 +79,17 @@ pub trait Node: Any + Send {
     /// renders. Allocate here.
     fn prepare(&mut self, _config: &EngineConfig) {}
 
+    /// How many frames late the node's output is, against what comes in: the
+    /// latency of a limiter that looks ahead or a linear-phase filter, say.
+    /// Delay compensation delays the paths that meet this node's path, so
+    /// they line up ([`Graph::prepare`]).
+    ///
+    /// Read off the audio thread, once the node is prepared. A node whose
+    /// latency changes needs a new graph to change it.
+    fn latency(&self) -> usize {
+        0
+    }
+
     /// Called on the audio thread when a new graph replaces the running one,
     /// and this node replaces `previous`, the old node with the same key.
     ///
