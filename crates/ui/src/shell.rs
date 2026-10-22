@@ -1,17 +1,19 @@
 //! The app shell: the menu bar, the transport bar, the arrangement with the
-//! mixer and the devices under it and the plugin browser beside it, and a
-//! status bar, with the keyboard shortcuts window, the command palette, and
-//! the box that renames things.
+//! mixer and the devices or the piano roll under it and the plugin browser
+//! beside it, and a status bar, with the keyboard shortcuts window, the
+//! command palette, and the box that renames things.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Button, DragValue, Id, Key, Layout, Modal, Modifiers, RichText, TextEdit, Ui};
+use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
-    edit, locator, options, take, track, transport, view,
+    controllers, edit, locator, notes, options, take, track, transport, view,
 };
+use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
@@ -21,6 +23,7 @@ use crate::menus::menus;
 use crate::mixer::{self, Choices, InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
+use crate::piano_roll::{PIANO_ROLL, PianoRoll};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::waveform::Waveforms;
@@ -69,6 +72,9 @@ pub struct View<'a> {
     pub messages: &'a [String],
     /// The plugins installed, and how the project's are doing.
     pub plugins: Plugins<'a>,
+    /// Musicable's own devices that play, which the browser lists: the
+    /// engine's `devices::BUILT`. The others wait for their sound.
+    pub native: &'a [NativeKind],
 }
 
 /// The transport, as the engine last reported it.
@@ -187,6 +193,7 @@ pub struct Shell {
     palette: Palette,
     arrangement: Arrangement,
     devices: DevicesPanel,
+    piano_roll: PianoRoll,
     browser: Browser,
     theme: Theme,
     mouse: MouseMap,
@@ -203,11 +210,13 @@ impl Default for Shell {
             palette: Palette::default(),
             arrangement: Arrangement::default(),
             devices: DevicesPanel::default(),
+            piano_roll: PianoRoll::default(),
             browser: Browser::default(),
             theme: Theme::default(),
             mouse: MouseMap::live(),
-            // The plugin browser waits to be asked for.
-            hidden: BTreeSet::from([BROWSER]),
+            // The plugin browser waits to be asked for, and the piano roll
+            // for a MIDI clip to be opened in it.
+            hidden: BTreeSet::from([BROWSER, PIANO_ROLL]),
             rename: None,
         }
     }
@@ -254,14 +263,27 @@ impl Shell {
                     self.browser.show(ui, view, chain, theme, &mut actions);
                 });
         }
-        // Under the mixer, as Live's Detail View is.
-        if !self.hidden.contains(DEVICES) {
+        // Under the mixer, as Live's Detail View is: the devices, or the
+        // piano roll in their place, as Live's clip view takes its device
+        // view's.
+        if !self.hidden.contains(PIANO_ROLL) {
+            egui::Panel::bottom(PIANO_ROLL)
+                .resizable(true)
+                .default_size(theme.piano_roll.panel)
+                .min_size(theme.piano_roll.panel / 3.0)
+                .show(ui, |ui| {
+                    self.piano_roll
+                        .show(ui, view, theme, &self.mouse, &mut actions);
+                });
+        } else if !self.hidden.contains(DEVICES) {
             let browse = egui::Panel::bottom(DEVICES)
                 .resizable(true)
                 .default_size(theme.devices.panel)
                 .min_size(theme.devices.panel / 2.0)
                 .show(ui, |ui| {
-                    self.devices.show(ui, view, chain, theme, &mut actions)
+                    let mouse = &self.mouse;
+                    self.devices
+                        .show(ui, view, chain, theme, mouse, &mut actions)
                 })
                 .inner;
             if browse && self.hidden.remove(BROWSER) {
@@ -282,6 +304,7 @@ impl Shell {
                             audio: view.inputs,
                             midi: view.midi_inputs,
                         },
+                        view.playback.playhead,
                         theme,
                         &self.mouse,
                         &mut actions,
@@ -301,10 +324,33 @@ impl Shell {
     }
 
     /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden, or
-    /// hides it.
+    /// hides it. The devices and the piano roll take turns in the same
+    /// place: showing one hides the other.
     pub fn toggle_panel(&mut self, id: &'static str) {
-        if !self.hidden.remove(id) {
+        if self.panel_shown(id) {
             self.hidden.insert(id);
+        } else {
+            self.show_panel(id);
+        }
+    }
+
+    /// Shows the panel with id `id`, if it's hidden.
+    pub fn show_panel(&mut self, id: &'static str) {
+        if self.hidden.remove(id)
+            && let Some(other) = sharing(id)
+        {
+            self.hidden.insert(other);
+        }
+    }
+
+    /// Shows the piano roll in the devices' place, or the devices in the
+    /// piano roll's, as Live's F12 switches between its clip view and its
+    /// device view.
+    pub fn switch_devices_piano_roll(&mut self) {
+        if self.panel_shown(PIANO_ROLL) {
+            self.show_panel(DEVICES);
+        } else {
+            self.show_panel(PIANO_ROLL);
         }
     }
 
@@ -458,6 +504,16 @@ impl Shell {
     }
 }
 
+/// The panel that takes turns with the panel `id` in the same place, if one
+/// does.
+fn sharing(id: &str) -> Option<&'static str> {
+    match id {
+        DEVICES => Some(PIANO_ROLL),
+        PIANO_ROLL => Some(DEVICES),
+        _ => None,
+    }
+}
+
 /// The menus, with every command and its keys, and the meters on the right.
 fn menu_bar(
     ui: &mut Ui,
@@ -513,6 +569,7 @@ fn command_button(
     let on = match id {
         id if *id == view::TOGGLE_MIXER => Some(!hidden.contains(MIXER)),
         id if *id == view::TOGGLE_DEVICES => Some(!hidden.contains(DEVICES)),
+        id if *id == view::TOGGLE_PIANO_ROLL => Some(!hidden.contains(PIANO_ROLL)),
         id if *id == view::TOGGLE_BROWSER => Some(!hidden.contains(BROWSER)),
         id => toggled(view, id),
     };
@@ -540,6 +597,11 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         (view::TOGGLE_SNAP, editor.grid.snap),
         (view::TRIPLET_GRID, editor.grid.triplet),
         (view::FIXED_GRID, editor.grid.fixed.is_some()),
+        (notes::TOGGLE_DRAW, editor.piano_roll.draw),
+        (
+            controllers::SHOW_VELOCITIES,
+            editor.piano_roll.lane == Lane::Velocity,
+        ),
     ];
     toggles
         .into_iter()
@@ -780,7 +842,7 @@ pub(crate) fn with_keys<'a>(button: Button<'a>, keymap: &Keymap, id: &CommandId)
 
 #[cfg(test)]
 mod tests {
-    use egui::accesskit::Role;
+    use egui::accesskit::{Role, Toggled};
     use egui_kittest::kittest::{NodeT, Queryable};
     use musicable_commands::{file, track, view};
     use musicable_model::{TrackId, TrackKind};
@@ -933,6 +995,58 @@ mod tests {
         harness.run();
         let mute = Change::Muted(TrackId(0), true);
         assert_eq!(harness.state().actions, [Action::Mixer(mute)]);
+    }
+
+    #[test]
+    fn the_piano_roll_takes_turns_with_the_devices() {
+        let mut shell = Shell::new();
+        assert!(shell.panel_shown(DEVICES));
+        assert!(!shell.panel_shown(PIANO_ROLL));
+        shell.switch_devices_piano_roll();
+        assert!(shell.panel_shown(PIANO_ROLL));
+        assert!(!shell.panel_shown(DEVICES));
+        shell.switch_devices_piano_roll();
+        assert!(shell.panel_shown(DEVICES));
+        assert!(!shell.panel_shown(PIANO_ROLL));
+        shell.toggle_panel(PIANO_ROLL);
+        assert!(!shell.panel_shown(DEVICES));
+        shell.toggle_panel(PIANO_ROLL);
+        assert!(!shell.panel_shown(PIANO_ROLL));
+        assert!(!shell.panel_shown(DEVICES));
+        // With neither shown, switching shows the piano roll.
+        shell.switch_devices_piano_roll();
+        assert!(shell.panel_shown(PIANO_ROLL));
+        shell.show_panel(MIXER);
+        assert!(shell.panel_shown(PIANO_ROLL));
+    }
+
+    #[test]
+    fn the_view_menu_ticks_the_panels_shown() {
+        let mut project = Project::new();
+        project.add_track("Keys", TrackKind::Midi);
+        let mut harness = harness(project);
+        harness.state_mut().shell.toggle_panel(PIANO_ROLL);
+        harness.run();
+        // The piano roll is in the devices' place, with nothing to show.
+        harness.get_by_label("Piano Roll");
+        harness.get_by_label("View").click();
+        harness.run();
+        let ticked = |harness: &egui_kittest::Harness<'_, crate::testing::State>, label| {
+            harness.get_by_label(label).accesskit_node().toggled()
+        };
+        assert_eq!(
+            ticked(&harness, "Piano Roll Ctrl+Alt+3"),
+            Some(Toggled::True)
+        );
+        assert_eq!(ticked(&harness, "Devices Ctrl+Alt+L"), Some(Toggled::False));
+        harness
+            .get_by_label("Switch Devices and Piano Roll F12")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [Action::Run(view::SWITCH_DEVICES_PIANO_ROLL)]
+        );
     }
 
     #[test]

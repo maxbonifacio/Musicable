@@ -157,7 +157,10 @@ plays them as players expect of an instrument track: always with `In`,
 while the track is armed with `Auto`, whether the transport plays or not,
 and never with `Off`. The clips play too, except with `In` and while an
 armed `Auto` track records over them. The notes sounding end when either
-stops playing. It reads its parameters as it renders, after it has played
+stops playing. Controllers go on from whichever plays, as their notes do:
+when one stops, the switches it held on, such as the sustain pedal, are let
+go, and when the clips play again, their controllers go back to what the
+clips hold. It reads its parameters as it renders, after it has played
 the block's notes, so arming changes what plays from the next block. The
 layout lists the MIDI inputs (`InputLayout::add_midi`), and `find_midi`
 says which messages a track's `MidiInput` takes: one input's or every
@@ -348,6 +351,54 @@ tone's level, ramp this way.
   (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
   of a fade doesn't jump.
 
+## Automation
+
+A parameter's automation is compiled into the graph and read at the song
+position, never sent through the message queue, so it loops, locates and
+follows tempo changes as clips do.
+
+- `compile()` makes an `automation::Automation` for each lane that isn't
+  overridden: its points, in beats, and its `Scale`. `keys::param` says
+  which node has the parameter and which `ParamId` it is: a channel's
+  fader, a `Gain`, for its volume (`Gain::GAIN`) and its pan
+  (`Gain::PAN`), a send's `Gain` for its level, and a device's node for its
+  parameter `n` (`ParamId(n)`). `Graph::automate` gives it to the node.
+- Whoever reads it places the points through the block's tempo map
+  (`ProcessContext::tempo`), each on the frame `TempoMap::frame_at` gives.
+  Between two points the value moves in a straight line in the lane's
+  scale: in the fourth root of the gain for faders and sends, as their
+  faders spread, in ratios on a log scale, and evenly otherwise. Two points
+  at the same place make a step, and on its frame the value is the one
+  after it.
+- **A node that reads its own** keeps it (`Node::automate` returns `None`)
+  and works the value out frame by frame with an `automation::Param`, as
+  `Gain` does for its gain and pan, and the built-in devices for each of
+  their parameters ([Built-in devices](#built-in-devices)). A `Param` follows its automation in
+  place of the value set, which ramps over 10 ms as `Smoothed` does and
+  applies again once the automation goes. Between points it follows the
+  line exactly. Wherever the automation jumps, at a step, where the
+  playhead locates or loops, or where a new graph brings automation the
+  old one hadn't, the value glides there over 10 ms instead, so it doesn't
+  click. Modulation (`Param::modulate`, for Tier 2's modulators) is added
+  after the ramp and the glide, unsmoothed, and the sum kept within the
+  parameter's range, so automation, modulation, MIDI mapping and
+  extensions can all address the same parameter.
+- **Other nodes** hand their automation back, and the graph sends them its
+  values as `Param` events (`automation::Feed`): on the frame of each point
+  (up to 16 a block), every 32 frames of engine time between them, and on
+  a block's first frame when the playhead has jumped or the graph is new,
+  each only when the value changed. They come after the engine's own
+  events on the same frame, so they win. Plugins get theirs this way, and
+  smooth their parameters themselves: a CLAP plugin gets values in its own
+  range, a VST3 plugin its normalized ones.
+- The events fall on the same frames however the blocks fall, so the
+  renderers stay bit-identical with automation at any block size
+  (`crates/engine/tests/automation.rs`).
+- Moving an automated control by hand overrides its lane
+  ([commands.md](commands.md#automation)), and the next graph leaves the
+  lane out, so the parameter ramps from where the automation left it to
+  the value set.
+
 ## The mixer
 
 `compile()` builds every track as a channel strip, and the master too, with
@@ -521,6 +572,12 @@ expression (pitch bend in semitones, pressure and timbre from 0 to 1), and
 the same key can sound at once, each with its own expression, as MPE, VST3
 and CLAP allow.
 
+Controllers travel with the notes: `NodeEventKind::Controller` moves a MIDI
+controller, such as the mod wheel or the sustain pedal, to a value from 0 to
+1, for every note the node plays, and it holds until the next move. It goes
+where notes go (`Notes::send_controller`, and `NodeEventKind::is_played`
+for either), in order with them, and takes room in a block as a note does.
+
 - `Graph::send_notes(from, to)` sends a node's notes to another, with or
   without an audio connection between them. Before a block renders, each
   node whose notes go somewhere plays them for the block
@@ -551,6 +608,21 @@ their expression, to the track's first instrument (`Track::instrument`).
   rebuilt player takes over, it lets go of the notes it doesn't have
   sounding as they are: a note deleted, moved, transposed, or shortened to
   end before the playhead. A note made longer plays on.
+- A clip's controller curves move their controllers as it plays, from its
+  `offset` for its length. Unlike notes, controllers are chased: wherever
+  playback starts or jumps, the player first sends each controller the
+  value its last move before there left it at, from any clip, so the song
+  sounds as it does played from its start. Before a controller's first
+  move, the player leaves it alone.
+- Controllers keep their values when a clip ends or the transport stops,
+  as MIDI's do, but a switch (64 to 69, such as the sustain pedal) held on
+  is let go then, so no notes ring on. A recompiled player sends only what
+  its curves hold differently from what the last one sent, so drawing a
+  curve while the song plays moves the controller at once.
+- At the same moment, a switch a clip lets go of comes first, then
+  controllers' moves, then notes ending, then notes starting, with each
+  note's expression after its start. So the next clip's pedal holds, and a
+  note that starts with the pedal goes down held.
 
 **MIDI input.** `midi::MidiNotes` turns MIDI 1.0 channel messages into
 notes, each with an id of its own. A note takes its channel's pitch bend,
@@ -562,9 +634,13 @@ message (RPN 6) sets the zones. Members bend 48 semitones until they're told
 otherwise, and the master's bend bends every note in its zone on top of the
 note's own. Taking one channel, it reads that channel as a keyboard plays
 it. All Notes Off and All Sound Off (CC 123, 120) end a channel's notes,
-and Reset All Controllers (CC 121) takes its expression back to rest. The
-sustain pedal and other controllers play no part yet: they come with the
-piano roll's controller lanes.
+and Reset All Controllers (CC 121) takes its expression back to rest. Other
+control changes move controllers for every note (`Played::Controller`),
+from any channel it takes: all but slide, the registered and non-registered
+parameters and their data entry (6, 38 and 96 to 101), and the channel mode
+messages. Reset All Controllers lets go of the switches held on as well. It
+knows what each controller holds (`MidiNotes::controllers`), so a recording
+can start with them where they are.
 
 A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
 a swap gives a track another input, the notes held on the old one end at
@@ -576,8 +652,108 @@ know, so a note started before the monitor came along still ends.
 stands in for instruments until plugin hosting. It plays each note with a
 sine at its pitch, bent by its pitch bend, with its second harmonic blended
 in by its timbre, and louder with velocity and pressure. A note rises over
-2 ms and rings out over 30 ms once let go. It adds what it plays to what
-comes into it.
+2 ms and rings out over 30 ms once let go, and while the sustain pedal is
+down, notes let go sound on until it comes up. It adds what it plays to
+what comes into it.
+
+## Built-in devices
+
+Musicable's own devices (`DeviceKind::Native`) are nodes in
+`crates/engine/src/devices/`, one file for each kind. The model holds what
+each kind is (`musicable_model::native`): its parameter table, with each
+parameter's key, range, default, unit and scale, and what it does.
+`devices::node` makes a device's node from the device as the project has
+it, and `compile()` puts it where the device sits in its chain, as it does
+a plugin. `devices::BUILT` lists the kinds that have a node, which the
+browser offers; a kind without one passes the signal through, so a project
+that has one still plays.
+
+**Parameters.** A device's node takes `NodeEventKind::Param` with
+`ParamId(n)`, where `n` is the parameter's place in its kind's table, and
+the app sends one for each change (`Edit::NativeParam`). The node keeps its
+parameters in `devices::Params`, which works each one out for every frame:
+
+- The value set ramps to each new one over 10 ms, as `Smoothed` does
+  ([Parameter smoothing](#parameter-smoothing)), and a new node carries on
+  the ramps of the node it replaces (`Params::take_over`).
+- A parameter the table marks `modulated` takes `NodeEventKind::Modulation`
+  without a note: an amount in the parameter's units, added to the value
+  set on every frame from the event on, and kept in the parameter's range.
+  It applies at once, without a ramp, since a modulator moves smoothly by
+  itself. Modulation for one note is the instruments' to handle.
+- A parameter with automation follows it instead of the value set
+  ([Automation](#automation)): each is an `automation::Param`, and the
+  node's `Node::automate` hands the lane to `Params::automate`, which hands
+  it back for a parameter the kind hasn't got. A kind whose node doesn't
+  forward it gets its lanes as `Param` events instead, a value every 32
+  frames, each ramped to over 10 ms.
+- `Params::run` renders a block in spans that end where its events fall,
+  and hands each span the values for each of its frames (`Values::frames`),
+  and whether a parameter holds one value over the span
+  (`Values::steady`), for a fast path. An event applies before the span it
+  starts, which gets the event too, for a note or a note's modulation.
+
+So a change or a modulation lands on its frame, and a device renders the
+same samples however the blocks fall, and on any thread: the parallel
+renderer stays bit-identical (`tests/devices.rs` checks it), and so do
+blocks of any size (`tests/automation.rs`). That holds only while a fast
+path for a steady span gives exactly what working frame by frame would: a
+frame on which a switch is off starts the EQ's band or the utility's DC
+filter afresh, as a span that's off throughout does, and a band's sections
+work in `f64` either way.
+
+**The utility** (`devices::Utility`): a DC filter (a one-pole high-pass at
+5 Hz), each side's polarity, the width (mid and side, exact at 100%), the
+pan (the mixer's pan law) and the gain, in that order, with the mute
+fading over the 10 ms ramp. Its tests check each stage exactly.
+
+**The EQ** (`devices::Equalizer`): eight bands of state-variable filters
+(Simper's trapezoidal SVF), whose responses equal the analog prototypes'
+of the RBJ cookbook under the bilinear transform, matched at each band's
+frequency; 24 and 48 dB cuts are Butterworth cascades of two and four
+sections. `musicable_model::native::eq::response` works out the design's
+response, and the test measures the node's, from its impulse response,
+to within 0.001 dB of it from 20 Hz to 20 kHz at 44.1 and 96 kHz. A band
+retunes on every frame while its shape, frequency, gain or Q moves, and
+fades in and out over 10 ms when it's switched on or off. A sample goes
+through all of a band's sections in `f64`, rounded to `f32` only after the
+last.
+
+**The compressor** (`devices::Compressor`): feed-forward, in decibels,
+after Giannoulis, Massberg and Reiss (JAES, 2012). On each frame it takes
+the louder channel's level, its peak or its power averaged over the attack
+time, and reads how far to turn it down off the static curve
+(`musicable_model::native::compressor::gain_reduction`: the ratio above
+the threshold, eased in across the knee by a parabola). A one-pole filter
+smooths that amount in dB, with the attack's coefficient while it grows
+and the release's while it shrinks, so each is a time constant whatever
+the level. Then the output gain, on the compressed signal only, and the
+mix with the dry; at 0% the output is the input exactly. The power is
+averaged in peak mode too, so the 10 ms fade of a switch to RMS finds it
+ready, and a NaN or infinity going in doesn't stick in the detector. The
+tests hold levels from -54 to 0 dB and find the node settled on the
+designed curve to within 0.001 dB, for both detectors, hard and soft
+knees; they follow the reduction frame by frame along the attack's and
+the release's exponentials; and RMS reads a sine 3 dB under its peak.
+
+**The gate** (`devices::Gate`): opens on the frame the louder channel's
+peak reaches the threshold, and closes once the peak has stayed more than
+`return` dB under it for the hold. Its gain fades in a straight line, from
+the floor to 1 over the attack and back over the release; a fade that
+starts part of the way takes that part of the time, and open, the signal
+passes untouched. A new gate starts open, so it lets a signal through
+until there's a quiet spell. Its tests check the hold, the fades, the
+floor and the return frame by frame, and that one loud channel opens both.
+
+**Adding a kind.** Write its node in a file of its own in `devices/`, make
+it in `devices::node`, add it to `BUILT`, and forward `Node::automate` to
+`Params::automate`. Its parameters are in its table already, and the
+format and commands handle them. Test it with `devices::testing::Run`,
+which renders a node over a signal in blocks of any length with events on
+given frames, under the real-time checks, and measure it against what it's
+meant to do, as the EQ's test does: a reference test, not a snapshot of
+what it happens to do. Give its parameters lanes in `tests/automation.rs`
+too, which plays them in blocks of any size.
 
 ## Parallel rendering
 

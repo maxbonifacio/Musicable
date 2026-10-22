@@ -12,6 +12,7 @@
 //!
 //! [behaviour]
 //! play_from = "start_marker"
+//! middle_c = "c3"
 //!
 //! [export]
 //! format = "wav"
@@ -214,7 +215,7 @@ impl std::error::Error for SettingsError {}
 
 #[cfg(test)]
 mod tests {
-    use musicable_commands::editor::PlayFrom;
+    use musicable_commands::editor::{MiddleC, PlayFrom};
 
     use super::*;
     use crate::export::{Bits, FileFormat};
@@ -230,6 +231,7 @@ mod tests {
             },
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
+                middle_c: MiddleC::C4,
             },
             export: ExportSettings {
                 format: FileFormat::Aiff,

@@ -492,7 +492,8 @@ fn record(
 ) -> Result<ExitCode, String> {
     let rate = studio.session.engine_config().sample_rate;
     // The stream opens again with the input, which lines up in a fraction
-    // of a second, unless it doesn't open.
+    // of a second, or a few on an output whose clock moves in steps, unless
+    // it doesn't open.
     studio.wait("input", 10, |studio| {
         let opened = studio.output.info().and_then(|info| info.inputs.first());
         let aligned = studio

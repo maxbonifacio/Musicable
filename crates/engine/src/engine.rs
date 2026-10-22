@@ -533,6 +533,7 @@ impl Engine {
                 input: input.range(offset..offset + frames),
                 midi: messages,
             };
+            graph.feed_automation(&block);
             let dropped = graph.play_notes(&block);
             if dropped > 0 {
                 self.counters.events_dropped.fetch_add(dropped, Relaxed);

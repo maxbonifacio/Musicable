@@ -2,13 +2,16 @@
 //! is, what it accepts, and what saving refuses.
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, NoteId, Point};
+use musicable_model::automation::{self, Lane};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::{
-    AudioInput, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId, TestTone,
-    TrackId, TrackKind,
+    AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
+    TestTone, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -50,9 +53,9 @@ fn mix() -> Project {
 }
 
 /// Clips: an audio track with a clip of a file, a MIDI track with a clip of
-/// two notes, the second with expression, played by a test instrument, and
-/// a group track. The tracks' ids are their places in the list, and the
-/// clips' ids are their tracks'.
+/// two notes, the second with expression, and the sustain pedal down for
+/// the first, played by a test instrument, and a group track. The tracks'
+/// ids are their places in the list, and the clips' ids are their tracks'.
 fn clips() -> Project {
     let mut project = Project::new();
     let audio = project.add_track("Audio", TrackKind::Audio);
@@ -72,6 +75,8 @@ fn clips() -> Project {
         Point::new(Beats::from_ratio(1, 2), 2.0),
     ];
     bent.expression.pressure = vec![Point::new(Beats::ZERO, 0.25)];
+    let pedal = vec![Point::new(Beats::ZERO, 1.0), Point::new(Beats::new(1), 0.0)];
+    notes.set_controller(Controller::SUSTAIN, pedal);
     let range = BeatRange::new(Beats::ZERO, Beats::new(4));
     let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
     let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
@@ -122,6 +127,34 @@ fn edited_plugin(edit: impl FnOnce(&mut Value)) -> Value {
     })
 }
 
+/// Built-in devices: a sampler with a sample on a MIDI track, and an EQ
+/// with a band turned down on the master.
+fn built_in() -> Project {
+    let mut project = Project::new();
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    let mut kick = NativeDevice::new(NativeKind::Sampler);
+    kick.sample = Some("Samples/Kick.wav".into());
+    kick.set(sampler::ROOT, 36.0);
+    let kick = project.new_device(DeviceKind::Native(kick));
+    project.track_mut(midi).unwrap().devices.push(kick);
+    let mut tone = NativeDevice::new(NativeKind::Eq);
+    tone.set(eq::GAIN, -3.0);
+    let tone = project.new_device(DeviceKind::Native(tone));
+    project.master.devices.push(tone);
+    project
+}
+
+/// Where the sampler's settings are in [`built_in`]'s file.
+const NATIVE: &str = "tracks[0].devices[0].kind.native";
+
+/// [`built_in`]'s file, changed by `edit`, which gets the sampler's
+/// settings.
+fn edited_native(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&built_in(), |f| {
+        edit(&mut f["tracks"][0]["devices"][0]["kind"]["native"]);
+    })
+}
+
 /// Where the audio clip's fields are in [`clips`]'s file.
 const AUDIO: &str = "tracks[0].clips[0].content.audio";
 
@@ -140,6 +173,14 @@ fn edited_audio(edit: impl FnOnce(&mut Value)) -> Value {
 fn edited_notes(edit: impl FnOnce(&mut Value)) -> Value {
     edited_from(&clips(), |f| {
         edit(&mut f["tracks"][1]["clips"][0]["content"]["midi"]["notes"]);
+    })
+}
+
+/// [`clips`]'s file, changed by `edit`, which gets the MIDI clip's
+/// controller curves.
+fn edited_controllers(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&clips(), |f| {
+        edit(&mut f["tracks"][1]["clips"][0]["content"]["midi"]["controllers"]);
     })
 }
 
@@ -740,6 +781,99 @@ fn plugins_name_their_plugin_and_keep_its_settings_in_order() {
 }
 
 #[test]
+fn built_in_devices_set_their_parameters_by_key() {
+    assert_eq!(load(&edited_native(|_| {})).unwrap(), built_in());
+    let at = |field: &str| format!("{NATIVE}.{field}");
+    refused(
+        &edited_native(|n| n["kind"] = json!("flanger")),
+        &at("kind"),
+        "unknown variant `flanger`",
+    );
+    refused(
+        &edited_native(|n| n["params"]["loudness"] = json!(1.0)),
+        &at("params.loudness"),
+        "isn't one of the Sampler's parameters",
+    );
+    for root in [json!(128), json!(60.5), json!(-1)] {
+        refused(
+            &edited_native(|n| n["params"]["root"] = root),
+            &at("params.root"),
+            "must be a whole number from 0 to 127",
+        );
+    }
+    refused(
+        &edited_native(|n| n["params"]["attack"] = json!(0.0)),
+        &at("params.attack"),
+        "must be a number from 0.1 to 20000",
+    );
+    refused(
+        &edited_native(|n| n["params"]["attack"] = json!("fast")),
+        &at("params.attack"),
+        "expected f64",
+    );
+    refused(
+        &edited_native(|n| n["params"] = json!([1.0])),
+        &at("params"),
+        "expected an object of parameter values",
+    );
+    refused(
+        &edited_native(|n| n["sample"] = json!("")),
+        &at("sample"),
+        "must name a file",
+    );
+    refused(
+        &edited_native(|n| {
+            n.as_object_mut().unwrap().remove("sample");
+        }),
+        NATIVE,
+        "missing field `sample`",
+    );
+    refused(
+        &edited_from(&built_in(), |f| {
+            f["master"]["devices"][0]["kind"]["native"]["sample"] = json!("Kick.wav");
+        }),
+        "master.devices[0].kind.native.sample",
+        "must be null: only samplers have samples",
+    );
+    // JSON objects can hold a key twice, but a device can't.
+    let text = project::to_string(&built_in()).unwrap();
+    let twice = text.replacen("\"root\": 36.0,", "\"root\": 36.0, \"root\": 40.0,", 1);
+    match project::from_str(&twice) {
+        Err(LoadError::Invalid(invalid)) => {
+            assert_eq!(invalid.path, at("params.root"));
+            assert!(invalid.message.contains("is given twice"), "{invalid}");
+        }
+        other => panic!("a parameter given twice loaded: {other:?}"),
+    }
+
+    // A parameter that isn't there takes its default, so kinds can gain
+    // parameters without a new version of the format.
+    let file = edited_native(|n| {
+        let params = n["params"].as_object_mut().unwrap();
+        params.remove("volume");
+        params.remove("root");
+    });
+    let project = load(&file).unwrap();
+    let kick = project.tracks[0].devices[0].kind.native().unwrap();
+    let defaults = NativeDevice::new(NativeKind::Sampler);
+    assert_eq!(kick.values, defaults.values);
+
+    // Saving checks the same rules.
+    let mut project = built_in();
+    let kick = project.tracks[0].devices[0].kind.native_mut().unwrap();
+    kick.values[sampler::ROOT] = 200.0;
+    refused_saving(&project, &at("params.root"), "from 0 to 127");
+    let mut project = built_in();
+    let tone = project.master.devices[0].kind.native_mut().unwrap();
+    tone.values[eq::FREQ] = f64::NAN;
+    refused_saving(
+        &project,
+        "master.devices[0].kind.native.params.band1_freq",
+        "must be a number from 10 to 22000",
+    );
+}
+
+#[test]
 fn only_audio_and_midi_tracks_record() {
     let mut project = mix();
     project.tracks[0].armed = true;
@@ -802,6 +936,21 @@ fn clips_and_notes_have_every_field_and_no_others() {
         }),
         &format!("{MIDI}.notes[0].expression"),
         "missing field `timbre`",
+    );
+    refused(
+        &edited_from(&clips(), |f| {
+            f["tracks"][1]["clips"][0]["content"]["midi"]
+                .as_object_mut()
+                .unwrap()
+                .remove("controllers");
+        }),
+        MIDI,
+        "missing field `controllers`",
+    );
+    refused(
+        &edited_controllers(|c| c[0]["channel"] = json!(0)),
+        &format!("{MIDI}.controllers[0].channel"),
+        "unknown field",
     );
     refused(
         &edited_from(&clips(), |f| {
@@ -1309,6 +1458,78 @@ fn expression_points_go_in_order_within_range() {
 }
 
 #[test]
+fn controllers_are_midi_s_each_moved_once_with_points_in_order() {
+    let cases = [
+        (
+            json!([{"controller": 120, "points": [[0, 1.0]]}]),
+            "controllers[0].controller",
+            "must be from 0 to 119",
+        ),
+        (
+            json!([
+                {"controller": 64, "points": [[0, 1.0]]},
+                {"controller": 64, "points": [[0, 0.0]]},
+            ]),
+            "controllers[1].controller",
+            "the clip moves controller 64 twice",
+        ),
+        (
+            json!([{"controller": 1, "points": []}]),
+            "controllers[0].points",
+            "must have a point",
+        ),
+        (
+            json!([{"controller": 1, "points": [[10, 0.0], [5, 1.0]]}]),
+            "controllers[0].points[1][0]",
+            "must be at or after the point before it",
+        ),
+        (
+            json!([{"controller": 1, "points": [[0, 1.5]]}]),
+            "controllers[0].points[0][1]",
+            "must be from 0 to 1",
+        ),
+        (
+            json!([{"controller": 1, "points": [[-MAX_TICKS - 1, 0.0]]}]),
+            "controllers[0].points[0][0]",
+            "within",
+        ),
+    ];
+    for (controllers, path, message) in cases {
+        refused(
+            &edited_controllers(|c| *c = controllers),
+            &format!("{MIDI}.{path}"),
+            message,
+        );
+    }
+    // Points can be before the clip's own time starts, as notes can, and
+    // on the same tick, where the later one wins. Curves can come in any
+    // order.
+    let file = edited_controllers(|c| {
+        *c = json!([
+            {"controller": 64, "points": [[-MAX_TICKS, 0.0], [0, 0.0], [0, 1.0]]},
+            {"controller": 0, "points": [[MAX_TICKS, 0.5]]},
+        ]);
+    });
+    let project = load(&file).unwrap();
+    let ClipContent::Midi(midi) = &project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    assert_eq!(
+        midi.controller_at(Controller::SUSTAIN, Beats::ZERO),
+        Some(1.0)
+    );
+    let lowest = Controller::new(0).unwrap();
+    assert_eq!(
+        midi.controller(lowest),
+        [Point::new(Beats::from_ticks(MAX_TICKS), 0.5)]
+    );
+    assert_eq!(
+        midi.controllers.keys().copied().collect::<Vec<_>>(),
+        [lowest, Controller::SUSTAIN]
+    );
+}
+
+#[test]
 fn saving_refuses_what_loading_would() {
     let mut project = sample();
     project.tracks[1].gain = f32::NAN;
@@ -1423,6 +1644,27 @@ fn saving_refuses_what_loading_would() {
     let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
         panic!("a MIDI clip");
     };
+    midi.controllers.get_mut(&Controller::SUSTAIN).unwrap()[1].value = f32::NAN;
+    refused_saving(
+        &project,
+        &format!("{MIDI}.controllers[0].points[1][1]"),
+        "must be from 0 to 1",
+    );
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
+    midi.controllers.insert(Controller::MOD_WHEEL, Vec::new());
+    refused_saving(
+        &project,
+        &format!("{MIDI}.controllers[0].points"),
+        "must have a point",
+    );
+
+    let mut project = clips();
+    let ClipContent::Midi(midi) = &mut project.tracks[1].clips[0].content else {
+        panic!("a MIDI clip");
+    };
     midi.next_note_id = 0;
     refused_saving(&project, &format!("{MIDI}.next_note_id"), "a note has id 1");
 
@@ -1466,6 +1708,204 @@ fn saving_refuses_what_loading_would() {
     let plugin = project.tracks[0].devices[0].kind.plugin_mut().unwrap();
     plugin.id.clear();
     refused_saving(&project, &format!("{PLUGIN}.id"), "must not be empty");
+}
+
+/// [`mix`] with its fader, its send and its test gain automated, and the
+/// master's pan, in that order.
+fn automated() -> Project {
+    let mut project = mix();
+    let send = project.tracks[0].sends[0].id;
+    let gain = project.tracks[0].devices[0].id;
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    project.automation = vec![
+        Lane::new(
+            ParamAddress::Volume(Chain::Track(TrackId(0))),
+            vec![point(0, 1.0), point(4, 0.5), point(4, 0.25)],
+        ),
+        Lane::new(ParamAddress::Send(send), vec![point(2, 0.5)]),
+        Lane::new(ParamAddress::Device(gain, 0), vec![point(0, -1.0)]),
+        Lane::new(ParamAddress::Pan(Chain::Master), vec![point(8, 1.0)]),
+    ];
+    project
+}
+
+#[test]
+fn lanes_automate_parameters_the_file_has_once_each() {
+    let file = edited_from(&automated(), |_| ());
+    assert_eq!(load(&file).unwrap(), automated());
+    let lane = |f: &mut Value, i: usize, param| f["automation"][i]["param"] = param;
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 1, json!({"volume": {"track": 0}}))
+        }),
+        "automation[1].param",
+        "automation[0] automates it too",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 0, json!({"pan": {"track": 9}}))),
+        "automation[0].param",
+        "names track 9, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 1, json!({"send": 4}))),
+        "automation[1].param",
+        "names send 4, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 2, json!({"device": {"id": 7, "param": 0}}));
+        }),
+        "automation[2].param",
+        "names device 7, which the file hasn't",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            lane(f, 2, json!({"device": {"id": 0, "param": 1}}));
+        }),
+        "automation[2].param",
+        "names parameter 1 of device 0, which has only parameter 0",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 3, json!({"pan": "left"}))),
+        "automation[3].param.pan",
+        "unknown variant `left`",
+    );
+    refused(
+        &edited_from(&automated(), |f| lane(f, 3, json!({"width": "master"}))),
+        "automation[3].param",
+        "unknown variant `width`",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            f["automation"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("overridden");
+        }),
+        "automation[0]",
+        "missing field `overridden`",
+    );
+    // A plugin's parameters are the plugin's to say, so any will do.
+    let mut project = plugged();
+    let synth = project.tracks[0].devices[0].id;
+    let param = ParamAddress::Device(synth, u32::MAX);
+    let point = automation::Point::new(Beats::ZERO, 1e9);
+    project.automation = vec![Lane::new(param, vec![point])];
+    assert_eq!(load(&edited_from(&project, |_| ())).unwrap(), project);
+    // Saving checks the same.
+    let mut project = automated();
+    project.automation[1].param = ParamAddress::Volume(Chain::Track(TrackId(0)));
+    refused_saving(
+        &project,
+        "automation[1].param",
+        "automation[0] automates it too",
+    );
+}
+
+#[test]
+fn lanes_of_built_in_devices_take_the_values_their_parameters_do() {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let device = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let id = device.id;
+    project.track_mut(vocal).unwrap().devices.push(device);
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    let param = |n: usize| ParamAddress::Device(id, n as u32);
+    project.automation = vec![
+        Lane::new(param(eq::FREQ), vec![point(0, 100.0), point(4, 2500.0)]),
+        Lane::new(
+            param(eq::SHAPE),
+            vec![point(0, 4.0), point(4, 4.0), point(4, 5.0)],
+        ),
+    ];
+    assert_eq!(load(&edited_from(&project, |_| ())).unwrap(), project);
+    let lane = |f: &mut Value, i: usize, param| f["automation"][i]["param"] = param;
+    refused(
+        &edited_from(&project, |f| {
+            lane(f, 0, json!({"device": {"id": id.0, "param": 41}}));
+        }),
+        "automation[0].param",
+        "names parameter 41 of device 0, which has parameters 0 to 40",
+    );
+    let points = |f: &mut Value, i: usize, points| f["automation"][i]["points"] = points;
+    refused(
+        &edited_from(&project, |f| points(f, 0, json!([[0, 5.0]]))),
+        "automation[0].points[0][1]",
+        "must be a number from 10 to 22000",
+    );
+    refused(
+        &edited_from(&project, |f| points(f, 1, json!([[0, 4.0], [4, 4.5]]))),
+        "automation[1].points[1][1]",
+        "must be a whole number from 0 to 9",
+    );
+    // Saving checks the same.
+    project.automation[0].points[1].value = 30_000.0;
+    refused_saving(
+        &project,
+        "automation[0].points[1][1]",
+        "must be a number from 10 to 22000",
+    );
+}
+
+#[test]
+fn lane_points_are_in_order_from_the_start_of_the_song() {
+    let points = |f: &mut Value, i: usize, points| f["automation"][i]["points"] = points;
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([]))),
+        "automation[1].points",
+        "needs at least one point",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[-1, 0.5]]))),
+        "automation[1].points[0][0]",
+        "can't be before the start of the song",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            points(f, 1, json!([[MAX_TICKS + 1, 0.5]]));
+        }),
+        "automation[1].points[0][0]",
+        "within",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[8, 0.5], [4, 0.5]]))),
+        "automation[1].points[1][0]",
+        "must be at or after the point before it",
+    );
+    refused(
+        &edited_from(&automated(), |f| {
+            points(f, 0, json!([[0, 1.0], [4, 0.5], [4, 0.25], [4, 0.0]]));
+        }),
+        "automation[0].points[3][0]",
+        "makes three points at one place",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 3, json!([[0, 1.5]]))),
+        "automation[3].points[0][1]",
+        "must be from -1 to 1",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[0, "loud"]]))),
+        "automation[1].points[0][1]",
+        "expected f64",
+    );
+    refused(
+        &edited_from(&automated(), |f| points(f, 1, json!([[0, 0.5, 1]]))),
+        "automation[1].points[0]",
+        "trailing",
+    );
+    // Faders, sends and test gains can go negative, inverting, as their
+    // own fields can.
+    let file = edited_from(&automated(), |f| points(f, 1, json!([[0, -2.0]])));
+    assert_eq!(load(&file).unwrap().automation[1].points[0].value, -2.0);
+    // Saving checks the same.
+    let mut project = automated();
+    project.automation[3].points[0].value = f64::INFINITY;
+    refused_saving(
+        &project,
+        "automation[3].points[0][1]",
+        "must be a finite number",
+    );
 }
 
 #[test]

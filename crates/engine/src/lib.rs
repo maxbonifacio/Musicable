@@ -21,9 +21,11 @@ use std::any::Any;
 
 use musicable_model::time::TempoMap;
 
+pub mod automation;
 pub mod buffer;
 pub mod clips;
 pub mod compile;
+pub mod devices;
 mod engine;
 pub mod event;
 pub mod graph;
@@ -39,6 +41,7 @@ pub mod tasks;
 pub mod timeline;
 mod transport;
 
+pub use automation::Automation;
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
     Compiled, Compiler, Devices, InputChannels, InputLayout, MidiSource, NodeMaker, compile,
@@ -51,7 +54,7 @@ pub use event::{
 };
 pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
-pub use midi::{MidiMessage, MidiMonitor, MidiNotes};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
 pub use timeline::{Segment, Timeline};
@@ -99,6 +102,23 @@ pub trait Node: Any + Send {
         0
     }
 
+    /// Has the node follow `automation` for its parameter `param`, read at
+    /// the song position, in place of the value set, for as long as it's in
+    /// this graph. Called off the audio thread as the graph is built
+    /// ([`Graph::automate`]), before [`prepare`](Node::prepare).
+    ///
+    /// A node that reads its automation itself, frame by frame with an
+    /// [`automation::Param`], keeps it and returns `None`. By default the
+    /// node hands it back, and the graph sends the node the automation's
+    /// values as [`Param`](NodeEventKind::Param) events instead: on the
+    /// frame of each point, every 32 frames of engine time in between, and
+    /// on the first frame after the playhead jumps, whenever the value
+    /// changed. Plugins get theirs that way, and smooth their parameters
+    /// themselves.
+    fn automate(&mut self, _param: ParamId, automation: Automation) -> Option<Automation> {
+        Some(automation)
+    }
+
     /// Called on the audio thread when a new graph replaces the running one,
     /// and this node replaces `previous`, the old node with the same key.
     ///
@@ -117,10 +137,11 @@ pub trait Node: Any + Send {
     /// clip player. The engine calls it on the audio thread before any node
     /// renders the block, so it must be real-time safe too.
     ///
-    /// `ctx.events` holds the notes sent to the node for the block, in order
-    /// of offset, from the nodes whose notes come to it and from the engine,
-    /// so a MIDI effect can play them on, changed. They come here instead of
-    /// with [`process`](Node::process), which gets the node's other events.
+    /// `ctx.events` holds the notes and controllers sent to the node for the
+    /// block, in order of offset, from the nodes whose notes come to it and
+    /// from the engine, so a MIDI effect can play them on, changed. They come
+    /// here instead of with [`process`](Node::process), which gets the
+    /// node's other events.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
 
     /// The notes whose voices the node ended in the block it last rendered.

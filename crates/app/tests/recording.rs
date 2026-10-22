@@ -100,7 +100,11 @@ impl Studio {
     fn play_until(&mut self, what: &str, done: impl Fn(&Session) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done(&self.session) {
-            assert!(Instant::now() < deadline, "no {what} after ten seconds");
+            assert!(
+                Instant::now() < deadline,
+                "no {what} after ten seconds: {:?}",
+                self.session.take_problems()
+            );
             self.play();
         }
     }
@@ -188,7 +192,11 @@ fn armed_midi_tracks_record_the_notes_played() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut shown = false;
     while session.project().track(keys).unwrap().takes.is_empty() {
-        assert!(Instant::now() < deadline, "no take after ten seconds");
+        assert!(
+            Instant::now() < deadline,
+            "no take after ten seconds: {:?}",
+            session.take_problems()
+        );
         if time == 48_000 {
             session.run(&transport::STOP).unwrap();
         }

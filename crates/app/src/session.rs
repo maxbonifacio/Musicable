@@ -18,6 +18,7 @@ use musicable_engine::{
     NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
     compile_with_inputs, compile_with_stems,
 };
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
@@ -513,6 +514,14 @@ impl Session {
         self.engine.beats_at(position)
     }
 
+    /// Whether the keymap binds `chord` to a command that applies now, so a
+    /// press of it runs one. Other keys can go elsewhere.
+    pub fn takes_key(&self, chord: KeyChord) -> bool {
+        self.keymap
+            .lookup(chord)
+            .is_some_and(|id| self.commands.applies(id, &self.document))
+    }
+
     /// Runs the command the keymap binds to `chord`. Returns `false` if there
     /// is none, so the key can go elsewhere.
     pub fn key_pressed(&mut self, chord: KeyChord) -> bool {
@@ -702,8 +711,9 @@ impl Session {
             match change {
                 Change::GestureBegin => self.document.begin_gesture(),
                 Change::GestureEnd => self.document.end_gesture(),
+                // Moved by hand, so it overrides the parameter's automation.
                 Change::Param { param, value } => self.document.transact(&name, |tx| {
-                    tx.set_plugin_param(device, param, Some(value));
+                    tx.set_param_by_hand(ParamAddress::Device(device, param), value);
                 }),
                 Change::Settings(settings) => self.document.transact(&name, |tx| {
                     tx.set_plugin_settings(device, settings);
@@ -844,13 +854,24 @@ impl Session {
                     // The plugins have their settings, not the engine: the
                     // plugins follow below.
                     Edit::PluginParam { .. } | Edit::PluginSettings { .. } => {}
+                    // A built-in device's node has its parameters.
+                    Edit::NativeParam {
+                        device, param, to, ..
+                    } => self.engine.push(Message::Event(Event::Param {
+                        node: keys::device(device),
+                        param: ParamId(param),
+                        value: to,
+                    })),
+                    // A sampler reads its sample as the graph is built.
+                    Edit::NativeSample { .. } => recompile = true,
                     // Tracks and their inputs are compiled into the graph,
                     // and the recorder records the armed ones.
                     Edit::AddTrack { .. } | Edit::RemoveTrack { .. } | Edit::TrackInput { .. } => {
                         recompile = true;
                         armed_changed = true;
                     }
-                    // Clips are compiled into the graph.
+                    // Clips are compiled into the graph, notes and all. A
+                    // note edited while it sounds is let go.
                     Edit::TrackOutput { .. }
                     | Edit::TrackClipType { .. }
                     | Edit::AddSend { .. }
@@ -861,8 +882,20 @@ impl Session {
                     | Edit::RemoveClip { .. }
                     | Edit::ClipTiming { .. }
                     | Edit::ClipFades { .. }
+                    | Edit::AddNote { .. }
+                    | Edit::RemoveNote { .. }
+                    | Edit::NoteTiming { .. }
+                    | Edit::NoteKey { .. }
+                    | Edit::NoteVelocity { .. }
+                    | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. } => recompile = true,
+                    // So is automation, and the plugins leave what it moves
+                    // to the engine.
+                    Edit::AddLane { .. }
+                    | Edit::RemoveLane { .. }
+                    | Edit::LanePoints { .. }
+                    | Edit::LaneOverridden { .. } => recompile = true,
                 }
             }
         }

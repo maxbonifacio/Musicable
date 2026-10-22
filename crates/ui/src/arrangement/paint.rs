@@ -1,31 +1,30 @@
-//! Drawing the arrangement: the lanes with their clips, and the takes'
-//! lanes under the tracks that show them, the ruler over them, the tracks'
-//! headers, and the corner between the ruler and the headers. Only what's
-//! in sight is drawn.
+//! Drawing the arrangement: the lanes with their clips, and the takes' and
+//! automation lanes under the tracks that show them, the ruler over them,
+//! the tracks' headers, and the corner between the ruler and the headers.
+//! Only what's in sight is drawn.
 
 use egui::{
     Align2, CornerRadius, FontId, Mesh, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
+use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
 use musicable_model::time::Beats;
 use musicable_model::{Track, TrackKind};
 
-use super::{HeaderButton, Plan, Row, Scene, Side, TakeRow, find};
+use super::{
+    AutoRow, Envelope, HeaderButton, Hit, LaneButton, Plan, Row, Scene, Side, TakeRow, find,
+};
 use crate::mixer::{meter_colour, meter_height};
+use crate::timeline::{self, Timeline};
 
-/// The closest the grid's lines are drawn, in points. A fixed grid finer
-/// than this at the zoom is drawn as the adaptive grid.
-const MIN_LINE_SPACING: f64 = 3.0;
-/// The closest the ruler's ticks are drawn, in points.
-const MIN_TICK_SPACING: f32 = 6.0;
 /// The fewest keys a MIDI clip's notes are spread over, so a clip of a few
 /// notes doesn't fill its height with them.
 const MIN_KEYS: u8 = 12;
 
-/// The lanes: each track's clips over the grid, and its takes' under it if
-/// it shows them, with what the tracks are recording, the loop region, the
-/// time selection, the start marker and the playhead, and where `plan`
-/// would put things.
+/// The lanes: each track's clips over the grid, and its takes' and its
+/// automation lanes under it if it shows them, with what the tracks are
+/// recording, the loop region, the time selection, the start marker and the
+/// playhead, and where `plan` would put things.
 pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -49,6 +48,10 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let rect = Rect::from_x_y_ranges(lanes.x_range(), take.top..=take.bottom());
         painter.rect_filled(rect, 0.0, theme.take_lane);
     }
+    for lane in layout.visible_automation() {
+        let rect = Rect::from_x_y_ranges(lanes.x_range(), lane.top..=lane.bottom());
+        painter.rect_filled(rect, 0.0, theme.automation_lane);
+    }
     let bottom = layout.bottom().clamp(lanes.top(), lanes.bottom());
     let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=bottom);
     if project.looping {
@@ -57,14 +60,17 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let shade = Rect::from_x_y_ranges(x, tracks.y_range());
         painter.rect_filled(shade, 0.0, theme.loop_shade);
     }
-    grid(painter, scene, tracks);
-    let bottoms = layout.visible_rows().map(Row::bottom);
-    for bottom in bottoms.chain(layout.visible_takes().map(TakeRow::bottom)) {
+    timeline::grid(painter, theme, &self::timeline(scene), editor.grid, tracks);
+    let bottoms = (layout.visible_rows().map(Row::bottom))
+        .chain(layout.visible_takes().map(TakeRow::bottom))
+        .chain(layout.visible_automation().map(AutoRow::bottom));
+    for bottom in bottoms {
         let y = painter.round_to_pixel_center(bottom - 0.5);
         painter.hline(lanes.x_range(), y, Stroke::new(1.0, theme.divider));
     }
     clips(painter, scene);
     takes(painter, scene);
+    automation(painter, scene, plan);
     recordings(painter, scene);
     time_selection(painter, scene);
     if let Some(plan) = plan {
@@ -79,42 +85,24 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
 }
 
-/// Where the playhead is drawn: while it plays, or where it stopped if
-/// that isn't the start marker.
+/// Where the playhead is drawn, if it is.
 fn playhead(scene: &Scene<'_>) -> Option<f32> {
-    let playback = scene.view.playback;
-    let shown = playback.playing || playback.playhead != scene.editor().start_marker;
-    shown.then(|| scene.layout.x_of(playback.playhead))
+    let at = timeline::playhead(&scene.view.playback, scene.editor().start_marker)?;
+    Some(scene.layout.x_of(at))
+}
+
+/// The song positions across the lanes.
+fn timeline<'s>(scene: &'s Scene<'_>) -> Timeline<'s> {
+    Timeline {
+        tempo: &scene.project().tempo,
+        viewport: scene.layout.viewport,
+        left: scene.layout.lanes.left(),
+    }
 }
 
 /// The lane of the track in `row`, across the timeline.
 fn lane(scene: &Scene<'_>, row: &Row) -> Rect {
     Rect::from_x_y_ranges(scene.layout.lanes.x_range(), row.top..=row.bottom())
-}
-
-/// The grid's lines over `area`: brightest at bars, then at beats.
-fn grid(painter: &Painter, scene: &Scene<'_>, area: Rect) {
-    let theme = scene.theme;
-    let layout = &scene.layout;
-    let tempo = &scene.project().tempo;
-    let zoom = layout.viewport.zoom;
-    let visible = layout.viewport.visible();
-    let bar = tempo.bar_at(visible.start).bar;
-    let length = tempo.bar_start(bar + 1) - tempo.bar_start(bar);
-    let mut grid = scene.editor().grid;
-    if grid.spacing(zoom, length) < MIN_LINE_SPACING {
-        grid.fixed = None;
-    }
-    for at in grid.lines(tempo, visible, zoom) {
-        let position = tempo.bar_at(at);
-        let colour = match (position.offset == Beats::ZERO, position.beat) {
-            (true, 0) => theme.grid_bar,
-            (true, _) => theme.grid_beat,
-            _ => theme.grid_step,
-        };
-        let x = painter.round_to_pixel_center(layout.x_of(at));
-        painter.vline(x, area.y_range(), Stroke::new(1.0, colour));
-    }
 }
 
 /// The time selection, over the clips on its tracks.
@@ -227,6 +215,101 @@ fn takes(painter: &Painter, scene: &Scene<'_>) {
                 waveform(&painter, scene, rect, clip, audio);
             }
         }
+    }
+}
+
+/// The automation lanes in sight: each one's line through its points, as
+/// `plan` would leave them while a drag edits it, grey where someone
+/// overrode it, or a parameter's own value where it has no automation.
+fn automation(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+    let theme = scene.theme;
+    let project = scene.project();
+    // The point under the pointer is filled in.
+    let lanes = scene.layout.lanes;
+    let hovered = (scene.pointer)
+        .filter(|&pos| lanes.contains(pos))
+        .map(|pos| scene.hit_lanes(pos));
+    for lane in scene.layout.visible_automation() {
+        let painter = painter.with_clip_rect(
+            Rect::from_x_y_ranges(scene.layout.lanes.x_range(), lane.top..=lane.bottom())
+                .intersect(painter.clip_rect()),
+        );
+        let planned = match plan {
+            Some(Plan::Points { param, points }) if *param == lane.param => Some(&points[..]),
+            _ => None,
+        };
+        let automated = project.lane(lane.param);
+        let colour = match automated {
+            Some(automated) if !automated.overridden => theme.automation,
+            _ => theme.automation_off,
+        };
+        let points = planned.or(automated.map(|automated| &automated.points[..]));
+        match points {
+            Some(points) if !points.is_empty() => {
+                let hovered = match hovered {
+                    Some(Hit::Automation {
+                        param,
+                        part: Envelope::Point(i),
+                        ..
+                    }) if param == lane.param && planned.is_none() => Some(i),
+                    _ => None,
+                };
+                envelope(&painter, scene, lane, points, colour, hovered);
+            }
+            // A dashed line at the parameter's own value, where it's known.
+            _ => {
+                let Some(own) = project.param_value(lane.param) else {
+                    continue;
+                };
+                let spec = scene.spec(lane.param);
+                let y = lane.y_of(theme, spec.scale.to_unit(own, spec.min, spec.max));
+                let y = painter.round_to_pixel_center(y);
+                let line = [pos2(lanes.left(), y), pos2(lanes.right(), y)];
+                let dashes = Shape::dashed_line(&line, Stroke::new(1.0, colour), 4.0, 4.0);
+                painter.extend(dashes);
+            }
+        }
+    }
+}
+
+/// The line through `points` on `lane`, level before the first and after
+/// the last, and the points in sight, with the one at `hovered` filled in.
+fn envelope(
+    painter: &Painter,
+    scene: &Scene<'_>,
+    lane: &AutoRow,
+    points: &[Point],
+    colour: egui::Color32,
+    hovered: Option<usize>,
+) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let spec = scene.spec(lane.param);
+    let at = |point: &Point| {
+        let unit = spec.scale.to_unit(point.value, spec.min, spec.max);
+        pos2(layout.x_of(point.at), lane.y_of(theme, unit))
+    };
+    // Those in sight, and one either side, for the lines out of sight.
+    let visible = layout.viewport.visible();
+    let first = points.partition_point(|p| p.at < visible.start);
+    let last = points.partition_point(|p| p.at <= visible.end);
+    let (from, to) = (first.saturating_sub(1), (last + 1).min(points.len()));
+    let mut line = Vec::with_capacity(to - from + 2);
+    if from == 0 {
+        line.push(pos2(layout.lanes.left(), at(&points[0]).y));
+    }
+    line.extend(points[from..to].iter().map(at));
+    if to == points.len() {
+        let end = at(&points[to - 1]).y;
+        line.push(pos2(layout.lanes.right(), end));
+    }
+    painter.add(Shape::line(line, Stroke::new(1.5, colour)));
+    for (i, point) in points.iter().enumerate().take(last).skip(first) {
+        let fill = match hovered == Some(i) {
+            true => colour,
+            false => theme.automation_lane,
+        };
+        painter.circle(at(point), theme.point, fill, Stroke::new(1.5, colour));
     }
 }
 
@@ -499,7 +582,13 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         strip.center().y..=strip.bottom() - 1.0,
     );
     painter.rect_filled(brace, theme.corner, colour);
-    bars(painter, scene);
+    timeline::bars(
+        painter,
+        theme,
+        &self::timeline(scene),
+        ruler,
+        strip.bottom(),
+    );
     for locator in &project.locators {
         let at = match plan {
             Some(&Plan::Locator { locator: id, at }) if id == locator.id => at,
@@ -526,17 +615,7 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         );
     }
     let x = layout.x_of(scene.editor().start_marker);
-    let marker = theme.marker;
-    let points = vec![
-        pos2(x - marker, ruler.bottom() - marker),
-        pos2(x + marker, ruler.bottom() - marker),
-        pos2(x, ruler.bottom()),
-    ];
-    painter.add(Shape::convex_polygon(
-        points,
-        theme.start_marker,
-        Stroke::NONE,
-    ));
+    timeline::start_marker(painter, theme, x, ruler);
     if let Some(x) = playhead(scene) {
         let x = painter.round_to_pixel_center(x);
         let below = strip.bottom()..=ruler.bottom();
@@ -544,49 +623,6 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
     let y = painter.round_to_pixel_center(ruler.bottom() - 0.5);
     painter.hline(ruler.x_range(), y, Stroke::new(1.0, theme.divider));
-}
-
-/// The ruler's bar numbers, every bar or every few so they don't crowd,
-/// with ticks at the bars and at the beats when there's room.
-fn bars(painter: &Painter, scene: &Scene<'_>) {
-    let theme = scene.theme;
-    let layout = &scene.layout;
-    let tempo = &scene.project().tempo;
-    let zoom = layout.viewport.zoom;
-    let visible = layout.viewport.visible();
-    let ruler = layout.ruler;
-    let below = layout.strip.bottom();
-    let first = tempo.bar_at(visible.start).bar;
-    let last = tempo.bar_at(visible.end).bar;
-    let width = |bar: i64| (tempo.bar_start(bar + 1) - tempo.bar_start(bar)).to_f64() * zoom;
-    // A label every bar, or every 2, 4, 8... bars.
-    let mut every: i64 = 1;
-    while (width(first) * every as f64) < f64::from(theme.label_spacing) && every < 1 << 20 {
-        every *= 2;
-    }
-    let tick = Stroke::new(1.0, theme.grid_bar);
-    let mut bar = first - first.rem_euclid(every);
-    while bar <= last {
-        let x = painter.round_to_pixel_center(layout.x_of(tempo.bar_start(bar)));
-        painter.vline(x, below..=ruler.bottom(), tick);
-        painter.text(
-            pos2(x + theme.padding, below),
-            Align2::LEFT_TOP,
-            (bar + 1).to_string(),
-            FontId::proportional(theme.text),
-            theme.ruler_text,
-        );
-        bar += every;
-    }
-    let beat = tempo.signature_at(visible.start).beat_length().to_f64() * zoom;
-    if beat as f32 >= MIN_TICK_SPACING {
-        let short = ruler.bottom() - (ruler.bottom() - below) / 4.0;
-        let tick = Stroke::new(1.0, theme.grid_beat);
-        for at in tempo.beats_in(visible).filter(|beat| beat.beat != 0) {
-            let x = painter.round_to_pixel_center(layout.x_of(at.at));
-            painter.vline(x, short..=ruler.bottom(), tick);
-        }
-    }
 }
 
 /// The tracks' headers: each track's name, colour and meter, with a line
@@ -663,8 +699,95 @@ pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
         let y = painter.round_to_pixel_center(lane.bottom() - 0.5);
         painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
     }
+    for lane in layout.visible_automation() {
+        automation_header(painter, scene, lane);
+    }
     let x = painter.round_to_pixel_center(headers.left() + 0.5);
     painter.vline(x, headers.y_range(), Stroke::new(1.0, theme.divider));
+}
+
+/// An automation lane's header: its parameter's name, and its value at the
+/// playhead, or that someone overrode its automation. Its buttons are
+/// drawn after this, with the tracks'.
+fn automation_header(painter: &Painter, scene: &Scene<'_>, lane: &AutoRow) {
+    let theme = scene.theme;
+    let headers = scene.layout.headers;
+    let rect = Rect::from_x_y_ranges(headers.x_range(), lane.top..=lane.bottom());
+    painter.rect_filled(rect, 0.0, theme.automation_lane);
+    let strip = Rect::from_min_size(rect.left_top(), vec2(theme.colour_strip, rect.height()));
+    let colour = lane
+        .track_index
+        .map_or(theme.automation_off, |i| theme.clip(i));
+    painter.rect_filled(strip, 0.0, colour);
+    let buttons = lane_buttons(scene, lane);
+    let right = buttons
+        .first()
+        .map_or(rect.right(), |(_, rect)| rect.left());
+    // Set in from the track's name, as it's the track's.
+    let room = Rect::from_min_max(
+        pos2(
+            strip.right() + 3.0 * theme.padding,
+            rect.top() + theme.padding,
+        ),
+        pos2(right - theme.padding, rect.bottom()),
+    );
+    let painter = painter.with_clip_rect(room.intersect(painter.clip_rect()));
+    let name = painter.text(
+        room.left_top(),
+        Align2::LEFT_TOP,
+        scene.lane_name(lane.param),
+        FontId::proportional(theme.small_text),
+        theme.header_text,
+    );
+    let overridden = scene
+        .project()
+        .lane(lane.param)
+        .is_some_and(|l| l.overridden);
+    let colour = match overridden {
+        true => theme.automation_off,
+        false => theme.ruler_text,
+    };
+    if let Some(value) = scene.header_value(lane.param) {
+        painter.text(
+            pos2(room.left(), name.bottom() + theme.padding / 2.0),
+            Align2::LEFT_TOP,
+            value,
+            FontId::proportional(theme.small_text),
+            colour,
+        );
+    }
+    let y = painter.round_to_pixel_center(lane.bottom() - 0.5);
+    painter.with_clip_rect(rect.intersect(headers)).hline(
+        rect.x_range(),
+        y,
+        Stroke::new(1.0, theme.divider),
+    );
+}
+
+/// Where the buttons go in an automation lane's header: along its top, at
+/// its right. A lane partly scrolled away has none.
+pub(super) fn lane_buttons(scene: &Scene<'_>, lane: &AutoRow) -> Vec<(LaneButton, Rect)> {
+    let theme = scene.theme;
+    let headers = scene.layout.headers;
+    let size = theme.button;
+    let mut right = headers.right() - theme.padding;
+    let mut placed: Vec<(LaneButton, Rect)> =
+        [LaneButton::Hide, LaneButton::Add, LaneButton::Choose]
+            .into_iter()
+            .map(|button| {
+                let rect =
+                    Rect::from_min_size(pos2(right - size.x, lane.top + theme.padding), size);
+                right = rect.left() - theme.padding / 2.0;
+                (button, rect)
+            })
+            .collect();
+    placed.reverse();
+    let fits = placed.iter().all(|(_, rect)| {
+        headers.contains_rect(*rect)
+            && rect.bottom() <= lane.bottom()
+            && rect.left() > headers.left()
+    });
+    if fits { placed } else { Vec::new() }
 }
 
 /// A track's meter, down the right of its header.
@@ -677,9 +800,9 @@ fn header_meter(scene: &Scene<'_>, row: &Row) -> Rect {
     )
 }
 
-/// Where mute, solo and arm go in a track's header: along its top, left of
-/// its meter. Return and group tracks have no arm. A row partly scrolled
-/// away has none.
+/// Where the automation button, mute, solo and arm go in a track's header:
+/// along its top, left of its meter. Return and group tracks have no arm. A
+/// row partly scrolled away has none.
 pub(super) fn header_buttons(
     scene: &Scene<'_>,
     row: &Row,
@@ -690,10 +813,17 @@ pub(super) fn header_buttons(
     let size = theme.button;
     let mut right = header_meter(scene, row).left() - theme.padding;
     let buttons: &[HeaderButton] = match track.kind {
-        TrackKind::Audio | TrackKind::Midi => {
-            &[HeaderButton::Mute, HeaderButton::Solo, HeaderButton::Arm]
-        }
-        TrackKind::Return | TrackKind::Group => &[HeaderButton::Mute, HeaderButton::Solo],
+        TrackKind::Audio | TrackKind::Midi => &[
+            HeaderButton::Automation,
+            HeaderButton::Mute,
+            HeaderButton::Solo,
+            HeaderButton::Arm,
+        ],
+        TrackKind::Return | TrackKind::Group => &[
+            HeaderButton::Automation,
+            HeaderButton::Mute,
+            HeaderButton::Solo,
+        ],
     };
     let mut placed: Vec<(HeaderButton, Rect)> = buttons
         .iter()

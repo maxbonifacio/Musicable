@@ -3,11 +3,14 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use musicable_model::clip::Controller;
+
+use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef};
 use crate::engine::EVENT_CAPACITY;
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
-use crate::{Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent};
+use crate::{Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, ParamId};
 
 /// A node's identity across graph rebuilds, chosen by whoever builds the
 /// graph. [`compile`](crate::compile()) derives keys from model ids.
@@ -66,6 +69,8 @@ pub struct Graph {
     taps: Vec<NodeId>,
     /// Which nodes' notes go to which, from [`send_notes`](Graph::send_notes).
     note_routes: Vec<(NodeId, NodeId)>,
+    /// The automation nodes handed back, to send them as events.
+    feeds: Vec<(NodeId, ParamId, Feed)>,
 }
 
 impl Graph {
@@ -100,6 +105,29 @@ impl Graph {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// The node with `key`, if there is one.
+    pub fn find(&self, key: NodeKey) -> Option<NodeId> {
+        self.keys.iter().position(|&k| k == key).map(NodeId)
+    }
+
+    /// Has `node` follow `automation` for its parameter `param`
+    /// ([`Node::automate`]). A node that hands the automation back gets its
+    /// values as parameter events, on top of the events the engine sends
+    /// it: the automation's come after those on the same frame, so they
+    /// win.
+    pub fn automate(
+        &mut self,
+        node: NodeId,
+        param: ParamId,
+        automation: Automation,
+    ) -> Result<(), GraphError> {
+        self.check(node)?;
+        if let Some(automation) = self.nodes[node.0].automate(param, automation) {
+            self.feeds.push((node, param, Feed::new(automation)));
+        }
+        Ok(())
     }
 
     /// Feeds `from`'s output into `to`.
@@ -238,10 +266,12 @@ impl Graph {
             plays_notes[player.node.0] = true;
             inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY);
         }
-        // Room for every parameter event the engine can hold, and for each
-        // player's notes to each of its targets.
+        // Room for every parameter event the engine can hold, for each
+        // player's notes to each of its targets, and for the automation
+        // the graph sends.
         let notes: usize = ordered.iter().map(|p| p.targets.len()).sum();
-        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY;
+        let feeds = self.feeds.len() * Feed::room(config.max_block);
+        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds;
         Ok(PreparedGraph {
             config: *config,
             event_ranges: vec![(0, 0); self.nodes.len()],
@@ -261,6 +291,7 @@ impl Graph {
             plays_notes,
             inbox: Vec::with_capacity(inbox),
             inbox_events: Vec::with_capacity(inbox),
+            feeds: self.feeds,
             schedule,
         })
     }
@@ -452,6 +483,9 @@ pub struct PreparedGraph {
     /// A player's notes as they're gathered for it, and then in order.
     inbox: Vec<Routed>,
     inbox_events: Vec<NodeEvent>,
+    /// The automation the graph sends nodes as events, by node and
+    /// parameter.
+    feeds: Vec<(NodeId, ParamId, Feed)>,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
 }
@@ -513,6 +547,10 @@ impl Notes<'_> {
     /// [`CAPACITY`](Self::CAPACITY) are dropped, and counted in
     /// [`Stats::events_dropped`](crate::Stats::events_dropped).
     pub fn send(&mut self, offset: usize, note: NoteEvent) -> bool {
+        self.send_kind(offset, NodeEventKind::Note(note))
+    }
+
+    fn send_kind(&mut self, offset: usize, kind: NodeEventKind) -> bool {
         debug_assert!(offset < self.frames, "notes are sent within the block");
         if self.room == 0 {
             self.dropped += 1;
@@ -524,13 +562,17 @@ impl Notes<'_> {
             self.routed.push(Routed {
                 node,
                 order,
-                event: NodeEvent {
-                    offset,
-                    kind: NodeEventKind::Note(note),
-                },
+                event: NodeEvent { offset, kind },
             });
         }
         true
+    }
+
+    /// Sends a controller's move to where this node's notes go, `offset`
+    /// frames into the block, in order with its notes. It takes room as a
+    /// note does, and returns whether there was some.
+    pub fn send_controller(&mut self, offset: usize, controller: Controller, value: f32) -> bool {
+        self.send_kind(offset, NodeEventKind::Controller { controller, value })
     }
 
     /// The block's length: notes are sent at offsets below it.
@@ -617,6 +659,31 @@ impl PreparedGraph {
         true
     }
 
+    /// Queues the automation the graph sends as events for `block`
+    /// ([`Node::automate`]), after the events queued so far. Runs on the
+    /// audio thread, before the block's notes play.
+    pub(crate) fn feed_automation(&mut self, block: &Block<'_>) {
+        let Self {
+            config,
+            routed,
+            feeds,
+            ..
+        } = self;
+        for (node, param, feed) in feeds.iter_mut() {
+            let (node, param) = (*node, *param);
+            feed.block(block, config.sample_rate, |offset, value| {
+                let order = routed.len() as u32;
+                let kind = NodeEventKind::Param { param, value };
+                let event = NodeEvent { offset, kind };
+                debug_assert!(
+                    routed.len() < routed.capacity(),
+                    "a graph has room for its automation"
+                );
+                routed.push(Routed { node, order, event });
+            });
+        }
+    }
+
     /// Has each node that plays notes send its notes for `block`, and
     /// returns how many there was no room for. Runs on the audio thread,
     /// before the block renders.
@@ -631,7 +698,7 @@ impl PreparedGraph {
             inbox_events,
             ..
         } = self;
-        let is_note = |r: &Routed| matches!(r.event.kind, NodeEventKind::Note(_));
+        let is_played = |r: &Routed| r.event.kind.is_played();
         let mut dropped = 0;
         for player in players.iter() {
             // The notes sent to it so far, which is all of them: the engine
@@ -640,7 +707,7 @@ impl PreparedGraph {
             inbox.clear();
             let sent = routed
                 .iter()
-                .filter(|r| r.node == player.node && is_note(r));
+                .filter(|r| r.node == player.node && is_played(r));
             inbox.extend(sent);
             inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
             inbox_events.clear();
@@ -658,7 +725,7 @@ impl PreparedGraph {
         }
         // The players have had theirs.
         if !players.is_empty() {
-            routed.retain(|r| !(plays_notes[r.node.0] && is_note(r)));
+            routed.retain(|r| !(plays_notes[r.node.0] && is_played(r)));
         }
         dropped
     }

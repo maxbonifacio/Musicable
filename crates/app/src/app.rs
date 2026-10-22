@@ -8,15 +8,16 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Request, arrange};
+use musicable_commands::{Args, CommandError, Focus, Request, arrange};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
+use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
-use musicable_plugins::{PluginInfo, Waker};
+use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
-    PluginEntry, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, PIANO_ROLL,
+    Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
@@ -51,6 +52,8 @@ pub struct App {
     plugin_entries: Vec<PluginEntry>,
     /// How each plugin device's plugin is doing, as of this frame.
     plugin_status: BTreeMap<DeviceId, PluginStatus>,
+    /// The parameters automation can move, for each loaded plugin.
+    plugin_params: BTreeMap<DeviceId, Listed>,
     output: Output,
     /// The output's stream whose inputs the session has.
     inputs_started: u64,
@@ -158,6 +161,7 @@ impl App {
             plugin_scan,
             plugin_entries: Vec::new(),
             plugin_status: BTreeMap::new(),
+            plugin_params: BTreeMap::new(),
             output,
             inputs_started: 0,
             input_choices: Vec::new(),
@@ -214,7 +218,8 @@ impl App {
         self.session.set_installed_plugins(installed);
     }
 
-    /// How each plugin device's plugin is doing, for the devices panel.
+    /// How each plugin device's plugin is doing, for the devices panel, and
+    /// its parameters, for automation lanes.
     fn update_plugin_status(&mut self) {
         self.plugin_status.clear();
         let devices = self
@@ -224,14 +229,33 @@ impl App {
             .flat_map(|(_, devices)| devices);
         for device in devices.filter(|d| d.kind.plugin().is_some()) {
             let instance = self.session.plugin(device.id);
+            let params = match instance {
+                Some(instance) => {
+                    let list = instance.params();
+                    let from = (list.as_ptr() as usize, list.len());
+                    let listed = self.plugin_params.entry(device.id).or_default();
+                    if listed.from != from {
+                        *listed = Listed {
+                            from,
+                            params: automatable(list),
+                        };
+                    }
+                    listed.params.clone()
+                }
+                None => Arc::default(),
+            };
             let status = PluginStatus {
                 loaded: instance.is_some(),
                 has_window: instance.is_some_and(|i| i.has_window()),
                 window_open: self.plugin_windows.is_open(device.id),
                 problem: self.session.plugin_problem(device.id).map(str::to_owned),
+                params,
             };
             self.plugin_status.insert(device.id, status);
         }
+        let status = &self.plugin_status;
+        self.plugin_params
+            .retain(|device, _| status.get(device).is_some_and(|status| status.loaded));
     }
 
     /// The project's name: its file's name without the extension.
@@ -345,7 +369,18 @@ impl App {
                 self.session.editor(),
                 self.export.is_some(),
             ),
-            Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
+            Request::TogglePanel(panel) => {
+                self.shell.toggle_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::ShowPanel(panel) => {
+                self.shell.show_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::SwitchDevicesPianoRoll => {
+                self.shell.switch_devices_piano_roll();
+                self.focus_in_sight();
+            }
             Request::Rename(named) => self.shell.rename(named),
             Request::PluginWindow { device, show: true } => {
                 self.show_plugin_window(device, ctx, frame);
@@ -355,6 +390,15 @@ impl App {
                 show: false,
             } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
+        }
+    }
+
+    /// Gives the arrangement the focus when the piano roll has it but is
+    /// hidden, so the keys act on what's in sight.
+    fn focus_in_sight(&mut self) {
+        let editor = self.session.editor_mut();
+        if editor.focus == Focus::PianoRoll && !self.shell.panel_shown(PIANO_ROLL) {
+            editor.focus = Focus::Arrangement;
         }
     }
 
@@ -723,6 +767,8 @@ impl App {
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
+    /// A key whose command doesn't apply now goes on to egui: with no notes
+    /// selected, the arrow keys move the keyboard focus between controls.
     /// While the keyboard shortcuts window waits for the keys to give a
     /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
@@ -737,7 +783,7 @@ impl eframe::App for App {
         // commands while the command palette is open either.
         let asking = self.pending.is_some() || self.shell.asking();
         self.keys.take(ctx, input, |chord, repeat| {
-            if asking || session.keymap().lookup(chord).is_none() {
+            if asking || !session.takes_key(chord) {
                 return false;
             }
             if !repeat {
@@ -851,6 +897,7 @@ impl eframe::App for App {
                 scanning: self.plugin_scan.is_running(),
                 status: &self.plugin_status,
             },
+            native: musicable_engine::devices::BUILT,
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -879,6 +926,34 @@ impl eframe::App for App {
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
     }
+}
+
+/// A plugin's parameters that automation can move, as last listed.
+#[derive(Default)]
+struct Listed {
+    /// Where the plugin kept the list they came from, and how long it was,
+    /// to know when the plugin describes them again.
+    from: (usize, usize),
+    params: Arc<[PluginParam]>,
+}
+
+/// The parameters of `params` automation can move: those the plugin
+/// neither hides nor keeps to itself.
+fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
+    params
+        .iter()
+        .filter(|param| param.automatable && !param.hidden && !param.read_only)
+        .map(|param| PluginParam {
+            id: param.id,
+            spec: ParamSpec {
+                name: param.name.clone(),
+                min: param.min,
+                max: param.max,
+                default: param.default,
+                scale: Scale::Linear,
+            },
+        })
+        .collect()
 }
 
 /// The readings of the meters of `project`'s channels, for the mixer.
@@ -954,6 +1029,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod arranging;
+#[cfg(test)]
+mod built_in_devices;
 #[cfg(test)]
 mod exporting;
 #[cfg(test)]

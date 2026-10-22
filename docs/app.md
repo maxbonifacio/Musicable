@@ -106,14 +106,15 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Locator, Transport, View and Options. Undo and Redo name the
-  change they would make, as in "Undo Set Tempo", and are greyed out when
-  there's nothing to undo or redo, as is any command that doesn't apply
-  now, such as Split with nothing selected. Toggles, such as Follow and
-  Snap to Grid, are ticked while on. A command in an area with no menu yet
-  gets a menu named after its area, before View, so every command can be
-  reached; commands that need arguments are left out, as menus can't give
-  them. On the right are the CPU meter and the dropout counter.
+  Track, Clip, Notes, Automation, Locator, Transport, View and Options.
+  Undo and Redo name the change they would make, as in "Undo Set Tempo",
+  and are greyed out when there's nothing to undo or redo, as is any
+  command that doesn't apply now, such as Split with nothing selected.
+  Toggles, such as Follow and Snap to Grid, are ticked while on. A command
+  in an area with no menu yet gets a menu named after its area, before
+  View, so every command can be reached; commands that need arguments are
+  left out, as menus can't give them. On the right are the CPU meter and
+  the dropout counter.
 - **The transport bar** has go to start, play, stop, record, loop, punch in
   and punch out, the metronome, the tempo, the time signature, and the
   playhead in bars, beats and sixteenths and in minutes and seconds.
@@ -127,10 +128,16 @@ That's what `ParallelOptions::inline_below` is for
 - **The arrangement** fills the middle of the window: the tracks over time,
   with their clips, under a ruler ([below](#the-arrangement)).
 - **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Plugin to open the plugin browser (see
-  [Plugins](#plugins)). **View > Devices** (Ctrl+Alt+L) hides or shows it.
-- **The plugin browser** is a panel on the left, hidden until Add Plugin or
-  **View > Plugin Browser** (Ctrl+Alt+B) shows it.
+  devices, or the master's, with Add Device to open the plugin browser (see
+  [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
+  **View > Devices** (Ctrl+Alt+L) hides or shows it.
+- **The piano roll** takes the devices panel's place, as Live's clip view
+  takes its device view's: showing one hides the other. Double-clicking a
+  MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
+  switches between the two ([below](#the-piano-roll)).
+- **The plugin browser** is a panel on the left, hidden until Add Device or
+  **View > Plugin Browser** (Ctrl+Alt+B) shows it. It lists Musicable's
+  own devices, then the plugins installed.
 - **The mixer** is a panel under them, with a strip for each track and the
   master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
   make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
@@ -175,6 +182,19 @@ undo history and the engine rebuilds its graph once.
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).
+- **Automation** shows in lanes under a track's lanes after the A button in
+  its header, **Automation > Show/Hide Automation** (A), or the same in the
+  header's menu: a lane for each parameter the track automates, or else
+  one for its volume. The master's lanes go under the last track; the
+  master strip's controls show them, in the mixer. A lane's header names
+  the parameter, with its value at the playhead, or "Overridden" once
+  someone moved its control by hand, and has three buttons: ▾ chooses the
+  parameter the lane shows (the track's volume, pan and sends, then each
+  device's parameters, a submenu for each device, the automated ones in
+  red), + adds a lane for the next parameter, and × hides the lane. The
+  line through a lane's points is red, or grey while its automation is
+  overridden; a lane without automation shows the parameter's own value as
+  a dashed line ([commands.md](commands.md#automation)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
@@ -187,6 +207,7 @@ The mouse does what it does in Live:
 | | Drag; Ctrl-drag; Alt-drag | Moves the selected clips, also to other tracks of their kind; copies them; moves them off the grid |
 | | Double-click | Renames the clip |
 | A clip's body | Click | Selects the clip and puts the start marker there, so Ctrl+E splits it there |
+| | Double-click | Opens a MIDI clip in the piano roll |
 | | Drag | Selects time, as on an empty lane |
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
 | A fade handle | Drag | Makes the fade longer or shorter |
@@ -201,6 +222,11 @@ The mouse does what it does in Live:
 | A track's bottom edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
+| An automation lane | Click; double-click | Selects the track and puts the start marker there; adds a point there |
+| | Drag; Alt-drag | Draws a value for each step of the grid crossed, as Live's Draw Mode does; draws freely, off the grid, as it does with Snap to Grid off |
+| An automation lane's line | Click; drag | Adds a point on the line, on the grid; moves that stretch of the line, with its points, up or down |
+| An automation point | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
+| An automation lane's header | Click | Selects the track |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
@@ -208,9 +234,12 @@ Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
 header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
-locator, and Comp, Rename, Delete Take and Show/Hide Take Lanes on a take. Each shows its keys, and takes its arguments from where the
-menu was opened: the clip, the track, or the position. Rename, from a menu,
-a key or a double-click, opens a box for the new name.
+locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
+and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
+automation lane. Each shows its keys, and takes its arguments from where
+the menu was opened: the clip, the track, the parameter, or the position.
+Rename, from a menu, a key or a double-click, opens a box for the new
+name.
 
 Audio files dropped on the window become clips, one after another, where
 they're dropped: on that track if it's an audio track, or else the
@@ -219,12 +248,13 @@ transport plays, **Follow** (Ctrl+Shift+F) turns the page when the playhead
 leaves the view; scrolling away pauses it until the playhead is in sight
 again.
 
-**Themes and mouse maps.** The arrangement and the mixer draw every colour
-and size from a `musicable_ui::Theme`, and look up what each gesture does,
-from where it starts and the modifiers held, in a `MouseMap`.
-`MouseMap::live()` is the table above. `Shell::set_theme` and
-`set_mouse_map` change them, for the profiles of Tier 2. Each view is a
-panel with its own id, such as `musicable_ui::MIXER`.
+**Themes and mouse maps.** The arrangement, the piano roll and the mixer
+draw every colour and size from a `musicable_ui::Theme`, and look up what
+each gesture does, from where it starts and the modifiers held, in a
+`MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
+`Shell::set_theme` and `set_mouse_map` change them, for the profiles of
+Tier 2. Each view is a panel with its own id, such as
+`musicable_ui::MIXER` and `PIANO_ROLL`.
 
 ### How fast it draws
 
@@ -263,6 +293,91 @@ triangles, such as automation of hundreds of tracks zoomed out, the lanes'
 drawing (`crates/ui/src/arrangement/paint.rs`) can move into an
 `egui_wgpu::Callback` with a render pass of its own, with the gestures left
 as they are.
+
+## The piano roll
+
+The piano roll shows the notes of a MIDI clip, as Live's MIDI note editor
+does: rows of keys beside a keyboard, under a ruler, over a lane of the
+notes' velocities or a controller's curve. It shows the MIDI clip selected
+last in the arrangement,
+or opened with a double-click. Across, it shows song positions, as the
+arrangement does, so the start marker, the playhead and the grid line up
+with it; its zoom and scrolling are its own. Everything it does runs a
+command ([commands.md](commands.md#notes) and
+[controllers](commands.md#controllers)), and a drag runs one when it ends,
+so it's one step to undo.
+
+- **Notes** take their track's colour, fainter the softer they start, with
+  their names on them when there's room. Selected notes are outlined. While
+  a drag lasts, ghosts show where notes will go.
+- **The rows** of the black keys are darker, with a line under each C,
+  where an octave starts. The clip's notes before its start or after its
+  end are shaded, as they don't play.
+- **The keyboard** names the Cs: middle C, MIDI note 60, is C3, as in
+  Live, unless the `middle_c` setting says otherwise
+  ([below](#settings-and-your-keymap)).
+- **The velocities** are stems at the notes' starts, as tall as the notes
+  start hard.
+- **The lane's name**, under the keyboard, opens a menu of what the lane
+  can show: the velocities; the controllers the clip moves; those
+  keyboards and pedals have, such as the mod wheel, the sustain pedal and
+  CC 74, MPE's slide; then the rest of MIDI's 120.
+- **A controller's curve** shows how the clip moves it: each point's value
+  held until the next, filled under, in the track's colour, from the first
+  point, as the clip leaves the controller alone before it. A drawing
+  drag shows the curve as it will be. The curve before the clip's start
+  and after its end is shaded.
+- **Draw Mode** (B) turns clicks and drags on the rows into drawing, as in
+  Live, and its button is in the Notes menu and the rows' context menu.
+
+| Where | Gesture | What it does |
+|---|---|---|
+| A note | Click; Ctrl- or Shift-click | Selects the note; adds it to the selection or takes it out |
+| | Drag; Ctrl-drag; Alt-drag | Moves the selected notes in time and to other keys, on the grid; copies them; changes their velocity |
+| | Double-click | Deletes the note |
+| A note's start or end | Drag; Alt-drag | Trims the selected notes, on the grid; off it |
+| A row | Click | Clears the selection and puts the start marker there |
+| | Double-click | Adds a note, a step of the grid long, on the line before the pointer |
+| | Drag | Selects the notes in the rectangle dragged over |
+| A row, in Draw Mode | Click; drag | Adds a note; draws a note at each step of the grid dragged over, on the key under the pointer |
+| A note, in Draw Mode | Click | Deletes the note |
+| A key | Click; Ctrl- or Shift-click | Selects the notes on the key; adds them |
+| | Wheel; Ctrl-wheel | Scrolls up and down; makes the rows taller or shorter around the pointer |
+| The velocities | Drag | Changes the velocity of the note dragged, or the selected notes |
+| A controller's lane | Click; drag | Draws the curve, a step of the grid at a time, at the pointer's height: the steps a fast drag skips get the values on the way. In MIDI's 128 steps, and off or on for a switch such as the sustain pedal, on from halfway up |
+| | Alt-click; Alt-drag | Erases the curve there, so what came before holds through it |
+| The ruler | Click; drag | Puts the start marker and the playhead there; zooms |
+| Anywhere else | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
+
+Live turns off the grid with Alt while a drag goes, but Alt-dragging a note
+changes its velocity there, so moving notes off the grid is Snap to Grid
+(Ctrl+4) turned off. Escape cancels a drag. A right-click opens a context
+menu of commands from the registry, as the arrangement's do: Cut, Copy,
+Paste, Duplicate, Delete, Quantize and Zoom to Selection on a note; Paste,
+Select All, Draw Mode and Quantize on the rows; the grid on both; Clear
+Controller and the grid on a controller's lane; and Locate and Follow on
+the ruler. With Snap to Grid off, drawing a controller fills steps of three
+points.
+
+**The focus.** Clicking in the piano roll gives it the focus, and clicking
+in the arrangement gives the arrangement the focus back. While the piano
+roll has it, the edit commands (Ctrl+X, C, V, D, A and Delete), Zoom and the
+arrow keys act on its notes: Up and Down transpose, Shift with them by
+octaves, Left and Right nudge by the grid, Shift+Left and Shift+Right
+shorten and lengthen, Ctrl+Up and Ctrl+Down change velocities, and Ctrl+U
+quantizes ([commands.md](commands.md#notes)). Hiding the piano roll gives
+the arrangement the focus.
+
+**For Tier 2's extensions and profiles.** What the piano roll shows, its
+selection, its zoom and the focus are the `Editor`'s, beside the
+arrangement's, where commands and agents read and change them; its context
+menus list commands from the registry; its colours and sizes are in the
+`Theme` (`theme.piano_roll` and the piano roll's colours); its gestures are
+the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
+`DrawGrid`, `PianoKey`, `VelocityLane` and `ControllerLane`; what its lane
+shows is the editor's too (`PianoRoll::lane`); its panel's id is
+`musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
+setting.
 
 ## The command palette
 
@@ -352,6 +467,13 @@ the pan to centre it. A whole drag is one step in the undo history. The
 faders, sends, pans, buttons, menus and meters are named for screen readers,
 such as "Lead Volume", which is how the tests drive them.
 
+**Automation.** A fader, a send or a pan with automation follows it, showing
+its value at the playhead, and has a red dot at its top left; the dot is
+grey once the control is moved by hand, which overrides the automation
+until it's re-enabled, as in Live. Right-clicking one of them has **Show
+Automation**, which shows its lane in the arrangement, **Re-Enable
+Automation** and **Clear Automation**.
+
 **Meters.** Each strip's meter shows its channel's output, after mute and
 solo, left and right: the peak in a light shade, and the RMS level, averaged
 over about 0.3 s, solid. They're green up to -6 dB, yellow to 0 dB and red
@@ -435,9 +557,11 @@ slide, each note's own with MPE. Each pass with notes is a take with a MIDI
 clip as long as the pass; a pass without notes makes no take. A note held
 as recording punches in isn't recorded, and one held as it punches out or
 stops ends there. Round a loop, a note held over the loop's end ends there
-and starts again at the loop's start, in the next pass. The sustain pedal
-and other controllers aren't recorded yet: they come with the piano roll's
-controller lanes.
+and starts again at the loop's start, in the next pass. It records how the
+controllers moved too, such as the sustain pedal and the mod wheel, as the
+clip's [controller curves](#the-piano-roll), each pass starting with them
+where they are: a pedal held down as a pass starts holds its notes in the
+take as it did while recording.
 
 **Files.** Recordings are 32-bit float WAV files at the engine's sample
 rate, in a `Recordings` folder in the project's folder, named after the
@@ -451,8 +575,10 @@ the same take.
 
 **The recorder** (`musicable-recorder`, a thread of its own) reads the
 engine's timeline and the inputs' buffers every 10 ms, and writes what the
-armed tracks record. The audio thread never waits for it. The inputs'
-buffers hold 8 seconds at least: if the recorder falls further behind than
+armed tracks record. The audio thread never waits for it. However late it
+runs, what the session sent it before the transport changed, such as a
+stream's inputs or the tracks just armed, takes effect before it follows
+the change. The inputs' buffers hold 8 seconds at least: if the recorder falls further behind than
 that, or an input stops capturing for two seconds, the recording has silence
 there, and the status bar says how much. A MIDI track's recording waits for
 its inputs to bring every message up to where it records, which the stream
@@ -470,9 +596,13 @@ buffers, the MIDI inputs' too, `Session::wanted_inputs` and
 arrangement. `crates/app/tests/recording.rs` records a second of a ramp
 through the session, checks it landed on the frame, and undoes it, and
 records a note on a MIDI track the same way;
+`crates/app/tests/mpe.rs` records an MPE performance, with the sustain pedal
+and the mod wheel, into a synth that takes only MPE MIDI, and checks the
+take plays back into it as it played, to the sample;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping, for audio and MIDI
-tracks, and the notes held over loops and punches.
+tracks, the notes held over loops and punches, and where the controllers
+start each pass.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks
@@ -498,6 +628,53 @@ Windows.
 After a new project's first save, it records into the Unsaved Recordings
 folder until it's opened again.
 
+## Built-in devices
+
+Musicable has devices of its own, which play without plugins: an EQ, a
+compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
+So far the EQ, the compressor, the gate and the utility play; the others
+come in the next few changes, and until then the browser leaves them out.
+Each is a node in the engine ([engine.md](engine.md#built-in-devices)),
+and the project saves its settings ([project-format.md](project-format.md)).
+
+The plugin browser lists them under **Built-in**, above the plugins, and
+finds them by name; All, Instruments and Effects pick among them too. A
+double-click puts one at the end of the selected track's devices, or the
+master's, with every control at its default.
+
+In the devices panel, a built-in device shows its controls in columns, a
+column for each group of them, such as one of the EQ's bands, under the
+group's name:
+
+- **A bar** for each number, filled as far as the value is along its range
+  (from zero, for a range either side of it, such as a gain in dB), with
+  its name and value on it. Drag it sideways, or Ctrl-drag (Cmd on a Mac)
+  to move it a tenth as far; the mouse map's `DeviceControl` target says
+  which. A double-click gives the default, and the right-click menu takes a
+  typed value: a number with or without its unit ("1.2k", "1.2 kHz",
+  "-6 dB", "250 ms"), a note's name ("C#3") or a pan ("20L"), applied on
+  Enter. Controls with whole steps, such as the synth's voices, move in
+  whole steps however slowly they're dragged.
+- **A button** for each switch, lit while it's on.
+- **A menu** for each choice, such as a band's shape.
+
+Every change is a step in the undo history named after the device, such
+as "Change EQ", and a whole drag is one. The engine hears each as it's
+made, and smooths it over 10 ms. Screen readers find each control by the
+device's name and the control's, such as "EQ Band 3 Freq", and can set a
+bar to a number.
+
+**Automation.** Every control of a built-in device can be automated. One
+with automation follows it, showing its value at the playhead, with the
+mixer's dot at its top left: red, or grey once the control is moved by
+hand, which overrides the automation until it's re-enabled
+([commands.md](commands.md#automation)). Right-clicking a button or a menu has **Show
+Automation**, **Re-Enable Automation** and **Clear Automation**, and a
+bar's right-click menu has them under the typed value. In the
+arrangement, a lane's ▾ lists every parameter of a track's built-in
+devices, and the lane spreads the values as the control does (a frequency
+on a log scale, say) and names them as it does ("1.20 kHz").
+
 ## Plugins
 
 The app finds CLAP and VST3 plugins in each format's usual places, and in
@@ -508,8 +685,9 @@ loads only the libraries that are new or changed since. A library that
 crashes, hangs or fails as it loads is left out, and the status bar says
 which; **Options > Rescan Plugins** tries those again too.
 
-**The plugin browser** lists the plugins found by name: all of them, or
-only the instruments or the effects. Hovering one shows its vendor, its
+**The plugin browser** lists the plugins found by name, under **Plugins**
+and after Musicable's own devices: all of them, or only the instruments or
+the effects. Hovering one shows its vendor, its
 kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
@@ -521,8 +699,9 @@ or says "Scanning..." while a scan runs.
 **The devices panel** shows the devices of the selected track, which a
 click on its header selects, in the order the signal goes through them,
 left to right. The buttons above them pick the selected track's or the
-master's. Each device has its name, its kind and format ("Instrument ·
-CLAP"), and:
+master's. A built-in device has its name and its controls
+([above](#built-in-devices)). A plugin device has its name, its kind and
+format ("Instrument · CLAP"), and:
 
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live. On Windows
@@ -549,8 +728,10 @@ has how the app hosts plugins.
 Every key press goes to the keymap before egui sees it, through
 `musicable_ui::KeyPresses`. A bound chord runs its command through
 `Session::key_pressed` and goes no further, so Space plays even when a button
-has keyboard focus. Unbound keys go on to egui. Key presses never reach the
-engine any other way.
+has keyboard focus. Unbound keys go on to egui, and so do keys whose command
+doesn't apply now (`Session::takes_key`): with no notes selected in the
+piano roll, the arrow keys move the keyboard focus between controls, as
+egui does with them. Key presses never reach the engine any other way.
 
 - While a text field has focus, such as the tempo field being typed into,
   every key goes to it instead. Ctrl+C, Ctrl+X and Ctrl+V reach the keymap
@@ -789,6 +970,7 @@ buffer_size = 128
 
 [behaviour]
 play_from = "start_marker"
+middle_c = "c3"
 
 [export]
 format = "wav"
@@ -804,11 +986,14 @@ Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
 smallest the device supports, or an ASIO driver's preferred size. `play_from`
 is where Space plays from: the start marker (`start_marker`), as in Live, or
-wherever the playhead stopped (`playhead`). The app reads it at startup;
-there's no window for it yet. `[export]` is the export window's settings as
-it was last used: `format` is `wav`, `aiff` or `flac`, `bits` is 16, 24, or
-32 for floats, and a `sample_rate` there renders at that rate instead of
-the engine's. Fields this version doesn't know are ignored.
+wherever the playhead stopped (`playhead`). `middle_c` is what the piano
+roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
+as in scientific pitch notation and Reaper, or `c5`, as in FL Studio. The
+app reads them at startup; there's no window for them yet. `[export]` is
+the export window's settings as it was last used: `format` is `wav`, `aiff`
+or `flac`, `bits` is 16, 24, or 32 for floats, and a `sample_rate` there
+renders at that rate instead of the engine's. Fields this version doesn't
+know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
@@ -891,6 +1076,11 @@ for, since those builds are distributed under it.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
   only what's in sight of a hundred tracks is laid out.
+  `crates/ui/src/piano_roll/tests.rs` does the same for the piano roll's
+  gestures, Draw Mode, keyboard, wheel and context menus.
+- [`crates/app/tests/piano_roll.rs`](../crates/app/tests/piano_roll.rs)
+  edits notes with the piano roll's commands and keys, and checks that the
+  test instrument plays them as they are after each change and undo.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
   tempo field and undoing a drag of it, and a new engine taking over. The
@@ -931,6 +1121,13 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
+- Automation: selecting points to move or delete several at once, curves
+  between points, automation moving and copying with its clips, and a
+  "Back to Arrangement" button in the transport bar, as Live has (for now
+  **Automation > Re-Enable Automation** re-enables every overridden lane).
+  Lanes of switches and choices drawn and edited as steps: for now their
+  points take whole values, but the value passes through the ones between
+  two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
 - Dragging plugins from the browser onto tracks, moving devices along a
@@ -938,6 +1135,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
+- In the piano roll: the notes' MPE expression, shown and edited (Tier 2),
+  drawing velocities across the lane, folding to the keys in use, scales,
+  and repeating the arrow keys while they're held.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.

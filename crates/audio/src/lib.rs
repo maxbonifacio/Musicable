@@ -508,8 +508,9 @@ impl Stream {
 
     /// The inputs' buffers, in the order requested: `None` for an input
     /// that didn't open. Each holds what its input captured, lined up with
-    /// the output, from a fraction of a second after the stream starts, and
-    /// can be read from any thread. Recordings read them. They keep what was
+    /// the output, from a fraction of a second after the stream starts (a
+    /// few seconds for an output whose clock moves in steps), and can be
+    /// read from any thread. Recordings read them. They keep what was
     /// captured after the stream stops, until dropped.
     pub fn input_buffers(&self) -> Vec<Option<InputBuffer>> {
         input_buffers(&self.inputs)
