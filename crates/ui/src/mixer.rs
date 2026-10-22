@@ -1,11 +1,11 @@
 //! The mixer: a channel strip for each track, in the project's order, and
 //! the master's on the right.
 //!
-//! A strip has, from the top: the track's name, where an audio track
-//! records from and when it plays its input, where its output goes, a send
-//! to each return track, the pan, the fader beside the meter, the gain and
-//! the highest peak, mute, solo and arm, and the clip stage. Its controls
-//! hand back [`Change`]s for the app to make.
+//! A strip has, from the top: the track's name, where an audio or MIDI
+//! track records from and when it plays its input, where its output goes,
+//! a send to each return track, the pan, the fader beside the meter, the
+//! gain and the highest peak, mute, solo and arm, and the clip stage. Its
+//! controls hand back [`Change`]s for the app to make.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -18,7 +18,9 @@ use egui::{
 };
 use musicable_commands::mixer::Change;
 use musicable_model::mixer::Bus;
-use musicable_model::{AudioInput, ClipType, Input, Monitor, Project, Track, TrackId, TrackKind};
+use musicable_model::{
+    AudioInput, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
+};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::Action;
@@ -44,6 +46,21 @@ pub struct InputChoice {
     pub name: String,
     /// How many channels it has, or 0 when that's only known once it opens.
     pub channels: u16,
+}
+
+/// A MIDI input tracks can record from, as the MIDI input menus offer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiChoice {
+    /// What tracks name it by: see [`MidiInput::device`].
+    pub id: String,
+    pub name: String,
+}
+
+/// What the input menus offer.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Choices<'a> {
+    pub audio: &'a [InputChoice],
+    pub midi: &'a [MidiChoice],
 }
 
 /// The readings of the project's meters, as the engine last measured them.
@@ -96,7 +113,7 @@ pub(crate) fn show(
     ui: &mut Ui,
     project: &Project,
     levels: &Levels,
-    inputs: &[InputChoice],
+    inputs: Choices<'_>,
     theme: &Theme,
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
@@ -158,8 +175,8 @@ struct Mixer<'a> {
     project: &'a Project,
     /// The return tracks. Each strip has a row of sends with one for each.
     returns: Vec<&'a Track>,
-    /// The audio inputs the input menus offer.
-    inputs: &'a [InputChoice],
+    /// The inputs the input menus offer.
+    inputs: Choices<'a>,
     /// How tall the faders are.
     fader: f32,
     theme: &'a Theme,
@@ -307,7 +324,11 @@ impl Mixer<'_> {
 
     /// Where an audio track records from: a menu of the inputs, each a pair
     /// of channels or a channel at a time, with the default input first.
+    /// For a MIDI track, a menu of the MIDI inputs.
     fn input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        if track.kind == TrackKind::Midi {
+            self.midi_input(ui, track, actions);
+        }
         if track.kind != TrackKind::Audio {
             return;
         }
@@ -317,7 +338,7 @@ impl Mixer<'_> {
         };
         let text = current.map_or("No Input".to_owned(), |input| self.input_name(input));
         let missing = current.is_some_and(|input| {
-            !input.device.is_empty() && !self.inputs.iter().any(|c| c.id == input.device)
+            !input.device.is_empty() && !self.inputs.audio.iter().any(|c| c.id == input.device)
         });
         let mut picked = None;
         let shown = if missing {
@@ -338,7 +359,7 @@ impl Mixer<'_> {
                     name: DEFAULT_INPUT.to_owned(),
                     channels: 2,
                 };
-                for choice in std::iter::once(&default).chain(self.inputs) {
+                for choice in std::iter::once(&default).chain(self.inputs.audio) {
                     ui.separator();
                     ui.label(RichText::new(&choice.name).weak());
                     for input in channel_choices(choice) {
@@ -376,6 +397,7 @@ impl Mixer<'_> {
             "" => DEFAULT_INPUT,
             id => self
                 .inputs
+                .audio
                 .iter()
                 .find(|choice| choice.id == id)
                 .map_or(input.name.as_str(), |choice| choice.name.as_str()),
@@ -383,10 +405,101 @@ impl Mixer<'_> {
         channels_name(name, input)
     }
 
-    /// When an audio track plays its input instead of its clips: In,
-    /// Auto, or Off.
+    /// Where a MIDI track records from: a menu of the MIDI inputs, every
+    /// one first, each with all its channels or one of them.
+    fn midi_input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        let current = match &track.input {
+            Some(Input::Midi(input)) => Some(input),
+            _ => None,
+        };
+        let text = current.map_or("No Input".to_owned(), |input| self.midi_input_name(input));
+        let missing = current.is_some_and(|input| {
+            !input.device.is_empty() && !self.inputs.midi.iter().any(|c| c.id == input.device)
+        });
+        let mut picked = None;
+        let shown = if missing {
+            RichText::new(&text).color(self.theme.warning)
+        } else {
+            RichText::new(&text)
+        };
+        let menu = ComboBox::from_id_salt(("midi input", track.id))
+            .width(self.sizes().inner())
+            .truncate()
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "No Input").clicked() {
+                    picked = Some(None);
+                }
+                let every = MidiChoice {
+                    id: String::new(),
+                    name: ALL_MIDI_INPUTS.to_owned(),
+                };
+                for choice in std::iter::once(&every).chain(self.inputs.midi) {
+                    ui.separator();
+                    ui.label(RichText::new(&choice.name).weak());
+                    ui.horizontal_wrapped(|ui| {
+                        for channel in std::iter::once(None).chain((0..16).map(Some)) {
+                            let input = MidiInput {
+                                device: choice.id.clone(),
+                                name: match choice.id.as_str() {
+                                    "" => String::new(),
+                                    _ => choice.name.clone(),
+                                },
+                                channel,
+                            };
+                            let on = current.is_some_and(|c| same_source(c, &input));
+                            let face = channel.map_or("All".to_owned(), |c| (c + 1).to_string());
+                            let label = match channel {
+                                Some(_) => midi_name(&choice.name, &input),
+                                None => format!("{}, All Channels", choice.name),
+                            };
+                            let button = ui.selectable_label(on, face);
+                            button.widget_info(|| {
+                                WidgetInfo::selected(Role::Button, true, on, &label)
+                            });
+                            if button.on_hover_text(&label).clicked() {
+                                picked = Some(Some(input));
+                            }
+                        }
+                    });
+                }
+            });
+        if menu.response.clicked() {
+            actions.push(Action::ListInputs);
+        }
+        name_menu(&menu.response, format!("{} Input", track.name), &text);
+        let hint = if missing {
+            "Where the track records from. This MIDI input isn't there: it's not plugged in."
+        } else {
+            "Where the track records from: a MIDI input, or all of them, and one channel or \
+             all of them, as MPE controllers need"
+        };
+        menu.response.on_hover_text(hint);
+        let changed = match (&picked, current) {
+            (Some(None), None) => false,
+            (Some(Some(input)), Some(current)) => !same_source(input, current),
+            (picked, _) => picked.is_some(),
+        };
+        if let Some(input) = picked.filter(|_| changed) {
+            mix(actions, Change::Input(track.id, input.map(Input::Midi)));
+        }
+    }
+
+    /// What a MIDI input menu calls `input`.
+    fn midi_input_name(&self, input: &MidiInput) -> String {
+        let name = match input.device.as_str() {
+            "" => ALL_MIDI_INPUTS,
+            id => (self.inputs.midi.iter())
+                .find(|choice| choice.id == id)
+                .map_or(input.name.as_str(), |choice| choice.name.as_str()),
+        };
+        midi_name(name, input)
+    }
+
+    /// When an audio or MIDI track plays its input instead of its clips:
+    /// In, Auto, or Off.
     fn monitor(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
-        if track.kind != TrackKind::Audio {
+        if !matches!(track.kind, TrackKind::Audio | TrackKind::Midi) {
             return;
         }
         let sizes = self.sizes();
@@ -427,6 +540,24 @@ impl Mixer<'_> {
 
 /// What the input menus call the default input.
 const DEFAULT_INPUT: &str = "Default";
+
+/// What the MIDI input menus call every MIDI input.
+const ALL_MIDI_INPUTS: &str = "All Inputs";
+
+/// Whether `a` and `b` take the same channels of the same MIDI input,
+/// whatever names they have for it.
+fn same_source(a: &MidiInput, b: &MidiInput) -> bool {
+    (&a.device, a.channel) == (&b.device, b.channel)
+}
+
+/// `name` with the MIDI channel `input` takes, counting from 1: "Keys,
+/// Ch. 10", or just "Keys" for all of them.
+fn midi_name(name: &str, input: &MidiInput) -> String {
+    match input.channel {
+        Some(channel) => format!("{name}, Ch. {}", channel + 1),
+        None => name.to_owned(),
+    }
+}
 
 /// The ways a track can take `choice`'s channels: each pair, then each
 /// channel on its own. An input whose channels aren't known yet offers two.
@@ -1237,6 +1368,7 @@ mod tests {
         document: Document,
         levels: Levels,
         inputs: Vec<InputChoice>,
+        midi: Vec<MidiChoice>,
         actions: Vec<Action>,
     }
 
@@ -1251,10 +1383,15 @@ mod tests {
             name: "Interface".to_owned(),
             channels: 4,
         };
+        let keystep = MidiChoice {
+            id: "keystep".to_owned(),
+            name: "Keystep".to_owned(),
+        };
         let state = State {
             document: Document::new(project),
             levels,
             inputs: vec![interface],
+            midi: vec![keystep],
             actions: Vec::new(),
         };
         Harness::builder().with_size([900.0, 600.0]).build_ui_state(
@@ -1262,11 +1399,15 @@ mod tests {
                 let mut actions = Vec::new();
                 let (theme, mouse) = (Theme::default(), MouseMap::live());
                 let project = state.document.project();
+                let inputs = Choices {
+                    audio: &state.inputs,
+                    midi: &state.midi,
+                };
                 show(
                     ui,
                     project,
                     &state.levels,
-                    &state.inputs,
+                    inputs,
                     &theme,
                     &mouse,
                     &mut actions,
@@ -1606,10 +1747,10 @@ mod tests {
                 .value()
         };
         // A new audio track takes the default input in stereo. Only audio
-        // tracks record audio.
+        // and MIDI tracks record.
         assert_eq!(input(&harness).as_deref(), Some("Default 1/2"));
-        assert!(harness.query_by_label("Keys Input").is_none());
-        assert!(harness.query_by_label("Keys Monitor In").is_none());
+        assert!(harness.query_by_label("Drums Input").is_none());
+        assert!(harness.query_by_label("Drums Monitor In").is_none());
 
         harness
             .get_by_role_and_label(Role::ComboBox, "Lead Input")
@@ -1665,6 +1806,55 @@ mod tests {
         harness.get_by_label("No Input").click();
         harness.run();
         assert_eq!(input(&harness).as_deref(), Some("No Input"));
+    }
+
+    #[test]
+    fn midi_tracks_choose_their_midi_input_and_monitoring() {
+        let (project, [_, keys, ..]) = project();
+        let mut harness = harness(project);
+        harness.run();
+        let input = |harness: &Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Keys Input")
+                .value()
+        };
+        // A new MIDI track takes every channel of every MIDI input.
+        assert_eq!(input(&harness).as_deref(), Some("All Inputs"));
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys Input")
+            .click();
+        harness.run();
+        assert!(harness.state().actions.contains(&Action::ListInputs));
+        for label in [
+            "All Inputs, Ch. 1",
+            "Keystep, All Channels",
+            "Keystep, Ch. 16",
+        ] {
+            assert!(harness.query_by_label(label).is_some(), "{label}");
+        }
+        harness.get_by_label("Keystep, Ch. 10").scroll_to_me();
+        harness.run();
+        harness.get_by_label("Keystep, Ch. 10").click();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("Keystep, Ch. 10"));
+        harness.get_by_label("Keys Monitor Off").click();
+        harness.run();
+        let tenth = MidiInput {
+            device: "keystep".to_owned(),
+            name: "Keystep".to_owned(),
+            channel: Some(9),
+        };
+        assert_eq!(
+            mixed(&harness),
+            [
+                Change::Input(keys, Some(Input::Midi(tenth))),
+                Change::Monitor(keys, Monitor::Off),
+            ]
+        );
+        // A MIDI input that isn't plugged in keeps its name.
+        harness.state_mut().midi.clear();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("Keystep, Ch. 10"));
     }
 
     #[test]
