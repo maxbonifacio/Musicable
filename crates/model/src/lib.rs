@@ -6,7 +6,8 @@
 //! [`mixer`] has the mixer's rules: where tracks can send their signal, and
 //! what mute and solo silence. [`clip`] has what tracks play: audio clips,
 //! and MIDI clips of notes with per-note expression. [`Locator`]s name
-//! places in the song. [`plugin`] has plugins in device chains. Tracks
+//! places in the song. [`plugin`] has plugins in device chains, and
+//! [`native`] Musicable's own devices. Tracks
 //! record from an [`Input`] into [`Take`]s, and comping copies the best of
 //! them to the track's own clips. [`param`] names every parameter in the
 //! project, and [`automation`] has the lanes that move them as the song
@@ -19,6 +20,7 @@
 pub mod automation;
 pub mod clip;
 pub mod mixer;
+pub mod native;
 pub mod param;
 pub mod plugin;
 pub mod time;
@@ -26,6 +28,7 @@ pub mod time;
 use automation::Lane;
 use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
+use native::NativeDevice;
 use plugin::PluginDevice;
 use time::{BeatRange, Beats, TempoMap};
 
@@ -93,12 +96,10 @@ pub struct Device {
     pub kind: DeviceKind,
 }
 
-/// What a device is: a plugin, or a test device. Musicable's own devices
-/// come later.
+/// What a device is: one of Musicable's own, a plugin, or a test device.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceKind {
-    /// Multiplies the signal by a linear gain, 1.0 = unity. It stands in for
-    /// Musicable's own devices until there are some.
+    /// Multiplies the signal by a linear gain, 1.0 = unity: a test device.
     TestGain { gain: f32 },
     /// Plays the notes of its track's MIDI clips with a plain tone, added to
     /// what comes into it: a test instrument. `level` is the linear
@@ -106,6 +107,8 @@ pub enum DeviceKind {
     TestInstrument { level: f32 },
     /// A CLAP or VST3 plugin.
     Plugin(PluginDevice),
+    /// One of Musicable's own devices.
+    Native(NativeDevice),
 }
 
 impl DeviceKind {
@@ -115,6 +118,7 @@ impl DeviceKind {
         match self {
             Self::TestInstrument { .. } => true,
             Self::Plugin(plugin) => plugin.instrument,
+            Self::Native(native) => native.kind.is_instrument(),
             Self::TestGain { .. } => false,
         }
     }
@@ -122,14 +126,28 @@ impl DeviceKind {
     pub fn plugin(&self) -> Option<&PluginDevice> {
         match self {
             Self::Plugin(plugin) => Some(plugin),
-            Self::TestGain { .. } | Self::TestInstrument { .. } => None,
+            _ => None,
         }
     }
 
     pub fn plugin_mut(&mut self) -> Option<&mut PluginDevice> {
         match self {
             Self::Plugin(plugin) => Some(plugin),
-            Self::TestGain { .. } | Self::TestInstrument { .. } => None,
+            _ => None,
+        }
+    }
+
+    pub fn native(&self) -> Option<&NativeDevice> {
+        match self {
+            Self::Native(native) => Some(native),
+            _ => None,
+        }
+    }
+
+    pub fn native_mut(&mut self) -> Option<&mut NativeDevice> {
+        match self {
+            Self::Native(native) => Some(native),
+            _ => None,
         }
     }
 }

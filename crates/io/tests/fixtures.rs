@@ -19,6 +19,7 @@ use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
 use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth, utility};
 use musicable_model::param::{ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -39,6 +40,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("plugins", plugins()),
         ("recording", recording()),
         ("controllers", controllers()),
+        ("built-in", built_in()),
         ("automation", automation()),
     ]
 }
@@ -565,10 +567,81 @@ fn controllers() -> Project {
     project
 }
 
-/// Automation, from version 8: lanes on a track's volume and pan, the
-/// master's volume and pan, a send, a test device's parameter and a
-/// plugin's, with ramps, steps, a lane of one point, one that starts into
-/// the song, values a float can only just hold, and an overridden lane.
+/// Musicable's own devices, from version 8: one of every kind, an EQ with
+/// bands at the edges of their ranges, a sampler with a sample and one
+/// without, a synth playing a MIDI track, a utility on the master, and a
+/// gap in the device ids where one was deleted.
+fn built_in() -> Project {
+    let mut project = Project::new();
+    let drums = project.add_track("Drums", TrackKind::Midi);
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let device = |project: &mut Project, kind, values: &[(usize, f64)]| {
+        let mut device = NativeDevice::new(kind);
+        for &(param, value) in values {
+            device.values[param] = value;
+        }
+        project.new_device(DeviceKind::Native(device))
+    };
+
+    let mut kick = NativeDevice::new(NativeKind::Sampler);
+    kick.sample = Some("Samples/Kick \"808\".wav".into());
+    kick.values[sampler::ROOT] = 36.0;
+    kick.values[sampler::MODE] = 1.0;
+    let kick = project.new_device(DeviceKind::Native(kick));
+    let empty = device(
+        &mut project,
+        NativeKind::Sampler,
+        &[(sampler::VOICES, 32.0)],
+    );
+    // Deleted.
+    device(&mut project, NativeKind::Gate, &[]);
+    let synth = device(
+        &mut project,
+        NativeKind::Synth,
+        &[
+            (synth::OSC1_WAVE, 3.0),
+            (synth::OSC2_PITCH, -24.0),
+            (synth::OSC2_DETUNE, 7.0),
+            (synth::FILTER_ENV, -96.0),
+            (synth::GLIDE, 1.0 / 3.0),
+        ],
+    );
+    let band = |b: usize, param: usize| b * eq::PER_BAND + param;
+    let tone = device(
+        &mut project,
+        NativeKind::Eq,
+        &[
+            (band(0, eq::ON), 1.0),
+            (band(0, eq::FREQ), 10.0),
+            (band(2, eq::GAIN), -24.0),
+            (band(2, eq::Q), 18.0),
+            (band(5, eq::SHAPE), 5.0),
+            (band(7, eq::ON), 1.0),
+            (band(7, eq::FREQ), 22_000.0),
+            (eq::OUTPUT, -0.0),
+        ],
+    );
+    let compressor = device(&mut project, NativeKind::Compressor, &[]);
+    let delay = device(&mut project, NativeKind::Delay, &[]);
+    let reverb = device(&mut project, NativeKind::Reverb, &[]);
+    let utility = device(
+        &mut project,
+        NativeKind::Utility,
+        &[(utility::GAIN, utility::MAX_GAIN), (utility::PAN, -1.0)],
+    );
+    project.track_mut(drums).unwrap().devices = vec![kick, empty];
+    project.track_mut(lead).unwrap().devices = vec![synth, delay];
+    project.track_mut(vocal).unwrap().devices = vec![tone, compressor, reverb];
+    project.master.devices = vec![utility];
+    project
+}
+
+/// Automation, from version 9: lanes on a track's volume and pan, the
+/// master's volume and pan, a send, a test device's parameter, a built-in
+/// EQ's frequency and shape, and a plugin's, with ramps, steps, a lane of
+/// one point, one that starts into the song, values a float can only just
+/// hold, the ends of a built-in parameter's range, and an overridden lane.
 fn automation() -> Project {
     let mut project = Project::new();
     project.tempo.set_tempo(90.0);
@@ -590,8 +663,10 @@ fn automation() -> Project {
     });
     let filter = project.new_device(filter);
     let filter_id = filter.id;
+    let tone = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let tone_id = tone.id;
     project.track_mut(bass).unwrap().devices = vec![gain];
-    project.track_mut(synth).unwrap().devices = vec![instrument, filter];
+    project.track_mut(synth).unwrap().devices = vec![instrument, filter, tone];
 
     let lane = |param, points: &[(f64, f64)]| {
         let points = points
@@ -632,6 +707,16 @@ fn automation() -> Project {
         lane(
             ParamAddress::Device(filter_id, 4_294_967_295),
             &[(0.25, 1e300), (0.5, -1e-300), (0.75, 20_000.0)],
+        ),
+        // A sweep from the bottom of the range to the top, and a step from
+        // one shape to another.
+        lane(
+            ParamAddress::Device(tone_id, eq::FREQ as u32),
+            &[(0.0, 10.0), (16.0, 22_000.0)],
+        ),
+        lane(
+            ParamAddress::Device(tone_id, eq::SHAPE as u32),
+            &[(4.0, 4.0), (4.0, 9.0)],
         ),
     ];
     project
@@ -735,4 +820,70 @@ fn the_documented_example_is_a_real_file() {
         .expect("docs/project-format.md starts with an example file");
     let project = project::from_str(example).unwrap();
     assert_eq!(project::to_string(&project).unwrap(), example);
+}
+
+/// Each built-in device's parameters as `docs/project-format.md` lists
+/// them: a table for each kind, a row for each parameter.
+fn parameter_tables() -> String {
+    let mut text = String::new();
+    for kind in NativeKind::ALL {
+        text += &format!("**{}** (`\"{}\"`):\n\n", kind.name(), kind.key());
+        text += "| # | Key | Control | Values | Default |\n|---|---|---|---|---|\n";
+        // The first parameter with each list of choices.
+        let mut listed: Vec<(&[&str], &str)> = Vec::new();
+        for (number, p) in kind.params().iter().enumerate() {
+            let range = format!("{} to {}", p.min, p.max);
+            let values = match p.unit {
+                Unit::Switch => "0 off, 1 on".to_owned(),
+                Unit::Choice(choices) => match listed.iter().find(|(c, _)| *c == choices) {
+                    Some((_, first)) => format!("as `{first}`"),
+                    None => {
+                        listed.push((choices, p.key));
+                        let named = choices.iter().enumerate().map(|(i, c)| format!("{i} {c}"));
+                        named.collect::<Vec<_>>().join(", ")
+                    }
+                },
+                Unit::Number if p.stepped => format!("{range}, whole"),
+                Unit::Number => range,
+                Unit::Note => format!("{range}, a MIDI note"),
+                Unit::Gain => format!("{range}, linear gain"),
+                Unit::Pan => format!("{range}, left to right"),
+                Unit::Ratio => format!("{range}, a ratio to 1"),
+                Unit::Semitones if p.stepped => format!("{range} semitones, whole"),
+                unit => {
+                    let word = match unit {
+                        Unit::Decibels => "dB",
+                        Unit::Hertz => "Hz",
+                        Unit::Milliseconds => "ms",
+                        Unit::Seconds => "s",
+                        Unit::Percent => "%",
+                        Unit::Semitones => "semitones",
+                        Unit::Cents => "cents",
+                        _ => unreachable!(),
+                    };
+                    format!("{range} {word}")
+                }
+            };
+            text += &format!(
+                "| {number} | `{}` | {} | {values} | {} |\n",
+                p.key,
+                p.full_name(),
+                p.default
+            );
+        }
+        text += "\n";
+    }
+    text
+}
+
+#[test]
+fn the_documented_parameters_are_the_tables() {
+    let page = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/project-format.md");
+    let page = fs::read_to_string(page).unwrap().replace("\r\n", "\n");
+    let tables = parameter_tables();
+    assert!(
+        page.contains(&tables),
+        "docs/project-format.md doesn't list the built-in devices' parameters as they \
+         are. Put this in its place:\n\n{tables}"
+    );
 }

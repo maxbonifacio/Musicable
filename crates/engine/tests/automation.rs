@@ -12,6 +12,7 @@ use musicable_engine::{
 };
 use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{ClipContent, MidiClip};
+use musicable_model::native::{NativeDevice, NativeKind, eq, utility};
 use musicable_model::param::{ParamAddress, Scale};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{Chain, DeviceKind, Project, TestTone, TrackKind};
@@ -158,6 +159,10 @@ fn automation_loops_and_locates_as_clips_do() {
 /// Bass and chords on tones and a test instrument, sending to a reverb,
 /// with lanes on volumes, pans, a send, a test device's gain and the
 /// instrument's level, which it gets as events, and an overridden lane.
+/// Then lanes on built-in devices, which read their own: an EQ on the bass
+/// whose shelf rises and moves, whose 24 dB cut (two sections) comes in and
+/// goes out and whose bell turns to a notch, and a utility on the master
+/// whose gain, balance and DC filter move.
 fn project() -> Project {
     let mut p = Project::new();
     let bass = p.add_track("Bass", TrackKind::Audio);
@@ -189,6 +194,12 @@ fn project() -> Project {
     let track = p.track_mut(keys).unwrap();
     track.clips.push(clip);
     track.devices.push(instrument);
+    let tone = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let tone_id = tone.id;
+    p.track_mut(bass).unwrap().devices.push(tone);
+    let utility = p.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Utility)));
+    let utility_id = utility.id;
+    p.master.devices.push(utility);
 
     let lane = |param, at: &[(Beats, f64)]| Lane::new(param, points(at));
     let mut overridden = lane(ParamAddress::Pan(Chain::Master), &[(beats(0, 1), 1.0)]);
@@ -225,6 +236,28 @@ fn project() -> Project {
         ),
         overridden,
     ];
+    let band = |band: usize, param: usize, at: &[(Beats, f64)]| {
+        let param = band * eq::PER_BAND + param;
+        lane(ParamAddress::Device(tone_id, param as u32), at)
+    };
+    let utility = |param: usize, at: &[(Beats, f64)]| {
+        lane(ParamAddress::Device(utility_id, param as u32), at)
+    };
+    let (two, five) = (beats(2, 1), beats(5, 1));
+    p.automation.extend([
+        band(1, eq::GAIN, &[(beats(0, 1), -12.0), (beats(4, 1), 12.0)]),
+        band(1, eq::FREQ, &[(beats(0, 1), 50.0), (beats(6, 1), 400.0)]),
+        band(
+            0,
+            eq::ON,
+            &[(two, 0.0), (two, 1.0), (five, 1.0), (five, 0.0)],
+        ),
+        band(0, eq::FREQ, &[(beats(0, 1), 40.0), (beats(4, 1), 120.0)]),
+        band(2, eq::SHAPE, &[(beats(3, 1), 4.0), (beats(3, 1), 5.0)]),
+        utility(utility::GAIN, &[(beats(0, 1), 1.0), (beats(4, 1), 0.5)]),
+        utility(utility::PAN, &[(beats(2, 1), 0.0), (beats(6, 1), -0.5)]),
+        utility(utility::DC, &[(beats(1, 1), 0.0), (beats(1, 1), 1.0)]),
+    ]);
     p
 }
 

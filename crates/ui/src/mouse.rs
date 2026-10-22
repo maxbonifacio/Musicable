@@ -56,6 +56,8 @@ pub enum Target {
     SoloButton,
     /// A fader, a pan control or a send in the mixer.
     MixerControl,
+    /// A built-in device's control, in the devices panel.
+    DeviceControl,
     /// The arrangement's tracks and ruler, and the piano roll's notes and
     /// ruler, for the wheel.
     Timeline,
@@ -308,6 +310,8 @@ impl MouseMap {
         bind(T::SoloButton, Click, &ctrl, A::AddSolo);
         bind(T::MixerControl, Drag, &[none], A::Coarse);
         bind(T::MixerControl, Drag, &ctrl, A::Fine);
+        bind(T::DeviceControl, Drag, &[none], A::Coarse);
+        bind(T::DeviceControl, Drag, &ctrl, A::Fine);
         bind(T::Timeline, Wheel, &[none], A::Scroll);
         bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
         bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);

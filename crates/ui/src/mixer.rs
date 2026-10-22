@@ -765,13 +765,7 @@ impl Mixer<'_> {
     /// What a control for `param` shows: the value its automation gives it
     /// at the playhead, unless someone overrode that, or else `own`.
     fn shown(&self, param: ParamAddress, own: f32) -> f32 {
-        let project = self.project;
-        match project.lane(param) {
-            Some(lane) if !lane.overridden => (lane
-                .value_at(self.playhead, project.param_scale(param)))
-            .map_or(own, |value| value as f32),
-            _ => own,
-        }
+        automated_value(self.project, param, self.playhead, f64::from(own)) as f32
     }
 
     /// Marks the control `response` if `param` has automation, and gives it
@@ -787,42 +781,12 @@ impl Mixer<'_> {
         response.context_menu(|ui| self.automation_items(ui, param, actions));
     }
 
-    /// A dot at the top left of the control `response` if `param` has
-    /// automation: in the automation's colour while it follows it, and
-    /// grey once someone overrode it.
     fn mark(&self, ui: &Ui, response: &Response, param: ParamAddress) {
-        let Some(lane) = self.project.lane(param) else {
-            return;
-        };
-        let colour = match lane.overridden {
-            true => self.theme.automation_off,
-            false => self.theme.automation,
-        };
-        let radius = self.theme.point;
-        let at = response.rect.left_top() + vec2(radius, radius);
-        ui.painter().circle_filled(at, radius, colour);
+        automation_mark(ui, self.theme, self.project, response, param);
     }
 
-    /// The commands for `param`'s automation, for a control's menu: showing
-    /// its lane, re-enabling it once someone overrode it, and clearing it.
     fn automation_items(&self, ui: &mut Ui, param: ParamAddress, actions: &mut Vec<Action>) {
-        let lane = self.project.lane(param);
-        let items = [
-            (automation::SHOW_LANE, "Show Automation", true),
-            (
-                automation::RE_ENABLE,
-                "Re-Enable Automation",
-                lane.is_some_and(|lane| lane.overridden),
-            ),
-            (automation::CLEAR, "Clear Automation", lane.is_some()),
-        ];
-        for (command, title, enabled) in items {
-            if ui.add_enabled(enabled, egui::Button::new(title)).clicked() {
-                let args = Args::new().with("param", param);
-                actions.push(Action::RunWith(command, args));
-                ui.close();
-            }
-        }
+        automation_items(ui, self.project, param, actions);
     }
 
     /// Mute, solo, and arm for audio and MIDI tracks.
@@ -1277,6 +1241,71 @@ fn paint_level(painter: &Painter, column: Rect, gain: f32, alpha: f32, theme: &T
     }
 }
 
+/// What a control for `param` shows: the value its automation gives it at
+/// `playhead`, unless someone overrode that, or else `own`, its own value.
+pub(crate) fn automated_value(
+    project: &Project,
+    param: ParamAddress,
+    playhead: Beats,
+    own: f64,
+) -> f64 {
+    match project.lane(param) {
+        Some(lane) if !lane.overridden => lane
+            .value_at(playhead, project.param_scale(param))
+            .unwrap_or(own),
+        _ => own,
+    }
+}
+
+/// A dot at the top left of the control `response` if `param` has
+/// automation: in the automation's colour while it follows it, and grey
+/// once someone overrode it.
+pub(crate) fn automation_mark(
+    ui: &Ui,
+    theme: &Theme,
+    project: &Project,
+    response: &Response,
+    param: ParamAddress,
+) {
+    let Some(lane) = project.lane(param) else {
+        return;
+    };
+    let colour = match lane.overridden {
+        true => theme.automation_off,
+        false => theme.automation,
+    };
+    let radius = theme.point;
+    let at = response.rect.left_top() + vec2(radius, radius);
+    ui.painter().circle_filled(at, radius, colour);
+}
+
+/// The commands for `param`'s automation, for a control's menu: showing its
+/// lane, re-enabling it once someone overrode it, and clearing it.
+pub(crate) fn automation_items(
+    ui: &mut Ui,
+    project: &Project,
+    param: ParamAddress,
+    actions: &mut Vec<Action>,
+) {
+    let lane = project.lane(param);
+    let items = [
+        (automation::SHOW_LANE, "Show Automation", true),
+        (
+            automation::RE_ENABLE,
+            "Re-Enable Automation",
+            lane.is_some_and(|lane| lane.overridden),
+        ),
+        (automation::CLEAR, "Clear Automation", lane.is_some()),
+    ];
+    for (command, title, enabled) in items {
+        if ui.add_enabled(enabled, egui::Button::new(title)).clicked() {
+            let args = Args::new().with("param", param);
+            actions.push(Action::RunWith(command, args));
+            ui.close();
+        }
+    }
+}
+
 /// The colour of a meter at `height` of the way up: the colour of the
 /// scale's zone there.
 pub(crate) fn meter_colour(height: f32, theme: &Theme) -> Color32 {
@@ -1340,7 +1369,7 @@ fn clip_hint(clip_type: ClipType) -> &'static str {
 
 /// Names the slider `response` for screen readers, and tells them its
 /// value in `range`. Returns the value one asked it to take.
-fn slider_info(
+pub(crate) fn slider_info(
     ui: &Ui,
     response: &Response,
     label: &str,
@@ -1370,7 +1399,7 @@ fn slider_info(
 }
 
 /// Names the combo box `response` for screen readers, showing `value`.
-fn name_menu(response: &Response, label: String, value: &str) {
+pub(crate) fn name_menu(response: &Response, label: String, value: &str) {
     response.widget_info(|| WidgetInfo {
         current_text_value: Some(value.to_owned()),
         ..WidgetInfo::labeled(Role::ComboBox, true, &label)

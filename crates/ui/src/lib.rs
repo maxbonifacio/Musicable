@@ -17,6 +17,7 @@ mod keys;
 mod menus;
 mod mixer;
 mod mouse;
+mod native;
 mod palette;
 mod piano_roll;
 mod search;

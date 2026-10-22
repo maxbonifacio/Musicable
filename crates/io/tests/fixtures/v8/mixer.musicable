@@ -309,6 +309,5 @@
     "clip_type": "soft",
     "console": {}
   },
-  "locators": [],
-  "automation": []
+  "locators": []
 }

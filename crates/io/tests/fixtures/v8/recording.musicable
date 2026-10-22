@@ -316,6 +316,5 @@
     "clip_type": "off",
     "console": {}
   },
-  "locators": [],
-  "automation": []
+  "locators": []
 }

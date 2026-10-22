@@ -10,6 +10,7 @@ use musicable_model::clip::{
     Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId, Point, Timing,
 };
 use musicable_model::mixer::Bus;
+use musicable_model::native::NativeKind;
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
@@ -344,6 +345,62 @@ impl Transaction<'_> {
                 device,
                 from,
                 to: settings,
+            });
+        }
+    }
+
+    /// Sets parameter `param` of the built-in device with id `device` to
+    /// `value`, kept in the parameter's range ([`ParamInfo::clamp`]). Not a
+    /// number does nothing, and so do a device that isn't built in and a
+    /// parameter it hasn't got.
+    ///
+    /// [`ParamInfo::clamp`]: musicable_model::native::ParamInfo::clamp
+    pub fn set_native_param(&mut self, device: DeviceId, param: u32, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let Some(native) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.native_mut())
+        else {
+            return;
+        };
+        let Some(from) = native.set(param as usize, value) else {
+            return;
+        };
+        let to = native.values[param as usize];
+        if from != to {
+            self.edits.push(Edit::NativeParam {
+                device,
+                param,
+                from,
+                to,
+            });
+        }
+    }
+
+    /// Gives the sampler with id `device` the sample `file`, or takes its
+    /// sample away with `None`. An empty path does nothing, and so does a
+    /// device that isn't a sampler.
+    pub fn set_native_sample(&mut self, device: DeviceId, file: Option<String>) {
+        if file.as_ref().is_some_and(String::is_empty) {
+            return;
+        }
+        let Some(native) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.native_mut())
+            .filter(|native| native.kind == NativeKind::Sampler)
+        else {
+            return;
+        };
+        if native.sample != file {
+            let from = std::mem::replace(&mut native.sample, file.clone());
+            self.edits.push(Edit::NativeSample {
+                device,
+                from,
+                to: file,
             });
         }
     }
@@ -1136,7 +1193,14 @@ impl Transaction<'_> {
                     self.set_send_level(track, send, narrow);
                 }
             }
-            ParamAddress::Device(device, n) => self.set_plugin_param(device, n, Some(value)),
+            ParamAddress::Device(device, n) => {
+                let device_kind = self.project.find_device(device).map(|(_, _, d)| &d.kind);
+                if device_kind.is_some_and(|kind| kind.native().is_some()) {
+                    self.set_native_param(device, n, value);
+                } else {
+                    self.set_plugin_param(device, n, Some(value));
+                }
+            }
         }
     }
 
@@ -1289,6 +1353,10 @@ impl Transaction<'_> {
             Edit::PluginSettings { device, to, .. } => {
                 self.set_plugin_settings(*device, to.clone())
             }
+            Edit::NativeParam {
+                device, param, to, ..
+            } => self.set_native_param(*device, *param, *to),
+            Edit::NativeSample { device, to, .. } => self.set_native_sample(*device, to.clone()),
             Edit::AddLane { index, lane } => self.add_lane(*index, lane.clone()),
             Edit::RemoveLane { lane, .. } => {
                 self.remove_lane(lane.param);
@@ -1626,6 +1694,19 @@ pub enum Edit {
         from: PluginSettings,
         to: PluginSettings,
     },
+    /// Parameter `param` of the built-in device with id `device` changed.
+    NativeParam {
+        device: DeviceId,
+        param: u32,
+        from: f64,
+        to: f64,
+    },
+    /// The sample of the sampler with id `device` changed.
+    NativeSample {
+        device: DeviceId,
+        from: Option<String>,
+        to: Option<String>,
+    },
     /// `lane` went in at `index` in the project's lanes: its parameter is
     /// automated.
     AddLane {
@@ -1913,6 +1994,22 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::NativeParam {
+                device,
+                param,
+                from,
+                to,
+            } => Edit::NativeParam {
+                device,
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::NativeSample { device, from, to } => Edit::NativeSample {
+                device,
+                from: to,
+                to: from,
+            },
             Edit::AddLane { index, lane } => Edit::RemoveLane { index, lane },
             Edit::RemoveLane { index, lane } => Edit::AddLane { index, lane },
             Edit::LanePoints { param, from, to } => Edit::LanePoints {
@@ -2162,6 +2259,25 @@ impl Edit {
                 },
             ) if device == other => to.clone_from(next),
             (
+                Edit::NativeParam {
+                    device, param, to, ..
+                },
+                Edit::NativeParam {
+                    device: other,
+                    param: other_param,
+                    to: next,
+                    ..
+                },
+            ) if device == other && param == other_param => *to = *next,
+            (
+                Edit::NativeSample { device, to, .. },
+                Edit::NativeSample {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => to.clone_from(next),
+            (
                 Edit::LanePoints { param, to, .. },
                 Edit::LanePoints {
                     param: other,
@@ -2227,6 +2343,8 @@ impl Edit {
                 | Edit::RemoveDevice { .. }
                 | Edit::PluginParam { .. }
                 | Edit::PluginSettings { .. }
+                | Edit::NativeParam { .. }
+                | Edit::NativeSample { .. }
                 | Edit::AddLane { .. }
                 | Edit::RemoveLane { .. }
                 | Edit::LanePoints { .. }
@@ -2289,6 +2407,8 @@ impl Edit {
             Edit::LocatorAt { from, to, .. } => from == to,
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,
+            Edit::NativeParam { from, to, .. } => from == to,
+            Edit::NativeSample { from, to, .. } => from == to,
             Edit::LanePoints { from, to, .. } => from == to,
             Edit::LaneOverridden { from, to, .. } => from == to,
         }

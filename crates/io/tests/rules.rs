@@ -5,6 +5,7 @@ use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERS
 use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
@@ -123,6 +124,34 @@ const PLUGIN: &str = "tracks[0].devices[0].kind.plugin";
 fn edited_plugin(edit: impl FnOnce(&mut Value)) -> Value {
     edited_from(&plugged(), |f| {
         edit(&mut f["tracks"][0]["devices"][0]["kind"]["plugin"]);
+    })
+}
+
+/// Built-in devices: a sampler with a sample on a MIDI track, and an EQ
+/// with a band turned down on the master.
+fn built_in() -> Project {
+    let mut project = Project::new();
+    let midi = project.add_track("MIDI", TrackKind::Midi);
+    let mut kick = NativeDevice::new(NativeKind::Sampler);
+    kick.sample = Some("Samples/Kick.wav".into());
+    kick.set(sampler::ROOT, 36.0);
+    let kick = project.new_device(DeviceKind::Native(kick));
+    project.track_mut(midi).unwrap().devices.push(kick);
+    let mut tone = NativeDevice::new(NativeKind::Eq);
+    tone.set(eq::GAIN, -3.0);
+    let tone = project.new_device(DeviceKind::Native(tone));
+    project.master.devices.push(tone);
+    project
+}
+
+/// Where the sampler's settings are in [`built_in`]'s file.
+const NATIVE: &str = "tracks[0].devices[0].kind.native";
+
+/// [`built_in`]'s file, changed by `edit`, which gets the sampler's
+/// settings.
+fn edited_native(edit: impl FnOnce(&mut Value)) -> Value {
+    edited_from(&built_in(), |f| {
+        edit(&mut f["tracks"][0]["devices"][0]["kind"]["native"]);
     })
 }
 
@@ -749,6 +778,99 @@ fn plugins_name_their_plugin_and_keep_its_settings_in_order() {
     };
     assert_eq!(plugin.name, "");
     assert_eq!(plugin.settings.state, Some(PluginState::new([])));
+}
+
+#[test]
+fn built_in_devices_set_their_parameters_by_key() {
+    assert_eq!(load(&edited_native(|_| {})).unwrap(), built_in());
+    let at = |field: &str| format!("{NATIVE}.{field}");
+    refused(
+        &edited_native(|n| n["kind"] = json!("flanger")),
+        &at("kind"),
+        "unknown variant `flanger`",
+    );
+    refused(
+        &edited_native(|n| n["params"]["loudness"] = json!(1.0)),
+        &at("params.loudness"),
+        "isn't one of the Sampler's parameters",
+    );
+    for root in [json!(128), json!(60.5), json!(-1)] {
+        refused(
+            &edited_native(|n| n["params"]["root"] = root),
+            &at("params.root"),
+            "must be a whole number from 0 to 127",
+        );
+    }
+    refused(
+        &edited_native(|n| n["params"]["attack"] = json!(0.0)),
+        &at("params.attack"),
+        "must be a number from 0.1 to 20000",
+    );
+    refused(
+        &edited_native(|n| n["params"]["attack"] = json!("fast")),
+        &at("params.attack"),
+        "expected f64",
+    );
+    refused(
+        &edited_native(|n| n["params"] = json!([1.0])),
+        &at("params"),
+        "expected an object of parameter values",
+    );
+    refused(
+        &edited_native(|n| n["sample"] = json!("")),
+        &at("sample"),
+        "must name a file",
+    );
+    refused(
+        &edited_native(|n| {
+            n.as_object_mut().unwrap().remove("sample");
+        }),
+        NATIVE,
+        "missing field `sample`",
+    );
+    refused(
+        &edited_from(&built_in(), |f| {
+            f["master"]["devices"][0]["kind"]["native"]["sample"] = json!("Kick.wav");
+        }),
+        "master.devices[0].kind.native.sample",
+        "must be null: only samplers have samples",
+    );
+    // JSON objects can hold a key twice, but a device can't.
+    let text = project::to_string(&built_in()).unwrap();
+    let twice = text.replacen("\"root\": 36.0,", "\"root\": 36.0, \"root\": 40.0,", 1);
+    match project::from_str(&twice) {
+        Err(LoadError::Invalid(invalid)) => {
+            assert_eq!(invalid.path, at("params.root"));
+            assert!(invalid.message.contains("is given twice"), "{invalid}");
+        }
+        other => panic!("a parameter given twice loaded: {other:?}"),
+    }
+
+    // A parameter that isn't there takes its default, so kinds can gain
+    // parameters without a new version of the format.
+    let file = edited_native(|n| {
+        let params = n["params"].as_object_mut().unwrap();
+        params.remove("volume");
+        params.remove("root");
+    });
+    let project = load(&file).unwrap();
+    let kick = project.tracks[0].devices[0].kind.native().unwrap();
+    let defaults = NativeDevice::new(NativeKind::Sampler);
+    assert_eq!(kick.values, defaults.values);
+
+    // Saving checks the same rules.
+    let mut project = built_in();
+    let kick = project.tracks[0].devices[0].kind.native_mut().unwrap();
+    kick.values[sampler::ROOT] = 200.0;
+    refused_saving(&project, &at("params.root"), "from 0 to 127");
+    let mut project = built_in();
+    let tone = project.master.devices[0].kind.native_mut().unwrap();
+    tone.values[eq::FREQ] = f64::NAN;
+    refused_saving(
+        &project,
+        "master.devices[0].kind.native.params.band1_freq",
+        "must be a number from 10 to 22000",
+    );
 }
 
 #[test]
@@ -1677,6 +1799,51 @@ fn lanes_automate_parameters_the_file_has_once_each() {
         &project,
         "automation[1].param",
         "automation[0] automates it too",
+    );
+}
+
+#[test]
+fn lanes_of_built_in_devices_take_the_values_their_parameters_do() {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let device = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let id = device.id;
+    project.track_mut(vocal).unwrap().devices.push(device);
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    let param = |n: usize| ParamAddress::Device(id, n as u32);
+    project.automation = vec![
+        Lane::new(param(eq::FREQ), vec![point(0, 100.0), point(4, 2500.0)]),
+        Lane::new(
+            param(eq::SHAPE),
+            vec![point(0, 4.0), point(4, 4.0), point(4, 5.0)],
+        ),
+    ];
+    assert_eq!(load(&edited_from(&project, |_| ())).unwrap(), project);
+    let lane = |f: &mut Value, i: usize, param| f["automation"][i]["param"] = param;
+    refused(
+        &edited_from(&project, |f| {
+            lane(f, 0, json!({"device": {"id": id.0, "param": 41}}));
+        }),
+        "automation[0].param",
+        "names parameter 41 of device 0, which has parameters 0 to 40",
+    );
+    let points = |f: &mut Value, i: usize, points| f["automation"][i]["points"] = points;
+    refused(
+        &edited_from(&project, |f| points(f, 0, json!([[0, 5.0]]))),
+        "automation[0].points[0][1]",
+        "must be a number from 10 to 22000",
+    );
+    refused(
+        &edited_from(&project, |f| points(f, 1, json!([[0, 4.0], [4, 4.5]]))),
+        "automation[1].points[1][1]",
+        "must be a whole number from 0 to 9",
+    );
+    // Saving checks the same.
+    project.automation[0].points[1].value = 30_000.0;
+    refused_saving(
+        &project,
+        "automation[0].points[1][1]",
+        "must be a number from 10 to 22000",
     );
 }
 

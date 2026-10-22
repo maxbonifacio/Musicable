@@ -318,15 +318,17 @@ device's id as `device`.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
+| `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, with every parameter at its default. Returns the new device | none | Double-click in the browser |
 | `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
-| `device.set_param` | Set Plugin Parameter | Sets the parameter `param` of the plugin `device` to `value`, or leaves it to the plugin's state without one | none | none |
+| `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
 | `device.hide_window` | Hide Plugin Window | Closes it | none | Ctrl+Alt+P |
 | `device.delete` | Delete Device | Deletes a device | none | Delete, with the device selected |
 
-Adding, changing and deleting are transactions named after the plugin, such
-as "Add Surge XT", "Change Surge XT" and "Delete Surge XT", so undo covers
-them. The window commands ask the app, with `Request::PluginWindow`; a
+Adding, changing and deleting are transactions named after the device:
+a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
+plugin by its name, such as "Delete Surge XT". So undo covers them, and
+dragging a control is one gesture, which one undo takes back. The window commands ask the app, with `Request::PluginWindow`; a
 plugin that isn't playing has no window to show, and the status bar says
 why. A new device starts with the plugin's own defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
@@ -337,8 +339,9 @@ Automation moves a parameter through points over the song
 ([project-format.md](project-format.md#lane)). Each command names
 its parameter with an argument of type `param`, a `ParamAddress`, which
 scripts write as text: "track 3 volume", "master pan", "send 2" or
-"device 4 param 17" (`param_text`). A plugin's parameter is its id in the
-plugin, and a test device's is 0.
+"device 4 param 17" (`param_text`). A built-in device's parameter is its
+number in its kind's table, a plugin's its id in the plugin, and a test
+device's is 0.
 
 | Command | Title | Arguments | What it does | Default key | Live |
 |---|---|---|---|---|---|
@@ -352,8 +355,9 @@ plugin, and a test device's is 0.
 | `automation.re_enable` | Re-Enable Automation | `param` | Has a parameter follow its automation again after someone moved it by hand, or every overridden one without `param` | none | Re-Enable Automation, Back to Arrangement |
 
 Values are kept within the parameter's range where the project knows it,
-as it does for the mixer's and the test devices' parameters; a plugin keeps
-its own in range. Deleting a lane's last point clears it. The arrangement's
+as it does for the mixer's, the built-in devices' and the test devices'
+parameters, and a switch's, a choice's, a note's or a count's are rounded
+to whole numbers; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
 gestures run these, and a drag of a point or a stretch of line, or a drag
 that draws, runs Edit Automation once, when it ends
 ([app.md](app.md#the-arrangement)).
@@ -361,8 +365,8 @@ that draws, runs Edit Automation once, when it ends
 Moving a control by hand overrides its automation, as in Live:
 `Transaction::set_param_by_hand` sets the value and marks the lane
 overridden in the same step, so one undo puts both back. The mixer's
-changes, `device.set_param` and what plugins change in their own windows all
-go through it. An overridden lane keeps its points, which can be edited as
+changes, `device.set_param` (and so the built-in devices' controls) and
+what plugins change in their own windows all do. An overridden lane keeps its points, which can be edited as
 usual, and the parameter holds the value it was moved to until Re-Enable
 Automation.
 

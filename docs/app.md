@@ -126,14 +126,16 @@ That's what `ParallelOptions::inline_below` is for
 - **The arrangement** fills the middle of the window: the tracks over time,
   with their clips, under a ruler ([below](#the-arrangement)).
 - **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Plugin to open the plugin browser (see
-  [Plugins](#plugins)). **View > Devices** (Ctrl+Alt+L) hides or shows it.
+  devices, or the master's, with Add Device to open the plugin browser (see
+  [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
+  **View > Devices** (Ctrl+Alt+L) hides or shows it.
 - **The piano roll** takes the devices panel's place, as Live's clip view
   takes its device view's: showing one hides the other. Double-clicking a
   MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
   switches between the two ([below](#the-piano-roll)).
-- **The plugin browser** is a panel on the left, hidden until Add Plugin or
-  **View > Plugin Browser** (Ctrl+Alt+B) shows it.
+- **The plugin browser** is a panel on the left, hidden until Add Device or
+  **View > Plugin Browser** (Ctrl+Alt+B) shows it. It lists Musicable's
+  own devices, then the plugins installed.
 - **The mixer** is a panel under them, with a strip for each track and the
   master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
   make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
@@ -624,6 +626,53 @@ Windows.
 After a new project's first save, it records into the Unsaved Recordings
 folder until it's opened again.
 
+## Built-in devices
+
+Musicable has devices of its own, which play without plugins: an EQ, a
+compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
+So far the EQ and the utility play; the others come in the next few
+changes, and until then the browser leaves them out. Each is a node in the
+engine ([engine.md](engine.md#built-in-devices)), and the project saves
+its settings ([project-format.md](project-format.md)).
+
+The plugin browser lists them under **Built-in**, above the plugins, and
+finds them by name; All, Instruments and Effects pick among them too. A
+double-click puts one at the end of the selected track's devices, or the
+master's, with every control at its default.
+
+In the devices panel, a built-in device shows its controls in columns, a
+column for each group of them, such as one of the EQ's bands, under the
+group's name:
+
+- **A bar** for each number, filled as far as the value is along its range
+  (from zero, for a range either side of it, such as a gain in dB), with
+  its name and value on it. Drag it sideways, or Ctrl-drag (Cmd on a Mac)
+  to move it a tenth as far; the mouse map's `DeviceControl` target says
+  which. A double-click gives the default, and the right-click menu takes a
+  typed value: a number with or without its unit ("1.2k", "1.2 kHz",
+  "-6 dB", "250 ms"), a note's name ("C#3") or a pan ("20L"), applied on
+  Enter. Controls with whole steps, such as the synth's voices, move in
+  whole steps however slowly they're dragged.
+- **A button** for each switch, lit while it's on.
+- **A menu** for each choice, such as a band's shape.
+
+Every change is a step in the undo history named after the device, such
+as "Change EQ", and a whole drag is one. The engine hears each as it's
+made, and smooths it over 10 ms. Screen readers find each control by the
+device's name and the control's, such as "EQ Band 3 Freq", and can set a
+bar to a number.
+
+**Automation.** Every control of a built-in device can be automated. One
+with automation follows it, showing its value at the playhead, with the
+mixer's dot at its top left: red, or grey once the control is moved by
+hand, which overrides the automation until it's re-enabled
+([commands.md](commands.md#automation)). Right-clicking a button or a menu has **Show
+Automation**, **Re-Enable Automation** and **Clear Automation**, and a
+bar's right-click menu has them under the typed value. In the
+arrangement, a lane's ▾ lists every parameter of a track's built-in
+devices, and the lane spreads the values as the control does (a frequency
+on a log scale, say) and names them as it does ("1.20 kHz").
+
 ## Plugins
 
 The app finds CLAP and VST3 plugins in each format's usual places, and in
@@ -634,8 +683,9 @@ loads only the libraries that are new or changed since. A library that
 crashes, hangs or fails as it loads is left out, and the status bar says
 which; **Options > Rescan Plugins** tries those again too.
 
-**The plugin browser** lists the plugins found by name: all of them, or
-only the instruments or the effects. Hovering one shows its vendor, its
+**The plugin browser** lists the plugins found by name, under **Plugins**
+and after Musicable's own devices: all of them, or only the instruments or
+the effects. Hovering one shows its vendor, its
 kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
@@ -647,8 +697,9 @@ or says "Scanning..." while a scan runs.
 **The devices panel** shows the devices of the selected track, which a
 click on its header selects, in the order the signal goes through them,
 left to right. The buttons above them pick the selected track's or the
-master's. Each device has its name, its kind and format ("Instrument ·
-CLAP"), and:
+master's. A built-in device has its name and its controls
+([above](#built-in-devices)). A plugin device has its name, its kind and
+format ("Instrument · CLAP"), and:
 
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live. On Windows
@@ -982,6 +1033,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   between points, automation moving and copying with its clips, and a
   "Back to Arrangement" button in the transport bar, as Live has (for now
   **Automation > Re-Enable Automation** re-enables every overridden lane).
+  Lanes of switches and choices drawn and edited as steps: for now their
+  points take whole values, but the value passes through the ones between
+  two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
 - Dragging plugins from the browser onto tracks, moving devices along a

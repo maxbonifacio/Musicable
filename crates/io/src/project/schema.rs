@@ -9,6 +9,7 @@
 //! can, so a new field doesn't compile until the format handles it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -18,6 +19,8 @@ use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{self, Beats};
 use musicable_model::{self as model, Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
+use serde::de::{self, Deserializer, MapAccess};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 use super::{FORMAT, Invalid, MAX_TICKS, VERSION};
@@ -276,6 +279,7 @@ enum DeviceKind {
     TestGain { gain: f32 },
     TestInstrument { level: f32 },
     Plugin(PluginDevice),
+    Native(NativeDevice),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -297,6 +301,70 @@ struct PluginDevice {
 enum PluginFormat {
     Clap,
     Vst3,
+}
+
+/// One of Musicable's own devices.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeDevice {
+    kind: NativeKind,
+    /// A sampler's sample file, or `None`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    sample: Option<String>,
+    params: NativeParams,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeKind {
+    Eq,
+    Compressor,
+    Gate,
+    Delay,
+    Reverb,
+    Utility,
+    Sampler,
+    Synth,
+}
+
+/// A native device's parameter values, as an object of each parameter's
+/// key and value, written in the order of the kind's table. Read in the
+/// file's order, so [`NativeDevice::to_model`] can say which key is wrong.
+#[derive(Debug)]
+struct NativeParams(Vec<(String, f64)>);
+
+impl Serialize for NativeParams {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NativeParams {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = NativeParams;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an object of parameter values")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<NativeParams, A::Error> {
+                let mut params = Vec::new();
+                while let Some(entry) = map.next_entry::<String, f64>()? {
+                    params.push(entry);
+                }
+                Ok(NativeParams(params))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -511,16 +579,37 @@ impl File {
             next_take_id: *next_take_id,
         };
         check_loops(&project)?;
-        // Which parameters a device has depends on its kind.
+        // Which parameters a device has depends on its kind, and a built-in
+        // device's take the values its own do.
         for (i, lane) in project.automation.iter().enumerate() {
             if let ParamAddress::Device(device, n) = lane.param
                 && !project.has_param(lane.param)
             {
+                let native = (project.find_device(device)).and_then(|(_, _, d)| d.kind.native());
+                let has = match native {
+                    Some(native) => format!("parameters 0 to {}", native.params().len() - 1),
+                    None => "only parameter 0".to_owned(),
+                };
                 let message = format!(
-                    "names parameter {n} of device {}, which has only parameter 0",
+                    "names parameter {n} of device {}, which has {has}",
                     device.0
                 );
                 return Err(Invalid::new(format!("automation[{i}].param"), message));
+            }
+            let Some(info) = project.native_param(lane.param) else {
+                continue;
+            };
+            for (j, point) in lane.points.iter().enumerate() {
+                if !info.is_valid(point.value) {
+                    let number = if info.stepped {
+                        "a whole number"
+                    } else {
+                        "a number"
+                    };
+                    let message = format!("must be {number} from {} to {}", info.min, info.max);
+                    let path = format!("automation[{i}].points[{j}][1]");
+                    return Err(Invalid::new(path, message));
+                }
             }
         }
         Ok(project)
@@ -1412,6 +1501,7 @@ impl From<&model::Device> for Device {
                     DeviceKind::TestInstrument { level: *level }
                 }
                 model::DeviceKind::Plugin(plugin) => DeviceKind::Plugin(PluginDevice::from(plugin)),
+                model::DeviceKind::Native(native) => DeviceKind::Native(NativeDevice::from(native)),
             },
         }
     }
@@ -1434,10 +1524,109 @@ fn devices_to_model(devices: &[Device], path: &str) -> Result<Vec<model::Device>
                 DeviceKind::Plugin(plugin) => {
                     model::DeviceKind::Plugin(plugin.to_model(&format!("{path}.plugin"))?)
                 }
+                DeviceKind::Native(native) => {
+                    model::DeviceKind::Native(native.to_model(&format!("{path}.native"))?)
+                }
             },
         })
     };
     devices.iter().enumerate().map(device).collect()
+}
+
+impl From<&model::native::NativeDevice> for NativeDevice {
+    fn from(device: &model::native::NativeDevice) -> Self {
+        let model::native::NativeDevice {
+            kind,
+            values,
+            sample,
+        } = device;
+        let params = kind.params().iter().zip(values);
+        Self {
+            kind: NativeKind::from(*kind),
+            sample: sample.clone(),
+            params: NativeParams(params.map(|(p, &v)| (p.key.to_owned(), v)).collect()),
+        }
+    }
+}
+
+impl NativeDevice {
+    /// Parameters missing from the file take their defaults, so a kind can
+    /// gain parameters without a new version of the format.
+    fn to_model(&self, path: &str) -> Result<model::native::NativeDevice, Invalid> {
+        let Self {
+            kind,
+            sample,
+            params,
+        } = self;
+        let kind = model::native::NativeKind::from(*kind);
+        let mut device = model::native::NativeDevice::new(kind);
+        let table = kind.params();
+        let mut given = vec![false; table.len()];
+        for (key, value) in &params.0 {
+            let path = format!("{path}.params.{key}");
+            let Some(i) = table.iter().position(|p| p.key == key) else {
+                let message = format!("isn't one of the {}'s parameters", kind.name());
+                return Err(Invalid::new(path, message));
+            };
+            if std::mem::replace(&mut given[i], true) {
+                return Err(Invalid::new(path, "is given twice"));
+            }
+            let p = &table[i];
+            if !p.is_valid(*value) {
+                let number = if p.stepped {
+                    "a whole number"
+                } else {
+                    "a number"
+                };
+                let message = format!("must be {number} from {} to {}", p.min, p.max);
+                return Err(Invalid::new(path, message));
+            }
+            device.values[i] = *value;
+        }
+        device.sample = match sample {
+            None => None,
+            Some(_) if kind != model::native::NativeKind::Sampler => {
+                let message = "must be null: only samplers have samples";
+                return Err(Invalid::new(format!("{path}.sample"), message));
+            }
+            Some(file) if file.is_empty() => {
+                return Err(Invalid::new(format!("{path}.sample"), "must name a file"));
+            }
+            Some(file) => Some(file.clone()),
+        };
+        Ok(device)
+    }
+}
+
+impl From<model::native::NativeKind> for NativeKind {
+    fn from(kind: model::native::NativeKind) -> Self {
+        use model::native::NativeKind as Model;
+        match kind {
+            Model::Eq => Self::Eq,
+            Model::Compressor => Self::Compressor,
+            Model::Gate => Self::Gate,
+            Model::Delay => Self::Delay,
+            Model::Reverb => Self::Reverb,
+            Model::Utility => Self::Utility,
+            Model::Sampler => Self::Sampler,
+            Model::Synth => Self::Synth,
+        }
+    }
+}
+
+impl From<NativeKind> for model::native::NativeKind {
+    fn from(kind: NativeKind) -> Self {
+        match kind {
+            NativeKind::Eq => Self::Eq,
+            NativeKind::Compressor => Self::Compressor,
+            NativeKind::Gate => Self::Gate,
+            NativeKind::Delay => Self::Delay,
+            NativeKind::Reverb => Self::Reverb,
+            NativeKind::Utility => Self::Utility,
+            NativeKind::Sampler => Self::Sampler,
+            NativeKind::Synth => Self::Synth,
+        }
+    }
 }
 
 impl From<&model::plugin::PluginDevice> for PluginDevice {

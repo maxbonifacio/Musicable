@@ -12,9 +12,9 @@ reference renderer bit for bit. This page is the map. The detail is in
 
 | Crate | Depends on | Holds |
 |---|---|---|
-| `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time |
+| `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
-| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
+| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
@@ -205,6 +205,13 @@ built yet, except where it says so.
   doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) checks plugin
   code in CI for what our allocation checker can't see.
+- **Built-in devices.** Partly built: eight kinds, each with a parameter
+  table in `musicable_model::native` that the format, the commands and the
+  devices panel's controls all work from, in format version 8. The engine's
+  `devices` module has the nodes, with each parameter worked out per frame
+  from the value set or its automation, and any modulation
+  (`devices::Params`); the EQ and the utility play, and the other six follow
+  ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
   paths of different latency meet, lines the cue output up with the output,
@@ -216,13 +223,14 @@ built yet, except where it says so.
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
   peak and RMS meters in atomics, shown in the app's mixer
   ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)).
-- **Automation.** Built: each lane is compiled into the node with its
-  parameter, not sent through the message queue, and read at the song
-  position, so it loops and locates like everything else. The mixer's
-  `Gain` reads its lanes frame by frame with an `automation::Param`, which
-  glides over jumps and adds modulation after its smoothing, and plugins
-  get theirs as parameter events on the points' frames and on a 32-frame
-  grid. Moving a control by hand overrides its lane until it's re-enabled
+- **Automation.** Built, in format version 9: each lane is compiled into
+  the node with its parameter, not sent through the message queue, and
+  read at the song position, so it loops and locates like everything else.
+  The mixer's `Gain` and the built-in devices read their lanes frame by
+  frame with an `automation::Param`, which glides over jumps and adds
+  modulation after its smoothing, and plugins get theirs as parameter
+  events on the points' frames and on a 32-frame grid. Moving a control by
+  hand overrides its lane until it's re-enabled
   ([engine.md](engine.md#automation), [commands.md](commands.md#automation),
   [app.md](app.md#the-arrangement)). Tempo automation is Tier 2.
 - **Recording.** Built: the backend captures inputs, system loopback on

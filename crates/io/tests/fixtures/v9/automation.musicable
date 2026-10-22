@@ -1,6 +1,6 @@
 {
   "format": "musicable-project",
-  "version": 8,
+  "version": 9,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -27,7 +27,7 @@
   "punch_out": false,
   "next_track_id": 3,
   "next_send_id": 1,
-  "next_device_id": 3,
+  "next_device_id": 4,
   "next_clip_id": 0,
   "next_locator_id": 0,
   "next_take_id": 0,
@@ -118,6 +118,58 @@
               "instrument": false,
               "state": null,
               "params": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "kind": {
+            "native": {
+              "kind": "eq",
+              "sample": null,
+              "params": {
+                "band1_on": 0.0,
+                "band1_shape": 1.0,
+                "band1_freq": 30.0,
+                "band1_gain": 0.0,
+                "band1_q": 0.7071067811865476,
+                "band2_on": 1.0,
+                "band2_shape": 3.0,
+                "band2_freq": 100.0,
+                "band2_gain": 0.0,
+                "band2_q": 0.7071067811865476,
+                "band3_on": 1.0,
+                "band3_shape": 4.0,
+                "band3_freq": 250.0,
+                "band3_gain": 0.0,
+                "band3_q": 0.7071067811865476,
+                "band4_on": 1.0,
+                "band4_shape": 4.0,
+                "band4_freq": 800.0,
+                "band4_gain": 0.0,
+                "band4_q": 0.7071067811865476,
+                "band5_on": 1.0,
+                "band5_shape": 4.0,
+                "band5_freq": 2500.0,
+                "band5_gain": 0.0,
+                "band5_q": 0.7071067811865476,
+                "band6_on": 1.0,
+                "band6_shape": 4.0,
+                "band6_freq": 6000.0,
+                "band6_gain": 0.0,
+                "band6_q": 0.7071067811865476,
+                "band7_on": 1.0,
+                "band7_shape": 6.0,
+                "band7_freq": 10000.0,
+                "band7_gain": 0.0,
+                "band7_q": 0.7071067811865476,
+                "band8_on": 0.0,
+                "band8_shape": 8.0,
+                "band8_freq": 18000.0,
+                "band8_gain": 0.0,
+                "band8_q": 0.7071067811865476,
+                "output": 0.0
+              }
             }
           }
         }
@@ -236,6 +288,32 @@
         [80640, 1e+300],
         [161280, -1e-300],
         [241920, 20000.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 3,
+          "param": 2
+        }
+      },
+      "points": [
+        [0, 10.0],
+        [5160960, 22000.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 3,
+          "param": 1
+        }
+      },
+      "points": [
+        [1290240, 4.0],
+        [1290240, 9.0]
       ],
       "overridden": false
     }

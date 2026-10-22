@@ -24,6 +24,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     plugins,
     recording,
     controllers,
+    native,
     automation,
 ];
 
@@ -168,7 +169,13 @@ fn no_controllers(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> 
     Ok(())
 }
 
-/// Version 8 added automation. Version 7 files have none.
+/// Version 8 added Musicable's own devices. Version 7 files have none, so
+/// they need nothing.
+fn native(_: &mut Map<String, Value>) -> Result<(), Invalid> {
+    Ok(())
+}
+
+/// Version 9 added automation. Version 8 files have none.
 fn automation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     add(file, "", "automation", json!([]))
 }
@@ -384,15 +391,15 @@ mod tests {
     }
 
     #[test]
-    fn version_7_files_have_no_automation() {
-        let mut file = json!({"version": 7, "tracks": []});
-        run(&STEPS[..7], &mut file, 7).unwrap();
-        assert_eq!(file, json!({"version": 8, "tracks": [], "automation": []}));
-        let mut file = json!({"version": 7, "automation": [{}]});
+    fn version_8_files_have_no_automation() {
+        let mut file = json!({"version": 8, "tracks": []});
+        run(&STEPS[..8], &mut file, 8).unwrap();
+        assert_eq!(file, json!({"version": 9, "tracks": [], "automation": []}));
+        let mut file = json!({"version": 8, "automation": [{}]});
         assert_eq!(
-            run(&STEPS[..7], &mut file, 7).unwrap_err().path,
+            run(&STEPS[..8], &mut file, 8).unwrap_err().path,
             "automation",
-            "automation in a version 7 file"
+            "automation in a version 8 file"
         );
     }
 

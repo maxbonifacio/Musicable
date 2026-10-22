@@ -3,6 +3,7 @@
 //! and a [`ParamSpec`] says what it is: its name, its range, its default
 //! and its [`Scale`].
 
+use crate::native::ParamInfo;
 use crate::{Chain, DeviceId, DeviceKind, Project, SendId};
 
 /// A parameter anywhere in the project: one address that automation,
@@ -24,7 +25,7 @@ pub enum ParamAddress {
 /// How a parameter's values spread along its control and its automation
 /// lane. Automation moves in a straight line in the scale from one point to
 /// the next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Scale {
     /// Evenly over the range.
     #[default]
@@ -35,7 +36,8 @@ pub enum Scale {
     /// A fader's taper over linear gain: the fourth root of the value
     /// spreads evenly, so the loud end spreads out, as on the mixer's
     /// faders. With the range from 0, 0 dB sits 84% of the way up a fader
-    /// that goes to +6 dB, -20 dB at 47% and -60 dB at 15%.
+    /// that goes to +6 dB, -20 dB at 47% and -60 dB at 15%. It suits times
+    /// that can be 0 too, giving short ones room.
     Fader,
 }
 
@@ -94,9 +96,13 @@ impl Scale {
     /// The value `t` of the way from `from` to `to`, moving evenly in the
     /// scale: what automation does between two points.
     pub fn mix(self, from: f64, to: f64, t: f64) -> f64 {
-        // Exactly the value between two the same, whatever the rounding.
-        if from == to {
+        // Exactly the ends, and the value between two the same, whatever
+        // the rounding.
+        if from == to || t <= 0.0 {
             return from;
+        }
+        if t >= 1.0 {
+            return to;
         }
         if self == Self::Linear {
             return from + (to - from) * t;
@@ -161,9 +167,10 @@ impl ParamSpec {
 
 impl Project {
     /// What the parameter at `address` is, where the project knows: the
-    /// mixer's parameters, and the test devices'. A plugin's parameters are
-    /// the plugin's to say, so they have none here. `None` too where the
-    /// project hasn't the parameter's channel, send or device.
+    /// mixer's parameters, the built-in devices' from their kind's table,
+    /// and the test devices'. A plugin's parameters are the plugin's to
+    /// say, so they have none here. `None` too where the project hasn't the
+    /// parameter's channel, send or device.
     pub fn param_spec(&self, address: ParamAddress) -> Option<ParamSpec> {
         if !self.has_param(address) {
             return None;
@@ -181,6 +188,15 @@ impl Project {
                 Some(ParamSpec::send(&self.track(to)?.name))
             }
             ParamAddress::Device(device, n) => {
+                if let Some(info) = self.native_param(address) {
+                    return Some(ParamSpec {
+                        name: info.full_name(),
+                        min: info.min,
+                        max: info.max,
+                        default: info.default,
+                        scale: info.scale,
+                    });
+                }
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {
                     (DeviceKind::TestGain { .. }, 0) => Some(ParamSpec {
@@ -200,10 +216,21 @@ impl Project {
         }
     }
 
+    /// The row in its kind's table of the built-in device's parameter at
+    /// `address`, if it's one.
+    pub fn native_param(&self, address: ParamAddress) -> Option<&'static ParamInfo> {
+        let ParamAddress::Device(device, n) = address else {
+            return None;
+        };
+        let (_, _, device) = self.find_device(device)?;
+        device.kind.native()?.params().get(n as usize)
+    }
+
     /// Whether the project has the parameter at `address`: the channel,
-    /// send or device it belongs to, and for a test device, parameter 0,
-    /// its only one. Which parameters a plugin has is the plugin's to say,
-    /// so any of a plugin's counts.
+    /// send or device it belongs to, and for a built-in device, a parameter
+    /// in its kind's table, and for a test device, parameter 0, its only
+    /// one. Which parameters a plugin has is the plugin's to say, so any of
+    /// a plugin's counts.
     pub fn has_param(&self, address: ParamAddress) -> bool {
         self.param_chain(address).is_some()
     }
@@ -225,15 +252,20 @@ impl Project {
                 .map(|t| Chain::Track(t.id)),
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
-                let known = matches!(device.kind, DeviceKind::Plugin(_)) || n == 0;
+                let known = match &device.kind {
+                    DeviceKind::Plugin(_) => true,
+                    DeviceKind::Native(native) => (n as usize) < native.params().len(),
+                    DeviceKind::TestGain { .. } | DeviceKind::TestInstrument { .. } => n == 0,
+                };
                 known.then_some(chain)
             }
         }
     }
 
     /// The parameter's own value, which applies where automation doesn't:
-    /// a channel's gain or pan, a send's level, a test device's setting, or
-    /// a plugin parameter set since the plugin last saved its state.
+    /// a channel's gain or pan, a send's level, a built-in or test device's
+    /// setting, or a plugin parameter set since the plugin last saved its
+    /// state.
     /// `None` for a plugin parameter that keeps the value its state gives
     /// it, and for parameters the project hasn't.
     pub fn param_value(&self, address: ParamAddress) -> Option<f64> {
@@ -251,6 +283,7 @@ impl Project {
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {
+                    (DeviceKind::Native(native), n) => native.value(n as usize),
                     (DeviceKind::TestGain { gain }, 0) => Some(f64::from(*gain)),
                     (DeviceKind::TestInstrument { level }, 0) => Some(f64::from(*level)),
                     (DeviceKind::Plugin(plugin), n) => plugin.settings.param(n),

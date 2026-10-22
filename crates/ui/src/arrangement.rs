@@ -895,6 +895,10 @@ impl Scene<'_> {
             }
             _ => project.param_value(param),
         }?;
+        if let Some(info) = project.native_param(param) {
+            // Between points, a switch or a choice shows its nearest value.
+            return Some(info.format(info.clamp(value)));
+        }
         Some(match param {
             ParamAddress::Pan(_) => pan_text(value as f32),
             _ if spec.scale == Scale::Fader => decibels(value as f32),
@@ -917,7 +921,8 @@ impl Scene<'_> {
 
     /// The parameters on `chain` an automation lane can show, with their
     /// names: the channel's volume, pan and sends, then each device's
-    /// parameters, by device.
+    /// parameters, by device: every one in a built-in device's table, and
+    /// the ones a plugin lists.
     #[allow(clippy::type_complexity)]
     fn chain_params(
         &self,
@@ -960,7 +965,13 @@ impl Scene<'_> {
                     }
                     params
                 }
-                _ => {
+                DeviceKind::Native(native) => (0..native.params().len() as u32)
+                    .map(|n| {
+                        let param = ParamAddress::Device(device.id, n);
+                        (param, self.spec(param).name)
+                    })
+                    .collect(),
+                DeviceKind::TestGain { .. } | DeviceKind::TestInstrument { .. } => {
                     let param = ParamAddress::Device(device.id, 0);
                     vec![(param, self.spec(param).name)]
                 }
