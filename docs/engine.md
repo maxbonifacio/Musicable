@@ -74,6 +74,9 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   `Stats::events_unmatched`.
 - A node gets its events for a block in `ProcessContext::events`, in order,
   each with an `offset` into the block. It applies each from that frame on.
+- `NodeEventKind::Modulation` offsets a parameter from its value, as a
+  modulator does, and the next one for the parameter replaces it. CLAP
+  plugins get it as parameter modulation. Nothing sends it yet.
 - `Event::Note` plays a note on a node from outside the graph, as live MIDI
   input will. Notes aren't sent again after a swap, as parameter values are
   (see [Notes](#notes)).
