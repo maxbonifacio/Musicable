@@ -80,9 +80,10 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   note id, it offsets the parameter for that note's voice alone, on top of
   the offset for every voice. CLAP plugins get it as parameter modulation,
   per note too. Nothing sends it yet.
-- `Event::Note` plays a note on a node from outside the graph, as live MIDI
-  input will. Notes aren't sent again after a swap, as parameter values are
-  (see [Notes](#notes)).
+- `Event::Note` plays a note on a node from outside the graph. Notes aren't
+  sent again after a swap, as parameter values are (see [Notes](#notes)).
+  Live MIDI input doesn't come this way, but with the device callback (see
+  **MIDI inputs** below).
 - Transport commands are `Play`, `Stop`, `Locate` and `Loop`. Since a block
   ends where the transport changes and where the loop jumps back,
   `ProcessContext::transport` holds for every frame of the block, and while
@@ -102,6 +103,14 @@ is what the inputs captured that long before frame `i` is heard. Recording
 doesn't go through the engine: it reads the inputs' buffers, which line up
 with the output exactly. The resampler (`musicable_engine::resample`) is
 public, for the backend's inputs on another clock.
+
+**MIDI inputs.** The same two calls take the messages the stream's MIDI
+inputs brought for the callback, as `midi::MidiMessage`s in order of time:
+the engine time each plays at, which MIDI input it came from (its place
+among the stream's), and its bytes, a MIDI 1.0 channel message. Each block
+gets those due before it ends in `ProcessContext::midi`. One timed before
+the callback plays at its first frame, and one timed after it at its last.
+The audio backend times them ([audio.md](audio.md#midi-inputs)).
 
 ## Recording
 
@@ -140,6 +149,20 @@ A track whose input isn't laid out monitors silence. Arming and monitoring
 are the node's parameters (`InputMonitor::ARMED`, `MONITOR`), so changing
 them doesn't rebuild the graph. `compile` and `compile_with_devices` lay out
 no inputs.
+
+A MIDI track has a `MidiMonitor` instead, with the same key and parameters,
+between its clip player and its instrument, on the way the notes go. It
+turns the messages its input takes into notes ([MIDI input](#notes)) and
+plays them as players expect of an instrument track: always with `In`,
+while the track is armed with `Auto`, whether the transport plays or not,
+and never with `Off`. The clips play too, except with `In` and while an
+armed `Auto` track records over them. The notes sounding end when either
+stops playing. It reads its parameters as it renders, after it has played
+the block's notes, so arming changes what plays from the next block. The
+layout lists the MIDI inputs (`InputLayout::add_midi`), and `find_midi`
+says which messages a track's `MidiInput` takes: one input's or every
+input's, one channel or all of them. A track whose input isn't laid out
+plays none.
 
 ## Musical time
 
@@ -518,6 +541,26 @@ their expression, to the track's first instrument (`Track::instrument`).
   sounding as they are: a note deleted, moved, transposed, or shortened to
   end before the playhead. A note made longer plays on.
 
+**MIDI input.** `midi::MidiNotes` turns MIDI 1.0 channel messages into
+notes, each with an id of its own. A note takes its channel's pitch bend,
+in the range RPN 0 sets (2 semitones either way until it does), its
+pressure, or its key's own, and its slide (CC 74). It starts with them
+where they're away from rest. Taking every channel, it reads MPE: channel
+1 is the master of a lower zone of the other 15 until an MPE configuration
+message (RPN 6) sets the zones. Members bend 48 semitones until they're told
+otherwise, and the master's bend bends every note in its zone on top of the
+note's own. Taking one channel, it reads that channel as a keyboard plays
+it. All Notes Off and All Sound Off (CC 123, 120) end a channel's notes,
+and Reset All Controllers (CC 121) takes its expression back to rest. The
+sustain pedal and other controllers play no part yet: they come with the
+piano roll's controller lanes.
+
+A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
+a swap gives a track another input, the notes held on the old one end at
+the next block. The monitor passes the clips' note ends and expression on
+whether the clips play or not, since instruments pass over notes they don't
+know, so a note started before the monitor came along still ends.
+
 **The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
 stands in for instruments until plugin hosting. It plays each note with a
 sine at its pitch, bent by its pitch bend, with its second harmonic blended
@@ -719,6 +762,7 @@ thread, but node code shouldn't rely on denormals either way.
 | Nodes in a graph the parallel renderer shares | `ParallelOptions::max_nodes`, 16,384 by default | The audio thread renders the graph alone |
 | Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped` |
 | Notes sounding in a MIDI clip player | 1,024 | It doesn't start more |
+| Clips' notes sounding through a MIDI monitor | 1,024 | It doesn't pass more on |
 | Notes the test instrument plays at once | `TestInstrument::VOICES`, 32 | A new note takes the place of the one that started longest ago |
 | Latency delay compensation lines up | `Graph::MAX_LATENCY`, 262,144 frames (5.5 s at 48 kHz) | Later paths are lined up as if they were that late |
 

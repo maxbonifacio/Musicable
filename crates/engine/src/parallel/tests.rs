@@ -262,6 +262,7 @@ fn render(
         transport,
         tempo,
         input: crate::AudioRef::empty(block.frames),
+        midi: &[],
     };
     rt::scope(|| renderer.render(graph, &block));
     graph.clear_events(&routed);
@@ -339,6 +340,7 @@ fn block(frames: usize, tempo: &TempoMap) -> Block<'_> {
         transport: TransportState::default(),
         tempo,
         input: crate::AudioRef::empty(frames),
+        midi: &[],
     }
 }
 

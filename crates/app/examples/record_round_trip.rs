@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use musicable_app::{Output, Session};
-use musicable_audio::{self as audio, DriverType, InputClock, Mode, StreamRequest};
+use musicable_audio::{self as audio, DriverType, InputClock, InputKind, Mode, StreamRequest};
 use musicable_commands::{Args, Keymap, edit, take, transport};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav};
 use musicable_model::clip::{AudioClip, ClipContent};
@@ -53,7 +53,7 @@ Usage: record_round_trip [options]
   --rate <hz>         sample rate (default: the output's)
   --period <frames>   frames per period, the buffer size
                       (default: the device's)
-  --input <text>      an input id, or part of its name
+  --input <text>      an input device's id, or part of its name
                       (default: the default input)
   --loopback          record what an output device plays, through its
                       loopback: the --output device's, or for an ASIO
@@ -255,7 +255,12 @@ fn find_input(options: &Options, output: Option<&str>) -> Result<(String, String
         };
         audio::loopback_id(&device)
     } else if let Some(text) = &options.input {
-        let found = matching(&inputs, text, |input| (&input.id, &input.name));
+        // A loopback has its output's name: --loopback records those.
+        let devices: Vec<_> = (inputs.iter())
+            .filter(|input| input.kind != InputKind::Loopback)
+            .cloned()
+            .collect();
+        let found = matching(&devices, text, |input| (&input.id, &input.name));
         match found.as_slice() {
             [input] => input.id.clone(),
             [] => return Err(format!("no input matches \"{text}\"")),
@@ -361,11 +366,12 @@ fn add_clicks(
 fn follow_inputs(output: &mut Output, session: &mut Session, started: &mut u64) {
     if !(session.is_recording() && session.stats().playing) {
         let wanted: BTreeSet<String> = session.wanted_inputs();
-        output.want_inputs(&wanted, session);
+        output.want_inputs(&wanted, &session.wanted_midi_inputs(), session);
     }
     if output.started() != *started {
         *started = output.started();
-        session.set_inputs(output.input_layout(), output.input_buffers());
+        let (buffers, midi) = (output.input_buffers(), output.midi_buffers());
+        session.set_inputs(output.input_layout(), buffers, midi);
     }
 }
 
@@ -418,6 +424,7 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         sample_rate: options.rate,
         period: options.period,
         inputs: Vec::new(),
+        midi_inputs: Vec::new(),
     };
     let mut notices = Vec::new();
     let (out, handle) = Output::open(request, &mut notices);

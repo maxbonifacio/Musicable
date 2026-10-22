@@ -357,6 +357,7 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         sample_rate: options.rate,
         period: options.period,
         inputs: vec![input],
+        midi_inputs: Vec::new(),
     };
     match options.soak {
         Some(length) => soak(&request, options, length),
