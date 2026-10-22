@@ -437,6 +437,27 @@ through the session, checks it landed on the frame, and undoes it;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping.
 
+The record round trip example records on real devices as the app does,
+through its own `Output`, `Session` and recorder. One track plays clicks
+out while an armed track records them back in, from an output's loopback or
+through a cable from an output to an input. It says where each click
+landed, to a fraction of a frame, then comps the take and undoes that and
+the recording. With `--minutes`, it records for that long and checks that
+nothing was lost. Through a loopback, a click lands on the frame it played;
+through a cable, late by the converters' latency that the drivers don't
+report, the same every time.
+
+```sh
+cargo run --release -p musicable-app --example record_round_trip -- --loopback
+cargo run --release -p musicable-app --example record_round_trip -- --output RME --input RME
+cargo run --release -p musicable-app --features asio --example record_round_trip -- --asio
+cargo run --release -p musicable-app --example record_round_trip -- --loopback --minutes 60
+```
+
+Under Wine, its clicks wander by up to 10 ms, as the audio crate's round
+trip's do there ([audio.md](audio.md#trying-it)). That says nothing of
+Windows.
+
 After a new project's first save, it records into the Unsaved Recordings
 folder until it's opened again. MIDI recording isn't done yet.
 
