@@ -237,10 +237,13 @@ impl Rig {
         output
     }
 
-    /// Renders a fifth of a second, waiting for any graph a change in a
-    /// plugin needs, and returns the peak of each channel over its last
-    /// half, when any change has long settled.
+    /// Renders a fifth of a second and returns the peak of each channel over
+    /// its last half, when any change has long settled. It waits first for
+    /// any graph a command needs, since under load one can take longer to
+    /// compile than the render takes, and after for any graph a change in a
+    /// plugin needs.
     fn peaks(&mut self) -> [f32; 2] {
+        self.session.wait_for_graph();
         let frames = 9_600;
         let output = self.render(frames);
         self.session.wait_for_graph();
@@ -395,7 +398,6 @@ fn follows_its_automation(format: PluginFormat) {
     rig.session
         .run_with(&automation::SET_POINTS, &args)
         .unwrap();
-    rig.session.wait_for_graph();
     let quarter = times(TONE, 0.25);
     near(rig.peaks(), quarter);
     assert_eq!(rig.settings(device.id).param(GAIN), None);

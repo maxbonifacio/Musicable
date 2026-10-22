@@ -261,8 +261,9 @@ fn a_recorded_mpe_performance_plays_back_identically_into_an_mpe_synth() {
         "the synth was silent"
     );
 
-    // Back at the start, playing the take.
+    // Back at the start, playing the take, once the graph with it is in.
     studio.play(&[]);
+    studio.session.wait_for_graph();
     studio.session.run(&transport::GO_TO_START).unwrap();
     studio.session.run(&transport::PLAY_STOP).unwrap();
     let mut played = Vec::new();
