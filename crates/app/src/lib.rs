@@ -3,6 +3,7 @@
 //! `docs/app.md` describes it.
 
 mod app;
+mod audio_files;
 mod audio_window;
 mod keymap_file;
 mod media;
@@ -16,7 +17,7 @@ pub use output::Output;
 pub use session::Session;
 pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
 
-use musicable_commands::{Registry, edit, file, options, track, transport, view};
+use musicable_commands::Registry;
 use musicable_engine::{
     Engine, EngineConfig, EngineHandle, ParallelMonitor, ParallelOptions, ParallelRenderer,
 };
@@ -25,12 +26,7 @@ use musicable_model::{Project, TestTone, TrackKind};
 /// Every command the app has.
 pub fn commands() -> Registry {
     let mut registry = Registry::new();
-    file::register(&mut registry);
-    edit::register(&mut registry);
-    transport::register(&mut registry);
-    track::register(&mut registry);
-    options::register(&mut registry);
-    view::register(&mut registry);
+    musicable_commands::register_all(&mut registry);
     registry
 }
 

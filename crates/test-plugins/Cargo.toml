@@ -1,0 +1,19 @@
+[package]
+name = "musicable-test-plugins"
+description = "Plugins for testing Musicable's plugin hosting. Not shipped."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# The cdylib is the plugin. The rlib only lets the crates that test with it
+# list it as a dev-dependency, so Cargo builds the plugin before their tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clap-sys = "0.5"
+
+[lints]
+workspace = true

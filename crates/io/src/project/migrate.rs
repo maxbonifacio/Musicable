@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips];
+const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -82,6 +82,12 @@ fn clips(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         }
     }
     Ok(())
+}
+
+/// Version 4 added locators. Version 3 files have none.
+fn locators(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "next_locator_id", json!(0))?;
+    add(file, "", "locators", json!([]))
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.
@@ -206,6 +212,22 @@ mod tests {
             run(&STEPS[..2], &mut file, 2).unwrap_err().path,
             "tracks[0].clips",
             "clips in a version 2 file"
+        );
+    }
+
+    #[test]
+    fn version_3_files_have_no_locators() {
+        let mut file = json!({"version": 3, "tracks": []});
+        run(&STEPS[..3], &mut file, 3).unwrap();
+        assert_eq!(
+            file,
+            json!({"version": 4, "tracks": [], "locators": [], "next_locator_id": 0})
+        );
+        let mut file = json!({"version": 3, "locators": [{}]});
+        assert_eq!(
+            run(&STEPS[..3], &mut file, 3).unwrap_err().path,
+            "locators",
+            "locators in a version 3 file"
         );
     }
 

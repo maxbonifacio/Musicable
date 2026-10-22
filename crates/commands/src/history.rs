@@ -159,19 +159,21 @@ fn compact(edits: &mut Vec<Edit>) {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::clip::{AudioClip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing};
     use musicable_model::mixer::Bus;
     use musicable_model::time::{BeatRange, Beats, TempoMap};
-    use musicable_model::{ClipType, Project, Send, SendId, TrackId, TrackKind};
+    use musicable_model::{ClipType, LocatorId, Project, Send, SendId, TrackId, TrackKind};
     use proptest::prelude::*;
 
     use super::*;
     use crate::{Committed, Document, Transaction};
 
     /// The project the edits in `one_of_each` change: a track of each kind,
-    /// two with a send, and a spare one that nothing refers to.
+    /// two with a send, and a spare one that nothing refers to; two audio
+    /// clips, one with fades, and a MIDI clip; and two locators.
     fn base() -> Project {
         let mut project = Project::new();
-        project.add_track("Audio", TrackKind::Audio);
+        let audio = project.add_track("Audio", TrackKind::Audio);
         let midi = project.add_track("MIDI", TrackKind::Midi);
         let group = project.add_track("Group", TrackKind::Group);
         let reverb = project.add_track("Reverb", TrackKind::Return);
@@ -179,6 +181,33 @@ mod tests {
         for track in [midi, group] {
             let send = project.new_send(reverb);
             project.track_mut(track).unwrap().sends.push(send);
+        }
+        let range = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+        let mut faded = AudioClip::new("a.wav");
+        faded.fade_in = Beats::new(1);
+        faded.fade_out = Beats::new(1);
+        let clips = [
+            (audio, "Faded", range(0, 8), ClipContent::Audio(faded)),
+            (
+                midi,
+                "Bass",
+                range(4, 8),
+                ClipContent::Midi(MidiClip::default()),
+            ),
+            (
+                audio,
+                "Take",
+                range(8, 12),
+                ClipContent::Audio(AudioClip::new("b.wav")),
+            ),
+        ];
+        for (track, name, range, content) in clips {
+            let clip = project.new_clip(name, range, content);
+            project.track_mut(track).unwrap().clips.push(clip);
+        }
+        for (name, at) in [("Verse", 0), ("Chorus", 16)] {
+            let locator = project.new_locator(name, Beats::new(at));
+            project.locators.push(locator);
         }
         project
     }
@@ -194,6 +223,11 @@ mod tests {
             level: 0.5,
             ..project.new_send(reverb)
         };
+        let [faded, bass, take] = [0, 1, 2].map(ClipId);
+        let range = BeatRange::new(Beats::new(8), Beats::new(12));
+        let new_clip = project.new_clip("New", range, ClipContent::Midi(MidiClip::default()));
+        let new_locator = project.new_locator("Bridge", Beats::new(32));
+        let bass_timing = project.find_clip(bass).unwrap().1.timing();
         let edits = vec![
             Edit::Tempo {
                 from: project.tempo.clone(),
@@ -295,6 +329,62 @@ mod tests {
                 from: ClipType::Off,
                 to: ClipType::Hard,
             },
+            Edit::AddClip {
+                track: midi,
+                index: 1,
+                clip: new_clip,
+            },
+            Edit::RemoveClip {
+                track: audio,
+                index: 1,
+                clip: project.find_clip(take).unwrap().1.clone(),
+            },
+            Edit::ClipTiming {
+                track: midi,
+                clip: bass,
+                from: bass_timing,
+                to: Timing {
+                    start: Beats::new(2),
+                    length: Beats::new(3),
+                    offset: Offset::Beats(Beats::new(-1)),
+                },
+            },
+            Edit::ClipFades {
+                track: audio,
+                clip: faded,
+                from: Fades {
+                    fade_in: Beats::new(1),
+                    fade_out: Beats::new(1),
+                },
+                to: Fades {
+                    fade_in: Beats::new(2),
+                    fade_out: Beats::ZERO,
+                },
+            },
+            Edit::ClipName {
+                track: midi,
+                clip: bass,
+                from: "Bass".into(),
+                to: "Lead".into(),
+            },
+            Edit::AddLocator {
+                index: 2,
+                locator: new_locator,
+            },
+            Edit::RemoveLocator {
+                index: 1,
+                locator: project.locators[1].clone(),
+            },
+            Edit::LocatorAt {
+                locator: LocatorId(0),
+                from: Beats::ZERO,
+                to: Beats::new(4),
+            },
+            Edit::LocatorName {
+                locator: LocatorId(0),
+                from: "Verse".into(),
+                to: "Intro".into(),
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -303,7 +393,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 22;
+    const KINDS: usize = 31;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -331,6 +421,15 @@ mod tests {
             Edit::MasterGain { .. } => 19,
             Edit::MasterPan { .. } => 20,
             Edit::MasterClipType { .. } => 21,
+            Edit::AddClip { .. } => 22,
+            Edit::RemoveClip { .. } => 23,
+            Edit::ClipTiming { .. } => 24,
+            Edit::ClipFades { .. } => 25,
+            Edit::ClipName { .. } => 26,
+            Edit::AddLocator { .. } => 27,
+            Edit::RemoveLocator { .. } => 28,
+            Edit::LocatorAt { .. } => 29,
+            Edit::LocatorName { .. } => 30,
         }
     }
 

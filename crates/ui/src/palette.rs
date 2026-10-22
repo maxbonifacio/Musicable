@@ -72,7 +72,9 @@ impl Palette {
                     let button = Button::selectable(selected, label.as_str())
                         .min_size(vec2(ui.available_width(), 0.0));
                     let button = with_keys(button, view.keymap, &command.id);
-                    let response = ui.add(button);
+                    // Greyed out when it doesn't apply, as in the menus.
+                    let applies = command.when.applies(view.project, view.editor);
+                    let response = ui.add_enabled(applies, button);
                     if selected && up + down > 0 {
                         response.scroll_to_me(None);
                     }
@@ -85,7 +87,10 @@ impl Palette {
                 }
             });
             if enter && run.is_none() {
-                run = matches.get(self.selected).map(|(c, _)| c.id.clone());
+                run = matches
+                    .get(self.selected)
+                    .filter(|(c, _)| c.when.applies(view.project, view.editor))
+                    .map(|(c, _)| c.id.clone());
             }
         });
         if let Some(id) = run {
@@ -100,11 +105,13 @@ impl Palette {
     }
 
     /// The commands that match what the user typed, with their labels: best
-    /// first, then the ones last run from the palette, then by name.
+    /// first, then the ones last run from the palette, then by name. Those
+    /// that need arguments, which the palette can't give, are left out.
     fn matches<'a>(&self, view: &View<'a>) -> Vec<(&'a Command, String)> {
         let mut matches: Vec<_> = view
             .commands
             .iter()
+            .filter(|command| !command.needs_arguments())
             .filter_map(|command| {
                 let label = label(command);
                 let chords: Vec<_> = view.keymap.chords_for(&command.id).collect();
@@ -163,7 +170,7 @@ mod tests {
         let harness = palette();
         let commands = &harness.state().commands;
         let keymap = &harness.state().keymap;
-        for command in commands.iter() {
+        for command in commands.iter().filter(|c| !c.needs_arguments()) {
             let row = match chords(keymap, &command.id) {
                 keys if keys.is_empty() => label(command),
                 keys => format!("{} {keys}", label(command)),
@@ -173,6 +180,8 @@ mod tests {
         harness.get_by_label("File: New Demo Project");
         harness.get_by_label("Transport: Toggle Loop Ctrl+L");
         harness.get_by_label("View: Command Palette... Ctrl+Shift+P");
+        // The palette can't say which clips to move.
+        assert!(harness.query_by_label_contains("Move Clips").is_none());
         assert!(harness.state().shell.asking(), "keys don't run commands");
     }
 
@@ -207,7 +216,7 @@ mod tests {
     fn the_arrows_choose_a_command() {
         let mut harness = palette();
         // "Toggle Loop", then "Toggle Metronome".
-        type_text(&mut harness, "toggle");
+        type_text(&mut harness, "transport toggle");
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowUp);
@@ -215,7 +224,7 @@ mod tests {
         assert_eq!(ran(&harness), [Action::Run(transport::TOGGLE_LOOP)]);
 
         let mut harness = palette();
-        type_text(&mut harness, "toggle");
+        type_text(&mut harness, "transport toggle");
         press(&mut harness, Key::ArrowUp);
         press(&mut harness, Key::ArrowDown);
         press(&mut harness, Key::ArrowDown);
@@ -226,6 +235,8 @@ mod tests {
     #[test]
     fn clicking_a_command_runs_it() {
         let mut harness = palette();
+        // Narrowed down, so that it's in sight.
+        type_text(&mut harness, "play");
         harness.get_by_label("Transport: Play Shift+Space").click();
         harness.run();
         assert_eq!(ran(&harness), [Action::Run(transport::PLAY)]);

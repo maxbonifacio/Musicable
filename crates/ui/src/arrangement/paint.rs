@@ -1,0 +1,630 @@
+//! Drawing the arrangement: the lanes with their clips, the ruler over
+//! them, the tracks' headers, and the corner between the ruler and the
+//! headers. Only what's in sight is drawn.
+
+use egui::{
+    Align2, CornerRadius, FontId, Mesh, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
+};
+use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
+use musicable_model::time::Beats;
+use musicable_model::{Track, TrackKind};
+
+use super::{HeaderButton, Plan, Row, Scene, Side, find};
+use crate::mixer::{meter_colour, meter_height};
+
+/// The closest the grid's lines are drawn, in points. A fixed grid finer
+/// than this at the zoom is drawn as the adaptive grid.
+const MIN_LINE_SPACING: f64 = 3.0;
+/// The closest the ruler's ticks are drawn, in points.
+const MIN_TICK_SPACING: f32 = 6.0;
+/// The fewest keys a MIDI clip's notes are spread over, so a clip of a few
+/// notes doesn't fill its height with them.
+const MIN_KEYS: u8 = 12;
+
+/// The lanes: each track's clips over the grid, with the loop region, the
+/// time selection, the start marker and the playhead, and where `plan`
+/// would put things.
+pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let project = scene.project();
+    let editor = scene.editor();
+    let lanes = layout.lanes;
+    painter.rect_filled(lanes, 0.0, theme.empty);
+    for row in layout.visible_rows() {
+        let selected =
+            editor.selected_track == Some(row.id) || editor.selection.tracks.contains(&row.id);
+        let fill = if selected {
+            theme.lane_selected
+        } else if row.index % 2 == 1 {
+            theme.lane_alternate
+        } else {
+            theme.lane
+        };
+        painter.rect_filled(lane(scene, row), 0.0, fill);
+    }
+    let bottom = layout
+        .rows
+        .last()
+        .map_or(lanes.top(), |row| row.bottom())
+        .clamp(lanes.top(), lanes.bottom());
+    let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=bottom);
+    if project.looping {
+        let region = project.loop_region;
+        let x = layout.x_of(region.start)..=layout.x_of(region.end);
+        let shade = Rect::from_x_y_ranges(x, tracks.y_range());
+        painter.rect_filled(shade, 0.0, theme.loop_shade);
+    }
+    grid(painter, scene, tracks);
+    for row in layout.visible_rows() {
+        let y = painter.round_to_pixel_center(row.bottom() - 0.5);
+        painter.hline(lanes.x_range(), y, Stroke::new(1.0, theme.divider));
+    }
+    clips(painter, scene);
+    time_selection(painter, scene);
+    if let Some(plan) = plan {
+        ghosts(painter, scene, plan);
+    }
+    let start = layout.x_of(editor.start_marker);
+    let x = painter.round_to_pixel_center(start);
+    painter.vline(x, tracks.y_range(), Stroke::new(1.0, theme.start_marker));
+    if let Some(x) = playhead(scene) {
+        let x = painter.round_to_pixel_center(x);
+        painter.vline(x, lanes.y_range(), Stroke::new(1.0, theme.playhead));
+    }
+}
+
+/// Where the playhead is drawn: while it plays, or where it stopped if
+/// that isn't the start marker.
+fn playhead(scene: &Scene<'_>) -> Option<f32> {
+    let playback = scene.view.playback;
+    let shown = playback.playing || playback.playhead != scene.editor().start_marker;
+    shown.then(|| scene.layout.x_of(playback.playhead))
+}
+
+/// The lane of the track in `row`, across the timeline.
+fn lane(scene: &Scene<'_>, row: &Row) -> Rect {
+    Rect::from_x_y_ranges(scene.layout.lanes.x_range(), row.top..=row.bottom())
+}
+
+/// The grid's lines over `area`: brightest at bars, then at beats.
+fn grid(painter: &Painter, scene: &Scene<'_>, area: Rect) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let tempo = &scene.project().tempo;
+    let zoom = layout.viewport.zoom;
+    let visible = layout.viewport.visible();
+    let bar = tempo.bar_at(visible.start).bar;
+    let length = tempo.bar_start(bar + 1) - tempo.bar_start(bar);
+    let mut grid = scene.editor().grid;
+    if grid.spacing(zoom, length) < MIN_LINE_SPACING {
+        grid.fixed = None;
+    }
+    for at in grid.lines(tempo, visible, zoom) {
+        let position = tempo.bar_at(at);
+        let colour = match (position.offset == Beats::ZERO, position.beat) {
+            (true, 0) => theme.grid_bar,
+            (true, _) => theme.grid_beat,
+            _ => theme.grid_step,
+        };
+        let x = painter.round_to_pixel_center(layout.x_of(at));
+        painter.vline(x, area.y_range(), Stroke::new(1.0, colour));
+    }
+}
+
+/// The time selection, over the clips on its tracks.
+fn time_selection(painter: &Painter, scene: &Scene<'_>) {
+    let Some(time) = &scene.editor().selection.time else {
+        return;
+    };
+    let layout = &scene.layout;
+    let x = layout.x_of(time.range.start)..=layout.x_of(time.range.end);
+    for row in layout.visible_rows() {
+        if time.tracks.contains(&row.id) {
+            let rect = Rect::from_x_y_ranges(x.clone(), row.top..=row.bottom());
+            painter.rect_filled(rect, 0.0, scene.theme.time_selection);
+        }
+    }
+}
+
+/// The clips in sight.
+fn clips(painter: &Painter, scene: &Scene<'_>) {
+    let visible = scene.layout.viewport.visible();
+    for row in scene.layout.visible_rows() {
+        let track = &scene.project().tracks[row.index];
+        for clip in &track.clips {
+            if clip.end() > visible.start && clip.start < visible.end {
+                self::clip(painter, scene, row, clip);
+            }
+        }
+    }
+}
+
+fn clip(painter: &Painter, scene: &Scene<'_>, row: &Row, clip: &Clip) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let at = layout.clip(theme, row, clip);
+    let colour = theme.clip(row.index);
+    painter.rect_filled(at.rect, theme.corner, colour);
+    let painter = painter.with_clip_rect(at.rect.intersect(painter.clip_rect()));
+    if let Some(body) = at.body {
+        let corner = theme.corner as u8;
+        let radius = CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: corner,
+            se: corner,
+        };
+        painter.rect_filled(body, radius, theme.clip_body);
+        match &clip.content {
+            ClipContent::Audio(audio) => {
+                waveform(&painter, scene, body, clip, audio);
+                fades(&painter, scene, body, clip, audio);
+            }
+            ClipContent::Midi(midi) => notes(&painter, scene, body, clip, midi),
+        }
+    }
+    // The name stays in sight while the clip's start is scrolled away.
+    let left = at.title.left().max(layout.lanes.left()) + theme.padding;
+    painter.text(
+        pos2(left, at.title.center().y),
+        Align2::LEFT_CENTER,
+        &clip.name,
+        FontId::proportional(theme.small_text),
+        theme.clip_text,
+    );
+    let selected = scene.editor().selection.clips.contains(&clip.id);
+    let hovered = scene.pointer.is_some_and(|pos| at.rect.contains(pos));
+    if selected || hovered {
+        for side in [Side::Start, Side::End] {
+            if let Some(handle) = layout.fade_handle(theme, &at, clip, side) {
+                painter.rect(
+                    handle,
+                    0.0,
+                    theme.fade,
+                    Stroke::new(1.0, theme.clip_selected),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+    }
+    if selected {
+        let outline = Stroke::new(1.5, theme.clip_selected);
+        painter.rect_stroke(at.rect, theme.corner, outline, StrokeKind::Inside);
+    }
+}
+
+/// An audio clip's waveform in its `body`, a column for each point, from
+/// the file's peaks once the app has read them.
+fn waveform(painter: &Painter, scene: &Scene<'_>, body: Rect, clip: &Clip, audio: &AudioClip) {
+    let Some(peaks) = scene.view.waveforms.get(&audio.file) else {
+        return;
+    };
+    let layout = &scene.layout;
+    let tempo = &scene.project().tempo;
+    let rate = peaks.sample_rate();
+    // The song's sample that the file's first frame plays on.
+    let first = tempo.sample_at(clip.start, rate) - audio.offset as f64;
+    let frame = |x: f32| tempo.sample_at(layout.beats_at(x), rate) - first;
+    let left = body.left().max(layout.lanes.left()).floor();
+    let right = body.right().min(layout.lanes.right()).ceil();
+    let middle = body.center().y;
+    let half = (body.height() / 2.0 - 1.0).max(0.0);
+    let height = |sample: f32| (sample * audio.gain).clamp(-1.0, 1.0) * half;
+    let mut mesh = Mesh::default();
+    let mut x = left;
+    let mut from = frame(x);
+    while x < right {
+        let to = frame(x + 1.0);
+        if let Some(peak) = peaks.range(from, to) {
+            // Silence still shows, as a line.
+            let top = middle - height(peak.max);
+            let bottom = (middle - height(peak.min)).max(top + 1.0);
+            let column = Rect::from_x_y_ranges(x..=x + 1.0, top..=bottom);
+            mesh.add_colored_rect(column, scene.theme.waveform);
+        }
+        x += 1.0;
+        from = to;
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// An audio clip's fades: lines from silence at its edges, with what they
+/// fade shaded.
+fn fades(painter: &Painter, scene: &Scene<'_>, body: Rect, clip: &Clip, audio: &AudioClip) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let (top, bottom) = (body.top(), body.bottom());
+    let shade = theme.fade.gamma_multiply(0.3);
+    let line = Stroke::new(1.0, theme.fade);
+    if audio.fade_in > Beats::ZERO {
+        let (start, end) = (
+            layout.x_of(clip.start),
+            layout.x_of(clip.start + audio.fade_in),
+        );
+        let points = vec![pos2(start, top), pos2(end, top), pos2(start, bottom)];
+        painter.add(Shape::convex_polygon(points, shade, Stroke::NONE));
+        painter.line_segment([pos2(start, bottom), pos2(end, top)], line);
+    }
+    if audio.fade_out > Beats::ZERO {
+        let (start, end) = (
+            layout.x_of(clip.end() - audio.fade_out),
+            layout.x_of(clip.end()),
+        );
+        let points = vec![pos2(start, top), pos2(end, top), pos2(end, bottom)];
+        painter.add(Shape::convex_polygon(points, shade, Stroke::NONE));
+        painter.line_segment([pos2(start, top), pos2(end, bottom)], line);
+    }
+}
+
+/// A MIDI clip's notes in its `body`, from the lowest key it plays at the
+/// bottom to the highest at the top.
+fn notes(painter: &Painter, scene: &Scene<'_>, body: Rect, clip: &Clip, midi: &MidiClip) {
+    let layout = &scene.layout;
+    // The notes the clip plays: those that start in its stretch of its own
+    // time.
+    let end = midi.offset + clip.length;
+    let playing = || {
+        midi.notes
+            .iter()
+            .filter(move |note| note.start >= midi.offset && note.start < end)
+    };
+    let Some(low) = playing().map(|note| note.key).min() else {
+        return;
+    };
+    let high = playing().map(|note| note.key).max().unwrap_or(low);
+    let spread = high - low;
+    let low = low.saturating_sub(MIN_KEYS.saturating_sub(spread) / 2);
+    let keys = f32::from((high - low + 1).max(MIN_KEYS));
+    let height = (body.height() - 2.0) / keys;
+    let visible = layout.lanes.x_range();
+    let mut mesh = Mesh::default();
+    for note in playing() {
+        let start = clip.start + (note.start - midi.offset);
+        let stop = (start + note.length).min(clip.end());
+        let (left, right) = (layout.x_of(start), layout.x_of(stop));
+        if right < visible.min || left > visible.max {
+            continue;
+        }
+        let y = body.bottom() - 1.0 - f32::from(note.key - low + 1) * height;
+        let rect = Rect::from_x_y_ranges(left..=right.max(left + 1.0), y..=y + height.max(1.0));
+        mesh.add_colored_rect(rect, scene.theme.notes);
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// Where the clips a drag moves, trims or fades will be.
+fn ghosts(painter: &Painter, scene: &Scene<'_>, plan: &Plan) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let project = scene.project();
+    let outline = Stroke::new(1.0, theme.clip_selected);
+    let ghost = |rect: Rect| {
+        painter.rect(rect, theme.corner, theme.ghost, outline, StrokeKind::Inside);
+    };
+    let span = |row: &Row, start: Beats, end: Beats| {
+        Rect::from_x_y_ranges(
+            layout.x_of(start)..=layout.x_of(end),
+            row.top + 1.0..=row.bottom() - 1.0,
+        )
+    };
+    match plan {
+        Plan::Move {
+            clips, by, tracks, ..
+        } => {
+            for &id in clips {
+                let Some((index, clip)) = find(project, id) else {
+                    continue;
+                };
+                let index = usize::try_from(index as i64 + tracks).ok();
+                if let Some(row) = index.and_then(|index| layout.rows.get(index)) {
+                    ghost(span(row, clip.start + *by, clip.end() + *by));
+                }
+            }
+        }
+        Plan::Trim { clip, side, at } => {
+            let Some((index, clip)) = find(project, *clip) else {
+                return;
+            };
+            let (start, end) = match side {
+                Side::Start => (*at, clip.end()),
+                Side::End => (clip.start, *at),
+            };
+            ghost(span(&layout.rows[index], start, end));
+        }
+        Plan::Fade { clip, side, length } => {
+            let Some((index, clip)) = find(project, *clip) else {
+                return;
+            };
+            let at = layout.clip(theme, &layout.rows[index], clip);
+            let body = at.body.unwrap_or(at.rect);
+            let (top, bottom) = (body.top(), body.bottom());
+            let line = match side {
+                Side::Start => {
+                    let x = layout.x_of(clip.start);
+                    [
+                        pos2(x, bottom),
+                        pos2(layout.x_of(clip.start + *length), top),
+                    ]
+                }
+                Side::End => {
+                    let x = layout.x_of(clip.end());
+                    [
+                        pos2(layout.x_of(clip.end() - *length), top),
+                        pos2(x, bottom),
+                    ]
+                }
+            };
+            painter.line_segment(line, Stroke::new(1.5, theme.clip_selected));
+        }
+        _ => {}
+    }
+}
+
+/// The ruler: the bar numbers, the loop brace, the locators, the start
+/// marker and the playhead, and where `plan` would put the loop or a
+/// locator.
+pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let project = scene.project();
+    let ruler = layout.ruler;
+    let strip = layout.strip;
+    painter.rect_filled(ruler, 0.0, theme.ruler);
+    let (start, end, looping) = match plan {
+        Some(&Plan::Loop {
+            start,
+            end,
+            looping,
+        }) => (start, end, looping),
+        _ => (
+            project.loop_region.start,
+            project.loop_region.end,
+            project.looping,
+        ),
+    };
+    let colour = if looping {
+        theme.loop_on
+    } else {
+        theme.loop_off
+    };
+    let brace = Rect::from_x_y_ranges(
+        layout.x_of(start)..=layout.x_of(end),
+        strip.center().y..=strip.bottom() - 1.0,
+    );
+    painter.rect_filled(brace, theme.corner, colour);
+    bars(painter, scene);
+    for locator in &project.locators {
+        let at = match plan {
+            Some(&Plan::Locator { locator: id, at }) if id == locator.id => at,
+            _ => locator.at,
+        };
+        let x = layout.x_of(at);
+        if x < ruler.left() - theme.label_spacing || x > ruler.right() {
+            continue;
+        }
+        let marker = theme.marker;
+        let points = vec![
+            pos2(x - marker, strip.top()),
+            pos2(x + marker, strip.top()),
+            pos2(x, strip.top() + marker),
+        ];
+        painter.add(Shape::convex_polygon(points, theme.locator, Stroke::NONE));
+        painter.vline(x, strip.y_range(), Stroke::new(1.0, theme.locator));
+        painter.text(
+            pos2(x + marker, strip.top()),
+            Align2::LEFT_TOP,
+            &locator.name,
+            FontId::proportional(theme.small_text),
+            theme.locator,
+        );
+    }
+    let x = layout.x_of(scene.editor().start_marker);
+    let marker = theme.marker;
+    let points = vec![
+        pos2(x - marker, ruler.bottom() - marker),
+        pos2(x + marker, ruler.bottom() - marker),
+        pos2(x, ruler.bottom()),
+    ];
+    painter.add(Shape::convex_polygon(
+        points,
+        theme.start_marker,
+        Stroke::NONE,
+    ));
+    if let Some(x) = playhead(scene) {
+        let x = painter.round_to_pixel_center(x);
+        let below = strip.bottom()..=ruler.bottom();
+        painter.vline(x, below, Stroke::new(1.0, theme.playhead));
+    }
+    let y = painter.round_to_pixel_center(ruler.bottom() - 0.5);
+    painter.hline(ruler.x_range(), y, Stroke::new(1.0, theme.divider));
+}
+
+/// The ruler's bar numbers, every bar or every few so they don't crowd,
+/// with ticks at the bars and at the beats when there's room.
+fn bars(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let tempo = &scene.project().tempo;
+    let zoom = layout.viewport.zoom;
+    let visible = layout.viewport.visible();
+    let ruler = layout.ruler;
+    let below = layout.strip.bottom();
+    let first = tempo.bar_at(visible.start).bar;
+    let last = tempo.bar_at(visible.end).bar;
+    let width = |bar: i64| (tempo.bar_start(bar + 1) - tempo.bar_start(bar)).to_f64() * zoom;
+    // A label every bar, or every 2, 4, 8... bars.
+    let mut every: i64 = 1;
+    while (width(first) * every as f64) < f64::from(theme.label_spacing) && every < 1 << 20 {
+        every *= 2;
+    }
+    let tick = Stroke::new(1.0, theme.grid_bar);
+    let mut bar = first - first.rem_euclid(every);
+    while bar <= last {
+        let x = painter.round_to_pixel_center(layout.x_of(tempo.bar_start(bar)));
+        painter.vline(x, below..=ruler.bottom(), tick);
+        painter.text(
+            pos2(x + theme.padding, below),
+            Align2::LEFT_TOP,
+            (bar + 1).to_string(),
+            FontId::proportional(theme.text),
+            theme.ruler_text,
+        );
+        bar += every;
+    }
+    let beat = tempo.signature_at(visible.start).beat_length().to_f64() * zoom;
+    if beat as f32 >= MIN_TICK_SPACING {
+        let short = ruler.bottom() - (ruler.bottom() - below) / 4.0;
+        let tick = Stroke::new(1.0, theme.grid_beat);
+        for at in tempo.beats_in(visible).filter(|beat| beat.beat != 0) {
+            let x = painter.round_to_pixel_center(layout.x_of(at.at));
+            painter.vline(x, short..=ruler.bottom(), tick);
+        }
+    }
+}
+
+/// The tracks' headers: each track's name, colour and meter, with a line
+/// between them. Mute, solo and arm are buttons, which the arrangement
+/// draws after this.
+pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let editor = scene.editor();
+    let headers = layout.headers;
+    painter.rect_filled(headers, 0.0, theme.empty);
+    for row in layout.visible_rows() {
+        let track = &scene.project().tracks[row.index];
+        let rect = Rect::from_x_y_ranges(headers.x_range(), row.top..=row.bottom());
+        let selected =
+            editor.selection.tracks.contains(&row.id) || editor.selected_track == Some(row.id);
+        let fill = if selected {
+            theme.header_selected
+        } else {
+            theme.header
+        };
+        painter.rect_filled(rect, 0.0, fill);
+        let strip = Rect::from_min_size(rect.left_top(), vec2(theme.colour_strip, rect.height()));
+        painter.rect_filled(strip, 0.0, theme.clip(row.index));
+        let meter = header_meter(scene, row);
+        let level = scene.view.levels.track(track.id);
+        let height = meter_height(level.peak[0].max(level.peak[1]));
+        painter.rect_filled(meter, 0.0, theme.divider);
+        if height > 0.0 {
+            let mut filled = meter;
+            filled.set_top(meter.bottom() - meter.height() * height);
+            painter.rect_filled(filled, 0.0, meter_colour(height, theme));
+        }
+        let buttons = header_buttons(scene, row, track);
+        let right = buttons
+            .first()
+            .map_or(meter.left(), |(_, rect)| rect.left());
+        let name = Rect::from_min_max(
+            pos2(strip.right() + theme.padding, rect.top() + theme.padding),
+            pos2(right - theme.padding, rect.bottom()),
+        );
+        painter
+            .with_clip_rect(name.intersect(painter.clip_rect()))
+            .text(
+                name.left_top(),
+                Align2::LEFT_TOP,
+                &track.name,
+                FontId::proportional(theme.text),
+                theme.header_text,
+            );
+        let y = painter.round_to_pixel_center(row.bottom() - 0.5);
+        painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
+    }
+    let x = painter.round_to_pixel_center(headers.left() + 0.5);
+    painter.vline(x, headers.y_range(), Stroke::new(1.0, theme.divider));
+}
+
+/// A track's meter, down the right of its header.
+fn header_meter(scene: &Scene<'_>, row: &Row) -> Rect {
+    let theme = scene.theme;
+    let right = scene.layout.headers.right() - theme.padding;
+    Rect::from_x_y_ranges(
+        right - theme.header_meter..=right,
+        row.top + theme.padding..=(row.bottom() - theme.padding).max(row.top + theme.padding),
+    )
+}
+
+/// Where mute, solo and arm go in a track's header: along its top, left of
+/// its meter. Return and group tracks have no arm. A row partly scrolled
+/// away has none.
+pub(super) fn header_buttons(
+    scene: &Scene<'_>,
+    row: &Row,
+    track: &Track,
+) -> Vec<(HeaderButton, Rect)> {
+    let theme = scene.theme;
+    let headers = scene.layout.headers;
+    let size = theme.button;
+    let mut right = header_meter(scene, row).left() - theme.padding;
+    let buttons: &[HeaderButton] = match track.kind {
+        TrackKind::Audio | TrackKind::Midi => {
+            &[HeaderButton::Mute, HeaderButton::Solo, HeaderButton::Arm]
+        }
+        TrackKind::Return | TrackKind::Group => &[HeaderButton::Mute, HeaderButton::Solo],
+    };
+    let mut placed: Vec<(HeaderButton, Rect)> = buttons
+        .iter()
+        .rev()
+        .map(|&button| {
+            let rect = Rect::from_min_size(pos2(right - size.x, row.top + theme.padding), size);
+            right = rect.left() - theme.padding / 2.0;
+            (button, rect)
+        })
+        .collect();
+    placed.reverse();
+    let fits = placed.iter().all(|(_, rect)| {
+        headers.contains_rect(*rect)
+            && rect.bottom() <= row.bottom()
+            && rect.left() > headers.left()
+    });
+    if fits { placed } else { Vec::new() }
+}
+
+/// The corner over the headers: the grid's step, and whether clips snap
+/// to it.
+pub(super) fn corner(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let corner = layout.corner;
+    painter.rect_filled(corner, 0.0, theme.ruler);
+    let grid = scene.editor().grid;
+    let tempo = &scene.project().tempo;
+    let bar = tempo.bar_at(layout.viewport.start).bar;
+    let length = tempo.bar_start(bar + 1) - tempo.bar_start(bar);
+    let step = grid.step(layout.viewport.zoom, length).name(grid.triplet);
+    let text = match (grid.snap, grid.fixed.is_some()) {
+        (true, false) => format!("Grid {step}"),
+        (true, true) => format!("Fixed grid {step}"),
+        (false, _) => format!("Grid {step}, no snap"),
+    };
+    painter.text(
+        corner.center(),
+        Align2::CENTER_CENTER,
+        text,
+        FontId::proportional(theme.small_text),
+        theme.ruler_text,
+    );
+    let x = painter.round_to_pixel_center(corner.left() + 0.5);
+    painter.vline(x, corner.y_range(), Stroke::new(1.0, theme.divider));
+    let y = painter.round_to_pixel_center(corner.bottom() - 0.5);
+    painter.hline(corner.x_range(), y, Stroke::new(1.0, theme.divider));
+}
+
+/// Shows that files can be dropped while they're dragged over the window.
+pub(super) fn drop_hint(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let lanes = scene.layout.lanes;
+    let outline = Stroke::new(2.0, theme.start_marker);
+    painter.rect_stroke(lanes.shrink(1.0), 0.0, outline, StrokeKind::Inside);
+    painter.text(
+        lanes.center(),
+        Align2::CENTER_CENTER,
+        "Drop audio files to insert them",
+        FontId::proportional(theme.text),
+        theme.header_text,
+    );
+}

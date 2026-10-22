@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use musicable_commands::{
-    CommandId, Context, Document, Edit, KeyChord, Keymap, Registry, Request, Transport,
-    UnknownCommand, mixer, transport,
+    Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
+    Request, Transport, UnknownCommand, Value, mixer, transport,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
@@ -43,6 +43,8 @@ pub struct Session {
     engine: EngineLink,
     /// What commands asked of the app, oldest first.
     requests: Vec<Request>,
+    /// Counts the project's changes.
+    revision: u64,
 }
 
 impl Session {
@@ -117,6 +119,7 @@ impl Session {
     ) -> Self {
         let mut engine = EngineLink {
             playing: handle.stats().playing,
+            tempo: project.tempo.clone(),
             handle,
             compiler: Compiler::spawn(),
             build,
@@ -131,12 +134,15 @@ impl Session {
         };
         engine.set_up(&project);
         engine.flush();
+        let mut document = Document::new(project);
+        document.editor_mut().sample_rate = engine.handle.config().sample_rate;
         Self {
-            document: Document::new(project),
+            document,
             commands: crate::commands(),
             keymap,
             engine,
             requests: Vec::new(),
+            revision: 0,
         }
     }
 
@@ -158,7 +164,13 @@ impl Session {
         self.engine.locate(Beats::ZERO);
         self.engine.set_up(&project);
         self.engine.flush();
+        // How editing behaves is the user's, not the project's.
+        let behaviour = self.document.editor().behaviour;
         self.document = Document::new(project);
+        let editor = self.document.editor_mut();
+        editor.behaviour = behaviour;
+        editor.sample_rate = self.engine.handle.config().sample_rate;
+        self.revision += 1;
     }
 
     /// Plays the project on the engine `handle` drives from now on, such as
@@ -182,11 +194,32 @@ impl Session {
             self.engine.play();
         }
         self.engine.flush();
+        self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
         old
     }
 
     pub fn project(&self) -> &Project {
         self.document.project()
+    }
+
+    /// The arrangement's editing state: the selection, the start marker,
+    /// the grid and the zoom.
+    pub fn editor(&self) -> &Editor {
+        self.document.editor()
+    }
+
+    /// The same, to change, such as when the app reads an audio file's
+    /// header into [`Editor::files`]. Changing it changes nothing the
+    /// engine plays.
+    pub fn editor_mut(&mut self) -> &mut Editor {
+        self.document.editor_mut()
+    }
+
+    /// Goes up with every change to the project, undone and redone ones
+    /// too, and when another project opens: for what follows the project,
+    /// such as the files its clips play.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Whether the project changed since it was opened or last saved.
@@ -246,9 +279,28 @@ impl Session {
 
     /// Where the playhead is in the song, as of the engine's last block.
     pub fn playhead(&self) -> Beats {
-        let position = self.stats().position as f64;
-        let rate = self.engine.handle.config().sample_rate;
-        Beats::from_f64(self.project().tempo.beats_at(position, rate))
+        self.engine.playhead()
+    }
+
+    /// Where the playhead is in what's heard, in frames from the start of
+    /// the song, for showing it: while the transport plays, what plays now
+    /// left the clips the running graph's latency, and the audio device's
+    /// `output_latency` frames, before the engine's position. See
+    /// `docs/engine.md`, on delay compensation.
+    pub fn heard_position(&self, output_latency: u64) -> u64 {
+        let stats = self.engine.handle.stats();
+        match stats.playing {
+            true => stats
+                .position
+                .saturating_sub(stats.latency + output_latency),
+            false => stats.position,
+        }
+    }
+
+    /// Where the engine's frame `position` is in the song, by the project's
+    /// tempo map.
+    pub fn beats_at(&self, position: u64) -> Beats {
+        self.engine.beats_at(position)
     }
 
     /// Runs the command the keymap binds to `chord`. Returns `false` if there
@@ -261,7 +313,9 @@ impl Session {
         self.run(&id).is_ok()
     }
 
-    /// Runs the command `id`, then sends the engine what it changed.
+    /// Runs the command `id` without arguments, as a menu or a key does,
+    /// then sends the engine what it changed. A command that needs
+    /// arguments, or doesn't apply now, does nothing.
     pub fn run(&mut self, id: &CommandId) -> Result<(), UnknownCommand> {
         let mut context = Context {
             document: &mut self.document,
@@ -273,6 +327,20 @@ impl Session {
         Ok(())
     }
 
+    /// Runs the command `id` with `args`, then sends the engine what it
+    /// changed, and returns the command's result. See
+    /// [`Registry::run_with`].
+    pub fn run_with(&mut self, id: &CommandId, args: &Args) -> Result<Value, CommandError> {
+        let mut context = Context {
+            document: &mut self.document,
+            transport: &mut self.engine,
+            requests: &mut self.requests,
+        };
+        let result = self.commands.run_with(id, args, &mut context);
+        self.sync();
+        result
+    }
+
     /// What the commands run so far asked the app to do, such as opening a
     /// file, oldest first. The app carries them out after each command.
     pub fn take_requests(&mut self) -> Vec<Request> {
@@ -281,18 +349,20 @@ impl Session {
 
     /// Sets the tempo at the playhead to `bpm`, moving every other tempo in
     /// the song by as much, then sends the engine the new tempo map. For a
-    /// tempo field: see [`transport::set_tempo`].
+    /// tempo field: see [`transport::SET_TEMPO`].
     pub fn set_tempo(&mut self, bpm: f64) {
-        let at = self.playhead();
-        transport::set_tempo(&mut self.document, at, bpm);
-        self.sync();
+        let args = Args::new().with("bpm", bpm);
+        // Only a tempo that isn't a number fails, and it changes nothing.
+        let _ = self.run_with(&transport::SET_TEMPO, &args);
     }
 
-    /// Makes a change from the mixer's controls, then sends the engine what
-    /// it changed. See [`mixer::change`].
+    /// Makes a change from the mixer's controls, through the command it
+    /// names, then sends the engine what it changed. See
+    /// [`mixer::Change::command`].
     pub fn change_mixer(&mut self, change: mixer::Change) {
-        mixer::change(&mut self.document, change);
-        self.sync();
+        let (id, args) = change.command();
+        // The mixer's controls only name tracks the project has.
+        let _ = self.run_with(&id, &args);
     }
 
     /// The level meters of the project's tracks and of the master, as the
@@ -346,7 +416,11 @@ impl Session {
         let mut loop_changed = false;
         let mut gates_changed = false;
         let mut recompile = false;
-        for committed in self.document.take_committed() {
+        let committed = self.document.take_committed();
+        if !committed.is_empty() {
+            self.revision += 1;
+        }
+        for committed in committed {
             for edit in committed.edits {
                 let mut param = |node: NodeKey, param: ParamId, value: f32| {
                     self.engine.push(Message::Event(Event::Param {
@@ -357,7 +431,10 @@ impl Session {
                 };
                 match edit {
                     // Only the last map counts.
-                    Edit::Tempo { to, .. } => tempo = Some(to),
+                    Edit::Tempo { to, .. } => {
+                        self.engine.tempo = to.clone();
+                        tempo = Some(to);
+                    }
                     Edit::LoopRegion { .. } | Edit::Looping { .. } => loop_changed = true,
                     Edit::Metronome { to, .. } => self.engine.push(Message::Event(Event::Param {
                         node: keys::METRONOME,
@@ -378,8 +455,15 @@ impl Session {
                     | Edit::TrackSoloSafe { .. } => {
                         gates_changed = true;
                     }
-                    // Nothing the engine plays yet.
-                    Edit::TrackName { .. } | Edit::TrackArmed { .. } => {}
+                    // Nothing the engine plays, or nothing yet.
+                    Edit::TrackName { .. }
+                    | Edit::TrackArmed { .. }
+                    | Edit::ClipName { .. }
+                    | Edit::AddLocator { .. }
+                    | Edit::RemoveLocator { .. }
+                    | Edit::LocatorAt { .. }
+                    | Edit::LocatorName { .. } => {}
+                    // Clips are compiled into the graph.
                     Edit::AddTrack { .. }
                     | Edit::RemoveTrack { .. }
                     | Edit::TrackOutput { .. }
@@ -387,7 +471,11 @@ impl Session {
                     | Edit::AddSend { .. }
                     | Edit::RemoveSend { .. }
                     | Edit::SendPreFader { .. }
-                    | Edit::MasterClipType { .. } => recompile = true,
+                    | Edit::MasterClipType { .. }
+                    | Edit::AddClip { .. }
+                    | Edit::RemoveClip { .. }
+                    | Edit::ClipTiming { .. }
+                    | Edit::ClipFades { .. } => recompile = true,
                 }
             }
         }
@@ -437,6 +525,8 @@ struct EngineLink {
     /// Whether the transport plays, counting what hasn't reached the engine
     /// yet.
     playing: bool,
+    /// The project's tempo map, for the playhead in beats.
+    tempo: TempoMap,
     /// The meters the graphs measure into.
     meters: Meters,
     /// Whether each output stage and send mutes, as last sent to the engine
@@ -458,6 +548,12 @@ enum Message {
 impl EngineLink {
     fn push(&mut self, message: Message) {
         self.outbox.push_back(message);
+    }
+
+    /// Where the engine's frame `position` is in the song.
+    fn beats_at(&self, position: u64) -> Beats {
+        let rate = self.handle.config().sample_rate;
+        Beats::from_f64(self.tempo.beats_at(position as f64, rate))
     }
 
     /// Compiles `project` on the compiler's thread, for the engine, and
@@ -486,6 +582,7 @@ impl EngineLink {
     /// map and its loop. All of it, and whatever comes after, waits for the
     /// graph.
     fn set_up(&mut self, project: &Project) {
+        self.tempo = project.tempo.clone();
         let job = self.recompile(project);
         // Graphs still to come from before were for another project or
         // another engine.
@@ -606,5 +703,9 @@ impl Transport for EngineLink {
         self.push(Message::Event(Event::Transport(TransportCommand::Locate(
             at,
         ))));
+    }
+
+    fn playhead(&self) -> Beats {
+        self.beats_at(self.handle.stats().position)
     }
 }

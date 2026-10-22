@@ -1,25 +1,41 @@
-//! The app shell: the menu bar, the transport bar, the mixer and a status
-//! bar, with the keyboard shortcuts window and the command palette.
+//! The app shell: the menu bar, the transport bar, the arrangement with the
+//! mixer under it, and a status bar, with the keyboard shortcuts window, the
+//! command palette, and the box that renames things.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use egui::{Align, Button, Color32, DragValue, Layout, RichText, Ui};
+use egui::{Align, Button, DragValue, Id, Key, Layout, Modal, Modifiers, RichText, TextEdit, Ui};
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Command, CommandId, KeyChord, Keymap, Problem, Registry, edit, options, transport,
+    Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
+    edit, locator, options, track, transport, view,
 };
-use musicable_model::Project;
 use musicable_model::time::{Beats, TempoMap};
+use musicable_model::{Project, TrackId};
 
+use crate::arrangement::Arrangement;
 use crate::menus::menus;
 use crate::mixer::{self, Levels};
+use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::shortcuts::Shortcuts;
+use crate::theme::Theme;
+use crate::waveform::Waveforms;
 use crate::widgets::{Icon, clock, icon_button, meter, position};
+
+/// The mixer's panel, under the arrangement.
+pub const MIXER: &str = "mixer";
 
 /// What the shell shows. The app fills one in for each frame.
 pub struct View<'a> {
     pub project: &'a Project,
+    /// What's selected, the zoom, the grid and the rest of the editor's
+    /// state.
+    pub editor: &'a Editor,
+    /// The waveforms of the audio files the clips play, as far as the app
+    /// has read them.
+    pub waveforms: &'a Waveforms,
     /// The project's name: its file's name, or "Untitled".
     pub name: &'a str,
     /// Whether the project changed since it was opened or saved.
@@ -48,7 +64,8 @@ pub struct View<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Playback {
     pub playing: bool,
-    /// Where the playhead is in the song.
+    /// Where the playhead is in the song: what's heard, so the latency of
+    /// plugins and of the audio device is taken off where the engine is.
     pub playhead: Beats,
     /// The same, in seconds from the start of the song.
     pub seconds: f64,
@@ -89,6 +106,17 @@ pub struct KeymapStatus<'a> {
 pub enum Action {
     /// Run a command.
     Run(CommandId),
+    /// Run a command with arguments, as the arrangement's gestures and
+    /// context menus do.
+    RunWith(CommandId, Args),
+    /// Read these audio files and insert them, as
+    /// [`arrange::INSERT_AUDIO`] does: on `track` at `at` when they're
+    /// dropped there.
+    DropFiles {
+        files: Vec<PathBuf>,
+        track: Option<TrackId>,
+        at: Option<Beats>,
+    },
     /// Set the tempo at the playhead, from the tempo field.
     SetTempo(f64),
     /// The user started dragging a control, such as the tempo field. Until
@@ -128,14 +156,46 @@ pub enum SaveChoice {
     Cancel,
 }
 
-/// The shell's own state: its windows and what they show.
-#[derive(Debug, Default)]
+/// The shell's own state: its windows and what they show, how it looks,
+/// and what the mouse does.
+#[derive(Debug)]
 pub struct Shell {
     shortcuts: Shortcuts,
     palette: Palette,
+    arrangement: Arrangement,
+    theme: Theme,
+    mouse: MouseMap,
+    /// The panels the user hid, by id.
+    hidden: BTreeSet<&'static str>,
+    /// What's being renamed, and the name typed so far.
+    rename: Option<Rename>,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self {
+            shortcuts: Shortcuts::default(),
+            palette: Palette::default(),
+            arrangement: Arrangement::default(),
+            theme: Theme::default(),
+            mouse: MouseMap::live(),
+            hidden: BTreeSet::new(),
+            rename: None,
+        }
+    }
+}
+
+/// A rename in progress.
+#[derive(Debug)]
+struct Rename {
+    named: Named,
+    /// The name typed so far: `None` until the box has shown the current
+    /// one.
+    text: Option<String>,
 }
 
 impl Shell {
+    /// The shell in the dark theme, with Live's mouse.
     pub fn new() -> Self {
         Self::default()
     }
@@ -144,25 +204,164 @@ impl Shell {
     /// asked for.
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
+        let theme = &self.theme;
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            menu_bar(ui, view, &mut actions);
+            menu_bar(ui, view, &self.hidden, theme, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
             ui.add_space(4.0);
-            transport_bar(ui, view, &mut actions);
+            transport_bar(ui, view, theme, &mut actions);
             ui.add_space(4.0);
         });
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
         });
-        egui::CentralPanel::default().show(ui, |ui| {
-            mixer::show(ui, view.project, view.levels, &mut actions);
+        if !self.hidden.contains(MIXER) {
+            egui::Panel::bottom(MIXER)
+                .resizable(true)
+                .default_size(theme.mixer.panel)
+                .min_size(theme.mixer.min_fader)
+                .show(ui, |ui| {
+                    mixer::show(
+                        ui,
+                        view.project,
+                        view.levels,
+                        theme,
+                        &self.mouse,
+                        &mut actions,
+                    );
+                });
+        }
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.arrangement
+                .show(ui, view, theme, &self.mouse, &mut actions);
         });
-        // The palette goes first, so the keys it takes while it's open, such
-        // as Escape, don't reach the window under it.
+        // The boxes that take keys go first, so the keys they take while
+        // they're open, such as Escape, don't reach the windows under them.
+        self.show_rename(ui.ctx(), view, &mut actions);
         self.palette.show(ui.ctx(), view, &mut actions);
         self.shortcuts.show(ui.ctx(), view, &mut actions);
         actions
+    }
+
+    /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden, or
+    /// hides it.
+    pub fn toggle_panel(&mut self, id: &'static str) {
+        if !self.hidden.remove(id) {
+            self.hidden.insert(id);
+        }
+    }
+
+    pub fn panel_shown(&self, id: &str) -> bool {
+        !self.hidden.contains(id)
+    }
+
+    /// Asks the user for a new name for `named`.
+    pub fn rename(&mut self, named: Named) {
+        self.rename = Some(Rename { named, text: None });
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Draws with `theme` from now on.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    pub fn mouse_map(&self) -> &MouseMap {
+        &self.mouse
+    }
+
+    /// Does what `mouse` says mouse gestures do from now on.
+    pub fn set_mouse_map(&mut self, mouse: MouseMap) {
+        self.mouse = mouse;
+    }
+
+    /// The box that renames a track, a clip or a locator, while one is
+    /// renamed. Enter runs the command that renames it.
+    fn show_rename(&mut self, ctx: &egui::Context, view: &View<'_>, actions: &mut Vec<Action>) {
+        let Some(rename) = &mut self.rename else {
+            return;
+        };
+        let project = view.project;
+        let (title, current, command, arg, value): (_, _, _, _, Value) = match rename.named {
+            Named::Track(id) => (
+                "Rename Track",
+                project.track(id).map(|t| t.name.clone()),
+                track::RENAME,
+                "track",
+                id.into(),
+            ),
+            Named::Clip(id) => (
+                "Rename Clip",
+                project.find_clip(id).map(|(_, c)| c.name.clone()),
+                arrange::RENAME,
+                "clip",
+                id.into(),
+            ),
+            Named::Locator(id) => (
+                "Rename Locator",
+                project.locator(id).map(|l| l.name.clone()),
+                locator::RENAME,
+                "locator",
+                id.into(),
+            ),
+        };
+        // It went while the box was open.
+        let Some(current) = current else {
+            self.rename = None;
+            return;
+        };
+        let first = rename.text.is_none();
+        let text = rename.text.get_or_insert_with(|| current.clone());
+        let (enter, escape) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        let mut done = None;
+        let modal = Modal::new(Id::unique("rename")).show(ctx, |ui| {
+            ui.set_width(ui.spacing().text_edit_width);
+            ui.heading(title);
+            let field = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+            if first {
+                // The whole name, ready to be typed over.
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
+                    let all = egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(text.chars().count()),
+                    );
+                    state.cursor.set_char_range(Some(all));
+                    state.store(ui.ctx(), field.id);
+                }
+            }
+            field.request_focus();
+            ui.horizontal(|ui| {
+                if ui.button("Rename").clicked() {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    done = Some(false);
+                }
+            });
+        });
+        if enter {
+            done = Some(true);
+        } else if escape || modal.backdrop_response.clicked() {
+            done = done.or(Some(false));
+        }
+        let Some(confirmed) = done else {
+            return;
+        };
+        let name = text.trim().to_owned();
+        if confirmed && !name.is_empty() && name != current {
+            let args = Args::new().with(arg, value).with("name", name);
+            actions.push(Action::RunWith(command, args));
+        }
+        self.rename = None;
     }
 
     /// Shows the command palette, which finds any command and runs it.
@@ -192,18 +391,24 @@ impl Shell {
     /// Whether the shell asks something that keys answer, or has the command
     /// palette open. Keys don't run commands while it does.
     pub fn asking(&self) -> bool {
-        self.palette.is_open() || self.shortcuts.asking()
+        self.palette.is_open() || self.shortcuts.asking() || self.rename.is_some()
     }
 }
 
 /// The menus, with every command and its keys, and the meters on the right.
-fn menu_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+fn menu_bar(
+    ui: &mut Ui,
+    view: &View<'_>,
+    hidden: &BTreeSet<&'static str>,
+    theme: &Theme,
+    actions: &mut Vec<Action>,
+) {
     egui::MenuBar::new().ui(ui, |ui| {
         for menu in menus(view.commands) {
             ui.menu_button(menu.title.as_str(), |ui| {
                 for item in &menu.items {
                     match item {
-                        Some(command) => command_button(ui, view, command, actions),
+                        Some(command) => command_button(ui, view, hidden, command, actions),
                         None => {
                             ui.separator();
                         }
@@ -212,15 +417,23 @@ fn menu_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
             });
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            meters(ui, &view.audio, actions);
+            meters(ui, &view.audio, theme, actions);
         });
     });
 }
 
-/// A menu entry for a command, showing its keys. Undo and Redo say what
-/// they'd change, and are greyed out when there's nothing to change.
-fn command_button(ui: &mut Ui, view: &View<'_>, command: &Command, actions: &mut Vec<Action>) {
-    let step = match &command.id {
+/// A menu entry for a command, showing its keys, ticked if it's a toggle
+/// that's on, and greyed out when it doesn't apply. Undo and Redo say what
+/// they'd change.
+fn command_button(
+    ui: &mut Ui,
+    view: &View<'_>,
+    hidden: &BTreeSet<&'static str>,
+    command: &Command,
+    actions: &mut Vec<Action>,
+) {
+    let id = &command.id;
+    let step = match id {
         id if *id == edit::UNDO => Some(view.undo),
         id if *id == edit::REDO => Some(view.redo),
         _ => None,
@@ -228,15 +441,45 @@ fn command_button(ui: &mut Ui, view: &View<'_>, command: &Command, actions: &mut
     let (title, enabled) = match step {
         Some(Some(name)) => (format!("{} {name}", command.title), true),
         Some(None) => (command.title.clone(), false),
-        None => (command.title.clone(), true),
+        None => (
+            command.title.clone(),
+            command.when.applies(view.project, view.editor),
+        ),
     };
-    let button = with_keys(Button::new(title), view.keymap, &command.id);
+    let mut button = with_keys(Button::new(title), view.keymap, id);
+    let on = match id {
+        id if *id == view::TOGGLE_MIXER => Some(!hidden.contains(MIXER)),
+        id => toggled(view, id),
+    };
+    if let Some(on) = on {
+        button = button.selected(on);
+    }
     if ui.add_enabled(enabled, button).clicked() {
-        actions.push(Action::Run(command.id.clone()));
+        actions.push(Action::Run(id.clone()));
     }
 }
 
-fn transport_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+/// Whether the command `id` is a toggle that's on, such as Loop or Snap to
+/// Grid, for menus to show. `None` for commands that aren't toggles, and for
+/// the panels, which the shell keeps.
+pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
+    let project = view.project;
+    let editor = view.editor;
+    let toggles = [
+        (transport::TOGGLE_LOOP, project.looping),
+        (transport::TOGGLE_METRONOME, project.metronome),
+        (view::TOGGLE_FOLLOW, editor.follow),
+        (view::TOGGLE_SNAP, editor.grid.snap),
+        (view::TRIPLET_GRID, editor.grid.triplet),
+        (view::FIXED_GRID, editor.grid.fixed.is_some()),
+    ];
+    toggles
+        .into_iter()
+        .find(|(toggle, _)| toggle == id)
+        .map(|(_, on)| on)
+}
+
+fn transport_bar(ui: &mut Ui, view: &View<'_>, theme: &Theme, actions: &mut Vec<Action>) {
     let project = view.project;
     let tempo = &project.tempo;
     let playhead = view.playback.playhead;
@@ -247,11 +490,12 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
         }
     };
     ui.horizontal(|ui| {
-        let start = icon_button(ui, Icon::ToStart, false);
+        let start = icon_button(ui, Icon::ToStart, false, theme);
         run(start, transport::GO_TO_START, actions);
-        let play = icon_button(ui, Icon::Play, view.playback.playing);
+        let play = icon_button(ui, Icon::Play, view.playback.playing, theme);
         run(play, transport::PLAY, actions);
-        run(icon_button(ui, Icon::Stop, false), transport::STOP, actions);
+        let stop = icon_button(ui, Icon::Stop, false, theme);
+        run(stop, transport::STOP, actions);
         ui.separator();
 
         let region = project.loop_region;
@@ -307,7 +551,7 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
         ui.label(
             RichText::new(position(tempo, playhead))
                 .monospace()
-                .size(18.0)
+                .size(theme.position_text)
                 .strong(),
         )
         .on_hover_text("Bars, beats and sixteenths");
@@ -320,13 +564,12 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
 }
 
 /// The CPU meter and the dropout counter, laid out right to left.
-fn meters(ui: &mut Ui, audio: &Audio<'_>, actions: &mut Vec<Action>) {
+fn meters(ui: &mut Ui, audio: &Audio<'_>, theme: &Theme, actions: &mut Vec<Action>) {
     let dropouts = if audio.dropouts == 0 {
         RichText::new("No dropouts")
     } else {
         let plural = if audio.dropouts == 1 { "" } else { "s" };
-        RichText::new(format!("{} dropout{plural}", audio.dropouts))
-            .color(Color32::from_rgb(235, 90, 80))
+        RichText::new(format!("{} dropout{plural}", audio.dropouts)).color(theme.warning)
     };
     let counter = ui
         .add(Button::new(dropouts).frame(false))
@@ -338,7 +581,7 @@ fn meters(ui: &mut Ui, audio: &Audio<'_>, actions: &mut Vec<Action>) {
         actions.push(Action::ResetDropouts);
     }
     ui.separator();
-    meter(ui, audio.load).on_hover_text(audio.details);
+    meter(ui, audio.load, theme).on_hover_text(audio.details);
     let load = audio.load.map_or("CPU --".to_owned(), |load| {
         format!("CPU {:.0}%", load * 100.0)
     });
