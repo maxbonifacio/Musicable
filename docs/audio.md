@@ -220,7 +220,8 @@ let range = buffers[0].as_ref().unwrap().frames();
   channels, and doesn't stop the stream.
 - `Stream::input_buffers` hands out each input's `InputBuffer`, which any
   thread can read without locks: the last 8 seconds at least, from a fraction
-  of a second after the stream starts, when the input has lined up. Frames it
+  of a second after the stream starts, when the input has lined up, or a few
+  seconds for an output whose clock moves in steps (below). Frames it
   hasn't captured yet read as `ReadError::NotYet`, and frames it no longer
   holds as `ReadError::Gone`, so a reader that falls behind finds out.
 - `Stream::input_stats` has each input's counters: frames captured and lost,
@@ -240,6 +241,27 @@ and when that was captured, on the same counter. Together they give each
 packet's offset: its position, less the engine frame heard as it was
 captured (scaled by the two rates).
 
+Some drivers move the position they report only in steps: the RME HDSPe's,
+in shared mode, 256 frames at a time, so a reading lags the frame being
+heard by anything up to 256 frames, and offsets wander by tens. So the output
+smooths its readings: less the steady advance at its rate, the highest of the
+last 256 lags least, and that's the one it publishes. A reading more than 64
+frames above them all, or below them all, is held back until three in a row
+agree, as when the device's clock jumps. The output publishes nothing until
+the highest is likely within a frame of the truth: after the first 32
+readings for a clock that keeps time, about a third of a second, and after
+the first 256, a few seconds, for one that moves in steps. On a device clock
+slow against the performance counter, the highest is the oldest, which puts
+the frame published ahead by the drift over the readings kept: a frame for
+10 ppm over 2.56 s at 44.1 kHz, the same throughout. All this relies on the
+readings falling on every part of a step. At 44.1 kHz they do, as the
+shared-mode period of 441 frames shares no factor with 256. At 48 kHz, 480
+frames shares a factor of 32 with it, so the readings fall on only 8 points
+of a step, and in simulations the frame published lags by up to 31 frames,
+less the more wake-ups jitter. It stays the same while the device plays, so
+inputs don't slip, but it changes each time the device opens, and with it
+where recordings land.
+
 - An input on the output's clock, at its rate, has an offset that can't
   drift: the median of the first 16 packets', then of the first full window
   of 64, to the nearest frame. Its frames are copied as they are. That's the
@@ -248,8 +270,9 @@ captured (scaled by the two rates).
   device, leaving out the one all built-in endpoints share. For those, such
   as a sound card's, it's the same adapter: the device their topology
   connects to, whose input and output filters share its clock. Every 16
-  packets the median is checked again. Moved by more than 4 frames twice in a
-  row, the input slips to it, which `slips` counts. A second slip the same
+  packets the median is checked again. Moved by more than 8 frames twice in a
+  row, the input slips to it, which `slips` counts: real devices' timings,
+  each up to 8 frames off, move the median by up to 5. A second slip the same
   way means the clocks drift apart after all, and the input goes over to
   being resampled, without a gap.
 - Any other input is resampled with the engine's resampler, following the
@@ -339,8 +362,8 @@ performance counter and takes the engine frame heard then from the output's
 latest clock reading, the one audio inputs line up by
 ([Inputs](#inputs)), extended at the output's rate. WinMM's own time stamps
 count whole milliseconds from when the input started, so they go unused. A
-message that comes before the output plays is dropped: there's no frame to
-place it on yet.
+message that comes before the output publishes its first reading is
+dropped: there's no frame to place it on yet.
 
 **Monitoring.** The engine plays each message its frame plus a fixed delay
 later: how far ahead of what's heard a callback renders, at most, which is
