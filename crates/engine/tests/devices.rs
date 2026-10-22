@@ -11,7 +11,7 @@ use musicable_engine::{
     AudioMut, Engine, EngineConfig, Event, ParallelOptions, ParallelRenderer, ReferenceRenderer,
     Renderer, TransportCommand, compile, rt,
 };
-use musicable_model::native::{NativeDevice, NativeKind, delay, eq, utility};
+use musicable_model::native::{NativeDevice, NativeKind, compressor, delay, eq, gate, utility};
 use musicable_model::time::{TempoMap, TimeSignature};
 use musicable_model::{Device, DeviceKind, Project, TestTone, TrackKind};
 
@@ -74,8 +74,9 @@ fn reference(project: &Project) -> Vec<f32> {
     play(project, Box::new(ReferenceRenderer), &[])
 }
 
-/// The built-in effects that leave the signal as it is at their defaults.
-/// The others, such as the reverb, are heard as soon as they're added.
+/// The built-in effects that leave the test tone as it is at their
+/// defaults. A compressor turns it down: it's 12 dB over the threshold.
+/// The delay and the reverb are heard as soon as they're added.
 const TRANSPARENT: [NativeKind; 3] = [NativeKind::Eq, NativeKind::Gate, NativeKind::Utility];
 
 #[test]
@@ -83,7 +84,12 @@ fn devices_without_dsp_yet_pass_the_signal_through() {
     let dry = reference(&project(|_| vec![]));
     for kind in NativeKind::ALL {
         let wet = reference(&project(|p| vec![native(p, kind, &[])]));
-        if !BUILT.contains(&kind) || TRANSPARENT.contains(&kind) {
+        if BUILT.contains(&kind) {
+            // Some new built-in effects start transparent, too.
+            if TRANSPARENT.contains(&kind) {
+                assert_eq!(wet, dry, "{kind:?}");
+            }
+        } else {
             assert_eq!(wet, dry, "{kind:?}");
         }
     }
@@ -116,6 +122,34 @@ fn devices_process_in_chain_order() {
         tail.iter().all(|s| s.abs() < 1e-3),
         "a notch lets 440 Hz through"
     );
+}
+
+#[test]
+fn dynamics_follow_the_tone() {
+    let dry = reference(&project(|_| vec![]));
+    let peak = |signal: &[f32]| signal.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+    // The tone peaks at -6 dB, 12 dB over a new compressor's threshold:
+    // past its 6 dB knee, so 4:1 takes three quarters of that off. With a
+    // quick attack and a slow release it holds that from peak to peak.
+    let compressed = reference(&project(|p| {
+        let quick = [(compressor::ATTACK, 0.1), (compressor::RELEASE, 3000.0)];
+        vec![native(p, NativeKind::Compressor, &quick)]
+    }));
+    let reduction = 20.0 * (peak(&dry[2400..]) / peak(&compressed[2400..])).log10();
+    let expected = 0.75 * (20.0 * 0.5_f32.log10() + 18.0);
+    assert!((reduction - expected).abs() < 0.01, "{reduction} dB");
+    // A gate whose threshold is over the tone closes on it, down to its
+    // floor.
+    let gated = reference(&project(|p| {
+        let shut = [
+            (gate::THRESHOLD, -1.0),
+            (gate::HOLD, 0.0),
+            (gate::RELEASE, 1.0),
+        ];
+        vec![native(p, NativeKind::Gate, &shut)]
+    }));
+    let floor = 20.0 * (peak(&gated[2400..]) / peak(&dry[2400..])).log10();
+    assert!((floor + 80.0).abs() < 0.01, "{floor} dB");
 }
 
 #[test]
