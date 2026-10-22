@@ -57,6 +57,14 @@ impl PluginSettings {
         }
     }
 
+    /// Whether a project file can hold the settings: the parameters in
+    /// order of id, at most one value for each, and every value a finite
+    /// number.
+    pub fn is_valid(&self) -> bool {
+        self.params.is_sorted_by(|a, b| a.id < b.id)
+            && self.params.iter().all(|p| p.value.is_finite())
+    }
+
     fn index(&self, id: u32) -> Result<usize, usize> {
         self.params.binary_search_by_key(&id, |p| p.id)
     }
@@ -109,6 +117,21 @@ mod tests {
         assert_eq!(settings.set_param(3, None), Some(1.0));
         assert_eq!(settings.set_param(3, None), None);
         assert_eq!(settings.params, [PluginParam { id: 7, value: 0.25 }]);
+    }
+
+    #[test]
+    fn valid_settings_have_parameters_in_order_once_each() {
+        let param = |id, value| PluginParam { id, value };
+        let settings = |params| PluginSettings {
+            state: None,
+            params,
+        };
+        assert!(settings(vec![]).is_valid());
+        assert!(settings(vec![param(1, 0.5), param(4, -2.0)]).is_valid());
+        assert!(!settings(vec![param(4, 0.5), param(1, 0.5)]).is_valid());
+        assert!(!settings(vec![param(1, 0.5), param(1, 0.25)]).is_valid());
+        assert!(!settings(vec![param(1, f64::NAN)]).is_valid());
+        assert!(!settings(vec![param(1, f64::INFINITY)]).is_valid());
     }
 
     #[test]
