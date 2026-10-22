@@ -1,12 +1,14 @@
-//! The device commands: adding Musicable's own devices and plugins to a
-//! track's devices or the master's, setting their parameters, giving
-//! samplers their samples, showing and closing plugins' windows, and
-//! deleting devices.
+//! The device commands: adding Musicable's own devices, plugins and presets
+//! to a track's devices or the master's, setting their parameters, giving
+//! samplers their samples, showing and closing plugins' windows, saving
+//! devices as presets, and deleting devices.
+
+use std::path::Path;
 
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
-use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, TrackId};
+use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, TrackId, TrackKind};
 
 use crate::{
     Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value,
@@ -17,6 +19,10 @@ use crate::{
 pub const ADD: CommandId = CommandId::new("device.add");
 /// Adds a plugin to a track's devices, or the master's.
 pub const ADD_PLUGIN: CommandId = CommandId::new("device.add_plugin");
+/// Adds the device a preset holds to a track's devices, or the master's.
+pub const ADD_PRESET: CommandId = CommandId::new("device.add_preset");
+/// Saves a device as a preset, for the browser.
+pub const SAVE_PRESET: CommandId = CommandId::new("device.save_preset");
 /// Sets a device's parameter, or leaves a plugin's to its state.
 pub const SET_PARAM: CommandId = CommandId::new("device.set_param");
 /// Gives a sampler a sample, or takes its sample away.
@@ -42,6 +48,12 @@ const INDEX: Param = Param::optional(
     Type::Int,
     "Where it goes in the chain: the end without it.",
 );
+const NEW_TRACK: Param = Param::optional(
+    "new_track",
+    Type::Bool,
+    "Puts it on a new track named after it instead: a MIDI track for an instrument, an \
+     audio track for an effect.",
+);
 
 /// The keys of Musicable's own devices, as `device.add` takes them.
 const KINDS: &str = "eq, compressor, gate, delay, reverb, utility, sampler or synth";
@@ -59,6 +71,7 @@ pub fn register(registry: &mut Registry) {
             TRACK,
             MASTER,
             INDEX,
+            NEW_TRACK,
         ]),
         |ctx, args| {
             let key: String = args.get("kind")?;
@@ -68,7 +81,7 @@ pub fn register(registry: &mut Registry) {
                 )));
             };
             let native = DeviceKind::Native(NativeDevice::new(kind));
-            add(ctx, args, kind.name(), native)
+            add(ctx, args, native, &format!("Add {}", kind.name()))
         },
     );
     registry.add(
@@ -88,6 +101,7 @@ pub fn register(registry: &mut Registry) {
             TRACK,
             MASTER,
             INDEX,
+            NEW_TRACK,
         ]),
         |ctx, args| {
             let format = match args.get::<String>("format")?.as_str() {
@@ -110,8 +124,61 @@ pub fn register(registry: &mut Registry) {
                 instrument: args.opt("instrument")?.unwrap_or(false),
                 settings: PluginSettings::default(),
             };
-            let name = plugin_name(&plugin).to_owned();
-            add(ctx, args, &name, DeviceKind::Plugin(plugin))
+            let name = format!("Add {}", plugin_name(&plugin));
+            add(ctx, args, DeviceKind::Plugin(plugin), &name)
+        },
+    );
+    registry.add(
+        Command::new(ADD_PRESET, "Add Preset").with_params(&[
+            Param::required(
+                "preset",
+                Type::Text,
+                "The preset file's path: Musicable's own, or a VST3 preset.",
+            ),
+            TRACK,
+            MASTER,
+            INDEX,
+            NEW_TRACK,
+        ]),
+        |ctx, args| {
+            let preset: String = args.get("preset")?;
+            let preset = Path::new(&preset);
+            let kind = ctx
+                .library
+                .load_preset(preset)
+                .map_err(CommandError::invalid)?;
+            let name = match preset.file_stem() {
+                Some(stem) => format!("Add {}", stem.to_string_lossy()),
+                None => "Add Preset".to_owned(),
+            };
+            add(ctx, args, kind, &name)
+        },
+    );
+    registry.add(
+        Command::new(SAVE_PRESET, "Save Device as Preset").with_params(&[
+            DEVICE,
+            Param::optional(
+                "name",
+                Type::Text,
+                "The preset's name: the device's and a number without it.",
+            ),
+        ]),
+        |ctx, args| {
+            let device = args.get("device")?;
+            let name: Option<String> = args.opt("name")?;
+            let name = match name.as_deref().map(str::trim) {
+                Some("") => return Err(CommandError::invalid("a preset's name can't be empty")),
+                name => name,
+            };
+            let Some((_, _, found)) = ctx.document.project().find_device(device) else {
+                return Err(no_device(device));
+            };
+            let kind = found.kind.clone();
+            let saved = ctx
+                .library
+                .save_preset(device, &kind, device_name(&kind), name)
+                .map_err(CommandError::invalid)?;
+            Ok(Value::Text(saved.to_string_lossy().into_owned()))
         },
     );
     registry.add(
@@ -137,7 +204,7 @@ pub fn register(registry: &mut Registry) {
                 .map_err(|_| CommandError::invalid("a parameter's id is from 0 to 4294967295"))?;
             let value: Option<f64> = args.opt("value")?;
             let found = find(ctx, device)?;
-            let name = format!("Change {}", device_name(found));
+            let name = format!("Change {}", device_name(&found.kind));
             match found.kind {
                 DeviceKind::Native(ref native) => {
                     let Some(info) = native.params().get(param as usize) else {
@@ -229,7 +296,7 @@ pub fn register(registry: &mut Registry) {
         Command::new(DELETE, "Delete Device").with_params(&[DEVICE]),
         |ctx, args| {
             let device = args.get("device")?;
-            let name = format!("Delete {}", device_name(find(ctx, device)?));
+            let name = format!("Delete {}", device_name(&find(ctx, device)?.kind));
             ctx.document.transact(&name, |tx| {
                 tx.remove_device(device);
             });
@@ -238,33 +305,51 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-/// Adds the device `kind`, called `name`, where `args` say, as the
-/// transaction "Add `name`". Returns its id.
+/// Adds a device of `kind` where `args` say, as the change `name`, and
+/// returns its id. A new track it goes on is selected.
 fn add(
     ctx: &mut Context<'_>,
     args: &Args,
-    name: &str,
     kind: DeviceKind,
+    name: &str,
 ) -> Result<Value, CommandError> {
-    let chain = chain(
-        ctx,
-        args.opt("track")?,
-        args.opt("master")?.unwrap_or(false),
-        if matches!(kind, DeviceKind::Plugin(_)) {
-            "plugin"
-        } else {
-            "device"
-        },
-    )?;
     let index = args
         .opt::<i64>("index")?
         .map_or(usize::MAX, |index| usize::try_from(index).unwrap_or(0));
-    let device = ctx.document.transact(&format!("Add {name}"), |tx| {
+    let what = match kind {
+        DeviceKind::Plugin(_) => "plugin",
+        _ => "device",
+    };
+    let chain = match args.opt("new_track")?.unwrap_or(false) {
+        true => None,
+        false => Some(chain(
+            ctx,
+            args.opt("track")?,
+            args.opt("master")?.unwrap_or(false),
+            what,
+        )?),
+    };
+    let track = match kind.is_instrument() {
+        true => TrackKind::Midi,
+        false => TrackKind::Audio,
+    };
+    let track_name = device_name(&kind).to_owned();
+    let (device, new) = ctx.document.transact(name, |tx| {
+        let (chain, new) = match chain {
+            Some(chain) => (chain, None),
+            None => {
+                let id = crate::track::add_track(tx, track_name, track);
+                (Chain::Track(id), Some(id))
+            }
+        };
         let device = tx.new_device(kind);
         let id = device.id;
         tx.add_device(chain, index, device);
-        id
+        (id, new)
     });
+    if new.is_some() {
+        ctx.document.editor_mut().selected_track = new;
+    }
     Ok(device.into())
 }
 
@@ -323,12 +408,12 @@ fn no_device(device: DeviceId) -> CommandError {
     CommandError::invalid(format!("there's no device {}", device.0))
 }
 
-/// What the Edit menu calls a device: a built-in device by its kind, such
-/// as "EQ", and a plugin by its name.
-fn device_name(device: &Device) -> &str {
-    match device.kind {
-        DeviceKind::Native(ref native) => native.kind.name(),
-        DeviceKind::Plugin(ref plugin) => plugin_name(plugin),
+/// What the browser and the Edit menu call a device: a built-in device by
+/// its kind, such as "EQ", and a plugin by its name.
+pub fn device_name(kind: &DeviceKind) -> &str {
+    match kind {
+        DeviceKind::Native(native) => native.kind.name(),
+        DeviceKind::Plugin(plugin) => plugin_name(plugin),
         _ => "Device",
     }
 }
@@ -678,5 +763,123 @@ mod tests {
         let keys: Vec<_> = NativeKind::ALL.iter().map(|kind| kind.key()).collect();
         let (rest, last) = keys.split_at(keys.len() - 1);
         assert_eq!(KINDS, format!("{} or {}", rest.join(", "), last[0]));
+    }
+
+    fn synth() -> DeviceKind {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.synth".to_owned(),
+            name: "Synth".to_owned(),
+            instrument: true,
+            settings: PluginSettings {
+                state: Some(musicable_model::plugin::PluginState::new(vec![1, 2])),
+                params: vec![PluginParam { id: 3, value: 0.5 }],
+            },
+        })
+    }
+
+    #[test]
+    fn presets_add_the_devices_they_hold() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut setup = Setup::new(project);
+        let warm = "/presets/Synth/Warm.musicable-preset";
+        setup.library.presets.insert(warm.into(), synth());
+        let args = Args::new().with("preset", warm).with("track", keys);
+        let device = setup.run_with(&ADD_PRESET, args).unwrap();
+        let added = &setup.document.project().tracks[0].devices[0];
+        assert_eq!((Value::from(added.id), &added.kind), (device, &synth()));
+        assert_eq!(setup.committed_names(), ["Add Warm"]);
+        let missing = Args::new()
+            .with("preset", "/presets/Missing.vstpreset")
+            .with("track", keys);
+        assert_eq!(
+            setup.run_with(&ADD_PRESET, missing),
+            Err(CommandError::invalid(
+                "/presets/Missing.vstpreset isn't a preset"
+            ))
+        );
+    }
+
+    #[test]
+    fn devices_save_as_presets_named_after_them() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let device = project.new_device(synth());
+        let id = device.id;
+        project.tracks[0].devices.push(device);
+        let mut setup = Setup::new(project);
+        let saved = setup.run_with(&SAVE_PRESET, Args::new().with("device", id));
+        assert_eq!(
+            saved,
+            Ok(Value::Text(
+                "/presets/Synth/Synth 1.musicable-preset".into()
+            ))
+        );
+        let named = Args::new().with("device", id).with("name", " Bright ");
+        assert_eq!(
+            setup.run_with(&SAVE_PRESET, named),
+            Ok(Value::Text("/presets/Synth/Bright.musicable-preset".into()))
+        );
+        let blank = Args::new().with("device", id).with("name", " ");
+        assert_eq!(
+            setup.run_with(&SAVE_PRESET, blank),
+            Err(CommandError::invalid("a preset's name can't be empty"))
+        );
+        assert_eq!(
+            setup.run_with(&SAVE_PRESET, Args::new().with("device", DeviceId(9))),
+            Err(CommandError::invalid("there's no device 9"))
+        );
+        assert_eq!(
+            setup.library.saved,
+            [
+                (synth(), "Synth".to_owned(), None),
+                (synth(), "Synth".to_owned(), Some("Bright".to_owned()))
+            ]
+        );
+        // Saving a preset doesn't change the project.
+        assert_eq!(setup.committed_names(), Vec::<String>::new());
+        assert_eq!(setup.document.project().tracks[0].id, keys);
+    }
+
+    #[test]
+    fn devices_can_go_on_a_new_track_named_after_them() {
+        let mut project = Project::new();
+        project.add_track("Reverb", TrackKind::Return);
+        let mut setup = Setup::new(project);
+        let synth = add("Synth")
+            .with("instrument", true)
+            .with("new_track", true);
+        let synth = setup.run_with(&ADD_PLUGIN, synth).unwrap();
+        let eq = setup
+            .run_with(&ADD_PLUGIN, add("EQ").with("new_track", true))
+            .unwrap();
+        let project = setup.document.project();
+        let tracks: Vec<(&str, TrackKind, Value)> = project
+            .tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.name.as_str(),
+                    t.kind,
+                    t.devices.first().map_or(Value::None, |d| d.id.into()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tracks,
+            [
+                ("Synth", TrackKind::Midi, synth),
+                ("EQ", TrackKind::Audio, eq),
+                ("Reverb", TrackKind::Return, Value::None)
+            ]
+        );
+        // The new track is selected, and it came with its device, as one
+        // change.
+        let eq_track = project.tracks[1].id;
+        assert_eq!(setup.document.editor().selected_track, Some(eq_track));
+        assert_eq!(setup.committed_names(), ["Add Synth", "Add EQ"]);
+        assert!(setup.document.undo());
+        assert_eq!(setup.document.project().tracks.len(), 2);
     }
 }

@@ -106,14 +106,14 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Notes, Automation, Locator, Transport, View and Options.
-  Undo and Redo name the change they would make, as in "Undo Set Tempo",
-  and are greyed out when there's nothing to undo or redo, as is any
+  Track, Clip, Notes, Automation, Locator, Transport, Browser, View and
+  Options. Undo and Redo name the change they would make, as in "Undo Set
+  Tempo", and are greyed out when there's nothing to undo or redo, as is any
   command that doesn't apply now, such as Split with nothing selected.
   Toggles, such as Follow and Snap to Grid, are ticked while on. A command
   in an area with no menu yet gets a menu named after its area, before
-  View, so every command can be reached; commands that need arguments are
-  left out, as menus can't give them. On the right are the CPU meter and
+  Browser, so every command can be reached; commands that need arguments
+  are left out, as menus can't give them. On the right are the CPU meter and
   the dropout counter.
 - **The transport bar** has go to start, play, stop, record, loop, punch in
   and punch out, the metronome, the tempo, the time signature, and the
@@ -128,16 +128,17 @@ That's what `ParallelOptions::inline_below` is for
 - **The arrangement** fills the middle of the window: the tracks over time,
   with their clips, under a ruler ([below](#the-arrangement)).
 - **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Device to open the plugin browser (see
-  [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
+  devices, or the master's, with Add Device to open the browser's devices
+  (see [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
   **View > Devices** (Ctrl+Alt+L) hides or shows it.
 - **The piano roll** takes the devices panel's place, as Live's clip view
   takes its device view's: showing one hides the other. Double-clicking a
   MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
   switches between the two ([below](#the-piano-roll)).
-- **The plugin browser** is a panel on the left, hidden until Add Device or
-  **View > Plugin Browser** (Ctrl+Alt+B) shows it. It lists Musicable's
-  own devices, then the plugins installed.
+- **The browser** is a panel on the left with the samples, the devices and
+  the presets ([The browser](#the-browser)), hidden until Add Device,
+  **Browser > Search in Browser** (Ctrl+F) or **View > Browser**
+  (Ctrl+Alt+B) shows it.
 - **The mixer** is a panel under them, with a strip for each track and the
   master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
   make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
@@ -699,16 +700,19 @@ loads only the libraries that are new or changed since. A library that
 crashes, hangs or fails as it loads is left out, and the status bar says
 which; **Options > Rescan Plugins** tries those again too.
 
-**The plugin browser** lists the plugins found by name, under **Plugins**
-and after Musicable's own devices: all of them, or only the instruments or
-the effects. Hovering one shows its vendor, its
+**The browser's Devices** list Musicable's own devices under **Built-in**,
+then the plugins found by name under **Plugins**: all of them, or only the
+instruments or the effects. Hovering one shows its vendor, its
 kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
 best matches first. Double-click a plugin to put it at the end of the
 selected track's devices, or the master's while the devices panel shows
-those. The browser's foot says how many plugins there are, and has Rescan,
-or says "Scanning..." while a scan runs.
+those. Or drag it: into the devices panel, onto a track for the end of
+its devices, or below the tracks for a new track named after it, a MIDI
+track for an instrument and an audio track for an effect. The list's foot
+says how many plugins there are, and has Rescan, or says "Scanning..."
+while a scan runs.
 
 **The devices panel** shows the devices of the selected track, which a
 click on its header selects, in the order the signal goes through them,
@@ -736,6 +740,150 @@ as it is then. Delay compensation lines up every track with the latest
 one, so a plugin that looks ahead doesn't put its track out of time
 ([engine.md](engine.md#delay-compensation)). [plugins.md](plugins.md)
 has how the app hosts plugins.
+
+## The browser
+
+The browser is the panel on the left, with three lists: Samples, Devices
+and Presets. Ctrl+F shows it with the keys in the search field of the list
+showing, and Up and Down there move through what it lists. What the browser
+does is commands (`browser.*` and the device commands,
+[commands.md](commands.md#browser)), so keys, the command palette and
+agents reach it too, and a search an agent runs shows in the browser.
+
+### Samples
+
+**The library** is the folders of samples you add, with the + at the foot
+of the list, or **Browser > Add Folder to Library...**. The app looks
+through each folder and the folders in it for WAV, AIFF and FLAC files,
+reading each one's header, and keeps what it finds in `library.json` in
+the config folder ([Settings](#settings-and-your-keymap)), so the next
+start has the library at once. Each start looks through the folders again
+in the background, reading only the files whose size or time of change
+differ, and **Browser > Rescan Library** does it when asked; a file that
+moved within its folder keeps its tags. A folder's right-click menu has
+Rescan and Remove from Library, which leaves the files where they are. A
+folder can't be added twice, nor one inside a folder of the library.
+
+**Browsing and searching.** With the search field empty, the list is the
+folders of the library, which a click opens and closes: each folder's
+folders first, then its files, each in order of name. Typing in the field
+searches as you type: every word has to be in a file's name, its folders
+or its tags, and the best matches come first, those whose names have the
+words before those whose folders do, and a word that starts a word of the
+name before one inside it, so "kick" finds "Kick_01" before "Sidekick".
+The list shows the first thousand files found, with their folders, and the
+foot says how many there are in all. Searches of a quarter of a million
+files take a few milliseconds ([below](#how-fast-it-finds-things)).
+
+**A sample's menu** has Preview, Insert, Find Similar, and its tags. Find
+Similar lists the files most like it, "Like Kick 01" above them, until ×
+goes back to the search: those whose names share the most words with its
+name, then those in the same folder, then those nearest its length. The
+names and lengths are all it goes on, until analysis
+([below](#not-done-yet)) gives sounds an embedding to compare. The tags
+are yours: type one in New tag and press Enter to give it, and click one
+to take it away. Searches find them, and the library file keeps them. They
+aren't in the project's undo history, as they aren't the project's.
+
+**Previews.** Clicking a sample plays it, beside the song, while Auto, at
+the foot, is on. The strip there shows its waveform with where it's
+playing, which a click plays from the start again; Stop stops it, and the
+slider sets how loud previews play, from -60 to +6 dB. Previews play after
+the master, so they're never in an export, and a file at another sample
+rate is resampled. A file up to about twelve seconds long at 44.1 kHz is
+read whole to preview it, and a longer one streams. The browser remembers
+Auto and the volume in `settings.toml`.
+
+**Onto tracks.** Double-click a sample, or pick Insert, to put it on the
+selected audio track at the start marker, or on a new audio track named
+after it, as an imported file goes
+([Audio files](#audio-files)). Or drag it onto a track, where it starts
+at the grid line nearest where it's dropped, or below the tracks for a new
+track there. While a sample, a plugin or a preset is dragged, the place it
+would go is outlined, and "New track" shows below the tracks.
+
+### Devices
+
+The Devices list is the plugins the scans found, which go on tracks as
+the samples do ([Plugins](#plugins)).
+
+### Presets
+
+**Presets** are a device's settings in a file, a plugin's state and all.
+**Save as Preset...** in a device's right-click menu in the devices panel
+asks for a name, and saves the device as a Musicable preset: a
+`.musicable-preset` file in a folder named after the device in the
+Presets folder, `Music/Musicable/Presets` in your home folder, or the
+`[browser]` settings' `presets_folder`. A name the device has a preset for
+already is refused. The Presets list also finds the VST3 presets
+(`.vstpreset`) in VST3's preset folders:
+
+| System | Folders |
+|---|---|
+| Windows | `Documents\VST3 Presets`, `%PROGRAMDATA%\VST3 Presets` |
+| macOS | `~/Library/Audio/Presets`, `/Library/Audio/Presets`, `/Network/Library/Audio/Presets` |
+| Linux | `~/.vst3/presets`, `/usr/share/vst3/presets`, `/usr/local/share/vst3/presets` |
+
+The list groups presets by device, finds them by name and device as the
+samples are found, and leaves out those for plugins that aren't
+installed, which its foot counts. Double-click a preset to add its device
+to the chain the devices panel shows, set as it was saved, or drag it
+there, onto a track, or below the tracks for a new track. Adding a preset
+is a step in the undo history named after it.
+
+### Behind the browser
+
+**One queue for file work.** Reading the library file, looking through
+folders, finding presets, opening the files to preview and drawing their
+waveforms all happen on one queue of the library's own
+(`musicable_library::Queue`), never on the window's thread or the
+engine's workers. It has a thread for every two cores, one to four of
+them, called `musicable-files-1` and up, which run below normal priority.
+A preview comes first, then a waveform, then scans. Scans run on every
+thread while the transport is stopped and on one while it plays, and
+while recording they rest as long as they work, so the disk and the cores
+are left to the recorder and the engine. On Windows and macOS they also
+run in the system's background mode, which puts their reads behind
+others. Analysis will run on it too.
+
+**The library file** has a record for each file, with room for what
+analysis will add: tags with where each came from (the name, a
+measurement, a model or you) and how sure it is, measured values, an
+embedding for finding similar sounds, and the version of the analyser that
+made them. The browser fills in only the names, the file's size and time
+of change, and its header: format, sample rate, channels and length. It's
+saved a couple of seconds after a change, so tagging a run of files saves
+it once, and when the app closes. A library file that can't be read is
+kept beside the new one as `library.json.broken`, and the status bar says
+so.
+
+### How fast it finds things
+
+`cargo bench -p musicable-library --bench large` builds a made-up library
+of a quarter of a million files, named as sample packs name them (pass
+`-- 1000000` for a million), and prints how long each step takes. On a
+four-core cloud machine:
+
+| What | Time |
+|---|---|
+| Writing the index file (44.1 MB) | 179 ms |
+| Reading the index file | 161 ms |
+| Preparing the index for search | 157 ms |
+| Preparing one folder of the library, of 62,500 files | 37 ms |
+| Searching for "kick" (38,874 found) | 3.9 ms |
+| Searching for "dark pad" (625 found) | 3.2 ms |
+| Searching for "deep house kick 120" (146 found) | 5.7 ms |
+| Searching for "ha" (64,375 found) | 4.2 ms |
+| Searching for "nothing like it" (none found) | 3.4 ms |
+| Finding files like one | 62 ms |
+| Scanning 20,000 files the first time | 133 ms |
+| Scanning them again, unchanged | 62 ms |
+
+The scan is of 20,000 small WAV files the bench writes, which the system
+has cached, so it measures Musicable's work, not the disk's. A search goes
+through every file's name and folders, in lower case, one after the other
+in a single string for each folder of the library, so there's no index of
+words to keep up to date.
 
 ## Keys
 
@@ -948,6 +1096,10 @@ is handy for testing.
 plugins at once and scans only what changed. Deleting it makes the next
 scan load every library again.
 
+`library.json` is the browser's library: the folders of samples you
+added, what's in them, and your tags ([The browser](#the-browser)).
+Deleting it empties the library, tags and all.
+
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
 describes. The app reads it at startup and when you click Reload in
 Options > Keyboard Shortcuts, which shows any mistakes in it. A file that
@@ -971,7 +1123,8 @@ backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, and how editing behaves:
+ones, how editing behaves, and the export window's and the browser's
+settings as they were last used:
 
 ```toml
 format = "musicable-settings"
@@ -994,6 +1147,10 @@ normalize = false
 tail = true
 mixdown = true
 stems = false
+
+[browser]
+auto_preview = true
+preview_volume = -6
 ```
 
 Every setting is optional: no device is the default output, no
@@ -1006,7 +1163,10 @@ as in scientific pitch notation and Reaper, or `c5`, as in FL Studio. The
 app reads them at startup; there's no window for them yet. `[export]` is
 the export window's settings as it was last used: `format` is `wav`, `aiff`
 or `flac`, `bits` is 16, 24, or 32 for floats, and a `sample_rate` there
-renders at that rate instead of the engine's. Fields this version doesn't
+renders at that rate instead of the engine's. `[browser]` has Auto, which
+plays a sample when it's picked, and the previews' volume in dB, from -60
+to 6; a `presets_folder` there saves presets somewhere other than
+`Music/Musicable/Presets` in your home folder. Fields this version doesn't
 know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
@@ -1061,10 +1221,15 @@ for, since those builds are distributed under it.
 
 ## How it's built
 
-- `crates/ui` draws the shell with egui. It depends on the model and the
-  commands only. The app hands it a `View` of what to show each frame, and
-  carries out the `Action`s it hands back. Its tests drive the shell with
-  `egui_kittest`.
+- `crates/ui` draws the shell with egui. It depends on the model, the
+  commands and the library's types only. The app hands it a `View` of what
+  to show each frame, and carries out the `Action`s it hands back. Its
+  tests drive the shell with `egui_kittest`.
+- `crates/library` is the browser's library: the index and its file,
+  scanning folders, searching, presets, and the queue for file work, with
+  no app or UI in it. `crates/app/src/library.rs` puts it to work for the
+  app: it runs the library's file work on the queue, hands the engine the
+  previews, and reaches the commands through `LibraryLink`.
 - `crates/app` has the eframe app (`App`), which holds the `Session`, the
   `Output`, the audio settings window and the user's keymap file
   (`UserKeymap`), and the binary. Debug builds install the engine's
@@ -1082,10 +1247,15 @@ for, since those builds are distributed under it.
   zooms, undoes every step and redoes it, then saves and opens the project
   again.
   [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
-  puts the test plugins on a track from the plugin browser, opens and
+  puts the test plugins on a track from the browser, opens and
   closes a plugin's window from the devices panel, turns a knob in it,
   undoes, deletes a device, saves, and opens the project again. It also
   puts a VST3 plugin on a track and opens its window.
+  [`crates/app/src/app/browsing.rs`](../crates/app/src/app/browsing.rs)
+  adds a folder of samples to the library, searches it with Ctrl+F,
+  previews a sample through the engine at the settings' volume, puts it on
+  a new track with a double-click, tags it, and starts the app again to
+  find the tag and the settings kept.
   `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
@@ -1144,8 +1314,15 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
-- Dragging plugins from the browser onto tracks, moving devices along a
-  chain, and a device's parameters in the devices panel.
+- Moving devices along a chain, and a device's parameters in the devices
+  panel.
+- In the browser: analysis, which will tag sounds by how they sound and
+  find similar ones by an embedding; previews in time with the song;
+  watching the library's folders, which are looked through at each start
+  and on Rescan; CLAP presets, which need the plugins' preset discovery;
+  renaming and deleting presets, and saving VST3 presets; and tags in the
+  undo history. Taking a folder out of the library forgets its files'
+  tags.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.

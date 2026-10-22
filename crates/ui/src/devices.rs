@@ -1,31 +1,34 @@
 //! The devices panel, under the arrangement: the devices of the selected
 //! track, or the master's, in the order they play, with the controls of
-//! Musicable's own. And the plugin browser, beside the arrangement, which
-//! lists Musicable's own devices and the plugins installed, and adds them to
-//! the devices the panel shows.
+//! Musicable's own. And the browser's list of Musicable's own devices and
+//! the plugins installed, which adds them to the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use egui::{
-    Align, Button, Frame, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit, Ui,
-    WidgetInfo, vec2,
+    Align, Button, Frame, Id, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit,
+    Ui, WidgetInfo, vec2,
 };
 use musicable_commands::{Args, device};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
+use crate::browser::Dragged;
 use crate::mouse::MouseMap;
 use crate::native;
 use crate::search::score;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
+use crate::widgets::name_box;
 
 /// The devices panel's id, for [`Shell::toggle_panel`](crate::Shell::toggle_panel).
 pub const DEVICES: &str = "devices";
-/// The plugin browser's id.
+/// The browser's id.
 pub const BROWSER: &str = "browser";
+/// The plugin search field's id, so a key can focus it.
+pub(crate) const PLUGIN_SEARCH: &str = "plugin search";
 
 /// A plugin the browser lists: one a scan found installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +94,7 @@ impl Default for Plugins<'_> {
 const NO_TRACK: &str = "Select a track to see its devices, or pick Master.";
 /// What it shows for a chain without devices.
 const NO_DEVICES: &str =
-    "No devices. Double-click a device or a plugin in the browser to add it here.";
+    "No devices. Double-click a device or a preset in the browser, or drag one here, to add it.";
 
 /// The devices panel's own state.
 #[derive(Debug, Default)]
@@ -101,6 +104,18 @@ pub(crate) struct DevicesPanel {
     /// The selected track as the panel last saw it, so selecting another
     /// track shows that track's devices.
     track: Option<TrackId>,
+    /// The device being saved as a preset, while the box asks for the
+    /// preset's name.
+    saving: Option<Saving>,
+}
+
+/// A device being saved as a preset.
+#[derive(Debug)]
+struct Saving {
+    device: DeviceId,
+    /// The name typed so far: `None` until the box has shown the device's.
+    name: Option<String>,
+    device_name: String,
 }
 
 impl DevicesPanel {
@@ -131,6 +146,7 @@ impl DevicesPanel {
     ) -> bool {
         let project = view.project;
         let mut browse = false;
+        self.ask_preset_name(ui.ctx(), actions);
         ui.add_space(theme.devices.margin);
         ui.horizontal(|ui| {
             let track = self.track.and_then(|id| project.track(id));
@@ -168,12 +184,40 @@ impl DevicesPanel {
                 ui.spacing_mut().item_spacing.x = theme.devices.gap;
                 for device in devices {
                     ui.push_id(device.id, |ui| {
-                        device_box(ui, device, view, theme, mouse, actions);
+                        let saving = &mut self.saving;
+                        device_box(ui, device, view, theme, mouse, saving, actions);
                     });
                 }
             });
         });
         browse
+    }
+
+    /// Whether the panel asks the name of a preset, as keys answer.
+    pub fn asking(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// The box that asks for the name of the preset a device is saved as,
+    /// while one is.
+    fn ask_preset_name(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(saving) = &mut self.saving else {
+            return;
+        };
+        let first = saving.name.is_none();
+        let name = saving
+            .name
+            .get_or_insert_with(|| saving.device_name.clone());
+        let title = format!("Save {} as a Preset", saving.device_name);
+        let Some(confirmed) = name_box(ctx, "save preset", &title, "Save", name, first) else {
+            return;
+        };
+        let name = name.trim();
+        if confirmed && !name.is_empty() {
+            let args = Args::new().with("device", saving.device).with("name", name);
+            actions.push(Action::RunWith(device::SAVE_PRESET, args));
+        }
+        self.saving = None;
     }
 }
 
@@ -187,13 +231,15 @@ fn chain_button(ui: &mut Ui, on: bool, name: &str) -> bool {
 }
 
 /// A device: its name, and a built-in device's controls, or a plugin's
-/// kind and how its plugin is doing.
+/// kind and how its plugin is doing. Its name's menu saves it as a preset,
+/// which `saving` asks the name of.
 fn device_box(
     ui: &mut Ui,
     device: &Device,
     view: &View<'_>,
     theme: &Theme,
     mouse: &MouseMap,
+    saving: &mut Option<Saving>,
     actions: &mut Vec<Action>,
 ) {
     let sizes = &theme.devices;
@@ -211,7 +257,7 @@ fn device_box(
             ui.set_width(width);
             // Top to bottom, whatever the row of boxes around it does.
             ui.vertical(|ui| {
-                title_row(ui, device, name, theme, actions);
+                title_row(ui, device, name, theme, saving, actions);
                 match device.kind {
                     DeviceKind::Native(ref native) => {
                         native::controls(ui, device.id, name, native, view, theme, mouse, actions);
@@ -229,8 +275,16 @@ fn device_box(
 }
 
 /// A device's name, which shows its plugin's window when double-clicked, as
-/// in Live, and the button that deletes it. And a sampler's sample.
-fn title_row(ui: &mut Ui, device: &Device, name: &str, theme: &Theme, actions: &mut Vec<Action>) {
+/// in Live, and whose menu saves it as a preset, and the button that
+/// deletes it. And a sampler's sample.
+fn title_row(
+    ui: &mut Ui,
+    device: &Device,
+    name: &str,
+    theme: &Theme,
+    saving: &mut Option<Saving>,
+    actions: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let delete = ui.small_button("×").on_hover_text("Delete");
@@ -256,6 +310,18 @@ fn title_row(ui: &mut Ui, device: &Device, name: &str, theme: &Theme, actions: &
             if title.double_clicked() && device.kind.plugin().is_some() {
                 actions.push(Action::RunWith(device::SHOW_WINDOW, args.clone()));
             }
+            title.context_menu(|ui| {
+                if ui.button("Save as Preset...").clicked() {
+                    *saving = Some(Saving {
+                        device: device.id,
+                        name: None,
+                        device_name: name.to_owned(),
+                    });
+                }
+                if ui.button("Delete").clicked() {
+                    actions.push(Action::RunWith(device::DELETE, args.clone()));
+                }
+            });
             if delete.clicked() {
                 actions.push(Action::RunWith(device::DELETE, args));
             }
@@ -404,7 +470,7 @@ enum Filter {
     Effects,
 }
 
-/// The plugin browser's own state.
+/// The browser's list of plugins.
 #[derive(Debug, Default)]
 pub(crate) struct Browser {
     /// What's typed in the search field.
@@ -428,6 +494,7 @@ impl Browser {
         ui.add_space(theme.devices.margin);
         ui.add(
             TextEdit::singleline(&mut self.search)
+                .id(Id::unique(PLUGIN_SEARCH))
                 .hint_text("Search")
                 .desired_width(f32::INFINITY),
         );
@@ -473,14 +540,7 @@ impl Browser {
                 twins.insert(key);
             }
         }
-        let to = match chain {
-            Some(Chain::Master) => "the master".to_owned(),
-            Some(Chain::Track(id)) => match view.project.track(id) {
-                Some(track) => track.name.clone(),
-                None => "the selected track".to_owned(),
-            },
-            None => "the selected track".to_owned(),
-        };
+        let to = chain_name(view.project, chain);
         let footer = ui.spacing().interact_size.y + 2.0 * theme.devices.margin;
         ScrollArea::vertical()
             .auto_shrink(false)
@@ -524,25 +584,27 @@ impl Browser {
                     } else {
                         plugin.name.clone()
                     };
-                    let row = ui
-                        .add(
-                            Button::selectable(false, name)
-                                .min_size(vec2(ui.available_width(), 0.0)),
-                        )
-                        .on_hover_text(format!(
-                            "{}{}\n{} · {}\nDouble-click to add it to {to}.",
-                            plugin.name,
-                            match plugin.vendor.as_str() {
-                                "" => String::new(),
-                                vendor => format!(" by {vendor}"),
-                            },
-                            if plugin.instrument {
-                                "Instrument"
-                            } else {
-                                "Effect"
-                            },
-                            format_name(plugin.format),
-                        ));
+                    let row = ui.add(
+                        Button::selectable(false, name)
+                            .min_size(vec2(ui.available_width(), 0.0))
+                            .sense(Sense::click_and_drag()),
+                    );
+                    row.dnd_set_drag_payload(Dragged::Plugin(plugin.clone()));
+                    let row = row.on_hover_text(format!(
+                        "{}{}\n{} · {}\nDouble-click to add it to {to}, or drag it onto a \
+                             track.",
+                        plugin.name,
+                        match plugin.vendor.as_str() {
+                            "" => String::new(),
+                            vendor => format!(" by {vendor}"),
+                        },
+                        if plugin.instrument {
+                            "Instrument"
+                        } else {
+                            "Effect"
+                        },
+                        format_name(plugin.format),
+                    ));
                     if row.double_clicked() {
                         actions.push(Action::RunWith(device::ADD_PLUGIN, add(plugin, chain)));
                     }
@@ -572,8 +634,21 @@ impl Browser {
     }
 }
 
+/// What the browser calls `chain`, where it adds devices: the selected
+/// track without a chain.
+pub(crate) fn chain_name(project: &Project, chain: Option<Chain>) -> String {
+    match chain {
+        Some(Chain::Master) => "the master".to_owned(),
+        Some(Chain::Track(id)) => match project.track(id) {
+            Some(track) => track.name.clone(),
+            None => "the selected track".to_owned(),
+        },
+        None => "the selected track".to_owned(),
+    }
+}
+
 /// The arguments that add `plugin` to `chain`, or to the selected track.
-fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
+pub(crate) fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
     let format = match plugin.format {
         PluginFormat::Clap => "clap",
         PluginFormat::Vst3 => "vst3",
@@ -780,6 +855,7 @@ mod tests {
         ];
         state.shell.toggle_panel(BROWSER);
         harness.run();
+        click(&mut harness, "Devices");
         let names = ["Dragonfly Hall Reverb", "Surge XT", "Vital"];
         let tops: Vec<f32> = (names.iter())
             .map(|name| harness.get_by_label(name).rect().top())
@@ -816,6 +892,7 @@ mod tests {
         state.editor.selected_track = Some(keys);
         state.shell.toggle_panel(BROWSER);
         harness.run();
+        click(&mut harness, "Devices");
         let at = harness.get_by_label("Vital").rect().center();
         double_click(&mut harness, at);
         // Or to the master, when the devices panel shows the master's.
@@ -869,6 +946,7 @@ mod tests {
         state.editor.selected_track = Some(keys);
         state.shell.toggle_panel(BROWSER);
         harness.run();
+        click(&mut harness, "Devices");
         harness.get_by_label("Surge XT (CLAP)");
         harness.get_by_label("Vital");
         harness.get_by_label("3 plugins");
@@ -894,7 +972,7 @@ mod tests {
         click(&mut harness, "View");
         let devices = harness.get_by_label("Devices Ctrl+Alt+L");
         assert_eq!(devices.accesskit_node().toggled(), Some(Toggled::True));
-        let browser = harness.get_by_label("Plugin Browser Ctrl+Alt+B");
+        let browser = harness.get_by_label("Browser Ctrl+Alt+B");
         assert_eq!(browser.accesskit_node().toggled(), Some(Toggled::False));
         browser.click();
         harness.run();
@@ -1118,6 +1196,7 @@ mod tests {
         state.editor.selected_track = Some(keys);
         state.shell.toggle_panel(BROWSER);
         harness.run();
+        click(&mut harness, "Devices");
         let top =
             |harness: &Harness<'static, State>, label| harness.get_by_label(label).rect().top();
         assert!(top(&harness, "Built-in") < top(&harness, "EQ"));

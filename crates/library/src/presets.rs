@@ -195,6 +195,9 @@ fn kind_of(device: &DeviceKind) -> PresetKind {
             id: plugin.id.clone(),
             name: plugin.name.clone(),
         },
+        DeviceKind::Native(native) => PresetKind::Device {
+            name: native.kind.name().to_owned(),
+        },
         DeviceKind::TestGain { .. } => PresetKind::Device {
             name: "Test Gain".to_owned(),
         },

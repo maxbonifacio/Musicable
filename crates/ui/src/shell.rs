@@ -1,12 +1,12 @@
 //! The app shell: the menu bar, the transport bar, the arrangement with the
-//! mixer and the devices or the piano roll under it and the plugin browser
-//! beside it, and a status bar, with the keyboard shortcuts window, the
-//! command palette, and the box that renames things.
+//! mixer and the devices or the piano roll under it and the browser beside
+//! it, and a status bar, with the keyboard shortcuts window, the command
+//! palette, and the box that renames things.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Button, DragValue, Id, Key, Layout, Modal, Modifiers, RichText, TextEdit, Ui};
+use egui::{Align, Button, DragValue, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
@@ -18,7 +18,8 @@ use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
 use crate::arrangement::Arrangement;
-use crate::devices::{BROWSER, Browser, DEVICES, DevicesPanel, Plugins};
+use crate::browser::{self, BrowserPanel, Destination, Library};
+use crate::devices::{BROWSER, DEVICES, DevicesPanel, Plugins};
 use crate::menus::menus;
 use crate::mixer::{self, Choices, InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
@@ -27,7 +28,7 @@ use crate::piano_roll::{PIANO_ROLL, PianoRoll};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::waveform::Waveforms;
-use crate::widgets::{Icon, clock, icon_button, meter, position};
+use crate::widgets::{Icon, clock, icon_button, meter, name_box, position};
 
 /// The mixer's panel, under the arrangement.
 pub const MIXER: &str = "mixer";
@@ -75,6 +76,8 @@ pub struct View<'a> {
     /// Musicable's own devices that play, which the browser lists: the
     /// engine's `devices::BUILT`. The others wait for their sound.
     pub native: &'a [NativeKind],
+    /// The browser's library of samples and presets, and the preview.
+    pub library: Library<'a>,
 }
 
 /// The transport, as the engine last reported it.
@@ -173,6 +176,11 @@ pub enum Action {
     CreateKeymap,
     /// Count dropouts from zero again.
     ResetDropouts,
+    /// Turn on or off previewing samples when they're picked in the
+    /// browser.
+    SetAutoPreview(bool),
+    /// Play previews this loud from now on, in dB.
+    SetPreviewVolume(i32),
     /// Clear the messages.
     DismissMessages,
 }
@@ -194,7 +202,7 @@ pub struct Shell {
     arrangement: Arrangement,
     devices: DevicesPanel,
     piano_roll: PianoRoll,
-    browser: Browser,
+    browser: BrowserPanel,
     theme: Theme,
     mouse: MouseMap,
     /// The panels hidden, by id.
@@ -211,11 +219,11 @@ impl Default for Shell {
             arrangement: Arrangement::default(),
             devices: DevicesPanel::default(),
             piano_roll: PianoRoll::default(),
-            browser: Browser::default(),
+            browser: BrowserPanel::default(),
             theme: Theme::default(),
             mouse: MouseMap::live(),
-            // The plugin browser waits to be asked for, and the piano roll
-            // for a MIDI clip to be opened in it.
+            // The browser waits to be asked for, and the piano roll for a
+            // MIDI clip to be opened in it.
             hidden: BTreeSet::from([BROWSER, PIANO_ROLL]),
             rename: None,
         }
@@ -276,7 +284,7 @@ impl Shell {
                         .show(ui, view, theme, &self.mouse, &mut actions);
                 });
         } else if !self.hidden.contains(DEVICES) {
-            let browse = egui::Panel::bottom(DEVICES)
+            let panel = egui::Panel::bottom(DEVICES)
                 .resizable(true)
                 .default_size(theme.devices.panel)
                 .min_size(theme.devices.panel / 2.0)
@@ -284,11 +292,18 @@ impl Shell {
                     let mouse = &self.mouse;
                     self.devices
                         .show(ui, view, chain, theme, mouse, &mut actions)
-                })
-                .inner;
-            if browse && self.hidden.remove(BROWSER) {
-                ui.ctx().request_repaint();
+                });
+            if panel.inner {
+                self.browser.show_devices();
+                if self.hidden.remove(BROWSER) {
+                    ui.ctx().request_repaint();
+                }
             }
+            // Devices and presets dragged from the browser go in the chain
+            // the panel shows.
+            let target = Destination::Chain(chain);
+            let rect = panel.response.rect;
+            actions.extend(browser::drop_in(ui.ctx(), rect, &target, theme));
         }
         if !self.hidden.contains(MIXER) {
             egui::Panel::bottom(MIXER)
@@ -320,6 +335,7 @@ impl Shell {
         self.show_rename(ui.ctx(), view, &mut actions);
         self.palette.show(ui.ctx(), view, &mut actions);
         self.shortcuts.show(ui.ctx(), view, &mut actions);
+        browser::show_dragged(ui.ctx());
         actions
     }
 
@@ -356,6 +372,13 @@ impl Shell {
 
     pub fn panel_shown(&self, id: &str) -> bool {
         !self.hidden.contains(id)
+    }
+
+    /// Shows the browser, and puts the keys in the search field of the list
+    /// it shows.
+    pub fn focus_browser_search(&mut self) {
+        self.hidden.remove(BROWSER);
+        self.browser.focus_search();
     }
 
     /// Asks the user for a new name for `named`.
@@ -425,44 +448,7 @@ impl Shell {
         };
         let first = rename.text.is_none();
         let text = rename.text.get_or_insert_with(|| current.clone());
-        let (enter, escape) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-            )
-        });
-        let mut done = None;
-        let modal = Modal::new(Id::unique("rename")).show(ctx, |ui| {
-            ui.set_width(ui.spacing().text_edit_width);
-            ui.heading(title);
-            let field = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
-            if first {
-                // The whole name, ready to be typed over.
-                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
-                    let all = egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(0),
-                        egui::text::CCursor::new(text.chars().count()),
-                    );
-                    state.cursor.set_char_range(Some(all));
-                    state.store(ui.ctx(), field.id);
-                }
-            }
-            field.request_focus();
-            ui.horizontal(|ui| {
-                if ui.button("Rename").clicked() {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    done = Some(false);
-                }
-            });
-        });
-        if enter {
-            done = Some(true);
-        } else if escape || modal.backdrop_response.clicked() {
-            done = done.or(Some(false));
-        }
-        let Some(confirmed) = done else {
+        let Some(confirmed) = name_box(ctx, "rename", title, "Rename", text, first) else {
             return;
         };
         let name = text.trim().to_owned();
@@ -500,7 +486,10 @@ impl Shell {
     /// Whether the shell asks something that keys answer, or has the command
     /// palette open. Keys don't run commands while it does.
     pub fn asking(&self) -> bool {
-        self.palette.is_open() || self.shortcuts.asking() || self.rename.is_some()
+        self.palette.is_open()
+            || self.shortcuts.asking()
+            || self.rename.is_some()
+            || self.devices.asking()
     }
 }
 

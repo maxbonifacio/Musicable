@@ -15,14 +15,16 @@ use musicable_engine::media::Media;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
-    NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
+    NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError, TransportCommand,
     compile_with_inputs, compile_with_stems,
 };
+use musicable_library::Busy;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
+use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::MediaPool;
 use crate::plugins::{Change, Plugins};
 use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report};
@@ -79,6 +81,10 @@ pub struct Session {
     requests: Vec<Request>,
     /// Counts the project's changes.
     revision: u64,
+    /// The browser's library, which previews through the engine.
+    library: Library,
+    /// How loud previews play: 1.0 as they are.
+    preview_gain: f32,
 }
 
 impl Session {
@@ -227,6 +233,8 @@ impl Session {
             problems: Vec::new(),
             requests: Vec::new(),
             revision: 0,
+            library: Library::none(),
+            preview_gain: 1.0,
         };
         session.arm();
         session
@@ -293,6 +301,7 @@ impl Session {
         }
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
+        self.engine.handle.set_preview_gain(self.preview_gain);
         self.arm();
         old
     }
@@ -536,10 +545,15 @@ impl Session {
     /// then sends the engine what it changed. A command that needs
     /// arguments, or doesn't apply now, does nothing.
     pub fn run(&mut self, id: &CommandId) -> Result<(), UnknownCommand> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+        };
         let mut context = Context {
             document: &mut self.document,
             transport: &mut self.engine,
             requests: &mut self.requests,
+            library: &mut library,
         };
         self.commands.run(id, &mut context)?;
         self.sync();
@@ -550,10 +564,15 @@ impl Session {
     /// changed, and returns the command's result. See
     /// [`Registry::run_with`].
     pub fn run_with(&mut self, id: &CommandId, args: &Args) -> Result<Value, CommandError> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+        };
         let mut context = Context {
             document: &mut self.document,
             transport: &mut self.engine,
             requests: &mut self.requests,
+            library: &mut library,
         };
         let result = self.commands.run_with(id, args, &mut context);
         self.sync();
@@ -596,6 +615,7 @@ impl Session {
     pub fn take_problems(&mut self) -> Vec<String> {
         let mut problems = self.engine.media.take_problems();
         problems.extend(self.plugins.take_problems());
+        problems.extend(self.library.take_problems());
         problems.append(&mut self.problems);
         problems
     }
@@ -666,8 +686,52 @@ impl Session {
             self.follow_plugins(changes);
         }
         self.take_recordings();
+        self.tick_library();
         self.engine.handle.collect_garbage();
         self.engine.flush();
+    }
+
+    /// Takes in what the library's jobs found, hands the engine the
+    /// previews it opened, and tells the library what the engine is doing.
+    fn tick_library(&mut self) {
+        self.library.tick();
+        for message in self.library.take_for_engine() {
+            // A preview the engine has no room for is dropped: the user can
+            // ask for it again.
+            let _ = match message {
+                ToEngine::Play { id, source } => {
+                    let preview = Preview::new(id, source, self.engine.handle.config());
+                    self.engine.handle.preview(preview).map_err(|_| ())
+                }
+                ToEngine::Stop => self.engine.handle.stop_preview().map_err(|_| ()),
+            };
+        }
+        let busy = match (self.engine.handle.stats().playing, self.engine.recording) {
+            (false, _) => Busy::Idle,
+            (true, false) => Busy::Playing,
+            (true, true) => Busy::Recording,
+        };
+        self.library.set_busy(busy);
+    }
+
+    /// The browser's library.
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    pub fn library_mut(&mut self) -> &mut Library {
+        &mut self.library
+    }
+
+    /// Uses `library` from now on, in place of one that has nothing.
+    pub fn set_library(&mut self, library: Library) {
+        self.library = library;
+    }
+
+    /// Plays previews at `gain` from now on: 1.0 plays them as they are.
+    pub fn set_preview_gain(&mut self, gain: f32) {
+        self.preview_gain = gain;
+        self.engine.handle.set_preview_gain(gain);
     }
 
     /// Adds the recordings that have finished as takes, and passes on what

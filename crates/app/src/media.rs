@@ -19,7 +19,7 @@ use musicable_model::clip::{ClipContent, ClipId};
 const LOAD_WHOLE: u64 = 1 << 21;
 
 /// An audio file, as the engine reads it.
-struct FileReader(Decoder);
+pub(crate) struct FileReader(pub(crate) Decoder);
 
 impl AudioReader for FileReader {
     fn channels(&self) -> usize {

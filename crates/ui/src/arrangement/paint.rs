@@ -14,6 +14,7 @@ use musicable_model::{Track, TrackKind};
 use super::{
     AutoRow, Envelope, HeaderButton, Hit, LaneButton, Plan, Row, Scene, Side, TakeRow, find,
 };
+use crate::browser::Destination;
 use crate::mixer::{meter_colour, meter_height};
 use crate::timeline::{self, Timeline};
 
@@ -886,4 +887,45 @@ pub(super) fn drop_hint(painter: &Painter, scene: &Scene<'_>) {
         FontId::proportional(theme.text),
         theme.header_text,
     );
+}
+
+/// Where something dragged from the browser would go: its track's row, or a
+/// new track's under the others, with a line where a sample would start.
+pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let across = layout.headers.left().min(layout.lanes.left())
+        ..=layout.headers.right().max(layout.lanes.right());
+    let outline = Stroke::new(2.0, theme.start_marker);
+    let (rows, at) = match *to {
+        Destination::Track { track, at, .. } => {
+            let Some(row) = layout.rows.iter().find(|row| row.id == track) else {
+                return;
+            };
+            (row.top..=row.bottom(), at)
+        }
+        Destination::NewTrack { at } => {
+            let last_row = layout.rows.last().map(Row::bottom);
+            let last_take = layout.takes.last().map(TakeRow::bottom);
+            let top = (last_row.into_iter().chain(last_take))
+                .reduce(f32::max)
+                .unwrap_or(layout.lanes.top());
+            let rows = top..=top + theme.track_height;
+            let rect = Rect::from_x_y_ranges(across.clone(), rows.clone());
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "New track",
+                FontId::proportional(theme.text),
+                theme.header_text,
+            );
+            (rows, at)
+        }
+        Destination::Chain(_) => return,
+    };
+    let rect = Rect::from_x_y_ranges(across, rows.clone());
+    painter.rect_stroke(rect.shrink(1.0), 0.0, outline, StrokeKind::Inside);
+    if let Some(at) = at {
+        painter.vline(layout.x_of(at), rows, outline);
+    }
 }

@@ -2,12 +2,16 @@
 //! what it's asked, and a document with every command, run as the app runs
 //! them.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
 use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
-use musicable_model::{Project, TrackId};
+use musicable_model::{DeviceId, DeviceKind, Project, TrackId};
 
 use crate::{
-    Args, CommandError, CommandId, Context, Document, Registry, Request, Transport, Value, edit,
+    Args, CommandError, CommandId, Context, Document, Library, Registry, Request, Transport, Value,
+    edit,
 };
 
 /// Records what commands ask of the transport, and plays along: locating
@@ -55,12 +59,115 @@ impl Transport for StubTransport {
     }
 }
 
+/// A library of the files given, which records what commands ask of it.
+#[derive(Debug, Default)]
+pub(crate) struct StubLibrary {
+    /// Every file it has, in the order searches find them.
+    pub files: Vec<PathBuf>,
+    /// The files' tags.
+    pub tags: BTreeSet<(PathBuf, String)>,
+    /// The presets it has, and what they hold.
+    pub presets: BTreeMap<PathBuf, DeviceKind>,
+    /// The presets saved: the device, its name, and the preset's name.
+    pub saved: Vec<(DeviceKind, String, Option<String>)>,
+    pub calls: Vec<String>,
+}
+
+impl StubLibrary {
+    fn has(&self, file: &Path) -> Result<(), String> {
+        match self.files.iter().any(|f| f == file) {
+            true => Ok(()),
+            false => Err(format!("{} isn't there", file.display())),
+        }
+    }
+}
+
+impl Library for StubLibrary {
+    fn search(&mut self, text: &str, limit: usize) -> Vec<PathBuf> {
+        self.calls.push(format!("search {text} {limit}"));
+        let text = text.to_lowercase();
+        let found = self.files.iter().filter(|file| {
+            let name = file.to_string_lossy().to_lowercase();
+            text.split_whitespace().all(|word| name.contains(word))
+        });
+        found.take(limit).cloned().collect()
+    }
+
+    fn find_similar(&mut self, file: &Path, limit: usize) -> Result<Vec<PathBuf>, String> {
+        self.calls
+            .push(format!("similar {} {limit}", file.display()));
+        self.has(file)?;
+        let others = self.files.iter().filter(|f| *f != file);
+        Ok(others.take(limit).cloned().collect())
+    }
+
+    fn preview(&mut self, file: &Path) -> Result<(), String> {
+        self.has(file)?;
+        self.calls.push(format!("preview {}", file.display()));
+        Ok(())
+    }
+
+    fn stop_preview(&mut self) {
+        self.calls.push("stop preview".to_owned());
+    }
+
+    fn tag(&mut self, file: &Path, tag: &str, on: bool) -> Result<bool, String> {
+        self.has(file)?;
+        let key = (file.to_owned(), tag.to_owned());
+        Ok(match on {
+            true => self.tags.insert(key),
+            false => self.tags.remove(&key),
+        })
+    }
+
+    fn add_folder(&mut self, folder: &Path) -> Result<(), String> {
+        self.calls.push(format!("add {}", folder.display()));
+        Ok(())
+    }
+
+    fn remove_folder(&mut self, folder: &Path) -> Result<(), String> {
+        self.calls.push(format!("remove {}", folder.display()));
+        Ok(())
+    }
+
+    fn rescan(&mut self, folder: Option<&Path>) -> Result<(), String> {
+        let folder = folder.map(|f| f.to_string_lossy().into_owned());
+        self.calls.push(format!("rescan {folder:?}"));
+        Ok(())
+    }
+
+    fn load_preset(&mut self, preset: &Path) -> Result<DeviceKind, String> {
+        let found = self.presets.get(preset).cloned();
+        found.ok_or_else(|| format!("{} isn't a preset", preset.display()))
+    }
+
+    fn save_preset(
+        &mut self,
+        _: DeviceId,
+        device: &DeviceKind,
+        device_name: &str,
+        name: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let saved = (
+            device.clone(),
+            device_name.to_owned(),
+            name.map(str::to_owned),
+        );
+        self.saved.push(saved);
+        let name = name.map_or_else(|| format!("{device_name} 1"), str::to_owned);
+        Ok(PathBuf::from(format!(
+            "/presets/{device_name}/{name}.musicable-preset"
+        )))
+    }
+}
+
 /// A document with every command, and what running them asks for.
 pub(crate) struct Setup {
     pub registry: Registry,
     pub document: Document,
     pub transport: StubTransport,
     pub requests: Vec<Request>,
+    pub library: StubLibrary,
 }
 
 impl Setup {
@@ -72,6 +179,7 @@ impl Setup {
             document: Document::new(project),
             transport: StubTransport::default(),
             requests: Vec::new(),
+            library: StubLibrary::default(),
         }
     }
 
@@ -82,6 +190,7 @@ impl Setup {
             document: &mut self.document,
             transport: &mut self.transport,
             requests: &mut self.requests,
+            library: &mut self.library,
         };
         self.registry.run(id, &mut ctx).unwrap();
     }
@@ -91,6 +200,7 @@ impl Setup {
             document: &mut self.document,
             transport: &mut self.transport,
             requests: &mut self.requests,
+            library: &mut self.library,
         };
         self.registry.run_with(id, &args, &mut ctx)
     }

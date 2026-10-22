@@ -21,6 +21,7 @@ use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
 mod args;
 pub mod arrange;
 pub mod automation;
+pub mod browser;
 pub mod controllers;
 pub mod device;
 mod document;
@@ -42,6 +43,7 @@ pub mod transport;
 pub mod view;
 
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
+pub use browser::{Library, NoLibrary};
 pub use document::{Committed, Document, Edit, Transaction};
 pub use editor::{Editor, Focus};
 pub use key::{ChordError, Key, KeyChord, Modifiers};
@@ -237,6 +239,11 @@ pub enum Request {
     /// Ask for an audio file, and give it to this sampler with
     /// [`device::SET_SAMPLE`].
     LoadSample(DeviceId),
+    /// Ask for a folder, and add it to the browser's library with
+    /// [`browser::ADD_FOLDER`].
+    AddLibraryFolder,
+    /// Show the browser, and put the cursor in its search field.
+    FocusBrowserSearch,
 }
 
 /// Something in the project with a name the user can change.
@@ -257,6 +264,8 @@ pub struct Context<'a> {
     /// What the command asks the app to do once it has run, such as showing
     /// a file dialog, which commands can't do themselves.
     pub requests: &'a mut Vec<Request>,
+    /// The browser's library of samples and presets.
+    pub library: &'a mut dyn Library,
 }
 
 /// The engine's transport, as commands see it. The app implements it on top
@@ -386,6 +395,7 @@ pub fn register_all(registry: &mut Registry) {
     arrange::register(registry);
     locator::register(registry);
     device::register(registry);
+    browser::register(registry);
     mixer::register(registry);
     take::register(registry);
     notes::register(registry);

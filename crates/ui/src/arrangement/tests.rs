@@ -51,6 +51,7 @@ impl State {
             document: &mut self.document,
             transport: &mut self.player,
             requests: &mut self.requests,
+            library: &mut musicable_commands::NoLibrary,
         };
         let ran = match action {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
@@ -190,6 +191,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         messages: &[],
                         plugins: Plugins::default(),
                         native: &[],
+                        library: crate::Library::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state

@@ -276,7 +276,7 @@ fn read_files(jobs: &Receiver<Job>, read: &Sender<Read>, current: &AtomicU64) {
 
 /// The waveform of the file at `path`, or `None` if it can't be read, or
 /// if `wanted` says it isn't wanted any more.
-fn waveform(path: &Path, wanted: impl Fn() -> bool) -> Option<Peaks> {
+pub(crate) fn waveform(path: &Path, wanted: impl Fn() -> bool) -> Option<Peaks> {
     let mut decoder = Decoder::open(path).ok()?;
     let info = decoder.info();
     let mut peaks = PeaksBuilder::new(info.sample_rate, info.channels);

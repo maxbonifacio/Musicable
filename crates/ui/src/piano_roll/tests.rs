@@ -5,7 +5,9 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_commands::editor::Viewport;
-use musicable_commands::{CommandError, Context, Document, Keymap, Registry, Request, Value};
+use musicable_commands::{
+    CommandError, Context, Document, Keymap, NoLibrary, Registry, Request, Value,
+};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Note, NoteId, Point};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackKind};
@@ -43,6 +45,7 @@ impl State {
             document: &mut self.document,
             transport: &mut self.player,
             requests: &mut self.requests,
+            library: &mut NoLibrary,
         };
         let ran = match action {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
@@ -219,6 +222,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         messages: &[],
                         plugins: Plugins::default(),
                         native: &[],
+                        library: crate::Library::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state.piano_roll.show(ui, &view, theme, mouse, &mut actions);

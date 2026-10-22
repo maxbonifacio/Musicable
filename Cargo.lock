@@ -1900,6 +1900,7 @@ dependencies = [
  "musicable-commands",
  "musicable-engine",
  "musicable-io",
+ "musicable-library",
  "musicable-model",
  "musicable-plugins",
  "musicable-test-plugins",
@@ -2001,6 +2002,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "musicable-commands",
+ "musicable-library",
  "musicable-model",
 ]
 

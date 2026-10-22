@@ -1,8 +1,8 @@
 //! Small widgets for the shell, and how it writes positions and times.
 
 use egui::{
-    Align2, Color32, FontId, Rect, Response, Role, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
-    WidgetInfo, pos2, vec2,
+    Align2, Color32, FontId, Id, Key, Modal, Modifiers, Rect, Response, Role, Sense, Shape, Stroke,
+    StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use musicable_model::time::{Beats, TempoMap};
 
@@ -216,6 +216,60 @@ pub(crate) fn paint_toggle(
             painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
         }
     }
+}
+
+/// A box over the window that asks for a name: `title` over a field with
+/// `text` in it, all of it selected to be typed over when the box is
+/// `first` shown, and buttons to `confirm` it or cancel. Enter confirms,
+/// and Escape or a click outside cancels. Returns whether the user
+/// confirmed, once they have or have cancelled. `id` tells boxes apart.
+pub(crate) fn name_box(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    confirm: &str,
+    text: &mut String,
+    first: bool,
+) -> Option<bool> {
+    let (enter, escape) = ctx.input_mut(|i| {
+        (
+            i.consume_key(Modifiers::NONE, Key::Enter),
+            i.consume_key(Modifiers::NONE, Key::Escape),
+        )
+    });
+    let mut done = None;
+    let modal = Modal::new(Id::unique(id)).show(ctx, |ui| {
+        ui.set_width(ui.spacing().text_edit_width);
+        let heading = ui.heading(title);
+        let field = TextEdit::singleline(text).desired_width(f32::INFINITY);
+        let field = ui.add(field).labelled_by(heading.id);
+        if first {
+            // The whole name, ready to be typed over.
+            if let Some(mut state) = TextEdit::load_state(ui.ctx(), field.id) {
+                let all = egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(text.chars().count()),
+                );
+                state.cursor.set_char_range(Some(all));
+                state.store(ui.ctx(), field.id);
+            }
+        }
+        field.request_focus();
+        ui.horizontal(|ui| {
+            if ui.button(confirm).clicked() {
+                done = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                done = Some(false);
+            }
+        });
+    });
+    if enter {
+        done = Some(true);
+    } else if escape || modal.backdrop_response.clicked() {
+        done = done.or(Some(false));
+    }
+    done
 }
 
 #[cfg(test)]

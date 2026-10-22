@@ -22,7 +22,7 @@ pub const TOGGLE_MIXER: CommandId = CommandId::new("view.toggle_mixer");
 /// Shows or hides the devices of the selected track, or the master's, under
 /// the arrangement: Live's Detail View.
 pub const TOGGLE_DEVICES: CommandId = CommandId::new("view.toggle_devices");
-/// Shows or hides the plugin browser, beside the arrangement.
+/// Shows or hides the browser, beside the arrangement.
 pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
 /// Shows or hides the piano roll, in place of the devices: Live's clip view.
 pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll");
@@ -113,11 +113,7 @@ const REQUESTS: [(CommandId, &str, Request); 6] = [
     ),
     (TOGGLE_MIXER, "Mixer", Request::TogglePanel("mixer")),
     (TOGGLE_DEVICES, "Devices", Request::TogglePanel("devices")),
-    (
-        TOGGLE_BROWSER,
-        "Plugin Browser",
-        Request::TogglePanel("browser"),
-    ),
+    (TOGGLE_BROWSER, "Browser", Request::TogglePanel("browser")),
     (
         TOGGLE_PIANO_ROLL,
         "Piano Roll",

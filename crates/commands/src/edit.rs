@@ -568,6 +568,7 @@ mod tests {
                 document,
                 transport: &mut transport,
                 requests: &mut requests,
+                library: &mut crate::NoLibrary,
             };
             registry.run(id, &mut ctx).unwrap();
         };

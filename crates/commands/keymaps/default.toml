@@ -39,7 +39,7 @@ version = 1
 
 # Live's keys for the arrangement's zoom, the grid and Follow, for showing
 # take lanes, for showing the mixer and the devices (Live's Detail View)
-# under the arrangement, and for showing the browser.
+# under the arrangement, and for showing the browser and searching in it.
 "view.zoom_in" = ["Equals", "NumpadAdd"]
 "view.zoom_out" = ["Minus", "NumpadSubtract"]
 "view.zoom_to_selection" = ["Z"]
@@ -53,6 +53,7 @@ version = 1
 "view.toggle_mixer" = ["Ctrl+Alt+M"]
 "view.toggle_devices" = ["Ctrl+Alt+L"]
 "view.toggle_browser" = ["Ctrl+Alt+B"]
+"browser.focus_search" = ["Ctrl+F"]
 
 # Live's keys for its clip view, which the piano roll stands in for: Live 12
 # shows and hides it with Ctrl+Alt+3, and switches between it and the device
