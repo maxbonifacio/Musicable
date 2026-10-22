@@ -85,7 +85,7 @@ impl Studio {
             .collect();
         let input = AudioRef::from_planar(&planar, 2);
         self.engine
-            .process_interleaved_with_input(input, &mut self.output, 2);
+            .process_interleaved_with_input(input, &[], &mut self.output, 2);
         let interleaved: Vec<f32> = range
             .flat_map(|w| [captured(w, 0), captured(w, 1)])
             .collect();

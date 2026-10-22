@@ -361,10 +361,10 @@ impl<'a> Runner<'a> {
             // SAFETY: WASAPI handed over `frames` frames of `channels` f32
             // samples, aligned as checked, until `ReleaseBuffer`.
             let out = unsafe { slice::from_raw_parts_mut(data.cast::<f32>(), samples) };
-            engine.process_interleaved_with_input(input, out, channels);
+            engine.process_interleaved_with_input(input, &[], out, channels);
         } else {
             let scratch = &mut self.scratch[..samples];
-            engine.process_interleaved_with_input(input, scratch, channels);
+            engine.process_interleaved_with_input(input, &[], scratch, channels);
             // SAFETY: as above, in the stream's sample format.
             let out = unsafe { slice::from_raw_parts_mut(data, samples * format.sample.bytes()) };
             format.sample.write(scratch, out);

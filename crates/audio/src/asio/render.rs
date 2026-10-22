@@ -220,6 +220,7 @@ impl Render {
                 let input = self.bus.fill(time, self.period);
                 engine.process_with_input(
                     input,
+                    &[],
                     &mut AudioMut::from_planar(&mut self.scratch, channels),
                 );
                 counters.inputs(self.bus.delay(), self.bus.late());

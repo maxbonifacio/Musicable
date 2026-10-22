@@ -7,7 +7,9 @@
 //! An audio track with an input plays it through an [`InputMonitor`] after
 //! its clip player, which plays the input in place of the clips while the
 //! track monitors it: the [`InputLayout`] says where the input is. A MIDI
-//! track's notes go to its first instrument. Group and return tracks
+//! track's notes go to its first instrument through a [`MidiMonitor`],
+//! which adds what comes into the track's MIDI input as the track monitors
+//! it: the layout says which MIDI inputs it takes. Group and return tracks
 //! are buses with strips of their own: what feeds them sums at the head of
 //! their strip. Tracks feed the master or a group, sends feed return tracks,
 //! and the master's strip feeds the audio device. Empty slots add no nodes.
@@ -27,13 +29,14 @@ use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
 use musicable_model::{
-    AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, Project,
-    Track, TrackKind,
+    AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, MidiInput,
+    Project, Track, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
 use crate::media::Media;
 use crate::meter::Meters;
+use crate::midi::MidiMonitor;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
 use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
@@ -42,8 +45,8 @@ use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGrap
 /// A track's nodes have its id in the low 32 bits of the key and their role
 /// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 6 for
 /// the built-in slots, 7 for the output stage, 8 for a group's or a
-/// return's bus, 11 for an audio or MIDI track's clip player and 12 for an
-/// audio track's input monitor. The slot in
+/// return's bus, 11 for an audio or MIDI track's clip player and 12 for a
+/// track's input monitor. The slot in
 /// front of a device also has the device's position in the top 16 bits. The
 /// master's strip has the keys of a track whose id is `u32::MAX`, which no
 /// track has. Sends and devices have their own ids in the low 32 bits, with
@@ -110,7 +113,9 @@ pub mod keys {
     }
 
     /// An audio track's [`InputMonitor`](crate::nodes::InputMonitor),
-    /// right after its clip player.
+    /// right after its clip player, or a MIDI track's
+    /// [`MidiMonitor`](crate::MidiMonitor), between its clip player and its
+    /// instrument.
     pub fn track_input(track: TrackId) -> NodeKey {
         track_key(12, track)
     }
@@ -287,7 +292,9 @@ pub fn compile_with_inputs(
 }
 
 /// Where the audio inputs tracks take are among the engine's device inputs
-/// ([`ProcessContext::input`](crate::ProcessContext::input)): the inputs a
+/// ([`ProcessContext::input`](crate::ProcessContext::input)), and which of
+/// the stream's MIDI inputs MIDI tracks take
+/// ([`ProcessContext::midi`](crate::ProcessContext::midi)): the inputs a
 /// stream opened, by their ids. Tracks monitor their inputs through it,
 /// and a recorder finds them in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -295,6 +302,9 @@ pub struct InputLayout {
     inputs: Vec<LaidOut>,
     /// The input that tracks taking the default input take.
     default: Option<String>,
+    /// The MIDI inputs' ids, by their places among the stream's
+    /// ([`MidiMessage::input`](crate::MidiMessage::input)).
+    midi: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +325,17 @@ pub struct InputChannels {
     pub first: usize,
     /// How many channels it takes: one or two.
     pub count: usize,
+}
+
+/// Which messages a MIDI track's input takes, in an [`InputLayout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MidiSource {
+    /// The one MIDI input, by its place among the stream's
+    /// ([`MidiMessage::input`](crate::MidiMessage::input)), or `None` for
+    /// every one.
+    pub input: Option<usize>,
+    /// The one MIDI channel, from 0 to 15, or `None` for every channel.
+    pub channel: Option<u8>,
 }
 
 impl InputLayout {
@@ -364,6 +385,30 @@ impl InputLayout {
             channel,
             first: laid.first + channel,
             count,
+        })
+    }
+
+    /// Lays out the MIDI input `id`: the stream's messages from it have the
+    /// next place, after the MIDI inputs added so far.
+    pub fn add_midi(&mut self, id: impl Into<String>) {
+        self.midi.push(id.into());
+    }
+
+    /// The MIDI inputs' ids, in the order they were added.
+    pub fn midi_ids(&self) -> impl Iterator<Item = &str> {
+        self.midi.iter().map(String::as_str)
+    }
+
+    /// Which messages `input` takes, or `None` if its MIDI input isn't laid
+    /// out. Taking every MIDI input, it takes those that are.
+    pub fn find_midi(&self, input: &MidiInput) -> Option<MidiSource> {
+        let index = match input.device.as_str() {
+            "" => None,
+            id => Some(self.midi.iter().position(|midi| midi == id)?),
+        };
+        Some(MidiSource {
+            input: index,
+            channel: input.channel,
         })
     }
 }
@@ -459,7 +504,7 @@ pub(crate) fn compile_with(
             player
         });
         let monitor = match (&track.input, player) {
-            (Some(Input::Audio(input)), Some(player)) => {
+            (Some(Input::Audio(input)), Some(player)) if track.kind == TrackKind::Audio => {
                 let mut monitor = InputMonitor::new(track.monitor, track.armed);
                 if let Some(channels) = inputs.find(input) {
                     monitor = monitor.with_input(channels.first, channels.count);
@@ -467,6 +512,21 @@ pub(crate) fn compile_with(
                 let monitor = graph.add(keys::track_input(track.id), monitor);
                 connect(&mut graph, player, monitor);
                 Some(monitor)
+            }
+            _ => None,
+        };
+        // A MIDI track's input joins its clips' notes on their way to its
+        // instrument. A track without one has a monitor too, so the notes
+        // held on an input it had end when the input goes.
+        let midi_monitor = match (track.kind, player) {
+            (TrackKind::Midi, Some(_)) => {
+                let mut monitor = MidiMonitor::new(track.monitor, track.armed);
+                if let Some(Input::Midi(input)) = &track.input
+                    && let Some(source) = inputs.find_midi(input)
+                {
+                    monitor = monitor.with_source(source);
+                }
+                Some(graph.add(keys::track_input(track.id), monitor))
             }
             _ => None,
         };
@@ -479,10 +539,16 @@ pub(crate) fn compile_with(
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
         {
-            strip
-                .graph
-                .send_notes(player, instrument)
-                .expect("both nodes were just added");
+            let routes = match midi_monitor {
+                Some(monitor) => vec![(player, monitor), (monitor, instrument)],
+                None => vec![(player, instrument)],
+            };
+            for (from, to) in routes {
+                strip
+                    .graph
+                    .send_notes(from, to)
+                    .expect("the nodes were just added");
+            }
         }
         // Mute and solo cut the output here, after the sends take their
         // signal, so they can cut each path on its own.
@@ -826,8 +892,8 @@ mod tests {
     use super::*;
     use crate::nodes::{Delay, Impulse, Latent};
     use crate::{
-        AudioMut, Block, Engine, Event, Inputs, ProcessContext, ReferenceRenderer, Renderer,
-        TransportCommand, TransportState,
+        AudioMut, Block, Engine, Event, Inputs, MidiMessage, ProcessContext, ReferenceRenderer,
+        Renderer, TransportCommand, TransportState,
     };
 
     const CONFIG: EngineConfig = EngineConfig {
@@ -943,10 +1009,10 @@ mod tests {
         let p = project();
         let graph = compile(&p).prepare(&CONFIG).unwrap();
         // The master bus, the cue bus, the metronome, the reverb's bus, a
-        // fader and an output stage for each track, clip players and tones
-        // for the drums and the bass, the drums' input monitor, and the
-        // master's fader and output stage.
-        assert_eq!(graph.len(), 17);
+        // fader and an output stage for each track, clip players, tones and
+        // input monitors for the drums and the bass, and the master's fader
+        // and output stage.
+        assert_eq!(graph.len(), 18);
         for key in [
             keys::MASTER,
             keys::CUE,
@@ -973,7 +1039,7 @@ mod tests {
             );
             assert_eq!(
                 graph.contains(keys::track_input(track.id)),
-                track.kind == TrackKind::Audio
+                !track.kind.is_bus()
             );
         }
         assert_eq!(shape(&graph).1, keys::master_output());
@@ -1351,10 +1417,63 @@ mod tests {
         let mut out = vec![0.0; 2 * 64];
         engine.process_with_input(
             crate::AudioRef::from_planar(&input, 5),
+            &[],
             &mut AudioMut::from_planar(&mut out, 2),
         );
         // The vocal's input in both channels; the guitar's is silent.
         assert!(out.iter().all(|&s| s == 0.5));
+    }
+
+    #[test]
+    fn midi_tracks_play_their_input_on_their_instrument() {
+        let mut layout = InputLayout::new();
+        layout.add_midi("pads");
+        layout.add_midi("keyboard");
+        assert_eq!(layout.midi_ids().collect::<Vec<_>>(), ["pads", "keyboard"]);
+        let keyboard = MidiInput {
+            device: "keyboard".into(),
+            channel: Some(0),
+            ..MidiInput::default()
+        };
+        let source = |input, channel| Some(MidiSource { input, channel });
+        assert_eq!(layout.find_midi(&keyboard), source(Some(1), Some(0)));
+        assert_eq!(layout.find_midi(&MidiInput::default()), source(None, None));
+        let missing = MidiInput {
+            device: "drum machine".into(),
+            ..MidiInput::default()
+        };
+        assert_eq!(layout.find_midi(&missing), None);
+
+        let mut p = Project::new();
+        let piano = p.add_track("Piano", TrackKind::Midi);
+        let synth = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let track = p.track_mut(piano).unwrap();
+        track.devices = vec![synth];
+        track.input = Some(Input::Midi(keyboard));
+        track.armed = true;
+        let graph =
+            compile_with_inputs(&p, &Meters::new(), &Media::new(), &Devices::new(), &layout)
+                .prepare(&CONFIG)
+                .unwrap();
+        assert!(graph.contains(keys::track_input(piano)));
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(graph).unwrap();
+        let message = |time, input, bytes| MidiMessage { time, input, bytes };
+        let mut out = vec![0.0; 2 * 256];
+        // A note from the pads, and one from the keyboard on another
+        // channel, go unheard.
+        let others = [
+            message(0, 0, [0x90, 69, 127]),
+            message(0, 1, [0x91, 69, 127]),
+        ];
+        let input = crate::AudioRef::empty(256);
+        engine.process_interleaved_with_input(input, &others, &mut out, 2);
+        assert!(out.iter().all(|&s| s == 0.0));
+        // The keyboard's plays from its frame.
+        let note = [message(300, 1, [0x90, 69, 127])];
+        engine.process_interleaved_with_input(input, &note, &mut out, 2);
+        assert!(out[..2 * 44].iter().all(|&s| s == 0.0));
+        assert!(out[2 * 44..].iter().any(|&s| s != 0.0));
     }
 
     #[test]
@@ -1450,6 +1569,7 @@ mod tests {
             },
             tempo: &p.tempo,
             input: crate::AudioRef::empty(64),
+            midi: &[],
         };
         ReferenceRenderer.render(&mut graph, &block);
         // The downbeat's click is on the cue output, and not in the mix.

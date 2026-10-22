@@ -29,6 +29,7 @@ pub mod event;
 pub mod graph;
 pub mod media;
 pub mod meter;
+pub mod midi;
 pub mod nodes;
 mod parallel;
 mod render;
@@ -40,8 +41,8 @@ mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
 pub use compile::{
-    Compiled, Compiler, Devices, InputChannels, InputLayout, NodeMaker, compile, compile_metered,
-    compile_with_devices, compile_with_inputs, compile_with_media,
+    Compiled, Compiler, Devices, InputChannels, InputLayout, MidiSource, NodeMaker, compile,
+    compile_metered, compile_with_devices, compile_with_inputs, compile_with_media,
 };
 pub use engine::{Engine, EngineHandle, QueueFull, Stats, SwapError};
 pub use event::{
@@ -49,6 +50,7 @@ pub use event::{
 };
 pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use render::{Block, ReferenceRenderer, Renderer};
 pub use timeline::{Segment, Timeline};
@@ -161,4 +163,9 @@ pub struct ProcessContext<'a> {
     /// `i` is heard: the input delay that monitoring adds, which the audio
     /// backend reports.
     pub input: AudioRef<'a>,
+    /// The messages from the stream's MIDI inputs that play in the block,
+    /// in order of [`time`](MidiMessage::time). A message plays at its
+    /// time's offset from the block's [`time`](Self::time), or at the
+    /// block's first frame if it came too late for its time.
+    pub midi: &'a [MidiMessage],
 }
