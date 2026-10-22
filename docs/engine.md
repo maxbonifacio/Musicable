@@ -624,16 +624,17 @@ its sound ends. A note past the device's `voices` takes the place of the
 voice let go longest ago, or of the oldest if none is, and that voice fades
 out over 5 ms beside the new one, so taking it doesn't click: an instrument
 has a slot for each of its up to 32 voices and as many again for voices
-fading out, all made with the node. Each note bends on its own
-(`NodeEventKind::PitchBend` with its note's id), and modulation for one
+fading out, all made with the node. Each note bends on its own (its
+`Dimension::PitchBend` expression, in semitones), and modulation for one
 note (`Modulation` with its id) moves that note's voice alone, for the
 first 48 parameters of the table, added on every frame to the values the
-device has; so MPE's per-note expression reaches a parameter however the
-app maps it. Each voice has an attack, decay, sustain and release envelope
-that curves as an analog one does, heading a little past each stage's end
-and stopping there, so every stage takes its time to the frame, and a 12 dB
-state variable filter (the EQ's SVF) whose resonance runs from a Q of 0.707
-to 25, retuned on every frame its cutoff moves. A voice renders the same
+device has. A note's pressure and timbre move nothing yet: modulation for
+one note is how a modulator will bring them to a parameter. Each voice has
+an attack, decay, sustain and release envelope that curves as an analog
+one does, heading a little past each stage's end and stopping there, so
+every stage takes its time to the frame, and a 12 dB state variable filter
+(the EQ's SVF) whose resonance runs from a Q of 0.707 to 25, retuned on
+every frame its cutoff moves. A voice renders the same
 whatever blocks it falls in: what it keeps from frame to frame, such as
 its filter's tuning, is a function of what it's from alone. When a voice's
 sound ends, the instrument says so (`Node::ended_voices`), as a CLAP plugin
