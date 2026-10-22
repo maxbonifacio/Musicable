@@ -1,15 +1,225 @@
 //! What the mixer's controls do: faders, pan, mute, solo, arm, routing,
 //! sends and clip types, for each track and the master.
 //!
-//! Each control sets a value, so these aren't commands, which don't take
-//! values yet: a control sends a [`Change`], and [`change`] makes it as a
-//! transaction, like [`transport::set_tempo`](crate::transport::set_tempo)
-//! for the tempo field.
+//! A control sends a [`Change`], and the app runs the command it names (see
+//! [`Change::command`]), which makes it as a transaction with [`change`].
+//! Scripts and agents run the same commands.
 
 use musicable_model::mixer::Bus;
 use musicable_model::{ClipType, SendId, TrackId};
 
-use crate::{Document, Transaction};
+use crate::{
+    Args, Command, CommandError, CommandId, Document, Param, Registry, Transaction, Type, Value,
+    track,
+};
+
+/// Sets a track's fader.
+pub const SET_VOLUME: CommandId = CommandId::new("mixer.set_volume");
+/// Sets a track's pan.
+pub const SET_PAN: CommandId = CommandId::new("mixer.set_pan");
+/// Mutes a track, or unmutes it.
+pub const SET_MUTE: CommandId = CommandId::new("mixer.set_mute");
+/// Solos a track, or unsolos it.
+pub const SET_SOLO: CommandId = CommandId::new("mixer.set_solo");
+/// Makes a track solo-safe, or not.
+pub const SET_SOLO_SAFE: CommandId = CommandId::new("mixer.set_solo_safe");
+/// Arms a track for recording, or disarms it.
+pub const SET_ARM: CommandId = CommandId::new("mixer.set_arm");
+/// Sets where a track's output goes.
+pub const SET_OUTPUT: CommandId = CommandId::new("mixer.set_output");
+/// Sets a track's clip type.
+pub const SET_CLIP_TYPE: CommandId = CommandId::new("mixer.set_clip_type");
+/// Sets the level of a track's send to a return track.
+pub const SET_SEND_LEVEL: CommandId = CommandId::new("mixer.set_send_level");
+/// Sets whether a track's send takes the signal before the fader.
+pub const SET_SEND_PRE_FADER: CommandId = CommandId::new("mixer.set_send_pre_fader");
+/// Removes a track's send to a return track.
+pub const REMOVE_SEND: CommandId = CommandId::new("mixer.remove_send");
+/// Sets the master's fader.
+pub const SET_MASTER_VOLUME: CommandId = CommandId::new("mixer.set_master_volume");
+/// Sets the master's pan.
+pub const SET_MASTER_PAN: CommandId = CommandId::new("mixer.set_master_pan");
+/// Sets the master's clip type.
+pub const SET_MASTER_CLIP_TYPE: CommandId = CommandId::new("mixer.set_master_clip_type");
+
+const TRACK: Param = Param::required("track", Type::Track, "The track.");
+const TO: Param = Param::required("to", Type::Track, "The return track the send goes to.");
+const GAIN: Param = Param::required("gain", Type::Number, "The gain, linear: 1 is unity.");
+const PAN: Param = Param::required("pan", Type::Number, "The balance, from -1 (left) to 1.");
+const CLIP_TYPE: Param = Param::required("clip_type", Type::Text, "Off, Hard or Soft.");
+
+/// Reads a change from a command's arguments.
+type Build = fn(&Args) -> Result<Change, CommandError>;
+
+/// The mixer's commands, with their titles, parameters and the change each
+/// makes.
+const COMMANDS: [(CommandId, &str, &[Param], Build); 14] = [
+    (SET_VOLUME, "Set Volume", &[TRACK, GAIN], |args| {
+        Ok(Change::Gain(args.get("track")?, number(args, "gain")?))
+    }),
+    (SET_PAN, "Set Pan", &[TRACK, PAN], |args| {
+        Ok(Change::Pan(args.get("track")?, number(args, "pan")?))
+    }),
+    (
+        SET_MUTE,
+        "Set Mute",
+        &[
+            TRACK,
+            Param::required("muted", Type::Bool, "Whether it's muted."),
+        ],
+        |args| Ok(Change::Muted(args.get("track")?, args.get("muted")?)),
+    ),
+    (
+        SET_SOLO,
+        "Set Solo",
+        &[
+            TRACK,
+            Param::required("solo", Type::Bool, "Whether it's soloed."),
+            Param::optional("exclusive", Type::Bool, "Unsolos every other track."),
+        ],
+        |args| {
+            Ok(Change::Solo {
+                track: args.get("track")?,
+                solo: args.get("solo")?,
+                exclusive: args.opt("exclusive")?.unwrap_or(false),
+            })
+        },
+    ),
+    (
+        SET_SOLO_SAFE,
+        "Set Solo-Safe",
+        &[
+            TRACK,
+            Param::required(
+                "solo_safe",
+                Type::Bool,
+                "Whether soloing others leaves it on.",
+            ),
+        ],
+        |args| Ok(Change::SoloSafe(args.get("track")?, args.get("solo_safe")?)),
+    ),
+    (
+        SET_ARM,
+        "Set Arm",
+        &[
+            TRACK,
+            Param::required("armed", Type::Bool, "Whether it's armed."),
+        ],
+        |args| Ok(Change::Armed(args.get("track")?, args.get("armed")?)),
+    ),
+    (
+        SET_OUTPUT,
+        "Set Output",
+        &[
+            TRACK,
+            Param::optional(
+                "group",
+                Type::Track,
+                "The group track it feeds: the master without it.",
+            ),
+        ],
+        |args| {
+            let bus = args.opt("group")?.map_or(Bus::Master, Bus::Group);
+            Ok(Change::Output(args.get("track")?, bus))
+        },
+    ),
+    (
+        SET_CLIP_TYPE,
+        "Set Clip Type",
+        &[TRACK, CLIP_TYPE],
+        |args| Ok(Change::ClipType(args.get("track")?, clip_type(args)?)),
+    ),
+    (
+        SET_SEND_LEVEL,
+        "Set Send Level",
+        &[
+            TRACK,
+            TO,
+            Param::required("level", Type::Number, "The level, linear."),
+        ],
+        |args| {
+            Ok(Change::SendLevel {
+                track: args.get("track")?,
+                to: args.get("to")?,
+                level: number(args, "level")?,
+            })
+        },
+    ),
+    (
+        SET_SEND_PRE_FADER,
+        "Set Send Pre-Fader",
+        &[
+            TRACK,
+            TO,
+            Param::required(
+                "pre_fader",
+                Type::Bool,
+                "Whether it takes the signal before the fader.",
+            ),
+        ],
+        |args| {
+            Ok(Change::SendPreFader {
+                track: args.get("track")?,
+                to: args.get("to")?,
+                pre_fader: args.get("pre_fader")?,
+            })
+        },
+    ),
+    (REMOVE_SEND, "Remove Send", &[TRACK, TO], |args| {
+        Ok(Change::RemoveSend {
+            track: args.get("track")?,
+            to: args.get("to")?,
+        })
+    }),
+    (SET_MASTER_VOLUME, "Set Master Volume", &[GAIN], |args| {
+        Ok(Change::MasterGain(number(args, "gain")?))
+    }),
+    (SET_MASTER_PAN, "Set Master Pan", &[PAN], |args| {
+        Ok(Change::MasterPan(number(args, "pan")?))
+    }),
+    (
+        SET_MASTER_CLIP_TYPE,
+        "Set Master Clip Type",
+        &[CLIP_TYPE],
+        |args| Ok(Change::MasterClipType(clip_type(args)?)),
+    ),
+];
+
+/// Registers the mixer's commands.
+pub fn register(registry: &mut Registry) {
+    for (id, title, params, build) in COMMANDS {
+        registry.add(
+            Command::new(id, title).with_params(params),
+            move |ctx, args| {
+                change(ctx.document, build(args)?);
+                Ok(Value::None)
+            },
+        );
+    }
+}
+
+/// The argument `name`, as the `f32` the mixer keeps.
+fn number(args: &Args, name: &str) -> Result<f32, CommandError> {
+    Ok(args.get::<f64>(name)? as f32)
+}
+
+/// The clip type the argument `clip_type` names.
+fn clip_type(args: &Args) -> Result<ClipType, CommandError> {
+    let name: String = args.get("clip_type")?;
+    [ClipType::Off, ClipType::Hard, ClipType::Soft]
+        .into_iter()
+        .find(|clip_type| clip_type_name(*clip_type).eq_ignore_ascii_case(name.trim()))
+        .ok_or_else(|| CommandError::invalid(format!("there's no clip type called {name}")))
+}
+
+/// A clip type's name, as the mixer's commands take it.
+pub fn clip_type_name(clip_type: ClipType) -> &'static str {
+    match clip_type {
+        ClipType::Off => "Off",
+        ClipType::Hard => "Hard",
+        ClipType::Soft => "Soft",
+    }
+}
 
 /// A change one of the mixer's controls makes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +269,74 @@ pub enum Change {
 }
 
 impl Change {
+    /// The command that makes this change, with its arguments: what the
+    /// mixer's controls run.
+    pub fn command(&self) -> (CommandId, Args) {
+        let on = |id, track: TrackId| (id, Args::new().with("track", track));
+        match *self {
+            Self::Gain(track, gain) => {
+                let (id, args) = on(SET_VOLUME, track);
+                (id, args.with("gain", gain))
+            }
+            Self::Pan(track, pan) => {
+                let (id, args) = on(SET_PAN, track);
+                (id, args.with("pan", pan))
+            }
+            Self::Muted(track, muted) => {
+                let (id, args) = on(SET_MUTE, track);
+                (id, args.with("muted", muted))
+            }
+            Self::Solo {
+                track,
+                solo,
+                exclusive,
+            } => {
+                let (id, args) = on(SET_SOLO, track);
+                (id, args.with("solo", solo).with("exclusive", exclusive))
+            }
+            Self::SoloSafe(track, solo_safe) => {
+                let (id, args) = on(SET_SOLO_SAFE, track);
+                (id, args.with("solo_safe", solo_safe))
+            }
+            Self::Armed(track, armed) => {
+                let (id, args) = on(SET_ARM, track);
+                (id, args.with("armed", armed))
+            }
+            Self::Output(track, Bus::Master) => on(SET_OUTPUT, track),
+            Self::Output(track, Bus::Group(group)) => {
+                let (id, args) = on(SET_OUTPUT, track);
+                (id, args.with("group", group))
+            }
+            Self::ClipType(track, clip_type) => {
+                let (id, args) = on(SET_CLIP_TYPE, track);
+                (id, args.with("clip_type", clip_type_name(clip_type)))
+            }
+            Self::SendLevel { track, to, level } => {
+                let (id, args) = on(SET_SEND_LEVEL, track);
+                (id, args.with("to", to).with("level", level))
+            }
+            Self::SendPreFader {
+                track,
+                to,
+                pre_fader,
+            } => {
+                let (id, args) = on(SET_SEND_PRE_FADER, track);
+                (id, args.with("to", to).with("pre_fader", pre_fader))
+            }
+            Self::RemoveSend { track, to } => {
+                let (id, args) = on(REMOVE_SEND, track);
+                (id, args.with("to", to))
+            }
+            Self::Delete(track) => (track::DELETE, Args::new().with("tracks", vec![track])),
+            Self::MasterGain(gain) => (SET_MASTER_VOLUME, Args::new().with("gain", gain)),
+            Self::MasterPan(pan) => (SET_MASTER_PAN, Args::new().with("pan", pan)),
+            Self::MasterClipType(clip_type) => (
+                SET_MASTER_CLIP_TYPE,
+                Args::new().with("clip_type", clip_type_name(clip_type)),
+            ),
+        }
+    }
+
     /// What the undo menu calls it.
     pub fn name(&self) -> &'static str {
         match self {
@@ -349,5 +627,67 @@ mod tests {
         change(&mut doc, Change::Pan(drums, f32::NAN));
         change(&mut doc, Change::MasterGain(f32::INFINITY));
         assert_eq!(doc.take_committed(), []);
+    }
+
+    #[test]
+    fn each_change_is_a_command() {
+        let (doc, [drums, group, reverb]) = document();
+        let changes = [
+            Change::Gain(drums, 0.5),
+            Change::Pan(drums, -0.25),
+            Change::Muted(drums, true),
+            Change::Solo {
+                track: drums,
+                solo: true,
+                exclusive: true,
+            },
+            Change::SoloSafe(drums, true),
+            Change::Armed(drums, true),
+            Change::Output(drums, Bus::Master),
+            Change::ClipType(group, ClipType::Soft),
+            Change::SendLevel {
+                track: drums,
+                to: reverb,
+                level: 0.5,
+            },
+            Change::SendPreFader {
+                track: drums,
+                to: reverb,
+                pre_fader: true,
+            },
+            Change::RemoveSend {
+                track: drums,
+                to: reverb,
+            },
+            Change::MasterGain(0.5),
+            Change::MasterPan(0.5),
+            Change::MasterClipType(ClipType::Hard),
+            Change::Delete(group),
+        ];
+        let mut setup = crate::testing::Setup::new(doc.project().clone());
+        let mut expected = Document::new(doc.project().clone());
+        for change in changes {
+            let (id, args) = change.command();
+            assert!(!args.is_empty(), "{id}");
+            setup.run_with(&id, args).unwrap();
+            super::change(&mut expected, change);
+            assert_eq!(setup.document.project(), expected.project(), "{change:?}");
+        }
+        let names = setup.committed_names();
+        let expected: Vec<_> = expected
+            .take_committed()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, expected);
+        // They're for the mixer's controls, scripts and agents, not keys.
+        for (id, ..) in COMMANDS {
+            assert!(setup.registry.get(&id).unwrap().needs_arguments(), "{id}");
+        }
+        let wrong = Args::new().with("clip_type", "Warm");
+        assert_eq!(
+            setup.run_with(&SET_MASTER_CLIP_TYPE, wrong),
+            Err(CommandError::invalid("there's no clip type called Warm"))
+        );
     }
 }

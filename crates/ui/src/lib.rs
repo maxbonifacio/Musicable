@@ -5,22 +5,32 @@
 //! and carries out the [`Action`]s it hands back. Key presses go to the
 //! keymap through [`KeyPresses`] before egui sees them.
 //!
-//! For now this is the app shell from the Tier 0 plan: a menu bar, a
-//! transport bar with meters, and the mixer, the keyboard shortcuts window
-//! and the command palette, which Tier 1 added. `docs/app.md` describes it.
+//! The window has a menu bar and a transport bar over the arrangement, with
+//! the mixer in a panel under it, and the keyboard shortcuts window and the
+//! command palette over them. Views draw from a [`Theme`], and look mouse
+//! gestures up in a [`MouseMap`]. `docs/app.md` describes it all.
 
+mod arrangement;
 mod keys;
 mod menus;
 mod mixer;
+mod mouse;
 mod palette;
 mod search;
 mod shell;
 mod shortcuts;
 #[cfg(test)]
 mod testing;
+mod theme;
+mod waveform;
 mod widgets;
 
 pub use keys::{KeyPresses, chord};
 pub use mixer::{Level, Levels};
-pub use shell::{Action, Audio, KeymapStatus, Playback, SaveChoice, Shell, View, ask_to_save};
+pub use mouse::{Gesture, MouseAction, MouseMap, Target};
+pub use shell::{
+    Action, Audio, KeymapStatus, MIXER, Playback, SaveChoice, Shell, View, ask_to_save,
+};
+pub use theme::{MixerSizes, Theme};
+pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};

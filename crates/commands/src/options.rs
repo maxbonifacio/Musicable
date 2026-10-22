@@ -29,21 +29,8 @@ mod tests {
     use musicable_model::Project;
 
     use super::*;
+    use crate::testing::StubTransport;
     use crate::{Context, Document, Keymap, view};
-
-    struct Stopped;
-
-    impl crate::Transport for Stopped {
-        fn is_playing(&self) -> bool {
-            false
-        }
-
-        fn play(&mut self) {}
-
-        fn stop(&mut self) {}
-
-        fn locate(&mut self, _: musicable_model::time::Beats) {}
-    }
 
     #[test]
     fn the_windows_are_commands_with_keys() {
@@ -55,7 +42,7 @@ mod tests {
         for id in [AUDIO_SETTINGS, KEYBOARD_SHORTCUTS, view::COMMAND_PALETTE] {
             let mut ctx = Context {
                 document: &mut document,
-                transport: &mut Stopped,
+                transport: &mut StubTransport::default(),
                 requests: &mut requests,
             };
             registry.run(&id, &mut ctx).unwrap();

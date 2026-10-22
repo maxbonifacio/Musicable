@@ -25,6 +25,30 @@ version = 1
 "edit.undo" = ["Ctrl+Z"]
 "edit.redo" = ["Ctrl+Y", "Ctrl+Shift+Z"]
 
+# Live's keys for editing the arrangement.
+"edit.cut" = ["Ctrl+X"]
+"edit.copy" = ["Ctrl+C"]
+"edit.paste" = ["Ctrl+V"]
+"edit.duplicate" = ["Ctrl+D"]
+"edit.delete" = ["Delete", "Backspace"]
+"edit.split" = ["Ctrl+E"]
+"edit.select_all" = ["Ctrl+A"]
+"edit.rename" = ["Ctrl+R"]
+"clip.insert_midi_clip" = ["Ctrl+Shift+M"]
+
+# Live's keys for the arrangement's zoom, the grid and Follow, and for
+# showing the mixer under the arrangement.
+"view.zoom_in" = ["Equals", "NumpadAdd"]
+"view.zoom_out" = ["Minus", "NumpadSubtract"]
+"view.zoom_to_selection" = ["Z"]
+"view.narrow_grid" = ["Ctrl+1"]
+"view.widen_grid" = ["Ctrl+2"]
+"view.triplet_grid" = ["Ctrl+3"]
+"view.toggle_snap" = ["Ctrl+4"]
+"view.fixed_grid" = ["Ctrl+5"]
+"view.toggle_follow" = ["Ctrl+Shift+F"]
+"view.toggle_mixer" = ["Ctrl+Alt+M"]
+
 # Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
 # groups the selected tracks, which needs a selection.
 "track.new_audio_track" = ["Ctrl+T"]

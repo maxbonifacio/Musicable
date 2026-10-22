@@ -10,12 +10,12 @@ tools can read and write projects too. `crates/io` implements it, in
 A project with a bass track playing a recording and sending to a reverb on
 a return track, and a keys track playing a note through the test
 instrument, bending it up a tone. It loops the first four bars, with the
-master's soft clip stage on:
+master's soft clip stage on, and a locator marks the chorus at bar 3:
 
 ```json
 {
   "format": "musicable-project",
-  "version": 3,
+  "version": 4,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -42,6 +42,7 @@ master's soft clip stage on:
   "next_send_id": 1,
   "next_device_id": 1,
   "next_clip_id": 2,
+  "next_locator_id": 1,
   "tracks": [
     {
       "id": 0,
@@ -167,7 +168,14 @@ master's soft clip stage on:
     "devices": [],
     "clip_type": "soft",
     "console": {}
-  }
+  },
+  "locators": [
+    {
+      "id": 0,
+      "name": "Chorus",
+      "at": 2580480
+    }
+  ]
 }
 ```
 
@@ -213,7 +221,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 3 for this page. |
+| `version` | whole number | The format version: 4 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -223,8 +231,10 @@ in version control shows only what really changed.
 | `next_send_id` | whole number | The same for sends. |
 | `next_device_id` | whole number | The same for devices, on tracks and on the master. |
 | `next_clip_id` | whole number | The same for clips. |
+| `next_locator_id` | whole number | The same for locators. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
+| `locators` | array of locators | Named places in the song, in any order. |
 
 ### Tempo map
 
@@ -392,6 +402,17 @@ master, and the master feeds the audio device.
 | `clip_type` | string | As for a track. |
 | `console` | object | As for a track. |
 
+### Locator
+
+A named place in the song, shown on the arrangement's ruler for finding
+the parts of a song and jumping between them.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_locator_id`, and no other locator has it. It stays with the locator. |
+| `name` | string | Any text, empty included. |
+| `at` | position | Where it is. Two locators can be at the same place. |
+
 ### Routing
 
 Signal flows from tracks to buses without loops:
@@ -412,6 +433,7 @@ Signal flows from tracks to buses without loops:
 | 1 | 2026-10-21 | The first version: tempo map, loop, metronome and tracks with test tones, clip types and console settings. |
 | 2 | 2026-10-21 | The mixer: each track's pan, solo, solo-safe, arm, output and sends, devices on tracks and on the master, the master channel, and the `"hard"` and `"soft"` clip types. Version 1 tracks open centred, feeding the master with no sends or devices, return tracks solo-safe, and the master at unity. |
 | 3 | 2026-10-21 | Clips: audio clips that play files, MIDI clips of notes with per-note expression, and the test instrument. Version 2 tracks have no clips. |
+| 4 | 2026-10-22 | Locators: named places in the song. Version 3 files have none. |
 
 ## Changing the format
 

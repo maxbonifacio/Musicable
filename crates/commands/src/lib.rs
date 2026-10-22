@@ -4,29 +4,41 @@
 //! Every user action is a named command. Menus, hotkeys, the command palette,
 //! scripting and agent control all go through this registry, so remapping a
 //! hotkey is just editing a [`Keymap`]. The user's changes to the default
-//! keymap live in a [`KeymapFile`]. Commands change the project only through
-//! transactions on its [`Document`], which keeps the undo history.
-//! `docs/commands.md` describes all of it and lists the commands.
+//! keymap live in a [`KeymapFile`]. Commands take typed [`Args`] and give
+//! back a [`Value`], and say [`When`] they apply. They change the project
+//! only through transactions on its [`Document`], which keeps the undo
+//! history and the arrangement's [`Editor`] state. `docs/commands.md`
+//! describes all of it and lists the commands.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use musicable_model::clip::ClipId;
 use musicable_model::time::Beats;
+use musicable_model::{LocatorId, Project, TrackId};
 
+mod args;
+pub mod arrange;
 mod document;
 pub mod edit;
+pub mod editor;
 pub mod file;
 mod history;
 mod key;
 mod keymap;
+pub mod locator;
 pub mod mixer;
 pub mod options;
+#[cfg(test)]
+mod testing;
 pub mod track;
 pub mod transport;
 pub mod view;
 
+pub use args::{Args, CommandError, FromValue, Param, Type, Value};
 pub use document::{Committed, Document, Edit, Transaction};
+pub use editor::Editor;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
 pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
 
@@ -68,6 +80,79 @@ pub struct Command {
     pub id: CommandId,
     /// Human-readable title shown in menus and the command palette.
     pub title: String,
+    /// The arguments it takes.
+    pub params: Vec<Param>,
+    /// When it applies without arguments. Menus grey it out, and keys skip
+    /// it, when it doesn't.
+    pub when: When,
+}
+
+impl Command {
+    /// A command without arguments that always applies.
+    pub fn new(id: impl Into<CommandId>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            params: Vec::new(),
+            when: When::Always,
+        }
+    }
+
+    pub fn with_params(mut self, params: &[Param]) -> Self {
+        self.params = params.to_vec();
+        self
+    }
+
+    pub fn when(mut self, when: When) -> Self {
+        self.when = when;
+        self
+    }
+
+    /// Whether it can only run with arguments: menus, keys and the command
+    /// palette, which have none to give, leave it out.
+    pub fn needs_arguments(&self) -> bool {
+        self.params.iter().any(|param| !param.optional)
+    }
+}
+
+/// When a command applies: a condition on the selection and the project
+/// that menus, keys, context menus and agents can check before running it.
+/// Arguments can name what a command acts on instead, so a command run with
+/// arguments needn't meet it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum When {
+    #[default]
+    Always,
+    /// Clips are selected.
+    ClipsSelected,
+    /// Clips are selected, or a stretch of time is.
+    ClipsOrTimeSelected,
+    /// Clips, time or tracks are selected.
+    SomethingSelected,
+    /// Tracks are selected.
+    TracksSelected,
+    /// Cut or Copy took something to paste.
+    CanPaste,
+    /// One clip is selected, or a track is: something Rename can name.
+    CanRename,
+    /// The project has locators.
+    HasLocators,
+}
+
+impl When {
+    pub fn applies(self, project: &Project, editor: &Editor) -> bool {
+        let selection = &editor.selection;
+        match self {
+            When::Always => true,
+            When::ClipsSelected => !selection.clips.is_empty(),
+            When::ClipsOrTimeSelected => !selection.clips.is_empty() || selection.time.is_some(),
+            When::SomethingSelected => !selection.is_empty(),
+            When::TracksSelected => !selection.tracks.is_empty(),
+            When::CanPaste => editor.clipboard.is_some(),
+            When::CanRename => selection.clips.len() == 1 || editor.selected_track.is_some(),
+            When::HasLocators => !project.locators.is_empty(),
+        }
+    }
 }
 
 /// Something only the app can do, which a command asks for: commands can't
@@ -80,12 +165,27 @@ pub enum Request {
     Save,
     SaveAs,
     Quit,
+    /// Ask for audio files, read them, and insert them with
+    /// [`arrange::INSERT_AUDIO`].
+    ImportAudio,
     /// Show the command palette.
     CommandPalette,
     /// Show the audio settings.
     AudioSettings,
     /// Show the keyboard shortcuts, where keys are changed.
     KeyboardShortcuts,
+    /// Show or hide the panel with this id, such as the mixer.
+    TogglePanel(&'static str),
+    /// Let the user type a new name for this.
+    Rename(Named),
+}
+
+/// Something in the project with a name the user can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Named {
+    Track(TrackId),
+    Clip(ClipId),
+    Locator(LocatorId),
 }
 
 /// What a running command can reach.
@@ -114,9 +214,11 @@ pub trait Transport {
     fn stop(&mut self);
     /// Moves the playhead to a musical position.
     fn locate(&mut self, at: Beats);
+    /// Where the playhead is, as of the engine's last block.
+    fn playhead(&self) -> Beats;
 }
 
-type Run = Box<dyn Fn(&mut Context<'_>)>;
+type Run = Box<dyn Fn(&mut Context<'_>, &Args) -> Result<Value, CommandError>>;
 
 #[derive(Default)]
 pub struct Registry {
@@ -128,23 +230,32 @@ impl Registry {
         Self::default()
     }
 
-    /// Registers a command that runs `run`. Returns `false` if the id was
-    /// already taken.
+    /// Registers a command without arguments that always applies, and
+    /// runs `run`. Returns `false` if the id was already taken.
     pub fn register(
         &mut self,
         id: impl Into<CommandId>,
         title: impl Into<String>,
         run: impl Fn(&mut Context<'_>) + 'static,
     ) -> bool {
-        let id = id.into();
-        if self.commands.contains_key(&id) {
+        self.add(Command::new(id, title), move |ctx, _| {
+            run(ctx);
+            Ok(Value::None)
+        })
+    }
+
+    /// Registers `command`, which runs `run` with arguments that fit its
+    /// parameters. Returns `false` if the id was already taken.
+    pub fn add(
+        &mut self,
+        command: Command,
+        run: impl Fn(&mut Context<'_>, &Args) -> Result<Value, CommandError> + 'static,
+    ) -> bool {
+        if self.commands.contains_key(&command.id) {
             return false;
         }
-        let command = Command {
-            id: id.clone(),
-            title: title.into(),
-        };
-        self.commands.insert(id, (command, Box::new(run)));
+        self.commands
+            .insert(command.id.clone(), (command, Box::new(run)));
         true
     }
 
@@ -156,14 +267,41 @@ impl Registry {
         self.commands.values().map(|(command, _)| command)
     }
 
-    /// Runs the command `id`.
+    /// Runs the command `id` without arguments, as a menu or a key does. A
+    /// command that needs arguments, or doesn't apply now, does nothing.
     pub fn run(&self, id: &CommandId, context: &mut Context<'_>) -> Result<(), UnknownCommand> {
-        let (_, run) = self
+        match self.run_with(id, &Args::new(), context) {
+            Err(CommandError::Unknown(id)) => Err(UnknownCommand(id)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Runs the command `id` with `args`, which must fit its parameters,
+    /// and returns its result. Without arguments, it must apply now: see
+    /// [`When`].
+    pub fn run_with(
+        &self,
+        id: &CommandId,
+        args: &Args,
+        context: &mut Context<'_>,
+    ) -> Result<Value, CommandError> {
+        let (command, run) = self
             .commands
             .get(id)
-            .ok_or_else(|| UnknownCommand(id.clone()))?;
-        run(context);
-        Ok(())
+            .ok_or_else(|| CommandError::Unknown(id.clone()))?;
+        args.check(&command.params)?;
+        let document = &context.document;
+        if args.is_empty() && !command.when.applies(document.project(), document.editor()) {
+            return Err(CommandError::NotNow(id.clone()));
+        }
+        run(context, args)
+    }
+
+    /// Whether the command `id` applies to `document` now, without
+    /// arguments: see [`When`].
+    pub fn applies(&self, id: &CommandId, document: &Document) -> bool {
+        self.get(id)
+            .is_some_and(|c| c.when.applies(document.project(), document.editor()))
     }
 }
 
@@ -171,6 +309,19 @@ impl fmt::Debug for Registry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
+}
+
+/// Registers every command.
+pub fn register_all(registry: &mut Registry) {
+    file::register(registry);
+    edit::register(registry);
+    transport::register(registry);
+    track::register(registry);
+    arrange::register(registry);
+    locator::register(registry);
+    mixer::register(registry);
+    view::register(registry);
+    options::register(registry);
 }
 
 /// Registers commands that each ask the app for something.

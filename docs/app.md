@@ -1,12 +1,12 @@
 # The app
 
-`musicable` opens a window with the app shell from the Tier 0 plan and the
-mixer from Tier 1. It plays a project through the audio device with the
-parallel scheduler, runs the transport, edit, track and file commands from
-keys, menus and the command palette, mixes the tracks, and opens and saves
-project files. Every command's keys can be changed in the app. Undo and redo
-cover every change to the project: the loop, the tempo, the tracks and the
-mix.
+`musicable` opens a window with the app shell from the Tier 0 plan, and the
+arrangement view and the mixer from Tier 1. It plays a project through the
+audio device with the parallel scheduler, runs the commands from keys,
+menus, the command palette and the mouse, arranges clips, mixes the tracks,
+and opens and saves project files. Every command's keys can be changed in
+the app. Undo and redo cover every change to the project: the clips, the
+locators, the loop, the tempo, the tracks and the mix.
 
 ## Running it
 
@@ -104,11 +104,14 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Transport, Track, View and Options. Undo and Redo name the change they would
-  make, as in "Undo Set Tempo", and are greyed out when there's nothing to
-  undo or redo. A command in an area with no menu yet gets a menu named
-  after its area, before View, so every command can be reached. On the
-  right are the CPU meter and the dropout counter.
+  Track, Clip, Locator, Transport, View and Options. Undo and Redo name the
+  change they would make, as in "Undo Set Tempo", and are greyed out when
+  there's nothing to undo or redo, as is any command that doesn't apply
+  now, such as Split with nothing selected. Toggles, such as Follow and
+  Snap to Grid, are ticked while on. A command in an area with no menu yet
+  gets a menu named after its area, before View, so every command can be
+  reached; commands that need arguments are left out, as menus can't give
+  them. On the right are the CPU meter and the dropout counter.
 - **The transport bar** has go to start, play, stop, loop, the metronome, the
   tempo, the time signature, and the playhead in bars, beats and sixteenths
   and in minutes and seconds. Hovering a button shows its command and keys,
@@ -117,8 +120,12 @@ That's what `ParallelOptions::inline_below` is for
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
   Tempo" transaction, and a whole drag is one step in the undo history.
-- **The mixer** fills the rest of the window, with a strip for each track
-  and the master's on the right (see [The mixer](#the-mixer)).
+- **The arrangement** fills the middle of the window: the tracks over time,
+  with their clips, under a ruler ([below](#the-arrangement)).
+- **The mixer** is a panel under it, with a strip for each track and the
+  master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
+  make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
+  shows it.
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
   measures it (click it for the audio settings), and the project's name,
@@ -128,6 +135,114 @@ That's what `ParallelOptions::inline_below` is for
   keys and runs it ([below](#the-command-palette)).
 - **Options > Keyboard Shortcuts** (Ctrl+K) lists every command with its
   keys, and changes them ([below](#changing-keys)).
+
+## The arrangement
+
+The arrangement shows the song's tracks over time, as Live's Arrangement
+View does: the ruler along the top, a lane for each track with its clips,
+and each track's header on the right. Everything it does runs a command
+([commands.md](commands.md#clip)), so it can all be undone and given other
+keys, and a drag runs one command when it ends, so it's one step in the
+undo history and the engine rebuilds its graph once.
+
+- **The ruler** has the bar numbers, and along its top, a strip with the
+  loop brace and the locators. The start marker is a triangle at the
+  ruler's foot, and the playhead a line through the lanes, drawn where the
+  sound is: the engine's position less the latency of the plugins and the
+  audio device ([engine.md](engine.md#delay-compensation)).
+- **Clips** show their name in a title bar, and under it an audio clip's
+  waveform, with its fades and their handles, or a MIDI clip's notes. A
+  clip takes the colour of its track's place in the list. Selected clips
+  are outlined. While a drag lasts, a ghost shows where the clips will go.
+- **Track headers** have the track's name, M, S and the arm button, and a
+  meter. A selected track's header and lane are lighter. The corner over
+  the headers says what the grid is, such as "Grid 1/16".
+- **The grid** follows the zoom, its lines at least 16 points apart, unless
+  it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
+  Gestures snap to it while Snap to Grid is on (Ctrl+4).
+
+The mouse does what it does in Live:
+
+| Where | Gesture | What it does |
+|---|---|---|
+| A clip's title bar | Click; Ctrl- or Shift-click | Selects the clip; adds it to the selection or takes it out |
+| | Drag; Ctrl-drag; Alt-drag | Moves the selected clips, also to other tracks of their kind; copies them; moves them off the grid |
+| | Double-click | Renames the clip |
+| A clip's body | Click | Selects the clip and puts the start marker there, so Ctrl+E splits it there |
+| | Drag | Selects time, as on an empty lane |
+| A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
+| A fade handle | Drag | Makes the fade longer or shorter |
+| A lane | Click | Selects the track and puts the start marker there |
+| | Drag | Selects the time dragged over, on the tracks dragged over |
+| The ruler | Click | Puts the start marker and the playhead there |
+| | Drag | Zooms up and down, and scrolls sideways |
+| The ruler's strip | Drag | Draws a new loop region, and turns looping on |
+| The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
+| A locator | Click; drag; double-click | Jumps there; moves it; renames it |
+| A track's header | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it |
+| A track's bottom edge | Drag | Makes the track taller or shorter |
+| Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
+| Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
+
+Escape cancels a drag. A right-click opens a context menu of commands from
+the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
+on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
+header, Locate and Toggle Loop on the ruler, and Rename and Delete Locator
+on a locator. Each shows its keys, and takes its arguments from where the
+menu was opened: the clip, the track, or the position. Rename, from a menu,
+a key or a double-click, opens a box for the new name.
+
+Audio files dropped on the window become clips, one after another, where
+they're dropped: on that track if it's an audio track, or else the
+selected one or a new one ([Audio files](#audio-files)). While the
+transport plays, **Follow** (Ctrl+Shift+F) turns the page when the playhead
+leaves the view; scrolling away pauses it until the playhead is in sight
+again.
+
+**Themes and mouse maps.** The arrangement and the mixer draw every colour
+and size from a `musicable_ui::Theme`, and look up what each gesture does,
+from where it starts and the modifiers held, in a `MouseMap`.
+`MouseMap::live()` is the table above. `Shell::set_theme` and
+`set_mouse_map` change them, for the profiles of Tier 2. Each view is a
+panel with its own id, such as `musicable_ui::MIXER`.
+
+### How fast it draws
+
+The arrangement is drawn with egui's painter: its shapes are tessellated
+into triangles on the CPU each frame, and egui-wgpu draws them with wgpu.
+Only what's in sight is laid out and drawn: the visible tracks, the clips in
+view, a waveform column per point of width from peaks read at a few
+resolutions (`musicable_ui::Peaks`), and the mixer strips in sight. The
+`arrangement_frames` example measures a hundred tracks of 32 clips each,
+audio with waveforms and MIDI with notes, in a 1920×1080 window:
+
+```sh
+cargo run --release -p musicable-ui --example arrangement_frames
+```
+
+On a 4-core cloud VM (Xeon at 2.8 GHz), 300 frames each:
+
+| Frame | Built in | Tessellated in | Slowest frame | Triangles |
+|---|---|---|---|---|
+| Stopped, mixer shown | 2.46 ms | 1.18 ms | 11.23 ms | 63k |
+| Stopped, mixer hidden | 2.30 ms | 1.17 ms | 9.80 ms | 61k |
+| Playing, the playhead moving | 2.11 ms | 1.02 ms | 5.67 ms | 61k |
+| Scrolling sideways every frame | 2.73 ms | 1.42 ms | 13.20 ms | 63k |
+| Zoomed out to the whole song, tracks small | 1.52 ms | 2.29 ms | 5.24 ms | 101k |
+| The same, scrolling down every frame | 1.55 ms | 2.23 ms | 10.39 ms | 104k |
+
+So a frame takes 3 to 4 ms of a 16.7 ms frame at 60 Hz, a hundred tracks or
+not; the slowest frames there are the shared VM's. Before the mixer drew
+only its strips in sight, its hundred strips cost another 3 ms.
+
+That settles the question the Tier 1 plan left open, whether the timeline
+needs wgpu drawing of its own inside egui: it doesn't, for now. Drawing
+with egui's painter keeps one way of drawing, which the tests can see
+(`egui_kittest`) and themes can colour. If a later view needs far more
+triangles, such as automation of hundreds of tracks zoomed out, the lanes'
+drawing (`crates/ui/src/arrangement/paint.rs`) can move into an
+`egui_wgpu::Callback` with a render pass of its own, with the gestures left
+as they are.
 
 ## The command palette
 
@@ -186,8 +301,8 @@ Under the list:
 ## The mixer
 
 Each track has a channel strip, in the project's order, and the master's
-strip is on the right. Tracks scroll sideways when they don't fit. From the
-top, a strip has:
+strip is on the right. Tracks scroll sideways when they don't fit, and only
+the strips in sight are drawn. From the top, a strip has:
 
 - **The name.** Hovering it shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
@@ -208,7 +323,8 @@ top, a strip has:
 - **The clip stage**: Off, Hard or Soft.
 
 Drag a fader, a send or the pan to move it, with Ctrl (Cmd on a Mac) held
-to move it finely. Double-click a fader for 0 dB, a send to silence it, or
+to move it finely. Both gestures come from the mouse map, as the
+arrangement's do. Double-click a fader for 0 dB, a send to silence it, or
 the pan to centre it. A whole drag is one step in the undo history. The
 faders, sends, pans, buttons, menus and meters are named for screen readers,
 such as "Lead Volume", which is how the tests drive them.
@@ -222,8 +338,9 @@ meters read the engine's `Meters` every frame, and the window redraws at
 way back after you stop.
 
 The **Track** menu adds tracks (see [commands.md](commands.md#track)). The
-mixer's controls aren't commands: they hand back `Action::Mixer` with a
-`mixer::Change`, which the app makes with `Session::change_mixer`.
+mixer's controls hand back `Action::Mixer` with a `mixer::Change`, which the
+app runs as its command with `Session::change_mixer`
+([commands.md](commands.md#the-mixers-controls)).
 
 ## Keys
 
@@ -309,10 +426,28 @@ file until another project is opened. So does a file that fails while it
 streams. A project that hasn't been saved has no folder, so relative paths
 lead nowhere.
 
-The app can't add clips yet: they come with the arrangement view and
-recording. Save Project As doesn't copy the files or change the clips'
-paths either, so a project saved in another folder, away from its files,
-plays its clips silent when it's opened again.
+**Adding files.** Drop audio files on the arrangement, or pick them with
+**File > Import Audio Files...**, and they become clips, one after another
+(`clip.insert_audio`). A file in the project's folder, or a folder inside
+it, is named relative to it, as `Samples/kick.wav`; any other is named by
+its absolute path. The app reads a file's header before it adds the clips,
+so they're as long as the file, and a file it can't read is left out, with
+the reason in the status bar.
+
+**Headers and waveforms.** A thread of the app's own
+(`crates/app/src/audio_files.rs`) reads the header and the waveform of
+every file the project's clips play: the headers first, as edits need them
+(an audio clip can't be trimmed past its file's end, and positions in a
+file count in its own sample rate), then the waveforms, a file at a time,
+so a long one never holds up the window. It looks again whenever the
+project changes, and starts over when another project opens. A waveform is
+the lowest and highest sample of every 64 frames, and of every 4 of those,
+and so on, about 5 MB for ten minutes of audio at 48 kHz; clips draw from
+it at any zoom.
+
+Save Project As doesn't copy the files or change the clips' paths, so a
+project saved in another folder, away from its files, plays its clips
+silent when it's opened again.
 
 To hear clips now, the `clips_demo` example writes a project and the files
 it plays, here into `target`, which Git ignores:
@@ -364,7 +499,7 @@ backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones:
+ones, and how editing behaves:
 
 ```toml
 format = "musicable-settings"
@@ -374,11 +509,17 @@ version = 1
 device = "{0.0.0.00000000}.{a1b2c3d4-...}"
 exclusive = false
 buffer_size = 128
+
+[behaviour]
+play_from = "start_marker"
 ```
 
 Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
-smallest the device supports. Fields this version doesn't know are ignored.
+smallest the device supports. `play_from` is where Space plays from: the
+start marker (`start_marker`), as in Live, or wherever the playhead stopped
+(`playhead`). The app reads it at startup; there's no window for it yet.
+Fields this version doesn't know are ignored.
 
 ## Audio
 
@@ -434,6 +575,16 @@ says what the stream got.
   eframe does, without an audio device. It gives every command new keys in
   the keyboard shortcuts window, finds every command in the command palette
   with them, and starts the app again to check they were saved.
+- [`crates/app/src/app/arranging.rs`](../crates/app/src/app/arranging.rs)
+  drives the window the same way through the Tier 1 demo's arranging
+  steps, with the mouse and the keys: it drops an audio file on a track,
+  inserts a MIDI clip, moves, duplicates, splits, deletes, trims and fades
+  clips, draws and toggles the loop, adds a locator from the ruler's menu,
+  zooms, undoes every step and redoes it, then saves and opens the project
+  again. `crates/app/src/app/testing.rs` has what both share.
+- `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
+  context menus, wheel and dropped files on a real document, and checks that
+  only what's in sight of a hundred tracks is laid out.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
   tempo field and undoing a drag of it, and a new engine taking over. The
@@ -463,7 +614,10 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
-- Renaming, reordering and selecting tracks, and devices in the mixer.
+- Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
+  devices in the mixer.
+- Nudging clips with the arrow keys, consolidating them, and crossfades
+  drawn between clips; a window for the behaviour settings.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.
