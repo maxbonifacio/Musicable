@@ -3,8 +3,8 @@
 
 use egui::{Button, Ui};
 use musicable_commands::{
-    Args, Command, CommandId, Registry, arrange, controllers, edit, file, locator, notes, options,
-    track, transport, view,
+    Args, Command, CommandId, Registry, arrange, automation, controllers, edit, file, locator,
+    notes, options, track, transport, view,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -19,7 +19,7 @@ type MenuSpec = (&'static str, &'static str, &'static [Option<CommandId>]);
 /// these, unless its commands are all in other menus, so every command can be
 /// reached. Commands that need arguments, which menus can't give, are left
 /// out.
-const MENUS: [MenuSpec; 7] = [
+const MENUS: [MenuSpec; 8] = [
     (
         "File",
         "file",
@@ -92,6 +92,11 @@ const MENUS: [MenuSpec; 7] = [
             Some(controllers::SHOW_VELOCITIES),
             Some(controllers::CLEAR),
         ],
+    ),
+    (
+        "Automation",
+        "automation",
+        &[Some(automation::SHOW), Some(automation::RE_ENABLE)],
     ),
     (
         "Locator",
@@ -317,6 +322,7 @@ mod tests {
                 "Track",
                 "Clip",
                 "Notes",
+                "Automation",
                 "Locator",
                 "Transport",
                 "Macro",
@@ -336,7 +342,7 @@ mod tests {
         }
         assert!(!listed.contains(&arrange::MOVE));
         // A command missing from its menu goes at its end.
-        let transport = &menus[6].items;
+        let transport = &menus.iter().find(|m| m.title == "Transport").unwrap().items;
         assert_eq!(transport[transport.len() - 2], None);
         assert_eq!(
             transport.last().unwrap().unwrap().id,

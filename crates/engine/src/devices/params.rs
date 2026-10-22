@@ -4,106 +4,9 @@ use std::ops::Range;
 
 use musicable_model::native::{NativeDevice, ParamInfo};
 
-use crate::event::{NodeEvent, NodeEventKind};
-use crate::nodes::Smoothed;
+use crate::automation::{Automation, Param};
+use crate::event::{NodeEvent, NodeEventKind, ParamId};
 use crate::{EngineConfig, ProcessContext};
-
-/// One of a node's parameters as the node works it out each frame: the
-/// value set, ramping to each new one over 10 ms as [`Smoothed`] does, plus
-/// the modulation for every voice, which applies at once.
-///
-/// A frame's value is the two added and kept in the range, which stretches
-/// to take in a value set outside it, so modulation never moves such a
-/// value, only keeps the sum in.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Param {
-    base: Smoothed,
-    modulation: f32,
-    min: f32,
-    max: f32,
-}
-
-impl Param {
-    /// Set to `value`, kept within `min..=max` once modulated.
-    pub fn new(value: f32, min: f32, max: f32) -> Self {
-        Self {
-            base: Smoothed::new(value),
-            modulation: 0.0,
-            min,
-            max,
-        }
-    }
-
-    /// From [`Node::prepare`](crate::Node::prepare).
-    pub fn prepare(&mut self, sample_rate: u32) {
-        self.base.prepare(sample_rate);
-    }
-
-    /// From [`Node::adopt`](crate::Node::adopt): carries on from the
-    /// previous node's parameter, its value and its modulation, ramping on
-    /// to this one's value.
-    pub fn take_over(&mut self, previous: &Param) {
-        self.base.take_over(&previous.base);
-        self.modulation = previous.modulation;
-    }
-
-    /// A [`Param`](NodeEventKind::Param) event: the value set, ramping to
-    /// it over 10 ms.
-    pub fn set(&mut self, value: f32) {
-        self.base.set(value);
-    }
-
-    /// A [`Modulation`](NodeEventKind::Modulation) event without a note:
-    /// replaces the last amount.
-    pub fn modulate(&mut self, amount: f32) {
-        self.modulation = amount;
-    }
-
-    /// Writes the parameter's value for each frame in `frames` of the block
-    /// into `values`, which is as long, and returns whether they're all
-    /// the same, for a fast path. Call it for the block's frames in order.
-    pub fn render(
-        &mut self,
-        _ctx: &ProcessContext<'_>,
-        frames: Range<usize>,
-        values: &mut [f32],
-    ) -> bool {
-        debug_assert_eq!(frames.len(), values.len());
-        if self.base.is_settled() {
-            values.fill(self.modulated(self.base.target()));
-            self.base.skip(frames.len());
-            return true;
-        }
-        for value in values.iter_mut() {
-            let base = self.base.next_value();
-            *value = self.modulated(base);
-        }
-        false
-    }
-
-    /// The value on the last frame rendered.
-    pub fn value(&self) -> f32 {
-        self.modulated(self.base.value())
-    }
-
-    /// The value set, without its ramp or its modulation: where it's
-    /// heading.
-    pub fn target(&self) -> f32 {
-        self.base.target()
-    }
-
-    /// The modulation for every voice: 0.0 for none.
-    pub fn modulation(&self) -> f32 {
-        self.modulation
-    }
-
-    fn modulated(&self, base: f32) -> f32 {
-        if self.modulation == 0.0 {
-            return base;
-        }
-        (base + self.modulation).clamp(self.min.min(base), self.max.max(base))
-    }
-}
 
 /// A built-in device's parameters, each worked out for every frame. A
 /// device's node renders through [`run`](Self::run), which splits the
@@ -158,6 +61,19 @@ impl Params {
     /// Parameter `param`'s value on the last frame rendered.
     pub fn value(&self, param: usize) -> f32 {
         self.params[param].value()
+    }
+
+    /// From [`Node::automate`](crate::Node::automate): has parameter
+    /// `param` follow `automation` frame by frame. Hands it back for a
+    /// parameter the device hasn't got.
+    pub fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        match self.params.get_mut(param.0 as usize) {
+            Some(p) => {
+                p.automate(automation);
+                None
+            }
+            None => Some(automation),
+        }
     }
 
     /// Renders the block through `render`, a span at a time: the frames

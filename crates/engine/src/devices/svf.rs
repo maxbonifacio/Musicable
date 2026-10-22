@@ -71,13 +71,6 @@ impl State {
         self.ic2eq = 2.0 * v2 - self.ic2eq;
         c.m0 * v0 + c.m1 * v1 + c.m2 * v2
     }
-
-    /// Filters `samples` in place.
-    pub fn run(&mut self, c: &Coefficients, samples: &mut [f32]) {
-        for sample in samples {
-            *sample = self.tick(c, f64::from(*sample)) as f32;
-        }
-    }
 }
 
 #[cfg(test)]

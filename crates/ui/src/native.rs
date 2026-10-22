@@ -7,16 +7,17 @@ use std::ops::Range;
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{
-    Align2, Color32, ComboBox, FontId, Id, Key, Rangef, Rect, Response, RichText, Sense,
+    Align2, Color32, ComboBox, FontId, Id, Key, Popup, Rangef, Rect, Response, RichText, Sense,
     StrokeKind, TextEdit, Ui, vec2,
 };
 use musicable_commands::{Args, device};
-use musicable_model::DeviceId;
 use musicable_model::native::{NativeDevice, ParamInfo, Unit};
+use musicable_model::param::ParamAddress;
+use musicable_model::{DeviceId, Project};
 
-use crate::mixer::{name_menu, slider_info};
+use crate::mixer::{automated_value, automation_items, automation_mark, name_menu, slider_info};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::shell::Action;
+use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::{Face, toggle};
 
@@ -47,12 +48,16 @@ pub(crate) fn width(device: &NativeDevice, theme: &Theme) -> f32 {
 }
 
 /// Shows the controls of `device`, the device with id `id`, which the panel
-/// calls `name`, and asks for the changes the user makes to it.
+/// calls `name`, and asks for the changes the user makes to it. A
+/// parameter with automation shows the value its lane gives it at the
+/// playhead, as the mixer's controls do, until someone overrides it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn controls(
     ui: &mut Ui,
     id: DeviceId,
     name: &str,
     device: &NativeDevice,
+    view: &View<'_>,
     theme: &Theme,
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
@@ -74,12 +79,19 @@ pub(crate) fn controls(
                     ui.label(RichText::new(heading).size(theme.small_text).weak());
                 }
                 for index in column {
-                    let value = device.values[index];
+                    let param = ParamAddress::Device(id, index as u32);
+                    let playhead = view.playback.playhead;
+                    let own = device.values[index];
+                    let automated = automated_value(view.project, param, playhead, own);
+                    // Between points, a switch or a choice shows its
+                    // nearest value.
+                    let value = params[index].clamp(automated);
                     let control = Control {
                         device: id,
                         index,
                         info: &params[index],
                         label: format!("{name} {}", params[index].full_name()),
+                        project: view.project,
                     };
                     ui.push_id(index, |ui| control.show(ui, value, theme, mouse, actions));
                 }
@@ -96,6 +108,8 @@ struct Control<'a> {
     info: &'a ParamInfo,
     /// What screen readers call it: "EQ Band 1 Freq".
     label: String,
+    /// The project, for the parameter's automation.
+    project: &'a Project,
 }
 
 impl Control<'_> {
@@ -118,6 +132,7 @@ impl Control<'_> {
                 if button.clicked() {
                     actions.push(self.set(if on { 0.0 } else { 1.0 }));
                 }
+                self.automated(ui, &button, theme, actions);
             }
             Unit::Choice(choices) => {
                 let current = info.format(value);
@@ -151,14 +166,17 @@ impl Control<'_> {
                         }
                     });
                 name_menu(&menu.response, self.label.clone(), &current);
-                menu.response
+                let response = menu
+                    .response
                     .on_hover_text(format!("{}: {current}", info.full_name()));
                 if let Some(choice) = picked.filter(|&choice| choice != value) {
                     actions.push(self.set(choice));
                 }
+                self.automated(ui, &response, theme, actions);
             }
             _ => {
-                let (response, moved) = self.bar(ui, value, size.x, theme, mouse);
+                let (response, moved) = self.bar(ui, value, size.x, theme, mouse, actions);
+                automation_mark(ui, theme, self.project, &response, self.param());
                 if response.drag_started() {
                     actions.push(Action::BeginGesture);
                 }
@@ -170,6 +188,22 @@ impl Control<'_> {
                 }
             }
         }
+    }
+
+    /// Where automation finds the parameter.
+    fn param(&self) -> ParamAddress {
+        ParamAddress::Device(self.device, self.index as u32)
+    }
+
+    /// Marks the control `response` if the parameter has automation, and
+    /// gives it a menu of the automation's commands. The menu has an id of
+    /// its own, so it leaves a choice's own menu be.
+    fn automated(&self, ui: &Ui, response: &Response, theme: &Theme, actions: &mut Vec<Action>) {
+        let param = self.param();
+        automation_mark(ui, theme, self.project, response, param);
+        Popup::context_menu(response)
+            .id(response.id.with("automation"))
+            .show(|ui| automation_items(ui, self.project, param, actions));
     }
 
     /// The command that sets the parameter to `value`.
@@ -185,8 +219,8 @@ impl Control<'_> {
     /// parameter's range, with its name and its value on it. Dragging it
     /// sideways moves the value, and the mouse map's fine drag, Ctrl-drag in
     /// Live's, a tenth as far. A double-click gives the default, and the
-    /// right-click menu takes a typed value. Returns the bar, and the value
-    /// the user moved it to.
+    /// right-click menu takes a typed value, and has the automation's
+    /// commands. Returns the bar, and the value the user moved it to.
     fn bar(
         &self,
         ui: &mut Ui,
@@ -194,6 +228,7 @@ impl Control<'_> {
         width: f32,
         theme: &Theme,
         mouse: &MouseMap,
+        actions: &mut Vec<Action>,
     ) -> (Response, Option<f64>) {
         let info = self.info;
         let size = vec2(width, ui.spacing().interact_size.y);
@@ -239,6 +274,8 @@ impl Control<'_> {
                 moved = Some(typed);
                 ui.close();
             }
+            ui.separator();
+            automation_items(ui, self.project, self.param(), actions);
         });
         // The menu starts from the value each time it opens.
         if menu.is_none() {

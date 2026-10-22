@@ -3,17 +3,17 @@
 //!
 //! Each place has its list of commands. A command's title, keys and
 //! condition come from the registry, and each of its parameters that names
-//! a clip, a track, a locator, a take or a position is filled in from where
-//! the menu was opened. A command that needs an argument the menu can't give
-//! is left out.
+//! a clip, a track, a locator, a take, a parameter or a position is filled
+//! in from where the menu was opened. A command that needs an argument the
+//! menu can't give is left out.
 
 use egui::Ui;
 use musicable_commands::{
-    Args, Command, CommandId, Type, Value, arrange, edit, file, locator, take, track, transport,
-    view,
+    Args, Command, CommandId, Type, Value, arrange, automation, edit, file, locator, take, track,
+    transport, view,
 };
-use musicable_model::TrackKind;
 use musicable_model::time::Beats;
+use musicable_model::{Chain, TrackKind};
 
 use super::{Hit, Scene, Spot};
 use crate::menus::context_menu;
@@ -60,6 +60,7 @@ const HEADER: Items = &[
     Some(track::DELETE),
     None,
     Some(view::TOGGLE_TAKE_LANES),
+    Some(automation::SHOW),
     None,
     Some(track::NEW_AUDIO_TRACK),
     Some(track::NEW_MIDI_TRACK),
@@ -103,6 +104,15 @@ const TAKE: Items = &[
     Some(view::TOGGLE_TAKE_LANES),
 ];
 
+/// On an automation lane or its header, for its parameter.
+const AUTOMATION: Items = &[
+    Some(automation::RE_ENABLE),
+    Some(automation::CLEAR),
+    None,
+    Some(automation::HIDE_LANE),
+    Some(automation::SHOW),
+];
+
 /// The commands of the context menu for `hit`.
 fn items(hit: Hit) -> Vec<Option<CommandId>> {
     let lists: &[Items] = match hit {
@@ -113,6 +123,8 @@ fn items(hit: Hit) -> Vec<Option<CommandId>> {
         Hit::Ruler | Hit::Strip | Hit::LoopBrace | Hit::LoopEdge(_) => &[RULER],
         Hit::Locator(_) => &[LOCATOR],
         Hit::Take { .. } | Hit::TakeHeader { .. } => &[TAKE],
+        Hit::Automation { .. } => &[AUTOMATION, GRID],
+        Hit::AutomationHeader { .. } => &[AUTOMATION],
     };
     lists
         .iter()
@@ -176,6 +188,19 @@ fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
                 }
             }),
             (Type::Locator, Hit::Locator(id)) => Some(id.into()),
+            (Type::Param, hit) if param.name == "param" => hit.lane().map(Value::from),
+            // The master's lanes are its, not the selected track's.
+            (
+                Type::Bool,
+                Hit::Automation {
+                    chain: Chain::Master,
+                    ..
+                }
+                | Hit::AutomationHeader {
+                    chain: Chain::Master,
+                    ..
+                },
+            ) if param.name == "master" => Some(true.into()),
             (Type::Beats, _) if matches!(param.name.as_ref(), "at" | "start") => {
                 Some(spot.at.into())
             }
@@ -210,17 +235,24 @@ fn comped(scene: &Scene<'_>, hit: Hit) -> Option<(Beats, Beats)> {
 
 /// Whether `id` suits the track the menu was opened on: MIDI clips go on
 /// MIDI tracks, audio files on audio tracks, and return and group tracks
-/// record nothing, so they have no takes.
+/// record nothing, so they have no takes. On an automation lane, there has
+/// to be automation to clear, and to have overridden to re-enable.
 fn fits(id: &CommandId, scene: &Scene<'_>, spot: Spot) -> bool {
     let kind = spot
         .hit
         .track()
         .and_then(|track| scene.project().track(track))
         .map(|track| track.kind);
+    let lane = spot
+        .hit
+        .lane()
+        .and_then(|param| scene.project().lane(param));
     match id {
         id if *id == arrange::INSERT_MIDI_CLIP => kind == Some(TrackKind::Midi),
         id if *id == file::IMPORT_AUDIO => kind.is_none_or(|kind| kind == TrackKind::Audio),
         id if *id == view::TOGGLE_TAKE_LANES => kind.is_some_and(|kind| !kind.is_bus()),
+        id if *id == automation::RE_ENABLE => lane.is_some_and(|lane| lane.overridden),
+        id if *id == automation::CLEAR => lane.is_some(),
         _ => true,
     }
 }

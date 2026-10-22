@@ -340,6 +340,54 @@ tone's level, ramp this way.
   (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
   of a fade doesn't jump.
 
+## Automation
+
+A parameter's automation is compiled into the graph and read at the song
+position, never sent through the message queue, so it loops, locates and
+follows tempo changes as clips do.
+
+- `compile()` makes an `automation::Automation` for each lane that isn't
+  overridden: its points, in beats, and its `Scale`. `keys::param` says
+  which node has the parameter and which `ParamId` it is: a channel's
+  fader, a `Gain`, for its volume (`Gain::GAIN`) and its pan
+  (`Gain::PAN`), a send's `Gain` for its level, and a device's node for its
+  parameter `n` (`ParamId(n)`). `Graph::automate` gives it to the node.
+- Whoever reads it places the points through the block's tempo map
+  (`ProcessContext::tempo`), each on the frame `TempoMap::frame_at` gives.
+  Between two points the value moves in a straight line in the lane's
+  scale: in the fourth root of the gain for faders and sends, as their
+  faders spread, in ratios on a log scale, and evenly otherwise. Two points
+  at the same place make a step, and on its frame the value is the one
+  after it.
+- **A node that reads its own** keeps it (`Node::automate` returns `None`)
+  and works the value out frame by frame with an `automation::Param`, as
+  `Gain` does for its gain and pan, and the built-in devices for each of
+  their parameters ([Built-in devices](#built-in-devices)). A `Param` follows its automation in
+  place of the value set, which ramps over 10 ms as `Smoothed` does and
+  applies again once the automation goes. Between points it follows the
+  line exactly. Wherever the automation jumps, at a step, where the
+  playhead locates or loops, or where a new graph brings automation the
+  old one hadn't, the value glides there over 10 ms instead, so it doesn't
+  click. Modulation (`Param::modulate`, for Tier 2's modulators) is added
+  after the ramp and the glide, unsmoothed, and the sum kept within the
+  parameter's range, so automation, modulation, MIDI mapping and
+  extensions can all address the same parameter.
+- **Other nodes** hand their automation back, and the graph sends them its
+  values as `Param` events (`automation::Feed`): on the frame of each point
+  (up to 16 a block), every 32 frames of engine time between them, and on
+  a block's first frame when the playhead has jumped or the graph is new,
+  each only when the value changed. They come after the engine's own
+  events on the same frame, so they win. Plugins get theirs this way, and
+  smooth their parameters themselves: a CLAP plugin gets values in its own
+  range, a VST3 plugin its normalized ones.
+- The events fall on the same frames however the blocks fall, so the
+  renderers stay bit-identical with automation at any block size
+  (`crates/engine/tests/automation.rs`).
+- Moving an automated control by hand overrides its lane
+  ([commands.md](commands.md#automation)), and the next graph leaves the
+  lane out, so the parameter ramps from where the automation left it to
+  the value set.
+
 ## The mixer
 
 `compile()` builds every track as a channel strip, and the master too, with
@@ -622,6 +670,12 @@ parameters in `devices::Params`, which works each one out for every frame:
   set on every frame from the event on, and kept in the parameter's range.
   It applies at once, without a ramp, since a modulator moves smoothly by
   itself. Modulation for one note is the instruments' to handle.
+- A parameter with automation follows it instead of the value set
+  ([Automation](#automation)): each is an `automation::Param`, and the
+  node's `Node::automate` hands the lane to `Params::automate`, which hands
+  it back for a parameter the kind hasn't got. A kind whose node doesn't
+  forward it gets its lanes as `Param` events instead, a value every 32
+  frames, each ramped to over 10 ms.
 - `Params::run` renders a block in spans that end where its events fall,
   and hands each span the values for each of its frames (`Values::frames`),
   and whether a parameter holds one value over the span
@@ -633,7 +687,12 @@ parameters in `devices::Params`, which works each one out for every frame:
 
 So a change or a modulation lands on its frame, and a device renders the
 same samples however the blocks fall, and on any thread: the parallel
-renderer stays bit-identical (`tests/devices.rs` checks it).
+renderer stays bit-identical (`tests/devices.rs` checks it), and so do
+blocks of any size (`tests/automation.rs`). That holds only while a fast
+path for a steady span gives exactly what working frame by frame would: a
+frame on which a switch is off starts the EQ's band or the utility's DC
+filter afresh, as a span that's off throughout does, and a band's sections
+work in `f64` either way.
 
 **The utility** (`devices::Utility`): a DC filter (a one-pole high-pass at
 5 Hz), each side's polarity, the width (mid and side, exact at 100%), the
@@ -647,8 +706,10 @@ frequency; 24 and 48 dB cuts are Butterworth cascades of two and four
 sections. `musicable_model::native::eq::response` works out the design's
 response, and the test measures the node's, from its impulse response,
 to within 0.001 dB of it from 20 Hz to 20 kHz at 44.1 and 96 kHz. A band
-retunes on every frame while its frequency, gain or Q moves, and fades in
-and out over 10 ms when it's switched on or off.
+retunes on every frame while its shape, frequency, gain or Q moves, and
+fades in and out over 10 ms when it's switched on or off. A sample goes
+through all of a band's sections in `f64`, rounded to `f32` only after the
+last.
 
 **The compressor** (`devices::Compressor`): feed-forward, in decibels,
 after Giannoulis, Massberg and Reiss (JAES, 2012). On each frame it takes
@@ -711,14 +772,16 @@ within 5% of half of it at the damping frequency. The low cut's effect on
 the tail matches its design to within 0.001 dB.
 
 **Adding a kind.** Write its node in a file of its own in `devices/`, make
-it in `devices::node`, and add it to `BUILT`. Its parameters are in its
-table already, and the format and commands handle them. Test it with
-`devices::testing::Run`, which renders a node over a signal in blocks of
-any length with events on given frames, under the real-time checks, at a
-given tempo and with the transport playing if it follows the song
-(`Run::with_tempo`, `Run::playing`), and measure it against what it's
-meant to do, as the EQ's test does: a reference test, not a snapshot of
-what it happens to do.
+it in `devices::node`, add it to `BUILT`, and forward `Node::automate` to
+`Params::automate`. Its parameters are in its table already, and the
+format and commands handle them. Test it with `devices::testing::Run`,
+which renders a node over a signal in blocks of any length with events on
+given frames, under the real-time checks, at a given tempo and with the
+transport playing if it follows the song (`Run::with_tempo`,
+`Run::playing`), and measure it against what it's meant to do, as the EQ's
+test does: a reference test, not a snapshot of what it happens to do. Give
+its parameters lanes in `tests/automation.rs` too, which plays them in
+blocks of any size.
 
 ## Parallel rendering
 

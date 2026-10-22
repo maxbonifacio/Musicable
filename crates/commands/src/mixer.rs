@@ -7,8 +7,9 @@
 //! Scripts and agents run the same commands.
 
 use musicable_model::mixer::Bus;
+use musicable_model::param::ParamAddress;
 use musicable_model::{
-    AudioInput, ClipType, Input, MidiInput, Monitor, Project, SendId, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, SendId, TrackId, TrackKind,
 };
 
 use crate::{
@@ -494,11 +495,16 @@ impl Change {
     }
 }
 
-/// Makes `change` to the document's project, as one transaction.
+/// Makes `change` to the document's project, as one transaction. Moving an
+/// automated fader, pan or send overrides its automation, as moving it by
+/// hand does.
 pub fn change(document: &mut Document, change: Change) {
+    let by_hand = |tx: &mut Transaction<'_>, param, value: f32| {
+        tx.set_param_by_hand(param, f64::from(value));
+    };
     document.transact(change.name(), |tx| match change {
-        Change::Gain(track, gain) => tx.set_track_gain(track, gain),
-        Change::Pan(track, pan) => tx.set_track_pan(track, pan),
+        Change::Gain(track, gain) => by_hand(tx, ParamAddress::Volume(Chain::Track(track)), gain),
+        Change::Pan(track, pan) => by_hand(tx, ParamAddress::Pan(Chain::Track(track)), pan),
         Change::Muted(track, muted) => tx.set_track_muted(track, muted),
         Change::Solo {
             track,
@@ -533,7 +539,7 @@ pub fn change(document: &mut Document, change: Change) {
                 None => None,
             };
             if let Some(send) = send {
-                tx.set_send_level(track, send, level);
+                by_hand(tx, ParamAddress::Send(send), level);
             }
         }
         Change::SendPreFader {
@@ -554,8 +560,8 @@ pub fn change(document: &mut Document, change: Change) {
         Change::Delete(track) => {
             tx.remove_track(track);
         }
-        Change::MasterGain(gain) => tx.set_master_gain(gain),
-        Change::MasterPan(pan) => tx.set_master_pan(pan),
+        Change::MasterGain(gain) => by_hand(tx, ParamAddress::Volume(Chain::Master), gain),
+        Change::MasterPan(pan) => by_hand(tx, ParamAddress::Pan(Chain::Master), pan),
         Change::MasterClipType(clip_type) => tx.set_master_clip_type(clip_type),
     });
 }

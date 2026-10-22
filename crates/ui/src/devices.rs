@@ -5,6 +5,7 @@
 //! the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use egui::{
     Align, Button, Frame, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit, Ui,
@@ -12,6 +13,7 @@ use egui::{
 };
 use musicable_commands::{Args, device};
 use musicable_model::native::NativeKind;
+use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
 use crate::mouse::MouseMap;
@@ -38,7 +40,7 @@ pub struct PluginEntry {
 }
 
 /// How a plugin device's plugin is doing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginStatus {
     /// Its plugin loaded, and plays.
     pub loaded: bool,
@@ -48,6 +50,18 @@ pub struct PluginStatus {
     pub window_open: bool,
     /// Why it plays nothing, if it doesn't.
     pub problem: Option<String>,
+    /// The parameters automation can move, in the plugin's order, once it's
+    /// loaded: those it neither hides nor keeps to itself.
+    pub params: Arc<[PluginParam]>,
+}
+
+/// A plugin's parameter, for automation lanes to show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginParam {
+    /// The plugin's id for it.
+    pub id: u32,
+    /// Its name, its range and its default. Its values spread evenly.
+    pub spec: ParamSpec,
 }
 
 /// The plugins, as the browser and the devices panel show them.
@@ -200,7 +214,7 @@ fn device_box(
                 title_row(ui, device, name, theme, actions);
                 match device.kind {
                     DeviceKind::Native(ref native) => {
-                        native::controls(ui, device.id, name, native, theme, mouse, actions);
+                        native::controls(ui, device.id, name, native, view, theme, mouse, actions);
                     }
                     DeviceKind::Plugin(_) => {
                         ui.label(RichText::new(kind).size(theme.small_text).weak());
@@ -288,7 +302,7 @@ fn plugin_status(
 }
 
 /// A device's name, and what kind of device it is.
-fn describe(device: &Device) -> (&str, String) {
+pub(crate) fn describe(device: &Device) -> (&str, String) {
     match &device.kind {
         DeviceKind::Plugin(plugin) => {
             let name = match plugin.name.trim() {
@@ -945,6 +959,55 @@ mod tests {
         assert!(
             values.len() > 3 && (16.0..=20.0).contains(&last),
             "{values:?}"
+        );
+    }
+
+    #[test]
+    fn automated_controls_follow_their_lanes_and_offer_their_commands() {
+        use musicable_commands::automation::{CLEAR, RE_ENABLE, SHOW_LANE};
+        use musicable_model::automation::{Lane, Point};
+        use musicable_model::param::ParamAddress;
+        use musicable_model::time::Beats;
+
+        let mut project = Project::new();
+        let eq = native(&mut project, NativeKind::Eq);
+        let freq = 2 * eq::PER_BAND + eq::FREQ;
+        let param = |n: usize| ParamAddress::Device(eq.id, n as u32);
+        let at = |beat, value| Point::new(Beats::new(beat), value);
+        let mut switch = Lane::new(param(eq::ON), vec![at(0, 1.0)]);
+        switch.overridden = true;
+        project.automation = vec![
+            Lane::new(param(freq), vec![at(0, 1000.0), at(8, 4000.0)]),
+            switch,
+        ];
+        let mut harness = showing(vec![eq.clone()], project);
+        // The bar shows what the lane gives it at the playhead, not its own
+        // 250 Hz, and the overridden switch its own value, off.
+        let bar = harness.get_by_role_and_label(Role::Slider, "EQ Band 3 Freq");
+        assert_eq!(bar.accesskit_node().numeric_value(), Some(1000.0));
+        let on = harness.get_by_label("EQ Band 1 On");
+        assert_eq!(on.accesskit_node().toggled(), Some(Toggled::False));
+
+        // The bar's menu has the automation's commands under the typed
+        // value; the switch's has them alone.
+        let menu = |harness: &mut Harness<'static, State>, label: &str, item: &str| {
+            harness.get_by_label(label).click_secondary();
+            harness.run();
+            harness.get_by_role_and_label(Role::Button, item).click();
+            harness.run();
+        };
+        menu(&mut harness, "EQ Band 3 Freq", "Clear Automation");
+        menu(&mut harness, "EQ Band 1 On", "Re-Enable Automation");
+        menu(&mut harness, "EQ Band 2 Freq", "Show Automation");
+        let run = |command, n: usize| Action::RunWith(command, Args::new().with("param", param(n)));
+        let band2 = eq::PER_BAND + eq::FREQ;
+        assert_eq!(
+            actions(&mut harness),
+            [
+                run(CLEAR, freq),
+                run(RE_ENABLE, eq::ON),
+                run(SHOW_LANE, band2)
+            ]
         );
     }
 

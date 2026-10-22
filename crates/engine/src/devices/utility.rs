@@ -9,7 +9,7 @@ use musicable_model::native::utility::{
 };
 
 use super::{Params, Span};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The utility's node.
 #[derive(Debug, Clone)]
@@ -35,6 +35,10 @@ impl Node for Utility {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
         self.pole = (-2.0 * PI * DC_CUTOFF / f64::from(config.sample_rate)).exp();
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
@@ -86,7 +90,11 @@ fn render(span: &Span<'_>, output: &mut AudioMut<'_>, dc: &mut [(f64, f64); 2], 
     );
     for i in 0..span.frames.len() {
         let mut frame = [out.channel(0)[i], out.channel(1)[i]];
-        if filtering {
+        if filtering && filter[i] == 0.0 {
+            // Off on this frame, it starts afresh, as when it's off for a
+            // whole span: so it sounds the same however the blocks fall.
+            *dc = [(0.0, 0.0); 2];
+        } else if filtering {
             for (sample, (last_in, last_out)) in frame.iter_mut().zip(dc.iter_mut()) {
                 let x = f64::from(*sample);
                 let y = x - *last_in + pole * *last_out;

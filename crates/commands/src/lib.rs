@@ -20,6 +20,7 @@ use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
+pub mod automation;
 pub mod controllers;
 pub mod device;
 mod document;
@@ -40,7 +41,7 @@ pub mod track;
 pub mod transport;
 pub mod view;
 
-pub use args::{Args, CommandError, FromValue, Param, Type, Value};
+pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use document::{Committed, Document, Edit, Transaction};
 pub use editor::{Editor, Focus};
 pub use key::{ChordError, Key, KeyChord, Modifiers};
@@ -158,6 +159,8 @@ pub enum When {
     /// The piano roll's lane shows a controller its clip moves: a curve
     /// Clear Controller can take away.
     ControllerCurve,
+    /// Someone overrode automation, which can be re-enabled.
+    AutomationOverridden,
 }
 
 impl When {
@@ -189,6 +192,7 @@ impl When {
                     .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Midi(_)))
             }),
             When::ControllerCurve => controllers::shown(project, editor).is_some(),
+            When::AutomationOverridden => project.automation.iter().any(|l| l.overridden),
         }
     }
 }
@@ -381,6 +385,7 @@ pub fn register_all(registry: &mut Registry) {
     take::register(registry);
     notes::register(registry);
     controllers::register(registry);
+    automation::register(registry);
     view::register(registry);
     options::register(registry);
 }

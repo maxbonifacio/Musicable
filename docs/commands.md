@@ -26,8 +26,9 @@ the app can do, such as showing a file dialog.
 A command can take arguments, and give back a result, so the arrangement's
 gestures, scripts and agents can say exactly what to change. Its `params`
 list them: each `Param` has a name, a `Type` (a bool, an integer, a number,
-text, a position in beats, a track, a clip, a note, a locator, or a list of
-one of those), whether it's optional, and a line on what it's for.
+text, a position in beats, a track, a clip, a note, a locator, a device, a
+take, a parameter, or a list of one of those), whether it's optional, and a
+line on what it's for.
 
 - `Registry::run_with(id, &args, ctx)` runs a command with `Args`, built
   with `Args::new().with("clips", ids).with("by", Beats::new(4))`. It checks
@@ -332,6 +333,43 @@ plugin that isn't playing has no window to show, and the status bar says
 why. A new device starts with the plugin's own defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
+### Automation
+
+Automation moves a parameter through points over the song
+([project-format.md](project-format.md#lane)). Each command names
+its parameter with an argument of type `param`, a `ParamAddress`, which
+scripts write as text: "track 3 volume", "master pan", "send 2" or
+"device 4 param 17" (`param_text`). A built-in device's parameter is its
+number in its kind's table, a plugin's its id in the plugin, and a test
+device's is 0.
+
+| Command | Title | Arguments | What it does | Default key | Live |
+|---|---|---|---|---|---|
+| `automation.show` | Show/Hide Automation | `track` or `master` | Shows the automation lanes of a track, the selected one without either, or the master, or hides them: a lane for each parameter it automates, or else one for its volume | A | A (Automation Mode) |
+| `automation.show_lane` | Show Automation Lane | `param`, `instead_of` | Shows a lane for a parameter, in place of the lane of `instead_of`, or under the others | none | none |
+| `automation.hide_lane` | Hide Automation Lane | `param` | Hides a parameter's lane | none | none |
+| `automation.set_points` | Edit Automation | `param`, `at`, `values` | Sets all of a parameter's points: where each is, and its value in the parameter's own units | none | none |
+| `automation.add_point` | Add Automation Point | `param`, `at`, `value` | Adds a point, after any already there, so it ends a step | none | none |
+| `automation.delete_points` | Delete Automation Points | `param`, `start`, `end` | Deletes the points from `start` to `end` | none | none |
+| `automation.clear` | Clear Automation | `param` | Deletes a parameter's automation, which leaves it with the value it had at the playhead | none | none |
+| `automation.re_enable` | Re-Enable Automation | `param` | Has a parameter follow its automation again after someone moved it by hand, or every overridden one without `param` | none | Re-Enable Automation, Back to Arrangement |
+
+Values are kept within the parameter's range where the project knows it,
+as it does for the mixer's, the built-in devices' and the test devices'
+parameters, and a switch's, a choice's, a note's or a count's are rounded
+to whole numbers; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
+gestures run these, and a drag of a point or a stretch of line, or a drag
+that draws, runs Edit Automation once, when it ends
+([app.md](app.md#the-arrangement)).
+
+Moving a control by hand overrides its automation, as in Live:
+`Transaction::set_param_by_hand` sets the value and marks the lane
+overridden in the same step, so one undo puts both back. The mixer's
+changes, `device.set_param` (and so the built-in devices' controls) and
+what plugins change in their own windows all do. An overridden lane keeps its points, which can be edited as
+usual, and the parameter holds the value it was moved to until Re-Enable
+Automation.
+
 ### The mixer's controls
 
 The mixer's faders, pan, sends, buttons and menus hand back a
@@ -458,6 +496,8 @@ for the behaviour settings.
 - **The clipboard**: the clips or time Cut and Copy took in the
   arrangement, for Paste.
 - **Take lanes**: the tracks whose takes show in lanes under them.
+- **Automation lanes** (`Editor::automation`): the parameters whose lanes
+  each track, or the master, shows, top to bottom.
 
 ## Transactions
 
@@ -477,8 +517,9 @@ the metronome; adding and removing tracks and sends; each mixer setting of
 a track, its input and monitoring among them, a send and the master; adding
 and removing clips, and their timing, fades and names; adding and removing
 notes, and their timing, keys and velocities; adding, naming and removing
-takes; adding, moving, naming and removing locators; and adding
-and removing devices, and a plugin's parameters and settings.
+takes; adding, moving, naming and removing locators; adding and removing
+devices, and a plugin's parameters and settings; and each parameter's
+automation, and whether it's overridden.
 `Transaction::editor` reads the editor's state, such as the files' sample
 rates. Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing

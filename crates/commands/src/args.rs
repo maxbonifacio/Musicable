@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use musicable_model::clip::{ClipId, NoteId};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
-use musicable_model::{DeviceId, LocatorId, TakeId, TrackId};
+use musicable_model::{Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
 
 use crate::CommandId;
 
@@ -36,6 +37,8 @@ pub enum Value {
     Locator(LocatorId),
     Device(DeviceId),
     Take(TakeId),
+    /// A parameter anywhere in the project.
+    Param(ParamAddress),
     List(Vec<Value>),
 }
 
@@ -53,6 +56,7 @@ pub enum Type {
     Locator,
     Device,
     Take,
+    Param,
     List(&'static Type),
 }
 
@@ -80,6 +84,7 @@ impl Type {
             Type::Locator => LocatorId::from_value(value).is_some(),
             Type::Device => DeviceId::from_value(value).is_some(),
             Type::Take => TakeId::from_value(value).is_some(),
+            Type::Param => ParamAddress::from_value(value).is_some(),
             Type::List(item) => {
                 matches!(value, Value::List(values) if values.iter().all(|v| item.accepts(v)))
             }
@@ -101,6 +106,10 @@ impl fmt::Display for Type {
             Type::Locator => f.write_str("a locator"),
             Type::Device => f.write_str("a device"),
             Type::Take => f.write_str("a take"),
+            Type::Param => f.write_str(
+                "a parameter, such as \"track 3 volume\", \"master pan\", \"send 2\" or \
+                 \"device 4 param 17\"",
+            ),
             Type::List(item) => write!(f, "a list, each {item}"),
         }
     }
@@ -314,6 +323,61 @@ id_from_value!(LocatorId, Locator);
 id_from_value!(DeviceId, Device);
 id_from_value!(TakeId, Take);
 
+impl FromValue for ParamAddress {
+    const TYPE: Type = Type::Param;
+
+    /// A parameter, or one written as a script would: "track 3 volume",
+    /// "track 3 pan", "master volume", "master pan", "send 2", or "device
+    /// 4 param 17".
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Param(param) => Some(*param),
+            Value::Text(text) => parse_param(text),
+            _ => None,
+        }
+    }
+}
+
+impl From<ParamAddress> for Value {
+    fn from(param: ParamAddress) -> Self {
+        Value::Param(param)
+    }
+}
+
+/// Reads a parameter written as [`param_text`] writes it.
+fn parse_param(text: &str) -> Option<ParamAddress> {
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let id = |word: &str| word.parse::<u32>().ok();
+    let fader = |chain, what: &str| match what {
+        "volume" => Some(ParamAddress::Volume(chain)),
+        "pan" => Some(ParamAddress::Pan(chain)),
+        _ => None,
+    };
+    match words.as_slice() {
+        ["track", track, what] => fader(Chain::Track(TrackId(id(track)?)), what),
+        ["master", what] => fader(Chain::Master, what),
+        ["send", send] => Some(ParamAddress::Send(SendId(id(send)?))),
+        ["device", device, "param", n] => Some(ParamAddress::Device(DeviceId(id(device)?), id(n)?)),
+        _ => None,
+    }
+}
+
+/// A parameter as scripts write it: "track 3 volume", "master pan", "send
+/// 2", "device 4 param 17".
+pub fn param_text(param: ParamAddress) -> String {
+    let chain = |chain| match chain {
+        Chain::Track(track) => format!("track {}", track.0),
+        Chain::Master => "master".to_owned(),
+    };
+    match param {
+        ParamAddress::Volume(on) => format!("{} volume", chain(on)),
+        ParamAddress::Pan(on) => format!("{} pan", chain(on)),
+        ParamAddress::Send(send) => format!("send {}", send.0),
+        ParamAddress::Device(device, n) => format!("device {} param {n}", device.0),
+    }
+}
+
 impl<T: FromValue> FromValue for Vec<T> {
     const TYPE: Type = Type::List(&T::TYPE);
 
@@ -481,5 +545,34 @@ mod tests {
         assert!(!Type::CLIPS.accepts(bad.value("clips").unwrap()));
         assert!(!Type::Beats.accepts(bad.value("by").unwrap()));
         assert_eq!(Type::CLIPS.to_string(), "a list, each a clip");
+    }
+
+    #[test]
+    fn scripts_can_write_parameters_as_text() {
+        let params = [
+            ParamAddress::Volume(Chain::Track(TrackId(3))),
+            ParamAddress::Pan(Chain::Track(TrackId(0))),
+            ParamAddress::Volume(Chain::Master),
+            ParamAddress::Pan(Chain::Master),
+            ParamAddress::Send(SendId(2)),
+            ParamAddress::Device(DeviceId(4), 17),
+        ];
+        for param in params {
+            let text = Value::Text(param_text(param));
+            assert_eq!(ParamAddress::from_value(&text), Some(param));
+            assert_eq!(ParamAddress::from_value(&param.into()), Some(param));
+        }
+        let read = |text: &str| ParamAddress::from_value(&Value::Text(text.into()));
+        assert_eq!(read(" Master  VOLUME "), Some(params[2]));
+        for bad in [
+            "track volume",
+            "track -1 pan",
+            "send",
+            "master gain",
+            "device 4 17",
+        ] {
+            assert_eq!(read(bad), None, "{bad}");
+        }
+        assert!(!Type::Param.accepts(&Value::Int(3)));
     }
 }
