@@ -104,14 +104,15 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Notes, Locator, Transport, View and Options. Undo and Redo name the
-  change they would make, as in "Undo Set Tempo", and are greyed out when
-  there's nothing to undo or redo, as is any command that doesn't apply
-  now, such as Split with nothing selected. Toggles, such as Follow and
-  Snap to Grid, are ticked while on. A command in an area with no menu yet
-  gets a menu named after its area, before View, so every command can be
-  reached; commands that need arguments are left out, as menus can't give
-  them. On the right are the CPU meter and the dropout counter.
+  Track, Clip, Notes, Automation, Locator, Transport, View and Options.
+  Undo and Redo name the change they would make, as in "Undo Set Tempo",
+  and are greyed out when there's nothing to undo or redo, as is any
+  command that doesn't apply now, such as Split with nothing selected.
+  Toggles, such as Follow and Snap to Grid, are ticked while on. A command
+  in an area with no menu yet gets a menu named after its area, before
+  View, so every command can be reached; commands that need arguments are
+  left out, as menus can't give them. On the right are the CPU meter and
+  the dropout counter.
 - **The transport bar** has go to start, play, stop, record, loop, punch in
   and punch out, the metronome, the tempo, the time signature, and the
   playhead in bars, beats and sixteenths and in minutes and seconds.
@@ -179,6 +180,19 @@ undo history and the engine rebuilds its graph once.
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).
+- **Automation** shows in lanes under a track's lanes after the A button in
+  its header, **Automation > Show/Hide Automation** (A), or the same in the
+  header's menu: a lane for each parameter the track automates, or else
+  one for its volume. The master's lanes go under the last track; the
+  master strip's controls show them, in the mixer. A lane's header names
+  the parameter, with its value at the playhead, or "Overridden" once
+  someone moved its control by hand, and has three buttons: ▾ chooses the
+  parameter the lane shows (the track's volume, pan and sends, then each
+  device's parameters, a submenu for each device, the automated ones in
+  red), + adds a lane for the next parameter, and × hides the lane. The
+  line through a lane's points is red, or grey while its automation is
+  overridden; a lane without automation shows the parameter's own value as
+  a dashed line ([commands.md](commands.md#automation)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
@@ -206,6 +220,11 @@ The mouse does what it does in Live:
 | A track's bottom edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
+| An automation lane | Click; double-click | Selects the track and puts the start marker there; adds a point there |
+| | Drag; Alt-drag | Draws a value for each step of the grid crossed, as Live's Draw Mode does; draws freely, off the grid, as it does with Snap to Grid off |
+| An automation lane's line | Click; drag | Adds a point on the line, on the grid; moves that stretch of the line, with its points, up or down |
+| An automation point | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
+| An automation lane's header | Click | Selects the track |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
@@ -213,9 +232,12 @@ Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
 header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
-locator, and Comp, Rename, Delete Take and Show/Hide Take Lanes on a take. Each shows its keys, and takes its arguments from where the
-menu was opened: the clip, the track, or the position. Rename, from a menu,
-a key or a double-click, opens a box for the new name.
+locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
+and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
+automation lane. Each shows its keys, and takes its arguments from where
+the menu was opened: the clip, the track, the parameter, or the position.
+Rename, from a menu, a key or a double-click, opens a box for the new
+name.
 
 Audio files dropped on the window become clips, one after another, where
 they're dropped: on that track if it's an audio track, or else the
@@ -443,6 +465,13 @@ the pan to centre it. A whole drag is one step in the undo history. The
 faders, sends, pans, buttons, menus and meters are named for screen readers,
 such as "Lead Volume", which is how the tests drive them.
 
+**Automation.** A fader, a send or a pan with automation follows it, showing
+its value at the playhead, and has a red dot at its top left; the dot is
+grey once the control is moved by hand, which overrides the automation
+until it's re-enabled, as in Live. Right-clicking one of them has **Show
+Automation**, which shows its lane in the arrangement, **Re-Enable
+Automation** and **Clear Automation**.
+
 **Meters.** Each strip's meter shows its channel's output, after mute and
 solo, left and right: the peak in a light shade, and the RMS level, averaged
 over about 0.3 s, solid. They're green up to -6 dB, yellow to 0 dB and red
@@ -646,6 +675,17 @@ there. The sampler reads the whole file when the graph is next built, and
 samplers playing the same file share it; if it can't, it plays nothing,
 and the status bar says why. Loading and removing a sample are steps in
 the undo history: "Load Sample" and "Remove Sample".
+
+**Automation.** Every control of a built-in device can be automated. One
+with automation follows it, showing its value at the playhead, with the
+mixer's dot at its top left: red, or grey once the control is moved by
+hand, which overrides the automation until it's re-enabled
+([commands.md](commands.md#automation)). Right-clicking a button or a menu has **Show
+Automation**, **Re-Enable Automation** and **Clear Automation**, and a
+bar's right-click menu has them under the typed value. In the
+arrangement, a lane's ▾ lists every parameter of a track's built-in
+devices, and the lane spreads the values as the control does (a frequency
+on a log scale, say) and names them as it does ("1.20 kHz").
 
 ## Plugins
 
@@ -1003,6 +1043,13 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
+- Automation: selecting points to move or delete several at once, curves
+  between points, automation moving and copying with its clips, and a
+  "Back to Arrangement" button in the transport bar, as Live has (for now
+  **Automation > Re-Enable Automation** re-enables every overridden lane).
+  Lanes of switches and choices drawn and edited as steps: for now their
+  points take whole values, but the value passes through the ones between
+  two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
 - Dragging plugins from the browser onto tracks, moving devices along a

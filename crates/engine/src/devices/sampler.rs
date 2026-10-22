@@ -30,7 +30,7 @@ use super::{Params, Values};
 use crate::event::{NodeEvent, NodeEventKind, NoteEvent, NoteId};
 use crate::media::AudioData;
 use crate::resample::{Resampler, kaiser, sinc};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The interpolating sinc's zero crossings each side of its centre, at the
 /// sample's own rate or slower.
@@ -297,6 +297,10 @@ impl Node for Sampler {
         self.params.prepare(config);
         self.sample_rate = f64::from(config.sample_rate);
         self.sum = [vec![0.0; config.max_block], vec![0.0; config.max_block]];
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {

@@ -43,6 +43,15 @@ pub enum Target {
     TakeLane,
     /// The header beside a take's lane, with the take's name.
     TakeHeader,
+    /// A point on an automation lane, under its track's lanes.
+    AutomationPoint,
+    /// Near the line through an automation lane's points, or through a
+    /// parameter's own value on a lane without automation.
+    AutomationLine,
+    /// The rest of an automation lane.
+    AutomationLane,
+    /// The header beside an automation lane, with its parameter's name.
+    AutomationHeader,
     /// A track's solo button, in its header or its mixer strip.
     SoloButton,
     /// A fader, a pan control or a send in the mixer.
@@ -127,6 +136,23 @@ pub enum MouseAction {
     Comp,
     /// Copies the stretch dragged over without snapping.
     CompFree,
+    /// Adds a point to the automation, snapping to the grid: on the line
+    /// where the line was clicked, so nothing changes until it's moved,
+    /// and elsewhere at the pointer's height.
+    AddPoint,
+    DeletePoint,
+    /// Moves a point of the automation, snapping to the grid. It stays
+    /// between the points either side.
+    MovePoint,
+    MovePointFree,
+    /// Moves the line between two points of the automation up or down,
+    /// with the points.
+    MoveSegment,
+    /// Draws the automation where the pointer goes, a value for each step
+    /// of the grid, in place of what was there.
+    Draw,
+    /// Draws it as the pointer goes, without the grid's steps.
+    DrawFree,
     /// Solos the track alone, or unsolos it.
     ExclusiveSolo,
     /// Solos the track along with the tracks soloed already.
@@ -269,6 +295,17 @@ impl MouseMap {
         bind(T::TakeLane, Drag, &[none], A::Comp);
         bind(T::TakeLane, Drag, &[alt], A::CompFree);
         bind(T::TakeHeader, DoubleClick, &[none], A::Rename);
+        // Live's breakpoint editing, and drawing as its Draw Mode does.
+        bind(T::AutomationPoint, Click, &[none], A::DeletePoint);
+        bind(T::AutomationPoint, Drag, &[none], A::MovePoint);
+        bind(T::AutomationPoint, Drag, &[alt], A::MovePointFree);
+        bind(T::AutomationLine, Click, &[none], A::AddPoint);
+        bind(T::AutomationLine, Drag, &[none], A::MoveSegment);
+        bind(T::AutomationLane, Click, &[none], A::PlaceMarker);
+        bind(T::AutomationLane, DoubleClick, &[none], A::AddPoint);
+        bind(T::AutomationLane, Drag, &[none], A::Draw);
+        bind(T::AutomationLane, Drag, &[alt], A::DrawFree);
+        bind(T::AutomationHeader, Click, &[none], A::Select);
         bind(T::SoloButton, Click, &[none], A::ExclusiveSolo);
         bind(T::SoloButton, Click, &ctrl, A::AddSolo);
         bind(T::MixerControl, Drag, &[none], A::Coarse);

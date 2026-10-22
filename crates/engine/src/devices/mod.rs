@@ -2,9 +2,12 @@
 //! [`musicable_model::native`], and what they share.
 //!
 //! A built-in device's node keeps its parameters in [`Params`], which works
-//! out each one's value for every frame: the value set, ramping to each new
-//! one over 10 ms as [`Smoothed`](crate::nodes::Smoothed) does, plus any
-//! modulation, which applies at once. The node renders a block in spans
+//! out each one's value for every frame with an
+//! [`automation::Param`](crate::automation::Param): its automation at the
+//! song position, or else the value set, ramping to each new one over 10
+//! ms, plus any modulation, which applies at once. The node hands its
+//! automation to its `Params` ([`Params::automate`]), so it follows lanes
+//! frame by frame rather than as parameter events. It renders a block in spans
 //! that end where its events fall ([`Params::run`]), so a parameter change,
 //! a modulation or a note lands on its frame however the blocks fall, and
 //! a device renders the same sample for sample whatever their length.
@@ -29,7 +32,7 @@ use musicable_model::native::{NativeDevice, NativeKind};
 pub use compressor::Compressor;
 pub use eq::Equalizer;
 pub use gate::Gate;
-pub use params::{Param, Params, Span, Values};
+pub use params::{Params, Span, Values};
 pub use sampler::{Sample, Sampler};
 pub use synth::Synth;
 pub use utility::Utility;

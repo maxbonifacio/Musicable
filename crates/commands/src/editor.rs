@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{Project, TrackId};
+use musicable_model::{Chain, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
 /// The arrangement's and the piano roll's editing state.
@@ -43,6 +44,10 @@ pub struct Editor {
     pub clipboard: Option<Clipboard>,
     /// The tracks whose takes the arrangement shows in lanes under them.
     pub take_lanes: BTreeSet<TrackId>,
+    /// The channels whose automation the arrangement shows, each with the
+    /// parameters it shows lanes for under the channel, top to bottom:
+    /// at least one each, whether or not they're automated yet.
+    pub automation: BTreeMap<Chain, Vec<ParamAddress>>,
     /// Which view the edit commands and the keys act on.
     pub focus: Focus,
     /// What the piano roll shows and has selected.
@@ -64,6 +69,7 @@ impl Default for Editor {
             sample_rate: 48_000,
             clipboard: None,
             take_lanes: BTreeSet::new(),
+            automation: BTreeMap::new(),
             focus: Focus::default(),
             piano_roll: PianoRoll::default(),
         }
@@ -154,6 +160,10 @@ impl Editor {
         }
         self.track_heights.retain(|id, _| tracks.contains(id));
         self.take_lanes.retain(|id| tracks.contains(id));
+        self.automation.retain(|&chain, params| {
+            params.retain(|&param| project.param_chain(param) == Some(chain));
+            !params.is_empty()
+        });
         let roll = &mut self.piano_roll;
         let shown = roll
             .clip
@@ -773,6 +783,19 @@ mod tests {
         };
         assert_eq!(off.snap(&tempo, beats(13), 16.0), beats(13));
         assert_eq!(off.nearest(&tempo, beats(13), 16.0), beats(12));
+        // The step a place is in, which the bar line ends.
+        assert_eq!(
+            grid.cell(&tempo, beats(13), 16.0),
+            BeatRange::new(beats(12), beats(14))
+        );
+        assert_eq!(
+            grid.cell(&tempo, near_the_end, 16.0),
+            BeatRange::new(beats(14), beats(15))
+        );
+        assert_eq!(
+            grid.cell(&tempo, beats(15), 16.0),
+            BeatRange::new(beats(15), beats(17))
+        );
         // A note drawn there starts at the line before.
         assert_eq!(off.floor(&tempo, near_the_end, 16.0), beats(14));
         assert_eq!(off.floor(&tempo, beats(14), 16.0), beats(14));

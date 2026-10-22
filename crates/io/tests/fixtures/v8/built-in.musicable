@@ -80,8 +80,7 @@
                 "filter": 0.0,
                 "cutoff": 2000.0,
                 "resonance": 0.0,
-                "voices": 8.0,
-                "loop_fade": 10.0
+                "voices": 8.0
               }
             }
           }
@@ -110,8 +109,7 @@
                 "filter": 0.0,
                 "cutoff": 2000.0,
                 "resonance": 0.0,
-                "voices": 32.0,
-                "loop_fade": 10.0
+                "voices": 32.0
               }
             }
           }

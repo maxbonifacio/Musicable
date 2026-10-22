@@ -16,7 +16,7 @@ use super::instrument::{
 };
 use super::{Params, Values};
 use crate::event::{NodeEvent, NodeEventKind, NoteEvent, NoteId};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The waves, by their place in [`WAVES`](musicable_model::native::synth::WAVES).
 const SINE: usize = 0;
@@ -77,6 +77,10 @@ impl Node for Synth {
         self.params.prepare(config);
         self.sample_rate = f64::from(config.sample_rate);
         self.sum = vec![0.0; config.max_block];
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {

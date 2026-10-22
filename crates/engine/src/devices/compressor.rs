@@ -14,7 +14,7 @@ use musicable_model::native::compressor::{
 };
 
 use super::{Params, Span, Values};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The parameters the DSP reads.
 const PARAMS: [usize; 8] = [
@@ -43,6 +43,10 @@ impl Node for Compressor {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
         self.sample_rate = f64::from(config.sample_rate);
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {

@@ -143,6 +143,8 @@ pub(crate) enum Face {
     Text(&'static str),
     /// A dot, as record buttons have.
     Dot,
+    /// A triangle pointing down, for a button that opens a menu.
+    Menu,
 }
 
 /// A button `width` wide and a row of the mixer high that's lit in `color`
@@ -202,6 +204,16 @@ pub(crate) fn paint_toggle(
         }
         Face::Dot => {
             painter.circle_filled(rect.center(), rect.height().min(rect.width()) * 0.22, ink);
+        }
+        Face::Menu => {
+            let c = rect.center();
+            let r = rect.height().min(rect.width()) * 0.22;
+            let points = vec![
+                pos2(c.x - r, c.y - r / 2.0),
+                pos2(c.x + r, c.y - r / 2.0),
+                pos2(c.x, c.y + r / 2.0 + 1.0),
+            ];
+            painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
         }
     }
 }

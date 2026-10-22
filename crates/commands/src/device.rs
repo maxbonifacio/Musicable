@@ -4,6 +4,7 @@
 //! deleting devices.
 
 use musicable_model::native::{NativeDevice, NativeKind};
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, TrackId};
 
@@ -152,12 +153,17 @@ pub fn register(registry: &mut Registry) {
                             info.full_name()
                         )));
                     };
-                    ctx.document
-                        .transact(&name, |tx| tx.set_native_param(device, param, value));
+                    ctx.document.transact(&name, |tx| {
+                        // As if by hand: automation stops moving it.
+                        tx.override_automation(ParamAddress::Device(device, param));
+                        tx.set_native_param(device, param, value);
+                    });
                 }
                 DeviceKind::Plugin(_) => {
-                    ctx.document
-                        .transact(&name, |tx| tx.set_plugin_param(device, param, value));
+                    ctx.document.transact(&name, |tx| {
+                        tx.override_automation(ParamAddress::Device(device, param));
+                        tx.set_plugin_param(device, param, value);
+                    });
                 }
                 _ => {
                     return Err(CommandError::invalid(format!(

@@ -25,6 +25,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     recording,
     controllers,
     native,
+    automation,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -172,6 +173,11 @@ fn no_controllers(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> 
 /// they need nothing.
 fn native(_: &mut Map<String, Value>) -> Result<(), Invalid> {
     Ok(())
+}
+
+/// Version 9 added automation. Version 8 files have none.
+fn automation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "automation", json!([]))
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.
@@ -381,6 +387,19 @@ mod tests {
             run(&STEPS[..6], &mut file, 6).unwrap_err().path,
             "tracks[0].takes[0].clips[0].content.midi.controllers",
             "controllers in a version 6 file"
+        );
+    }
+
+    #[test]
+    fn version_8_files_have_no_automation() {
+        let mut file = json!({"version": 8, "tracks": []});
+        run(&STEPS[..8], &mut file, 8).unwrap();
+        assert_eq!(file, json!({"version": 9, "tracks": [], "automation": []}));
+        let mut file = json!({"version": 8, "automation": [{}]});
+        assert_eq!(
+            run(&STEPS[..8], &mut file, 8).unwrap_err().path,
+            "automation",
+            "automation in a version 8 file"
         );
     }
 
