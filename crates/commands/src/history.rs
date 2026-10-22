@@ -160,8 +160,8 @@ fn compact(edits: &mut Vec<Edit>) {
 #[cfg(test)]
 mod tests {
     use musicable_model::clip::{
-        AudioClip, ClipContent, ClipId, Expression, Fades, MidiClip, Note, NoteId, Offset, Point,
-        Timing,
+        AudioClip, ClipContent, ClipId, Controller, Expression, Fades, MidiClip, Note, NoteId,
+        Offset, Point, Timing,
     };
     use musicable_model::mixer::Bus;
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
@@ -212,6 +212,7 @@ mod tests {
         let mut bass = MidiClip::default();
         bass.add_note(Beats::ZERO, Beats::new(1), 36, 0.75);
         bass.add_note(Beats::new(1), Beats::new(1), 43, 0.5);
+        bass.set_controller(Controller::SUSTAIN, vec![Point::new(Beats::ZERO, 1.0)]);
         // As if a third note had been added and deleted.
         bass.new_note_id();
         let clips = [
@@ -487,6 +488,13 @@ mod tests {
                 from: 0.75,
                 to: 0.25,
             },
+            Edit::Controller {
+                track: midi,
+                clip: bass,
+                controller: Controller::SUSTAIN,
+                from: vec![Point::new(Beats::ZERO, 1.0)],
+                to: vec![Point::new(Beats::ZERO, 1.0), Point::new(Beats::new(1), 0.0)],
+            },
             Edit::AddTake {
                 track: midi,
                 index: 0,
@@ -553,7 +561,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 47;
+    const KINDS: usize = 48;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -606,6 +614,7 @@ mod tests {
             Edit::NoteTiming { .. } => 44,
             Edit::NoteKey { .. } => 45,
             Edit::NoteVelocity { .. } => 46,
+            Edit::Controller { .. } => 47,
         }
     }
 

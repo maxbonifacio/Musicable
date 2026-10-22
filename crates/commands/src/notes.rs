@@ -68,7 +68,7 @@ pub const VELOCITY: f32 = 100.0 / 127.0;
 /// Live.
 pub const VELOCITY_STEP: f32 = 10.0 / 127.0;
 
-const CLIP: Param = Param::optional(
+pub(crate) const CLIP: Param = Param::optional(
     "clip",
     Type::Clip,
     "The MIDI clip: the one the piano roll shows, without it.",
@@ -487,7 +487,7 @@ fn add_notes(
 
 /// The clip the `clip` argument names, or else the one the piano roll
 /// shows, if it's a MIDI clip on a track.
-fn clip_arg(ctx: &Context<'_>, args: &Args) -> Result<ClipId, CommandError> {
+pub(crate) fn clip_arg(ctx: &Context<'_>, args: &Args) -> Result<ClipId, CommandError> {
     let clip = match args.opt("clip")? {
         Some(clip) => clip,
         None => ctx

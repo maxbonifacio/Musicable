@@ -155,17 +155,18 @@ Tier 1 of the feature list, and where each part should go. None of this is
 built yet, except where it says so.
 
 - **Clips.** Built: audio clips of WAV, AIFF and FLAC files, and MIDI
-  clips of notes with per-note expression (MPE), on `Track` in format
-  version 3. A clip player heads each audio and MIDI track's strip and
-  renders from the song position. Short files load whole as the graph
-  builds, and longer ones stream from the disk thread through lock-free
-  chunks, ahead of the playhead and at the loop start. Files at other
-  sample rates are resampled, and clips fade and crossfade. Notes are
-  `NodeEventKind::Note`s at sample offsets, and can pass through a chain of
-  nodes, such as a MIDI effect, on their way to an instrument
-  ([engine.md](engine.md#clips), [app.md](app.md#audio-files)). The
-  arrangement view makes and edits them (below), and the piano roll edits
-  their notes.
+  clips of notes with per-note expression (MPE) and controller curves, on
+  `Track` in format version 7. A clip player heads each audio and MIDI
+  track's strip and renders from the song position. Short files load whole
+  as the graph builds, and longer ones stream from the disk thread through
+  lock-free chunks, ahead of the playhead and at the loop start. Files at
+  other sample rates are resampled, and clips fade and crossfade. Notes are
+  `NodeEventKind::Note`s at sample offsets, and controllers' moves
+  `NodeEventKind::Controller`s, chased wherever playback starts. Both can
+  pass through a chain of nodes, such as a MIDI effect, on their way to an
+  instrument ([engine.md](engine.md#clips),
+  [app.md](app.md#audio-files)). The arrangement view makes and edits them
+  (below), and the piano roll edits their notes and controllers.
 - **The arrangement view.** Built: tracks with headers, clips with
   waveforms and notes, the ruler with locators, the start marker and the
   loop brace, drawn with egui's painter, only what's in sight, so a hundred
@@ -178,12 +179,16 @@ built yet, except where it says so.
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
 - **The piano roll.** Built: a MIDI clip's notes on rows of keys beside a
-  keyboard, with a velocity lane, in the devices panel's place, drawn and
-  tested as the arrangement is. Its gestures run the note commands
-  (`notes.move` and the rest) and Live's keys, which act where the
+  keyboard, over a lane of their velocities or a controller's curve, in the
+  devices panel's place, drawn and tested as the arrangement is. Its
+  gestures run the note and controller commands (`notes.move`,
+  `controllers.draw` and the rest) and Live's keys, which act where the
   `Editor`'s focus is; it shares the arrangement's grid and song positions,
-  and has a viewport of its own ([app.md](app.md#the-piano-roll)).
-  Controller lanes and MPE out to plugins come next.
+  and has a viewport of its own ([app.md](app.md#the-piano-roll)). Plugins
+  get notes as CLAP's own or VST3's note expression, or as MPE MIDI, and
+  controllers as MIDI or, for VST3, through the plugin's MIDI mapping
+  ([plugins.md](plugins.md#notes-and-the-transport)). Recording the sustain
+  pedal and controllers comes next.
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There

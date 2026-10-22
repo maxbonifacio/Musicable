@@ -6,7 +6,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_commands::editor::Viewport;
 use musicable_commands::{CommandError, Context, Document, Keymap, Registry, Request, Value};
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Note, NoteId};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Note, NoteId, Point};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackKind};
 
@@ -79,6 +79,18 @@ impl State {
         let roll = &self.editor().piano_roll;
         roll.notes.iter().copied().collect()
     }
+
+    /// How the clip the piano roll shows moves `controller`, as (beat in
+    /// its own time, value).
+    fn curve(&self, controller: Controller) -> Vec<(f64, f32)> {
+        let id = self.editor().piano_roll.clip.unwrap();
+        let (_, clip) = self.document.project().find_clip(id).unwrap();
+        let ClipContent::Midi(midi) = &clip.content else {
+            panic!("the piano roll shows a MIDI clip");
+        };
+        let points = midi.controller(controller).iter();
+        points.map(|p| (p.at.to_f64(), p.value)).collect()
+    }
 }
 
 /// Keys, a MIDI track with Chords, a clip from beat 4 to beat 12 whose own
@@ -103,6 +115,34 @@ fn project() -> (Project, ClipId, [NoteId; 3]) {
     project.track_mut(keys).unwrap().clips.push(chords);
     project.track_mut(vox).unwrap().clips.push(words);
     (project, id, notes)
+}
+
+/// The project, with the clip with id `clip` moving `controller` by
+/// `points`: (beat in its own time, value).
+fn moving(
+    mut project: Project,
+    clip: ClipId,
+    controller: Controller,
+    points: &[(f64, f32)],
+) -> Project {
+    let points = points
+        .iter()
+        .map(|&(at, value)| Point::new(Beats::from_f64(at), value))
+        .collect();
+    let clips = project.tracks.iter_mut().flat_map(|t| &mut t.clips);
+    let clip = clips.into_iter().find(|c| c.id == clip).unwrap();
+    let ClipContent::Midi(midi) = &mut clip.content else {
+        panic!("a MIDI clip");
+    };
+    midi.set_controller(controller, points);
+    project
+}
+
+/// Shows `controller` in the piano roll's lane.
+fn show_lane(harness: &mut Harness<'_, State>, controller: Controller) {
+    let roll = &mut harness.state_mut().document.editor_mut().piano_roll;
+    roll.lane = Lane::Controller(controller);
+    harness.run();
 }
 
 /// The piano roll showing `clip` in a window, with the focus, a beat a
@@ -201,6 +241,14 @@ fn at(harness: &Harness<'_, State>, at: f64, key: u8) -> Pos2 {
     let x = rows.left() + roll.viewport.x_of(Beats::from_f64(at));
     let row = f32::from(Note::MAX_KEY - key) + 0.5;
     pos2(x, rows.top() - roll.viewport.top + row * roll.key_height)
+}
+
+/// Where the controller lane shows song position `beat` at `value`.
+fn on_lane(harness: &Harness<'_, State>, beat: f64, value: f32) -> Pos2 {
+    let lane = harness.get_by_label("Controller Lane").rect();
+    let x = at(harness, beat, 60).x;
+    let marker = Theme::default().marker;
+    pos2(x, lane.bottom() - 1.0 - (lane.height() - marker) * value)
 }
 
 /// Where the note called `name` is drawn.
@@ -660,4 +708,108 @@ fn escape_cancels_a_drag() {
         Modifiers::NONE,
     );
     assert_eq!(harness.state().note(c3).start, Beats::ZERO);
+}
+
+#[test]
+fn the_lane_s_menu_chooses_what_it_shows() {
+    let (project, clip, _) = project();
+    let project = moving(project, clip, Controller::SUSTAIN, &[(0.0, 1.0)]);
+    let mut harness = harness(project, Some(clip));
+    let chooser = harness.get_by_role_and_label(Role::ComboBox, "Lane");
+    assert_eq!(chooser.value().as_deref(), Some("Velocity"));
+    chooser.click();
+    harness.run();
+    // The controllers the clip moves come first, then those keyboards and
+    // pedals have, then the rest.
+    for name in ["CC 64 Sustain", "CC 1 Mod Wheel", "CC 3", "CC 119"] {
+        harness.get_by_role_and_label(Role::Button, name);
+    }
+    harness
+        .get_by_role_and_label(Role::Button, "CC 1 Mod Wheel")
+        .click();
+    harness.run();
+    let lane = harness.state().editor().piano_roll.lane;
+    assert_eq!(lane, Lane::Controller(Controller::MOD_WHEEL));
+    harness.get_by_label("Controller Lane");
+    assert!(harness.query_by_label("Velocities").is_none());
+    let chooser = harness.get_by_role_and_label(Role::ComboBox, "Lane");
+    assert_eq!(chooser.value().as_deref(), Some("CC 1 Mod Wheel"));
+    // Choosing isn't a change to undo.
+    assert_eq!(harness.state().document.undo_name(), None);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn dragging_in_the_controller_lane_draws_a_step_of_the_grid_at_a_time() {
+    let (project, clip, _) = project();
+    let mut harness = harness(project, Some(clip));
+    let wheel = Controller::MOD_WHEEL;
+    show_lane(&mut harness, wheel);
+    let from = on_lane(&harness, 5.05, 0.25);
+    let to = on_lane(&harness, 6.05, 0.75);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let state = harness.state();
+    let curve = state.curve(wheel);
+    // A point at the start of each sixteenth, the grid's step, in the
+    // clip's own time, rising with the drag, in MIDI's steps. Before, the
+    // clip left the wheel alone, so it's left alone after.
+    let at: Vec<f64> = curve.iter().map(|p| p.0).collect();
+    assert_eq!(at, [1.0, 1.25, 1.5, 1.75, 2.0]);
+    let values: Vec<f32> = curve.iter().map(|p| p.1).collect();
+    assert_eq!(values[0], 32.0 / 127.0);
+    assert_eq!(values[4], 95.0 / 127.0);
+    assert!(values.is_sorted(), "{values:?}");
+    for value in values {
+        let steps = value * 127.0;
+        assert!((steps - steps.round()).abs() < 1e-4, "{value}");
+    }
+    // As one step to undo.
+    assert_eq!(state.document.undo_name(), Some("Draw Controller"));
+    assert!(state.errors.is_empty());
+}
+
+#[test]
+fn alt_drags_erase_and_clicks_draw_a_step() {
+    let (project, clip, _) = project();
+    let sustain = Controller::SUSTAIN;
+    let pedal = [(0.0, 1.0), (1.0, 0.0), (2.0, 1.0), (3.0, 0.0)];
+    let mut harness = harness(moving(project, clip, sustain, &pedal), Some(clip));
+    show_lane(&mut harness, sustain);
+    // From 0.5 to 2.75 in the clip's own time: the pedal stays down, as it
+    // was before, until it comes up at 3.
+    let from = on_lane(&harness, 4.55, 0.5);
+    let to = on_lane(&harness, 6.55, 0.5);
+    drag(&mut harness, from, to, Modifiers::ALT);
+    assert_eq!(harness.state().curve(sustain), [(0.0, 1.0), (3.0, 0.0)]);
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Erase Controller")
+    );
+    // A switch is on from halfway up: a click there holds the pedal down a
+    // sixteenth longer.
+    let on = on_lane(&harness, 7.05, 0.6);
+    click(&mut harness, on, Modifiers::NONE);
+    assert_eq!(harness.state().curve(sustain), [(0.0, 1.0), (3.25, 0.0)]);
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Draw Controller")
+    );
+    // The lane's menu clears it.
+    let lane = harness.get_by_label("Controller Lane").rect();
+    let empty = pos2(on.x + 100.0, lane.center().y);
+    harness.hover_at(empty);
+    harness.run();
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: empty,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    harness.get_by_label("Clear Controller").click();
+    harness.run();
+    assert_eq!(harness.state().curve(sustain), []);
+    assert!(harness.state().errors.is_empty());
 }

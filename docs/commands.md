@@ -226,6 +226,31 @@ The grid's step is the one the piano roll shows at its zoom. With no notes
 selected, or the arrangement's focus, these don't apply, so the arrow keys
 go on to move the keyboard focus between controls ([app.md](app.md#keys)).
 
+### Controllers
+
+These choose what the lane under the piano roll's notes shows, and draw a
+controller's curve in a MIDI clip, such as the mod wheel's or the sustain
+pedal's ([project-format.md](project-format.md#track)). Like the
+note commands, they take the clip as `clip`, or edit the one the piano roll
+shows, and place points in the clip's own time. They take the controller as
+`controller`, its MIDI CC number from 0 to 119, or else the one the lane
+shows. A controller's values go from 0 to 1, a MIDI value over 127. Each
+change is one transaction.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `controllers.show` | Show Controller | `controller` | Shows a controller in the lane |
+| `controllers.show_velocities` | Show Velocities | | Shows the notes' velocities in the lane, as it does at first |
+| `controllers.draw` | Draw Controller | `start`, `end`, `at`, `values`, `controller`?, `clip`? | Draws over the stretch from `start` to `end`: a point at each of `at`, with the value in `values` in the same order, and shows the controller in the lane |
+| `controllers.erase` | Erase Controller | `start`, `end`, `controller`?, `clip`? | Erases the stretch, so what came before holds through it |
+| `controllers.clear` | Clear Controller | `controller`?, `clip`? | Takes away the whole curve, so the clip leaves the controller alone; it applies when the lane shows a controller the clip moves |
+
+Drawing and erasing keep the rest of the curve as it was: from the
+stretch's end on, it holds what it did, with a point there if it needs one
+(`clip::redraw`). A drawn point that holds what came before is left out.
+Show Velocities and Clear Controller are in the Notes menu, and the lane's
+context menu has Clear Controller.
+
 ### Locator
 
 | Command | Title | Arguments | What it does | Default key |
@@ -415,8 +440,9 @@ for the behaviour settings.
   selected notes, its own viewport (song positions across, as the
   arrangement's, so the start marker, the playhead and the grid line up,
   and how far down the keys are scrolled), how tall a key's row is, the
-  rows' height on screen, Draw Mode, and what Cut and Copy took from it.
-  The grid is the arrangement's, at the piano roll's zoom.
+  rows' height on screen, Draw Mode, what Cut and Copy took from it, and
+  what the lane under the notes shows (`Lane`: the velocities, or a
+  controller). The grid is the arrangement's, at the piano roll's zoom.
 - **Behaviour** (`Behaviour`): how editing behaves where people's habits
   differ, kept as settings so profiles can follow other DAWs. So far:
   where Play/Stop plays from, and what middle C is called (`MiddleC`: C3 as

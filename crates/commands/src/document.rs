@@ -6,7 +6,7 @@
 //! engine and the undo history now, ARA change notifications in Tier 2.
 
 use musicable_model::clip::{
-    Clip, ClipContent, ClipId, Dimension, Fades, MidiClip, Note, NoteId, Timing,
+    Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId, Point, Timing,
 };
 use musicable_model::mixer::Bus;
 use musicable_model::plugin::PluginSettings;
@@ -879,6 +879,30 @@ impl Transaction<'_> {
         }
     }
 
+    /// Sets how the MIDI clip with id `clip` moves `controller`: by
+    /// `points`, in the clip's own time, in order, with values from 0.0 to
+    /// 1.0. No points stops the clip moving it. Points out of order or with
+    /// values beyond do nothing.
+    pub fn set_controller(&mut self, clip: ClipId, controller: Controller, points: Vec<Point>) {
+        if !curve_fits(&points) {
+            return;
+        }
+        let Some((track, midi)) = midi_mut(self.project, clip) else {
+            return;
+        };
+        let from = midi.controller(controller).to_vec();
+        if from != points {
+            midi.set_controller(controller, points.clone());
+            self.edits.push(Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to: points,
+            });
+        }
+    }
+
     /// A new, empty take with the next take id, for
     /// [`add_take`](Self::add_take): see [`Project::new_take`].
     pub fn new_take(&mut self, name: impl Into<String>) -> Take {
@@ -1087,6 +1111,12 @@ impl Transaction<'_> {
             Edit::NoteVelocity { clip, note, to, .. } => {
                 self.set_note_velocity(*clip, *note, *to);
             }
+            Edit::Controller {
+                clip,
+                controller,
+                to,
+                ..
+            } => self.set_controller(*clip, *controller, to.clone()),
             Edit::AddTake { track, index, take } => self.add_take(*track, *index, take.clone()),
             Edit::RemoveTake { take, .. } => {
                 self.remove_take(take.id);
@@ -1158,6 +1188,12 @@ pub(crate) fn note_fits(note: &Note) -> bool {
                 && curve.is_sorted_by_key(|p| p.at)
                 && curve.iter().all(|p| (low..=high).contains(&p.value))
         })
+}
+
+/// Whether a file could hold a controller's curve: its points are in order,
+/// with values from 0 to 1.
+fn curve_fits(points: &[Point]) -> bool {
+    points.is_sorted_by_key(|p| p.at) && points.iter().all(|p| (0.0..=1.0).contains(&p.value))
 }
 
 /// One change to the project, with the value it replaced.
@@ -1361,6 +1397,15 @@ pub enum Edit {
         note: NoteId,
         from: f32,
         to: f32,
+    },
+    /// How the MIDI clip with id `clip` moves `controller` changed: its
+    /// curve's points, none for a controller it doesn't move.
+    Controller {
+        track: TrackId,
+        clip: ClipId,
+        controller: Controller,
+        from: Vec<Point>,
+        to: Vec<Point>,
     },
     /// `take` went in at `index` in the takes of the track with id `track`.
     AddTake {
@@ -1620,6 +1665,19 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to,
+            } => Edit::Controller {
+                track,
+                clip,
+                controller,
+                from: to,
+                to: from,
+            },
             Edit::AddTake { track, index, take } => Edit::RemoveTake { track, index, take },
             Edit::RemoveTake { track, index, take } => Edit::AddTake { track, index, take },
             Edit::TakeName {
@@ -1859,6 +1917,20 @@ impl Edit {
                 },
             ) if clip == other && note == other_note => *to = *next,
             (
+                Edit::Controller {
+                    clip,
+                    controller,
+                    to,
+                    ..
+                },
+                Edit::Controller {
+                    clip: other,
+                    controller: other_controller,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && controller == other_controller => to.clone_from(next),
+            (
                 Edit::TakeName { take, to, .. },
                 Edit::TakeName {
                     take: other,
@@ -1939,6 +2011,7 @@ impl Edit {
                 | Edit::NoteTiming { .. }
                 | Edit::NoteKey { .. }
                 | Edit::NoteVelocity { .. }
+                | Edit::Controller { .. }
                 | Edit::AddTake { .. }
                 | Edit::RemoveTake { .. }
                 | Edit::TakeName { .. }
@@ -1999,6 +2072,7 @@ impl Edit {
             Edit::NoteTiming { from, to, .. } => from == to,
             Edit::NoteKey { from, to, .. } => from == to,
             Edit::NoteVelocity { from, to, .. } => from == to,
+            Edit::Controller { from, to, .. } => from == to,
             Edit::ClipName { from, to, .. }
             | Edit::TakeName { from, to, .. }
             | Edit::LocatorName { from, to, .. } => from == to,

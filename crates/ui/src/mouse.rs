@@ -64,6 +64,8 @@ pub enum Target {
     PianoKey,
     /// The lane of the notes' velocities, under the rows.
     VelocityLane,
+    /// The lane under the rows while it shows a controller.
+    ControllerLane,
 }
 
 /// What the user does with the mouse.
@@ -157,6 +159,12 @@ pub enum MouseAction {
     ZoomKeys,
     /// Shows the MIDI clip in the piano roll, and gives it the focus.
     Open,
+    /// Draws the controller's curve along the drag, a step of the grid at a
+    /// time, at the heights the drag passes.
+    DrawController,
+    /// Erases the controller's curve along the drag, so what came before
+    /// holds there.
+    EraseController,
 }
 
 /// Gestures and what they do. See the [module docs](self).
@@ -291,6 +299,10 @@ impl MouseMap {
         bind(T::PianoKey, Wheel, &[none], A::Scroll);
         bind(T::PianoKey, Wheel, &[ctrl[0], ctrl[1], alt], A::ZoomKeys);
         bind(T::VelocityLane, Drag, &[none], A::Velocity);
+        for gesture in [Click, Drag] {
+            bind(T::ControllerLane, gesture, &[none], A::DrawController);
+            bind(T::ControllerLane, gesture, &[alt], A::EraseController);
+        }
         map
     }
 }

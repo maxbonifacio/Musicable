@@ -164,6 +164,8 @@ pub(crate) struct SoundingNote {
     /// Never negative: CLAP's and VST3's note ids both use -1 for none.
     pub(crate) id: i32,
     pub(crate) key: i16,
+    /// The MIDI channel it plays on, for a plugin that takes MPE.
+    pub(crate) channel: i16,
 }
 
 impl Sounding {
@@ -187,6 +189,7 @@ impl Sounding {
             note,
             id: self.next_id,
             key: key.into(),
+            channel: 0,
         };
         self.next_id = self.next_id.checked_add(1).unwrap_or(0);
         self.notes.push(sounding);

@@ -153,8 +153,8 @@ pub struct PianoRollSizes {
     pub keys: f32,
     /// The ruler over the rows.
     pub ruler: f32,
-    /// The lane of the velocities, under the rows.
-    pub velocity: f32,
+    /// The lane under the rows, of the notes' velocities or a controller.
+    pub lane: f32,
     /// How near a note's start or end a drag trims it.
     pub edge_grab: f32,
     /// How far a drag up or down a note goes to change its velocity from
@@ -328,7 +328,7 @@ impl Default for Theme {
                 panel: 320.0,
                 keys: 56.0,
                 ruler: 22.0,
-                velocity: 60.0,
+                lane: 60.0,
                 edge_grab: 4.0,
                 velocity_drag: 127.0,
             },

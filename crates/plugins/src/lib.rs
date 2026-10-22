@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 mod bundle;
 pub mod clap;
 mod instance;
+mod midi;
 mod process;
 pub mod scan;
 #[cfg(test)]

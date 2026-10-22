@@ -7,10 +7,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Button, DragValue, Id, Key, Layout, Modal, Modifiers, RichText, TextEdit, Ui};
+use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
-    edit, locator, notes, options, take, track, transport, view,
+    controllers, edit, locator, notes, options, take, track, transport, view,
 };
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
@@ -590,6 +591,10 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         (view::TRIPLET_GRID, editor.grid.triplet),
         (view::FIXED_GRID, editor.grid.fixed.is_some()),
         (notes::TOGGLE_DRAW, editor.piano_roll.draw),
+        (
+            controllers::SHOW_VELOCITIES,
+            editor.piano_roll.lane == Lane::Velocity,
+        ),
     ];
     toggles
         .into_iter()

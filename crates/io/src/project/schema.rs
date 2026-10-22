@@ -8,7 +8,7 @@
 //! files changing. The conversions name every field of the model types they
 //! can, so a new field doesn't compile until the format handles it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -222,6 +222,17 @@ struct MidiClip {
     offset: i64,
     next_note_id: u32,
     notes: Vec<Note>,
+    /// In order of controller number.
+    controllers: Vec<ControllerCurve>,
+}
+
+/// How a clip moves a controller: its points as `[at, value]` pairs, `at`
+/// in ticks of the clip's own time.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControllerCurve {
+    controller: u8,
+    points: Vec<(i64, f32)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1074,11 +1085,19 @@ impl From<&clip::MidiClip> for MidiClip {
             offset,
             next_note_id,
             notes,
+            controllers,
         } = midi;
         Self {
             offset: offset.ticks(),
             next_note_id: *next_note_id,
             notes: notes.iter().map(Note::from).collect(),
+            controllers: controllers
+                .iter()
+                .map(|(controller, points)| ControllerCurve {
+                    controller: controller.number(),
+                    points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -1089,6 +1108,7 @@ impl MidiClip {
             offset,
             next_note_id,
             notes,
+            controllers,
         } = self;
         let mut ids = Ids::new("note", format!("{path}.next_note_id"), *next_note_id);
         let mut model_notes = Vec::with_capacity(notes.len());
@@ -1098,11 +1118,38 @@ impl MidiClip {
             model_notes.push(note.to_model(&path)?);
         }
         ids.check_next()?;
+        let mut curves = BTreeMap::new();
+        for (k, curve) in controllers.iter().enumerate() {
+            let path = format!("{path}.controllers[{k}]");
+            let (controller, points) = curve.to_model(&path)?;
+            if curves.insert(controller, points).is_some() {
+                let message = format!("the clip moves controller {} twice", curve.controller);
+                return Err(Invalid::new(format!("{path}.controller"), message));
+            }
+        }
         Ok(clip::MidiClip {
             offset: position(*offset, || format!("{path}.offset"))?,
             next_note_id: *next_note_id,
             notes: model_notes,
+            controllers: curves,
         })
+    }
+}
+
+impl ControllerCurve {
+    fn to_model(&self, path: &str) -> Result<(clip::Controller, Vec<clip::Point>), Invalid> {
+        let Self { controller, points } = self;
+        let Some(controller) = clip::Controller::new(*controller) else {
+            let message = format!("must be from 0 to {}", clip::Controller::MAX);
+            return Err(Invalid::new(format!("{path}.controller"), message));
+        };
+        let path = format!("{path}.points");
+        if points.is_empty() {
+            let message = "must have a point: a clip that doesn't move a controller leaves it out";
+            return Err(Invalid::new(path, message));
+        }
+        let points = curve(points, (0.0, 1.0), &path)?;
+        Ok((controller, points))
     }
 }
 
@@ -1181,33 +1228,44 @@ impl Note {
             velocity: unit(*velocity, "velocity")?,
             release_velocity: unit(*release_velocity, "release_velocity")?,
             expression: clip::Expression {
-                pitch_bend: curve(
+                pitch_bend: expression_curve(
                     pitch_bend,
                     Dimension::PitchBend,
-                    &format!("{path}.pitch_bend"),
+                    &path,
+                    "pitch_bend",
                 )?,
-                pressure: curve(pressure, Dimension::Pressure, &format!("{path}.pressure"))?,
-                timbre: curve(timbre, Dimension::Timbre, &format!("{path}.timbre"))?,
+                pressure: expression_curve(pressure, Dimension::Pressure, &path, "pressure")?,
+                timbre: expression_curve(timbre, Dimension::Timbre, &path, "timbre")?,
             },
         })
     }
 }
 
-/// An expression curve: points in order, from the note's start on, with
-/// values `dimension` takes.
-fn curve(
+/// An expression curve, `name` in the expression at `path`: points from
+/// the note's start on, with values `dimension` takes.
+fn expression_curve(
     points: &[(i64, f32)],
     dimension: Dimension,
     path: &str,
+    name: &str,
 ) -> Result<Vec<clip::Point>, Invalid> {
-    let (low, high) = dimension.range();
+    let path = format!("{path}.{name}");
+    if let Some(k) = points.iter().position(|&(at, _)| at < 0) {
+        let message = "must be 0 or more: points start from the note's start";
+        return Err(Invalid::new(format!("{path}[{k}][0]"), message));
+    }
+    curve(points, dimension.range(), &path)
+}
+
+/// A curve of steps: points in order, with values from `low` to `high`.
+fn curve(
+    points: &[(i64, f32)],
+    (low, high): (f32, f32),
+    path: &str,
+) -> Result<Vec<clip::Point>, Invalid> {
     let mut curve = Vec::with_capacity(points.len());
     for (k, &(at, value)) in points.iter().enumerate() {
         let path = format!("{path}[{k}]");
-        if at < 0 {
-            let message = "must be 0 or more: points start from the note's start";
-            return Err(Invalid::new(format!("{path}[0]"), message));
-        }
         if k > 0 && at < points[k - 1].0 {
             let message = "must be at or after the point before it";
             return Err(Invalid::new(format!("{path}[0]"), message));

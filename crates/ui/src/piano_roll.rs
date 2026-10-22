@@ -1,6 +1,6 @@
 //! The piano roll: the notes of the MIDI clip it shows, on rows of keys
-//! beside a keyboard, under a ruler and over a lane of their velocities, as
-//! Live's MIDI note editor shows them.
+//! beside a keyboard, under a ruler and over a lane of their velocities or
+//! a controller's curve, as Live's MIDI note editor shows them.
 //!
 //! Like the arrangement, it's drawn with egui's painter, only what's in
 //! sight, and everything it does goes through commands. What it shows and
@@ -24,12 +24,12 @@ use std::collections::BTreeMap;
 use egui::{
     CursorIcon, Event, Id, MouseWheelUnit, Pos2, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2,
 };
-use musicable_commands::editor::Viewport;
+use musicable_commands::editor::{Lane, Viewport};
 use musicable_commands::{
-    Args, CommandId, Editor, Focus, Modifiers, notes, transport, view as views,
+    Args, CommandId, Editor, Focus, Modifiers, controllers, notes, transport, view as views,
 };
 use musicable_model::Project;
-use musicable_model::clip::{Clip, ClipContent, MidiClip, Note, NoteId};
+use musicable_model::clip::{Clip, ClipContent, Controller, MidiClip, Note, NoteId};
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
@@ -49,6 +49,10 @@ const SCRUB_ZOOM_SPEED: f32 = 0.01;
 /// The keys there are: MIDI notes 0 to 127.
 const KEYS: f32 = Note::MAX_KEY as f32 + 1.0;
 
+/// How wide a step of a controller's curve drawn off the grid is, in
+/// points.
+const FREE_STEP: f32 = 3.0;
+
 /// The piano roll's own state: the gesture in progress, and the menu open.
 #[derive(Debug, Default)]
 pub(crate) struct PianoRoll {
@@ -66,7 +70,8 @@ enum Area {
     Rows,
     Keys,
     Ruler,
-    Velocities,
+    /// The lane under the rows.
+    Lane,
 }
 
 /// What's under the mouse.
@@ -83,6 +88,8 @@ enum Hit {
     Ruler,
     /// The velocities' lane, on a note's velocity or beside them.
     Velocity(Option<NoteId>),
+    /// The lane while it shows a controller.
+    Controller,
 }
 
 impl Hit {
@@ -100,6 +107,7 @@ impl Hit {
             Hit::Key(_) => Target::PianoKey,
             Hit::Ruler => Target::Ruler,
             Hit::Velocity(_) => Target::VelocityLane,
+            Hit::Controller => Target::ControllerLane,
         }
     }
 
@@ -141,6 +149,13 @@ struct Drag {
     /// Where Draw Mode adds notes, by the song positions they start at, on
     /// the keys the drag passed over there.
     drawn: BTreeMap<Beats, u8>,
+    /// The controller the lane showed as the drag started, if it showed
+    /// one, and the steps of its curve the drag drew or erased: by the song
+    /// positions they start at, where they end and the value drawn there.
+    controller: Option<Controller>,
+    steps: BTreeMap<Beats, (Beats, f32)>,
+    /// The step the pointer was last in, and the value there.
+    last_step: Option<(Beats, f32)>,
     /// What the drag last asked for, for those that ask while they last.
     sent: Option<Plan>,
 }
@@ -167,6 +182,18 @@ enum Plan {
     Area { notes: Vec<NoteId>, rect: Rect },
     /// Adds notes at these song positions, on these keys.
     Draw { notes: Vec<(Beats, u8)> },
+    /// Draws over a stretch of song positions of a controller's curve,
+    /// with a point at each of these.
+    DrawController {
+        controller: Controller,
+        range: BeatRange,
+        points: Vec<(Beats, f32)>,
+    },
+    /// Erases a stretch of a controller's curve.
+    EraseController {
+        controller: Controller,
+        range: BeatRange,
+    },
     /// Scrolls and zooms. Drags ask for it as they go.
     Viewport(Viewport),
 }
@@ -189,8 +216,9 @@ struct Layout {
     keys: Rect,
     /// The rows of keys, where the notes are.
     rows: Rect,
-    /// The lane of the velocities under the rows, and its name beside it.
-    velocities: Rect,
+    /// The lane under the rows, and its name beside it, which chooses what
+    /// it shows.
+    lane: Rect,
     label: Rect,
     /// The zoom and scrolling, with the rows' width this frame.
     viewport: Viewport,
@@ -202,12 +230,12 @@ impl Layout {
         let sizes = theme.piano_roll;
         let split = (rect.left() + sizes.keys).min(rect.right());
         let ruler_bottom = (rect.top() + sizes.ruler).min(rect.bottom());
-        let lane_top = (rect.bottom() - sizes.velocity).max(ruler_bottom);
+        let lane_top = (rect.bottom() - sizes.lane).max(ruler_bottom);
         let ruler = Rect::from_min_max(pos2(split, rect.top()), pos2(rect.right(), ruler_bottom));
         let corner = Rect::from_min_max(rect.left_top(), pos2(split, ruler_bottom));
         let keys = Rect::from_min_max(pos2(rect.left(), ruler_bottom), pos2(split, lane_top));
         let rows = Rect::from_min_max(pos2(split, ruler_bottom), pos2(rect.right(), lane_top));
-        let velocities = Rect::from_min_max(pos2(split, lane_top), rect.right_bottom());
+        let lane = Rect::from_min_max(pos2(split, lane_top), rect.right_bottom());
         let label = Rect::from_min_max(pos2(rect.left(), lane_top), pos2(split, rect.bottom()));
         let lowest = (KEYS * key_height - rows.height()).max(0.0);
         let viewport = Viewport {
@@ -220,7 +248,7 @@ impl Layout {
             corner,
             keys,
             rows,
-            velocities,
+            lane,
             label,
             viewport,
             key_height,
@@ -260,6 +288,13 @@ impl Layout {
             left..=right.max(left + 1.0),
             top + 0.5..=top + self.key_height - 0.5,
         )
+    }
+
+    /// Where the lane shows values from 0 to 1: the foot, at 0, and how far
+    /// up from it 1 is, leaving room for a velocity's head at the top.
+    fn span(&self, theme: &Theme) -> (f32, f32) {
+        let lane = self.lane;
+        (lane.bottom() - 1.0, (lane.height() - theme.marker).max(1.0))
     }
 }
 
@@ -343,6 +378,42 @@ impl Scene<'_> {
         self.editor().grid.step_at(tempo, at.max(Beats::ZERO), zoom)
     }
 
+    /// The controller the lane shows, if it shows one.
+    fn controller(&self) -> Option<Controller> {
+        match self.editor().piano_roll.lane {
+            Lane::Controller(controller) => Some(controller),
+            Lane::Velocity => None,
+        }
+    }
+
+    /// The song position at `x` in the lane, kept within the lane and from
+    /// the song's start.
+    fn lane_at(&self, x: f32) -> Beats {
+        let lane = self.layout.lane;
+        let at = self.layout.beats_at(x.clamp(lane.left(), lane.right()));
+        at.max(Beats::ZERO)
+    }
+
+    /// The step of a controller's curve that drawing at song position `at`
+    /// fills: the grid's step there while snapping is on, or else a few
+    /// points' worth.
+    fn controller_step(&self, at: Beats) -> BeatRange {
+        let viewport = &self.layout.viewport;
+        let grid = self.editor().grid;
+        if grid.snap {
+            return grid.cell(&self.project().tempo, at, viewport.zoom);
+        }
+        let step = viewport.beats_in(FREE_STEP).ticks().max(1);
+        let start = at.ticks() - at.ticks().rem_euclid(step);
+        BeatRange::new(Beats::from_ticks(start), Beats::from_ticks(start + step))
+    }
+
+    /// The value drawn at `y` in the lane for `controller`.
+    fn controller_value(&self, y: f32, controller: Controller) -> f32 {
+        let (foot, height) = self.layout.span(self.theme);
+        drawn_value((foot - y) / height, controller)
+    }
+
     /// What's under `pos` in `area`.
     fn hit(&self, area: Area, pos: Pos2) -> Hit {
         let layout = &self.layout;
@@ -350,7 +421,8 @@ impl Scene<'_> {
             Area::Rows => self.hit_rows(pos),
             Area::Keys => Hit::Key(layout.key_at(pos.y)),
             Area::Ruler => Hit::Ruler,
-            Area::Velocities => {
+            Area::Lane if self.controller().is_some() => Hit::Controller,
+            Area::Lane => {
                 // The note whose start is nearest, among those there.
                 let grab = self.theme.piano_roll.edge_grab;
                 let near = self.midi.notes.iter().filter_map(|note| {
@@ -447,7 +519,7 @@ impl Scene<'_> {
             }
             (MouseAction::Velocity, _) => {
                 let travel = match drag.area {
-                    Area::Velocities => layout.velocities.height().max(1.0),
+                    Area::Lane => layout.lane.height().max(1.0),
                     _ => self.theme.piano_roll.velocity_drag,
                 };
                 let by = -(drag.to.y - drag.from.y) / travel;
@@ -468,6 +540,20 @@ impl Scene<'_> {
             (MouseAction::DrawNotes, _) => Some(Plan::Draw {
                 notes: drag.drawn.iter().map(|(&at, &key)| (at, key)).collect(),
             }),
+            (MouseAction::DrawController | MouseAction::EraseController, Hit::Controller) => {
+                let controller = drag.controller?;
+                let (&start, _) = drag.steps.first_key_value()?;
+                let (_, &(end, _)) = drag.steps.last_key_value()?;
+                let range = BeatRange::new(start, end);
+                Some(match drag.action {
+                    MouseAction::DrawController => Plan::DrawController {
+                        controller,
+                        range,
+                        points: drag.steps.iter().map(|(&at, &(_, v))| (at, v)).collect(),
+                    },
+                    _ => Plan::EraseController { controller, range },
+                })
+            }
             (MouseAction::ScrubZoom, _) => {
                 let mut viewport = drag.viewport;
                 let left = layout.rows.left();
@@ -536,10 +622,51 @@ fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
                 .with("clip", scene.clip.id);
             run(actions, notes::DRAW, args);
         }
+        Plan::DrawController {
+            controller,
+            range,
+            points,
+        } => {
+            let at: Vec<Beats> = points.iter().map(|&(at, _)| scene.own(at)).collect();
+            let values: Vec<f64> = points.iter().map(|&(_, v)| f64::from(v)).collect();
+            let args = stretch(scene, *controller, *range)
+                .with("at", at)
+                .with("values", values);
+            run(actions, controllers::DRAW, args);
+        }
+        Plan::EraseController { controller, range } => {
+            run(
+                actions,
+                controllers::ERASE,
+                stretch(scene, *controller, *range),
+            );
+        }
         Plan::Viewport(viewport) => {
             let roll = &scene.editor().piano_roll;
             set_viewport(actions, viewport, roll.key_height, roll.height);
         }
+    }
+}
+
+/// The arguments that name the stretch `range` of song positions of
+/// `controller`'s curve in the clip the piano roll shows.
+fn stretch(scene: &Scene<'_>, controller: Controller, range: BeatRange) -> Args {
+    Args::new()
+        .with("start", scene.own(range.start))
+        .with("end", scene.own(range.end))
+        .with("controller", i64::from(controller.number()))
+        .with("clip", scene.clip.id)
+}
+
+/// `value`, the share of the lane's height up from its foot, as drawing
+/// sets `controller` to: one of MIDI's 128 steps from 0 to 1, or off or on
+/// for a switch.
+fn drawn_value(value: f32, controller: Controller) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    match controller.is_switch() {
+        true if Controller::is_on(value) => 1.0,
+        true => 0.0,
+        false => (value * 127.0).round() / 127.0,
     }
 }
 
@@ -602,11 +729,15 @@ impl PianoRoll {
         let mut viewport = scene.layout.viewport;
         let mut key_height = roll.key_height;
         let id = ui.scope_id().with("piano roll");
+        let lane = match scene.controller() {
+            Some(_) => "Controller Lane",
+            None => "Velocities",
+        };
         let areas = [
             (scene.layout.rows, Area::Rows, "Piano Roll"),
             (scene.layout.keys, Area::Keys, "Keyboard"),
             (scene.layout.ruler, Area::Ruler, "Piano Roll Ruler"),
-            (scene.layout.velocities, Area::Velocities, "Velocities"),
+            (scene.layout.lane, Area::Lane, lane),
         ];
         let responses: Vec<(Response, Area)> = areas
             .into_iter()
@@ -637,13 +768,11 @@ impl PianoRoll {
         paint::rows(&painter.with_clip_rect(layout.rows), &scene, plan.as_ref());
         paint::keys(&painter.with_clip_rect(layout.keys), &scene);
         paint::ruler(&painter.with_clip_rect(layout.ruler), &scene);
-        paint::velocities(
-            &painter.with_clip_rect(layout.velocities),
-            &scene,
-            plan.as_ref(),
-        );
+        paint::lane(&painter.with_clip_rect(layout.lane), &scene, plan.as_ref());
         paint::corner(&painter.with_clip_rect(layout.corner), &scene);
-        paint::label(&painter.with_clip_rect(layout.label), &scene);
+        let chooser = ui.interact(layout.label, id.with("lane"), Sense::click());
+        paint::label(&painter.with_clip_rect(layout.label), &scene, &chooser);
+        menu::lanes(&chooser, &scene, actions);
         name_for_screen_readers(ui, &scene, id);
 
         for (response, area) in &responses {
@@ -695,8 +824,12 @@ impl PianoRoll {
             {
                 drag.action = action;
             }
-            if drag.action == MouseAction::DrawNotes {
-                draw_along(scene, drag);
+            match drag.action {
+                MouseAction::DrawNotes => draw_along(scene, drag),
+                MouseAction::DrawController | MouseAction::EraseController => {
+                    controller_along(scene, drag);
+                }
+                _ => {}
             }
             // The selection and the scrolling change as the drag goes.
             if matches!(
@@ -758,6 +891,9 @@ impl PianoRoll {
             notes: Vec::new(),
             viewport: scene.layout.viewport,
             drawn: BTreeMap::new(),
+            controller: scene.controller(),
+            steps: BTreeMap::new(),
+            last_step: None,
             sent: None,
         };
         let acts_on_notes = matches!(
@@ -778,8 +914,12 @@ impl PianoRoll {
                 vec![note]
             };
         }
-        if action == MouseAction::DrawNotes {
-            draw_along(scene, &mut drag);
+        match action {
+            MouseAction::DrawNotes => draw_along(scene, &mut drag),
+            MouseAction::DrawController | MouseAction::EraseController => {
+                controller_along(scene, &mut drag);
+            }
+            _ => {}
         }
         self.drag = Some(drag);
     }
@@ -790,7 +930,7 @@ impl PianoRoll {
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
             return;
         };
-        let parts = [layout.rows, layout.keys, layout.ruler, layout.velocities];
+        let parts = [layout.rows, layout.keys, layout.ruler, layout.lane];
         let Some(&over) = parts
             .iter()
             .find(|rect| rect.contains(pos) && ui.rect_contains_pointer(**rect))
@@ -887,7 +1027,9 @@ impl PianoRoll {
             Some(MouseAction::Velocity) => Some(CursorIcon::ResizeVertical),
             Some(MouseAction::Copy) => Some(CursorIcon::Copy),
             Some(MouseAction::Move) => Some(CursorIcon::Grab),
-            Some(MouseAction::DrawNotes) => Some(CursorIcon::Crosshair),
+            Some(MouseAction::DrawNotes | MouseAction::DrawController) => {
+                Some(CursorIcon::Crosshair)
+            }
             _ => None,
         };
         let shown = match &self.drag {
@@ -903,7 +1045,7 @@ impl PianoRoll {
                 let areas = [
                     (layout.rows, Area::Rows),
                     (layout.keys, Area::Keys),
-                    (layout.velocities, Area::Velocities),
+                    (layout.lane, Area::Lane),
                 ];
                 let Some((_, area)) = areas.into_iter().find(|(rect, _)| rect.contains(pos)) else {
                     return;
@@ -966,6 +1108,33 @@ fn draw_along(scene: &Scene<'_>, drag: &mut Drag) {
         }
     }
     drag.drawn.insert(at, key);
+}
+
+/// Adds the step of the controller's curve under the pointer to `drag`,
+/// with the value at the pointer's height, and the steps it passed over
+/// since the last frame, with the values on the way there.
+fn controller_along(scene: &Scene<'_>, drag: &mut Drag) {
+    let Some(controller) = drag.controller else {
+        return;
+    };
+    let step = scene.controller_step(scene.lane_at(drag.to.x));
+    let value = scene.controller_value(drag.to.y, controller);
+    if let Some((last, was)) = drag.last_step.filter(|&(last, _)| last != step.start) {
+        let (from, to) = (last.min(step.start), last.max(step.start));
+        let mut at = scene.controller_step(from).end;
+        while at < to {
+            let skipped = scene.controller_step(at);
+            if skipped.end <= at {
+                break;
+            }
+            let along = ((at - last).to_f64() / (step.start - last).to_f64()) as f32;
+            let between = drawn_value(was + (value - was) * along, controller);
+            drag.steps.insert(at, (skipped.end, between));
+            at = skipped.end;
+        }
+    }
+    drag.steps.insert(step.start, (step.end, value));
+    drag.last_step = Some((step.start, value));
 }
 
 fn drag_stopped(scene: &Scene<'_>, drag: &Drag, actions: &mut Vec<Action>) {
@@ -1042,6 +1211,22 @@ fn clicked(
         (MouseAction::Locate, Hit::Ruler) => {
             let at = scene.snapped(pos.x);
             run(actions, transport::LOCATE, Args::new().with("at", at));
+        }
+        // A step of the curve, as a drag that goes nowhere draws.
+        (MouseAction::DrawController | MouseAction::EraseController, Hit::Controller) => {
+            let Some(controller) = scene.controller() else {
+                return false;
+            };
+            let range = scene.controller_step(scene.lane_at(pos.x));
+            let plan = match action {
+                MouseAction::DrawController => Plan::DrawController {
+                    controller,
+                    range,
+                    points: vec![(range.start, scene.controller_value(pos.y, controller))],
+                },
+                _ => Plan::EraseController { controller, range },
+            };
+            send(actions, scene, &plan);
         }
         _ => return false,
     }

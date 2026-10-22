@@ -20,6 +20,7 @@ use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
+pub mod controllers;
 pub mod device;
 mod document;
 pub mod edit;
@@ -154,6 +155,9 @@ pub enum When {
     /// Quantize has notes to move: the piano roll's, while it has the focus
     /// and shows a clip, or else those of the selected MIDI clips.
     CanQuantize,
+    /// The piano roll's lane shows a controller its clip moves: a curve
+    /// Clear Controller can take away.
+    ControllerCurve,
 }
 
 impl When {
@@ -184,6 +188,7 @@ impl When {
                     .find_clip(id)
                     .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Midi(_)))
             }),
+            When::ControllerCurve => controllers::shown(project, editor).is_some(),
         }
     }
 }
@@ -375,6 +380,7 @@ pub fn register_all(registry: &mut Registry) {
     mixer::register(registry);
     take::register(registry);
     notes::register(registry);
+    controllers::register(registry);
     view::register(registry);
     options::register(registry);
 }

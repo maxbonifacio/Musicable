@@ -17,7 +17,8 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins, recording];
+const STEPS: [Step; VERSION as usize - 1] =
+    [mixer, clips, locators, plugins, recording, controllers];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -121,6 +122,41 @@ fn recording(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         add(track, &path, "input", input)?;
         add(track, &path, "monitor", json!("auto"))?;
         add(track, &path, "takes", json!([]))?;
+    }
+    Ok(())
+}
+
+/// Version 7 added controllers to MIDI clips, such as the sustain pedal.
+/// Version 6 clips move none, on tracks and in takes.
+fn controllers(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let path = format!("tracks[{i}]");
+        no_controllers(track.get_mut("clips"), &format!("{path}.clips"))?;
+        let takes = track.get_mut("takes").and_then(Value::as_array_mut);
+        for (j, take) in takes.into_iter().flatten().enumerate() {
+            no_controllers(take.get_mut("clips"), &format!("{path}.takes[{j}].clips"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Gives each MIDI clip in `clips`, a list at `path`, no controllers.
+fn no_controllers(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let clips = clips.and_then(Value::as_array_mut);
+    for (k, clip) in clips.into_iter().flatten().enumerate() {
+        let midi = clip
+            .get_mut("content")
+            .and_then(|c| c.get_mut("midi"))
+            .and_then(Value::as_object_mut);
+        if let Some(midi) = midi {
+            add(
+                midi,
+                &format!("{path}[{k}].content.midi"),
+                "controllers",
+                json!([]),
+            )?;
+        }
     }
     Ok(())
 }
@@ -295,6 +331,43 @@ mod tests {
             run(&STEPS[..5], &mut file, 5).unwrap_err().path,
             "tracks[0].takes",
             "takes in a version 5 file"
+        );
+    }
+
+    #[test]
+    fn version_6_midi_clips_move_no_controllers() {
+        let midi = || json!({"content": {"midi": {"notes": []}}});
+        let audio = json!({"content": {"audio": {"file": "Take.wav"}}});
+        let mut file = json!({
+            "version": 6,
+            "tracks": [
+                {"clips": [midi(), audio.clone()], "takes": [{"clips": [midi()]}]},
+                {"clips": [audio]},
+                "not a track",
+            ],
+        });
+        run(&STEPS[..6], &mut file, 6).unwrap();
+        let moving = json!({"content": {"midi": {"notes": [], "controllers": []}}});
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], moving);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], moving);
+        assert_eq!(
+            tracks[0]["clips"][1]["content"]["audio"],
+            json!({"file": "Take.wav"})
+        );
+        assert_eq!(
+            tracks[1]["clips"][0]["content"]["audio"],
+            json!({"file": "Take.wav"})
+        );
+        assert_eq!(file["version"], json!(7));
+        let mut file = json!({
+            "version": 6,
+            "tracks": [{"takes": [{"clips": [{"content": {"midi": {"controllers": []}}}]}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..6], &mut file, 6).unwrap_err().path,
+            "tracks[0].takes[0].clips[0].content.midi.controllers",
+            "controllers in a version 6 file"
         );
     }
 

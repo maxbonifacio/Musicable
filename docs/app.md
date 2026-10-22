@@ -272,12 +272,14 @@ as they are.
 
 The piano roll shows the notes of a MIDI clip, as Live's MIDI note editor
 does: rows of keys beside a keyboard, under a ruler, over a lane of the
-notes' velocities. It shows the MIDI clip selected last in the arrangement,
+notes' velocities or a controller's curve. It shows the MIDI clip selected
+last in the arrangement,
 or opened with a double-click. Across, it shows song positions, as the
 arrangement does, so the start marker, the playhead and the grid line up
 with it; its zoom and scrolling are its own. Everything it does runs a
-command ([commands.md](commands.md#notes)), and a drag runs one when it
-ends, so it's one step to undo.
+command ([commands.md](commands.md#notes) and
+[controllers](commands.md#controllers)), and a drag runs one when it ends,
+so it's one step to undo.
 
 - **Notes** take their track's colour, fainter the softer they start, with
   their names on them when there's room. Selected notes are outlined. While
@@ -290,6 +292,15 @@ ends, so it's one step to undo.
   ([below](#settings-and-your-keymap)).
 - **The velocities** are stems at the notes' starts, as tall as the notes
   start hard.
+- **The lane's name**, under the keyboard, opens a menu of what the lane
+  can show: the velocities; the controllers the clip moves; those
+  keyboards and pedals have, such as the mod wheel, the sustain pedal and
+  CC 74, MPE's slide; then the rest of MIDI's 120.
+- **A controller's curve** shows how the clip moves it: each point's value
+  held until the next, filled under, in the track's colour, from the first
+  point, as the clip leaves the controller alone before it. A drawing
+  drag shows the curve as it will be. The curve before the clip's start
+  and after its end is shaded.
 - **Draw Mode** (B) turns clicks and drags on the rows into drawing, as in
   Live, and its button is in the Notes menu and the rows' context menu.
 
@@ -307,6 +318,8 @@ ends, so it's one step to undo.
 | A key | Click; Ctrl- or Shift-click | Selects the notes on the key; adds them |
 | | Wheel; Ctrl-wheel | Scrolls up and down; makes the rows taller or shorter around the pointer |
 | The velocities | Drag | Changes the velocity of the note dragged, or the selected notes |
+| A controller's lane | Click; drag | Draws the curve, a step of the grid at a time, at the pointer's height: the steps a fast drag skips get the values on the way. In MIDI's 128 steps, and off or on for a switch such as the sustain pedal, on from halfway up |
+| | Alt-click; Alt-drag | Erases the curve there, so what came before holds through it |
 | The ruler | Click; drag | Puts the start marker and the playhead there; zooms |
 | Anywhere else | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
@@ -315,8 +328,10 @@ changes its velocity there, so moving notes off the grid is Snap to Grid
 (Ctrl+4) turned off. Escape cancels a drag. A right-click opens a context
 menu of commands from the registry, as the arrangement's do: Cut, Copy,
 Paste, Duplicate, Delete, Quantize and Zoom to Selection on a note; Paste,
-Select All, Draw Mode and Quantize on the rows; the grid on both; and Locate
-and Follow on the ruler.
+Select All, Draw Mode and Quantize on the rows; the grid on both; Clear
+Controller and the grid on a controller's lane; and Locate and Follow on
+the ruler. With Snap to Grid off, drawing a controller fills steps of three
+points.
 
 **The focus.** Clicking in the piano roll gives it the focus, and clicking
 in the arrangement gives the arrangement the focus back. While the piano
@@ -333,7 +348,8 @@ arrangement's, where commands and agents read and change them; its context
 menus list commands from the registry; its colours and sizes are in the
 `Theme` (`theme.piano_roll` and the piano roll's colours); its gestures are
 the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
-`DrawGrid`, `PianoKey` and `VelocityLane`; its panel's id is
+`DrawGrid`, `PianoKey`, `VelocityLane` and `ControllerLane`; what its lane
+shows is the editor's too (`PianoRoll::lane`); its panel's id is
 `musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
 setting.
 
@@ -932,9 +948,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
-- In the piano roll: controller lanes and MPE (coming with N9's next
-  steps), drawing velocities across the lane, folding to the keys in use,
-  scales, and repeating the arrow keys while they're held.
+- In the piano roll: the notes' MPE expression, shown and edited (Tier 2),
+  drawing velocities across the lane, folding to the keys in use, scales,
+  and repeating the arrow keys while they're held.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.

@@ -1,10 +1,12 @@
 //! Drawing the piano roll: the rows of keys with the notes on them over the
 //! grid, the keyboard beside them, the ruler over them, the lane of their
-//! velocities under them, and the corners. Only what's in sight is drawn.
+//! velocities or a controller's curve under them, and the corners. Only
+//! what's in sight is drawn.
 
-use egui::{Align2, FontId, Painter, Rect, Stroke, StrokeKind, Vec2, pos2};
-use musicable_model::clip::Note;
-use musicable_model::time::Beats;
+use egui::{Align2, FontId, Painter, Rect, Response, Shape, Stroke, StrokeKind, Vec2, pos2};
+use musicable_commands::editor::Lane;
+use musicable_model::clip::{self, Controller, Note, Point};
+use musicable_model::time::{BeatRange, Beats};
 
 use super::{Plan, Scene, Side};
 use crate::theme::Theme;
@@ -72,20 +74,7 @@ pub(super) fn rows(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, rows);
     notes(painter, scene, plan);
     // Notes outside the clip don't play.
-    let (start, end) = (
-        layout
-            .x_of(scene.clip.start)
-            .clamp(rows.left(), rows.right()),
-        layout
-            .x_of(scene.clip.end())
-            .clamp(rows.left(), rows.right()),
-    );
-    for x in [rows.left()..=start, end..=rows.right()] {
-        if x.start() < x.end() {
-            let shade = Rect::from_x_y_ranges(x, rows.y_range());
-            painter.rect_filled(shade, 0.0, theme.outside_clip);
-        }
-    }
+    outside_clip(painter, scene, rows);
     if let Some(plan) = plan {
         ghosts(painter, scene, plan);
     }
@@ -94,6 +83,20 @@ pub(super) fn rows(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     if let Some(x) = playhead(scene) {
         let x = painter.round_to_pixel_center(x);
         painter.vline(x, rows.y_range(), Stroke::new(1.0, theme.playhead));
+    }
+}
+
+/// Shades `rect` before the clip's start and after its end, where what's
+/// there doesn't play.
+fn outside_clip(painter: &Painter, scene: &Scene<'_>, rect: Rect) {
+    let layout = &scene.layout;
+    let x = |at| layout.x_of(at).clamp(rect.left(), rect.right());
+    let (start, end) = (x(scene.clip.start), x(scene.clip.end()));
+    for x in [rect.left()..=start, end..=rect.right()] {
+        if x.start() < x.end() {
+            let shade = Rect::from_x_y_ranges(x, rect.y_range());
+            painter.rect_filled(shade, 0.0, scene.theme.outside_clip);
+        }
     }
 }
 
@@ -191,7 +194,10 @@ fn ghosts(painter: &Painter, scene: &Scene<'_>, plan: &Plan) {
             let outline = Stroke::new(1.0, theme.start_marker);
             painter.rect(*rect, 0.0, theme.area, outline, StrokeKind::Inside);
         }
-        Plan::Velocity { .. } | Plan::Viewport(_) => {}
+        Plan::Velocity { .. }
+        | Plan::DrawController { .. }
+        | Plan::EraseController { .. }
+        | Plan::Viewport(_) => {}
     }
 }
 
@@ -251,17 +257,29 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>) {
     painter.hline(ruler.x_range(), y, Stroke::new(1.0, theme.divider));
 }
 
-/// The velocities' lane: a stem for each note in sight, as tall as it
-/// starts hard, at its start.
-pub(super) fn velocities(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+/// The lane under the rows, over the grid: the notes' velocities, or the
+/// curve of the controller it shows, as `plan` would leave them.
+pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
-    let layout = &scene.layout;
-    let lane = layout.velocities;
+    let lane = scene.layout.lane;
     painter.rect_filled(lane, 0.0, theme.empty);
     timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, lane);
+    match scene.controller() {
+        Some(controller) => curve(painter, scene, controller, plan),
+        None => velocities(painter, scene, plan),
+    }
+    let y = painter.round_to_pixel_center(lane.top() + 0.5);
+    painter.hline(lane.x_range(), y, Stroke::new(1.0, theme.divider));
+}
+
+/// The velocities: a stem for each note in sight, as tall as it starts
+/// hard, at its start.
+fn velocities(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let lane = layout.lane;
     let colour = theme.clip(scene.index);
-    let bottom = lane.bottom() - 1.0;
-    let height = (lane.height() - theme.marker).max(1.0);
+    let (bottom, height) = layout.span(theme);
     // The selected on top.
     let mut notes: Vec<&Note> = scene.midi.notes.iter().collect();
     notes.sort_by_key(|note| scene.selected(note.id));
@@ -282,8 +300,63 @@ pub(super) fn velocities(painter: &Painter, scene: &Scene<'_>, plan: Option<&Pla
         let head = Rect::from_center_size(pos2(x, top), Vec2::splat(theme.marker * 0.8));
         painter.rect_filled(head, 1.0, stem);
     }
-    let y = painter.round_to_pixel_center(lane.top() + 0.5);
-    painter.hline(lane.x_range(), y, Stroke::new(1.0, theme.divider));
+}
+
+/// `controller`'s curve as the clip moves it, or as `plan` would leave it:
+/// each point's value held until the next point, filled under, from the
+/// first point on, as the clip leaves the controller alone before it. It's
+/// shaded where the clip doesn't play.
+fn curve(painter: &Painter, scene: &Scene<'_>, controller: Controller, plan: Option<&Plan>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let lane = layout.lane;
+    let curve = scene.midi.controller(controller);
+    let own = |range: &BeatRange| BeatRange::new(scene.own(range.start), scene.own(range.end));
+    let curve = match plan {
+        Some(Plan::DrawController {
+            controller: drawn,
+            range,
+            points,
+        }) if *drawn == controller => {
+            let points: Vec<Point> = points
+                .iter()
+                .map(|&(at, value)| Point::new(scene.own(at), value))
+                .collect();
+            clip::redraw(curve, own(range), &points)
+        }
+        Some(Plan::EraseController {
+            controller: erased,
+            range,
+        }) if *erased == controller => clip::redraw(curve, own(range), &[]),
+        _ => curve.to_vec(),
+    };
+    let colour = theme.clip(scene.index);
+    let line = Stroke::new(1.5, colour);
+    let fill = colour.gamma_multiply(0.3);
+    let (foot, height) = layout.span(theme);
+    let y = |value: f32| foot - height * value;
+    let visible = lane.x_range();
+    for (i, point) in curve.iter().enumerate() {
+        let next = curve.get(i + 1);
+        let left = layout.x_of(scene.song(point.at));
+        let right = next.map_or(visible.max, |next| layout.x_of(scene.song(next.at)));
+        if right < visible.min || left > visible.max {
+            continue;
+        }
+        let (left, right) = (left.max(visible.min - 1.0), right.min(visible.max + 1.0));
+        let top = y(point.value);
+        if right > left {
+            let under = Rect::from_min_max(pos2(left, top), pos2(right, foot));
+            painter.rect_filled(under, 0.0, fill);
+            painter.hline(left..=right, top, line);
+        }
+        // The step up or down to the next point's value.
+        if let Some(next) = next {
+            let to = y(next.value);
+            painter.vline(right, top.min(to)..=top.max(to), line);
+        }
+    }
+    outside_clip(painter, scene, lane);
 }
 
 /// The corner over the keyboard: the name of the clip the piano roll shows.
@@ -302,18 +375,42 @@ pub(super) fn corner(painter: &Painter, scene: &Scene<'_>) {
     painter.hline(corner.x_range(), y, Stroke::new(1.0, theme.divider));
 }
 
-/// The velocities' lane's name, beside it, under the keyboard.
-pub(super) fn label(painter: &Painter, scene: &Scene<'_>) {
+/// The name of what the lane shows, beside it, under the keyboard, with a
+/// triangle that says a click on it, `chooser`, chooses: "Velocity", or a
+/// controller's number over its name.
+pub(super) fn label(painter: &Painter, scene: &Scene<'_>, chooser: &Response) {
     let theme = scene.theme;
     let label = scene.layout.label;
-    painter.rect_filled(label, 0.0, theme.ruler);
-    painter.text(
-        pos2(label.left() + theme.padding, label.top() + theme.padding),
-        Align2::LEFT_TOP,
-        "Velocity",
-        FontId::proportional(theme.small_text),
+    let fill = match chooser.hovered() {
+        true => theme.header,
+        false => theme.ruler,
+    };
+    painter.rect_filled(label, 0.0, fill);
+    let (name, detail) = match scene.editor().piano_roll.lane {
+        Lane::Velocity => ("Velocity".to_owned(), None),
+        Lane::Controller(controller) => (format!("CC {}", controller.number()), controller.name()),
+    };
+    let font = FontId::proportional(theme.small_text);
+    let at = pos2(label.left() + theme.padding, label.top() + theme.padding);
+    let name = painter.text(at, Align2::LEFT_TOP, name, font.clone(), theme.ruler_text);
+    if let Some(detail) = detail {
+        let under = pos2(at.x, name.bottom() + 2.0);
+        painter.text(under, Align2::LEFT_TOP, detail, font, theme.ruler_text);
+    }
+    // A triangle pointing down, after the name.
+    let size = theme.small_text * 0.5;
+    let left = name.right() + theme.padding;
+    let top = name.center().y - size / 4.0;
+    let triangle = vec![
+        pos2(left, top),
+        pos2(left + size, top),
+        pos2(left + size / 2.0, top + size / 2.0),
+    ];
+    painter.add(Shape::convex_polygon(
+        triangle,
         theme.ruler_text,
-    );
+        Stroke::NONE,
+    ));
     let y = painter.round_to_pixel_center(label.top() + 0.5);
     painter.hline(label.x_range(), y, Stroke::new(1.0, theme.divider));
 }

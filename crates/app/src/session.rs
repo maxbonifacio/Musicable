@@ -827,6 +827,7 @@ impl Session {
                     | Edit::NoteTiming { .. }
                     | Edit::NoteKey { .. }
                     | Edit::NoteVelocity { .. }
+                    | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. } => recompile = true,
                 }

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use musicable_model::clip::{Clip, ClipContent, ClipId, Note, NoteId};
+use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 use serde::{Deserialize, Serialize};
@@ -211,6 +211,8 @@ pub struct PianoRoll {
     pub draw: bool,
     /// What Cut and Copy took from it, for Paste.
     pub clipboard: Option<NoteClipboard>,
+    /// What the lane under the notes shows.
+    pub lane: Lane,
 }
 
 impl Default for PianoRoll {
@@ -232,6 +234,7 @@ impl Default for PianoRoll {
             height,
             draw: false,
             clipboard: None,
+            lane: Lane::default(),
         }
     }
 }
@@ -272,6 +275,16 @@ impl PianoRoll {
         let middle = (rows - key - 0.5) * key_height;
         (middle - height / 2.0).clamp(0.0, (rows * key_height - height).max(0.0))
     }
+}
+
+/// What the lane under the piano roll's notes shows and edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lane {
+    /// How hard each note starts.
+    #[default]
+    Velocity,
+    /// How the clip moves a controller, such as the mod wheel.
+    Controller(Controller),
 }
 
 /// Notes that Cut or Copy took in the piano roll.
@@ -559,6 +572,14 @@ impl Grid {
     /// is on or not: where a note drawn at `at` starts.
     pub fn floor(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> Beats {
         self.around(tempo, at, zoom).0
+    }
+
+    /// The step of the grid `at` is in, at `zoom`, whether snapping is on or
+    /// not: from the line at `at` or the last before it, up to the next.
+    /// Drawing in the piano roll's controller lane fills steps.
+    pub fn cell(&self, tempo: &TempoMap, at: Beats, zoom: f64) -> BeatRange {
+        let (before, after) = self.around(tempo, at, zoom);
+        BeatRange::new(before, after)
     }
 
     /// The line at `at` or the last before it, and the next, at `zoom`.

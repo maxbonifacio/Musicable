@@ -116,10 +116,11 @@ pub trait Node: Any + Send {
     /// clip player. The engine calls it on the audio thread before any node
     /// renders the block, so it must be real-time safe too.
     ///
-    /// `ctx.events` holds the notes sent to the node for the block, in order
-    /// of offset, from the nodes whose notes come to it and from the engine,
-    /// so a MIDI effect can play them on, changed. They come here instead of
-    /// with [`process`](Node::process), which gets the node's other events.
+    /// `ctx.events` holds the notes and controllers sent to the node for the
+    /// block, in order of offset, from the nodes whose notes come to it and
+    /// from the engine, so a MIDI effect can play them on, changed. They come
+    /// here instead of with [`process`](Node::process), which gets the
+    /// node's other events.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
 
     /// The notes whose voices the node ended in the block it last rendered.

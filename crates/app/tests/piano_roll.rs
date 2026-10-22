@@ -1,10 +1,10 @@
-//! Editing notes through the app, as the piano roll's gestures and keys do:
-//! each change reaches the engine, rendering offline, which plays the notes
-//! as they are now. Keys whose commands don't apply, such as the arrow keys
-//! with no notes selected, are left to the window.
+//! Editing notes and controllers through the app, as the piano roll's
+//! gestures and keys do: each change reaches the engine, rendering offline,
+//! which plays the notes as they are now. Keys whose commands don't apply,
+//! such as the arrow keys with no notes selected, are left to the window.
 
 use musicable_app::Session;
-use musicable_commands::{Args, Focus, KeyChord, Keymap, Value, notes};
+use musicable_commands::{Args, Focus, KeyChord, Keymap, Value, controllers, notes};
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_model::clip::{ClipContent, ClipId, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
@@ -78,6 +78,17 @@ impl Rig {
         output.into_iter().step_by(2).collect()
     }
 
+    /// Adds a note to the clip, at full velocity: the A at 440 Hz.
+    fn add_note(&mut self, start: Beats, length: Beats) -> Value {
+        let add = Args::new()
+            .with("start", start)
+            .with("key", 69)
+            .with("length", length)
+            .with("velocity", 1.0)
+            .with("clip", self.clip);
+        self.session.run_with(&notes::ADD, &add).unwrap()
+    }
+
     /// Plays the song's first beat, once the engine has the notes as they
     /// are now, and returns it.
     fn first_beat(&mut self) -> Vec<f32> {
@@ -117,13 +128,7 @@ fn notes_edited_as_the_piano_roll_does_play_as_they_are_now() {
     assert!(!rig.takes("Delete"));
 
     // A double click adds a note, selected: the A at 440 Hz, for a beat.
-    let add = Args::new()
-        .with("start", Beats::ZERO)
-        .with("key", 69)
-        .with("length", Beats::new(1))
-        .with("velocity", 1.0)
-        .with("clip", rig.clip);
-    let Value::Note(note) = rig.session.run_with(&notes::ADD, &add).unwrap() else {
+    let Value::Note(note) = rig.add_note(Beats::ZERO, Beats::new(1)) else {
         panic!("Add Note returns the note");
     };
     let editor = rig.session.editor();
@@ -170,6 +175,53 @@ fn notes_edited_as_the_piano_roll_does_play_as_they_are_now() {
     // With the arrangement's focus, the arrow keys go to the window again.
     rig.session.editor_mut().focus = Focus::Arrangement;
     assert!(!rig.takes("Up"));
+    let stats = rig.session.stats();
+    assert_eq!(stats.events_late, 0);
+    assert_eq!(stats.events_dropped, 0);
+}
+
+#[test]
+fn a_sustain_pedal_drawn_in_the_lane_holds_the_notes() {
+    let mut rig = Rig::new();
+    // A sixteenth: it's died away by the second half of the beat.
+    rig.add_note(Beats::ZERO, Beats::from_f64(0.25));
+    let half = (BEAT / 2) as usize;
+    let played = rig.first_beat();
+    assert!(peak(&played[..half]) > 0.4);
+    assert!(peak(&played[half..]) < 1e-6);
+
+    // Drawing the pedal down holds the note through the beat.
+    let clip = rig.clip;
+    let draw = |start: f64, value: f64| {
+        Args::new()
+            .with("start", Beats::from_f64(start))
+            .with("end", Beats::new(1))
+            .with("at", vec![Beats::from_f64(start)])
+            .with("values", vec![value])
+            .with("controller", 64)
+            .with("clip", clip)
+    };
+    rig.session
+        .run_with(&controllers::DRAW, &draw(0.0, 1.0))
+        .unwrap();
+    let held = rig.first_beat();
+    assert!(peak(&held[3 * half / 2..]) > 0.4);
+    // Stopping let it go, so it died away.
+    assert!(peak(&rig.render(BEAT / 4)) < 1e-6);
+
+    // Up halfway through: the note ends there.
+    rig.session
+        .run_with(&controllers::DRAW, &draw(0.5, 0.0))
+        .unwrap();
+    let played = rig.first_beat();
+    assert!(peak(&played[half / 2..half]) > 0.4);
+    assert!(peak(&played[5 * half / 4..]) < 1e-6);
+    // Undoing holds it again, and clearing the pedal lets it end as it did.
+    rig.press("Ctrl+Z");
+    assert!(peak(&rig.first_beat()[3 * half / 2..]) > 0.4);
+    let clear = Args::new().with("controller", 64).with("clip", rig.clip);
+    rig.session.run_with(&controllers::CLEAR, &clear).unwrap();
+    assert!(peak(&rig.first_beat()[half..]) < 1e-6);
     let stats = rig.session.stats();
     assert_eq!(stats.events_late, 0);
     assert_eq!(stats.events_dropped, 0);

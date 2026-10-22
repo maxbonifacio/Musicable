@@ -3,8 +3,8 @@
 
 use egui::{Button, Ui};
 use musicable_commands::{
-    Args, Command, CommandId, Registry, arrange, edit, file, locator, notes, options, track,
-    transport, view,
+    Args, Command, CommandId, Registry, arrange, controllers, edit, file, locator, notes, options,
+    track, transport, view,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -13,10 +13,12 @@ use crate::shell::{Action, View, toggled, with_keys};
 /// `None` is a separator.
 type MenuSpec = (&'static str, &'static str, &'static [Option<CommandId>]);
 
-/// The menus that come first, before those for other areas. A command missing
-/// from its area's menu goes at the end of it, and an area of commands
-/// without a menu gets one after these, so every command can be reached.
-/// Commands that need arguments, which menus can't give, are left out.
+/// The menus that come first, before those for other areas. A menu can list
+/// commands of other areas too. A command missing from its area's menu goes
+/// at the end of it, and an area of commands without a menu gets one after
+/// these, unless its commands are all in other menus, so every command can be
+/// reached. Commands that need arguments, which menus can't give, are left
+/// out.
 const MENUS: [MenuSpec; 7] = [
     (
         "File",
@@ -86,6 +88,9 @@ const MENUS: [MenuSpec; 7] = [
             None,
             Some(notes::VELOCITY_UP),
             Some(notes::VELOCITY_DOWN),
+            None,
+            Some(controllers::SHOW_VELOCITIES),
+            Some(controllers::CLEAR),
         ],
     ),
     (
@@ -169,9 +174,12 @@ pub(crate) struct Menu<'a> {
 /// Every command in `commands` that runs without arguments, in the menus
 /// the menu bar shows. A menu without commands is left out.
 pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
-    let listed = |area: &str| MENUS.iter().chain(&LAST_MENUS).any(|m| m.1 == area);
+    let specs = || MENUS.iter().chain(&LAST_MENUS);
+    let listed = |area: &str| specs().any(|m| m.1 == area);
+    let in_a_menu = |id: &CommandId| specs().any(|m| m.2.contains(&Some(id.clone())));
     let offered = || commands.iter().filter(|c| !c.needs_arguments());
     let mut others: Vec<&str> = offered()
+        .filter(|c| !in_a_menu(&c.id))
         .map(|c| area_of(&c.id))
         .filter(|area| !listed(area))
         .collect();
@@ -179,7 +187,7 @@ pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
     let others = others.into_iter().map(|area| Menu {
         title: capitalized(area),
         items: offered()
-            .filter(|c| area_of(&c.id) == area)
+            .filter(|c| area_of(&c.id) == area && !in_a_menu(&c.id))
             .map(Some)
             .collect(),
     });

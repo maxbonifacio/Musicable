@@ -1,5 +1,6 @@
 //! The piano roll's context menus, as the arrangement's: commands from the
 //! registry, with their arguments taken from what the menu was opened on.
+//! And the menu of what the lane under the notes can show.
 //!
 //! Each place has its list of commands. A parameter that names a clip gets
 //! the clip the piano roll shows, one that names notes the note the menu was
@@ -8,11 +9,14 @@
 //! give is left out. The edit commands take no arguments: the menu gives the
 //! piano roll the focus, so they act on its notes.
 
-use egui::Ui;
-use musicable_commands::{Args, Command, CommandId, Type, Value, edit, notes, transport, view};
-use musicable_model::clip::NoteId;
+use egui::{Popup, Response, Role, ScrollArea, Ui, WidgetInfo};
+use musicable_commands::editor::Lane;
+use musicable_commands::{
+    Args, Command, CommandId, Type, Value, controllers, edit, notes, transport, view,
+};
+use musicable_model::clip::{Controller, NoteId};
 
-use super::{Hit, Scene, Spot};
+use super::{Hit, Scene, Spot, run};
 use crate::menus::context_menu;
 use crate::shell::Action;
 
@@ -52,12 +56,20 @@ const GRID: Items = &[
 
 const RULER: Items = &[Some(transport::LOCATE), None, Some(view::TOGGLE_FOLLOW)];
 
+/// The lane's while it shows a controller.
+const CONTROLLER: Items = &[Some(controllers::CLEAR)];
+
+/// How tall the menu of what the lane can show gets before it scrolls, in
+/// points.
+const LANES_HEIGHT: f32 = 320.0;
+
 /// The commands of the context menu for `hit`.
 fn items(hit: Hit) -> Vec<Option<CommandId>> {
     let lists: &[Items] = match hit {
         Hit::Note { .. } | Hit::Velocity(Some(_)) => &[NOTE, GRID],
         Hit::Row(_) | Hit::Key(_) | Hit::Velocity(None) => &[ROWS, GRID],
         Hit::Ruler => &[RULER],
+        Hit::Controller => &[CONTROLLER, GRID],
     };
     lists
         .iter()
@@ -111,4 +123,55 @@ fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
         }
     }
     Some(args)
+}
+
+/// The menu of what the lane can show, which a click on its name,
+/// `chooser`, opens: the notes' velocities, the controllers the clip moves,
+/// those keyboards and pedals have, then the rest.
+pub(super) fn lanes(chooser: &Response, scene: &Scene<'_>, actions: &mut Vec<Action>) {
+    let shown = scene.editor().piano_roll.lane;
+    let name = |lane| match lane {
+        Lane::Velocity => "Velocity".to_owned(),
+        Lane::Controller(controller) => format!("{controller}"),
+    };
+    chooser.widget_info(|| WidgetInfo {
+        current_text_value: Some(name(shown)),
+        ..WidgetInfo::labeled(Role::ComboBox, true, "Lane")
+    });
+    let moved: Vec<Controller> = scene.midi.controllers.keys().copied().collect();
+    let common: Vec<Controller> = Controller::COMMON
+        .into_iter()
+        .filter(|c| !moved.contains(c))
+        .collect();
+    let rest: Vec<Controller> = Controller::all()
+        .filter(|c| !moved.contains(c) && !common.contains(c))
+        .collect();
+    Popup::menu(chooser).show(|ui| {
+        ScrollArea::vertical()
+            .max_height(LANES_HEIGHT)
+            .show(ui, |ui| {
+                let mut item = |ui: &mut Ui, lane: Lane| {
+                    if ui.selectable_label(lane == shown, name(lane)).clicked() && lane != shown {
+                        match lane {
+                            Lane::Velocity => {
+                                run(actions, controllers::SHOW_VELOCITIES, Args::new());
+                            }
+                            Lane::Controller(c) => {
+                                let args = Args::new().with("controller", i64::from(c.number()));
+                                run(actions, controllers::SHOW, args);
+                            }
+                        }
+                    }
+                };
+                item(ui, Lane::Velocity);
+                for group in [&moved, &common, &rest] {
+                    if !group.is_empty() {
+                        ui.separator();
+                    }
+                    for &controller in group {
+                        item(ui, Lane::Controller(controller));
+                    }
+                }
+            });
+    });
 }

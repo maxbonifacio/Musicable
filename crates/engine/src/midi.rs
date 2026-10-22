@@ -454,6 +454,9 @@ const MAX_CLIP_NOTES: usize = 1024;
 /// played the block's notes, so they change what plays from the next
 /// block.
 ///
+/// The clips' controllers, such as the sustain pedal, go on while the
+/// clips play.
+///
 /// The input's messages come from the MIDI inputs its [`MidiSource`] says,
 /// turned into notes by [`MidiNotes`], in the blocks the stream places them
 /// in ([`ProcessContext::midi`]).
@@ -632,10 +635,7 @@ impl Node for MidiMonitor {
             .filter(|m| source.is_some_and(|s| s.input.is_none_or(|i| i == m.input)))
             .peekable();
         let last = ctx.frames.saturating_sub(1);
-        for event in ctx.events {
-            let NodeEventKind::Note(note) = event.kind else {
-                continue;
-            };
+        for event in ctx.events.iter().filter(|e| e.kind.is_played()) {
             while let Some(message) = messages.next_if(|m| offset(ctx, m) < event.offset) {
                 let at = offset(ctx, message).min(last);
                 self.notes.take(message.bytes, |note| {
@@ -644,7 +644,14 @@ impl Node for MidiMonitor {
                     }
                 });
             }
-            self.clip_note(event.offset, note, clips, notes);
+            match event.kind {
+                NodeEventKind::Note(note) => self.clip_note(event.offset, note, clips, notes),
+                // The clips' controllers move as their notes play.
+                NodeEventKind::Controller { controller, value } if clips => {
+                    notes.send_controller(event.offset, controller, value);
+                }
+                _ => {}
+            }
         }
         for message in messages {
             let at = offset(ctx, message).min(last);
