@@ -6,7 +6,9 @@
 //! [`mixer`] has the mixer's rules: where tracks can send their signal, and
 //! what mute and solo silence. [`clip`] has what tracks play: audio clips,
 //! and MIDI clips of notes with per-note expression. [`Locator`]s name
-//! places in the song. [`plugin`] has plugins in device chains.
+//! places in the song. [`plugin`] has plugins in device chains. Tracks
+//! record from an [`Input`] into [`Take`]s, and comping copies the best of
+//! them to the track's own clips.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -158,6 +160,115 @@ pub struct Send {
     pub pre_fader: bool,
 }
 
+/// Where a track records from: some channels of an audio input on an audio
+/// track, a MIDI input on a MIDI track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Audio(AudioInput),
+    Midi(MidiInput),
+}
+
+impl Input {
+    /// What a new track of `kind` records from: the default input's first
+    /// two channels, in stereo, for audio; every MIDI input for MIDI; and
+    /// nothing for a bus.
+    pub fn default_for(kind: TrackKind) -> Option<Input> {
+        match kind {
+            TrackKind::Audio => Some(Input::Audio(AudioInput::default())),
+            TrackKind::Midi => Some(Input::Midi(MidiInput::default())),
+            TrackKind::Return | TrackKind::Group => None,
+        }
+    }
+
+    pub fn audio(&self) -> Option<&AudioInput> {
+        match self {
+            Self::Audio(input) => Some(input),
+            Self::Midi(_) => None,
+        }
+    }
+}
+
+/// Some channels of an audio input. Defaults to the default input's first
+/// two channels, in stereo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioInput {
+    /// The input, as the audio backend identifies it
+    /// (`musicable_audio::InputDevice::id`), or empty for the default
+    /// input: the system's, or the ASIO driver's while one plays.
+    pub device: String,
+    /// The input's name when it was chosen, to show while it's missing.
+    /// Empty for the default input.
+    pub name: String,
+    /// The first channel, from 0.
+    pub channel: u16,
+    /// Whether it takes two channels, `channel` and the one after, rather
+    /// than one. A mono input plays in the middle of a track's two
+    /// channels.
+    pub stereo: bool,
+}
+
+impl Default for AudioInput {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            name: String::new(),
+            channel: 0,
+            stereo: true,
+        }
+    }
+}
+
+impl AudioInput {
+    /// How many channels it takes.
+    pub fn channels(&self) -> u16 {
+        if self.stereo { 2 } else { 1 }
+    }
+}
+
+/// A MIDI input, or all of them. Defaults to every channel of every input.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MidiInput {
+    /// The input, as the MIDI backend identifies it, or empty for every
+    /// input.
+    pub device: String,
+    /// The input's name when it was chosen, to show while it's missing.
+    pub name: String,
+    /// The one MIDI channel to take, from 0 to 15, or `None` for all of
+    /// them, as MPE controllers need.
+    pub channel: Option<u8>,
+}
+
+/// When a track plays what comes into its input instead of its clips: its
+/// input monitoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Monitor {
+    /// Always.
+    In,
+    /// While the track is armed, and the transport is stopped or recording
+    /// it: when a player hears themselves while they record, and the
+    /// recording when it plays back.
+    #[default]
+    Auto,
+    /// Never: the input is only recorded.
+    Off,
+}
+
+/// Stable identifier for a take, unique within a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TakeId(pub u32);
+
+/// A take lane: what a track recorded in one pass of a recording, kept
+/// under the track's own clips, which comping copies the best parts of
+/// takes to. Takes don't play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Take {
+    pub id: TakeId,
+    pub name: String,
+    /// Clips of the track's kind, in any order. Their ids are unique among
+    /// all the project's clips.
+    pub clips: Vec<Clip>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub id: TrackId,
@@ -175,6 +286,10 @@ pub struct Track {
     pub solo_safe: bool,
     /// Whether the track is armed for recording.
     pub armed: bool,
+    /// Where it records from: `None` for a track that records nothing, as
+    /// buses don't.
+    pub input: Option<Input>,
+    pub monitor: Monitor,
     /// Where the track's output goes. See [`Project::can_feed`] for which
     /// buses a track can feed.
     pub output: Bus,
@@ -184,6 +299,8 @@ pub struct Track {
     /// Audio clips on audio tracks, MIDI clips on MIDI tracks, and none on
     /// buses. In any order: the arrangement places them by position.
     pub clips: Vec<Clip>,
+    /// The track's takes, top to bottom: none on buses.
+    pub takes: Vec<Take>,
     /// In signal order.
     pub devices: Vec<Device>,
     pub clip_type: ClipType,
@@ -216,6 +333,24 @@ impl Track {
     /// The first of the track's devices that plays notes.
     pub fn instrument(&self) -> Option<&Device> {
         self.devices.iter().find(|d| d.kind.is_instrument())
+    }
+
+    pub fn take(&self, id: TakeId) -> Option<&Take> {
+        self.takes.iter().find(|t| t.id == id)
+    }
+
+    pub fn take_mut(&mut self, id: TakeId) -> Option<&mut Take> {
+        self.takes.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Where the take with `id` is in the track's list of them.
+    pub fn take_index(&self, id: TakeId) -> Option<usize> {
+        self.takes.iter().position(|t| t.id == id)
+    }
+
+    /// Whether any of the track's clips, its takes' included, has `id`.
+    pub fn uses_clip_id(&self, id: ClipId) -> bool {
+        self.clip(id).is_some() || self.takes.iter().flat_map(|t| &t.clips).any(|c| c.id == id)
     }
 }
 
@@ -268,6 +403,12 @@ pub struct Project {
     pub looping: bool,
     /// Whether the metronome clicks while the transport plays.
     pub metronome: bool,
+    /// Whether recording waits for the loop region's start: it punches in
+    /// there.
+    pub punch_in: bool,
+    /// Whether recording stops at the loop region's end: it punches out
+    /// there.
+    pub punch_out: bool,
     pub master: Master,
     pub tracks: Vec<Track>,
     /// In any order: the ruler shows them by position.
@@ -284,6 +425,8 @@ pub struct Project {
     pub next_clip_id: u32,
     /// The same for locators.
     pub next_locator_id: u32,
+    /// The same for takes.
+    pub next_take_id: u32,
 }
 
 impl Default for Project {
@@ -295,6 +438,8 @@ impl Default for Project {
             tempo,
             looping: false,
             metronome: false,
+            punch_in: false,
+            punch_out: false,
             master: Master::default(),
             tracks: Vec::new(),
             locators: Vec::new(),
@@ -303,6 +448,7 @@ impl Default for Project {
             next_device_id: 0,
             next_clip_id: 0,
             next_locator_id: 0,
+            next_take_id: 0,
         }
     }
 }
@@ -321,7 +467,9 @@ impl Project {
     }
 
     /// A track with the next track id, for the caller to add: unity gain,
-    /// centred, feeding the master. Return tracks start solo-safe.
+    /// centred, feeding the master, recording from the default input
+    /// ([`Input::default_for`]) with automatic monitoring. Return tracks
+    /// start solo-safe.
     ///
     /// # Panics
     ///
@@ -338,10 +486,13 @@ impl Project {
             solo: false,
             solo_safe: kind == TrackKind::Return,
             armed: false,
+            input: Input::default_for(kind),
+            monitor: Monitor::Auto,
             output: Bus::Master,
             sends: Vec::new(),
             tone: None,
             clips: Vec::new(),
+            takes: Vec::new(),
             devices: Vec::new(),
             clip_type: ClipType::Off,
             console: ConsoleSettings::default(),
@@ -397,6 +548,15 @@ impl Project {
         }
     }
 
+    /// An empty take with the next take id, for the caller to add.
+    pub fn new_take(&mut self, name: impl Into<String>) -> Take {
+        Take {
+            id: TakeId(next_id(&mut self.next_take_id, "take")),
+            name: name.into(),
+            clips: Vec::new(),
+        }
+    }
+
     pub fn track(&self, id: TrackId) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == id)
     }
@@ -448,11 +608,24 @@ impl Project {
         tracks.chain(&mut self.master.devices).find(|d| d.id == id)
     }
 
-    /// The clip with `id`, and the track it's on.
+    /// The clip with `id`, and the track it's on. Only tracks' own clips:
+    /// takes' clips are found through their take.
     pub fn find_clip(&self, id: ClipId) -> Option<(&Track, &Clip)> {
         self.tracks
             .iter()
             .find_map(|track| Some((track, track.clip(id)?)))
+    }
+
+    /// Whether any clip in the project, takes' included, has `id`.
+    pub fn uses_clip_id(&self, id: ClipId) -> bool {
+        self.tracks.iter().any(|t| t.uses_clip_id(id))
+    }
+
+    /// The take with `id`, and the track it's under.
+    pub fn find_take(&self, id: TakeId) -> Option<(&Track, &Take)> {
+        self.tracks
+            .iter()
+            .find_map(|track| Some((track, track.take(id)?)))
     }
 
     pub fn locator(&self, id: LocatorId) -> Option<&Locator> {
@@ -515,6 +688,53 @@ mod tests {
             assert_eq!(track.output, Bus::Master);
             assert_eq!(track.solo_safe, kind == TrackKind::Return);
         }
+    }
+
+    #[test]
+    fn new_tracks_record_from_the_default_input_and_buses_from_nothing() {
+        let mut p = Project::new();
+        let input = |p: &mut Project, kind| {
+            let id = p.add_track("", kind);
+            let track = p.track(id).unwrap();
+            assert_eq!(track.monitor, Monitor::Auto);
+            track.input.clone()
+        };
+        let audio = input(&mut p, TrackKind::Audio).unwrap();
+        assert_eq!(audio.audio().map(AudioInput::channels), Some(2));
+        assert_eq!(audio.audio().map(|a| a.device.as_str()), Some(""));
+        assert_eq!(
+            input(&mut p, TrackKind::Midi),
+            Some(Input::Midi(MidiInput::default()))
+        );
+        assert_eq!(input(&mut p, TrackKind::Return), None);
+        assert_eq!(input(&mut p, TrackKind::Group), None);
+    }
+
+    #[test]
+    fn takes_and_their_clips_are_found_by_id() {
+        let mut p = Project::new();
+        let track = p.add_track("Vocal", TrackKind::Audio);
+        let mut take = p.new_take("Take 1");
+        let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+        let audio = || ClipContent::Audio(clip::AudioClip::new("take.wav"));
+        let clip = p.new_clip("Vocal", range, audio());
+        let in_take = clip.id;
+        take.clips.push(clip);
+        let id = take.id;
+        assert_ne!(p.new_take("Take 2").id, id);
+        p.track_mut(track).unwrap().takes.push(take);
+
+        let (found, take) = p.find_take(id).unwrap();
+        assert_eq!((found.id, take.name.as_str()), (track, "Take 1"));
+        assert_eq!(found.take_index(id), Some(0));
+        assert!(p.find_take(TakeId(id.0 + 1)).is_none());
+        // Takes' clips use clip ids, but aren't the track's own clips.
+        assert!(p.uses_clip_id(in_take));
+        assert!(p.find_clip(in_take).is_none());
+        let own = p.new_clip("Vocal", range, audio());
+        assert!(!p.uses_clip_id(own.id));
+        p.track_mut(track).unwrap().clips.push(own.clone());
+        assert!(p.uses_clip_id(own.id));
     }
 
     #[test]

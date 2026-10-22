@@ -17,7 +17,7 @@ type Step = fn(&mut Map<String, Value>) -> Result<(), Invalid>;
 /// One step for each version after the first, oldest first: `STEPS[0]` takes
 /// version 1 files to version 2. Raising [`VERSION`] without adding its step
 /// doesn't compile.
-const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins];
+const STEPS: [Step; VERSION as usize - 1] = [mixer, clips, locators, plugins, recording];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
 pub(super) fn upgrade(document: &mut Value, from: u32) -> Result<(), Invalid> {
@@ -93,6 +93,35 @@ fn locators(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 /// Version 5 added plugin devices. Version 4 files have none, so they need
 /// nothing.
 fn plugins(_: &mut Map<String, Value>) -> Result<(), Invalid> {
+    Ok(())
+}
+
+/// Version 6 added recording: each track's input and monitoring, takes,
+/// and punching in and out. Version 5 tracks get what a new track has: an
+/// audio track records from the default input's first two channels, a MIDI
+/// track from every MIDI input, a bus from nothing, all with automatic
+/// monitoring and no takes. Punching in and out is off.
+fn recording(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "punch_in", json!(false))?;
+    add(file, "", "punch_out", json!(false))?;
+    add(file, "", "next_take_id", json!(0))?;
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let Some(track) = track.as_object_mut() else {
+            continue;
+        };
+        let path = format!("tracks[{i}]");
+        let input = match track.get("kind").and_then(Value::as_str) {
+            Some("audio") => json!({
+                "audio": {"device": "", "name": "", "channel": 0, "stereo": true},
+            }),
+            Some("midi") => json!({"midi": {"device": "", "name": "", "channel": null}}),
+            _ => Value::Null,
+        };
+        add(track, &path, "input", input)?;
+        add(track, &path, "monitor", json!("auto"))?;
+        add(track, &path, "takes", json!([]))?;
+    }
     Ok(())
 }
 
@@ -234,6 +263,38 @@ mod tests {
             run(&STEPS[..3], &mut file, 3).unwrap_err().path,
             "locators",
             "locators in a version 3 file"
+        );
+    }
+
+    #[test]
+    fn version_5_tracks_record_from_the_default_inputs() {
+        let mut file = json!({
+            "version": 5,
+            "tracks": [{"kind": "audio"}, {"kind": "midi"}, {"kind": "group"}, "not a track"],
+        });
+        run(&STEPS[..5], &mut file, 5).unwrap();
+        let track = |kind: &str, input| json!({"kind": kind, "input": input, "monitor": "auto", "takes": []});
+        let audio = json!({"audio": {"device": "", "name": "", "channel": 0, "stereo": true}});
+        let midi = json!({"midi": {"device": "", "name": "", "channel": null}});
+        assert_eq!(
+            file["tracks"],
+            json!([
+                track("audio", audio),
+                track("midi", midi),
+                track("group", Value::Null),
+                "not a track",
+            ])
+        );
+        assert_eq!(
+            (&file["punch_in"], &file["punch_out"], &file["next_take_id"]),
+            (&json!(false), &json!(false), &json!(0))
+        );
+        assert_eq!(file["version"], json!(6));
+        let mut file = json!({"version": 5, "tracks": [{"kind": "audio", "takes": []}]});
+        assert_eq!(
+            run(&STEPS[..5], &mut file, 5).unwrap_err().path,
+            "tracks[0].takes",
+            "takes in a version 5 file"
         );
     }
 

@@ -8,7 +8,10 @@ use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
 use musicable_model::clip::{AudioClip, Clip, ClipContent, Dimension, MidiClip, Point};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{ClipType, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{
+    AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
+    TrackId, TrackKind,
+};
 use serde_json::{Value, json};
 
 /// SplitMix64, for making test projects. Seeded, so a failure happens again
@@ -320,10 +323,38 @@ fn random_project(random: &mut Random) -> Project {
                 .map(|_| random.clip(&mut project, kind))
                 .collect(),
         };
+        let mut takes = Vec::new();
+        if !kind.is_bus() {
+            for _ in 0..random.below(3) {
+                let mut take = project.new_take(random.name());
+                take.clips = (0..random.below(3))
+                    .map(|_| random.clip(&mut project, kind))
+                    .collect();
+                takes.push(take);
+            }
+        }
+        let input = match kind {
+            _ if random.one_in(4) => None,
+            TrackKind::Audio => Some(Input::Audio(AudioInput {
+                device: random.name(),
+                name: random.name(),
+                channel: random.below(65535) as u16,
+                stereo: random.one_in(2),
+            })),
+            TrackKind::Midi => Some(Input::Midi(MidiInput {
+                device: random.name(),
+                name: random.name(),
+                channel: (!random.one_in(2)).then(|| random.below(16) as u8),
+            })),
+            TrackKind::Return | TrackKind::Group => None,
+        };
         let track = project.track_mut(id).unwrap();
         track.output = output;
         track.sends = sends;
         track.clips = clips;
+        track.takes = takes;
+        track.input = input;
+        track.monitor = random.pick(&[Monitor::In, Monitor::Auto, Monitor::Off]);
         track.devices = devices;
         track.pan = random.pan();
         track.solo = random.one_in(4);
@@ -352,6 +383,9 @@ fn random_project(random: &mut Random) -> Project {
         project.locators.push(locator);
     }
     project.next_locator_id += random.below(3) as u32;
+    project.next_take_id += random.below(3) as u32;
+    project.punch_in = random.one_in(2);
+    project.punch_out = random.one_in(2);
     project
 }
 
