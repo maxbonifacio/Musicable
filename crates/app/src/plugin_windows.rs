@@ -60,6 +60,17 @@ impl PluginWindows {
         Ok(())
     }
 
+    /// Closes the window of the device `device`'s plugin, if it's open.
+    pub fn hide(&mut self, session: &mut Session, device: DeviceId) {
+        // Kept until the plugin has closed its window, which is inside it.
+        let Some(_window) = self.open.remove(&device) else {
+            return;
+        };
+        if let Some(instance) = session.plugin_mut(device) {
+            instance.close_window();
+        }
+    }
+
     /// Whether the device `device`'s plugin window is open.
     pub fn is_open(&self, device: DeviceId) -> bool {
         self.open.contains_key(&device)

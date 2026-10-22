@@ -319,7 +319,13 @@ impl App {
             }
             Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
             Request::Rename(named) => self.shell.rename(named),
-            Request::PluginWindow(device) => self.show_plugin_window(device, ctx, frame),
+            Request::PluginWindow { device, show: true } => {
+                self.show_plugin_window(device, ctx, frame);
+            }
+            Request::PluginWindow {
+                device,
+                show: false,
+            } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
         }
     }

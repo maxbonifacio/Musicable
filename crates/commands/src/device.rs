@@ -1,6 +1,6 @@
 //! The device commands: adding plugins to a track's devices or the
-//! master's, setting their parameters, showing their windows, and deleting
-//! devices.
+//! master's, setting their parameters, showing and closing their windows,
+//! and deleting devices.
 
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::{Chain, DeviceId, DeviceKind, PluginFormat, TrackId};
@@ -13,6 +13,8 @@ pub const ADD_PLUGIN: CommandId = CommandId::new("device.add_plugin");
 pub const SET_PARAM: CommandId = CommandId::new("device.set_param");
 /// Shows a plugin's own window.
 pub const SHOW_WINDOW: CommandId = CommandId::new("device.show_window");
+/// Closes a plugin's own window.
+pub const HIDE_WINDOW: CommandId = CommandId::new("device.hide_window");
 /// Deletes a device.
 pub const DELETE: CommandId = CommandId::new("device.delete");
 
@@ -107,15 +109,20 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
-    registry.add(
-        Command::new(SHOW_WINDOW, "Show Plugin Window").with_params(&[DEVICE]),
-        |ctx, args| {
-            let device = args.get("device")?;
-            plugin(ctx, device)?;
-            ctx.requests.push(Request::PluginWindow(device));
-            Ok(Value::None)
-        },
-    );
+    for (id, title, show) in [
+        (SHOW_WINDOW, "Show Plugin Window", true),
+        (HIDE_WINDOW, "Hide Plugin Window", false),
+    ] {
+        registry.add(
+            Command::new(id, title).with_params(&[DEVICE]),
+            move |ctx, args| {
+                let device = args.get("device")?;
+                plugin(ctx, device)?;
+                ctx.requests.push(Request::PluginWindow { device, show });
+                Ok(Value::None)
+            },
+        );
+    }
     registry.add(
         Command::new(DELETE, "Delete Device").with_params(&[DEVICE]),
         |ctx, args| {
@@ -303,7 +310,17 @@ mod tests {
 
         let window = Args::new().with("device", device);
         setup.run_with(&SHOW_WINDOW, window.clone()).unwrap();
-        assert_eq!(setup.requests, [Request::PluginWindow(device)]);
+        setup.run_with(&HIDE_WINDOW, window.clone()).unwrap();
+        assert_eq!(
+            setup.requests,
+            [
+                Request::PluginWindow { device, show: true },
+                Request::PluginWindow {
+                    device,
+                    show: false
+                }
+            ]
+        );
 
         setup.run_with(&DELETE, window.clone()).unwrap();
         setup

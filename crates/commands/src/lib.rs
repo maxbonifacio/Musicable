@@ -179,8 +179,11 @@ pub enum Request {
     TogglePanel(&'static str),
     /// Let the user type a new name for this.
     Rename(Named),
-    /// Show this plugin's own window.
-    PluginWindow(DeviceId),
+    /// Show this plugin's own window, or close it.
+    PluginWindow {
+        device: DeviceId,
+        show: bool,
+    },
     /// Scan for plugins again, loading the libraries that were bad too.
     RescanPlugins,
 }
