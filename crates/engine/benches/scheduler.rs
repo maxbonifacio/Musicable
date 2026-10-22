@@ -69,6 +69,7 @@ fn scheduler(c: &mut Criterion) {
             transport: TransportState::default(),
             tempo: &tempo,
             input: AudioRef::empty(frames),
+            midi: &[],
         };
         let mut group = c.benchmark_group(format!("{frames} frames"));
         group

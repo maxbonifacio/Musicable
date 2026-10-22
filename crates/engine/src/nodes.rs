@@ -1278,6 +1278,7 @@ mod tests {
             tempo,
             events,
             input: AudioRef::empty(frames),
+            midi: &[],
         }
     }
 
@@ -1299,6 +1300,7 @@ mod tests {
         let ctx = ProcessContext {
             transport,
             input: AudioRef::from_planar(&input, 3),
+            midi: &[],
             ..context(frames, events, transport.playing, &tempo)
         };
         let views = [AudioRef::from_planar(&clips, 2)];

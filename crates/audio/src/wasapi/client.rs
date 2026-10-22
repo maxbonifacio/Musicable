@@ -216,6 +216,7 @@ impl Client {
             latency,
             realtime,
             inputs: Vec::new(),
+            midi_inputs: Vec::new(),
         }
     }
 

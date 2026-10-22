@@ -47,6 +47,14 @@ pub struct StreamStats {
     /// hadn't captured them in time: what monitoring dropped as the delay
     /// grew. Recordings don't lose them.
     pub input_late: u64,
+    /// How long after they were heard the engine plays the MIDI inputs'
+    /// messages, in frames: the output's latency and a period, at most. 0
+    /// until a MIDI input is open and the output plays. It never shrinks.
+    pub midi_delay: u64,
+    /// MIDI messages the engine played later than their frame, at the start
+    /// of a callback, because the delay was still settling or a callback had
+    /// too many. Recordings don't move them.
+    pub midi_late: u64,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +71,8 @@ pub(crate) struct Counters {
     queued: AtomicU64,
     input_delay: AtomicU64,
     input_late: AtomicU64,
+    midi_delay: AtomicU64,
+    midi_late: AtomicU64,
     ended: AtomicBool,
 }
 
@@ -117,6 +127,13 @@ impl Counters {
         self.input_late.store(late, Relaxed);
     }
 
+    /// The MIDI bus's delay and late messages so far.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn midi(&self, delay: u64, late: u64) {
+        self.midi_delay.store(delay, Relaxed);
+        self.midi_late.store(late, Relaxed);
+    }
+
     pub fn end(&self) {
         self.ended.store(true, Relaxed);
     }
@@ -139,6 +156,8 @@ impl Counters {
             queued: self.queued.load(Relaxed),
             input_delay: self.input_delay.load(Relaxed),
             input_late: self.input_late.load(Relaxed),
+            midi_delay: self.midi_delay.load(Relaxed),
+            midi_late: self.midi_late.load(Relaxed),
         }
     }
 }

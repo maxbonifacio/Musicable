@@ -78,6 +78,7 @@ pub(crate) mod testing {
             tempo: tempo(),
             events,
             input: AudioRef::empty(frames),
+            midi: &[],
         }
     }
 
