@@ -574,8 +574,10 @@ static THREAD_POOL: clap_host_thread_pool = clap_host_thread_pool {
     request_exec: Some(request_exec),
 };
 
-/// Runs the plugin's tasks, one after the other on the thread processing
-/// it, which CLAP allows.
+/// Runs the plugin's tasks on the renderer's threads, as many at once as
+/// are free, while the thread processing it waits for them
+/// ([`tasks::run`](musicable_engine::tasks::run)). Each counts as an audio
+/// thread while it runs one.
 unsafe extern "C" fn request_exec(host: *const clap_host, tasks: u32) -> bool {
     // SAFETY: plugins call back with their host.
     let Some(shared) = (unsafe { shared(host) }) else {
@@ -590,10 +592,25 @@ unsafe extern "C" fn request_exec(host: *const clap_host, tasks: u32) -> bool {
     if !is_audio_thread() {
         return false;
     }
-    let plugin = shared.plugin();
-    for task in 0..tasks {
-        // SAFETY: the plugin asked, from processing.
-        unsafe { exec(plugin, task) };
-    }
+    let plugin = Pooled(shared.plugin());
+    musicable_engine::tasks::run(tasks, &|task| {
+        let _audio_thread = AudioThread::enter();
+        // SAFETY: the plugin asked, from processing, which waits for its
+        // tasks.
+        unsafe { exec(plugin.get(), task) };
+    });
     true
+}
+
+/// A plugin whose tasks run on several threads at once.
+struct Pooled(*const clap_plugin);
+
+// SAFETY: CLAP's thread pool calls a plugin's `exec` from any thread, and
+// from several at once.
+unsafe impl Sync for Pooled {}
+
+impl Pooled {
+    fn get(&self) -> *const clap_plugin {
+        self.0
+    }
 }

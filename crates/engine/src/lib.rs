@@ -34,6 +34,7 @@ mod parallel;
 mod render;
 mod resample;
 pub mod rt;
+pub mod tasks;
 mod transport;
 
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};

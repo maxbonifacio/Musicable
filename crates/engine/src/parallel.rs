@@ -28,6 +28,15 @@
 //! sleep. Blocks with little work run on the audio thread alone
 //! ([`ParallelOptions::inline_below`]), since waking workers would cost more
 //! than they save.
+//!
+//! A node can split its own work into tasks ([`tasks::run`](crate::tasks)),
+//! as a plugin using CLAP's thread pool does. Its lane puts them in its
+//! [`Tasks`], wakes up to two sleeping workers, and takes tasks itself until
+//! none are left; each worker that takes one wakes up to two more while
+//! tasks are left. Lanes with no node to run take tasks too. A block the
+//! audio thread renders alone runs a node's tasks there, one after another,
+//! and the blocks after it are shared, if they take enough work, even when
+//! nothing in them can run alongside anything else.
 
 mod deque;
 mod priority;
@@ -36,12 +45,12 @@ mod schedule;
 mod tests;
 
 use std::any::Any;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::hint::spin_loop;
 use std::ops::Deref;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
@@ -134,6 +143,7 @@ impl ParallelRenderer {
                 deque: Deque::new(options.max_nodes),
                 sleeping: CachePadded(AtomicBool::new(false)),
                 thread: OnceLock::new(),
+                tasks: Tasks::default(),
             })
             .collect();
         let shared = Arc::new(Shared {
@@ -143,6 +153,7 @@ impl ParallelRenderer {
             remaining: CachePadded(AtomicUsize::new(0)),
             job: AtomicPtr::new(std::ptr::null_mut()),
             wanted: AtomicUsize::new(0),
+            tasks_asked: AtomicBool::new(false),
             failure: Failure::default(),
             shutdown: AtomicBool::new(false),
             spin: options.spin,
@@ -185,6 +196,7 @@ impl ParallelRenderer {
 
     /// Whether to share this block between threads.
     fn share(&mut self, graph: &PreparedGraph) -> bool {
+        let tasks = self.shared.tasks_asked.swap(false, Relaxed);
         if self.workers.is_empty() || graph.len() > self.max_nodes {
             return false;
         }
@@ -197,15 +209,19 @@ impl ParallelRenderer {
         let Some(below) = self.inline_below else {
             return true;
         };
-        // Nothing can run alongside anything else, or there's too little to
-        // do. Once inline, stay there until there's clearly enough work, so a
-        // graph near the line doesn't flip every block.
+        // Nothing can run alongside anything else, and no node splits its
+        // work into tasks, or there's too little to do. Once inline, stay
+        // there until there's clearly enough work, so a graph near the line
+        // doesn't flip every block.
         let below = if self.inline { below * 2 } else { below };
-        graph.schedule.width > 1 && self.last_work >= below
+        (graph.schedule.width > 1 || tasks) && self.last_work >= below
     }
 
     fn render_inline(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
         let started = Instant::now();
+        // Nodes that ask to run tasks run them here, and get the next block
+        // shared.
+        let _lane = WorkingFor::enter(&self.shared, INLINE);
         ReferenceRenderer.render(graph, block);
         self.last_work = started.elapsed();
         self.inline = true;
@@ -371,8 +387,11 @@ struct Shared {
     /// its nodes, as the block can't end before that node is counted.
     job: AtomicPtr<Job>,
     /// How many lanes the current block can keep busy. Sleeping workers
-    /// beyond that aren't woken.
+    /// beyond that aren't woken, unless a node has tasks for them.
     wanted: AtomicUsize,
+    /// Set when a node asks to run tasks, so the next block is shared even
+    /// when nothing in it can run alongside anything else.
+    tasks_asked: AtomicBool,
     failure: Failure,
     shutdown: AtomicBool,
     spin: Duration,
@@ -387,15 +406,21 @@ struct Lane {
     sleeping: CachePadded<AtomicBool>,
     /// The worker, to wake it. Set when it starts; lane 0 never has one.
     thread: OnceLock<Thread>,
+    /// The tasks of the node this lane is running, for other lanes to help
+    /// with.
+    tasks: Tasks,
 }
 
 impl Lane {
-    fn wake(&self) {
+    /// Wakes the worker if it sleeps, and says whether it did.
+    fn wake(&self) -> bool {
         if self.sleeping.swap(false, SeqCst)
             && let Some(thread) = self.thread.get()
         {
             thread.unpark();
+            return true;
         }
+        false
     }
 }
 
@@ -491,9 +516,11 @@ impl Shared {
     }
 
     /// Runs nodes of block `epoch` until all of them have run, or until the
-    /// next block starts. A worker only starts on a block through
+    /// next block starts, and helps with other lanes' tasks when there's no
+    /// node to run. A worker only starts on a block through
     /// [`Shared::wait`], so it never misses waking the lanes below it.
     fn work(&self, lane: usize, epoch: u64) {
+        let _lane = WorkingFor::enter(self, lane);
         let mut backoff = Backoff::default();
         loop {
             match self.take_source(epoch).or_else(|| self.steal(lane)) {
@@ -503,9 +530,95 @@ impl Shared {
                 }
                 None if self.remaining.load(Acquire) == 0 => return,
                 None if self.epoch.load(Acquire) != epoch => return,
+                None if self.help(lane) => backoff = Backoff::default(),
                 None => backoff.snooze(),
             }
         }
+    }
+
+    /// Runs `task` for each of `0..tasks`, for the node `lane` is running,
+    /// with whichever lanes can help, and returns once every task is done.
+    /// Every task runs, even after one panics; the first panic here comes
+    /// out once they're done, and one on another lane at the end of the
+    /// block.
+    fn run_tasks(&self, lane: usize, tasks: u32, task: &(dyn Fn(u32) + Sync)) {
+        let slot = &self.lanes[lane].tasks;
+        // Only this lane gives out the slot's jobs.
+        let job = ((slot.left.load(Relaxed) >> 32) as u32).wrapping_add(1);
+        // SAFETY: no lane reads the slot's task between jobs, as there's
+        // none left to take, and this function waits for every task of this
+        // job to finish, so the task outlives every use.
+        unsafe { *slot.task.get() = Some(erase(task)) };
+        slot.done.store(0, Relaxed);
+        // Publishes the task: a lane reads it only after taking a task.
+        slot.left
+            .store(u64::from(job) << 32 | u64::from(tasks), Release);
+        self.wake_helpers(tasks.saturating_sub(1));
+        let mut failure = None;
+        while let Some(index) = slot.take(job) {
+            if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| task(index))) {
+                failure.get_or_insert(payload);
+            }
+            slot.done.fetch_add(1, Release);
+        }
+        // Every task is taken. Wait for the ones other lanes took.
+        let mut backoff = Backoff::default();
+        while slot.done.load(Acquire) < tasks {
+            backoff.snooze();
+        }
+        if let Some(payload) = failure {
+            panic::resume_unwind(payload);
+        }
+    }
+
+    /// Wakes up to two sleeping workers, if `left` tasks are still to take.
+    /// Each helper wakes up to two more as it takes a task, so the wake-up
+    /// calls spread out over the threads, as they do when a block starts.
+    /// Workers already awake help when they have no node to run.
+    fn wake_helpers(&self, left: u32) {
+        let mut wanted = left.min(2);
+        for lane in &self.lanes[1..] {
+            if wanted == 0 {
+                return;
+            }
+            if lane.sleeping.load(Relaxed) && lane.wake() {
+                wanted -= 1;
+            }
+        }
+    }
+
+    /// Runs a task of a node another lane is running, if there's one to
+    /// take. Says whether it ran one.
+    fn help(&self, lane: usize) -> bool {
+        let lanes = self.lanes.len();
+        for offset in 1..lanes {
+            let slot = &self.lanes[(lane + offset) % lanes].tasks;
+            let word = slot.left.load(Acquire);
+            if word as u32 == 0 {
+                continue;
+            }
+            let Some(index) = slot.take((word >> 32) as u32) else {
+                continue;
+            };
+            self.wake_helpers(index);
+            let started = Instant::now();
+            // SAFETY: taking a task keeps its job from ending until the task
+            // is counted done, so the task is set, and alive.
+            let task = unsafe { &*(*slot.task.get()).expect("a job has its task") };
+            let ran = {
+                let _tasks = WorkingFor::none();
+                panic::catch_unwind(AssertUnwindSafe(|| rt::scope(|| task(index))))
+            };
+            if let Err(payload) = ran {
+                self.failure.record(payload);
+            }
+            self.counters
+                .block_busy
+                .fetch_add(nanos(started.elapsed()), Relaxed);
+            slot.done.fetch_add(1, Release);
+            return true;
+        }
+        false
     }
 
     /// Takes one of block `epoch`'s sources.
@@ -623,6 +736,109 @@ impl Shared {
             }
         }
     }
+}
+
+/// A node's tasks, which any lane can take while the node waits for them.
+/// Each call to [`tasks::run`](crate::tasks::run) is a job.
+#[derive(Default)]
+struct Tasks {
+    /// The job's number in the high half, which only the slot's own lane
+    /// changes, and how many of its tasks are left to take in the low half.
+    /// Tasks are taken from the last down.
+    left: CachePadded<AtomicU64>,
+    /// The job's tasks done.
+    done: AtomicU32,
+    /// What runs each task. Set before `left` gives out a new job, and read
+    /// only by a lane that has taken one of its tasks.
+    task: UnsafeCell<Option<*const (dyn Fn(u32) + Sync)>>,
+}
+
+// SAFETY: `task` is written by the slot's own lane before it publishes a
+// job through `left`, and read by others only after they take one of the
+// job's tasks, which the job can't end without; it runs on any thread at
+// once, as its `Sync` bound allows.
+unsafe impl Sync for Tasks {}
+// SAFETY: as above; the pointer is only a borrowed task.
+unsafe impl Send for Tasks {}
+
+impl Tasks {
+    /// Takes one of job `job`'s tasks, if any are left: its index, which is
+    /// also how many are left after it.
+    fn take(&self, job: u32) -> Option<u32> {
+        let mut word = self.left.load(Acquire);
+        loop {
+            let left = word as u32;
+            if left == 0 || (word >> 32) as u32 != job {
+                return None;
+            }
+            match self
+                .left
+                .compare_exchange_weak(word, word - 1, AcqRel, Acquire)
+            {
+                Ok(_) => return Some(left - 1),
+                Err(actual) => word = actual,
+            }
+        }
+    }
+}
+
+/// `task`, with its lifetime erased, for a lane's [`Tasks`].
+fn erase<'a>(task: &'a (dyn Fn(u32) + Sync + 'a)) -> *const (dyn Fn(u32) + Sync) {
+    // SAFETY: the same pointer, which `run_tasks` uses only while `task`
+    // lives.
+    unsafe {
+        std::mem::transmute::<&'a (dyn Fn(u32) + Sync + 'a), &'static (dyn Fn(u32) + Sync)>(task)
+    }
+}
+
+thread_local! {
+    /// The renderer and lane this thread is working for while it renders a
+    /// block: where the tasks of the nodes it runs go.
+    static LANE: Cell<(*const Shared, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+}
+
+/// The lane of a block the audio thread renders alone.
+const INLINE: usize = usize::MAX;
+
+/// Marks this thread as working for a lane of a renderer, or for none, until
+/// dropped.
+struct WorkingFor((*const Shared, usize));
+
+impl WorkingFor {
+    fn enter(shared: &Shared, lane: usize) -> Self {
+        Self(LANE.replace((shared, lane)))
+    }
+
+    /// For none, while this thread runs a task: tasks it asks for run here.
+    fn none() -> Self {
+        Self(LANE.replace((std::ptr::null(), 0)))
+    }
+}
+
+impl Drop for WorkingFor {
+    fn drop(&mut self) {
+        LANE.set(self.0);
+    }
+}
+
+/// Runs `task` for each of `0..tasks` with the lanes of the renderer whose
+/// shared block this thread is working on, and says whether it did: false,
+/// having run nothing, in any other block or task.
+pub(crate) fn run_tasks(tasks: u32, task: &(dyn Fn(u32) + Sync)) -> bool {
+    let (shared, lane) = LANE.get();
+    if shared.is_null() {
+        return false;
+    }
+    // SAFETY: set only while this thread renders a block for the renderer,
+    // which keeps `Shared` alive meanwhile.
+    let shared = unsafe { &*shared };
+    shared.tasks_asked.store(true, Relaxed);
+    if lane == INLINE {
+        return false;
+    }
+    let _tasks = WorkingFor::none();
+    shared.run_tasks(lane, tasks, task);
+    true
 }
 
 /// Counts `node` as finished for each node it feeds. Of the nodes that makes

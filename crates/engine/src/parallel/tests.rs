@@ -760,3 +760,267 @@ fn dropping_the_renderer_stops_its_workers() {
         drop(renderer);
     }
 }
+
+/// What a [`Splits`] node's tasks did.
+#[derive(Default)]
+struct Seen {
+    /// How often each task ran.
+    runs: [AtomicUsize; 16],
+    /// Which lanes ran tasks: the test's own thread, which plays the audio
+    /// thread, then each worker.
+    lanes: [AtomicBool; 8],
+    arrived: AtomicUsize,
+    missed: AtomicUsize,
+}
+
+impl Seen {
+    fn runs(&self, tasks: usize) -> Vec<usize> {
+        self.runs[..tasks].iter().map(|r| r.load(Relaxed)).collect()
+    }
+
+    fn lanes(&self, lanes: usize) -> Vec<bool> {
+        self.lanes[..lanes]
+            .iter()
+            .map(|l| l.load(Relaxed))
+            .collect()
+    }
+}
+
+/// The lane of the thread running this.
+fn lane() -> usize {
+    let thread = thread::current();
+    let worker = thread
+        .name()
+        .and_then(|n| n.strip_prefix("musicable-worker-"));
+    worker.map_or(0, |n| n.parse().unwrap())
+}
+
+/// Splits its work into `tasks` tasks a block. The first `together` to start
+/// wait for each other, or until a deadline long past, so a block only
+/// finishes in time if that many threads run its tasks at once.
+struct Splits {
+    tasks: u32,
+    together: usize,
+    seen: Arc<Seen>,
+    blocks: usize,
+}
+
+impl Splits {
+    fn new(tasks: u32, together: usize) -> (Self, Arc<Seen>) {
+        let seen = Arc::new(Seen::default());
+        let splits = Self {
+            tasks,
+            together,
+            seen: seen.clone(),
+            blocks: 0,
+        };
+        (splits, seen)
+    }
+}
+
+impl Node for Splits {
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        let all = self.tasks as usize * self.blocks + self.together;
+        self.blocks += 1;
+        let seen = &*self.seen;
+        crate::tasks::run(self.tasks, &|index| {
+            seen.runs[index as usize].fetch_add(1, Relaxed);
+            seen.lanes[lane()].store(true, Relaxed);
+            seen.arrived.fetch_add(1, AcqRel);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while seen.arrived.load(Acquire) < all {
+                if Instant::now() > deadline {
+                    seen.missed.fetch_add(1, Relaxed);
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+        output.clear();
+    }
+}
+
+/// A graph of `node` alone, which nothing can run alongside.
+fn alone(node: impl Node) -> PreparedGraph {
+    let mut g = Graph::new();
+    let node = g.add(NodeKey(0), node);
+    g.set_output(node).unwrap();
+    g.prepare(&CONFIG).unwrap()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_nodes_tasks_run_on_several_threads_at_once() {
+    // The workers have no node to run, only the tasks, and each task waits
+    // for one on every other thread. They sleep between blocks, so the tasks
+    // have to wake them, or spin.
+    let threads = 3;
+    let tempo = TempoMap::default();
+    for spin in [Duration::ZERO, Duration::from_millis(5)] {
+        let (splits, seen) = Splits::new(8, threads + 1);
+        let mut graph = alone(splits);
+        let mut renderer = ParallelRenderer::new(options(threads, spin));
+        for _ in 0..10 {
+            renderer.render(&mut graph, &block(16, &tempo));
+        }
+        assert_eq!(seen.missed.load(Relaxed), 0);
+        assert_eq!(seen.runs(8), [10; 8], "each task ran once a block");
+        assert_eq!(seen.lanes(threads + 1), [true; 4]);
+    }
+}
+
+#[test]
+fn elsewhere_a_nodes_tasks_run_one_after_another() {
+    let tempo = TempoMap::default();
+    let (splits, seen) = Splits::new(8, 1);
+    let mut graph = alone(splits);
+    ReferenceRenderer.render(&mut graph, &block(16, &tempo));
+    // A parallel renderer with no workers, and one running the block on the
+    // audio thread alone.
+    let mut renderer = ParallelRenderer::new(options(0, Duration::ZERO));
+    renderer.render(&mut graph, &block(16, &tempo));
+    let mut renderer = ParallelRenderer::new(ParallelOptions {
+        inline_below: Some(Duration::from_secs(3600)),
+        ..options(3, Duration::ZERO)
+    });
+    renderer.render(&mut graph, &block(16, &tempo));
+    assert_eq!(renderer.monitor().stats().inline_blocks, 1);
+    assert_eq!(seen.runs(8), [3; 8]);
+    assert_eq!(seen.lanes(4), [true, false, false, false]);
+}
+
+#[test]
+fn blocks_after_one_with_tasks_are_shared() {
+    // Nothing can run alongside the node, so the renderer would run its
+    // blocks on the audio thread alone, but for its tasks. The first block
+    // shows them, and the rest are shared, while there's enough work.
+    let tempo = TempoMap::default();
+    let blocks = |inline_below| {
+        let (splits, _) = Splits::new(4, 1);
+        let mut graph = alone(splits);
+        let mut renderer = ParallelRenderer::new(ParallelOptions {
+            inline_below: Some(inline_below),
+            ..options(2, Duration::ZERO)
+        });
+        for _ in 0..5 {
+            renderer.render(&mut graph, &block(16, &tempo));
+        }
+        let stats = renderer.monitor().stats();
+        (stats.parallel_blocks, stats.inline_blocks)
+    };
+    assert_eq!(blocks(Duration::ZERO), (4, 1));
+    assert_eq!(blocks(Duration::from_secs(3600)), (0, 5));
+}
+
+/// Splits its work into tasks that call [`tasks::run`](crate::tasks::run)
+/// themselves, and checks that those run on the same thread.
+struct SplitsAgain(Arc<AtomicUsize>);
+
+impl Node for SplitsAgain {
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        let inner = &*self.0;
+        crate::tasks::run(4, &|_| {
+            let outer = lane();
+            crate::tasks::run(3, &|_| {
+                assert_eq!(lane(), outer);
+                inner.fetch_add(1, Relaxed);
+            });
+        });
+        output.clear();
+    }
+}
+
+#[test]
+fn a_task_runs_its_own_tasks_itself() {
+    let tempo = TempoMap::default();
+    let inner = Arc::new(AtomicUsize::new(0));
+    let mut graph = alone(SplitsAgain(inner.clone()));
+    let mut renderer = ParallelRenderer::new(options(3, Duration::from_millis(5)));
+    for _ in 0..20 {
+        renderer.render(&mut graph, &block(16, &tempo));
+    }
+    assert_eq!(inner.load(Relaxed), 20 * 4 * 3);
+}
+
+/// Splits its work into tasks that panic in its first block.
+#[derive(Default)]
+struct TasksPanicOnce {
+    seen: Arc<Seen>,
+    panicked: bool,
+}
+
+impl Node for TasksPanicOnce {
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        let panic = !std::mem::replace(&mut self.panicked, true);
+        let seen = &*self.seen;
+        crate::tasks::run(8, &|index| {
+            seen.runs[index as usize].fetch_add(1, Relaxed);
+            if panic {
+                panic!("a task failed");
+            }
+        });
+        output.clear();
+    }
+}
+
+#[test]
+fn a_panic_in_a_task_reaches_the_audio_thread_once_every_task_has_run() {
+    let tempo = TempoMap::default();
+    let fails = |renderer: &mut dyn Renderer, graph: &mut PreparedGraph| {
+        let failed = panic::catch_unwind(AssertUnwindSafe(|| {
+            renderer.render(graph, &block(16, &tempo));
+        }));
+        let payload = failed.expect_err("the block should have failed");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"a task failed"));
+    };
+    // One after another.
+    let node = TasksPanicOnce::default();
+    let seen = node.seen.clone();
+    fails(&mut ReferenceRenderer, &mut alone(node));
+    assert_eq!(seen.runs(8), [1; 8]);
+    // On several threads at once.
+    let node = TasksPanicOnce::default();
+    let seen = node.seen.clone();
+    let mut graph = alone(node);
+    let mut renderer = ParallelRenderer::new(options(3, Duration::ZERO));
+    fails(&mut renderer, &mut graph);
+    assert_eq!(seen.runs(8), [1; 8]);
+    // The renderer carries on.
+    renderer.render(&mut graph, &block(16, &tempo));
+    assert_eq!(seen.runs(8), [2; 8]);
+}
+
+/// Splits its work into tasks, one of which allocates, which tasks must not
+/// do.
+#[cfg(debug_assertions)]
+struct TaskAllocates;
+
+#[cfg(debug_assertions)]
+impl Node for TaskAllocates {
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        crate::tasks::run(8, &|index| {
+            if index == 5 {
+                drop(std::hint::black_box(vec![0u8; 16]));
+            }
+        });
+        output.clear();
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[cfg_attr(miri, ignore)]
+fn allocating_in_a_task_on_any_thread_fails_the_block() {
+    let tempo = TempoMap::default();
+    let mut renderer = ParallelRenderer::new(options(3, Duration::ZERO));
+    let mut graph = alone(TaskAllocates);
+    // The task runs on whichever thread takes it.
+    for _ in 0..20 {
+        let failed = panic::catch_unwind(AssertUnwindSafe(|| {
+            renderer.render(&mut graph, &block(16, &tempo));
+        }));
+        let payload = failed.expect_err("the block should have failed");
+        let message = payload.downcast::<String>().unwrap();
+        assert!(message.contains("real-time violation"), "{message}");
+    }
+}
