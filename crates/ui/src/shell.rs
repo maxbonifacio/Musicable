@@ -304,6 +304,7 @@ impl Shell {
                             audio: view.inputs,
                             midi: view.midi_inputs,
                         },
+                        view.playback.playhead,
                         theme,
                         &self.mouse,
                         &mut actions,

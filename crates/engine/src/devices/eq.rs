@@ -5,7 +5,7 @@ use musicable_model::native::{NativeDevice, decibels_to_gain};
 
 use super::svf::{Coefficients, State};
 use super::{Params, Span, Values};
-use crate::{AudioMut, EngineConfig, Inputs, Node, ProcessContext};
+use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The most sections a band has: a 48 dB cut's four.
 const SECTIONS: usize = 4;
@@ -15,9 +15,6 @@ const SECTIONS: usize = 4;
 pub struct Equalizer {
     params: Params,
     bands: [BandFilter; BANDS],
-    /// The signal into a band that's fading in or out, for each channel,
-    /// `max_block` frames each.
-    dry: Vec<f32>,
     sample_rate: f64,
 }
 
@@ -26,7 +23,6 @@ impl Equalizer {
         Self {
             params: Params::new(device),
             bands: [BandFilter::default(); BANDS],
-            dry: Vec::new(),
             sample_rate: 48_000.0,
         }
     }
@@ -35,8 +31,11 @@ impl Equalizer {
 impl Node for Equalizer {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
-        self.dry = vec![0.0; 2 * config.max_block];
         self.sample_rate = f64::from(config.sample_rate);
+    }
+
+    fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
+        self.params.automate(param, automation)
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {
@@ -55,13 +54,12 @@ impl Node for Equalizer {
         let Self {
             params,
             bands,
-            dry,
             sample_rate,
         } = self;
         params.run(ctx, |span| {
             let mut out = output.range_mut(span.frames.clone());
             for (b, band) in bands.iter_mut().enumerate() {
-                band.render(b, &span, &mut out, dry, *sample_rate);
+                band.render(b, &span, &mut out, *sample_rate);
             }
             let gain = span.values.frames(OUTPUT);
             if span.values.steady(OUTPUT) {
@@ -113,19 +111,13 @@ const FLAT: musicable_model::native::eq::Section = musicable_model::native::eq::
 };
 
 impl BandFilter {
-    /// Filters one span of the output in place as band `b`.
-    fn render(
-        &mut self,
-        b: usize,
-        span: &Span<'_>,
-        out: &mut AudioMut<'_>,
-        dry: &mut [f32],
-        sample_rate: f64,
-    ) {
+    /// Filters one span of the output in place as band `b`. A frame comes
+    /// out the same whichever way it goes, so the band sounds the same
+    /// however the blocks fall.
+    fn render(&mut self, b: usize, span: &Span<'_>, out: &mut AudioMut<'_>, sample_rate: f64) {
         let values = span.values;
         let param = |p: usize| b * PER_BAND + p;
-        let frames = span.frames.len();
-        if frames == 0 {
+        if span.frames.is_empty() {
             return;
         }
         let on = values.frames(param(ON));
@@ -134,47 +126,45 @@ impl BandFilter {
             self.state = [[State::default(); SECTIONS]; 2];
             return;
         }
-        let fading = !(values.steady(param(ON)) && on[0] == 1.0);
         let channels = out.channels().min(2);
-        if fading {
-            for c in 0..channels {
-                dry[c * frames..][..frames].copy_from_slice(out.channel(c));
-            }
-        }
         let tuning = [SHAPE, FREQ, GAIN, Q].map(param);
-        if tuning.iter().all(|&p| values.steady(p)) {
+        let fully_on = values.steady(param(ON)) && on[0] == 1.0;
+        if fully_on && tuning.iter().all(|&p| values.steady(p)) {
             self.tune(tuning.map(|p| values.first(p)), sample_rate);
             for c in 0..channels {
-                let channel = out.channel_mut(c);
-                for (coefficients, state) in
-                    self.sections[..self.count].iter().zip(&mut self.state[c])
-                {
-                    state.run(coefficients, channel);
+                for sample in out.channel_mut(c) {
+                    *sample = self.tick(c, *sample);
                 }
             }
-        } else {
-            // Tuned anew each frame, as it moves.
-            for i in 0..frames {
-                self.tune(at(values, tuning, i), sample_rate);
-                for c in 0..channels {
-                    let mut x = f64::from(out.channel(c)[i]);
-                    for (coefficients, state) in
-                        self.sections[..self.count].iter().zip(&mut self.state[c])
-                    {
-                        x = state.tick(coefficients, x);
-                    }
-                    out.channel_mut(c)[i] = x as f32;
-                }
-            }
+            return;
         }
-        if fading {
+        // Tuned anew each frame, as it moves, and faded in or out.
+        for (i, &on) in on.iter().enumerate() {
+            if on == 0.0 {
+                self.state = [[State::default(); SECTIONS]; 2];
+                continue;
+            }
+            self.tune(at(values, tuning, i), sample_rate);
             for c in 0..channels {
-                let dry = &dry[c * frames..][..frames];
-                for ((wet, &dry), &on) in out.channel_mut(c).iter_mut().zip(dry).zip(on) {
-                    *wet = dry + on * (*wet - dry);
-                }
+                let dry = out.channel(c)[i];
+                let wet = self.tick(c, dry);
+                out.channel_mut(c)[i] = if on == 1.0 {
+                    wet
+                } else {
+                    dry + on * (wet - dry)
+                };
             }
         }
+    }
+
+    /// Filters one of channel `c`'s samples through the sections.
+    #[inline]
+    fn tick(&mut self, c: usize, sample: f32) -> f32 {
+        let mut x = f64::from(sample);
+        for (coefficients, state) in self.sections[..self.count].iter().zip(&mut self.state[c]) {
+            x = state.tick(coefficients, x);
+        }
+        x as f32
     }
 
     /// Works out the coefficients for the band set as `tuning`, unless

@@ -83,6 +83,12 @@ pub struct Theme {
     pub take_clip: Color32,
     /// What the armed tracks have recorded so far, while they record.
     pub recording: Color32,
+    /// Automation lanes, under the tracks, and the lines and points on
+    /// them: grey where someone overrode the automation by hand, and for a
+    /// parameter's own value where it has none.
+    pub automation_lane: Color32,
+    pub automation: Color32,
+    pub automation_off: Color32,
     pub header: Color32,
     pub header_selected: Color32,
     pub header_text: Color32,
@@ -117,6 +123,12 @@ pub struct Theme {
     pub track_height: f32,
     /// A take lane's height.
     pub take_height: f32,
+    /// An automation lane's height.
+    pub automation_height: f32,
+    /// The radius of an automation lane's points, and how near a point or
+    /// the line through them a press takes it.
+    pub point: f32,
+    pub point_grab: f32,
     /// The bar with a clip's name, when the clip is tall enough for one.
     pub clip_title: f32,
     /// How near a clip's edge a drag trims it.
@@ -274,6 +286,9 @@ impl Default for Theme {
             take_lane: Color32::from_gray(33),
             take_clip: Color32::from_gray(96),
             recording: Color32::from_rgba_unmultiplied(230, 75, 65, 110),
+            automation_lane: Color32::from_gray(35),
+            automation: Color32::from_rgb(240, 95, 85),
+            automation_off: Color32::from_gray(125),
             header: Color32::from_gray(46),
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),
@@ -293,6 +308,9 @@ impl Default for Theme {
             header_width: 190.0,
             track_height: 60.0,
             take_height: 36.0,
+            automation_height: 48.0,
+            point: 3.0,
+            point_grab: 5.0,
             clip_title: 14.0,
             edge_grab: 6.0,
             fade_handle: 7.0,

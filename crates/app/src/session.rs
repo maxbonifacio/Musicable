@@ -18,6 +18,7 @@ use musicable_engine::{
     NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
     compile_with_inputs,
 };
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::{DeviceId, Input, Monitor, Project, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
@@ -678,8 +679,9 @@ impl Session {
             match change {
                 Change::GestureBegin => self.document.begin_gesture(),
                 Change::GestureEnd => self.document.end_gesture(),
+                // Moved by hand, so it overrides the parameter's automation.
                 Change::Param { param, value } => self.document.transact(&name, |tx| {
-                    tx.set_plugin_param(device, param, Some(value));
+                    tx.set_param_by_hand(ParamAddress::Device(device, param), value);
                 }),
                 Change::Settings(settings) => self.document.transact(&name, |tx| {
                     tx.set_plugin_settings(device, settings);
@@ -840,6 +842,12 @@ impl Session {
                     | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. } => recompile = true,
+                    // So is automation, and the plugins leave what it moves
+                    // to the engine.
+                    Edit::AddLane { .. }
+                    | Edit::RemoveLane { .. }
+                    | Edit::LanePoints { .. }
+                    | Edit::LaneOverridden { .. } => recompile = true,
                 }
             }
         }

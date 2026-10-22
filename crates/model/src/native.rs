@@ -21,6 +21,8 @@ pub mod sampler;
 pub mod synth;
 pub mod utility;
 
+pub use crate::param::Scale;
+
 /// Which built-in device a device is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NativeKind {
@@ -406,49 +408,6 @@ pub enum Unit {
     Switch,
     /// One of these, by its index from 0.
     Choice(&'static [&'static str]),
-}
-
-/// How a parameter's values spread along its control. The same as
-/// automation's scales (`musicable_model::param::Scale`, which can replace
-/// this one).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Scale {
-    /// Evenly over the range.
-    #[default]
-    Linear,
-    /// Evenly in ratios, for frequencies and times. The range is above 0.
-    Log,
-    /// A fader's taper, as the mixer's faders spread linear gain: the
-    /// fourth root of value / max spreads evenly, from 0 at the bottom. It
-    /// suits times that can be 0 too, giving short ones room. The range
-    /// starts at 0.
-    Fader,
-}
-
-impl Scale {
-    /// Where `value` is along `min..=max`, from 0.0 to 1.0.
-    pub fn to_unit(self, value: f64, min: f64, max: f64) -> f64 {
-        let unit = match self {
-            Self::Linear => (value - min) / (max - min),
-            Self::Log => (value / min).ln() / (max / min).ln(),
-            Self::Fader => (value / max).max(0.0).sqrt().sqrt(),
-        };
-        if unit.is_nan() {
-            0.0
-        } else {
-            unit.clamp(0.0, 1.0)
-        }
-    }
-
-    /// The value at `unit` along `min..=max`.
-    pub fn from_unit(self, unit: f64, min: f64, max: f64) -> f64 {
-        let unit = unit.clamp(0.0, 1.0);
-        match self {
-            Self::Linear => min + (max - min) * unit,
-            Self::Log => min * (max / min).powf(unit),
-            Self::Fader => max * unit.powi(4),
-        }
-    }
 }
 
 /// The linear gain of `db` decibels.

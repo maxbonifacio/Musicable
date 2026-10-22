@@ -9,18 +9,23 @@
 //! places in the song. [`plugin`] has plugins in device chains, and
 //! [`native`] Musicable's own devices. Tracks
 //! record from an [`Input`] into [`Take`]s, and comping copies the best of
-//! them to the track's own clips.
+//! them to the track's own clips. [`param`] names every parameter in the
+//! project, and [`automation`] has the lanes that move them as the song
+//! plays.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
 //! `docs/project-format.md` for how.
 
+pub mod automation;
 pub mod clip;
 pub mod mixer;
 pub mod native;
+pub mod param;
 pub mod plugin;
 pub mod time;
 
+use automation::Lane;
 use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
 use native::NativeDevice;
@@ -431,6 +436,8 @@ pub struct Project {
     pub tracks: Vec<Track>,
     /// In any order: the ruler shows them by position.
     pub locators: Vec<Locator>,
+    /// The automated parameters' lanes, one for each, in any order.
+    pub automation: Vec<Lane>,
     /// The id [`add_track`](Self::add_track) gives the next track. Ids are
     /// never reused, so it stays above the id of every track the project has
     /// had, deleted ones included.
@@ -461,6 +468,7 @@ impl Default for Project {
             master: Master::default(),
             tracks: Vec::new(),
             locators: Vec::new(),
+            automation: Vec::new(),
             next_track_id: 0,
             next_send_id: 0,
             next_device_id: 0,
