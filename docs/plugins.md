@@ -1,18 +1,22 @@
 # Plugins
 
-How Musicable hosts plugins: CLAP so far, in `crates/plugins`, and how the
-app puts them on tracks, in `crates/app`. VST3 comes next on the same
-pieces, then ARA 2 on top of VST3. [app.md](app.md#plugins) says how
-plugins look and work in the app's window.
+How Musicable hosts plugins, CLAP and VST3, in `crates/plugins`, and how
+the app puts them on tracks, in `crates/app`. The app has CLAP plugins so
+far, and VST3 comes to it next. ARA 2 comes after, on top of VST3.
+[app.md](app.md#plugins) says how plugins look and work in the app's
+window.
+
+Most of what follows holds for both formats, in CLAP's words. [VST3](#vst3)
+says what's different there.
 
 ## The pieces
 
 | Piece | Where | What it does |
 |---|---|---|
-| `Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else CLAP wants done on the main thread |
-| `NodeSource`, `ClapNode` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
+| `clap::Instance`, `vst3::Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else the format wants done on the main thread |
+| `NodeSource`, `ClapNode`, `Vst3Node` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
 | `scan` | A process of its own | Lists the plugins in a library, so one that crashes or hangs as it loads takes only the scanner down; `ScanCache` remembers what was found |
-| `crates/test-plugins` | Tests | A gain and a synth that check the host keeps CLAP's rules, and libraries that crash, hang or fail to load |
+| `crates/test-plugins` | Tests | A gain and a synth, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
 | `Plugins` | The app's main thread | An instance for each plugin device in the open project, kept in step with it both ways (`crates/app/src/plugins.rs`) |
 | `PluginScan` | A thread of the app's | Scans in the background, each library in a process of its own, and keeps what it found (`crates/app/src/plugin_scan.rs`) |
 | `PluginWindows` | The app's main thread | The plugins' own windows, and Musicable's windows they go inside (`crates/app/src/plugin_windows.rs`) |
@@ -127,6 +131,65 @@ new size. A plugin that can't go inside another window gets one of its own
 (`open_floating_window`). When the plugin asks for a new size or to close,
 `poll` says so.
 
+## VST3
+
+A VST3 module is a `.vst3` bundle, a folder with a binary for each
+platform (`Contents/x86_64-win`, `Contents/MacOS`, `Contents/x86_64-linux`
+and so on), or on Windows also a single `.vst3` file. It's loaded and
+entered once per process, as CLAP libraries are, and its factory makes its
+classes. Its audio module classes are its plugins, named by their class
+ids: 32 hex digits, written as VST3 writes them on every platform.
+
+- **Two parts.** A VST3 plugin is a component, whose audio processor
+  processes, and an edit controller, which has the parameters' names and
+  text, and the window. In most plugins the controller is an object of its
+  own, and in some one object is both. The instance makes both and
+  initializes them,
+  connects them so they can talk through the host's messages, and gives the
+  controller the component's state. VST3's UI thread is the main thread.
+- **Activating** sets the plugin up for the engine's sample rate and block
+  size, turns on its main audio buses and its first event input, activates
+  it and starts it processing, all on the main thread.
+- **Parameters** are normalized, from 0 to 1, whatever they stand for.
+  `steps` is VST3's step count, and the module is the unit the parameter is
+  in, with its parents', such as `Oscillators/Osc 1`. VST3 has no
+  modulation, so nodes drop modulation events.
+- **Changes from the app** go to the controller at once, but VST3's
+  processor only takes changes as it processes. So an active plugin gets
+  them in its next block, and an inactive one as it's activated, in a block
+  of no frames, before it says its latency. A plugin that asked to restart
+  for them, as for a new latency, is activated once more, since many only
+  take their latency as they're activated. Saving and loading the state
+  first make sure changes on their way reach the processor: they wait a
+  few blocks for a node to hand them over, then hand them over themselves,
+  holding the busy flag. A state saved while the plugin is inactive misses
+  the changes since it was deactivated, which the device keeps anyway.
+- **Changes from the plugin.** Edits in its window come back from `poll`,
+  as for CLAP, and go on to the processor. What the processor reports, such
+  as meters, and the graph's automation only go to the controller, for its
+  window to show: they don't come back from `poll`.
+- **Restarts.** A plugin asks the host to restart it with flags. A new
+  latency, new buses, or reloading it whole deactivate and activate it
+  again (`Restarted`). New parameter names or ids read the parameters again
+  (`ParamsChanged`). New parameter values, and the plugin saying it's
+  changed (`setDirty`), are `StateChanged`. A restart asked for while the
+  plugin is inactive waits for it to activate, which is the restart.
+- **Notes** go to the first event input, with note ids, which notes off
+  name. Pitch bend is VST3's tuning expression, which goes from 120
+  semitones down to 120 up; pressure is poly pressure, and timbre is
+  brightness. The transport is VST3's process context, with the frames
+  since the plugin was activated.
+- **State** is a `.vstpreset` file: the plugin's class id, the component's
+  state, and the controller's if it's an object of its own. Loading checks
+  the class id.
+- **Windows** only go inside a window of Musicable's: an `HWND` on Windows,
+  an `NSView` on macOS, an X11 window on Linux. `open_floating_window`
+  fails. The scale goes to the plugin's window, except on macOS, which
+  scales windows itself. A window that asks for a new size gets it at once,
+  and `poll` says so, for Musicable's to follow.
+- **Scanning.** `scan::vst3_dirs` has VST3's standard places, and the ones
+  in `VST3_PATH`, which Musicable reads as it reads `CLAP_PATH`.
+
 ## Plugins on tracks
 
 A plugin device names its plugin by format and id, with the name it had
@@ -190,14 +253,16 @@ seconds, counts as bad, as does one that fails to initialize. `ScanCache`
 remembers every library scanned, good or bad, with its time and size, so
 the next scan only loads new and changed libraries, and a bad one isn't
 loaded again until it changes or someone asks. `scan::clap_dirs` has CLAP's
-standard places, and the ones in `CLAP_PATH`.
+standard places, and the ones in `CLAP_PATH`, and `scan::vst3_dirs` VST3's.
 
 ## Limits
 
 | What | Limit | When it's reached |
 |---|---|---|
 | Parameter changes waiting for a plugin's next block | 1,024 | The rest wait on the main thread, one per parameter, until the next `poll` |
+| Parameter changes a VST3 plugin gets in one block | 4,096, for up to 1,024 parameters | The rest are dropped |
 | Events a plugin gets in one block | 4,096 | The rest are dropped |
+| Parameters a VST3 plugin reports in one block, such as meters | 256 | The rest are dropped. Each keeps its last value, which is what the controller shows |
 | Events a plugin sends back between two polls | 4,096 | The plugin is told the queue is full |
 | Notes sounding on a plugin | 512 | New notes are dropped |
 | Latency | `Graph::MAX_LATENCY` | Delay compensation treats the plugin as that late |
@@ -216,11 +281,21 @@ breach. Tests drive them through
 hooks the library exports: turning a knob in the pretend window, changing
 state that isn't a parameter, asking for a callback or a resize.
 
-Each test copies the library to a file of its own, so the plugins' counts
-are its own. A copy whose name starts with `crash` crashes as it
-initializes, one starting with `hang` never finishes, and one starting with
-`refuse` fails. The scanner's test runs the test binary itself as the
-scanning process (`tests::scan_child`).
+The library is also a VST3 module with the same two plugins. There, Test
+Gain is a component with a controller of its own, which tells the
+component about state that isn't a parameter in a message, asks to restart
+for a new latency, and has a meter, Peak, which the processor sets. Test
+Synth is one object, and plays notes with VST3's note expression. Both
+check VST3's rules, in the same count: what's called on which thread and in
+which state, and that the host connects, terminates and lets go of each
+object, in order, before the module exits.
+
+Each test copies the library to a file of its own, or makes a VST3 bundle
+of its own (`testing::copy_vst3`), so the plugins' counts are its own. A
+copy whose name starts with `crash` crashes as it initializes, one starting
+with `hang` never finishes, and one starting with `refuse` fails. The
+scanner's test runs the test binary itself as the scanning process
+(`tests::scan_child`).
 
 The node is checked for allocations like every node. The plugin's own code
 isn't: its allocations go through its own allocator. RTSan will check that.
@@ -242,5 +317,10 @@ does it all in the app's window, with the mouse and the keys.
   state.
 - Audio ports beyond the main ones (sidechains), 64-bit processing, MPE
   MIDI, notes a plugin plays, and letting a quiet plugin sleep.
-- VST3, then ARA 2.
+- VST3 in the app: scanning for VST3 modules, VST3 devices on tracks, and
+  their windows.
+- VST3 windows on Linux, which need the host's run loop, and VST3's MIDI
+  mapping, so MIDI controllers reach plugins that only take them as
+  parameters.
+- ARA 2.
 - A CI job with [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html).

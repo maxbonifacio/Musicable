@@ -454,7 +454,25 @@ impl Instance {
         self.shared.set_lifecycle(PROCESSING);
         // Before it says its latency, which they may change.
         // SAFETY: processing, holding `busy`.
-        unsafe { node::flush(parts.processor.as_com_ref(), audio, &mut self.pending) };
+        let handed = unsafe { node::flush(parts.processor.as_com_ref(), audio, &mut self.pending) };
+        // A plugin that asked to restart for them, as for a new latency,
+        // may only take them as it's activated, so it's activated again.
+        let restart = &self.shared.requests.restart;
+        if handed && restart.load(Ordering::Acquire) & RESTART != 0 {
+            // SAFETY: on the main thread, active and processing.
+            let again = unsafe {
+                parts.processor.setProcessing(0);
+                parts.component.setActive(0);
+                parts.component.setActive(1) == kResultOk
+            };
+            if !again {
+                self.shared.set_lifecycle(INACTIVE);
+                audio.config = None;
+                return Err(Error::new(format!("{name} couldn't start at {rate} Hz")));
+            }
+            // SAFETY: on the main thread, and active.
+            unsafe { parts.processor.setProcessing(1) };
+        }
         // SAFETY: on the main thread, and active.
         let latency = unsafe { parts.processor.getLatencySamples() };
         self.shared
@@ -462,7 +480,6 @@ impl Instance {
         drop(busy);
         // This is the restart the plugin asked for, if it asked for one, as
         // it was set up or before.
-        let restart = &self.shared.requests.restart;
         restart.fetch_and(!RESTART, Ordering::AcqRel);
         self.config = Some(config);
         Ok(())
@@ -597,10 +614,8 @@ impl Instance {
         if !preset.class_id.eq_ignore_ascii_case(&self.info.id) {
             return Err(Error::new(format!("{name}'s state is another plugin's")));
         }
-        // The changes that haven't reached the processor are older than
-        // the state.
+        // Changes on their way to the processor are older than the state.
         self.settle();
-        self.pending.clear();
         let parts = &*self.parts;
         let component = Stream::new(preset.component);
         // SAFETY: on the main thread, with streams that live for the calls.
@@ -608,6 +623,8 @@ impl Instance {
             if parts.component.setState(Stream::ptr(&component)) != kResultOk {
                 return Err(Error::new(format!("{name} couldn't load its state")));
             }
+            // So are those waiting for it to activate.
+            self.pending.clear();
             if let Some(controller) = &parts.controller {
                 component.rewind();
                 controller.setComponentState(Stream::ptr(&component));
@@ -658,16 +675,26 @@ impl Instance {
                 unsafe { controller.setParamNormalized(change.id, change.value) };
             }
         }
-        let restart = self.shared.requests.restart.swap(0, Ordering::AcqRel);
-        if restart & RESTART != 0
-            && let Some(config) = self.config
-        {
-            let latency = self.latency();
-            match self.activate(config) {
-                Ok(()) => events.push(PluginEvent::Restarted {
-                    latency_changed: self.latency() != latency,
-                }),
-                Err(e) => events.push(PluginEvent::Failed(e.to_string())),
+        let requests = &self.shared.requests;
+        let restart = requests.restart.swap(0, Ordering::AcqRel);
+        if restart & RESTART != 0 {
+            match self.config {
+                Some(config) => {
+                    let latency = self.latency();
+                    match self.activate(config) {
+                        Ok(()) => events.push(PluginEvent::Restarted {
+                            latency_changed: self.latency() != latency,
+                        }),
+                        Err(e) => events.push(PluginEvent::Failed(e.to_string())),
+                    }
+                }
+                // An inactive plugin restarts as it's activated, which needs
+                // to know it asked.
+                None => {
+                    requests
+                        .restart
+                        .fetch_or(restart & RESTART, Ordering::AcqRel);
+                }
             }
         }
         if restart & PARAMS_CHANGED != 0 {

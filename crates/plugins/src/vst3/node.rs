@@ -311,6 +311,7 @@ unsafe fn process(
 
 /// Hands the plugin the changes the main thread has for it, `pending` after
 /// the ones waiting for the nodes, as many blocks of no frames as it takes.
+/// Says whether there were any.
 ///
 /// # Safety
 ///
@@ -319,7 +320,8 @@ pub(crate) unsafe fn flush(
     processor: ComRef<'_, IAudioProcessor>,
     audio: &mut Audio,
     pending: &mut Vec<ParamChange>,
-) {
+) -> bool {
+    let mut handed = false;
     loop {
         audio.changes.clear();
         audio.events.clear();
@@ -338,12 +340,14 @@ pub(crate) unsafe fn flush(
         if audio.changes.is_empty() {
             break;
         }
+        handed = true;
         audio.changes.ready();
         // SAFETY: the caller's promise; a block of no frames reads no
         // buffers.
         unsafe { process(processor, audio, 0) };
     }
     audio.changes.clear();
+    handed
 }
 
 /// Puts the block's parameter changes and events in the plugin's lists:

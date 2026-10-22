@@ -1,4 +1,6 @@
-//! Plugin hosting: CLAP now, then VST3, then ARA 2 on top of VST3.
+//! Plugin hosting: CLAP ([`clap`]) and VST3 ([`vst3`]), then ARA 2 on top
+//! of VST3. The two work alike, and what's said here of CLAP's
+//! [`Instance`] holds for [`vst3::Instance`] too.
 //!
 //! [`Instance::new`] loads a plugin's library and makes an instance of the
 //! plugin. The instance lives on the thread that made it, the app's main

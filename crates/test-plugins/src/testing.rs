@@ -5,17 +5,16 @@
 //! The hooks reach the copy the host loads, not this crate as it's linked
 //! into the test: each copy of the library has statics of its own.
 
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap_sys::plugin::clap_plugin;
 
-/// Copies the test plugins' library, as Cargo built it for the tests
-/// running, to `name.clap` in `dir`, without loading it. A name that starts
-/// with `crash`, `hang` or `refuse` makes the copy misbehave as it loads:
-/// see the crate's documentation.
-pub fn copy(dir: &Path, name: &str) -> PathBuf {
+use crate::vst3::Vst3Transport;
+
+/// The test plugins' library, as Cargo built it for the tests running.
+fn built() -> PathBuf {
     let file = format!(
         "{}musicable_test_plugins{}",
         std::env::consts::DLL_PREFIX,
@@ -23,14 +22,56 @@ pub fn copy(dir: &Path, name: &str) -> PathBuf {
     );
     let exe = std::env::current_exe().expect("the tests know where they are");
     let deps = exe.parent().expect("tests run from target/<profile>/deps");
-    let built = [deps.join(&file), deps.parent().unwrap_or(deps).join(&file)]
+    [deps.join(&file), deps.parent().unwrap_or(deps).join(&file)]
         .into_iter()
         .find(|path| path.exists())
-        .expect("Cargo builds the test plugins before the tests that list them");
+        .expect("Cargo builds the test plugins before the tests that list them")
+}
+
+/// Copies the test plugins' library to `name.clap` in `dir`, without
+/// loading it. A name that starts with `crash`, `hang` or `refuse` makes
+/// the copy misbehave as it loads: see the crate's documentation.
+pub fn copy(dir: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(dir).expect("the test's folder is writable");
     let copy = dir.join(format!("{name}.clap"));
-    fs::copy(built, &copy).expect("the test's folder is writable");
+    fs::copy(built(), &copy).expect("the test's folder is writable");
     copy
+}
+
+/// Makes a VST3 bundle, `name.vst3` in `dir`, with a copy of the test
+/// plugins' library as its binary for this platform, without loading it.
+/// Names misbehave as they do for [`copy`]. Returns the bundle and its
+/// binary.
+pub fn copy_vst3(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let bundle = dir.join(format!("{name}.vst3"));
+    let contents = bundle.join("Contents");
+    let binary = if cfg!(target_os = "macos") {
+        contents.join("MacOS").join(name)
+    } else {
+        let arch = match (cfg!(windows), cfg!(target_arch = "aarch64")) {
+            (true, true) => "arm64-win",
+            (true, false) => "x86_64-win",
+            (false, true) => "aarch64-linux",
+            (false, false) => "x86_64-linux",
+        };
+        let extension = if cfg!(windows) { "vst3" } else { "so" };
+        contents.join(arch).join(format!("{name}.{extension}"))
+    };
+    let folder = binary.parent().expect("the binary is in the bundle");
+    fs::create_dir_all(folder).expect("the test's folder is writable");
+    fs::copy(built(), &binary).expect("the test's folder is writable");
+    if cfg!(target_os = "macos") {
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <plist version=\"1.0\">\n<dict>\n\
+             \t<key>CFBundleExecutable</key>\n\t<string>{name}</string>\n\
+             \t<key>CFBundleIdentifier</key>\n\t<string>org.musicable.test.{name}</string>\n\
+             \t<key>CFBundlePackageType</key>\n\t<string>BNDL</string>\n\
+             </dict>\n</plist>\n"
+        );
+        fs::write(contents.join("Info.plist"), plist).expect("the test's folder is writable");
+    }
+    (bundle, binary)
 }
 
 /// A copy of the test plugins' library, and the hooks into it.
@@ -45,15 +86,27 @@ impl Library {
     /// that starts with CLAP's entry, which only the host calls.
     pub fn copy(dir: &Path, name: &str) -> Self {
         let path = copy(dir, name);
+        Self::load(path.clone(), &path)
+    }
+
+    /// Makes a VST3 bundle, as [`copy_vst3`] does, and loads its binary for
+    /// its hooks. Loading runs none of the plugins' code: that starts with
+    /// the module's entry, which only the host calls.
+    pub fn copy_vst3(dir: &Path, name: &str) -> Self {
+        let (bundle, binary) = copy_vst3(dir, name);
+        Self::load(bundle, &binary)
+    }
+
+    fn load(path: PathBuf, binary: &Path) -> Self {
         // The path the host loads it by, so it's the same library.
-        let canonical = canonical(&path);
+        let canonical = canonical(binary);
         // SAFETY: as above, loading the library runs none of its code.
         let hooks = unsafe { libloading::Library::new(&canonical) }
             .expect("the test plugins' library loads");
         Self { path, hooks }
     }
 
-    /// Where the copy is.
+    /// Where the copy is: the library, or the VST3 bundle.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -238,6 +291,161 @@ impl Library {
         // SAFETY: the caller's promise.
         unsafe { transport(plugin, &mut flags, &mut beats, &mut tempo) }
             .then_some((flags, beats, tempo))
+    }
+
+    // The VST3 plugins' hooks. Each takes one of a plugin's objects, as the
+    // host has it: Test Gain's component or its controller, or Test Synth,
+    // which is both.
+
+    /// Edits a parameter in a VST3 plugin's window: see
+    /// [`musicable_test_vst3_gui`](crate::vst3::musicable_test_vst3_gui).
+    /// Says whether the host took it.
+    ///
+    /// # Safety
+    ///
+    /// `object` must be a controller of this copy's plugins, as the host has
+    /// it, that's alive, and this must be called on the plugin's UI thread.
+    pub unsafe fn vst3_gui(
+        &self,
+        object: *mut c_void,
+        action: u32,
+        param: u32,
+        value: f64,
+    ) -> bool {
+        let gui = self.hook::<unsafe extern "C" fn(*mut c_void, u32, u32, f64) -> bool>(
+            "musicable_test_vst3_gui",
+        );
+        // SAFETY: the caller's promise.
+        unsafe { gui(object, action, param, value) }
+    }
+
+    /// Sets a VST3 plugin's label, as someone would in its window.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_set_label(&self, object: *mut c_void, label: &str) -> bool {
+        let set = self.hook::<unsafe extern "C" fn(*mut c_void, *const c_char) -> bool>(
+            "musicable_test_vst3_set_label",
+        );
+        let label = CString::new(label).expect("labels have no nul");
+        // SAFETY: the caller's promise.
+        unsafe { set(object, label.as_ptr()) }
+    }
+
+    /// The label a VST3 plugin's component has, which its state holds.
+    ///
+    /// # Safety
+    ///
+    /// `object` must be a component of this copy's plugins, as the host has
+    /// it, that's alive.
+    pub unsafe fn vst3_label(&self, object: *mut c_void) -> Option<String> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void, *mut c_char, u32) -> bool>(
+            "musicable_test_vst3_label",
+        );
+        let mut buffer = [0 as c_char; 256];
+        // SAFETY: the caller's promise, and the buffer holds as much as it
+        // says, nul-terminated by the hook.
+        unsafe {
+            get(object, buffer.as_mut_ptr(), buffer.len() as u32).then(|| {
+                CStr::from_ptr(buffer.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        }
+    }
+
+    /// Sets the zoom of Test Gain's window, its controller's own state.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_set_zoom(&self, object: *mut c_void, zoom: f64) -> bool {
+        let set = self
+            .hook::<unsafe extern "C" fn(*mut c_void, f64) -> bool>("musicable_test_vst3_set_zoom");
+        // SAFETY: the caller's promise.
+        unsafe { set(object, zoom) }
+    }
+
+    /// The zoom of Test Gain's window.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_zoom(&self, object: *mut c_void) -> Option<f64> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void) -> f64>("musicable_test_vst3_zoom");
+        // SAFETY: the caller's promise.
+        Some(unsafe { get(object) }).filter(|zoom| !zoom.is_nan())
+    }
+
+    /// A parameter's value, normalized, as a VST3 plugin's processor has
+    /// it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_label`](Self::vst3_label).
+    pub unsafe fn vst3_processor_value(&self, object: *mut c_void, param: u32) -> Option<f64> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void, u32) -> f64>(
+            "musicable_test_vst3_processor_value",
+        );
+        // SAFETY: the caller's promise.
+        Some(unsafe { get(object, param) }).filter(|value| !value.is_nan())
+    }
+
+    /// A VST3 plugin's pretend window: -1 for none, 0 made but not in the
+    /// host's, 1 in it; the window it's in; its platform (1 Win32, 2 Cocoa,
+    /// 3 X11); and the scale the host gave it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_window(&self, object: *mut c_void) -> (i32, usize, i32, f64) {
+        type Window = unsafe extern "C" fn(*mut c_void, *mut usize, *mut i32, *mut f64) -> i32;
+        let window = self.hook::<Window>("musicable_test_vst3_window");
+        let (mut parent, mut platform, mut scale) = (0, 0, 0.0);
+        // SAFETY: the caller's promise.
+        let state = unsafe { window(object, &mut parent, &mut platform, &mut scale) };
+        (state, parent, platform, scale)
+    }
+
+    /// Asks the host to resize a VST3 plugin's window, and says what it
+    /// answered.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_request_resize(&self, object: *mut c_void, width: u32, height: u32) -> bool {
+        let resize = self.hook::<unsafe extern "C" fn(*mut c_void, u32, u32) -> bool>(
+            "musicable_test_vst3_request_resize",
+        );
+        // SAFETY: the caller's promise.
+        unsafe { resize(object, width, height) }
+    }
+
+    /// The transport as a VST3 plugin last saw it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_label`](Self::vst3_label).
+    pub unsafe fn vst3_transport(&self, object: *mut c_void) -> Option<Vst3Transport> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void, *mut Vst3Transport) -> bool>(
+            "musicable_test_vst3_transport",
+        );
+        let mut transport = Vst3Transport::default();
+        // SAFETY: the caller's promise.
+        unsafe { get(object, &mut transport) }.then_some(transport)
+    }
+
+    /// Has a VST3 plugin ask the host to restart it with VST3's `flags`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui).
+    pub unsafe fn vst3_restart(&self, object: *mut c_void, flags: i32) -> bool {
+        let restart = self
+            .hook::<unsafe extern "C" fn(*mut c_void, i32) -> bool>("musicable_test_vst3_restart");
+        // SAFETY: the caller's promise.
+        unsafe { restart(object, flags) }
     }
 }
 
