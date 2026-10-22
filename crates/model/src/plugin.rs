@@ -1,0 +1,120 @@
+//! Plugins in device chains: which plugin a device is, and how it's set.
+//!
+//! A plugin keeps its settings in its own state, bytes only it understands.
+//! The project holds the state the plugin last gave, and the parameter
+//! values set since, so it can always bring the plugin back as it was: when
+//! the project opens, and when undo brings back a device that was deleted.
+
+use std::fmt;
+use std::sync::Arc;
+
+use crate::PluginFormat;
+
+/// A plugin in a device chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginDevice {
+    pub format: PluginFormat,
+    /// The plugin's id in its format, which finds the plugin when the
+    /// project opens: CLAP's reverse-domain id, such as
+    /// `org.surge-synth-team.surge-xt`.
+    pub id: String,
+    /// The plugin's name when it was added, to show while it's missing.
+    pub name: String,
+    /// Whether it plays notes. A MIDI track's notes go to its first
+    /// instrument.
+    pub instrument: bool,
+    pub settings: PluginSettings,
+}
+
+/// How a plugin is set: the state it last saved, and the values of the
+/// parameters set after it. The plugin gets the state first, then the
+/// values.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PluginSettings {
+    /// `None` for a plugin as it starts, new.
+    pub state: Option<PluginState>,
+    /// In order of parameter id, at most one value for each.
+    pub params: Vec<PluginParam>,
+}
+
+impl PluginSettings {
+    /// The value set for the parameter `id`, or `None` if the state has it.
+    pub fn param(&self, id: u32) -> Option<f64> {
+        self.index(id).ok().map(|i| self.params[i].value)
+    }
+
+    /// Sets the parameter `id` to `value`, or leaves it to the state with
+    /// `None`, and returns what it was.
+    pub fn set_param(&mut self, id: u32, value: Option<f64>) -> Option<f64> {
+        match (self.index(id), value) {
+            (Ok(i), Some(value)) => Some(std::mem::replace(&mut self.params[i].value, value)),
+            (Ok(i), None) => Some(self.params.remove(i).value),
+            (Err(i), Some(value)) => {
+                self.params.insert(i, PluginParam { id, value });
+                None
+            }
+            (Err(_), None) => None,
+        }
+    }
+
+    fn index(&self, id: u32) -> Result<usize, usize> {
+        self.params.binary_search_by_key(&id, |p| p.id)
+    }
+}
+
+/// A plugin parameter's value, in the plugin's own units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PluginParam {
+    /// The plugin's id for the parameter.
+    pub id: u32,
+    pub value: f64,
+}
+
+/// A plugin's saved state, in the plugin's own format. Clones share the
+/// bytes, so the undo history can hold many without copying them.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PluginState(Arc<[u8]>);
+
+impl PluginState {
+    pub fn new(bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self(bytes.into())
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PluginState {
+    /// The size only: states can be megabytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PluginState({} bytes)", self.0.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameters_stay_in_order_of_id() {
+        let mut settings = PluginSettings::default();
+        assert_eq!(settings.set_param(7, Some(0.5)), None);
+        assert_eq!(settings.set_param(3, Some(1.0)), None);
+        assert_eq!(settings.set_param(7, Some(0.25)), Some(0.5));
+        assert_eq!(settings.param(7), Some(0.25));
+        assert_eq!(settings.param(4), None);
+        let ids: Vec<u32> = settings.params.iter().map(|p| p.id).collect();
+        assert_eq!(ids, [3, 7]);
+        assert_eq!(settings.set_param(3, None), Some(1.0));
+        assert_eq!(settings.set_param(3, None), None);
+        assert_eq!(settings.params, [PluginParam { id: 7, value: 0.25 }]);
+    }
+
+    #[test]
+    fn states_show_their_size() {
+        let state = PluginState::new(vec![1, 2, 3]);
+        assert_eq!(format!("{state:?}"), "PluginState(3 bytes)");
+        assert_eq!(state.clone().bytes(), [1, 2, 3]);
+    }
+}

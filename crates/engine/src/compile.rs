@@ -12,14 +12,19 @@
 //! master, not through it. Node keys come from model ids and slots (see
 //! [`keys`]), so a channel's nodes keep their identity when the project is
 //! recompiled.
+//!
+//! Plugins process outside the engine, in plugin instances the app holds:
+//! [`Devices`] has the app's [`NodeMaker`] for each plugin device.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
 use musicable_model::{
-    ClipType, ConsoleSettings, Device, DeviceKind, Master, Project, Track, TrackKind,
+    ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Master, Project, Track, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
@@ -235,20 +240,82 @@ pub fn compile_metered(project: &Project, meters: &Meters) -> Graph {
     compile_with_media(project, meters, &Media::new())
 }
 
+/// Builds the graph for `project`, without plugins: plugin devices pass
+/// their signal through. See [`compile_with_devices`].
+pub fn compile_with_media(project: &Project, meters: &Meters, media: &Media) -> Graph {
+    compile_with_devices(project, meters, media, &Devices::new())
+}
+
 /// Builds the graph for `project`. Each channel's output stage measures
 /// into its meter in `meters`: call [`Meters::follow`] first, or channels
 /// without a meter there get one nobody reads. Audio clips play their audio
-/// from `media`, and clips it doesn't have are silent.
-pub fn compile_with_media(project: &Project, meters: &Meters, media: &Media) -> Graph {
-    compile_with(project, meters, media, native_stage)
+/// from `media`, and clips it doesn't have are silent. Plugin devices
+/// process through the nodes `devices` makes for them, and the ones it has
+/// none for, such as a plugin that isn't installed, pass their signal
+/// through.
+pub fn compile_with_devices(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+) -> Graph {
+    compile_with(project, meters, media, devices, native_stage)
 }
 
-/// Like [`compile_with_media`], with `stages` choosing the native stage for
-/// each slot of each channel. `None` leaves the slot empty.
+/// Makes the nodes for a device that processes outside the engine, such as
+/// a plugin: every node it makes processes the same device, so a graph
+/// swap carries on where the last block left off.
+pub trait NodeMaker: Send + Sync {
+    fn make(&self) -> Box<dyn Node>;
+}
+
+/// What makes the nodes of the devices the engine can't make itself, by
+/// device: plugins now, extension devices later. The app fills it from the
+/// plugin instances it holds.
+#[derive(Clone, Default)]
+pub struct Devices {
+    makers: HashMap<DeviceId, Arc<dyn NodeMaker>>,
+}
+
+impl Devices {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, device: DeviceId, maker: Arc<dyn NodeMaker>) {
+        self.makers.insert(device, maker);
+    }
+
+    pub fn get(&self, device: DeviceId) -> Option<&dyn NodeMaker> {
+        self.makers.get(&device).map(|maker| &**maker)
+    }
+
+    pub fn len(&self) -> usize {
+        self.makers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.makers.is_empty()
+    }
+}
+
+impl fmt::Debug for Devices {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut devices: Vec<_> = self.makers.keys().collect();
+        devices.sort();
+        f.debug_struct("Devices")
+            .field("devices", &devices)
+            .finish()
+    }
+}
+
+/// Like [`compile_with_devices`], with `stages` choosing the native stage
+/// for each slot of each channel. `None` leaves the slot empty.
 pub(crate) fn compile_with(
     project: &Project,
     meters: &Meters,
     media: &Media,
+    devices: &Devices,
     mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -289,7 +356,7 @@ pub(crate) fn compile_with(
             graph: &mut graph,
             tail: head,
         };
-        let taps = strip.channel(Channel::Track(track), &mut stages);
+        let taps = strip.channel(Channel::Track(track), devices, &mut stages);
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
         {
@@ -329,7 +396,7 @@ pub(crate) fn compile_with(
         graph: &mut graph,
         tail: Some(master),
     };
-    strip.channel(Channel::Master(&project.master), &mut stages);
+    strip.channel(Channel::Master(&project.master), devices, &mut stages);
     let output = Gain::new(1.0).with_meter(meters.master().clone());
     strip.push(keys::master_output(), Box::new(output));
     let output = strip.tail.expect("the master's strip has its output stage");
@@ -375,11 +442,13 @@ fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
     }
 }
 
-/// A device's node.
-fn device_node(device: &Device) -> Box<dyn Node> {
+/// A device's node, if it has one: a plugin `devices` has nothing for has
+/// none.
+fn device_node(device: &Device, devices: &Devices) -> Option<Box<dyn Node>> {
     match device.kind {
-        DeviceKind::TestGain { gain } => Box::new(Gain::new(gain)),
-        DeviceKind::TestInstrument { level } => Box::new(TestInstrument::new(level)),
+        DeviceKind::TestGain { gain } => Some(Box::new(Gain::new(gain))),
+        DeviceKind::TestInstrument { level } => Some(Box::new(TestInstrument::new(level))),
+        DeviceKind::Plugin(_) => devices.get(device.id).map(NodeMaker::make),
     }
 }
 
@@ -411,10 +480,14 @@ impl Strip<'_> {
     }
 
     /// Adds `channel`'s devices, its fader and the stages `stages` puts in
-    /// its slots, up to its output stage.
+    /// its slots, up to its output stage. A device without a node leaves the
+    /// signal as it is, with the slot in front of it still there. An
+    /// instrument without one still takes the notes, so they don't go to an
+    /// instrument after it.
     fn channel(
         &mut self,
         channel: Channel<'_>,
+        devices: &Devices,
         stages: &mut impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
     ) -> Taps {
         let mut slot = |strip: &mut Self, at: Slot| {
@@ -428,9 +501,10 @@ impl Strip<'_> {
             if let Ok(position) = u16::try_from(position) {
                 slot(self, Slot::BeforeDevice(position));
             }
-            let node = self.push(keys::device(device.id), device_node(device));
-            if device.kind.is_instrument() {
-                instrument = instrument.or(Some(node));
+            let node =
+                device_node(device, devices).map(|node| self.push(keys::device(device.id), node));
+            if device.kind.is_instrument() && instrument.is_none() {
+                instrument = Some(node);
             }
         }
         slot(self, Slot::PreFader);
@@ -442,7 +516,7 @@ impl Strip<'_> {
         Taps {
             pre_fader,
             post_fader,
-            instrument,
+            instrument: instrument.flatten(),
         }
     }
 
@@ -626,6 +700,8 @@ mod tests {
     use std::any::{Any, TypeId};
     use std::collections::BTreeSet;
 
+    use musicable_model::clip::ClipContent;
+    use musicable_model::time::{BeatRange, Beats};
     use musicable_model::{DeviceId, SendId, TestTone, TrackId, TrackKind};
 
     use super::*;
@@ -861,7 +937,7 @@ mod tests {
         let p = project();
         let shape_with = |stages| {
             shape(
-                &compile_with(&p, &Meters::new(), &Media::new(), stages)
+                &compile_with(&p, &Meters::new(), &Media::new(), &Devices::new(), stages)
                     .prepare(&CONFIG)
                     .unwrap(),
             )
@@ -875,12 +951,12 @@ mod tests {
         let p = project();
         let meters = Meters::new();
         let off = || {
-            compile_with(&p, &meters, &Media::new(), no_stages)
+            compile_with(&p, &meters, &Media::new(), &Devices::new(), no_stages)
                 .prepare(&CONFIG)
                 .unwrap()
         };
         let on = || {
-            compile_with(&p, &meters, &Media::new(), half_drums)
+            compile_with(&p, &meters, &Media::new(), &Devices::new(), half_drums)
                 .prepare(&CONFIG)
                 .unwrap()
         };
@@ -921,7 +997,7 @@ mod tests {
         };
         let meters = Meters::new();
         let graph = |at: Slot| {
-            compile_with(&p, &meters, &Media::new(), ramp_in(at))
+            compile_with(&p, &meters, &Media::new(), &Devices::new(), ramp_in(at))
                 .prepare(&CONFIG)
                 .unwrap()
         };
@@ -966,7 +1042,7 @@ mod tests {
             };
             Some(stage)
         };
-        let graph = compile_with(&p, &Meters::new(), &Media::new(), stages)
+        let graph = compile_with(&p, &Meters::new(), &Media::new(), &Devices::new(), stages)
             .prepare(&CONFIG)
             .unwrap();
         assert_eq!(graph.latency(), 37);
@@ -978,6 +1054,97 @@ mod tests {
         // return, all on the same frame, in both channels.
         let loud: Vec<_> = out.iter().enumerate().filter(|(_, s)| **s != 0.0).collect();
         assert_eq!(loud, [(2 * 137, &2.75), (2 * 137 + 1, &2.75)]);
+    }
+
+    /// Makes nodes that halve the signal, standing in for a plugin.
+    struct Halves;
+
+    impl NodeMaker for Halves {
+        fn make(&self) -> Box<dyn Node> {
+            Box::new(Gain::new(0.5))
+        }
+    }
+
+    /// Makes test instruments, standing in for a plugin that plays notes.
+    struct Synth;
+
+    impl NodeMaker for Synth {
+        fn make(&self) -> Box<dyn Node> {
+            Box::new(TestInstrument::new(0.5))
+        }
+    }
+
+    fn plugin(instrument: bool) -> DeviceKind {
+        DeviceKind::Plugin(musicable_model::plugin::PluginDevice {
+            format: musicable_model::PluginFormat::Clap,
+            id: "org.example.plugin".into(),
+            name: "Plugin".into(),
+            instrument,
+            settings: Default::default(),
+        })
+    }
+
+    #[test]
+    fn plugins_play_through_the_nodes_the_app_makes_and_missing_ones_pass_through() {
+        let mut p = Project::new();
+        let track = p.add_track("Tone", TrackKind::Audio);
+        let device = p.new_device(plugin(false));
+        let id = device.id;
+        let t = p.track_mut(track).unwrap();
+        t.tone = Some(TestTone {
+            frequency: 440.0,
+            level: 0.5,
+        });
+        t.devices.push(device);
+        let mut devices = Devices::new();
+        devices.insert(id, Arc::new(Halves));
+        let with = |devices: &Devices| {
+            compile_with_devices(&p, &Meters::new(), &Media::new(), devices)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
+        assert!(with(&devices).contains(keys::device(id)));
+        assert!(!with(&Devices::new()).contains(keys::device(id)));
+
+        let missing = render(with(&Devices::new()), 256);
+        let halved = render(with(&devices), 256);
+        assert!(missing.iter().any(|&s| s != 0.0));
+        let half: Vec<f32> = missing.iter().map(|s| s * 0.5).collect();
+        assert!(halved == half);
+    }
+
+    #[test]
+    fn a_midi_tracks_notes_go_to_a_plugin_that_plays_them() {
+        let mut p = Project::new();
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let mut notes = musicable_model::clip::MidiClip::default();
+        notes.add_note(Beats::ZERO, Beats::new(1), 69, 1.0);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let clip = p.new_clip("Note", range, ClipContent::Midi(notes));
+        // An effect first, which notes pass by.
+        let effect = p.new_device(plugin(false));
+        let synth = p.new_device(plugin(true));
+        let mut devices = Devices::new();
+        devices.insert(effect.id, Arc::new(Halves));
+        devices.insert(synth.id, Arc::new(Synth));
+        let t = p.track_mut(keys).unwrap();
+        t.clips.push(clip);
+        t.devices = vec![effect, synth];
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices)
+            .prepare(&CONFIG)
+            .unwrap();
+        assert!(render(graph, 1000).iter().any(|&s| s != 0.0));
+
+        // Without the synth's node, nothing plays the notes: not even an
+        // instrument after it.
+        devices = Devices::new();
+        devices.insert(p.tracks[0].devices[0].id, Arc::new(Halves));
+        let after = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        p.tracks[0].devices.push(after);
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices)
+            .prepare(&CONFIG)
+            .unwrap();
+        assert!(render(graph, 1000).iter().all(|&s| s == 0.0));
     }
 
     #[test]

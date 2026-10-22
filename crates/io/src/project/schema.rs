@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
 use musicable_model::time::{self, Beats};
@@ -209,6 +211,28 @@ struct Device {
 enum DeviceKind {
     TestGain { gain: f32 },
     TestInstrument { level: f32 },
+    Plugin(PluginDevice),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginDevice {
+    format: PluginFormat,
+    id: String,
+    name: String,
+    instrument: bool,
+    /// Base64, or `None` for a plugin as new.
+    #[serde(deserialize_with = "Option::deserialize")]
+    state: Option<String>,
+    /// Parameter ids and values, in order of id.
+    params: Vec<(u32, f64)>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PluginFormat {
+    Clap,
+    Vst3,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1043,9 +1067,12 @@ impl From<&model::Device> for Device {
         let model::Device { id, kind } = device;
         Self {
             id: id.0,
-            kind: match *kind {
-                model::DeviceKind::TestGain { gain } => DeviceKind::TestGain { gain },
-                model::DeviceKind::TestInstrument { level } => DeviceKind::TestInstrument { level },
+            kind: match kind {
+                model::DeviceKind::TestGain { gain } => DeviceKind::TestGain { gain: *gain },
+                model::DeviceKind::TestInstrument { level } => {
+                    DeviceKind::TestInstrument { level: *level }
+                }
+                model::DeviceKind::Plugin(plugin) => DeviceKind::Plugin(PluginDevice::from(plugin)),
             },
         }
     }
@@ -1058,17 +1085,91 @@ fn devices_to_model(devices: &[Device], path: &str) -> Result<Vec<model::Device>
         let path = format!("{path}[{j}].kind");
         Ok(model::Device {
             id: DeviceId(*id),
-            kind: match *kind {
+            kind: match kind {
                 DeviceKind::TestGain { gain } => model::DeviceKind::TestGain {
-                    gain: finite(gain, || format!("{path}.test_gain.gain"))?,
+                    gain: finite(*gain, || format!("{path}.test_gain.gain"))?,
                 },
                 DeviceKind::TestInstrument { level } => model::DeviceKind::TestInstrument {
-                    level: finite(level, || format!("{path}.test_instrument.level"))?,
+                    level: finite(*level, || format!("{path}.test_instrument.level"))?,
                 },
+                DeviceKind::Plugin(plugin) => {
+                    model::DeviceKind::Plugin(plugin.to_model(&format!("{path}.plugin"))?)
+                }
             },
         })
     };
     devices.iter().enumerate().map(device).collect()
+}
+
+impl From<&model::plugin::PluginDevice> for PluginDevice {
+    fn from(plugin: &model::plugin::PluginDevice) -> Self {
+        let model::plugin::PluginDevice {
+            format,
+            id,
+            name,
+            instrument,
+            settings,
+        } = plugin;
+        let model::plugin::PluginSettings { state, params } = settings;
+        Self {
+            format: match format {
+                model::PluginFormat::Clap => PluginFormat::Clap,
+                model::PluginFormat::Vst3 => PluginFormat::Vst3,
+            },
+            id: id.clone(),
+            name: name.clone(),
+            instrument: *instrument,
+            state: state.as_ref().map(|state| BASE64.encode(state.bytes())),
+            params: params.iter().map(|p| (p.id, p.value)).collect(),
+        }
+    }
+}
+
+impl PluginDevice {
+    fn to_model(&self, path: &str) -> Result<model::plugin::PluginDevice, Invalid> {
+        let Self {
+            format,
+            id,
+            name,
+            instrument,
+            state,
+            params,
+        } = self;
+        if id.is_empty() {
+            return Err(Invalid::new(format!("{path}.id"), "must not be empty"));
+        }
+        let state = match state {
+            Some(text) => {
+                let bytes = BASE64
+                    .decode(text)
+                    .map_err(|_| Invalid::new(format!("{path}.state"), "must be base64"))?;
+                Some(model::plugin::PluginState::new(bytes))
+            }
+            None => None,
+        };
+        let mut checked = Vec::with_capacity(params.len());
+        for (k, &(param, value)) in params.iter().enumerate() {
+            if k > 0 && param <= params[k - 1].0 {
+                let message = "must be after the parameter before it: in order of id, once each";
+                return Err(Invalid::new(format!("{path}.params[{k}][0]"), message));
+            }
+            let value = finite(value, || format!("{path}.params[{k}][1]"))?;
+            checked.push(model::plugin::PluginParam { id: param, value });
+        }
+        Ok(model::plugin::PluginDevice {
+            format: match format {
+                PluginFormat::Clap => model::PluginFormat::Clap,
+                PluginFormat::Vst3 => model::PluginFormat::Vst3,
+            },
+            id: id.clone(),
+            name: name.clone(),
+            instrument: *instrument,
+            settings: model::plugin::PluginSettings {
+                state,
+                params: checked,
+            },
+        })
+    }
 }
 
 impl From<model::ClipType> for ClipType {

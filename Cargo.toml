@@ -17,6 +17,7 @@ musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-ui = { path = "crates/ui" }
 rtrb = "0.4"
+base64 = "0.22"
 # Decodes FLAC frames; finding them is ours (io::audio).
 claxon = "0.4"
 serde = { version = "1", features = ["derive"] }
