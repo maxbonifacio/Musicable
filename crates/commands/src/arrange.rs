@@ -356,9 +356,7 @@ pub fn trim(tx: &mut Transaction<'_>, clip: ClipId, start: Option<Beats>, end: O
         return;
     };
     let (track, current) = (track.id, current.clone());
-    let start = start.unwrap_or(current.start).max(Beats::ZERO);
-    let range = BeatRange::new(start, end.unwrap_or(current.end()));
-    let Some(timing) = timing_over(tx.project(), tx.editor(), &current, range) else {
+    let Some(timing) = trimmed(tx.project(), tx.editor(), &current, start, end) else {
         return;
     };
     let keep = BTreeSet::from([clip]);
@@ -375,6 +373,22 @@ pub fn trim(tx: &mut Transaction<'_>, clip: ClipId, start: Option<Beats>, end: O
         &keep,
     );
     tx.set_clip_timing(clip, timing);
+}
+
+/// Where [`trim`] would have `clip`, in `project`, play with its start or
+/// its end, or both, moved there: from the song's start at the earliest,
+/// and for an audio clip, only where its file has audio. `None` if that
+/// leaves nothing of it.
+pub fn trimmed(
+    project: &Project,
+    editor: &Editor,
+    clip: &Clip,
+    start: Option<Beats>,
+    end: Option<Beats>,
+) -> Option<Timing> {
+    let start = start.unwrap_or(clip.start).max(Beats::ZERO);
+    let range = BeatRange::new(start, end.unwrap_or(clip.end()));
+    timing_over(project, editor, clip, range)
 }
 
 /// Splits the clip with id `clip` at `at`, if `at` is inside it, and
@@ -828,9 +842,14 @@ mod tests {
             panic!()
         };
         assert_eq!(audio.fades().fade_in, Beats::new(1));
-        // Back out, it can't start before the file does, or end after.
+        // Back out, it can't start before the file does, or end after, as
+        // `trimmed` says beforehand.
+        let (project, editor) = (setup.document.project(), setup.document.editor());
+        let (start, end) = (Some(Beats::new(-4)), Some(Beats::new(40)));
+        let planned = super::trimmed(project, editor, &trimmed, start, end);
         trim(&mut setup, Some(-4), Some(40));
         let trimmed = clip(&setup, d);
+        assert_eq!(Some(trimmed.timing()), planned);
         assert_eq!(trimmed.range(), BeatRange::new(Beats::ZERO, Beats::new(12)));
         assert_eq!(trimmed.content.offset(), Offset::Frames(0));
         // Trimmed past another clip, it overwrites it.

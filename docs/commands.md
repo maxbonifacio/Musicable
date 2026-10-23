@@ -168,7 +168,7 @@ before.
 | Command | Title | Arguments | What it does | Default key |
 |---|---|---|---|---|
 | `clip.move` | Move Clips | `clips`, `by`?, `tracks`?, `copy`? | Moves the clips, or copies them, some beats later or earlier and some tracks down or up; gives back the ids of the clips moved or the copies | none |
-| `clip.trim` | Trim Clip | `clip`, `start`?, `end`? | Moves a clip's start or end. An audio clip doesn't go past its file's end | none |
+| `clip.trim` | Trim Clip | `clip`, `start`?, `end`? | Moves a clip's start or end. An audio clip doesn't go past its file's start or end | none |
 | `clip.set_fades` | Set Fades | `clip`, `fade_in`?, `fade_out`? | Sets an audio clip's fades, which fit inside it | none |
 | `clip.rename` | Rename Clip | `clip`, `name` | Names a clip | none |
 | `clip.split` | Split Clips | `clips`, `at` | Splits the clips at a position | none |
@@ -178,7 +178,9 @@ before.
 
 When the clips can't all land on tracks that hold them, such as an audio
 clip on a MIDI track, they keep their tracks and only move in time. Moving
-clips before the start of the song stops at the start. Insert Audio needs each file's header read into
+clips before the start of the song stops at the start. `arrange::trimmed`
+says where a trim would leave a clip, which the arrangement's ghost shows
+while a drag lasts. Insert Audio needs each file's header read into
 the editor first ([below](#the-editors-state)): the app reads it when a file
 is dropped or imported.
 

@@ -1173,6 +1173,13 @@ impl Scene<'_> {
                     Side::Start => at.min(c.end() - least).max(Beats::ZERO),
                     Side::End => at.max(c.start + least),
                 };
+                // As far as trimming takes it: an audio clip stops where its
+                // file does.
+                let editor = self.editor();
+                let at = match side {
+                    Side::Start => arrange::trimmed(project, editor, c, Some(at), None)?.start,
+                    Side::End => arrange::trimmed(project, editor, c, None, Some(at))?.end(),
+                };
                 (at != edge).then_some(Plan::Trim { clip, side, at })
             }
             (

@@ -10,7 +10,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
@@ -494,6 +494,49 @@ fn edges_trim_and_handles_fade() {
     let fade = audio.fade_in.to_f64();
     assert!((fade - 1.0).abs() < 0.01, "{fade}");
     assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_trims_ghost_stops_where_the_audio_does() {
+    let (mut project, ids) = project();
+    // Line plays bass.wav from a second in, from beat 18.
+    let timing = Timing {
+        start: Beats::new(18),
+        length: Beats::new(6),
+        offset: Offset::Frames(48_000),
+    };
+    assert!(project.track_mut(ids.bass).unwrap().clips[0].set_timing(timing));
+    let mut harness = harness(project);
+    // Its start dragged four beats earlier, two before the file starts.
+    let rect = harness.get_by_label("Clip Line").rect();
+    let from = pos2(rect.left() + 2.0, rect.center().y);
+    let to = from - vec2(width(&harness, 4.0), 0.0);
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true, Modifiers::NONE);
+    for step in 1..=4 {
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.run();
+    }
+    let ghosts = filled(
+        &harness,
+        Theme::default().ghost,
+        across(&harness, "Track Bass"),
+    );
+    let [ghost] = ghosts[..] else {
+        panic!("one ghost, not {ghosts:?}");
+    };
+    let starts = x_of(&harness, 16.0);
+    assert!(
+        (ghost.left() - starts).abs() < 0.5,
+        "{} {starts}",
+        ghost.left()
+    );
+    // And that's where the trim takes it.
+    press(&mut harness, to, false, Modifiers::NONE);
+    let line = clip(&harness, ids.line).1;
+    assert_eq!(line.range(), BeatRange::new(Beats::new(16), Beats::new(24)));
+    assert_eq!(line.content.offset(), Offset::Frames(0));
 }
 
 #[test]
