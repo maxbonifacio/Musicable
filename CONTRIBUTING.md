@@ -18,8 +18,9 @@ This adds `Signed-off-by: Your Name <you@example.com>` and certifies that you
 wrote the change, or otherwise have the right to submit it, under the
 project's license.
 
-Unless you say otherwise, any contribution you submit is dual-licensed as
-MIT OR Apache-2.0, with no additional terms.
+Contributions are licensed as the rest of Musicable is, under the GNU
+General Public License, version 3 or any later version, with no additional
+terms.
 
 ## Clean-room rule
 

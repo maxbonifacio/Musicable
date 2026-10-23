@@ -268,8 +268,8 @@ lives. What each still lacks is in its doc's "Not done yet".
   [commands.md](commands.md#changing-keys-in-the-app)). Keymaps in the style
   of other DAWs would be keymap files to import.
 - **ASIO** is built: our own host, behind `musicable_audio::open` like the
-  other backends, in builds with the opt-in `asio` feature, which are
-  distributed under the GPLv3 ([audio.md](audio.md#asio)).
+  other backends, in builds with the opt-in `asio` feature
+  ([audio.md](audio.md#asio)).
 
 Audio Units and macOS were out of Tier 1's scope, since Windows comes
 first, so VST3 plugins' windows and audio and MIDI inputs on macOS and

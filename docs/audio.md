@@ -421,13 +421,11 @@ Nothing else needs installing: no SDK, and no LLVM for bindings. The driver
 interface is written from Steinberg's ASIO 2.3 specification, in our own
 words, and the drivers come with the hardware. Builds are 64-bit only.
 
-**License.** The source stays MIT OR Apache-2.0, as the rest of the
-repository. Builds with the feature are distributed under the GNU GPL,
-version 3, as the project decided for ASIO, and the app shows the notice the
-GPL asks for at the foot of its audio settings in those builds. The default
-build has no ASIO code: the module only compiles with the feature, and CI
-checks that the app's default build doesn't turn it on. ASIO is a trademark
-of Steinberg Media Technologies GmbH.
+**Opt-in.** The default build has no ASIO code for now: the module only
+compiles with the feature, and CI checks that the app's default build
+doesn't turn it on. Like the rest of Musicable, it's licensed under the GNU
+GPL, version 3 or later. ASIO is a trademark of Steinberg Media Technologies
+GmbH.
 
 **Drivers as devices.** `output_devices` lists each ASIO driver installed for
 64-bit apps (under `HKEY_LOCAL_MACHINE\SOFTWARE\ASIO`, with its COM class
@@ -635,8 +633,8 @@ Debian and Ubuntu).
   jitter and narrowed to suit it would do better.
 - Choosing an ASIO driver's clock source. The driver's own settings do it
   for now.
-- Packaging ASIO builds for release, with the GPL's text and the offer of
-  the source.
+- Packaging builds for release, with the GPL's text and the offer of the
+  source.
 - Following the default output when it changes.
 - Counting glitches downstream that don't hold up the audio engine, such as
   a late driver on a device whose clock drifts against it. Without a late
