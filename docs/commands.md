@@ -608,6 +608,10 @@ project isn't modified for it.
 - **Unsaved changes.** `Document::is_modified` follows the history: undo
   back to where the project was saved, and it's unchanged again.
 - Opening a project starts a new history.
+- **Note ids.** A MIDI clip hands out its notes' ids, and taking one isn't
+  an edit. So redo makes a clip again as it was made, before it handed out
+  the ids of the notes then drawn in it, and `Transaction::add_note` has the
+  clip take a note's id it hasn't handed out yet, so the notes come back.
 
 A new kind of edit needs an arm in each match in
 [`crates/commands/src/document.rs`](../crates/commands/src/document.rs):

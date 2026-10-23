@@ -869,9 +869,13 @@ impl Transaction<'_> {
     /// Puts `note` at `index` in the notes of the MIDI clip with id `clip`,
     /// or at the end if `index` is past them. It's left out if there's no
     /// MIDI clip on a track with that id, if the clip has a note with the
-    /// note's id or never handed the id out (see
-    /// [`new_note_id`](Self::new_note_id)), or if a file couldn't hold the
-    /// note: see [`note_fits`].
+    /// note's id, or if a file couldn't hold the note: see [`note_fits`].
+    ///
+    /// The note's id is one the clip handed out (see
+    /// [`new_note_id`](Self::new_note_id)), or else the clip takes it then,
+    /// and hands out the ids after it from then on. Redo needs that: it
+    /// makes a clip again as it was made, with none of the ids handed out
+    /// since, then the notes added to it.
     pub fn add_note(&mut self, clip: ClipId, index: usize, note: Note) {
         if !note_fits(&note) {
             return;
@@ -879,9 +883,13 @@ impl Transaction<'_> {
         let Some((track, midi)) = midi_mut(self.project, clip) else {
             return;
         };
-        if note.id.0 >= midi.next_note_id || midi.note(note.id).is_some() {
+        let Some(after) = note.id.0.checked_add(1) else {
+            return;
+        };
+        if midi.note(note.id).is_some() {
             return;
         }
+        midi.next_note_id = midi.next_note_id.max(after);
         let index = index.min(midi.notes.len());
         midi.notes.insert(index, note.clone());
         self.edits.push(Edit::AddNote {
