@@ -832,8 +832,11 @@ impl Session {
         }
     }
 
-    /// Makes what changed in the plugins changes to the project, as
-    /// transactions named after each plugin, so undo takes them back.
+    /// Makes what changed in the plugins changes to the project: what
+    /// someone changed in a plugin's window as transactions named after the
+    /// plugin, so undo takes them back, and what a plugin changed on its own
+    /// as changes the project follows, which aren't steps in the undo
+    /// history.
     fn follow_plugins(&mut self, changes: Vec<(DeviceId, Change)>) {
         let mut latency = false;
         for (device, change) in changes {
@@ -842,10 +845,23 @@ impl Session {
                 Change::GestureBegin => self.document.begin_gesture(),
                 Change::GestureEnd => self.document.end_gesture(),
                 // Moved by hand, so it overrides the parameter's automation.
-                Change::Param { param, value } => self.document.transact(&name, |tx| {
+                Change::Param {
+                    param,
+                    value,
+                    by_hand: true,
+                } => self.document.transact(&name, |tx| {
                     tx.set_param_by_hand(ParamAddress::Device(device, param), value);
                 }),
-                Change::Settings(settings) => self.document.transact(&name, |tx| {
+                Change::Param { param, value, .. } => self.document.follow(&name, |tx| {
+                    tx.set_param_value(ParamAddress::Device(device, param), value);
+                }),
+                Change::Settings {
+                    settings,
+                    by_hand: true,
+                } => self.document.transact(&name, |tx| {
+                    tx.set_plugin_settings(device, settings);
+                }),
+                Change::Settings { settings, .. } => self.document.follow(&name, |tx| {
                     tx.set_plugin_settings(device, settings);
                 }),
                 Change::Latency => latency = true,

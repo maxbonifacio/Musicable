@@ -864,7 +864,9 @@ format ("Instrument · CLAP"), and:
 
 Adding, deleting and every change made in a plugin's window are steps in
 the undo history, named after the plugin, such as "Change Surge XT"; a
-whole drag of a knob is one. Saving the project saves each plugin's state
+whole drag of a knob is one. What a plugin changes on its own, as it loads
+or takes in what undo gave it, or with its window closed, goes into the
+project without a step, so redo carries on past it. Saving the project saves each plugin's state
 as it is then. Delay compensation lines up every track with the latest
 one, so a plugin that looks ahead doesn't put its track out of time
 ([engine.md](engine.md#delay-compensation)). [plugins.md](plugins.md)

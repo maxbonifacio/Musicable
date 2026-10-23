@@ -96,7 +96,8 @@ any more: every instance and every node holds it.
   every voice, or, with a note id, for that note's voice alone.
 - **From the plugin**, a change someone makes in its window, or one it makes
   itself, comes back from `poll` as `GestureBegin`, `ParamChanged` and
-  `GestureEnd`. These become transactions, so undo covers them. A plugin
+  `GestureEnd`. These become transactions, so undo covers the ones made in
+  its window ([Plugins on tracks](#plugins-on-tracks)). A plugin
   that no node processes is flushed when it asks, so its changes come back
   without an audio device too.
 
@@ -265,8 +266,14 @@ open project, on a track or on the master:
   state changed, as when someone picks a preset in its window, the session
   saves the state into the project, as a step of its own, or at the end of
   the gesture it's in. A plugin without a state has its parameters read
-  instead. A plugin that restarts with another latency gets a new graph,
-  which compensates for it.
+  instead. What a plugin changes on its own goes into the project without
+  a step (`Document::follow`): a change outside a gesture while its window
+  is closed, as when a MIDI controller turns a knob it learned, or in the
+  second after it starts or is given a state or parameters
+  (`PLUGIN_SETTLING`), as it takes them in. Some plugins say their state
+  changed as they load, or as undo hands them one; were that a step, it
+  would take the place of everything left to redo. A plugin that restarts
+  with another latency gets a new graph, which compensates for it.
 - **Saving.** `Session::saved_project` is the project with a fresh state
   from each plugin that has one, which is what the app writes. So the file
   has everything the plugins keep, and `params` is usually empty there.
@@ -379,7 +386,8 @@ at run time may allocate the first time the thread touches it.
 The app's tests use the same plugins, in both formats:
 [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays them
 through the session, saves and opens them again, undoes changes made in
-their windows, plays a missing plugin, lines a latent plugin up with a dry
+their windows and redoes past the changes they make on their own, plays a
+missing plugin, lines a latent plugin up with a dry
 track to the sample, also after its latency changes, and runs the app's
 binary as the scanner.
 [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)

@@ -593,6 +593,10 @@ transaction named after the step, such as "Undo Tempo Up".
 `Document::redo` makes it again, as "Redo Tempo Up". Since they're
 transactions like any other, the engine follows them the same way. A new
 transaction forgets what was undone, so there's nothing left to redo.
+`Document::follow` commits a change the project only follows, such as a
+plugin changing its own state as it starts: the engine follows it, but
+it's no step, so undo doesn't take it back, redo carries on, and the
+project isn't modified for it.
 
 - `Document::undo_name` and `redo_name` say what Undo and Redo would
   change, for the Edit menu.

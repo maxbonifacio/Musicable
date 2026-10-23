@@ -10,6 +10,14 @@
 //! for the session to make into transactions, so undo covers it. The
 //! plugin has those changes already, so they aren't sent back to it.
 //!
+//! Only what someone does in a plugin's window is a step in the undo
+//! history. Plugins change things on their own too: as they start, as they
+//! take in a state or parameters they were given, by undo and redo among
+//! others, and with their windows closed, as when a MIDI controller turns a
+//! knob it learned. Those come back marked as the plugin's own, for the
+//! project to follow without a step, so they don't take the place of what
+//! redo would make again.
+//!
 //! The engine sends a plugin the values of its automated parameters as it
 //! plays, so those are left to it: the plugin isn't given their values
 //! here until their automation stops, and the values it reports for them
@@ -18,13 +26,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
 use musicable_model::{DeviceId, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
+
+/// How long what a plugin reports, after it starts or is given a state or
+/// parameters, counts as it taking that in rather than as someone's change
+/// in its window. Plugins take a block or two, and some a tick of a timer
+/// after that, to say they changed.
+pub const PLUGIN_SETTLING: Duration = Duration::from_secs(1);
 
 /// A change a plugin made itself, for the project to follow.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,15 +47,22 @@ pub(crate) enum Change {
     /// changes up to [`GestureEnd`](Self::GestureEnd) are one step in the
     /// undo history.
     GestureBegin,
-    /// One of the plugin's parameters changed.
+    /// One of the plugin's parameters changed. `by_hand` says someone
+    /// changed it in the plugin's window, which makes it a step in the undo
+    /// history; otherwise the plugin changed it on its own.
     Param {
         param: u32,
         value: f64,
+        by_hand: bool,
     },
     GestureEnd,
     /// The plugin's settings as a whole, as it saved them after a change its
-    /// parameters don't say, such as someone picking a preset.
-    Settings(PluginSettings),
+    /// parameters don't say, such as someone picking a preset. `by_hand`
+    /// as for [`Param`](Self::Param).
+    Settings {
+        settings: PluginSettings,
+        by_hand: bool,
+    },
     /// The plugin restarted with another latency, so the graph needs
     /// building again for delay compensation.
     Latency,
@@ -89,6 +110,9 @@ struct Hosted {
     /// The plugin's state changed in a way its parameters don't say, and
     /// goes into the project once no gesture is open.
     dirty: bool,
+    /// Until when what the plugin reports is its own doing, as it takes in
+    /// what it was given last: see [`PLUGIN_SETTLING`].
+    settling: Instant,
 }
 
 impl Plugins {
@@ -195,6 +219,7 @@ impl Plugins {
             automated: BTreeSet::new(),
             gestures: 0,
             dirty: false,
+            settling: Instant::now(),
         };
         if let Err(problem) = hosted.apply(&plugin.settings, automated) {
             self.problems.push(problem);
@@ -202,6 +227,7 @@ impl Plugins {
         if let Err(e) = hosted.instance.activate(self.config) {
             self.problems.push(format!("{e}: it plays nothing"));
         }
+        hosted.settle();
         Ok(hosted)
     }
 
@@ -222,6 +248,7 @@ impl Plugins {
             if let Err(e) = hosted.instance.activate(config) {
                 self.problems.push(format!("{e}: it plays nothing"));
             }
+            hosted.settle();
         }
     }
 
@@ -315,6 +342,7 @@ impl Hosted {
         let mut result = Ok(false);
         if settings.state != self.applied.state {
             result = Ok(true);
+            self.settle();
             if let Some(state) = settings.state.as_ref().or(self.fresh.as_ref())
                 && let Err(e) = self.instance.load_state(state.bytes())
             {
@@ -333,6 +361,7 @@ impl Hosted {
             .map(|p| p.id)
             .chain(released.iter().copied())
             .collect();
+        let mut given = false;
         for id in ids.difference(&self.automated) {
             let base = self.base.get(id).copied();
             let wanted = settings.param(*id).or(base);
@@ -341,10 +370,27 @@ impl Hosted {
                 && (wanted != had || released.contains(id))
             {
                 self.instance.set_param(*id, value);
+                given = true;
             }
+        }
+        if given {
+            self.settle();
         }
         self.applied.params.clone_from(&settings.params);
         result
+    }
+
+    /// Starts the plugin's settling: what it reports for a while from now
+    /// is it taking in what it was just given, or starting.
+    fn settle(&mut self) {
+        self.settling = Instant::now() + PLUGIN_SETTLING;
+    }
+
+    /// Whether what the plugin reports now, outside a gesture, is
+    /// someone's change in its window: it's open, and the plugin isn't
+    /// settling.
+    fn by_hand(&self) -> bool {
+        self.instance.is_window_open() && Instant::now() >= self.settling
     }
 
     /// Polls the plugin, and turns what it says into changes for the
@@ -368,19 +414,25 @@ impl Hosted {
                     // A plugin can echo a value the host set.
                     if had != Some(value) {
                         self.applied.set_param(param, Some(value));
-                        changes.push(Change::Param { param, value });
+                        let by_hand = self.gestures > 0 || self.by_hand();
+                        changes.push(Change::Param {
+                            param,
+                            value,
+                            by_hand,
+                        });
                     }
                 }
                 PluginEvent::GestureEnd { .. } if self.gestures > 0 => {
                     self.gestures -= 1;
                     if self.gestures == 0 {
-                        self.capture(&mut changes);
+                        self.capture(true, &mut changes);
                         changes.push(Change::GestureEnd);
                     }
                 }
                 PluginEvent::GestureEnd { .. } => {}
                 PluginEvent::StateChanged | PluginEvent::ParamsChanged => self.dirty = true,
                 PluginEvent::Restarted { latency_changed } => {
+                    self.settle();
                     if latency_changed {
                         changes.push(Change::Latency);
                     }
@@ -392,15 +444,16 @@ impl Hosted {
             }
         }
         if self.gestures == 0 {
-            self.capture(&mut changes);
+            let by_hand = self.by_hand();
+            self.capture(by_hand, &mut changes);
         }
         changes
     }
 
-    /// Takes in the change the plugin said its state had, if it said so.
-    /// A plugin with a state saves it; one without has only its parameters
-    /// to read.
-    fn capture(&mut self, changes: &mut Vec<Change>) {
+    /// Takes in the change the plugin said its state had, if it said so,
+    /// as made `by_hand` or not. A plugin with a state saves it; one
+    /// without has only its parameters to read.
+    fn capture(&mut self, by_hand: bool, changes: &mut Vec<Change>) {
         if !std::mem::take(&mut self.dirty) {
             return;
         }
@@ -412,7 +465,11 @@ impl Hosted {
                 let had = self.applied.param(id).or(self.base.get(&id).copied());
                 if had != Some(value) {
                     self.applied.set_param(id, Some(value));
-                    changes.push(Change::Param { param: id, value });
+                    changes.push(Change::Param {
+                        param: id,
+                        value,
+                        by_hand,
+                    });
                 }
             }
             return;
@@ -424,7 +481,10 @@ impl Hosted {
                     params: Vec::new(),
                 };
                 self.base = values(&self.instance);
-                changes.push(Change::Settings(self.applied.clone()));
+                changes.push(Change::Settings {
+                    settings: self.applied.clone(),
+                    by_hand,
+                });
             }
             Err(e) => changes.push(Change::Failed(e.to_string())),
         }

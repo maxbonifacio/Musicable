@@ -82,6 +82,19 @@ impl Document {
         result
     }
 
+    /// Runs `edit` as a change the project follows rather than one someone
+    /// made, such as a plugin changing its own state as it starts. It's
+    /// committed as a transaction is, so the engine follows it, but it's no
+    /// step in the undo history: undo doesn't take it back, and what was
+    /// undone can still be redone.
+    pub fn follow<R>(&mut self, name: &str, edit: impl FnOnce(&mut Transaction<'_>) -> R) -> R {
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
+        let result = edit(&mut transaction);
+        let edits = transaction.edits;
+        self.commit(name.to_owned(), edits);
+        result
+    }
+
     /// Takes back the last step in the undo history, by setting what it
     /// changed back the way it was. Returns `false` if there's nothing to
     /// undo.
@@ -2467,6 +2480,52 @@ mod tests {
         assert_eq!(doc.take_committed(), []);
         doc.mark_saved();
         assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn changes_the_project_follows_are_no_steps_in_the_undo_history() {
+        let mut project = Project::new();
+        let track = project.add_track("Synth", TrackKind::Midi);
+        let synth = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.synth".into(),
+            name: "Synth".into(),
+            instrument: true,
+            settings: PluginSettings::default(),
+        }));
+        project
+            .track_mut(track)
+            .unwrap()
+            .devices
+            .push(synth.clone());
+        let mut doc = Document::new(project);
+        doc.transact("Metronome On", |tx| tx.set_metronome(true));
+        assert!(doc.undo());
+        doc.take_committed();
+
+        // The plugin saves a state of its own as it starts, say. The engine
+        // follows it, but undo doesn't, and redo still can.
+        let own = PluginSettings {
+            state: Some(PluginState::new(*b"own")),
+            params: Vec::new(),
+        };
+        doc.follow("Change Synth", |tx| {
+            tx.set_plugin_settings(synth.id, own.clone());
+        });
+        let settings = |doc: &Document| {
+            let (_, _, device) = doc.project().find_device(synth.id).unwrap();
+            device.kind.plugin().unwrap().settings.clone()
+        };
+        assert_eq!(settings(&doc), own);
+        let committed = doc.take_committed();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].name, "Change Synth");
+        assert_eq!(doc.undo_name(), None);
+        assert_eq!(doc.redo_name(), Some("Metronome On"));
+        assert!(!doc.is_modified());
+        assert!(doc.redo());
+        assert!(doc.project().metronome);
+        assert_eq!(settings(&doc), own);
     }
 
     #[test]
