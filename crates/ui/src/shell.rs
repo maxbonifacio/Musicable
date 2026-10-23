@@ -617,6 +617,8 @@ fn transport_bar(ui: &mut Ui, view: &View<'_>, theme: &Theme, actions: &mut Vec<
         run(stop, transport::STOP, actions);
         let record = icon_button(ui, Icon::Record, view.playback.record, theme);
         run(record, transport::RECORD, actions);
+        let capture = ui.add(Button::new("Capture"));
+        run(capture, transport::CAPTURE, actions);
         ui.separator();
 
         // Punching in and out happens at the loop's ends.
@@ -847,6 +849,7 @@ mod tests {
             "Play",
             "Stop",
             "Record",
+            "Capture",
             "Loop",
             "Punch In",
             "Punch Out",
@@ -862,6 +865,7 @@ mod tests {
             transport::PLAY,
             transport::STOP,
             transport::RECORD,
+            transport::CAPTURE,
             transport::TOGGLE_LOOP,
             transport::TOGGLE_PUNCH_IN,
             transport::TOGGLE_PUNCH_OUT,

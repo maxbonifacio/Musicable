@@ -62,6 +62,11 @@ const RECORDINGS: &str = "Recordings";
 /// tracks record the notes their MIDI inputs play. When recording stops,
 /// what each track recorded becomes takes, in one step of the undo
 /// history.
+///
+/// Capture does the same with what armed tracks, and those monitoring In,
+/// played over the transport's last run without recording, from the last
+/// few minutes of their inputs, which the recorder holds once
+/// [`set_capture_seconds`](Self::set_capture_seconds) says how long.
 pub struct Session {
     document: Document,
     commands: Registry,
@@ -71,6 +76,9 @@ pub struct Session {
     recorder: Recorder,
     /// Where recordings of a project that isn't saved go.
     unsaved_recordings: Option<PathBuf>,
+    /// How long Capture holds the inputs of the tracks it takes, in
+    /// seconds: 0 holds nothing.
+    capture_seconds: u64,
     /// Counts the projects opened, to tell a recording of an earlier one.
     opened: u64,
     /// What the plugins' windows asked for, oldest first.
@@ -228,6 +236,7 @@ impl Session {
             plugins,
             recorder,
             unsaved_recordings: recorder::unsaved_folder(),
+            capture_seconds: 0,
             opened: 0,
             window_events: Vec::new(),
             problems: Vec::new(),
@@ -385,25 +394,45 @@ impl Session {
         self.arm();
     }
 
+    /// Holds the last `seconds` of the inputs of armed tracks, and of those
+    /// monitoring In, at least, for [`capture`](Self::capture), from now
+    /// on. With 0, the default, it holds nothing.
+    pub fn set_capture_seconds(&mut self, seconds: u64) {
+        self.capture_seconds = seconds;
+        self.arm();
+    }
+
+    /// Makes what the armed tracks, and those monitoring In, played over
+    /// the transport's last run, where it didn't record, into takes,
+    /// as if they had recorded it then: one step of the undo history, named
+    /// Capture, once the recorder has written it. If there's nothing to
+    /// take, the problems say why.
+    pub fn capture(&mut self) {
+        self.recorder.capture(self.engine.handle.stats().time);
+    }
+
     /// Tells the recorder which tracks to record from the next recording
-    /// on, and where.
+    /// on, and where, and which inputs to hold for Capture.
     fn arm(&mut self) {
         let project = self.document.project();
-        let armed = project
-            .tracks
-            .iter()
-            .filter(|track| track.armed)
-            .filter_map(|track| match (&track.input, track.kind) {
-                (Some(input @ Input::Audio(_)), TrackKind::Audio)
-                | (Some(input @ Input::Midi(_)), TrackKind::Midi) => Some(Armed {
+        let tracks = |held: bool| {
+            (project.tracks.iter())
+                .filter(move |track| track.armed || (held && track.monitor == Monitor::In))
+                .filter_map(move |track| match (&track.input, track.kind) {
+                    (Some(input @ Input::Audio(_)), TrackKind::Audio)
+                    | (Some(input @ Input::Midi(_)), TrackKind::Midi) => Some((track, input)),
+                    _ => None,
+                })
+                .map(|(track, input)| Armed {
                     track: track.id,
                     name: track.name.clone(),
                     input: input.clone(),
                     offset: 0,
-                }),
-                _ => None,
-            })
-            .collect();
+                })
+                .collect()
+        };
+        let armed = tracks(false);
+        let held = tracks(true);
         let place = match &self.engine.folder {
             Some(folder) => Some(Place {
                 folder: folder.join(RECORDINGS),
@@ -416,6 +445,7 @@ impl Session {
         };
         let rate = self.engine.handle.config().sample_rate;
         self.recorder.set_tracks(rate, armed, place, self.opened);
+        self.recorder.set_held(held, self.capture_seconds);
     }
 
     pub fn project(&self) -> &Project {
@@ -747,10 +777,15 @@ impl Session {
                     rate,
                     recorded,
                     files,
+                    captured,
                 } if project == self.opened => {
                     let editor = self.document.editor_mut();
                     editor.files.extend(files);
-                    take::add_recording(&mut self.document, rate, &recorded);
+                    if captured {
+                        take::add_capture(&mut self.document, rate, &recorded);
+                    } else {
+                        take::add_recording(&mut self.document, rate, &recorded);
+                    }
                     added = true;
                 }
                 Report::Finished { files, .. } => {
@@ -904,6 +939,8 @@ impl Session {
                     Edit::TrackMonitor { track, to, .. } => {
                         let monitor = InputMonitor::monitor_value(to) as f32;
                         param(keys::track_input(track), InputMonitor::MONITOR, monitor);
+                        // Capture holds the inputs of tracks monitoring In.
+                        armed_changed = true;
                     }
                     // Recordings are named after their tracks.
                     Edit::TrackName { .. } => armed_changed = true,

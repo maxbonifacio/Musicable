@@ -118,8 +118,9 @@ fn run(tape: &mut Tape, segments: &[Segment], until: u64) -> Vec<Report> {
 /// What a recording that finished recorded, and its files.
 type Finished = (Vec<Recorded>, Vec<(String, AudioFile)>);
 
-/// The recordings that finished, and the problems, in `reports`.
-fn split(reports: Vec<Report>) -> (Vec<Finished>, Vec<String>) {
+/// The recordings that finished, and the problems, in `reports`, or with
+/// `captures`, the captures taken.
+fn split_reports(reports: Vec<Report>, captures: bool) -> (Vec<Finished>, Vec<String>) {
     let mut finished = Vec::new();
     let mut problems = Vec::new();
     for report in reports {
@@ -129,8 +130,9 @@ fn split(reports: Vec<Report>) -> (Vec<Finished>, Vec<String>) {
                 rate,
                 recorded,
                 files,
+                captured,
             } => {
-                assert_eq!((project, rate), (1, RATE));
+                assert_eq!((project, rate, captured), (1, RATE, captures));
                 finished.push((recorded, files));
             }
             Report::Problem(problem) => problems.push(problem),
@@ -139,9 +141,22 @@ fn split(reports: Vec<Report>) -> (Vec<Finished>, Vec<String>) {
     (finished, problems)
 }
 
+/// The recordings that finished, and the problems, in `reports`.
+fn split(reports: Vec<Report>) -> (Vec<Finished>, Vec<String>) {
+    split_reports(reports, false)
+}
+
 /// The one recording that finished, if nothing went wrong.
 fn finished(reports: Vec<Report>) -> Finished {
     let (mut finished, problems) = split(reports);
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    finished.remove(0)
+}
+
+/// The one capture taken, if nothing went wrong.
+fn taken(reports: Vec<Report>) -> Finished {
+    let (mut finished, problems) = split_reports(reports, true);
     assert_eq!(problems, Vec::<String>::new());
     assert_eq!(finished.len(), 1, "{finished:?}");
     finished.remove(0)
@@ -791,14 +806,10 @@ fn an_armed_midi_track_whose_input_isnt_open_records_nothing() {
     assert_eq!(problems, [closed]);
 }
 
-#[test]
-fn audio_and_midi_tracks_record_together() {
-    let folder = folder("together");
-    let (audio, _audio_writer) = input(0, 1000);
-    let (midi, mut writer) = MidiBuffer::new(64);
-    writer.push(100, on(60, 100));
-    writer.push(200, off(60));
-    drop(writer);
+/// A tape with the stereo input mic, the default, which has `audio`, and
+/// the MIDI input Keystep, which has `midi`, recording `armed` into the
+/// project folder `folder`.
+fn mic_and_keystep(folder: &Path, audio: InputBuffer, midi: MidiBuffer, armed: Vec<Armed>) -> Tape {
     let mut tape = Tape::new();
     let mut layout = InputLayout::new();
     layout.add("mic", 0, 2);
@@ -809,8 +820,20 @@ fn audio_and_midi_tracks_record_together() {
         midi: vec![Some(midi)],
     };
     tape.set_inputs(layout, buffers);
+    tape.set_tracks(RATE, armed, place(folder), 1);
+    tape
+}
+
+#[test]
+fn audio_and_midi_tracks_record_together() {
+    let folder = folder("together");
+    let (audio, _audio_writer) = input(0, 1000);
+    let (midi, mut writer) = MidiBuffer::new(64);
+    writer.push(100, on(60, 100));
+    writer.push(200, off(60));
+    drop(writer);
     let armed = vec![lead(0), keys("Keystep", None, 0)];
-    tape.set_tracks(RATE, armed, place(&folder), 1);
+    let mut tape = mic_and_keystep(&folder, audio, midi, armed);
     let segments = [recording(0, 0, 0), stopped(500, 500)];
     let (recorded, files) = finished(run(&mut tape, &segments, 600));
     let name = "Recordings/Lead 1.wav";
@@ -818,4 +841,403 @@ fn audio_and_midi_tracks_record_together() {
     expected.extend(takes(vec![pass(0, 500, vec![note(100, 200, 60, 100)])]));
     assert_eq!(recorded, expected);
     assert_eq!(files, stereo(name, 500));
+}
+
+/// A tape holding the last `seconds` of the stereo input `buffer`, the
+/// default, for Capture to take `held` from, which records `armed` into
+/// the project folder `folder`.
+fn holding(
+    folder: &Path,
+    buffer: &InputBuffer,
+    armed: Vec<Armed>,
+    held: Vec<Armed>,
+    seconds: u64,
+) -> Tape {
+    let mut tape = tape(folder, buffer, armed);
+    tape.set_held(held, seconds);
+    tape
+}
+
+/// Playing without recording, with the graph `latency` frames late.
+fn playing(time: u64, position: u64, latency: u64) -> Segment {
+    Segment {
+        time,
+        position,
+        playing: true,
+        latency,
+        ..Segment::default()
+    }
+}
+
+/// Asks `tape` for a capture once the timeline has got to `until`, and
+/// returns what it reported.
+fn capture_at(tape: &mut Tape, until: u64) -> Vec<Report> {
+    tape.add(&[], Read { until, lost: false });
+    tape.ask_capture(until);
+    tape.step();
+    tape.take_reports()
+}
+
+#[test]
+fn a_capture_lands_where_it_was_played() {
+    let folder = folder("capture");
+    let (buffer, _writer) = input(0, 4000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(5)], 1);
+    // Song positions 5,000 to 7,000 played from engine time 1,000, without
+    // recording, were heard 64 frames later, and the input has them 5
+    // frames after that.
+    let segments = [stopped(0, 0), playing(1000, 5000, 64), stopped(3000, 7000)];
+    assert!(run(&mut tape, &segments, 3100).is_empty());
+    let (recorded, files) = taken(capture_at(&mut tape, 3200));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(5000, 2000, 0)]));
+    assert_eq!(files, stereo(name, 2000));
+    assert_eq!(frames(&folder.join(name)), from(1069, 2000));
+}
+
+#[test]
+fn each_time_round_the_loop_a_capture_is_a_pass() {
+    let folder = folder("capture-loop");
+    let (buffer, _writer) = input(0, 2000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    let segments = [playing(0, 100, 0), playing(500, 100, 0), stopped(900, 500)];
+    assert!(run(&mut tape, &segments, 1000).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 1000));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(100, 500, 0), (100, 400, 500)]));
+    assert_eq!(frames(&folder.join(name)), from(0, 900));
+}
+
+#[test]
+fn a_capture_leaves_out_what_was_recorded() {
+    let folder = folder("capture-recorded");
+    let (buffer, _writer) = input(0, 2000);
+    let mut tape = holding(&folder, &buffer, vec![lead(0)], vec![lead(0)], 1);
+    // Recording by hand from 300 to 600, while playing from 0 to 1,000.
+    let segments = [
+        playing(0, 0, 0),
+        recording(300, 300, 0),
+        playing(600, 600, 0),
+        stopped(1000, 1000),
+    ];
+    let (recorded, _) = finished(run(&mut tape, &segments, 1100));
+    assert_eq!(recorded, passes("Recordings/Lead 1.wav", &[(300, 300, 0)]));
+    let (recorded, _) = taken(capture_at(&mut tape, 1100));
+    let name = "Recordings/Lead 2.wav";
+    assert_eq!(recorded, passes(name, &[(0, 300, 0), (600, 400, 300)]));
+    let mut expected = from(0, 300);
+    expected.extend(from(600, 400));
+    assert_eq!(frames(&folder.join(name)), expected);
+}
+
+#[test]
+fn a_capture_takes_the_last_run() {
+    let folder = folder("capture-last");
+    let (buffer, _writer) = input(0, 1000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    let segments = [
+        playing(0, 0, 0),
+        stopped(100, 100),
+        playing(200, 0, 0),
+        stopped(300, 100),
+    ];
+    assert!(run(&mut tape, &segments, 400).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 400));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(0, 100, 0)]));
+    assert_eq!(frames(&folder.join(name)), from(200, 100));
+}
+
+#[test]
+fn a_capture_while_playing_waits_for_its_inputs() {
+    let folder = folder("capture-waits");
+    let (buffer, mut writer) = input(0, 500);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 1000).is_empty());
+    // It takes up to where the engine got as it was asked, once the input
+    // has that.
+    assert!(capture_at(&mut tape, 1000).is_empty());
+    capture(&mut writer, 500, 1200);
+    let (recorded, _) = taken(run(&mut tape, &[], 1200));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(0, 1000, 0)]));
+    assert_eq!(frames(&folder.join(name)), from(0, 1000));
+}
+
+#[test]
+fn a_capture_waits_for_the_timeline_to_get_where_it_was_asked() {
+    let folder = folder("capture-timeline");
+    let (buffer, _writer) = input(0, 2000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 900).is_empty());
+    // Asked for after the transport stopped at 1,000, which the timeline
+    // doesn't say yet.
+    tape.ask_capture(1100);
+    tape.step();
+    assert!(tape.take_reports().is_empty());
+    let (recorded, _) = taken(run(&mut tape, &[stopped(1000, 1000)], 1100));
+    assert_eq!(recorded, passes("Recordings/Lead 1.wav", &[(0, 1000, 0)]));
+}
+
+#[test]
+fn a_capture_goes_back_as_far_as_the_inputs_are_held() {
+    let folder = folder("capture-length");
+    let (buffer, mut writer) = input(0, 40_000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 40_000).is_empty());
+    capture(&mut writer, 40_000, 100_000);
+    assert!(run(&mut tape, &[stopped(100_000, 100_000)], 100_000).is_empty());
+    // A second at 48 kHz holds 65,536 frames.
+    let held = 1 << 16;
+    let (recorded, _) = taken(capture_at(&mut tape, 100_000));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(100_000 - held, held, 0)]));
+    assert_eq!(frames(&folder.join(name)), from(100_000 - held, held));
+}
+
+#[test]
+fn held_inputs_go_on_from_the_next_stream() {
+    let folder = folder("capture-stream");
+    let (old, old_writer) = input(0, 1000);
+    let mut tape = holding(&folder, &old, Vec::new(), vec![lead(0)], 1);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 1000).is_empty());
+    drop(old_writer);
+    // Opening the stream again took 500 frames.
+    let (new, _new_writer) = input(1500, 3000);
+    let mut layout = InputLayout::new();
+    layout.add("mic", 0, 2);
+    layout.set_default("mic");
+    tape.set_inputs(layout, audio(new));
+    assert!(run(&mut tape, &[stopped(3000, 3000)], 3000).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 3000));
+    let name = "Recordings/Lead 1.wav";
+    assert_eq!(recorded, passes(name, &[(0, 3000, 0)]));
+    let mut expected = from(0, 1000);
+    expected.extend(silence(500));
+    expected.extend(from(1500, 1500));
+    assert_eq!(frames(&folder.join(name)), expected);
+}
+
+#[test]
+fn tracks_on_the_same_channels_share_what_is_held() {
+    let folder = folder("capture-shared");
+    let (buffer, _writer) = input(0, 1000);
+    let vox = Armed {
+        track: TrackId(3),
+        name: "Vox".to_owned(),
+        ..lead(0)
+    };
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0), vox], 1);
+    let segments = [playing(0, 0, 0), stopped(100, 100)];
+    assert!(run(&mut tape, &segments, 200).is_empty());
+    assert_eq!(tape.held.audio.len(), 1);
+    let (recorded, files) = taken(capture_at(&mut tape, 200));
+    let tracks: Vec<_> = (recorded.iter())
+        .map(|recorded| match recorded {
+            Recorded::Audio { track, .. } => *track,
+            Recorded::Midi { .. } => panic!("{recorded:?}"),
+        })
+        .collect();
+    assert_eq!(tracks, [TrackId(1), TrackId(3)]);
+    let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["Recordings/Lead 1.wav", "Recordings/Vox 1.wav"]);
+}
+
+#[test]
+fn held_inputs_stay_within_their_memory() {
+    let folder = folder("capture-memory");
+    let (buffer, _writer) = input(0, 1000);
+    let vox = Armed {
+        track: TrackId(3),
+        name: "Vox".to_owned(),
+        input: Input::Audio(AudioInput {
+            stereo: false,
+            ..AudioInput::default()
+        }),
+        offset: 0,
+    };
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0), vox], 1);
+    // Room for Lead's second in stereo, 65,536 frames, and no more.
+    tape.held_bytes = 1 << 19;
+    let segments = [playing(0, 0, 0), stopped(100, 100)];
+    let refused = "Capture doesn't hold Vox's input: holding it would take Capture past 512 KiB \
+                   of memory. A shorter capture_minutes in the settings holds more inputs.";
+    let (_, problems) = split(run(&mut tape, &segments, 200));
+    assert_eq!(problems, [refused]);
+    // It says so once.
+    assert!(run(&mut tape, &[], 300).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 300));
+    assert!(matches!(
+        recorded[..],
+        [Recorded::Audio {
+            track: TrackId(1),
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn capture_says_why_it_has_nothing_to_take() {
+    let folder = folder("capture-nothing");
+    let (buffer, _writer) = input(0, 1000);
+    let problem = |tape: &mut Tape, until: u64| {
+        let (finished, problems) = split(capture_at(tape, until));
+        assert!(finished.is_empty());
+        problems
+    };
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 0);
+    let off = "Capture is off: its length, capture_minutes in the settings, is 0.";
+    assert_eq!(problem(&mut tape, 100), [off]);
+    tape.set_held(Vec::new(), 1);
+    let trackless = "Nothing to capture: no track is armed or monitoring In.";
+    assert_eq!(problem(&mut tape, 100), [trackless]);
+    tape.set_held(vec![lead(0)], 1);
+    assert!(run(&mut tape, &[stopped(0, 0)], 200).is_empty());
+    let unplayed = "Nothing to capture: the transport hasn't played while the tracks' inputs \
+                    were held.";
+    assert_eq!(problem(&mut tape, 200), [unplayed]);
+    // All of the last run recorded, by a track that isn't held.
+    let segments = [recording(300, 0, 0), stopped(400, 100)];
+    assert!(run(&mut tape, &segments, 500).is_empty());
+    let recorded = "Nothing to capture: the transport recorded what it last played, or the \
+                    tracks' inputs didn't play then.";
+    assert_eq!(problem(&mut tape, 500), [recorded]);
+}
+
+#[test]
+fn a_new_engine_drops_what_was_held() {
+    let folder = folder("capture-engine");
+    let (buffer, _writer) = input(0, 1000);
+    let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 1);
+    let segments = [playing(0, 0, 0), stopped(500, 500)];
+    assert!(run(&mut tape, &segments, 600).is_empty());
+    tape.cut();
+    tape.restart_held();
+    assert!(tape.held.audio.iter().all(|input| input.held.is_none()));
+    assert!(run(&mut tape, &[stopped(0, 500)], 100).is_empty());
+    let (_, problems) = split(capture_at(&mut tape, 100));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+}
+
+/// A tape holding the last `seconds` of the MIDI input Keystep, which has
+/// `buffer`, for Capture to take `held` from.
+fn holding_midi(buffer: &MidiBuffer, held: Vec<Armed>, seconds: u64) -> Tape {
+    let mut tape = midi_tape(buffer, Vec::new());
+    tape.set_held(held, seconds);
+    tape
+}
+
+#[test]
+fn a_midi_capture_lands_where_it_was_played() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = holding_midi(&buffer, vec![keys("Keystep", None, 5)], 1);
+    // As in notes_land_where_they_were_played, without recording.
+    let heard = |position: u64| position - 5000 + 1000 + 64 + 5;
+    writer.push(500, on(48, 90));
+    writer.push(600, off(48));
+    writer.push(heard(5100), on(60, 100));
+    writer.push(heard(5500), off(60));
+    writer.push(heard(6000), on(64, 80));
+    buffer.settle(3300);
+    let segments = [stopped(0, 0), playing(1000, 5000, 64), stopped(3000, 7000)];
+    assert!(run(&mut tape, &segments, 3100).is_empty());
+    let (recorded, files) = taken(capture_at(&mut tape, 3200));
+    let notes = vec![note(5100, 5500, 60, 100), held(note(6000, 7000, 64, 80))];
+    assert_eq!(recorded, takes(vec![pass(5000, 2000, notes)]));
+    assert!(files.is_empty());
+}
+
+#[test]
+fn a_midi_capture_waits_for_its_input_to_settle() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = holding_midi(&buffer, vec![keys("Keystep", None, 0)], 1);
+    writer.push(100, on(60, 100));
+    buffer.settle(500);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 1000).is_empty());
+    // Asked for as the engine got to 1,000, while what was heard from 500
+    // may still be on its way.
+    assert!(capture_at(&mut tape, 1000).is_empty());
+    writer.push(700, off(60));
+    buffer.settle(1000);
+    let (recorded, _) = taken(run(&mut tape, &[], 1000));
+    let notes = vec![note(100, 700, 60, 100)];
+    assert_eq!(recorded, takes(vec![pass(0, 1000, notes)]));
+}
+
+#[test]
+fn audio_and_midi_tracks_are_captured_together() {
+    let folder = folder("capture-together");
+    let (audio, _audio_writer) = input(0, 1000);
+    let (midi, mut writer) = MidiBuffer::new(64);
+    writer.push(100, on(60, 100));
+    writer.push(200, off(60));
+    midi.settle(1000);
+    let mut tape = mic_and_keystep(&folder, audio, midi, Vec::new());
+    // Keys takes every MIDI input.
+    tape.set_held(vec![lead(0), keys("", None, 0)], 1);
+    let segments = [playing(0, 0, 0), stopped(500, 500)];
+    assert!(run(&mut tape, &segments, 600).is_empty());
+    let (recorded, files) = taken(capture_at(&mut tape, 600));
+    let name = "Recordings/Lead 1.wav";
+    let mut expected = passes(name, &[(0, 500, 0)]);
+    expected.extend(takes(vec![pass(0, 500, vec![note(100, 200, 60, 100)])]));
+    assert_eq!(recorded, expected);
+    assert_eq!(files, stereo(name, 500));
+}
+
+#[test]
+fn held_midi_inputs_go_on_from_the_next_stream() {
+    let (old, mut old_writer) = MidiBuffer::new(64);
+    let mut tape = holding_midi(&old, vec![keys("Keystep", None, 0)], 1);
+    old_writer.push(100, on(60, 100));
+    old.settle(1000);
+    assert!(run(&mut tape, &[playing(0, 0, 0)], 1000).is_empty());
+    drop(old_writer);
+    // The input opened again with the next stream, and the note went on.
+    let (new, mut new_writer) = MidiBuffer::new(64);
+    new_writer.push(1500, off(60));
+    new.settle(3000);
+    let mut layout = InputLayout::new();
+    layout.add_midi("Keystep");
+    let buffers = Buffers {
+        audio: Vec::new(),
+        midi: vec![Some(new)],
+    };
+    tape.set_inputs(layout, buffers);
+    assert!(run(&mut tape, &[stopped(3000, 3000)], 3000).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 3000));
+    let notes = vec![note(100, 1500, 60, 100)];
+    assert_eq!(recorded, takes(vec![pass(0, 3000, notes)]));
+}
+
+#[test]
+fn held_midi_inputs_stay_within_their_memory() {
+    let folder = folder("capture-midi-memory");
+    let (audio, _audio_writer) = input(0, 1000);
+    let (midi, _writer) = MidiBuffer::new(64);
+    let mut tape = mic_and_keystep(&folder, audio, midi, Vec::new());
+    tape.set_held(vec![lead(0), keys("Keystep", None, 0)], 1);
+    // Room for Lead's second in stereo, and not for Keys's 2,048 messages.
+    tape.held_bytes = 1 << 19;
+    let segments = [playing(0, 0, 0), stopped(100, 100)];
+    let refused = "Capture doesn't hold Keys's MIDI input: holding it would take Capture past \
+                   512 KiB of memory. A shorter capture_minutes in the settings holds more \
+                   inputs.";
+    let (_, problems) = split(run(&mut tape, &segments, 200));
+    assert_eq!(problems, [refused]);
+    assert!(tape.held.midi.iter().all(|input| input.held.is_none()));
+}
+
+#[test]
+fn a_midi_capture_without_notes_takes_nothing() {
+    let (buffer, _writer) = MidiBuffer::new(64);
+    buffer.settle(1000);
+    let mut tape = holding_midi(&buffer, vec![keys("Keystep", None, 0)], 1);
+    let segments = [playing(0, 0, 0), stopped(500, 500)];
+    assert!(run(&mut tape, &segments, 600).is_empty());
+    let (finished, problems) = split(capture_at(&mut tape, 600));
+    assert!(finished.is_empty());
+    let nothing = "Nothing to capture: the transport recorded what it last played, or the \
+                   tracks' inputs didn't play then.";
+    assert_eq!(problems, [nothing]);
 }

@@ -1,7 +1,9 @@
 //! Recording through the app: an armed track records its input while the
 //! transport records, and plays it as it does, and the recording becomes a
 //! take on the track, which undo takes back. An armed MIDI track records
-//! the notes its MIDI input plays the same way.
+//! the notes its MIDI input plays the same way. Capture makes what armed
+//! tracks, and those monitoring In, played without recording into takes,
+//! audio and MIDI.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,12 +13,12 @@ use std::time::{Duration, Instant};
 use musicable_app::Session;
 use musicable_audio::{InputBuffer, InputWriter, MidiBuffer};
 use musicable_commands::editor::AudioFile;
-use musicable_commands::{Keymap, edit, transport};
+use musicable_commands::{Args, Keymap, edit, mixer, track, transport};
 use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, rt};
 use musicable_io::audio::Decoder;
 use musicable_model::clip::ClipContent;
 use musicable_model::time::Beats;
-use musicable_model::{Project, TrackId, TrackKind};
+use musicable_model::{Monitor, Project, TrackId, TrackKind};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -33,8 +35,8 @@ fn captured(w: u64, c: usize) -> f32 {
 }
 
 /// The engine, a session on it with an armed audio track, Lead, whose
-/// recordings go in a folder of the test's own, and the input Lead records
-/// from.
+/// recordings go in a folder of the test's own, `name`, and the input Lead
+/// records from.
 struct Studio {
     engine: Engine,
     session: Session,
@@ -48,9 +50,9 @@ struct Studio {
 }
 
 impl Studio {
-    fn new() -> Self {
+    fn new(name: &str) -> Self {
         let folder =
-            std::env::temp_dir().join(format!("musicable-recording-{}", std::process::id()));
+            std::env::temp_dir().join(format!("musicable-recording-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
         let mut project = Project::new();
         let lead = project.add_track("Lead", TrackKind::Audio);
@@ -112,7 +114,7 @@ impl Studio {
 
 #[test]
 fn armed_tracks_record_takes_where_they_were_played() {
-    let mut studio = Studio::new();
+    let mut studio = Studio::new("record");
     studio.session.run(&transport::RECORD).unwrap();
     assert!(studio.session.is_recording());
     // Recording starts with the first block, once the graph is there.
@@ -228,6 +230,120 @@ fn armed_midi_tracks_record_the_notes_played() {
     assert_eq!(notes, [(half, Beats::new(1), 60, 100.0 / 127.0)]);
 
     assert_eq!(session.undo_name(), Some("Record"));
+    session.run(&edit::UNDO).unwrap();
+    let track = session.project().track(keys).unwrap();
+    assert!(track.takes.is_empty() && track.clips.is_empty());
+}
+
+#[test]
+fn capture_takes_what_tracks_played_without_recording() {
+    let mut studio = Studio::new("capture");
+    // A new track, which isn't armed, and plays its input, the same as
+    // Lead's, always.
+    studio.session.run(&track::NEW_AUDIO_TRACK).unwrap();
+    let pad = studio.session.project().tracks.last().unwrap().id;
+    let args = Args::new().with("track", pad).with("monitor", "In");
+    studio.session.run_with(&mixer::SET_MONITOR, &args).unwrap();
+    assert_eq!(
+        studio.session.project().track(pad).unwrap().monitor,
+        Monitor::In
+    );
+    studio.session.set_capture_seconds(10);
+    studio.session.run(&transport::PLAY).unwrap();
+    studio.session.wait_for_graph();
+    while studio.time < 48_000 {
+        studio.play();
+    }
+    studio.session.run(&transport::STOP).unwrap();
+    studio.play();
+    studio.session.capture();
+    let lead = studio.lead;
+    studio.play_until("capture", |s| {
+        !s.project().track(lead).unwrap().takes.is_empty()
+    });
+    assert_eq!(studio.session.take_problems(), Vec::<String>::new());
+
+    // The second played, from the first frame, on both tracks, in files
+    // named after them.
+    for track in [lead, pad] {
+        let track = studio.session.project().track(track).unwrap();
+        assert_eq!(
+            (track.takes.len(), track.clips.len()),
+            (1, 1),
+            "{}",
+            track.name
+        );
+        let clip = &track.clips[0];
+        assert_eq!((clip.start, clip.end()), (Beats::ZERO, Beats::new(2)));
+        let file = format!("{} 1.wav", track.name);
+        let path = studio.folder.join(&file);
+        let channels = Decoder::open(&path).unwrap().read_all().unwrap();
+        for (c, channel) in channels.iter().enumerate() {
+            let expected: Vec<f32> = (0..48_000).map(|w| captured(w, c)).collect();
+            assert!(
+                *channel == expected,
+                "channel {c} of {file} isn't the input"
+            );
+        }
+    }
+
+    assert_eq!(studio.session.undo_name(), Some("Capture"));
+    studio.session.run(&edit::UNDO).unwrap();
+    let track = studio.session.project().track(lead).unwrap();
+    assert!(track.takes.is_empty() && track.clips.is_empty());
+    let _ = fs::remove_dir_all(&studio.folder);
+}
+
+#[test]
+fn capture_takes_the_notes_midi_tracks_played() {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    project.track_mut(keys).unwrap().armed = true;
+    let (mut engine, handle) = Engine::new(CONFIG);
+    let mut session = Session::offline(project, None, Keymap::default_keymap(), handle);
+    session.set_capture_seconds(10);
+    // The note armed_midi_tracks_record_the_notes_played records, played
+    // without recording.
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut layout = InputLayout::new();
+    layout.add_midi("Keystep");
+    session.set_inputs(layout, Vec::new(), vec![Some(buffer.clone())]);
+    writer.push(12_000, [0x90, 60, 100]);
+    writer.push(36_000, [0x80, 60, 64]);
+    session.run(&transport::PLAY).unwrap();
+    session.wait_for_graph();
+    let mut output = vec![0.0; 2 * CONFIG.max_block];
+    let mut time = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.project().track(keys).unwrap().takes.is_empty() {
+        assert!(Instant::now() < deadline, "no capture after ten seconds");
+        if time == 48_000 {
+            session.run(&transport::STOP).unwrap();
+        } else if time == 48_000 + CONFIG.max_block as u64 {
+            session.capture();
+        }
+        engine.process_interleaved(&mut output, 2);
+        time += CONFIG.max_block as u64;
+        buffer.settle(time);
+        session.tick();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(session.take_problems(), Vec::<String>::new());
+
+    let track = session.project().track(keys).unwrap();
+    assert_eq!((track.takes.len(), track.clips.len()), (1, 1));
+    let clip = &track.clips[0];
+    assert_eq!((clip.start, clip.end()), (Beats::ZERO, Beats::new(2)));
+    let ClipContent::Midi(midi) = &clip.content else {
+        panic!("{clip:?}");
+    };
+    let notes: Vec<_> = (midi.notes.iter())
+        .map(|note| (note.start, note.length, note.key, note.velocity))
+        .collect();
+    let half = Beats::from_f64(0.5);
+    assert_eq!(notes, [(half, Beats::new(1), 60, 100.0 / 127.0)]);
+
+    assert_eq!(session.undo_name(), Some("Capture"));
     session.run(&edit::UNDO).unwrap();
     let track = session.project().track(keys).unwrap();
     assert!(track.takes.is_empty() && track.clips.is_empty());

@@ -152,6 +152,7 @@ impl App {
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
         session.editor_mut().behaviour = settings.behaviour;
+        session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_waker(waker(ctx));
         // The browser's library, whose file work runs on a queue of its own.
         let queue = Arc::new(Queue::for_this_machine());
@@ -413,6 +414,7 @@ impl App {
                 show: false,
             } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
+            Request::Capture => self.session.capture(),
             Request::LoadSample(device) => {
                 if let Some(path) = self.audio_dialog(frame).pick_file() {
                     self.set_sample(device, &path);

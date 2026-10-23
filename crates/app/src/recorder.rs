@@ -12,6 +12,11 @@
 //! left the clips the graph's latency before, so a frame captured at `w`
 //! goes where the song was at `w` minus the latency, and minus the input's
 //! own calibration offset, and a MIDI message the same way.
+//!
+//! For Capture, it also holds the last few minutes of what the inputs of
+//! armed tracks, and of those monitoring In, brought, and the timeline over
+//! as long. Capturing records what they held over the transport's last
+//! run, where it didn't record, as if they had recorded it then.
 //! `docs/app.md` describes it.
 
 use std::collections::VecDeque;
@@ -31,6 +36,7 @@ use musicable_engine::{InputChannels, InputLayout, MidiSource, Segment, Timeline
 use musicable_io::audio::WavWriter;
 use musicable_model::{AudioInput, Input, TrackId};
 
+use self::capture::{HELD_BYTES, Held};
 use self::midi::MidiTape;
 use crate::audio_files::clip_path;
 
@@ -45,7 +51,6 @@ const FLUSH_SECONDS: u64 = 1;
 /// recording stops waiting for it and records silence in its place: an
 /// input that stalled.
 const PATIENCE_SECONDS: u64 = 2;
-
 /// A track to record when the transport records: an armed audio or MIDI
 /// track.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,14 +79,16 @@ pub(crate) struct Place {
 /// What the recorder's thread reports.
 #[derive(Debug)]
 pub(crate) enum Report {
-    /// A recording stopped: what each track recorded, a pass at a time, at
-    /// `rate`, and the files it's in, as clips name them. `project` is what
-    /// [`Recorder::set_tracks`] was given as it started.
+    /// A recording stopped, or with `captured`, a capture was taken: what
+    /// each track recorded, a pass at a time, at `rate`, and the files it's
+    /// in, as clips name them. `project` is what [`Recorder::set_tracks`]
+    /// was given as it started.
     Finished {
         project: u64,
         rate: u32,
         recorded: Vec<Recorded>,
         files: Vec<(String, AudioFile)>,
+        captured: bool,
     },
     /// Something went wrong, for the status bar.
     Problem(String),
@@ -105,6 +112,11 @@ enum Command {
         place: Option<Place>,
         project: u64,
     },
+    Hold {
+        tracks: Vec<Armed>,
+        seconds: u64,
+    },
+    Capture(u64),
 }
 
 /// Records on a thread of its own, `musicable-recorder`: the control
@@ -158,6 +170,22 @@ impl Recorder {
             place,
             project,
         });
+    }
+
+    /// Holds what the inputs of `tracks`, armed tracks and those
+    /// monitoring In, bring from now on, the last `seconds` of it at least,
+    /// for [`capture`](Self::capture). With 0 seconds, it holds nothing.
+    pub fn set_held(&self, tracks: Vec<Armed>, seconds: u64) {
+        self.send(Command::Hold { tracks, seconds });
+    }
+
+    /// Records what the held tracks' inputs played over the transport's
+    /// last run up to engine time `at`, as Capture was asked for, where it
+    /// didn't record, as if they had recorded it then, and reports it as
+    /// [`Report::Finished`], `captured`, or else says why there's nothing
+    /// to take.
+    pub fn capture(&self, at: u64) {
+        self.send(Command::Capture(at));
     }
 
     /// The next report, if there is one.
@@ -229,6 +257,7 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
                     // As far as the old engine got.
                     follow(&mut timeline, &mut tape);
                     tape.cut();
+                    tape.restart_held();
                     timeline = Some(new);
                 }
                 Command::Inputs(layout, buffers) => tape.set_inputs(layout, buffers),
@@ -238,6 +267,8 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
                     place,
                     project,
                 } => tape.set_tracks(rate, armed, place, project),
+                Command::Hold { tracks, seconds } => tape.set_held(tracks, seconds),
+                Command::Capture(at) => tape.ask_capture(at),
             }
         }
         tape.step();
@@ -257,7 +288,7 @@ pub(crate) struct Buffers {
 }
 
 /// What the recorder's thread keeps: the timeline so far, the inputs, the
-/// tracks to record, and the recording running.
+/// tracks to record, the recording running, and what Capture holds.
 struct Tape {
     rate: u32,
     armed: Vec<Armed>,
@@ -278,6 +309,14 @@ struct Tape {
     /// The most frames a file holds, short of the 4 GB a WAV file can:
     /// fewer in tests, to see a recording go on in another file.
     file_frames: u64,
+    held: Held,
+    /// The engine time Capture was asked for at, while it waits for the
+    /// timeline to get there, and the held inputs to have what was heard up
+    /// to then.
+    capture_at: Option<u64>,
+    /// The most memory the held inputs take together, in bytes: less in
+    /// tests.
+    held_bytes: u64,
 }
 
 /// A recording running.
@@ -294,6 +333,8 @@ struct Running {
     notes: Vec<MidiTape>,
     /// The engine time recording stopped at, once the timeline says.
     end: Option<u64>,
+    /// Whether it's a capture, of what was held.
+    captured: bool,
 }
 
 impl Running {
@@ -350,10 +391,17 @@ impl Tape {
             scratch: Vec::new(),
             interleaved: Vec::new(),
             file_frames: u64::MAX,
+            held: Held::default(),
+            capture_at: None,
+            held_bytes: HELD_BYTES,
         }
     }
 
     fn set_tracks(&mut self, rate: u32, armed: Vec<Armed>, place: Option<Place>, project: u64) {
+        if project != self.project {
+            // What the last project's tracks played isn't the next's.
+            self.drop_held();
+        }
         self.rate = rate;
         self.armed = armed;
         self.place = place;
@@ -362,8 +410,11 @@ impl Tape {
 
     /// Takes the stream's inputs. Tracks recording now go on from their
     /// inputs' new buffers: what the old ones didn't capture is silent, and
-    /// what the old MIDI inputs hadn't brought is missing.
+    /// what the old MIDI inputs hadn't brought is missing. The held inputs
+    /// go on the same way.
     fn set_inputs(&mut self, layout: InputLayout, buffers: Buffers) {
+        // The last of what the old buffers have.
+        self.hold();
         if let Some(running) = &mut self.running {
             for track in &mut running.tracks {
                 if let Some((buffer, channels)) = find(&layout, &buffers.audio, &track.input) {
@@ -382,6 +433,7 @@ impl Tape {
         }
         self.layout = layout;
         self.buffers = buffers;
+        self.hold_from_new_inputs();
     }
 
     /// Takes the segments the timeline published since the last read.
@@ -401,12 +453,16 @@ impl Tape {
         }
         self.segments.extend(segments);
         self.until = self.until.max(read.until);
+        self.hold_timeline(segments);
     }
 
     /// The timeline ends where it has got to, such as when the engine is
     /// replaced: a recording running stops there, with what its inputs have
-    /// captured, and the next timeline starts its own times.
+    /// captured, Capture takes what's held if it was asked to, and the next
+    /// timeline starts its own times.
     fn cut(&mut self) {
+        self.take_capture_now();
+        self.drop_timeline();
         if let Some(mut running) = self.running.take() {
             let end = running
                 .end
@@ -420,9 +476,12 @@ impl Tape {
         self.until = 0;
     }
 
-    /// Writes what it can, and finishes a recording that stopped once its
-    /// tracks have caught up.
+    /// Holds what the held inputs brought since, takes a capture once its
+    /// inputs have caught up, writes what it can, and finishes a recording
+    /// that stopped once its tracks have caught up.
     fn step(&mut self) {
+        self.hold();
+        self.take_capture();
         while self.running.is_some() || self.start() {
             let mut running = self.running.take().expect("a recording runs");
             if running.end.is_none() {
@@ -495,6 +554,7 @@ impl Tape {
             tracks,
             notes,
             end: None,
+            captured: false,
         });
         true
     }
@@ -728,6 +788,11 @@ impl Tape {
         let end = running
             .end
             .expect("a recording finishes once it has stopped");
+        let what = if running.captured {
+            "capture"
+        } else {
+            "recording"
+        };
         let mut recorded = Vec::new();
         let mut files = Vec::new();
         for mut track in running.tracks {
@@ -736,7 +801,7 @@ impl Tape {
             }
             if let Err(error) = close(&mut track) {
                 self.reports.push(Report::Problem(format!(
-                    "Couldn't finish {}'s recording: {error}.",
+                    "Couldn't finish {}'s {what}: {error}.",
                     track.armed.name
                 )));
                 continue;
@@ -744,8 +809,7 @@ impl Tape {
             if track.lost > 0 {
                 let seconds = track.lost as f64 / f64::from(running.rate);
                 self.reports.push(Report::Problem(format!(
-                    "{seconds:.2} seconds of {}'s recording are silent: its input didn't have \
-                     them.",
+                    "{seconds:.2} seconds of {}'s {what} are silent: its input didn't have them.",
                     track.armed.name
                 )));
             }
@@ -779,6 +843,7 @@ impl Tape {
                 rate: running.rate,
                 recorded,
                 files,
+                captured: running.captured,
             });
         }
         // The next recording starts after this one.
@@ -925,6 +990,7 @@ pub(crate) fn unsaved_folder() -> Option<PathBuf> {
     )
 }
 
+mod capture;
 mod midi;
 #[cfg(test)]
 mod tests;

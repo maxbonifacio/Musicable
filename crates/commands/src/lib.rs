@@ -236,6 +236,11 @@ pub enum Request {
     },
     /// Scan for plugins again, loading the libraries that were bad too.
     RescanPlugins,
+    /// Make what the armed tracks, and those monitoring In, played over
+    /// the transport's last run, where it didn't record, into takes, as if
+    /// they had recorded it then, from what the recorder holds of their
+    /// inputs.
+    Capture,
     /// Ask for an audio file, and give it to this sampler with
     /// [`device::SET_SAMPLE`].
     LoadSample(DeviceId),

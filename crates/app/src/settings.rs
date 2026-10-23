@@ -26,6 +26,9 @@
 //! [browser]
 //! auto_preview = true
 //! preview_volume = -6
+//!
+//! [recording]
+//! capture_minutes = 5
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -86,6 +89,7 @@ pub struct Settings {
     /// [`ExportSettings`].
     pub export: ExportSettings,
     pub browser: BrowserSettings,
+    pub recording: RecordingSettings,
 }
 
 /// How the browser previews samples, and where Musicable's own presets go.
@@ -120,6 +124,21 @@ impl BrowserSettings {
             .preview_volume
             .clamp(MIN_PREVIEW_VOLUME, MAX_PREVIEW_VOLUME);
         10f32.powf(db as f32 / 20.0)
+    }
+}
+
+/// How Musicable records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    /// How many minutes of the inputs of armed tracks, and of those
+    /// monitoring In, Capture holds in memory, at least: 0 turns it off.
+    pub capture_minutes: u32,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self { capture_minutes: 5 }
     }
 }
 
@@ -286,6 +305,7 @@ mod tests {
                 preview_volume: -12,
                 presets_folder: Some(PathBuf::from("/music/presets")),
             },
+            recording: RecordingSettings { capture_minutes: 0 },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -302,6 +322,7 @@ mod tests {
         let settings = Settings::parse("[audio]\nbuffer_size = 256\nlater = true\n").unwrap();
         assert_eq!(settings.audio.buffer_size, Some(256));
         assert_eq!(settings.behaviour, Behaviour::default());
+        assert_eq!(settings.recording.capture_minutes, 5);
         assert_eq!(
             settings.audio.request(),
             StreamRequest {

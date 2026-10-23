@@ -1,7 +1,8 @@
-//! The transport commands: play, stop, record, the start marker, loop,
-//! punch in and out, metronome and tempo.
+//! The transport commands: play, stop, record, capture, the start marker,
+//! loop, punch in and out, metronome and tempo.
 //!
-//! Play, stop, record and locating drive the engine's transport. The loop,
+//! Play, stop, record and locating drive the engine's transport. Capture
+//! asks the app, which holds what the inputs played. The loop,
 //! punching in and out, the metronome and the tempo are part of the project,
 //! so those commands change it through transactions, and the app passes the
 //! changes on to the engine. The start marker is the arrangement's, in the
@@ -10,7 +11,9 @@
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::editor::PlayFrom;
-use crate::{Command, CommandError, CommandId, Context, Document, Param, Registry, Type, Value};
+use crate::{
+    Command, CommandError, CommandId, Context, Document, Param, Registry, Request, Type, Value,
+};
 
 /// Plays from the start marker when stopped, and stops when playing. The
 /// behaviour settings can have it play from the playhead instead.
@@ -24,6 +27,10 @@ pub const STOP: CommandId = CommandId::new("transport.stop");
 /// [`PLAY_STOP`] does, or while playing, turns recording on or off: a punch
 /// in or out by hand.
 pub const RECORD: CommandId = CommandId::new("transport.record");
+/// Makes what the armed tracks, and those monitoring In, played over the
+/// transport's last run into takes, as if they had recorded it: see
+/// [`Request::Capture`].
+pub const CAPTURE: CommandId = CommandId::new("transport.capture");
 /// Moves the start marker and the playhead to the start of the song.
 pub const GO_TO_START: CommandId = CommandId::new("transport.go_to_start");
 /// Loops the selection, or else turns looping over the loop region on or
@@ -53,11 +60,14 @@ type Handler = fn(&mut Context<'_>);
 
 /// The transport commands that take no arguments, with their titles and
 /// what they run.
-const COMMANDS: [(CommandId, &str, Handler); 9] = [
+const COMMANDS: [(CommandId, &str, Handler); 10] = [
     (PLAY_STOP, "Play/Stop", play_stop),
     (PLAY, "Play", |ctx| ctx.transport.play()),
     (STOP, "Stop", |ctx| ctx.transport.stop()),
     (RECORD, "Record", record),
+    (CAPTURE, "Capture", |ctx| {
+        ctx.requests.push(Request::Capture)
+    }),
     (GO_TO_START, "Go to Start", |ctx| jump(ctx, Beats::ZERO)),
     (TOGGLE_LOOP, "Toggle Loop", toggle_loop),
     (TOGGLE_METRONOME, "Toggle Metronome", toggle_metronome),
