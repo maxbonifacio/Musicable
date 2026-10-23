@@ -695,7 +695,7 @@ the device opens.
 ```sh
 cargo run --release -p musicable-app --example record_round_trip -- --loopback
 cargo run --release -p musicable-app --example record_round_trip -- --output RME --input RME
-cargo run --release -p musicable-app --features asio --example record_round_trip -- --asio
+cargo run --release -p musicable-app --example record_round_trip -- --asio
 cargo run --release -p musicable-app --example record_round_trip -- --loopback --minutes 60
 ```
 
@@ -1352,11 +1352,10 @@ milliseconds: drag it, or type it and press Enter, and the next recording
 uses it, as does Capture. The foot of the window has the notice the GPL asks
 for.
 
-Windows builds with the `asio` feature ([audio.md](audio.md#asio)) add a
-driver type, WASAPI or ASIO, above the device. For ASIO it lists the
-installed drivers, the rates each can switch to and the buffer sizes it
-takes, by default the one it prefers, and Driver Settings opens the playing
-driver's own settings.
+On Windows, the window has a driver type above the device, WASAPI or ASIO
+([audio.md](audio.md#asio)). For ASIO it lists the installed drivers, the
+rates each can switch to and the buffer sizes it takes, by default the one
+it prefers, and Driver Settings opens the playing driver's own settings.
 
 ### Meters
 

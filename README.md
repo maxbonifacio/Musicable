@@ -35,7 +35,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/model` | Pure-data project model. No audio, no UI. |
 | `crates/commands` | Command registry, keymaps and transactions. See [docs/commands.md](docs/commands.md). |
 | `crates/engine` | Real-time audio engine: graph, reference renderer and parallel scheduler. See [docs/engine.md](docs/engine.md). |
-| `crates/audio` | Audio device output: our own WASAPI backend on Windows, and our own ASIO host with the `asio` feature; cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
+| `crates/audio` | Audio device output: our own WASAPI backend and ASIO host on Windows; cpal on macOS and Linux. See [docs/audio.md](docs/audio.md). |
 | `crates/plugins` | CLAP and VST3 hosting, then ARA. See [docs/plugins.md](docs/plugins.md). |
 | `crates/test-plugins` | Plugins that test the plugin hosting. Not shipped. |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
@@ -54,7 +54,6 @@ cargo test --workspace
 cargo run --release -p musicable-app                    # the app; File > New Demo Project plays the demo
 cargo run --release -p musicable-app -- null-test       # the parallel scheduler against the reference renderer
 cargo run --release -p musicable-audio --example tone   # a test tone on the default output
-cargo run --release -p musicable-app --features asio    # Windows: ASIO drivers too
 ```
 
 On Windows, install the Visual Studio Build Tools and use Rust's MSVC

@@ -64,14 +64,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI also checks the ASIO build (the `asio` feature, [docs/audio.md](docs/audio.md#asio)),
-which matters when you change `crates/audio` or the app's audio settings:
-
-```sh
-cargo clippy --workspace --all-targets --features musicable-app/asio -- -D warnings
-cargo test -p musicable-audio --features asio
-```
-
 ## Commands
 
 Every command needs an example in

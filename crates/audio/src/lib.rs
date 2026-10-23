@@ -3,10 +3,9 @@
 //! On Windows this is our own WASAPI backend. Shared mode runs at the
 //! smallest period the driver offers through IAudioClient3, or at the audio
 //! engine's default period (usually 10 ms) when it offers nothing smaller.
-//! Exclusive mode is an option. Builds with the `asio` feature play through
-//! ASIO drivers too, with our own ASIO host. On macOS and Linux it goes
-//! through [cpal](https://docs.rs/cpal): it builds and plays, but isn't
-//! tuned.
+//! Exclusive mode is an option, and ASIO drivers play through our own ASIO
+//! host. On macOS and Linux it goes through [cpal](https://docs.rs/cpal): it
+//! builds and plays, but isn't tuned.
 //!
 //! Opening a stream takes two steps, because the engine has to be built for
 //! what the device actually does, which isn't always what was asked for:
@@ -60,7 +59,7 @@ mod cpal_host;
 use cpal_host as backend;
 
 // Elsewhere than on Windows, only the tests build it, with a fake driver.
-#[cfg(all(feature = "asio", any(windows, test)))]
+#[cfg(any(windows, test))]
 mod asio;
 
 pub use input::{
@@ -97,8 +96,7 @@ pub enum DriverType {
     /// ALSA on Linux.
     #[default]
     System,
-    /// An ASIO driver, which talks to its hardware itself. Windows builds
-    /// with the `asio` feature only.
+    /// An ASIO driver, which talks to its hardware itself. Windows only.
     Asio,
 }
 
@@ -119,29 +117,28 @@ const ASIO_ID_PREFIX: &str = "asio:";
 
 /// The driver types this build plays through, the system's first.
 pub fn driver_types() -> &'static [DriverType] {
-    if cfg!(all(windows, feature = "asio")) {
+    if cfg!(windows) {
         &[DriverType::System, DriverType::Asio]
     } else {
         &[DriverType::System]
     }
 }
 
-/// The output devices that are plugged in and enabled, and in builds with
-/// ASIO, the ASIO drivers that are installed.
+/// The output devices that are plugged in and enabled, and on Windows, the
+/// ASIO drivers that are installed.
 pub fn output_devices() -> Result<Vec<Device>, Error> {
     let devices = backend::output_devices()?;
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     let devices = devices.into_iter().chain(asio::output_devices()).collect();
     Ok(devices)
 }
 
 /// The inputs a stream can record from: the input devices that are plugged
-/// in and enabled, then on Windows a loopback of each output device, and in
-/// builds with ASIO, each ASIO driver's inputs, which open only with the
-/// driver's own output.
+/// in and enabled, then on Windows a loopback of each output device, and
+/// each ASIO driver's inputs, which open only with the driver's own output.
 pub fn input_devices() -> Result<Vec<InputDevice>, Error> {
     let devices = backend::input_devices()?;
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     let devices = devices.into_iter().chain(asio::input_devices()).collect();
     Ok(devices)
 }
@@ -205,7 +202,7 @@ pub struct AsioCapabilities {
 /// What `device` supports, or the default output's if it's `None`. For an
 /// ASIO driver, this loads it, unless a stream has it open.
 pub fn capabilities(device: Option<&str>) -> Result<Capabilities, Error> {
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     if let Some(id) = device.filter(|&id| DriverType::of(id) == DriverType::Asio) {
         return asio::capabilities(id);
     }
@@ -364,7 +361,7 @@ pub fn open(request: &StreamRequest) -> Result<OpenStream, Error> {
         playback,
         midi: midi.bus(),
     };
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     if let Some(id) = request.device.as_deref()
         && DriverType::of(id) == DriverType::Asio
     {
@@ -410,14 +407,14 @@ pub struct OpenStream {
 /// The backend an open stream is on.
 enum OpenInner {
     System(backend::OpenStream),
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     Asio(asio::OpenStream),
 }
 
 /// The backend a stream plays on.
 enum StreamInner {
     System(backend::Stream),
-    #[cfg(all(windows, feature = "asio"))]
+    #[cfg(windows)]
     Asio(asio::Stream),
 }
 
@@ -454,7 +451,7 @@ impl OpenStream {
         }
         let inner = match self.inner {
             OpenInner::System(open) => StreamInner::System(open.start(engine)?),
-            #[cfg(all(windows, feature = "asio"))]
+            #[cfg(windows)]
             OpenInner::Asio(open) => StreamInner::Asio(open.start(engine)?),
         };
         Ok(Stream {
@@ -536,7 +533,7 @@ impl Stream {
     pub fn stats(&self) -> StreamStats {
         match &self.inner {
             StreamInner::System(stream) => stream.stats(),
-            #[cfg(all(windows, feature = "asio"))]
+            #[cfg(windows)]
             StreamInner::Asio(stream) => stream.stats(),
         }
     }
@@ -546,7 +543,7 @@ impl Stream {
     pub fn has_ended(&self) -> bool {
         match &self.inner {
             StreamInner::System(stream) => stream.has_ended(),
-            #[cfg(all(windows, feature = "asio"))]
+            #[cfg(windows)]
             StreamInner::Asio(stream) => stream.has_ended(),
         }
     }
@@ -556,7 +553,7 @@ impl Stream {
     /// ends the stream with [`Error::DriverReset`]: open it again. Returns
     /// `false` for streams with no settings of their own: all but ASIO's.
     pub fn show_driver_settings(&self) -> bool {
-        #[cfg(all(windows, feature = "asio"))]
+        #[cfg(windows)]
         if let StreamInner::Asio(stream) = &self.inner {
             stream.show_driver_settings();
             return true;
@@ -568,7 +565,7 @@ impl Stream {
     pub fn stop(self) -> Stopped {
         match self.inner {
             StreamInner::System(stream) => stream.stop(),
-            #[cfg(all(windows, feature = "asio"))]
+            #[cfg(windows)]
             StreamInner::Asio(stream) => stream.stop(),
         }
     }

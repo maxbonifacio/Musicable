@@ -1,14 +1,10 @@
 [package]
 name = "musicable-audio"
-description = "Audio device I/O: our own WASAPI backend on Windows, and ASIO with a feature; cpal elsewhere."
+description = "Audio device I/O: our own WASAPI backend and ASIO host on Windows; cpal elsewhere."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-
-[features]
-# ASIO output on Windows: see docs/audio.md.
-asio = []
 
 [dependencies]
 musicable-engine.workspace = true

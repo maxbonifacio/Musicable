@@ -10,7 +10,7 @@ inputs, and ASIO.
 | Platform | Backend | Modes |
 |---|---|---|
 | Windows | Our own WASAPI backend | Shared (the default) and exclusive |
-| Windows, with the `asio` feature | Our own ASIO host as well ([ASIO](#asio)) | One: the driver's |
+| Windows, ASIO drivers | Our own ASIO host as well ([ASIO](#asio)) | One: the driver's |
 | macOS | cpal, CoreAudio | Shared only. Builds and plays, not tuned |
 | Linux | cpal, ALSA | Shared only. Builds and plays, not tuned |
 
@@ -212,8 +212,8 @@ let range = buffers[0].as_ref().unwrap().frames();
 - `input_devices` lists what a stream can record from: each input device
   that's plugged in and enabled (`InputKind::Device`), then on Windows each
   output device's loopback (`InputKind::Loopback`: `loopback_id` of the
-  output's id), and in ASIO builds each driver's inputs, which have the
-  driver's own id. The ids stay the same across runs.
+  output's id), and each ASIO driver's inputs, which have the driver's own
+  id. The ids stay the same across runs.
 - `StreamInfo::inputs` says what each requested input opened as: its name,
   channels, rate and `InputClock`, and its first channel among the engine's
   device inputs, or why it didn't open. An input that doesn't open has no
@@ -410,22 +410,15 @@ ASIO streams render on the driver's own thread instead ([ASIO](#asio)).
 
 ## ASIO
 
-Windows builds with the `asio` feature play through ASIO drivers too, with a
-host of our own in `src/asio/`:
+Every Windows build plays through ASIO drivers too, with a host of our own
+in `src/asio/`. Nothing else needs installing: no SDK, and no LLVM for
+bindings. The driver interface is written from Steinberg's ASIO 2.3
+specification, in our own words, and the drivers come with the hardware.
+Builds are 64-bit only. Elsewhere than on Windows, the module builds only for
+its tests.
 
-```sh
-cargo build --release -p musicable-app --features asio
-```
-
-Nothing else needs installing: no SDK, and no LLVM for bindings. The driver
-interface is written from Steinberg's ASIO 2.3 specification, in our own
-words, and the drivers come with the hardware. Builds are 64-bit only.
-
-**Opt-in.** The default build has no ASIO code for now: the module only
-compiles with the feature, and CI checks that the app's default build
-doesn't turn it on. Like the rest of Musicable, it's licensed under the GNU
-GPL, version 3 or later. ASIO is a trademark of Steinberg Media Technologies
-GmbH.
+Like the rest of Musicable, the host is licensed under the GNU GPL, version 3
+or later. ASIO is a trademark of Steinberg Media Technologies GmbH.
 
 **Drivers as devices.** `output_devices` lists each ASIO driver installed for
 64-bit apps (under `HKEY_LOCAL_MACHINE\SOFTWARE\ASIO`, with its COM class
@@ -542,9 +535,9 @@ its own dropouts, which would leave that sign out for it, wasn't recorded;
 **Tests.** `src/asio/fake.rs` is a fake driver built in Rust, set up to behave
 as drivers do, that records what the stream asks of it, and the tests in
 `src/asio/tests.rs` play the driver's thread. They run on every platform with
-`cargo test -p musicable-audio --features asio`: elsewhere than on Windows the
-module builds only for them, with stand-ins for COM and for the event the
-stream's thread waits on.
+`cargo test -p musicable-audio`: elsewhere than on Windows the module builds
+only for them, with stand-ins for COM and for the event the stream's thread
+waits on.
 
 ## Trying it
 
@@ -562,15 +555,14 @@ periods every five seconds, to see that each one is counted. `--device` takes
 an id or part of a device name, and `--help` lists the rest. When the device
 goes away mid-run, it keeps trying to open it again.
 
-With the `asio` feature, `--list` shows the ASIO drivers as well, and
-whether each reports its own dropouts. `--asio` plays through one: the one
+On Windows, `--list` shows the ASIO drivers as well, and whether each
+reports its own dropouts. `--asio` plays through one: the one
 `--device` names, or the only one installed. `--driver-settings` opens the
 driver's own settings once it plays, to see a change there reset the stream
 and reopen it.
 
 ```sh
-cargo run --release -p musicable-audio --features asio --example tone -- --list
-cargo run --release -p musicable-audio --features asio --example tone -- --asio --seconds 3600
+cargo run --release -p musicable-audio --example tone -- --asio --seconds 3600
 ```
 
 The round trip example plays clicks and records them back, through a cable from
@@ -585,7 +577,7 @@ repeated or misplaced frame shows.
 cargo run --release -p musicable-audio --example round_trip -- --list
 cargo run --release -p musicable-audio --example round_trip -- --loopback --runs 5
 cargo run --release -p musicable-audio --example round_trip -- --output RME --input RME
-cargo run --release -p musicable-audio --features asio --example round_trip -- --asio
+cargo run --release -p musicable-audio --example round_trip -- --asio
 cargo run --release -p musicable-audio --example round_trip -- --input RME --soak 60
 ```
 
