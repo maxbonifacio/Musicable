@@ -67,6 +67,10 @@ const RECORDINGS: &str = "Recordings";
 /// played over the transport's last run without recording, from the last
 /// few minutes of their inputs, which the recorder holds once
 /// [`set_capture_seconds`](Self::set_capture_seconds) says how long.
+///
+/// Audio takes make up for a device's latency that its driver doesn't
+/// report once [`set_recording_offset`](Self::set_recording_offset) says
+/// how much.
 pub struct Session {
     document: Document,
     commands: Registry,
@@ -79,6 +83,9 @@ pub struct Session {
     /// How long Capture holds the inputs of the tracks it takes, in
     /// seconds: 0 holds nothing.
     capture_seconds: u64,
+    /// How many frames late audio inputs' buffers have what they captured,
+    /// beyond the latency their drivers report.
+    recording_offset: i64,
     /// Counts the projects opened, to tell a recording of an earlier one.
     opened: u64,
     /// What the plugins' windows asked for, oldest first.
@@ -237,6 +244,7 @@ impl Session {
             recorder,
             unsaved_recordings: recorder::unsaved_folder(),
             capture_seconds: 0,
+            recording_offset: 0,
             opened: 0,
             window_events: Vec::new(),
             problems: Vec::new(),
@@ -402,6 +410,23 @@ impl Session {
         self.arm();
     }
 
+    /// Makes up for `frames` of the audio inputs' latency that their
+    /// drivers don't report, from the next recording or capture on: each
+    /// audio take starts that much later in what its input captured. What a
+    /// cable from an output to an input measures, as the device's recording
+    /// offset. 0 by default. MIDI takes are left as they are.
+    pub fn set_recording_offset(&mut self, frames: i64) {
+        if frames != self.recording_offset {
+            self.recording_offset = frames;
+            self.arm();
+        }
+    }
+
+    /// The recording offset, in frames.
+    pub fn recording_offset(&self) -> i64 {
+        self.recording_offset
+    }
+
     /// Makes what the armed tracks, and those monitoring In, played over
     /// the transport's last run, where it didn't record, into takes,
     /// as if they had recorded it then: one step of the undo history, named
@@ -415,6 +440,7 @@ impl Session {
     /// on, and where, and which inputs to hold for Capture.
     fn arm(&mut self) {
         let project = self.document.project();
+        let audio_offset = self.recording_offset;
         let tracks = |held: bool| {
             (project.tracks.iter())
                 .filter(move |track| track.armed || (held && track.monitor == Monitor::In))
@@ -427,7 +453,10 @@ impl Session {
                     track: track.id,
                     name: track.name.clone(),
                     input: input.clone(),
-                    offset: 0,
+                    offset: match input {
+                        Input::Audio(_) => audio_offset,
+                        Input::Midi(_) => 0,
+                    },
                 })
                 .collect()
         };

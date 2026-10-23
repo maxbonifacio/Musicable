@@ -29,6 +29,12 @@
 //!
 //! [recording]
 //! capture_minutes = 5
+//!
+//! [[recording.offsets]]
+//! device = "{0.0.0.00000000}.{a1b2c3d4-...}"
+//! exclusive = true
+//! sample_rate = 44100
+//! frames = 878
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -39,7 +45,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use musicable_audio::{Mode, StreamRequest};
+use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
 use musicable_ui::{MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
@@ -134,11 +140,72 @@ pub struct RecordingSettings {
     /// How many minutes of the inputs of armed tracks, and of those
     /// monitoring In, Capture holds in memory, at least: 0 turns it off.
     pub capture_minutes: u32,
+    /// How late audio recorded through each device lands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub offsets: Vec<RecordingOffset>,
 }
 
 impl Default for RecordingSettings {
     fn default() -> Self {
-        Self { capture_minutes: 5 }
+        Self {
+            capture_minutes: 5,
+            offsets: Vec::new(),
+        }
+    }
+}
+
+impl RecordingSettings {
+    /// The recording offset of the stream `info` describes: 0 unless one
+    /// was set for its device, in its mode and at its rate.
+    pub fn offset_for(&self, info: &StreamInfo) -> i64 {
+        let key = key(info);
+        (self.offsets.iter())
+            .find(|offset| offset.is_for(key))
+            .map_or(0, |offset| offset.frames)
+    }
+
+    /// Sets the recording offset of the stream `info` describes, for its
+    /// device, in its mode and at its rate. 0 leaves it out.
+    pub fn set_offset_for(&mut self, info: &StreamInfo, frames: i64) {
+        let key = key(info);
+        self.offsets.retain(|offset| !offset.is_for(key));
+        let (device, exclusive, sample_rate) = key;
+        if frames != 0 {
+            self.offsets.push(RecordingOffset {
+                device: device.to_owned(),
+                exclusive,
+                sample_rate,
+                frames,
+            });
+        }
+    }
+}
+
+/// What a recording offset is for: a device, in exclusive mode or not, at
+/// a rate. ASIO drivers have no modes.
+fn key(info: &StreamInfo) -> (&str, bool, u32) {
+    let exclusive = info.api == Api::WasapiExclusive;
+    (&info.device.id, exclusive, info.sample_rate)
+}
+
+/// How many frames late audio recorded through a device lands, in a mode
+/// and at a rate, beyond the latency its driver reports: what a cable from
+/// one of its outputs to one of its inputs measures. Each audio take
+/// recorded through it starts that much later in what the input captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingOffset {
+    /// The device's id, as in [`AudioSettings::device`].
+    pub device: String,
+    /// Whether it's for the device in exclusive mode.
+    #[serde(default)]
+    pub exclusive: bool,
+    pub sample_rate: u32,
+    pub frames: i64,
+}
+
+impl RecordingOffset {
+    fn is_for(&self, (device, exclusive, sample_rate): (&str, bool, u32)) -> bool {
+        self.device == device && self.exclusive == exclusive && self.sample_rate == sample_rate
     }
 }
 
@@ -305,7 +372,15 @@ mod tests {
                 preview_volume: -12,
                 presets_folder: Some(PathBuf::from("/music/presets")),
             },
-            recording: RecordingSettings { capture_minutes: 0 },
+            recording: RecordingSettings {
+                capture_minutes: 0,
+                offsets: vec![RecordingOffset {
+                    device: "{0.0.0.00000000}.{guid}".into(),
+                    exclusive: true,
+                    sample_rate: 44_100,
+                    frames: 878,
+                }],
+            },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -375,6 +450,56 @@ mod tests {
             midi_inputs: Vec::new(),
         };
         assert_eq!(AudioSettings::from_request(&request).request(), request);
+    }
+
+    #[test]
+    fn recording_offsets_are_kept_for_each_device_mode_and_rate() {
+        let info = |id: &str, api, sample_rate| StreamInfo {
+            device: musicable_audio::Device {
+                id: id.to_owned(),
+                name: id.to_owned(),
+                is_default: false,
+                driver_type: musicable_audio::DriverType::System,
+            },
+            api,
+            sample_rate,
+            channels: 2,
+            format: musicable_audio::SampleFormat::F32,
+            period: 441,
+            buffer: 882,
+            latency: 441,
+            realtime: true,
+            inputs: Vec::new(),
+            midi_inputs: Vec::new(),
+        };
+        let exclusive = info("rme", Api::WasapiExclusive, 44_100);
+        let shared = info("rme", Api::WasapiShared, 44_100);
+        let low_latency = info("rme", Api::WasapiLowLatency, 44_100);
+        let asio = info("asio:RME", Api::Asio, 44_100);
+        let mut recording = RecordingSettings::default();
+        assert_eq!(recording.offset_for(&exclusive), 0);
+        recording.set_offset_for(&exclusive, 878);
+        recording.set_offset_for(&shared, 1_002);
+        recording.set_offset_for(&asio, -3);
+        assert_eq!(recording.offset_for(&exclusive), 878);
+        // Shared mode is shared mode, at the audio engine's period or not.
+        assert_eq!(recording.offset_for(&low_latency), 1_002);
+        assert_eq!(recording.offset_for(&asio), -3);
+        let other_rate = info("rme", Api::WasapiExclusive, 48_000);
+        let other_device = info("speakers", Api::WasapiShared, 44_100);
+        assert_eq!(recording.offset_for(&other_rate), 0);
+        assert_eq!(recording.offset_for(&other_device), 0);
+        // Setting one again replaces it, and 0 leaves it out.
+        recording.set_offset_for(&exclusive, 879);
+        recording.set_offset_for(&asio, 0);
+        assert_eq!(recording.offsets.len(), 2);
+        assert_eq!(recording.offset_for(&exclusive), 879);
+        assert_eq!(recording.offset_for(&asio), 0);
+        let settings = Settings {
+            recording,
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&settings.to_toml()).unwrap(), settings);
     }
 
     #[test]
