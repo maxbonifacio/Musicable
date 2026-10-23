@@ -923,6 +923,7 @@ mod tests {
     use musicable_model::{TrackId, TrackKind};
 
     use super::*;
+    use crate::arrange::INSERT_MIDI_CLIP;
     use crate::editor::Viewport;
     use crate::testing::Setup;
     use crate::{Keymap, edit, view};
@@ -1086,6 +1087,43 @@ mod tests {
             setup.run_with(&DRAW, args),
             Err(CommandError::invalid("each note needs a start and a key"))
         );
+    }
+
+    #[test]
+    fn redo_draws_notes_again_in_a_clip_it_makes_again() {
+        let (mut setup, [keys, _], _, _) = roll();
+        let args = Args::new()
+            .with("track", keys)
+            .with("start", Beats::new(16));
+        let inserted = setup.run_with(&INSERT_MIDI_CLIP, args).unwrap();
+        let Value::List(inserted) = inserted else {
+            panic!("no clips in {inserted:?}");
+        };
+        let [Value::Clip(clip)] = inserted[..] else {
+            panic!("not one clip: {inserted:?}");
+        };
+        let args = Args::new()
+            .with("starts", vec![Beats::ZERO, Beats::new(1)])
+            .with("keys", vec![60_i64, 62])
+            .with("clip", clip);
+        setup.run_with(&DRAW, args).unwrap();
+        let drawn = notes(&setup, clip);
+        assert_eq!(drawn.len(), 2);
+        setup.run(&edit::UNDO);
+        setup.run(&edit::UNDO);
+        assert!(midi(setup.document.project(), clip).is_err());
+        // Redo makes the clip again as it was made, empty, and then draws
+        // the notes in it.
+        setup.run(&edit::REDO);
+        setup.run(&edit::REDO);
+        assert_eq!(notes(&setup, clip), drawn);
+        // A note drawn after them is a new one.
+        let args = Args::new()
+            .with("start", Beats::new(2))
+            .with("key", 64_i64)
+            .with("clip", clip);
+        let added = setup.run_with(&ADD, args).unwrap();
+        assert_eq!(added, Value::Note(NoteId(2)));
     }
 
     #[test]
