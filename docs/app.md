@@ -59,7 +59,9 @@ automate a fader, undo and redo freely, save and reopen, and export a WAV
 faster than real time:
 
 1. **File > New Project** (Ctrl+N), then **File > Save Project As**
-   (Ctrl+Shift+S), so the recordings go in the project's folder.
+   (Ctrl+Shift+S) and **File > Open Project** (Ctrl+O) it again, so the
+   recordings go in the project's folder: until it's opened again, a new
+   project records into Unsaved Recordings ([Recording](#recording)).
 2. **Track > New MIDI Track** (Ctrl+Shift+T). With it selected, double-click
    a synth in the browser's Devices (Ctrl+Alt+B shows the browser), such as
    "Surge XT (CLAP)". Then **Track > New Audio Track** (Ctrl+T): it records
