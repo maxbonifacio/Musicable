@@ -1,7 +1,8 @@
 //! The null test: a project played offline with the parallel scheduler and
 //! with the reference renderer, side by side, checked sample for sample.
-//! `musicable null-test` runs it on a project file, and
-//! `tests/tier0_demo.rs` on the Tier 0 demo. `docs/app.md` describes it.
+//! `musicable null-test` runs it on a project file, `tests/tier0_demo.rs`
+//! on the Tier 0 demo, and `tests/tier1_demo.rs` on the Tier 1 demo, with
+//! the test plugins. `docs/app.md` describes it.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use musicable_engine::{
     Engine, EngineConfig, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats, Stats,
 };
 use musicable_model::Project;
+use musicable_plugins::PluginInfo;
 
 use crate::Session;
 
@@ -52,6 +54,30 @@ impl Player {
         render: &Render,
         config: EngineConfig,
     ) -> Self {
+        Self::start(project, folder, render, config, None)
+    }
+
+    /// Like [`new`](Self::new), with the project's plugins found among
+    /// `installed`, as a scan would find them, and loaded before it plays.
+    /// Only plugins that render the same every time they play the same,
+    /// such as the test plugins, play the same with every renderer.
+    pub fn with_plugins(
+        project: Project,
+        folder: Option<&Path>,
+        render: &Render,
+        config: EngineConfig,
+        installed: Vec<PluginInfo>,
+    ) -> Self {
+        Self::start(project, folder, render, config, Some(installed))
+    }
+
+    fn start(
+        project: Project,
+        folder: Option<&Path>,
+        render: &Render,
+        config: EngineConfig,
+        installed: Option<Vec<PluginInfo>>,
+    ) -> Self {
         let (engine, handle, monitor) = match render {
             Render::Reference => {
                 let (engine, handle) = Engine::new(config);
@@ -69,6 +95,9 @@ impl Player {
             }
         };
         let mut session = Session::offline(project, folder, Keymap::default_keymap(), handle);
+        if let Some(installed) = installed {
+            session.set_installed_plugins(installed);
+        }
         session
             .run(&transport::PLAY)
             .expect("the app has a play command");
