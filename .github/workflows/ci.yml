@@ -31,37 +31,12 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # The ASIO build (docs/audio.md#asio): the whole app on Windows, and
-      # elsewhere the ASIO host's tests, which play a fake driver.
-      - run: cargo clippy --workspace --all-targets --features musicable-app/asio -- -D warnings
       # A debug build, so the engine's allocation checker is on: the
       # equivalence tests, the real-time checks, the file round trips and the
-      # Tier 0 demo all run with it. The benchmarks are in bench.yml.
+      # Tier 0 demo all run with it, and the ASIO host's tests play a fake
+      # driver on every platform (docs/audio.md#asio). The benchmarks are in
+      # bench.yml.
       - run: cargo test --workspace
-      - run: cargo test -p musicable-audio --features asio
-
-  asio-opt-in:
-    name: ASIO stays opt-in
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      # ASIO is opt-in for now, so nothing in the default build may turn the
-      # asio feature on, on any platform.
-      - name: Check the default build leaves ASIO out
-        shell: bash
-        run: |
-          features() {
-            cargo tree --workspace --target all -e features -i musicable-audio "$@"
-          }
-          if ! features --features musicable-app/asio | grep -q 'feature "asio"'; then
-            echo "::error::cargo tree doesn't show the asio feature even when it's on, so this check can't see it"
-            exit 1
-          fi
-          if features | grep 'feature "asio"'; then
-            echo "::error::The default build turns on musicable-audio's asio feature"
-            exit 1
-          fi
 
   fmt:
     runs-on: ubuntu-latest

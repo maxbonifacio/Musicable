@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p musicable-audio --example tone -- --period 128 --seconds 3600
-//! cargo run --release -p musicable-audio --features asio --example tone -- --asio --seconds 3600
+//! cargo run --release -p musicable-audio --example tone -- --asio --seconds 3600
 //! ```
 //!
 //! It prints the stream's counters every few seconds and a summary at the
@@ -41,8 +41,7 @@ Usage: tone [options]
   --device <text>     a device id, or part of a device name
                       (default: the default output)
   --asio              play through an ASIO driver: the one --device names,
-                      or the only one installed (Windows builds with the
-                      asio feature)
+                      or the only one installed (Windows only)
   --driver-settings   open the ASIO driver's own settings once it plays
   --exclusive         use the device in exclusive mode (Windows only)
   --rate <hz>         sample rate (default: the device's)
@@ -249,9 +248,6 @@ fn find_device(text: Option<&str>, asio: bool) -> Result<Option<String>, String>
             [device] => Ok(Some(device.id.clone())),
             [] if audio::driver_types().contains(&DriverType::Asio) => {
                 Err("no ASIO drivers are installed".to_owned())
-            }
-            [] if cfg!(windows) => {
-                Err("this build has no ASIO: build it with --features asio".to_owned())
             }
             [] => Err("ASIO is for Windows only".to_owned()),
             _ => {

@@ -15,7 +15,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
-| `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
+| `audio` | `engine` | Device output: our own WASAPI backend and ASIO host on Windows; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
 | `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
@@ -268,8 +268,7 @@ lives. What each still lacks is in its doc's "Not done yet".
   [commands.md](commands.md#changing-keys-in-the-app)). Keymaps in the style
   of other DAWs would be keymap files to import.
 - **ASIO** is built: our own host, behind `musicable_audio::open` like the
-  other backends, in builds with the opt-in `asio` feature
-  ([audio.md](audio.md#asio)).
+  other backends, in every Windows build ([audio.md](audio.md#asio)).
 
 Audio Units and macOS were out of Tier 1's scope, since Windows comes
 first, so VST3 plugins' windows and audio and MIDI inputs on macOS and

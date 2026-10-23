@@ -7,7 +7,7 @@
 //! cargo run --release -p musicable-audio --example round_trip -- --list
 //! cargo run --release -p musicable-audio --example round_trip -- --loopback
 //! cargo run --release -p musicable-audio --example round_trip -- --output RME --input RME
-//! cargo run --release -p musicable-audio --features asio --example round_trip -- --asio
+//! cargo run --release -p musicable-audio --example round_trip -- --asio
 //! cargo run --release -p musicable-audio --example round_trip -- --input RME --soak 60
 //! ```
 //!
@@ -48,7 +48,7 @@ Usage: round_trip [options]
   --asio              play through an ASIO driver: the one --output names,
                       or the only one installed, and record from its own
                       inputs unless --input or --loopback says otherwise
-                      (Windows builds with the asio feature)
+                      (Windows only)
   --exclusive         use the output in exclusive mode (Windows only)
   --rate <hz>         sample rate (default: the output's)
   --period <frames>   frames per period, the buffer size
@@ -262,9 +262,6 @@ fn find_output(text: Option<&str>, asio: bool) -> Result<Option<String>, String>
             [device] => Ok(Some(device.id.clone())),
             [] if audio::driver_types().contains(&DriverType::Asio) => {
                 Err("no ASIO drivers are installed".to_owned())
-            }
-            [] if cfg!(windows) => {
-                Err("this build has no ASIO: build it with --features asio".to_owned())
             }
             [] => Err("ASIO is for Windows only".to_owned()),
             _ => Err(format!(

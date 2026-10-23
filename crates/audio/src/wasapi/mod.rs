@@ -11,7 +11,6 @@ mod device;
 mod stream;
 
 // For inputs that record through the system with an ASIO output.
-#[cfg(feature = "asio")]
 pub(crate) use capture::{Capture, Output, open as open_inputs};
 pub(crate) use device::{capabilities, input_devices, output_devices};
 pub(crate) use stream::{OpenStream, Stream, open};

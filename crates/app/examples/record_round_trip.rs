@@ -8,7 +8,7 @@
 //! ```text
 //! cargo run --release -p musicable-app --example record_round_trip -- --loopback
 //! cargo run --release -p musicable-app --example record_round_trip -- --output RME --input RME
-//! cargo run --release -p musicable-app --features asio --example record_round_trip -- --asio
+//! cargo run --release -p musicable-app --example record_round_trip -- --asio
 //! cargo run --release -p musicable-app --example record_round_trip -- --loopback --minutes 60
 //! ```
 //!
@@ -48,7 +48,7 @@ Usage: record_round_trip [options]
   --asio              play through an ASIO driver: the one --output names,
                       or the only one installed, and record from its own
                       inputs unless --input or --loopback says otherwise
-                      (Windows builds with the asio feature)
+                      (Windows only)
   --exclusive         use the output in exclusive mode (Windows only)
   --rate <hz>         sample rate (default: the output's)
   --period <frames>   frames per period, the buffer size

@@ -1,5 +1,5 @@
-//! ASIO output and inputs, in builds with the `asio` feature. `docs/audio.md`
-//! describes how it works.
+//! ASIO output and inputs, on Windows. `docs/audio.md` describes how it
+//! works.
 //!
 //! An ASIO driver is a COM class the registry lists. A stream loads its
 //! driver on a thread of its own, which makes every call to it but the

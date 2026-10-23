@@ -95,7 +95,7 @@ impl Counters {
     }
 
     // cpal doesn't say how much audio an xrun lost.
-    #[cfg(any(windows, all(test, feature = "asio")))]
+    #[cfg(any(windows, test))]
     pub fn lost(&self, frames: u64) {
         if frames > 0 {
             self.lost_frames.fetch_add(frames, Relaxed);
