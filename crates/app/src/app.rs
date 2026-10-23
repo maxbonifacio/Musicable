@@ -102,6 +102,7 @@ impl App {
     /// Opens the audio device and the project at `path`, or a new project,
     /// in the window whose egui context is `ctx`.
     pub fn new(path: Option<PathBuf>, ctx: &egui::Context) -> Self {
+        follow_system_double_clicks(ctx);
         let mut messages = Vec::new();
         let config_dir = settings::config_dir();
         let settings = match &config_dir {
@@ -1120,6 +1121,29 @@ fn owner(_frame: &eframe::Frame) -> Option<isize> {
     None
 }
 
+/// Gives two clicks as long to make a double-click as the system does, where
+/// it says, rather than egui's 0.3 seconds. Read as the app starts.
+fn follow_system_double_clicks(ctx: &egui::Context) {
+    if let Some(time) = double_click_time() {
+        ctx.options_mut(|options| options.input_options.max_double_click_delay = time);
+    }
+}
+
+/// The double-click time in Windows' mouse settings, in seconds: 0.5 unless
+/// it's been changed.
+#[cfg(windows)]
+fn double_click_time() -> Option<f64> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+    // SAFETY: a plain Win32 call that reads a setting.
+    let millis = unsafe { GetDoubleClickTime() };
+    (millis > 0).then(|| f64::from(millis) / 1000.0)
+}
+
+#[cfg(not(windows))]
+fn double_click_time() -> Option<f64> {
+    None
+}
+
 /// `path`, with the project file extension added unless it has it.
 fn with_extension(path: PathBuf) -> PathBuf {
     if path.extension().is_some_and(|ext| ext == EXTENSION) {
@@ -1150,6 +1174,23 @@ mod testing;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_clicks_take_as_long_as_the_system_gives_them() {
+        let ctx = egui::Context::default();
+        follow_system_double_clicks(&ctx);
+        let delay = ctx.options(|options| options.input_options.max_double_click_delay);
+        if cfg!(windows) {
+            let time = double_click_time().expect("Windows has a double-click time");
+            assert!(
+                (0.1..=5.0).contains(&time),
+                "a double-click time of {time} s"
+            );
+            assert_eq!(delay, time);
+        } else {
+            assert_eq!(delay, egui::InputOptions::default().max_double_click_delay);
+        }
+    }
 
     #[test]
     fn saved_projects_get_the_extension() {

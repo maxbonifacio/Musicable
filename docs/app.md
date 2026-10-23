@@ -153,6 +153,11 @@ That's what `ParallelOptions::inline_below` is for
 - **Options > Keyboard Shortcuts** (Ctrl+K) lists every command with its
   keys, and changes them ([below](#changing-keys)).
 
+**Double-clicks** count when the second click comes soon enough after the
+first: on Windows, within the double-click time in its mouse settings, as
+in other Windows apps, which the app reads as it starts; elsewhere, within
+egui's 0.3 seconds.
+
 ## The arrangement
 
 The arrangement shows the song's tracks over time, as Live's Arrangement
