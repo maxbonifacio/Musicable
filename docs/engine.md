@@ -725,7 +725,11 @@ parameters in `devices::Params`, which works each one out for every frame:
   without its ramp, or with automation the lane's value on the frame,
   without the glide after a jump (`automation::Param::render_with_targets`).
   An event applies before the span it starts, which gets the event too, for
-  a note or a note's modulation.
+  a note or a note's modulation. So events on one frame make spans without
+  frames, which every kind takes in its stride: a swap sends a node every
+  value set on it again, all on the next block's first frame
+  ([Graph swaps](#graph-swaps)), and `devices::tests` sends each kind
+  such spans.
 
 So a change or a modulation lands on its frame, and a device renders the
 same samples however the blocks fall, and on any thread: the parallel
