@@ -54,7 +54,7 @@ cargo test --workspace
 cargo run --release -p musicable-app                    # the app; File > New Demo Project plays the demo
 cargo run --release -p musicable-app -- null-test       # the parallel scheduler against the reference renderer
 cargo run --release -p musicable-audio --example tone   # a test tone on the default output
-cargo run --release -p musicable-app --features asio    # Windows: ASIO drivers too, in a GPLv3 build
+cargo run --release -p musicable-app --features asio    # Windows: ASIO drivers too
 ```
 
 On Windows, install the Visual Studio Build Tools and use Rust's MSVC
@@ -64,14 +64,16 @@ Debian and Ubuntu).
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
+Copyright © 2026 the Musicable contributors.
 
-Some optional components sit behind opt-in build features, and binaries built
-with them are distributed under GPLv3: ASIO output on Windows (the `asio`
-feature, see [docs/audio.md](docs/audio.md#asio)) and, later, Rubber Band. The
-default build has none of them. The source in this repository stays MIT OR
-Apache-2.0.
+Musicable is free software: you can share it and change it under the terms
+of the [GNU General Public License](LICENSE) as published by the Free Software
+Foundation, either version 3 of the License or, at your option, any later
+version. It comes with no warranty.
+
+Musicable was licensed under either of the Apache License, Version 2.0 or
+the MIT license, at your option, until it moved to the GPL in October 2026.
+Copies from before then, such as v0.1.0, keep those terms.
 
 Contributions are accepted under the same terms. See
 [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see

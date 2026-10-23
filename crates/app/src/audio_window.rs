@@ -132,10 +132,8 @@ impl AudioWindow {
                 {
                     change = Some(Change::RecordingOffset(frames));
                 }
-                if audio::driver_types().contains(&DriverType::Asio) {
-                    ui.separator();
-                    gpl_notice(ui);
-                }
+                ui.separator();
+                gpl_notice(ui);
             });
         self.open = open;
         change
@@ -541,22 +539,24 @@ fn samples(frames: u32, rate: Option<u32>) -> String {
     }
 }
 
-/// The notice the GPL asks for in builds with ASIO, which are distributed
-/// under it (docs/audio.md).
+/// The notice the GPL asks for in a program's windows, since Musicable is
+/// distributed under it (README.md).
 fn gpl_notice(ui: &mut Ui) {
     let small = |text: &str| RichText::new(text).small().weak();
     ui.label(small(
-        "Copyright © the Musicable contributors. This build plays through ASIO drivers, and is \
-         distributed under the GNU General Public License, version 3: you may share and change it \
-         under that license. It comes with no warranty.",
+        "Copyright © the Musicable contributors. Musicable is free software, distributed under \
+         the GNU General Public License, version 3 or any later version: you may share and \
+         change it under that license. It comes with no warranty.",
     ));
     ui.hyperlink_to(
         small("The GNU GPL, version 3"),
         "https://www.gnu.org/licenses/gpl-3.0.html",
     );
-    ui.label(small(
-        "ASIO is a trademark of Steinberg Media Technologies GmbH.",
-    ));
+    if audio::driver_types().contains(&DriverType::Asio) {
+        ui.label(small(
+            "ASIO is a trademark of Steinberg Media Technologies GmbH.",
+        ));
+    }
 }
 
 #[cfg(test)]

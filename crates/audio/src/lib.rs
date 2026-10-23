@@ -4,9 +4,9 @@
 //! smallest period the driver offers through IAudioClient3, or at the audio
 //! engine's default period (usually 10 ms) when it offers nothing smaller.
 //! Exclusive mode is an option. Builds with the `asio` feature play through
-//! ASIO drivers too, with our own ASIO host; those builds are distributed
-//! under the GPL, version 3. On macOS and Linux it goes through
-//! [cpal](https://docs.rs/cpal): it builds and plays, but isn't tuned.
+//! ASIO drivers too, with our own ASIO host. On macOS and Linux it goes
+//! through [cpal](https://docs.rs/cpal): it builds and plays, but isn't
+//! tuned.
 //!
 //! Opening a stream takes two steps, because the engine has to be built for
 //! what the device actually does, which isn't always what was asked for:

@@ -1349,14 +1349,14 @@ supports. Drivers round the buffer size, and some ignore it, so "Now playing"
 says what the stream got. Below that, **Recording offset** is the device's
 [recording offset](#recording) in its mode and at its rate, in frames and
 milliseconds: drag it, or type it and press Enter, and the next recording
-uses it, as does Capture.
+uses it, as does Capture. The foot of the window has the notice the GPL asks
+for.
 
 Windows builds with the `asio` feature ([audio.md](audio.md#asio)) add a
 driver type, WASAPI or ASIO, above the device. For ASIO it lists the
 installed drivers, the rates each can switch to and the buffer sizes it
 takes, by default the one it prefers, and Driver Settings opens the playing
-driver's own settings. The foot of the window has the notice the GPL asks
-for, since those builds are distributed under it.
+driver's own settings.
 
 ### Meters
 

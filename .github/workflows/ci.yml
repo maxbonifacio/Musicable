@@ -46,8 +46,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # Builds with the asio feature are distributed under the GPLv3, so
-      # nothing in the default build may turn it on, on any platform.
+      # ASIO is opt-in for now, so nothing in the default build may turn the
+      # asio feature on, on any platform.
       - name: Check the default build leaves ASIO out
         shell: bash
         run: |
