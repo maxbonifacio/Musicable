@@ -59,7 +59,9 @@ automate a fader, undo and redo freely, save and reopen, and export a WAV
 faster than real time:
 
 1. **File > New Project** (Ctrl+N), then **File > Save Project As**
-   (Ctrl+Shift+S), so the recordings go in the project's folder.
+   (Ctrl+Shift+S) and **File > Open Project** (Ctrl+O) it again, so the
+   recordings go in the project's folder: until it's opened again, a new
+   project records into Unsaved Recordings ([Recording](#recording)).
 2. **Track > New MIDI Track** (Ctrl+Shift+T). With it selected, double-click
    a synth in the browser's Devices (Ctrl+Alt+B shows the browser), such as
    "Surge XT (CLAP)". Then **Track > New Audio Track** (Ctrl+T): it records
@@ -241,10 +243,12 @@ undo history and the engine rebuilds its graph once.
   the headers says what the grid is, such as "Grid 1/16".
 - **Takes** show in lanes under their track, each named in its header,
   after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
-  track header's menu. A take's clips are grey where the track doesn't play
-  them, and in the track's colour where it does. Dragging across a take
-  copies that stretch of it to the track, replacing what the track has
-  there, and clicking one of its clips copies all of the clip: that's
+  track header's menu. A take's clips show their waveforms or their notes,
+  grey where the track doesn't play them, and in the track's colour where
+  it does: where its own clips play the same audio or the same notes from
+  the same place, until one is moved or its notes change. Dragging across
+  a take copies that stretch of it to the track, replacing what the track
+  has there, and clicking one of its clips copies all of the clip: that's
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).
@@ -860,7 +864,9 @@ format ("Instrument · CLAP"), and:
 
 Adding, deleting and every change made in a plugin's window are steps in
 the undo history, named after the plugin, such as "Change Surge XT"; a
-whole drag of a knob is one. Saving the project saves each plugin's state
+whole drag of a knob is one. What a plugin changes on its own, as it loads
+or takes in what undo gave it, or with its window closed, goes into the
+project without a step, so redo carries on past it. Saving the project saves each plugin's state
 as it is then. Delay compensation lines up every track with the latest
 one, so a plugin that looks ahead doesn't put its track out of time
 ([engine.md](engine.md#delay-compensation)). [plugins.md](plugins.md)

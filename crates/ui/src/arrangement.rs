@@ -60,6 +60,10 @@ const MAX_NAMED_POINTS: usize = 64;
 #[derive(Debug, Default)]
 pub(crate) struct Arrangement {
     drag: Option<Drag>,
+    /// What the drag that ended this frame asked for. The frame draws it as
+    /// the drag left it, since the app only carries it out once the frame
+    /// is drawn.
+    landed: Option<Plan>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
     /// Set when the user scrolls away from the playhead while it plays, so
@@ -1173,6 +1177,13 @@ impl Scene<'_> {
                     Side::Start => at.min(c.end() - least).max(Beats::ZERO),
                     Side::End => at.max(c.start + least),
                 };
+                // As far as trimming takes it: an audio clip stops where its
+                // file does.
+                let editor = self.editor();
+                let at = match side {
+                    Side::Start => arrange::trimmed(project, editor, c, Some(at), None)?.start,
+                    Side::End => arrange::trimmed(project, editor, c, None, Some(at))?.end(),
+                };
                 (at != edge).then_some(Plan::Trim { clip, side, at })
             }
             (
@@ -1546,6 +1557,7 @@ impl Arrangement {
         }
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene, plan.as_ref());
+        let plan = plan.or(self.landed.take());
         // What's dragged from the browser, and where it would go.
         let dropping = scene.pointer.and_then(|pos| {
             let dragged = egui::DragAndDrop::payload::<Dragged>(ui.ctx())?;
@@ -1666,7 +1678,7 @@ impl Arrangement {
             }
             if response.drag_stopped() {
                 let drag = self.drag.take().expect("a drag is in progress");
-                self.drag_stopped(scene, &drag, actions);
+                self.landed = self.drag_stopped(scene, &drag, actions);
             }
         }
         if response.drag_stopped() {
@@ -1922,10 +1934,14 @@ impl Arrangement {
         self.drag = Some(drag);
     }
 
-    fn drag_stopped(&mut self, scene: &Scene<'_>, drag: &Drag, actions: &mut Vec<Action>) {
-        let Some(plan) = scene.plan(drag) else {
-            return;
-        };
+    /// Asks for what the drag `drag` planned, as it ends. Returns the plan.
+    fn drag_stopped(
+        &mut self,
+        scene: &Scene<'_>,
+        drag: &Drag,
+        actions: &mut Vec<Action>,
+    ) -> Option<Plan> {
+        let plan = scene.plan(drag)?;
         match &plan {
             // Moving nowhere does nothing.
             Plan::Move { by, tracks, .. } if *by == Beats::ZERO && *tracks == 0 => {}
@@ -1947,6 +1963,7 @@ impl Arrangement {
             }
             _ => send(actions, &plan),
         }
+        Some(plan)
     }
 
     /// Mute, solo and arm in each header in sight, as buttons. Returns

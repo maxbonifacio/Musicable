@@ -1,7 +1,8 @@
 //! Plugins on tracks, through the app's session, with the test plugins
 //! (`crates/test-plugins`), CLAP and VST3 alike. A plugin loads once a scan
 //! says it's installed, plays, and comes back from the project's file as it
-//! was saved. Changes made in its window are steps in the undo history. Its
+//! was saved. Changes made in its window are steps in the undo history, and
+//! the ones it makes on its own aren't, so redo carries on past them. Its
 //! parameters follow their automation until someone turns them by hand. A
 //! missing plugin lets the sound through and says why. Delay compensation
 //! lines a latent plugin up with a dry track to the sample, also after the
@@ -12,9 +13,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{ptr, thread};
 
-use musicable_app::{SCAN_PLUGIN, Session};
-use musicable_commands::{Args, Keymap, automation, edit, transport};
+use musicable_app::{PLUGIN_SETTLING, SCAN_PLUGIN, Session};
+use musicable_commands::{Args, Keymap, Value, automation, device, edit, transport};
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
@@ -24,7 +26,7 @@ use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
 use musicable_plugins::scan::{self, Outcome};
-use musicable_plugins::{Instance, PluginInfo};
+use musicable_plugins::{Instance, ParentWindow, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::vst3::VST3_GAIN_ID;
 use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, gui};
@@ -307,11 +309,9 @@ fn plays_and_comes_back_as_it_was_saved(format: PluginFormat) {
     let wet = rig.peaks();
     near(wet, times(TONE, 0.25));
 
-    // State that isn't a parameter, changed in the plugin's window, goes
-    // into the project, as a step in the undo history.
+    // State that isn't a parameter goes into the project.
     plugins.set_label(rig.session.plugin(device.id).unwrap(), "Warm");
     rig.session.tick();
-    assert_eq!(rig.session.undo_name(), Some("Change Test Gain"));
     assert!(rig.settings(device.id).state.is_some());
     let path = plugins.dir.join("Song.musicable");
     project::save(&path, &rig.session.saved_project()).unwrap();
@@ -366,6 +366,96 @@ fn changes_in_its_window_are_steps_in_the_undo_history(format: PluginFormat) {
     assert_eq!(instance.param_value(GAIN), Some(plugins.factor(1.0)));
     assert_eq!(rig.session.undo_name(), None);
     rig.session.run(&edit::REDO).unwrap();
+    near(rig.peaks(), half);
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_clap_plugins_own_changes_are_no_steps_in_the_undo_history() {
+    own_changes_are_no_steps_in_the_undo_history(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_plugins_own_changes_are_no_steps_in_the_undo_history() {
+    own_changes_are_no_steps_in_the_undo_history(PluginFormat::Vst3);
+}
+
+fn own_changes_are_no_steps_in_the_undo_history(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "own");
+    let mut song = Project::new();
+    let tone = song.add_track("Tone", TrackKind::Audio);
+    song.track_mut(tone).unwrap().tone = Some(TestTone {
+        frequency: 440.0,
+        level: 0.5,
+    });
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+
+    // Test Gain goes on the track, and its gain to a half.
+    let (kind, id) = match format {
+        PluginFormat::Clap => ("clap", GAIN_ID.to_str().unwrap()),
+        PluginFormat::Vst3 => ("vst3", VST3_GAIN_ID),
+    };
+    let args = Args::new()
+        .with("format", kind)
+        .with("plugin", id)
+        .with("name", "Test Gain")
+        .with("track", tone);
+    let Ok(Value::Device(gain)) = rig.session.run_with(&device::ADD_PLUGIN, &args) else {
+        panic!("Test Gain didn't go on the track");
+    };
+    let args = Args::new()
+        .with("device", gain)
+        .with("param", i64::from(GAIN))
+        .with("value", plugins.factor(0.5));
+    rig.session.run_with(&device::SET_PARAM, &args).unwrap();
+    let half = times(TONE, 0.5);
+    near(rig.peaks(), half);
+
+    // Both undone, then the plugin redone: it loads afresh, and changes its
+    // state as it starts, as some plugins do. The project follows, but
+    // that's no step in the undo history, so the gain can still be redone.
+    rig.session.run(&edit::UNDO).unwrap();
+    rig.session.run(&edit::UNDO).unwrap();
+    near(rig.peaks(), TONE);
+    rig.session.run(&edit::REDO).unwrap();
+    rig.session.wait_for_graph();
+    plugins.set_label(rig.session.plugin(gain).unwrap(), "Warm");
+    rig.session.tick();
+    let warm = rig.settings(gain).state;
+    assert!(warm.is_some());
+    assert_eq!(rig.session.undo_name(), Some("Add Test Gain"));
+    assert_eq!(rig.session.redo_name(), Some("Change Test Gain"));
+    rig.session.run(&edit::REDO).unwrap();
+    near(rig.peaks(), half);
+    assert_eq!(rig.settings(gain).state, warm);
+
+    // Once it has settled, a change in its window is a step: someone picked
+    // a preset, say.
+    let parent = ParentWindow::Win32(ptr::without_provenance_mut(77));
+    let instance = rig.session.plugin_mut(gain).unwrap();
+    instance.open_window(parent, 1.0).unwrap();
+    thread::sleep(PLUGIN_SETTLING);
+    plugins.set_label(rig.session.plugin(gain).unwrap(), "Bright");
+    rig.session.tick();
+    let bright = rig.settings(gain).state;
+    assert_ne!(bright, warm);
+
+    // Undo takes it back, and the plugin says its state changed as it loads
+    // the one from before, as plugins do: that's its own doing too, with
+    // its window open, so redo can still make the change again.
+    rig.session.run(&edit::UNDO).unwrap();
+    assert_eq!(rig.settings(gain).state, warm);
+    let instance = rig.session.plugin(gain).unwrap();
+    assert_eq!(plugins.label(instance), "Warm");
+    plugins.set_label(instance, "Warm");
+    rig.session.tick();
+    assert_eq!(rig.session.redo_name(), Some("Change Test Gain"));
+    rig.session.run(&edit::REDO).unwrap();
+    assert_eq!(rig.settings(gain).state, bright);
+    let instance = rig.session.plugin(gain).unwrap();
+    assert_eq!(plugins.label(instance), "Bright");
     near(rig.peaks(), half);
     drop(rig);
     plugins.assert_alright();

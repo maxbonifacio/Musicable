@@ -168,7 +168,7 @@ before.
 | Command | Title | Arguments | What it does | Default key |
 |---|---|---|---|---|
 | `clip.move` | Move Clips | `clips`, `by`?, `tracks`?, `copy`? | Moves the clips, or copies them, some beats later or earlier and some tracks down or up; gives back the ids of the clips moved or the copies | none |
-| `clip.trim` | Trim Clip | `clip`, `start`?, `end`? | Moves a clip's start or end. An audio clip doesn't go past its file's end | none |
+| `clip.trim` | Trim Clip | `clip`, `start`?, `end`? | Moves a clip's start or end. An audio clip doesn't go past its file's start or end | none |
 | `clip.set_fades` | Set Fades | `clip`, `fade_in`?, `fade_out`? | Sets an audio clip's fades, which fit inside it | none |
 | `clip.rename` | Rename Clip | `clip`, `name` | Names a clip | none |
 | `clip.split` | Split Clips | `clips`, `at` | Splits the clips at a position | none |
@@ -178,7 +178,9 @@ before.
 
 When the clips can't all land on tracks that hold them, such as an audio
 clip on a MIDI track, they keep their tracks and only move in time. Moving
-clips before the start of the song stops at the start. Insert Audio needs each file's header read into
+clips before the start of the song stops at the start. `arrange::trimmed`
+says where a trim would leave a clip, which the arrangement's ghost shows
+while a drag lasts. Insert Audio needs each file's header read into
 the editor first ([below](#the-editors-state)): the app reads it when a file
 is dropped or imported.
 
@@ -292,8 +294,11 @@ the notes played, each starting and ending on its frames, with its
 expression, and of how the controllers moved, as curves that start with
 what each held as the pass began; a pass without notes makes no take.
 Comping copies
-the take's clips, so the take keeps them. `view.toggle_take_lanes` (see
-below) shows the takes.
+the take's clips, so the take keeps them. `take::comped` says where a
+track plays a take's clip: where its own clips play the same audio or the
+same notes from the same place in the song, as comping copies them, and
+not a copy moved since or whose notes changed. `view.toggle_take_lanes`
+(see below) shows the takes.
 
 ### Track
 
@@ -588,6 +593,10 @@ transaction named after the step, such as "Undo Tempo Up".
 `Document::redo` makes it again, as "Redo Tempo Up". Since they're
 transactions like any other, the engine follows them the same way. A new
 transaction forgets what was undone, so there's nothing left to redo.
+`Document::follow` commits a change the project only follows, such as a
+plugin changing its own state as it starts: the engine follows it, but
+it's no step, so undo doesn't take it back, redo carries on, and the
+project isn't modified for it.
 
 - `Document::undo_name` and `redo_name` say what Undo and Redo would
   change, for the Edit menu.

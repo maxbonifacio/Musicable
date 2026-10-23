@@ -15,11 +15,12 @@ use musicable_model::clip::{
     AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, MidiClip, Point,
 };
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{TakeId, TrackId, TrackKind};
+use musicable_model::{Project, TakeId, Track, TrackId, TrackKind};
 
 use crate::arrange::{after_frames, clear, crop};
 use crate::{
-    Command, CommandError, CommandId, Context, Document, Param, Registry, Transaction, Type, Value,
+    Command, CommandError, CommandId, Context, Document, Editor, Param, Registry, Transaction,
+    Type, Value,
 };
 
 /// Copies a stretch of a take to its track, replacing what the track has
@@ -107,6 +108,43 @@ pub fn comp(tx: &mut Transaction<'_>, take: TakeId, range: BeatRange) -> Vec<Cli
         tx.add_clip(track, usize::MAX, copy);
     }
     copies
+}
+
+/// Where `track` plays `clip`, one of its takes' clips: where its own clips
+/// play the same audio or the same notes, lined up with it, as comping
+/// copies it. A copy moved since, or whose notes changed, doesn't count.
+/// In the order of the track's clips.
+pub fn comped(project: &Project, editor: &Editor, track: &Track, clip: &Clip) -> Vec<BeatRange> {
+    track
+        .clips
+        .iter()
+        .filter_map(|own| {
+            let range = BeatRange::new(own.start.max(clip.start), own.end().min(clip.end()));
+            (!range.is_empty() && lined_up(project, editor, own, clip)).then_some(range)
+        })
+        .collect()
+}
+
+/// Whether the track's clip `own` plays what the take's clip `take` does,
+/// from the same place in the song.
+fn lined_up(project: &Project, editor: &Editor, own: &Clip, take: &Clip) -> bool {
+    match (&own.content, &take.content) {
+        (ClipContent::Audio(a), ClipContent::Audio(b)) => {
+            let tempo = &project.tempo;
+            let rate = editor.sample_rate_of(&b.file);
+            // The song's frame that the file's first frame plays on, by a
+            // clip.
+            let first = |c: &Clip, offset: u64| tempo.frame_at(c.start, rate) - offset as i64;
+            // A frame either way, as the clips' edges fall on ticks.
+            a.file == b.file && (first(own, a.offset) - first(take, b.offset)).abs() <= 1
+        }
+        (ClipContent::Midi(a), ClipContent::Midi(b)) => {
+            own.start - a.offset == take.start - b.offset
+                && a.notes == b.notes
+                && a.controllers == b.controllers
+        }
+        _ => false,
+    }
 }
 
 /// What a track recorded in one pass of the playhead over the song: a
@@ -851,5 +889,86 @@ mod tests {
             ]
         );
         assert_eq!(midi.controllers.len(), 2);
+    }
+
+    #[test]
+    fn tracks_play_their_takes_where_they_were_comped() {
+        let (mut setup, vocal, keys) = setup();
+        // Twice round a loop of eight beats: sung into one file, one pass
+        // after the other, and a note on each beat, a key higher the second
+        // time.
+        let sung = (0..2).map(|i| pass(0, 8 * BEAT, i * 8 * BEAT)).collect();
+        let notes = (0..2u8)
+            .map(|i| NotePass {
+                start: 0,
+                frames: 8 * BEAT,
+                notes: (0..8)
+                    .map(|beat| PlayedNote {
+                        key: 60 + i,
+                        ..played(beat * BEAT, beat * BEAT + BEAT / 2)
+                    })
+                    .collect(),
+                controllers: Vec::new(),
+            })
+            .collect();
+        let recorded = [
+            Recorded::Audio {
+                track: vocal,
+                passes: sung,
+            },
+            Recorded::Midi {
+                track: keys,
+                passes: notes,
+            },
+        ];
+        add_recording(&mut setup.document, RATE, &recorded);
+        // Where the track plays each of its takes.
+        let plays = |setup: &Setup, track: TrackId| -> Vec<Vec<BeatRange>> {
+            let (project, editor) = (setup.document.project(), setup.document.editor());
+            let track = project.track(track).unwrap();
+            (track.takes.iter())
+                .map(|take| {
+                    let mut played = comped(project, editor, track, &take.clips[0]);
+                    played.sort_by_key(|range| range.start);
+                    played
+                })
+                .collect()
+        };
+        for track in [vocal, keys] {
+            // The last pass, all of it.
+            assert_eq!(plays(&setup, track), [vec![], vec![beats(0, 8)]]);
+            // Beats 2 to 5 of the first go in its place.
+            let take = setup.document.project().track(track).unwrap().takes[0].id;
+            setup
+                .document
+                .transact("Comp", |tx| comp(tx, take, beats(2, 5)));
+            let rest = vec![beats(0, 2), beats(5, 8)];
+            assert_eq!(plays(&setup, track), [vec![beats(2, 5)], rest]);
+        }
+
+        // The copy of the first take, moved a beat later, plays it no
+        // longer, and the second take's clip it cuts into still plays.
+        let copy_of = |setup: &Setup, track: TrackId| {
+            let track = setup.document.project().track(track).unwrap();
+            let copy = track.clips.iter().find(|clip| clip.range() == beats(2, 5));
+            copy.unwrap().clone()
+        };
+        let moved = Args::new()
+            .with("clips", vec![copy_of(&setup, vocal).id])
+            .with("by", Beats::new(1));
+        setup.run_with(&crate::arrange::MOVE, moved).unwrap();
+        let rest = vec![beats(0, 2), beats(6, 8)];
+        assert_eq!(plays(&setup, vocal), [vec![], rest]);
+        // Nor does the copy on the keys once a note is on another key.
+        let copy = copy_of(&setup, keys);
+        let ClipContent::Midi(midi) = &copy.content else {
+            panic!("a MIDI clip");
+        };
+        let note = midi.notes[0].id;
+        setup
+            .document
+            .transact("Key", |tx| tx.set_note_key(copy.id, note, 72));
+        let rest = vec![beats(0, 2), beats(5, 8)];
+        assert_eq!(plays(&setup, keys), [vec![], rest]);
     }
 }
