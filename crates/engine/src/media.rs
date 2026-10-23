@@ -6,7 +6,7 @@
 //! and the stretch it plays after the loop jumps back, in a fixed set of
 //! chunks that the audio thread copies from without locking or allocating.
 //! The player says where it's about to read every block. [`Media`] holds a
-//! project's sources by clip, for
+//! project's sources by clip, and its samplers' samples by device, for
 //! [`compile_with_media`](crate::compile::compile_with_media).
 //!
 //! The engine doesn't read files itself: the disk thread reads through
@@ -23,8 +23,10 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::Duration;
 
+use musicable_model::DeviceId;
 use musicable_model::clip::ClipId;
 
+use crate::devices::Sample;
 use crate::rt;
 
 /// Random access to an audio file's frames, for the disk thread.
@@ -153,11 +155,13 @@ impl Source {
     }
 }
 
-/// The audio each audio clip plays, by clip. A clip without a source, such
-/// as one whose file is missing, is silent.
+/// The audio each audio clip plays, by clip, and the sample each sampler
+/// plays, by device. A clip without a source, such as one whose file is
+/// missing, is silent, and so is a sampler without a sample.
 #[derive(Debug, Clone, Default)]
 pub struct Media {
     sources: HashMap<ClipId, Source>,
+    samples: HashMap<DeviceId, Arc<Sample>>,
 }
 
 impl Media {
@@ -173,12 +177,22 @@ impl Media {
         self.sources.get(&clip)
     }
 
+    /// Gives sampler `device` `sample` to play.
+    pub fn insert_sample(&mut self, device: DeviceId, sample: Arc<Sample>) {
+        self.samples.insert(device, sample);
+    }
+
+    pub fn sample(&self, device: DeviceId) -> Option<&Arc<Sample>> {
+        self.samples.get(&device)
+    }
+
+    /// The clips' sources and the samplers' samples.
     pub fn len(&self) -> usize {
-        self.sources.len()
+        self.sources.len() + self.samples.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.len() == 0
     }
 }
 

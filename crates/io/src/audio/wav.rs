@@ -81,7 +81,7 @@ fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Encoding), AudioError> {
 
 /// The most bytes of samples a WAV file holds, with room for its header
 /// within the 4 GiB its sizes can say.
-const MAX_DATA: u64 = u32::MAX as u64 - 64;
+pub(super) const MAX_DATA: u64 = u32::MAX as u64 - 64;
 
 pub(super) fn write(
     out: &mut impl Write,
@@ -113,12 +113,18 @@ pub(super) fn write(
 }
 
 /// The most bytes [`header`] writes.
-const HEADER: usize = 56;
+pub(super) const HEADER: usize = 56;
 
 /// Writes the header of a WAV file of `frames` frames of `channels`
 /// channels of `format` samples at `sample_rate`, up to the start of its
 /// samples.
-fn header(out: &mut Vec<u8>, sample_rate: u32, format: SampleFormat, channels: u16, frames: u64) {
+pub(super) fn header(
+    out: &mut Vec<u8>,
+    sample_rate: u32,
+    format: SampleFormat,
+    channels: u16,
+    frames: u64,
+) {
     let block = u32::from(channels) * format.bytes() as u32;
     // Callers keep the samples within MAX_DATA.
     let data = (frames * u64::from(block)) as u32;

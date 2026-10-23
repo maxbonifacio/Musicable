@@ -16,13 +16,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
+use musicable_model::automation::{self, Lane};
+use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
 use musicable_model::mixer::Bus;
+use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth, utility};
+use musicable_model::param::{ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::{
-    AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
-    Track, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
+    TestTone, Track, TrackId, TrackKind,
 };
 
 fn fixtures() -> Vec<(&'static str, Project)> {
@@ -36,6 +39,9 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("locators", locators()),
         ("plugins", plugins()),
         ("recording", recording()),
+        ("controllers", controllers()),
+        ("built-in", built_in()),
+        ("automation", automation()),
     ]
 }
 
@@ -507,6 +513,215 @@ fn recording() -> Project {
     project
 }
 
+/// Controllers, from version 7: the sustain pedal down and up across a
+/// clip's notes, held on at its end; the mod wheel with two points on the
+/// same tick, the later winning; the lowest and highest controllers, one
+/// MIDI names and one it doesn't; values at the edges of the range; a point
+/// before the clip's own time starts and one as far in as a file reaches;
+/// and a take's clip that moves a controller.
+fn controllers() -> Project {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let at = |beats: f64, value| Point::new(Beats::from_f64(beats), value);
+
+    let mut chords = MidiClip {
+        offset: Beats::from_ratio(-1, 2),
+        ..MidiClip::default()
+    };
+    chords.add_note(Beats::ZERO, Beats::new(2), 60, 0.75);
+    chords.add_note(Beats::new(2), Beats::new(2), 64, 0.75);
+    let controller = |number| Controller::new(number).unwrap();
+    chords.set_controller(
+        Controller::SUSTAIN,
+        vec![at(-0.5, 1.0), at(1.75, 0.0), at(2.0, 1.0)],
+    );
+    chords.set_controller(
+        Controller::MOD_WHEEL,
+        vec![
+            at(0.0, 0.0),
+            at(1.0, 0.25),
+            at(1.0, 64.0 / 127.0),
+            at(3.5, 1.0),
+        ],
+    );
+    chords.set_controller(controller(0), vec![at(0.0, 0.0)]);
+    chords.set_controller(controller(3), vec![at(0.25, 1.0 / 3.0)]);
+    chords.set_controller(
+        controller(Controller::MAX),
+        vec![Point::new(Beats::from_ticks(MAX_TICKS), 1.0)],
+    );
+    let chords = project.new_clip("Chords", beats(0, 4), ClipContent::Midi(chords));
+
+    let mut played = MidiClip::default();
+    played.add_note(Beats::ZERO, Beats::new(1), 48, 0.5);
+    played.set_controller(Controller::EXPRESSION, vec![at(0.0, 0.5), at(0.5, 0.0)]);
+    let mut take = project.new_take("Take 1");
+    take.clips
+        .push(project.new_clip("Keys", beats(4, 8), ClipContent::Midi(played)));
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
+    let track = project.track_mut(keys).unwrap();
+    track.clips = vec![chords];
+    track.takes = vec![take];
+    track.devices = vec![instrument];
+    project
+}
+
+/// Musicable's own devices, from version 8: one of every kind, an EQ with
+/// bands at the edges of their ranges, a sampler with a sample and one
+/// without, a synth playing a MIDI track, a utility on the master, and a
+/// gap in the device ids where one was deleted.
+fn built_in() -> Project {
+    let mut project = Project::new();
+    let drums = project.add_track("Drums", TrackKind::Midi);
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let device = |project: &mut Project, kind, values: &[(usize, f64)]| {
+        let mut device = NativeDevice::new(kind);
+        for &(param, value) in values {
+            device.values[param] = value;
+        }
+        project.new_device(DeviceKind::Native(device))
+    };
+
+    let mut kick = NativeDevice::new(NativeKind::Sampler);
+    kick.sample = Some("Samples/Kick \"808\".wav".into());
+    kick.values[sampler::ROOT] = 36.0;
+    kick.values[sampler::MODE] = 1.0;
+    let kick = project.new_device(DeviceKind::Native(kick));
+    let empty = device(
+        &mut project,
+        NativeKind::Sampler,
+        &[(sampler::VOICES, 32.0)],
+    );
+    // Deleted.
+    device(&mut project, NativeKind::Gate, &[]);
+    let synth = device(
+        &mut project,
+        NativeKind::Synth,
+        &[
+            (synth::OSC1_WAVE, 3.0),
+            (synth::OSC2_PITCH, -24.0),
+            (synth::OSC2_DETUNE, 7.0),
+            (synth::FILTER_ENV, -96.0),
+            (synth::GLIDE, 1.0 / 3.0),
+        ],
+    );
+    let band = |b: usize, param: usize| b * eq::PER_BAND + param;
+    let tone = device(
+        &mut project,
+        NativeKind::Eq,
+        &[
+            (band(0, eq::ON), 1.0),
+            (band(0, eq::FREQ), 10.0),
+            (band(2, eq::GAIN), -24.0),
+            (band(2, eq::Q), 18.0),
+            (band(5, eq::SHAPE), 5.0),
+            (band(7, eq::ON), 1.0),
+            (band(7, eq::FREQ), 22_000.0),
+            (eq::OUTPUT, -0.0),
+        ],
+    );
+    let compressor = device(&mut project, NativeKind::Compressor, &[]);
+    let delay = device(&mut project, NativeKind::Delay, &[]);
+    let reverb = device(&mut project, NativeKind::Reverb, &[]);
+    let utility = device(
+        &mut project,
+        NativeKind::Utility,
+        &[(utility::GAIN, utility::MAX_GAIN), (utility::PAN, -1.0)],
+    );
+    project.track_mut(drums).unwrap().devices = vec![kick, empty];
+    project.track_mut(lead).unwrap().devices = vec![synth, delay];
+    project.track_mut(vocal).unwrap().devices = vec![tone, compressor, reverb];
+    project.master.devices = vec![utility];
+    project
+}
+
+/// Automation, from version 9: lanes on a track's volume and pan, the
+/// master's volume and pan, a send, a test device's parameter, a built-in
+/// EQ's frequency and shape, and a plugin's, with ramps, steps, a lane of
+/// one point, one that starts into the song, values a float can only just
+/// hold, the ends of a built-in parameter's range, and an overridden lane.
+fn automation() -> Project {
+    let mut project = Project::new();
+    project.tempo.set_tempo(90.0);
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    let synth = project.add_track("Synth", TrackKind::Midi);
+    let reverb = project.add_track("Reverb", TrackKind::Return);
+    let send = project.new_send(reverb);
+    let send_id = send.id;
+    project.track_mut(bass).unwrap().sends.push(send);
+    let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+    let gain_id = gain.id;
+    let instrument = project.new_device(DeviceKind::TestInstrument { level: 0.8 });
+    let filter = DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "com.example.filter".into(),
+        name: "Filter".into(),
+        instrument: false,
+        settings: PluginSettings::default(),
+    });
+    let filter = project.new_device(filter);
+    let filter_id = filter.id;
+    let tone = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let tone_id = tone.id;
+    project.track_mut(bass).unwrap().devices = vec![gain];
+    project.track_mut(synth).unwrap().devices = vec![instrument, filter, tone];
+
+    let lane = |param, points: &[(f64, f64)]| {
+        let points = points
+            .iter()
+            .map(|&(at, value)| automation::Point::new(Beats::from_f64(at), value))
+            .collect();
+        Lane::new(param, points)
+    };
+    let mut overridden = lane(
+        ParamAddress::Pan(Chain::Track(bass)),
+        &[(0.0, -0.5), (8.0, 0.5)],
+    );
+    overridden.overridden = true;
+    project.track_mut(bass).unwrap().pan = 0.125;
+    project.automation = vec![
+        // A fade in, a step down at bar 3 and a ramp back up.
+        lane(
+            ParamAddress::Volume(Chain::Track(bass)),
+            &[
+                (0.0, 0.0),
+                (4.0, 1.0),
+                (8.0, 1.0),
+                (8.0, 0.25),
+                (15.5, ParamSpec::VOLUME_MAX),
+            ],
+        ),
+        overridden,
+        lane(ParamAddress::Send(send_id), &[(2.0 / 3.0, 0.1)]),
+        lane(ParamAddress::Volume(Chain::Master), &[(0.0, 0.8)]),
+        lane(
+            ParamAddress::Pan(Chain::Master),
+            &[(4.0, -1.0), (4.0, 1.0), (12.0, -0.0)],
+        ),
+        lane(
+            ParamAddress::Device(gain_id, 0),
+            &[(0.0, f64::from_bits(1)), (1.0, -2.0)],
+        ),
+        lane(
+            ParamAddress::Device(filter_id, 4_294_967_295),
+            &[(0.25, 1e300), (0.5, -1e-300), (0.75, 20_000.0)],
+        ),
+        // A sweep from the bottom of the range to the top, and a step from
+        // one shape to another.
+        lane(
+            ParamAddress::Device(tone_id, eq::FREQ as u32),
+            &[(0.0, 10.0), (16.0, 22_000.0)],
+        ),
+        lane(
+            ParamAddress::Device(tone_id, eq::SHAPE as u32),
+            &[(4.0, 4.0), (4.0, 9.0)],
+        ),
+    ];
+    project
+}
+
 fn signature(numerator: u8, denominator: u8) -> TimeSignature {
     TimeSignature::new(numerator, denominator).unwrap()
 }
@@ -605,4 +820,70 @@ fn the_documented_example_is_a_real_file() {
         .expect("docs/project-format.md starts with an example file");
     let project = project::from_str(example).unwrap();
     assert_eq!(project::to_string(&project).unwrap(), example);
+}
+
+/// Each built-in device's parameters as `docs/project-format.md` lists
+/// them: a table for each kind, a row for each parameter.
+fn parameter_tables() -> String {
+    let mut text = String::new();
+    for kind in NativeKind::ALL {
+        text += &format!("**{}** (`\"{}\"`):\n\n", kind.name(), kind.key());
+        text += "| # | Key | Control | Values | Default |\n|---|---|---|---|---|\n";
+        // The first parameter with each list of choices.
+        let mut listed: Vec<(&[&str], &str)> = Vec::new();
+        for (number, p) in kind.params().iter().enumerate() {
+            let range = format!("{} to {}", p.min, p.max);
+            let values = match p.unit {
+                Unit::Switch => "0 off, 1 on".to_owned(),
+                Unit::Choice(choices) => match listed.iter().find(|(c, _)| *c == choices) {
+                    Some((_, first)) => format!("as `{first}`"),
+                    None => {
+                        listed.push((choices, p.key));
+                        let named = choices.iter().enumerate().map(|(i, c)| format!("{i} {c}"));
+                        named.collect::<Vec<_>>().join(", ")
+                    }
+                },
+                Unit::Number if p.stepped => format!("{range}, whole"),
+                Unit::Number => range,
+                Unit::Note => format!("{range}, a MIDI note"),
+                Unit::Gain => format!("{range}, linear gain"),
+                Unit::Pan => format!("{range}, left to right"),
+                Unit::Ratio => format!("{range}, a ratio to 1"),
+                Unit::Semitones if p.stepped => format!("{range} semitones, whole"),
+                unit => {
+                    let word = match unit {
+                        Unit::Decibels => "dB",
+                        Unit::Hertz => "Hz",
+                        Unit::Milliseconds => "ms",
+                        Unit::Seconds => "s",
+                        Unit::Percent => "%",
+                        Unit::Semitones => "semitones",
+                        Unit::Cents => "cents",
+                        _ => unreachable!(),
+                    };
+                    format!("{range} {word}")
+                }
+            };
+            text += &format!(
+                "| {number} | `{}` | {} | {values} | {} |\n",
+                p.key,
+                p.full_name(),
+                p.default
+            );
+        }
+        text += "\n";
+    }
+    text
+}
+
+#[test]
+fn the_documented_parameters_are_the_tables() {
+    let page = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/project-format.md");
+    let page = fs::read_to_string(page).unwrap().replace("\r\n", "\n");
+    let tables = parameter_tables();
+    assert!(
+        page.contains(&tables),
+        "docs/project-format.md doesn't list the built-in devices' parameters as they \
+         are. Put this in its place:\n\n{tables}"
+    );
 }

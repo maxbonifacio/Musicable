@@ -3,9 +3,10 @@
 //! else, so a position always renders the same, however the blocks fall and
 //! however often the graph is rebuilt.
 
+use std::collections::BTreeMap;
 use std::f64::consts::FRAC_PI_2;
 
-use musicable_model::clip::{self, Clip, ClipContent, ClipId, Dimension};
+use musicable_model::clip::{self, Clip, ClipContent, ClipId, Controller, Dimension};
 use musicable_model::time::Beats;
 
 use crate::media::Source;
@@ -199,7 +200,7 @@ impl AudioClips {
 /// Reads `channels` channels of `source` from file frame `start` into
 /// `out`, a channel after another, as many frames as fit. Frames before the
 /// file starts or after it ends are silent.
-fn read(source: &Source, start: i64, out: &mut [f32], channels: usize) {
+pub(crate) fn read(source: &Source, start: i64, out: &mut [f32], channels: usize) {
     let frames = out.len() / channels;
     // Frames before the file.
     let skip = (-start).clamp(0, frames as i64) as usize;
@@ -330,9 +331,10 @@ impl Node for AudioClips {
 /// start notes beyond them.
 const MAX_SOUNDING: usize = 1024;
 
-/// Plays a track's MIDI clips: sends their notes, with their expression, to
-/// the track's instrument ([`Graph::send_notes`](crate::Graph::send_notes)).
-/// Audio coming into it passes through.
+/// Plays a track's MIDI clips: sends their notes, with their expression,
+/// and their controllers' moves to the track's instrument
+/// ([`Graph::send_notes`](crate::Graph::send_notes)). Audio coming into it
+/// passes through.
 ///
 /// A note plays from its start until it ends or its clip does. Notes that
 /// started before the playhead reached them don't play, so a locate or a
@@ -344,14 +346,30 @@ const MAX_SOUNDING: usize = 1024;
 ///
 /// Each note's id is its clip's and its own ([`note_id`]), so a note keeps
 /// its id however the notes around it are edited.
+///
+/// A controller moves as its clip's curve does, from wherever playback
+/// starts or jumps to: the player chases it, sending the value its last
+/// move before there left it at, from any clip, as playing the song from
+/// its start would. Controllers keep their values when the transport stops
+/// or a clip ends, as MIDI's do, but a switch held on, such as the sustain
+/// pedal, is let go then, so no notes are left ringing. When a recompiled
+/// player takes over, it sends whatever its curves hold differently from
+/// what the last one sent.
 #[derive(Debug)]
 pub struct MidiClips {
     /// What the clips play, in order of when.
     events: Vec<Scheduled>,
     /// The notes that play, by id.
     spans: Vec<Span>,
+    /// Each controller's moves, in order of when, for chasing.
+    curves: BTreeMap<Controller, Vec<Move>>,
     /// The notes sounding now. Capacity for [`MAX_SOUNDING`].
     sounding: Vec<Sounding>,
+    /// What each controller was last sent, by number.
+    sent: [Option<f32>; CONTROLLERS],
+    /// A recompiled player took over: it sends what changed at the next
+    /// block it plays.
+    rechase: bool,
     /// The next event to play, as of the last block.
     cursor: Option<usize>,
     /// The transport's jumps and whether it was playing, as of the last
@@ -361,12 +379,50 @@ pub struct MidiClips {
     played_to: Beats,
 }
 
+/// How many controllers there are.
+const CONTROLLERS: usize = Controller::MAX as usize + 1;
+
 #[derive(Debug, Clone, Copy)]
 struct Scheduled {
     at: Beats,
-    event: NoteEvent,
-    /// For a note's start: its release velocity, in case it's cut short.
-    release: f32,
+    /// Where it comes among events at the same time.
+    rank: Rank,
+    play: Play,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Play {
+    Note {
+        event: NoteEvent,
+        /// For a note's start: its release velocity, in case it's cut
+        /// short.
+        release: f32,
+    },
+    Controller {
+        controller: Controller,
+        value: f32,
+    },
+}
+
+/// Where an event comes among others at the same time: switches let go
+/// where a clip ends before the next clip's controllers move, controllers
+/// move before notes, notes end before others start, and a note's
+/// expression follows its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    LetGo,
+    Move,
+    Off,
+    On,
+    Expression,
+}
+
+/// A controller's move, for chasing.
+#[derive(Debug, Clone, Copy)]
+struct Move {
+    at: Beats,
+    rank: Rank,
+    value: f32,
 }
 
 /// Where a note plays, and on which key.
@@ -401,14 +457,17 @@ impl MidiClips {
         Self {
             events: Vec::new(),
             spans: Vec::new(),
+            curves: BTreeMap::new(),
             sounding: Vec::with_capacity(MAX_SOUNDING),
+            sent: [None; CONTROLLERS],
+            rechase: false,
             cursor: None,
             last: None,
             played_to: Beats::ZERO,
         }
     }
 
-    /// Adds `clip`'s notes. Audio clips are ignored.
+    /// Adds `clip`'s notes and controllers. Audio clips are ignored.
     pub fn add(&mut self, clip: &Clip) {
         let ClipContent::Midi(midi) = &clip.content else {
             return;
@@ -423,10 +482,13 @@ impl MidiClips {
             let id = note_id(clip.id, note.id);
             let on = clip.start + (note.start - midi.offset);
             let off = (on + note.length).min(clip.end());
-            let schedule = |at, event| Scheduled {
+            let schedule = |at, event: NoteEvent| Scheduled {
                 at,
-                event,
-                release: note.release_velocity,
+                rank: rank(&event),
+                play: Play::Note {
+                    event,
+                    release: note.release_velocity,
+                },
             };
             self.events.push(schedule(
                 on,
@@ -461,6 +523,29 @@ impl MidiClips {
                 off,
             });
         }
+        for (&controller, points) in &midi.controllers {
+            let mut moves = Vec::new();
+            // What the curve holds where the clip starts, then its moves
+            // while it plays.
+            let first = points.partition_point(|p| p.at <= midi.offset);
+            if let Some(held) = first.checked_sub(1) {
+                moves.push((clip.start, Rank::Move, points[held].value));
+            }
+            for point in points[first..].iter().take_while(|p| p.at < window.end) {
+                let at = clip.start + (point.at - midi.offset);
+                moves.push((at, Rank::Move, point.value));
+            }
+            let held = moves.last().map(|&(_, _, value)| value);
+            if controller.is_switch() && held.is_some_and(Controller::is_on) {
+                moves.push((clip.end(), Rank::LetGo, 0.0));
+            }
+            let curve = self.curves.entry(controller).or_default();
+            for (at, rank, value) in moves {
+                let play = Play::Controller { controller, value };
+                self.events.push(Scheduled { at, rank, play });
+                curve.push(Move { at, rank, value });
+            }
+        }
     }
 
     pub fn with_clip(mut self, clip: &Clip) -> Self {
@@ -477,6 +562,50 @@ impl MidiClips {
             notes.send(0, off);
         }
     }
+
+    /// Sends `controller` `value` at `offset`, and remembers it.
+    fn send_controller(
+        &mut self,
+        notes: &mut Notes<'_>,
+        offset: usize,
+        controller: Controller,
+        value: f32,
+    ) {
+        if notes.send_controller(offset, controller, value) {
+            self.sent[usize::from(controller.number())] = Some(value);
+        }
+    }
+
+    /// Lets go of the switches it holds on, as the transport stops.
+    fn let_go(&mut self, notes: &mut Notes<'_>) {
+        for controller in Controller::all().filter(|c| c.is_switch()) {
+            if self.sent[usize::from(controller.number())].is_some_and(Controller::is_on) {
+                self.send_controller(notes, 0, controller, 0.0);
+            }
+        }
+    }
+
+    /// Sends what each controller's curve holds as the block starts, as
+    /// playback starts or jumps there, or with `changed`, only where that
+    /// differs from what was sent, as a recompiled player takes over. A
+    /// switch held on that its curve doesn't hold on there is let go.
+    fn chase(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>, changed: bool) {
+        let (tempo, rate) = (ctx.tempo, ctx.sample_rate);
+        let first = ctx.transport.position as i64;
+        for controller in Controller::all() {
+            let held = self.curves.get(&controller).and_then(|moves| {
+                let before = moves.partition_point(|m| tempo.frame_at(m.at, rate) < first);
+                before.checked_sub(1).map(|last| moves[last].value)
+            });
+            let sent = self.sent[usize::from(controller.number())];
+            let value = match held {
+                Some(value) if !changed || sent != Some(value) => value,
+                None if controller.is_switch() && sent.is_some_and(Controller::is_on) => 0.0,
+                _ => continue,
+            };
+            self.send_controller(notes, 0, controller, value);
+        }
+    }
 }
 
 /// The id a note from a clip plays with: its clip's id in the top 32 bits,
@@ -486,20 +615,21 @@ pub fn note_id(clip: ClipId, note: clip::NoteId) -> NoteId {
     NoteId((u64::from(clip.0) << 32) | u64::from(note.0))
 }
 
-/// Where an event comes among others at the same time: notes end before
-/// others start, and a note's expression follows its start.
-fn rank(event: &NoteEvent) -> u8 {
+fn rank(event: &NoteEvent) -> Rank {
     match event {
-        NoteEvent::Off { .. } => 0,
-        NoteEvent::On { .. } => 1,
-        NoteEvent::Expression { .. } => 2,
+        NoteEvent::Off { .. } => Rank::Off,
+        NoteEvent::On { .. } => Rank::On,
+        NoteEvent::Expression { .. } => Rank::Expression,
     }
 }
 
 impl Node for MidiClips {
     fn prepare(&mut self, _config: &EngineConfig) {
         // Stable, so events at the same time keep the clips' order.
-        self.events.sort_by_key(|e| (e.at, rank(&e.event)));
+        self.events.sort_by_key(|e| (e.at, e.rank));
+        for moves in self.curves.values_mut() {
+            moves.sort_by_key(|m| (m.at, m.rank));
+        }
         self.spans.sort_unstable();
     }
 
@@ -508,6 +638,8 @@ impl Node for MidiClips {
             return;
         };
         std::mem::swap(&mut self.sounding, &mut previous.sounding);
+        self.sent = previous.sent;
+        self.rechase = true;
         self.last = previous.last;
         self.played_to = previous.played_to;
         for sounding in &mut self.sounding {
@@ -544,12 +676,18 @@ impl Node for MidiClips {
             !sounding.cut
         });
         let transport = ctx.transport;
-        if self.last != Some((transport.jumps, true)) || !transport.playing {
+        let jumped = self.last != Some((transport.jumps, true));
+        if jumped || !transport.playing {
             self.release_all(notes);
         }
         self.last = Some((transport.jumps, transport.playing));
         if !transport.playing {
+            self.let_go(notes);
             return;
+        }
+        if jumped || self.rechase {
+            self.chase(ctx, notes, !jumped);
+            self.rechase = false;
         }
 
         let (tempo, rate) = (ctx.tempo, ctx.sample_rate);
@@ -567,42 +705,49 @@ impl Node for MidiClips {
             Some(i) if carries_on(i) => i,
             _ => events.partition_point(|e| frame(e.at) < first),
         };
-        while let Some(scheduled) = events.get(i) {
+        while let Some(&scheduled) = self.events.get(i) {
             let at = frame(scheduled.at);
             if at >= end {
                 break;
             }
             let offset = (at.max(first) - first) as usize;
-            let note = scheduled.event.note();
+            i += 1;
+            let (event, release) = match scheduled.play {
+                Play::Note { event, release } => (event, release),
+                Play::Controller { controller, value } => {
+                    self.send_controller(notes, offset, controller, value);
+                    continue;
+                }
+            };
+            let note = event.note();
             let sounding = self.sounding.iter().position(|s| s.note == note);
-            match scheduled.event {
+            match event {
                 NoteEvent::On { key, .. } => {
                     if sounding.is_none()
                         && self.sounding.len() < MAX_SOUNDING
-                        && notes.send(offset, scheduled.event)
+                        && notes.send(offset, event)
                     {
                         self.sounding.push(Sounding {
                             note,
                             on: scheduled.at,
                             key,
-                            release: scheduled.release,
+                            release,
                             cut: false,
                         });
                     }
                 }
                 NoteEvent::Expression { .. } => {
                     if sounding.is_some() {
-                        notes.send(offset, scheduled.event);
+                        notes.send(offset, event);
                     }
                 }
                 NoteEvent::Off { .. } => {
                     if let Some(s) = sounding {
-                        notes.send(offset, scheduled.event);
+                        notes.send(offset, event);
                         self.sounding.swap_remove(s);
                     }
                 }
             }
-            i += 1;
         }
         self.cursor = Some(i);
         self.played_to = Beats::from_f64(tempo.beats_at(end as f64, rate));
@@ -635,8 +780,12 @@ mod tests {
         Beats::from_f64(beats)
     }
 
-    /// Records the notes it gets, at the song position they land on.
-    struct Recorder(Vec<(u64, NoteEvent)>);
+    /// Records the notes and controllers it gets, at the song position
+    /// they land on.
+    struct Recorder {
+        notes: Vec<(u64, NoteEvent)>,
+        controllers: Vec<(u64, Controller, f32)>,
+    }
 
     impl Node for Recorder {
         fn channels(&self) -> usize {
@@ -651,9 +800,13 @@ mod tests {
         ) {
             output.clear();
             for event in ctx.events {
-                if let NodeEventKind::Note(note) = event.kind {
-                    let at = ctx.transport.position + event.offset as u64;
-                    self.0.push((at, note));
+                let at = ctx.transport.position + event.offset as u64;
+                match event.kind {
+                    NodeEventKind::Note(note) => self.notes.push((at, note)),
+                    NodeEventKind::Controller { controller, value } => {
+                        self.controllers.push((at, controller, value));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -672,7 +825,11 @@ mod tests {
         fn new(player: MidiClips) -> Self {
             let mut g = Graph::new();
             let player = g.add(NodeKey(0), player);
-            let recorder = g.add(NodeKey(1), Recorder(Vec::with_capacity(4096)));
+            let recorder = Recorder {
+                notes: Vec::with_capacity(4096),
+                controllers: Vec::with_capacity(4096),
+            };
+            let recorder = g.add(NodeKey(1), recorder);
             g.send_notes(player, recorder).unwrap();
             g.set_output(recorder).unwrap();
             Self {
@@ -720,14 +877,31 @@ mod tests {
             self.transport.jumps += 1;
         }
 
+        fn recorder(&mut self) -> &mut Recorder {
+            let node = self.graph.nodes[self.recorder.0].as_mut();
+            node.downcast_mut::<Recorder>().unwrap()
+        }
+
         /// The notes recorded since last asked.
         fn notes(&mut self) -> Vec<(u64, NoteEvent)> {
-            let node = self.graph.nodes[self.recorder.0].as_mut();
-            let recorded = &mut node.downcast_mut::<Recorder>().unwrap().0;
             // With as much room again, so the recorder doesn't allocate
             // while it records.
+            let recorded = &mut self.recorder().notes;
             let room = recorded.capacity();
             std::mem::replace(recorded, Vec::with_capacity(room))
+        }
+
+        /// The controllers' moves recorded since last asked, with the moves
+        /// in beats.
+        fn controllers(&mut self) -> Vec<(f64, Controller, f32)> {
+            let recorded = &mut self.recorder().controllers;
+            let room = recorded.capacity();
+            let moves = std::mem::replace(recorded, Vec::with_capacity(room));
+            let beat = |at: u64| at as f64 / BEAT as f64;
+            moves
+                .into_iter()
+                .map(|(at, c, v)| (beat(at), c, v))
+                .collect()
         }
 
         /// Swaps in a player for `clips`, as a recompile would.
@@ -748,9 +922,23 @@ mod tests {
                 offset: beats(offset),
                 next_note_id: notes.iter().map(|n| n.id.0 + 1).max().unwrap_or(0),
                 notes,
+                controllers: BTreeMap::new(),
             }),
         }
     }
+
+    /// `clip` with `controller` moving as `points`, `(at, value)` pairs, do.
+    fn moving(mut clip: Clip, controller: Controller, points: &[(f64, f32)]) -> Clip {
+        let ClipContent::Midi(midi) = &mut clip.content else {
+            unreachable!("a MIDI clip");
+        };
+        let points = points.iter().map(|&(at, v)| Point::new(beats(at), v));
+        midi.set_controller(controller, points.collect());
+        clip
+    }
+
+    const MOD: Controller = Controller::MOD_WHEEL;
+    const SUSTAIN: Controller = Controller::SUSTAIN;
 
     fn note(id: u32, start: f64, length: f64, key: u8) -> Note {
         Note {
@@ -966,6 +1154,115 @@ mod tests {
             [(BEAT, "off"), (BEAT, "off"), (6 * BEAT, "off")]
         );
         assert_eq!(notes[2].1.note(), note_id(ClipId(0), clip::NoteId(0)));
+    }
+
+    #[test]
+    fn controllers_move_with_their_clips_and_are_chased_where_playback_starts() {
+        // A clip from beat 1 to 5, whose last move comes after its end.
+        let clip = moving(
+            clip(0, 1.0, 4.0, 0.0, Vec::new()),
+            MOD,
+            &[(0.0, 0.25), (2.0, 0.75), (6.0, 1.0)],
+        );
+        for block in [1, 7, 64] {
+            let mut rig = Rig::new(MidiClips::new().with_clip(&clip));
+            rig.play(8 * BEAT, block);
+            assert_eq!(
+                rig.controllers(),
+                [(1.0, MOD, 0.25), (3.0, MOD, 0.75)],
+                "blocks of {block}"
+            );
+        }
+        let mut rig = Rig::new(MidiClips::new().with_clip(&clip));
+        // Starting in the middle of the clip sends what its curve held
+        // there, at the start.
+        rig.locate(2 * BEAT);
+        rig.play(2 * BEAT, 64);
+        assert_eq!(rig.controllers(), [(2.0, MOD, 0.25), (3.0, MOD, 0.75)]);
+        // Jumping past the clip sends where it left the controller: as
+        // playing from the start of the song would.
+        rig.locate(6 * BEAT);
+        rig.play(BEAT, 64);
+        assert_eq!(rig.controllers(), [(6.0, MOD, 0.75)]);
+        // Before the first move, nothing has moved it yet, so it's left
+        // where it is.
+        rig.locate(0);
+        rig.play(2 * BEAT, 64);
+        assert_eq!(rig.controllers(), [(1.0, MOD, 0.25)]);
+    }
+
+    #[test]
+    fn a_clip_that_starts_inside_its_curve_starts_with_what_the_curve_holds() {
+        // Two beats into its content, and so past the curve's first point.
+        let clip = moving(
+            clip(0, 4.0, 4.0, 2.0, Vec::new()),
+            MOD,
+            &[(1.0, 0.5), (3.0, 1.0)],
+        );
+        let mut rig = Rig::new(MidiClips::new().with_clip(&clip));
+        rig.play(10 * BEAT, 64);
+        assert_eq!(rig.controllers(), [(4.0, MOD, 0.5), (5.0, MOD, 1.0)]);
+    }
+
+    #[test]
+    fn switches_held_on_are_let_go_where_clips_end_and_the_transport_stops() {
+        let first = moving(
+            clip(0, 0.0, 4.0, 0.0, Vec::new()),
+            SUSTAIN,
+            &[(0.0, 1.0), (1.0, 0.0), (2.0, 1.0)],
+        );
+        // Straight after the first, with the pedal down from its start. Added
+        // first, it still moves after the first clip lets go.
+        let second = moving(clip(1, 4.0, 4.0, 0.0, Vec::new()), SUSTAIN, &[(0.0, 1.0)]);
+        let mut rig = Rig::new(MidiClips::new().with_clip(&second).with_clip(&first));
+        rig.play(6 * BEAT, 64);
+        assert_eq!(
+            rig.controllers(),
+            [
+                (0.0, SUSTAIN, 1.0),
+                (1.0, SUSTAIN, 0.0),
+                (2.0, SUSTAIN, 1.0),
+                (4.0, SUSTAIN, 0.0),
+                (4.0, SUSTAIN, 1.0),
+            ]
+        );
+        // Stopping lets go of it, once.
+        rig.transport.playing = false;
+        rig.play(64, 64);
+        rig.play(64, 64);
+        assert_eq!(rig.controllers(), [(6.0, SUSTAIN, 0.0)]);
+        // And starting again from there holds it down again.
+        rig.transport.playing = true;
+        rig.play(BEAT, 64);
+        assert_eq!(rig.controllers(), [(6.0, SUSTAIN, 1.0)]);
+        // A jump to where no clip holds it lets go of it.
+        rig.locate(BEAT + BEAT / 2);
+        rig.play(BEAT / 4, 64);
+        assert_eq!(rig.controllers(), [(1.5, SUSTAIN, 0.0)]);
+    }
+
+    #[test]
+    fn a_recompiled_player_sends_what_its_curves_hold_differently() {
+        let notes = vec![note(0, 0.0, 8.0, 60)];
+        let clip = |id, value: f32| {
+            let clip = moving(clip(id, 0.0, 8.0, 0.0, notes.clone()), MOD, &[(0.0, value)]);
+            moving(clip, SUSTAIN, &[(0.0, 1.0)])
+        };
+        let mut rig = Rig::new(MidiClips::new().with_clip(&clip(0, 0.5)));
+        rig.play(BEAT, 64);
+        assert_eq!(rig.controllers(), [(0.0, MOD, 0.5), (0.0, SUSTAIN, 1.0)]);
+        assert_eq!(kinds(&rig.notes()), [(0, "on")]);
+        // Unchanged: nothing is sent again.
+        rig.recompile(MidiClips::new().with_clip(&clip(0, 0.5)));
+        rig.play(BEAT, 64);
+        assert!(rig.controllers().is_empty());
+        // The mod wheel's curve changed, and the sustain pedal's is gone.
+        let changed = moving(clip(0, 0.8), SUSTAIN, &[]);
+        rig.recompile(MidiClips::new().with_clip(&changed));
+        rig.play(BEAT, 64);
+        assert_eq!(rig.controllers(), [(2.0, MOD, 0.8), (2.0, SUSTAIN, 0.0)]);
+        // The note sounds on through all of it.
+        assert!(rig.notes().is_empty());
     }
 
     #[test]

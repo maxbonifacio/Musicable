@@ -9,55 +9,15 @@ use egui::{DroppedFile, Event, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::AudioFile;
-use musicable_commands::{
-    CommandError, Context, Document, Keymap, Named, Registry, Request, Transport,
-};
+use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
+use crate::testing::Player;
 use crate::{Levels, Plugins, Waveforms};
-
-/// A transport that plays along: locating moves its playhead.
-#[derive(Debug, Default)]
-struct Player {
-    playing: bool,
-    recording: bool,
-    playhead: Beats,
-}
-
-impl Transport for Player {
-    fn is_playing(&self) -> bool {
-        self.playing
-    }
-
-    fn play(&mut self) {
-        self.playing = true;
-    }
-
-    fn stop(&mut self) {
-        self.playing = false;
-        self.recording = false;
-    }
-
-    fn locate(&mut self, at: Beats) {
-        self.playhead = at;
-    }
-
-    fn playhead(&self) -> Beats {
-        self.playhead
-    }
-
-    fn is_recording(&self) -> bool {
-        self.recording
-    }
-
-    fn set_recording(&mut self, on: bool) {
-        self.recording = on;
-    }
-}
 
 struct State {
     arrangement: Arrangement,
@@ -91,6 +51,7 @@ impl State {
             document: &mut self.document,
             transport: &mut self.player,
             requests: &mut self.requests,
+            library: &mut musicable_commands::NoLibrary,
         };
         let ran = match action {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
@@ -229,6 +190,8 @@ fn harness(project: Project) -> Harness<'static, State> {
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
                         plugins: Plugins::default(),
+                        native: &[],
+                        library: crate::Library::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state
@@ -565,6 +528,38 @@ fn locators_move_and_a_double_click_renames_them() {
     assert_eq!(harness.state().requests, [rename]);
     // A click on a locator jumps there.
     assert_eq!(harness.state().player.playhead, Beats::new(20));
+}
+
+#[test]
+fn a_double_click_opens_a_midi_clip_in_the_piano_roll() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let double_click = |harness: &mut Harness<'_, State>, at: Pos2| {
+        harness.run_steps(30);
+        harness.hover_at(at);
+        harness.run();
+        for pressed in [true, false, true, false] {
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+    };
+    let at = body(&harness, "Kick", 30.0);
+    double_click(&mut harness, at);
+    assert!(harness.state().requests.is_empty());
+    let at = body(&harness, "Chords", 30.0);
+    double_click(&mut harness, at);
+    assert_eq!(
+        harness.state().requests,
+        [Request::ShowPanel(crate::PIANO_ROLL)]
+    );
+    let editor = harness.state().editor();
+    assert_eq!(editor.piano_roll.clip, Some(ids.chords));
+    assert_eq!(editor.focus, musicable_commands::Focus::PianoRoll);
 }
 
 #[test]
@@ -920,5 +915,331 @@ fn takes_show_in_lanes_and_dragging_or_clicking_comps_them() {
     assert!(harness.state().project().find_take(first).is_none());
     assert!(harness.query_by_label("Take 1 of Bass").is_none());
     assert!(harness.query_by_label("Take 2 of Bass").is_some());
+    assert!(harness.state().errors.is_empty());
+}
+
+/// Where `value` of a parameter like `spec` is on the automation lane
+/// called `label`, at `at`.
+fn on_lane(
+    harness: &Harness<'_, State>,
+    label: &str,
+    spec: &ParamSpec,
+    at: f64,
+    value: f64,
+) -> Pos2 {
+    let row = harness.get_by_label(label).rect();
+    let margin = Theme::default().point + 2.0;
+    let unit = spec.scale.to_unit(value, spec.min, spec.max) as f32;
+    let y = row.bottom() - margin - unit * (row.height() - 2.0 * margin);
+    pos2(x_of(harness, at), y)
+}
+
+/// The points of the automation of `param`, as where they are and what
+/// they're set to.
+fn points(harness: &Harness<'_, State>, param: ParamAddress) -> Vec<(Beats, f64)> {
+    let lane = harness.state().project().lane(param);
+    let points = lane.map_or(&[][..], |lane| &lane.points[..]);
+    points.iter().map(|point| (point.at, point.value)).collect()
+}
+
+/// Lets long enough go by since the last click that the next isn't a
+/// double click.
+fn pause(harness: &mut Harness<'_, State>) {
+    for _ in 0..40 {
+        harness.step();
+    }
+}
+
+fn double_click(harness: &mut Harness<'_, State>, at: Pos2) {
+    harness.hover_at(at);
+    harness.run();
+    for pressed in [true, false, true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
+#[track_caller]
+fn near(value: f64, expected: f64) {
+    assert!(
+        (value - expected).abs() < 1e-4,
+        "{value}, expected {expected}"
+    );
+}
+
+#[test]
+fn automation_lanes_show_under_their_tracks_and_edit_as_breakpoints() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let spec = ParamSpec::volume();
+    let unit = |value| spec.scale.to_unit(value, spec.min, spec.max);
+    let lane = "Volume of Drums";
+    assert!(harness.query_by_label(lane).is_none());
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+
+    // The volume's lane shows under the track, at the volume's own value
+    // while it has no automation, and the next track under it.
+    let drums = harness.get_by_label("Track Drums").rect();
+    let row = harness.get_by_label(lane).rect();
+    let height = Theme::default().automation_height;
+    assert_eq!((row.top(), row.height()), (drums.bottom(), height));
+    assert_eq!(
+        harness.get_by_label("Track Keys").rect().top(),
+        row.bottom()
+    );
+    assert_eq!(
+        harness.get_by_label(lane).value().as_deref(),
+        Some("0.0 dB")
+    );
+    let button = harness.get_by_label("Show automation of track Drums");
+    assert_eq!(button.accesskit_node().toggled(), Some(Toggled::True));
+
+    // A click on the line puts a point on it, on the grid, which changes
+    // nothing until it moves. A double click off the line puts one where
+    // it was clicked.
+    let at = on_lane(&harness, lane, &spec, 4.3, 1.0);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(points(&harness, volume), [(Beats::new(4), 1.0)]);
+    let undo =
+        |harness: &Harness<'_, State>| harness.state().document.undo_name().map(str::to_owned);
+    assert_eq!(undo(&harness).as_deref(), Some("Add Automation Point"));
+    pause(&mut harness);
+    let at = on_lane(&harness, lane, &spec, 12.2, 0.0);
+    double_click(&mut harness, at);
+    let added = [(Beats::new(4), 1.0), (Beats::new(12), 0.0)];
+    assert_eq!(points(&harness, volume), added);
+    harness.get_by_label("Point 2 of Volume of Drums");
+
+    // Dragging a point moves it on the grid, and up or down.
+    pause(&mut harness);
+    let half = spec.scale.from_unit(0.5, spec.min, spec.max);
+    let from = on_lane(&harness, lane, &spec, 12.0, 0.0);
+    let to = on_lane(&harness, lane, &spec, 8.2, half);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let moved = points(&harness, volume);
+    assert_eq!((moved[0], moved[1].0), (added[0], Beats::new(8)));
+    near(moved[1].1, half);
+    assert_eq!(undo(&harness).as_deref(), Some("Edit Automation"));
+
+    // Dragging the line between two points moves them both.
+    let middle = (unit(1.0) + 0.5) / 2.0;
+    let middle = spec.scale.from_unit(middle, spec.min, spec.max);
+    let from = on_lane(&harness, lane, &spec, 6.0, middle);
+    let travel = row.height() - 2.0 * (Theme::default().point + 2.0);
+    drag(
+        &mut harness,
+        from,
+        from + vec2(0.0, travel / 4.0),
+        Modifiers::NONE,
+    );
+    let lowered = points(&harness, volume);
+    assert_eq!((lowered[0].0, lowered[1].0), (Beats::new(4), Beats::new(8)));
+    near(unit(lowered[0].1), unit(1.0) - 0.25);
+    near(unit(lowered[1].1), 0.25);
+
+    // A click on a point deletes it. Deleting the last deletes the
+    // automation, which leaves the volume where it had it at the playhead.
+    pause(&mut harness);
+    let at = on_lane(&harness, lane, &spec, 8.0, lowered[1].1);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(points(&harness, volume), [lowered[0]]);
+    pause(&mut harness);
+    let at = on_lane(&harness, lane, &spec, 4.0, lowered[0].1);
+    click(&mut harness, at, Modifiers::NONE);
+    assert!(harness.state().project().lane(volume).is_none());
+    assert_eq!(undo(&harness).as_deref(), Some("Clear Automation"));
+    let gain = harness.state().project().track(ids.drums).unwrap().gain;
+    near(f64::from(gain), lowered[0].1);
+
+    // The button hides the lanes again.
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    assert!(harness.query_by_label(lane).is_none());
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_drag_on_an_automation_lane_draws_a_step_of_the_grid_at_a_time() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let spec = ParamSpec::volume();
+    let at_unit = |unit| spec.scale.from_unit(unit, spec.min, spec.max);
+    let lane = "Volume of Drums";
+    // The track's menu shows its automation too.
+    harness.get_by_label("Track Drums").click_secondary();
+    harness.run();
+    harness.get_by_label("Show/Hide Automation A").click();
+    harness.run();
+
+    // Each step of the grid the drag crosses takes the value where it
+    // crossed the step's middle, with a step from the volume's own value at
+    // either end.
+    let quarter = at_unit(0.25);
+    let from = on_lane(&harness, lane, &spec, 2.5, quarter);
+    let to = on_lane(&harness, lane, &spec, 7.5, quarter);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let drawn = points(&harness, volume);
+    let at: Vec<Beats> = drawn.iter().map(|&(at, _)| at).collect();
+    assert_eq!(at, [2, 2, 8, 8].map(Beats::new));
+    for (&(_, value), expected) in drawn.iter().zip([1.0, quarter, quarter, 1.0]) {
+        near(value, expected);
+    }
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Edit Automation")
+    );
+
+    // With Alt, it draws freely, off the grid: here, a ramp up.
+    let from = on_lane(&harness, lane, &spec, 10.0, 0.0);
+    let to = on_lane(&harness, lane, &spec, 14.0, spec.max);
+    drag(&mut harness, from, to, Modifiers::ALT);
+    let project = harness.state().project();
+    let automated = project.lane(volume).unwrap();
+    let value = |at: f64| automated.value_at(Beats::from_f64(at), spec.scale).unwrap();
+    for (at, unit) in [(11.0, 0.25), (12.0, 0.5), (13.0, 0.75)] {
+        near(value(at), at_unit(unit));
+    }
+    // What was there before and after stays.
+    near(value(5.0), quarter);
+    near(value(9.0), 1.0);
+    near(value(15.0), 1.0);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn an_automation_lanes_header_chooses_adds_and_hides_lanes() {
+    let (mut project, ids) = project();
+    // Drums sends to the reverb, and plays through a test gain.
+    let reverb = project.tracks[3].id;
+    let send = project.new_send(reverb);
+    let gain = project.new_device(DeviceKind::TestGain { gain: 1.0 });
+    let (send_level, gain_param) = (
+        ParamAddress::Send(send.id),
+        ParamAddress::Device(gain.id, 0),
+    );
+    let track = project.track_mut(ids.drums).unwrap();
+    track.sends.push(send);
+    track.devices.push(gain);
+    let mut harness = harness(project);
+    let chain = Chain::Track(ids.drums);
+    let shown = |harness: &Harness<'_, State>| {
+        let automation = &harness.state().editor().automation;
+        automation.get(&chain).cloned().unwrap_or_default()
+    };
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    assert_eq!(shown(&harness), [ParamAddress::Volume(chain)]);
+
+    // The chooser offers the track's volume, pan and sends, then its
+    // devices' parameters, and shows the one chosen in the lane's place.
+    harness
+        .get_by_label("Choose the parameter of Volume of Drums")
+        .click();
+    harness.run();
+    harness.get_by_label("Pan");
+    harness.get_by_label("Send to Reverb").click();
+    harness.run();
+    assert_eq!(shown(&harness), [send_level]);
+    harness
+        .get_by_label("Choose the parameter of Send to Reverb of Drums")
+        .click();
+    harness.run();
+    harness.get_by_label("Test Gain").hover();
+    harness.run();
+    harness.get_by_label("Gain").click();
+    harness.run();
+    assert_eq!(shown(&harness), [gain_param]);
+    harness.get_by_label("Test Gain: Gain of Drums");
+
+    // Add shows a lane for the next parameter without one, under the
+    // others, and Hide hides a lane.
+    harness
+        .get_by_label("Add a lane under Test Gain: Gain of Drums")
+        .click();
+    harness.run();
+    assert_eq!(shown(&harness), [gain_param, ParamAddress::Volume(chain)]);
+    harness
+        .get_by_label("Hide Test Gain: Gain of Drums")
+        .click();
+    harness.run();
+    assert_eq!(shown(&harness), [ParamAddress::Volume(chain)]);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn automation_menus_clear_and_re_enable_a_lane() {
+    let (mut project, ids) = project();
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let points = vec![
+        Point::new(Beats::ZERO, 0.5),
+        Point::new(Beats::new(8), 0.25),
+    ];
+    let mut lane = musicable_model::automation::Lane::new(volume, points);
+    lane.overridden = true;
+    project.automation.push(lane);
+    let mut harness = harness(project);
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    // Someone moved the volume by hand, so the lane says so, and its menu
+    // has the volume follow its automation again.
+    let header = harness.get_by_label("Volume of Drums");
+    assert_eq!(header.value().as_deref(), Some("Overridden"));
+    header.click_secondary();
+    harness.run();
+    harness.get_by_label("Re-Enable Automation").click();
+    harness.run();
+    let project = harness.state().project();
+    assert!(!project.lane(volume).unwrap().overridden);
+    let header = harness.get_by_label("Volume of Drums");
+    assert_eq!(header.value().as_deref(), Some("-6.0 dB"));
+    // Clear deletes it.
+    harness.get_by_label("Volume of Drums").click_secondary();
+    harness.run();
+    assert!(harness.query_by_label("Re-Enable Automation").is_none());
+    harness.get_by_label("Clear Automation").click();
+    harness.run();
+    assert!(harness.state().project().lane(volume).is_none());
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_masters_lanes_go_under_the_tracks() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let state = harness.state_mut();
+    let lanes = &mut state.document.editor_mut().automation;
+    lanes.insert(Chain::Master, vec![ParamAddress::Pan(Chain::Master)]);
+    lanes.insert(
+        Chain::Track(ids.drums),
+        vec![ParamAddress::Volume(Chain::Track(ids.drums))],
+    );
+    harness.run();
+    let reverb = harness.get_by_label("Track Reverb").rect();
+    let pan = harness.get_by_label("Pan of Master");
+    assert_eq!(pan.rect().top(), reverb.bottom());
+    assert_eq!(pan.value().as_deref(), Some("C"));
+    // Its menu acts on the master's.
+    pan.click_secondary();
+    harness.run();
+    harness.get_by_label("Hide Automation Lane").click();
+    harness.run();
+    assert!(harness.query_by_label("Pan of Master").is_none());
+    harness.get_by_label("Volume of Drums");
     assert!(harness.state().errors.is_empty());
 }

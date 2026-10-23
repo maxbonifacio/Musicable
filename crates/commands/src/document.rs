@@ -5,8 +5,13 @@
 //! replaced, so everything that has to follow the project hooks in here: the
 //! engine and the undo history now, ARA change notifications in Tier 2.
 
-use musicable_model::clip::{Clip, ClipContent, ClipId, Fades, Timing};
+use musicable_model::automation::{self, Lane};
+use musicable_model::clip::{
+    Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId, Point, Timing,
+};
 use musicable_model::mixer::Bus;
+use musicable_model::native::NativeKind;
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
@@ -279,7 +284,11 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
+    /// The lanes that automate its parameters go first, each as an edit of
+    /// its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
+        self.project.find_device(device)?;
+        self.remove_lanes(|param| matches!(param, ParamAddress::Device(d, _) if d == device));
         let (chain, index, _) = self.project.find_device(device)?;
         let device = self.project.devices_mut(chain)?.remove(index);
         self.edits.push(Edit::RemoveDevice {
@@ -340,6 +349,62 @@ impl Transaction<'_> {
         }
     }
 
+    /// Sets parameter `param` of the built-in device with id `device` to
+    /// `value`, kept in the parameter's range ([`ParamInfo::clamp`]). Not a
+    /// number does nothing, and so do a device that isn't built in and a
+    /// parameter it hasn't got.
+    ///
+    /// [`ParamInfo::clamp`]: musicable_model::native::ParamInfo::clamp
+    pub fn set_native_param(&mut self, device: DeviceId, param: u32, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let Some(native) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.native_mut())
+        else {
+            return;
+        };
+        let Some(from) = native.set(param as usize, value) else {
+            return;
+        };
+        let to = native.values[param as usize];
+        if from != to {
+            self.edits.push(Edit::NativeParam {
+                device,
+                param,
+                from,
+                to,
+            });
+        }
+    }
+
+    /// Gives the sampler with id `device` the sample `file`, or takes its
+    /// sample away with `None`. An empty path does nothing, and so does a
+    /// device that isn't a sampler.
+    pub fn set_native_sample(&mut self, device: DeviceId, file: Option<String>) {
+        if file.as_ref().is_some_and(String::is_empty) {
+            return;
+        }
+        let Some(native) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.native_mut())
+            .filter(|native| native.kind == NativeKind::Sampler)
+        else {
+            return;
+        };
+        if native.sample != file {
+            let from = std::mem::replace(&mut native.sample, file.clone());
+            self.edits.push(Edit::NativeSample {
+                device,
+                from,
+                to: file,
+            });
+        }
+    }
+
     /// Puts `track` at `index` in the track list, or at the end if `index`
     /// is past it. A track with the id of one the project has is left out.
     pub fn add_track(&mut self, index: usize, track: Track) {
@@ -353,9 +418,10 @@ impl Transaction<'_> {
 
     /// Removes the track with id `id` and returns it. What refers to it goes
     /// first, each as an edit of its own: tracks feeding it feed the master
-    /// instead, and sends to it go.
+    /// instead, sends to it go, and so do the lanes that automate its
+    /// parameters, its sends' and its devices'.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
-        let index = self.project.track_index(id)?;
+        self.project.track(id)?;
         let feeding: Vec<TrackId> = self
             .project
             .tracks
@@ -375,6 +441,16 @@ impl Transaction<'_> {
         for (track, send) in sends {
             self.remove_send(track, send);
         }
+        let on_track = Some(Chain::Track(id));
+        let project = &*self.project;
+        let lanes: Vec<ParamAddress> = (project.automation.iter())
+            .map(|l| l.param)
+            .filter(|&param| project.param_chain(param) == on_track)
+            .collect();
+        for param in lanes {
+            self.remove_lane(param);
+        }
+        let index = self.project.track_index(id)?;
         let track = self.project.tracks.remove(index);
         self.edits.push(Edit::RemoveTrack {
             index,
@@ -549,7 +625,14 @@ impl Transaction<'_> {
         self.edits.push(Edit::AddSend { track, index, send });
     }
 
+    /// Removes the track's send with id `send`. The lane that automates its
+    /// level goes first, as an edit of its own.
     pub fn remove_send(&mut self, track: TrackId, send: SendId) {
+        let has = |t: &Track| t.sends.iter().any(|s| s.id == send);
+        if !self.project.track(track).is_some_and(has) {
+            return;
+        }
+        self.remove_lane(ParamAddress::Send(send));
         let Some(t) = self.project.track_mut(track) else {
             return;
         };
@@ -761,6 +844,146 @@ impl Transaction<'_> {
         }
     }
 
+    /// An id for a new note in the MIDI clip with id `clip`, for
+    /// [`add_note`](Self::add_note), or `None` if there's no MIDI clip on a
+    /// track with that id. Taking an id isn't an edit, since ids are never
+    /// used again in the clip, as with tracks.
+    pub fn new_note_id(&mut self, clip: ClipId) -> Option<NoteId> {
+        let (_, midi) = midi_mut(self.project, clip)?;
+        Some(midi.new_note_id())
+    }
+
+    /// Puts `note` at `index` in the notes of the MIDI clip with id `clip`,
+    /// or at the end if `index` is past them. It's left out if there's no
+    /// MIDI clip on a track with that id, if the clip has a note with the
+    /// note's id or never handed the id out (see
+    /// [`new_note_id`](Self::new_note_id)), or if a file couldn't hold the
+    /// note: see [`note_fits`].
+    pub fn add_note(&mut self, clip: ClipId, index: usize, note: Note) {
+        if !note_fits(&note) {
+            return;
+        }
+        let Some((track, midi)) = midi_mut(self.project, clip) else {
+            return;
+        };
+        if note.id.0 >= midi.next_note_id || midi.note(note.id).is_some() {
+            return;
+        }
+        let index = index.min(midi.notes.len());
+        midi.notes.insert(index, note.clone());
+        self.edits.push(Edit::AddNote {
+            track,
+            clip,
+            index,
+            note,
+        });
+    }
+
+    /// Removes the note with id `note` from the MIDI clip with id `clip`,
+    /// and returns it.
+    pub fn remove_note(&mut self, clip: ClipId, note: NoteId) -> Option<Note> {
+        let (track, midi) = midi_mut(self.project, clip)?;
+        let index = midi.notes.iter().position(|n| n.id == note)?;
+        let note = midi.notes.remove(index);
+        self.edits.push(Edit::RemoveNote {
+            track,
+            clip,
+            index,
+            note: note.clone(),
+        });
+        Some(note)
+    }
+
+    /// Moves a note, or changes its length: it sounds over `range`, in its
+    /// clip's own time, from now on. An empty range does nothing.
+    pub fn set_note_timing(&mut self, clip: ClipId, note: NoteId, range: BeatRange) {
+        if range.is_empty() {
+            return;
+        }
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        let from = n.range();
+        if from != range {
+            n.start = range.start;
+            n.length = range.len();
+            self.edits.push(Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from,
+                to: range,
+            });
+        }
+    }
+
+    /// Sets a note's key, its MIDI note number. A key past
+    /// [`Note::MAX_KEY`] does nothing.
+    pub fn set_note_key(&mut self, clip: ClipId, note: NoteId, key: u8) {
+        if key > Note::MAX_KEY {
+            return;
+        }
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        if n.key != key {
+            let from = std::mem::replace(&mut n.key, key);
+            self.edits.push(Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from,
+                to: key,
+            });
+        }
+    }
+
+    /// Sets how hard a note starts, from 0.0 to 1.0. Velocities beyond move
+    /// to the nearest end, and NaN does nothing.
+    pub fn set_note_velocity(&mut self, clip: ClipId, note: NoteId, velocity: f32) {
+        if velocity.is_nan() {
+            return;
+        }
+        let velocity = velocity.clamp(0.0, 1.0);
+        let Some((track, n)) = note_mut(self.project, clip, note) else {
+            return;
+        };
+        if n.velocity != velocity {
+            let from = std::mem::replace(&mut n.velocity, velocity);
+            self.edits.push(Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from,
+                to: velocity,
+            });
+        }
+    }
+
+    /// Sets how the MIDI clip with id `clip` moves `controller`: by
+    /// `points`, in the clip's own time, in order, with values from 0.0 to
+    /// 1.0. No points stops the clip moving it. Points out of order or with
+    /// values beyond do nothing.
+    pub fn set_controller(&mut self, clip: ClipId, controller: Controller, points: Vec<Point>) {
+        if !curve_fits(&points) {
+            return;
+        }
+        let Some((track, midi)) = midi_mut(self.project, clip) else {
+            return;
+        };
+        let from = midi.controller(controller).to_vec();
+        if from != points {
+            midi.set_controller(controller, points.clone());
+            self.edits.push(Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to: points,
+            });
+        }
+    }
+
     /// A new, empty take with the next take id, for
     /// [`add_take`](Self::add_take): see [`Project::new_take`].
     pub fn new_take(&mut self, name: impl Into<String>) -> Take {
@@ -882,6 +1105,136 @@ impl Transaction<'_> {
         }
     }
 
+    /// Puts `lane` at `index` in the project's lanes, or at the end if
+    /// `index` is past them, with its points tidied (see
+    /// [`automation::tidy`]). A lane left without points is left out, and
+    /// so is one for a parameter that has a lane already, or whose channel,
+    /// send or device the project hasn't.
+    pub fn add_lane(&mut self, index: usize, mut lane: Lane) {
+        automation::tidy(&mut lane.points);
+        let project = &*self.project;
+        if lane.points.is_empty()
+            || project.lane(lane.param).is_some()
+            || !project.has_param(lane.param)
+        {
+            return;
+        }
+        let index = index.min(self.project.automation.len());
+        self.project.automation.insert(index, lane.clone());
+        self.edits.push(Edit::AddLane { index, lane });
+    }
+
+    /// Removes the lane that automates `param`, and returns it. The
+    /// parameter keeps its own value from then on.
+    pub fn remove_lane(&mut self, param: ParamAddress) -> Option<Lane> {
+        let index = self.project.lane_index(param)?;
+        let lane = self.project.automation.remove(index);
+        self.edits.push(Edit::RemoveLane {
+            index,
+            lane: lane.clone(),
+        });
+        Some(lane)
+    }
+
+    /// Sets the points of the lane that automates `param`, tidied (see
+    /// [`automation::tidy`]). A parameter without a lane gets one, if the
+    /// project has the parameter, and a lane left without points goes.
+    pub fn set_lane_points(&mut self, param: ParamAddress, mut points: Vec<automation::Point>) {
+        automation::tidy(&mut points);
+        let Some(lane) = self.project.lane_mut(param) else {
+            self.add_lane(usize::MAX, Lane::new(param, points));
+            return;
+        };
+        if points.is_empty() {
+            self.remove_lane(param);
+        } else if lane.points != points {
+            let from = std::mem::replace(&mut lane.points, points.clone());
+            self.edits.push(Edit::LanePoints {
+                param,
+                from,
+                to: points,
+            });
+        }
+    }
+
+    /// Overrides the automation of `param`, so the parameter keeps its own
+    /// value, or re-enables it with `false`. What moving an automated
+    /// parameter by hand does. A parameter without a lane is left alone.
+    pub fn set_lane_overridden(&mut self, param: ParamAddress, overridden: bool) {
+        if let Some(lane) = self.project.lane_mut(param)
+            && lane.overridden != overridden
+        {
+            lane.overridden = overridden;
+            self.edits.push(Edit::LaneOverridden {
+                param,
+                from: !overridden,
+                to: overridden,
+            });
+        }
+    }
+
+    /// Sets the own value of the parameter at `param`: the value it has
+    /// where automation doesn't move it. Values that aren't finite do
+    /// nothing, and so do parameters the project hasn't and the test
+    /// devices'.
+    pub fn set_param_value(&mut self, param: ParamAddress, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        // The mixer keeps its values as `f32`.
+        let narrow = value as f32;
+        match param {
+            ParamAddress::Volume(Chain::Track(track)) => self.set_track_gain(track, narrow),
+            ParamAddress::Volume(Chain::Master) => self.set_master_gain(narrow),
+            ParamAddress::Pan(Chain::Track(track)) => self.set_track_pan(track, narrow),
+            ParamAddress::Pan(Chain::Master) => self.set_master_pan(narrow),
+            ParamAddress::Send(send) => {
+                if let Some(Chain::Track(track)) = self.project.param_chain(param) {
+                    self.set_send_level(track, send, narrow);
+                }
+            }
+            ParamAddress::Device(device, n) => {
+                let device_kind = self.project.find_device(device).map(|(_, _, d)| &d.kind);
+                if device_kind.is_some_and(|kind| kind.native().is_some()) {
+                    self.set_native_param(device, n, value);
+                } else {
+                    self.set_plugin_param(device, n, Some(value));
+                }
+            }
+        }
+    }
+
+    /// Sets the parameter at `param` by hand, as a control does: automation
+    /// it follows is overridden first, so the value holds until automation
+    /// is re-enabled. Values that aren't finite do nothing.
+    pub fn set_param_by_hand(&mut self, param: ParamAddress, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        self.override_automation(param);
+        self.set_param_value(param, value);
+    }
+
+    /// Overrides the automation of `param`, if it follows some: what
+    /// touching an automated control does.
+    pub fn override_automation(&mut self, param: ParamAddress) {
+        if self.project.is_automated(param) {
+            self.set_lane_overridden(param, true);
+        }
+    }
+
+    /// Removes the lanes of the parameters `which` picks, each as an edit of
+    /// its own.
+    fn remove_lanes(&mut self, which: impl Fn(ParamAddress) -> bool) {
+        let params: Vec<ParamAddress> = (self.project.automation.iter())
+            .map(|l| l.param)
+            .filter(|&param| which(param))
+            .collect();
+        for param in params {
+            self.remove_lane(param);
+        }
+    }
+
     fn clip_mut(&mut self, track: TrackId, clip: ClipId) -> Option<&mut Clip> {
         self.project.track_mut(track)?.clip_mut(clip)
     }
@@ -958,6 +1311,23 @@ impl Transaction<'_> {
             Edit::ClipTiming { clip, to, .. } => self.set_clip_timing(*clip, *to),
             Edit::ClipFades { clip, to, .. } => self.set_clip_fades(*clip, *to),
             Edit::ClipName { clip, to, .. } => self.set_clip_name(*clip, to),
+            Edit::AddNote {
+                clip, index, note, ..
+            } => self.add_note(*clip, *index, note.clone()),
+            Edit::RemoveNote { clip, note, .. } => {
+                self.remove_note(*clip, note.id);
+            }
+            Edit::NoteTiming { clip, note, to, .. } => self.set_note_timing(*clip, *note, *to),
+            Edit::NoteKey { clip, note, to, .. } => self.set_note_key(*clip, *note, *to),
+            Edit::NoteVelocity { clip, note, to, .. } => {
+                self.set_note_velocity(*clip, *note, *to);
+            }
+            Edit::Controller {
+                clip,
+                controller,
+                to,
+                ..
+            } => self.set_controller(*clip, *controller, to.clone()),
             Edit::AddTake { track, index, take } => self.add_take(*track, *index, take.clone()),
             Edit::RemoveTake { take, .. } => {
                 self.remove_take(take.id);
@@ -983,6 +1353,16 @@ impl Transaction<'_> {
             Edit::PluginSettings { device, to, .. } => {
                 self.set_plugin_settings(*device, to.clone())
             }
+            Edit::NativeParam {
+                device, param, to, ..
+            } => self.set_native_param(*device, *param, *to),
+            Edit::NativeSample { device, to, .. } => self.set_native_sample(*device, to.clone()),
+            Edit::AddLane { index, lane } => self.add_lane(*index, lane.clone()),
+            Edit::RemoveLane { lane, .. } => {
+                self.remove_lane(lane.param);
+            }
+            Edit::LanePoints { param, to, .. } => self.set_lane_points(*param, to.clone()),
+            Edit::LaneOverridden { param, to, .. } => self.set_lane_overridden(*param, *to),
         }
     }
 }
@@ -993,6 +1373,48 @@ fn fades_of(clip: &Clip) -> Option<Fades> {
         ClipContent::Audio(audio) => Some(audio.fades()),
         ClipContent::Midi(_) => None,
     }
+}
+
+/// The notes of the MIDI clip with id `clip`, on one of the project's
+/// tracks, and the track's id.
+fn midi_mut(project: &mut Project, clip: ClipId) -> Option<(TrackId, &mut MidiClip)> {
+    let track = project.find_clip(clip)?.0.id;
+    match &mut project.track_mut(track)?.clip_mut(clip)?.content {
+        ClipContent::Midi(midi) => Some((track, midi)),
+        ClipContent::Audio(_) => None,
+    }
+}
+
+/// The note with id `note` in the MIDI clip with id `clip`, and the clip's
+/// track's id.
+fn note_mut(project: &mut Project, clip: ClipId, note: NoteId) -> Option<(TrackId, &mut Note)> {
+    let (track, midi) = midi_mut(project, clip)?;
+    Some((track, midi.note_mut(note)?))
+}
+
+/// Whether a file could hold `note`: it lasts more than zero, its key is a
+/// MIDI note number, its velocities are from 0 to 1, and each of its
+/// expression curves starts at the note's start or after, is in order, and
+/// keeps to its dimension's values.
+pub(crate) fn note_fits(note: &Note) -> bool {
+    let unit = |v: f32| (0.0..=1.0).contains(&v);
+    note.length > Beats::ZERO
+        && note.key <= Note::MAX_KEY
+        && unit(note.velocity)
+        && unit(note.release_velocity)
+        && Dimension::ALL.into_iter().all(|dimension| {
+            let curve = note.expression.curve(dimension);
+            let (low, high) = dimension.range();
+            curve.first().is_none_or(|p| p.at >= Beats::ZERO)
+                && curve.is_sorted_by_key(|p| p.at)
+                && curve.iter().all(|p| (low..=high).contains(&p.value))
+        })
+}
+
+/// Whether a file could hold a controller's curve: its points are in order,
+/// with values from 0 to 1.
+fn curve_fits(points: &[Point]) -> bool {
+    points.is_sorted_by_key(|p| p.at) && points.iter().all(|p| (0.0..=1.0).contains(&p.value))
 }
 
 /// One change to the project, with the value it replaced.
@@ -1159,6 +1581,53 @@ pub enum Edit {
         from: String,
         to: String,
     },
+    /// `note` went in at `index` in the notes of the MIDI clip with id
+    /// `clip`, on the track with id `track`.
+    AddNote {
+        track: TrackId,
+        clip: ClipId,
+        index: usize,
+        note: Note,
+    },
+    /// `note`, which was at `index` in the clip's notes, went.
+    RemoveNote {
+        track: TrackId,
+        clip: ClipId,
+        index: usize,
+        note: Note,
+    },
+    /// The note with id `note`, in the clip with id `clip`, moved or changed
+    /// length: when it sounds, in the clip's own time.
+    NoteTiming {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: BeatRange,
+        to: BeatRange,
+    },
+    NoteKey {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: u8,
+        to: u8,
+    },
+    NoteVelocity {
+        track: TrackId,
+        clip: ClipId,
+        note: NoteId,
+        from: f32,
+        to: f32,
+    },
+    /// How the MIDI clip with id `clip` moves `controller` changed: its
+    /// curve's points, none for a controller it doesn't move.
+    Controller {
+        track: TrackId,
+        clip: ClipId,
+        controller: Controller,
+        from: Vec<Point>,
+        to: Vec<Point>,
+    },
     /// `take` went in at `index` in the takes of the track with id `track`.
     AddTake {
         track: TrackId,
@@ -1224,6 +1693,42 @@ pub enum Edit {
         device: DeviceId,
         from: PluginSettings,
         to: PluginSettings,
+    },
+    /// Parameter `param` of the built-in device with id `device` changed.
+    NativeParam {
+        device: DeviceId,
+        param: u32,
+        from: f64,
+        to: f64,
+    },
+    /// The sample of the sampler with id `device` changed.
+    NativeSample {
+        device: DeviceId,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    /// `lane` went in at `index` in the project's lanes: its parameter is
+    /// automated.
+    AddLane {
+        index: usize,
+        lane: Lane,
+    },
+    /// `lane`, which was at `index` in the project's lanes, went.
+    RemoveLane {
+        index: usize,
+        lane: Lane,
+    },
+    /// The points of the lane that automates `param` changed.
+    LanePoints {
+        param: ParamAddress,
+        from: Vec<automation::Point>,
+        to: Vec<automation::Point>,
+    },
+    /// The automation of `param` was overridden, or re-enabled.
+    LaneOverridden {
+        param: ParamAddress,
+        from: bool,
+        to: bool,
     },
 }
 
@@ -1356,6 +1861,80 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::AddNote {
+                track,
+                clip,
+                index,
+                note,
+            } => Edit::RemoveNote {
+                track,
+                clip,
+                index,
+                note,
+            },
+            Edit::RemoveNote {
+                track,
+                clip,
+                index,
+                note,
+            } => Edit::AddNote {
+                track,
+                clip,
+                index,
+                note,
+            },
+            Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteTiming {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteKey {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from,
+                to,
+            } => Edit::NoteVelocity {
+                track,
+                clip,
+                note,
+                from: to,
+                to: from,
+            },
+            Edit::Controller {
+                track,
+                clip,
+                controller,
+                from,
+                to,
+            } => Edit::Controller {
+                track,
+                clip,
+                controller,
+                from: to,
+                to: from,
+            },
             Edit::AddTake { track, index, take } => Edit::RemoveTake { track, index, take },
             Edit::RemoveTake { track, index, take } => Edit::AddTake { track, index, take },
             Edit::TakeName {
@@ -1412,6 +1991,34 @@ impl Edit {
             },
             Edit::PluginSettings { device, from, to } => Edit::PluginSettings {
                 device,
+                from: to,
+                to: from,
+            },
+            Edit::NativeParam {
+                device,
+                param,
+                from,
+                to,
+            } => Edit::NativeParam {
+                device,
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::NativeSample { device, from, to } => Edit::NativeSample {
+                device,
+                from: to,
+                to: from,
+            },
+            Edit::AddLane { index, lane } => Edit::RemoveLane { index, lane },
+            Edit::RemoveLane { index, lane } => Edit::AddLane { index, lane },
+            Edit::LanePoints { param, from, to } => Edit::LanePoints {
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::LaneOverridden { param, from, to } => Edit::LaneOverridden {
+                param,
                 from: to,
                 to: from,
             },
@@ -1568,6 +2175,47 @@ impl Edit {
                 },
             ) if clip == other => to.clone_from(next),
             (
+                Edit::NoteTiming { clip, note, to, .. },
+                Edit::NoteTiming {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::NoteKey { clip, note, to, .. },
+                Edit::NoteKey {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::NoteVelocity { clip, note, to, .. },
+                Edit::NoteVelocity {
+                    clip: other,
+                    note: other_note,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && note == other_note => *to = *next,
+            (
+                Edit::Controller {
+                    clip,
+                    controller,
+                    to,
+                    ..
+                },
+                Edit::Controller {
+                    clip: other,
+                    controller: other_controller,
+                    to: next,
+                    ..
+                },
+            ) if clip == other && controller == other_controller => to.clone_from(next),
+            (
                 Edit::TakeName { take, to, .. },
                 Edit::TakeName {
                     take: other,
@@ -1610,6 +2258,41 @@ impl Edit {
                     ..
                 },
             ) if device == other => to.clone_from(next),
+            (
+                Edit::NativeParam {
+                    device, param, to, ..
+                },
+                Edit::NativeParam {
+                    device: other,
+                    param: other_param,
+                    to: next,
+                    ..
+                },
+            ) if device == other && param == other_param => *to = *next,
+            (
+                Edit::NativeSample { device, to, .. },
+                Edit::NativeSample {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => to.clone_from(next),
+            (
+                Edit::LanePoints { param, to, .. },
+                Edit::LanePoints {
+                    param: other,
+                    to: next,
+                    ..
+                },
+            ) if param == other => to.clone_from(next),
+            (
+                Edit::LaneOverridden { param, to, .. },
+                Edit::LaneOverridden {
+                    param: other,
+                    to: next,
+                    ..
+                },
+            ) if param == other => *to = *next,
             // Adding and removing never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
@@ -1643,6 +2326,12 @@ impl Edit {
                 | Edit::ClipTiming { .. }
                 | Edit::ClipFades { .. }
                 | Edit::ClipName { .. }
+                | Edit::AddNote { .. }
+                | Edit::RemoveNote { .. }
+                | Edit::NoteTiming { .. }
+                | Edit::NoteKey { .. }
+                | Edit::NoteVelocity { .. }
+                | Edit::Controller { .. }
                 | Edit::AddTake { .. }
                 | Edit::RemoveTake { .. }
                 | Edit::TakeName { .. }
@@ -1653,7 +2342,13 @@ impl Edit {
                 | Edit::AddDevice { .. }
                 | Edit::RemoveDevice { .. }
                 | Edit::PluginParam { .. }
-                | Edit::PluginSettings { .. },
+                | Edit::PluginSettings { .. }
+                | Edit::NativeParam { .. }
+                | Edit::NativeSample { .. }
+                | Edit::AddLane { .. }
+                | Edit::RemoveLane { .. }
+                | Edit::LanePoints { .. }
+                | Edit::LaneOverridden { .. },
                 _,
             ) => return false,
         }
@@ -1675,12 +2370,16 @@ impl Edit {
             | Edit::RemoveSend { .. }
             | Edit::AddClip { .. }
             | Edit::RemoveClip { .. }
+            | Edit::AddNote { .. }
+            | Edit::RemoveNote { .. }
             | Edit::AddTake { .. }
             | Edit::RemoveTake { .. }
             | Edit::AddLocator { .. }
             | Edit::RemoveLocator { .. }
             | Edit::AddDevice { .. }
-            | Edit::RemoveDevice { .. } => false,
+            | Edit::RemoveDevice { .. }
+            | Edit::AddLane { .. }
+            | Edit::RemoveLane { .. } => false,
             Edit::TrackName { from, to, .. } => from == to,
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
@@ -1698,12 +2397,20 @@ impl Edit {
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
             Edit::ClipTiming { from, to, .. } => from == to,
             Edit::ClipFades { from, to, .. } => from == to,
+            Edit::NoteTiming { from, to, .. } => from == to,
+            Edit::NoteKey { from, to, .. } => from == to,
+            Edit::NoteVelocity { from, to, .. } => from == to,
+            Edit::Controller { from, to, .. } => from == to,
             Edit::ClipName { from, to, .. }
             | Edit::TakeName { from, to, .. }
             | Edit::LocatorName { from, to, .. } => from == to,
             Edit::LocatorAt { from, to, .. } => from == to,
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,
+            Edit::NativeParam { from, to, .. } => from == to,
+            Edit::NativeSample { from, to, .. } => from == to,
+            Edit::LanePoints { from, to, .. } => from == to,
+            Edit::LaneOverridden { from, to, .. } => from == to,
         }
     }
 }

@@ -1,0 +1,212 @@
+//! Musicable's own devices in the app: the device commands add them, their
+//! parameters reach the engine as they change, undo takes the changes back,
+//! and they keep their settings when the graph is built again. The
+//! instruments play their tracks' notes, and a sampler the file it's given.
+
+use std::f64::consts::TAU;
+use std::fs;
+use std::path::PathBuf;
+
+use musicable_app::Session;
+use musicable_commands::{Args, CommandId, Keymap, Value, device, edit, track, transport};
+use musicable_engine::{Engine, EngineConfig, rt};
+use musicable_io::audio::{SampleFormat, save_wav};
+use musicable_model::clip::{ClipContent, MidiClip};
+use musicable_model::native::{NativeDevice, NativeKind, utility};
+use musicable_model::time::{BeatRange, Beats};
+use musicable_model::{DeviceId, DeviceKind, Project, TestTone, TrackKind};
+
+#[global_allocator]
+static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
+
+const CONFIG: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 256,
+};
+
+/// A session, and an engine that renders when told to, standing in for the
+/// audio device.
+struct Rig {
+    engine: Engine,
+    session: Session,
+}
+
+impl Rig {
+    fn new(project: Project) -> Self {
+        let (engine, handle) = Engine::new(CONFIG);
+        let mut session = Session::new(project, None, Keymap::default_keymap(), handle);
+        session.wait_for_graph();
+        Self { engine, session }
+    }
+
+    /// Runs the command `id` with `args`, and waits for the graph it needs,
+    /// if any, as the app's next frames would.
+    fn run(&mut self, id: &CommandId, args: Args) -> Value {
+        let value = self.session.run_with(id, &args).unwrap();
+        self.session.wait_for_graph();
+        value
+    }
+
+    /// Sets parameter `param` of `device` to `value`.
+    fn set(&mut self, device: DeviceId, param: usize, value: f64) {
+        let args = Args::new()
+            .with("device", device)
+            .with("param", param as i64)
+            .with("value", value);
+        self.run(&device::SET_PARAM, args);
+    }
+
+    /// Renders a fifth of a second as the audio thread would, ticking the
+    /// session as the UI would, and returns the peak of each channel over
+    /// the last half of it, when any change has long settled.
+    fn peaks(&mut self) -> [f32; 2] {
+        let frames = 9_600;
+        let mut output = vec![0.0; 2 * frames];
+        for block in output.chunks_mut(2 * 480) {
+            self.engine.process_interleaved(block, 2);
+            self.session.tick();
+        }
+        let mut peaks = [0.0_f32; 2];
+        for frame in output[frames..].chunks(2) {
+            for (peak, sample) in peaks.iter_mut().zip(frame) {
+                *peak = peak.max(sample.abs());
+            }
+        }
+        let stats = self.session.stats();
+        assert_eq!((stats.events_late, stats.events_dropped), (0, 0));
+        assert_eq!(stats.events_unmatched, 0);
+        peaks
+    }
+}
+
+#[track_caller]
+fn near(peaks: [f32; 2], expected: [f32; 2]) {
+    for (peak, expected) in peaks.into_iter().zip(expected) {
+        assert!(
+            (peak - expected).abs() < 0.01,
+            "{peaks:?}, expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn the_checker_is_installed() {
+    drop(Box::new(0));
+    assert!(rt::checker_installed());
+}
+
+#[test]
+fn a_utility_on_a_track_follows_its_controls() {
+    let mut project = Project::new();
+    let lead = project.add_track("Lead", TrackKind::Audio);
+    project.track_mut(lead).unwrap().tone = Some(TestTone {
+        frequency: 440.0,
+        level: 0.5,
+    });
+    let mut rig = Rig::new(project);
+    rig.session.run(&transport::PLAY).unwrap();
+    near(rig.peaks(), [0.5, 0.5]);
+
+    let added = rig.run(
+        &device::ADD,
+        Args::new().with("kind", "utility").with("track", lead),
+    );
+    let Value::Device(utility) = added else {
+        panic!("a device, not {added:?}");
+    };
+    // A new utility leaves the signal as it is.
+    near(rig.peaks(), [0.5, 0.5]);
+    rig.set(utility, utility::GAIN, 0.5);
+    near(rig.peaks(), [0.25, 0.25]);
+    rig.set(utility, utility::PAN, 1.0);
+    near(rig.peaks(), [0.0, 0.25]);
+
+    // Building the graph again, for a new track, keeps the settings.
+    rig.run(&track::NEW_AUDIO_TRACK, Args::new());
+    near(rig.peaks(), [0.0, 0.25]);
+
+    // Undo takes the changes back, one at a time.
+    rig.run(&edit::UNDO, Args::new());
+    assert_eq!(rig.session.undo_name(), Some("Change Utility"));
+    rig.run(&edit::UNDO, Args::new());
+    near(rig.peaks(), [0.25, 0.25]);
+    rig.run(&edit::UNDO, Args::new());
+    near(rig.peaks(), [0.5, 0.5]);
+
+    rig.run(&device::DELETE, Args::new().with("device", utility));
+    near(rig.peaks(), [0.5, 0.5]);
+    assert_eq!(rig.session.undo_name(), Some("Delete Utility"));
+}
+
+/// A project with a MIDI track holding middle C at full velocity for its
+/// first two beats, a second at 120 BPM, and a `kind` on the track to play
+/// it. Returns the device's id too.
+fn playing(kind: NativeKind) -> (Project, DeviceId) {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let mut notes = MidiClip::default();
+    notes.add_note(Beats::new(0), Beats::new(2), 60, 1.0);
+    let range = BeatRange::new(Beats::new(0), Beats::new(2));
+    let clip = project.new_clip("Notes", range, ClipContent::Midi(notes));
+    let device = project.new_device(DeviceKind::Native(NativeDevice::new(kind)));
+    let id = device.id;
+    let track = project.track_mut(keys).unwrap();
+    track.clips.push(clip);
+    track.devices.push(device);
+    (project, id)
+}
+
+#[test]
+fn a_synth_plays_its_tracks_notes() {
+    let (project, synth) = playing(NativeKind::Synth);
+    let mut rig = Rig::new(project);
+    rig.session.run(&transport::PLAY).unwrap();
+    let [left, right] = rig.peaks();
+    assert!(left > 0.05 && left == right, "{left}, {right}");
+    rig.run(&device::DELETE, Args::new().with("device", synth));
+    near(rig.peaks(), [0.0, 0.0]);
+}
+
+/// A folder of its own for the test, empty.
+fn folder(name: &str) -> PathBuf {
+    let folder = std::env::temp_dir()
+        .join(format!("musicable-built-in-{}", std::process::id()))
+        .join(name);
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+#[test]
+fn a_sampler_plays_the_file_it_is_given() {
+    let folder = folder("sampler");
+    let path = folder.join("sine.wav");
+    let sine: Vec<f32> = (0..48_000)
+        .map(|i| (0.5 * (TAU * 440.0 * f64::from(i) / 48_000.0).sin()) as f32)
+        .collect();
+    save_wav(&path, 48_000, SampleFormat::Float32, &[&sine]).unwrap();
+    let (project, sampler) = playing(NativeKind::Sampler);
+    let mut rig = Rig::new(project);
+    let load = |path: PathBuf| {
+        let file = path.to_string_lossy().into_owned();
+        Args::new().with("device", sampler).with("file", file)
+    };
+    rig.run(&device::SET_SAMPLE, load(path));
+    assert_eq!(rig.session.undo_name(), Some("Load Sample"));
+    rig.session.run(&transport::PLAY).unwrap();
+    // Middle C is the root, so the sample plays at its own pitch.
+    near(rig.peaks(), [0.5, 0.5]);
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+
+    // Without its sample, it's silent.
+    rig.run(&edit::UNDO, Args::new());
+    near(rig.peaks(), [0.0, 0.0]);
+    // And with a file that isn't there, the app hears why.
+    rig.run(&device::SET_SAMPLE, load(folder.join("missing.wav")));
+    near(rig.peaks(), [0.0, 0.0]);
+    let problems = rig.session.take_problems();
+    assert!(
+        problems.len() == 1 && problems[0].starts_with("Couldn't read the sample"),
+        "{problems:?}"
+    );
+}

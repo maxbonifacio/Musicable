@@ -15,6 +15,7 @@ musicable-engine = { path = "crates/engine" }
 musicable-audio = { path = "crates/audio" }
 musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
+musicable-library = { path = "crates/library" }
 musicable-ui = { path = "crates/ui" }
 rtrb = "0.4"
 base64 = "0.22"
@@ -36,6 +37,8 @@ eframe = { version = "0.37", default-features = false, features = [
 egui = "0.37"
 rfd = "0.17"
 num_cpus = "1.17"
+# Finds a search's words in the browser's library.
+memchr = "2.8"
 # Dev-only: property tests and benchmarks.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }

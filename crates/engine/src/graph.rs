@@ -3,11 +3,14 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use musicable_model::clip::Controller;
+
+use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef};
 use crate::engine::EVENT_CAPACITY;
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
-use crate::{Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent};
+use crate::{Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, ParamId};
 
 /// A node's identity across graph rebuilds, chosen by whoever builds the
 /// graph. [`compile`](crate::compile()) derives keys from model ids.
@@ -62,8 +65,12 @@ pub struct Graph {
     outputs: Vec<Vec<NodeId>>,
     output: Option<NodeId>,
     cue: Option<NodeId>,
+    /// The nodes [`add_tap`](Graph::add_tap) tapped, in order.
+    taps: Vec<NodeId>,
     /// Which nodes' notes go to which, from [`send_notes`](Graph::send_notes).
     note_routes: Vec<(NodeId, NodeId)>,
+    /// The automation nodes handed back, to send them as events.
+    feeds: Vec<(NodeId, ParamId, Feed)>,
 }
 
 impl Graph {
@@ -98,6 +105,29 @@ impl Graph {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// The node with `key`, if there is one.
+    pub fn find(&self, key: NodeKey) -> Option<NodeId> {
+        self.keys.iter().position(|&k| k == key).map(NodeId)
+    }
+
+    /// Has `node` follow `automation` for its parameter `param`
+    /// ([`Node::automate`]). A node that hands the automation back gets its
+    /// values as parameter events, on top of the events the engine sends
+    /// it: the automation's come after those on the same frame, so they
+    /// win.
+    pub fn automate(
+        &mut self,
+        node: NodeId,
+        param: ParamId,
+        automation: Automation,
+    ) -> Result<(), GraphError> {
+        self.check(node)?;
+        if let Some(automation) = self.nodes[node.0].automate(param, automation) {
+            self.feeds.push((node, param, Feed::new(automation)));
+        }
+        Ok(())
     }
 
     /// Feeds `from`'s output into `to`.
@@ -149,6 +179,17 @@ impl Graph {
         Ok(())
     }
 
+    /// Taps `node`'s output, for an offline render to keep alongside the
+    /// output, such as an export's stems: see
+    /// [`Engine::process_with_taps`](crate::Engine::process_with_taps).
+    /// Taps line up with the output the way the cue output does. Returns the
+    /// tap's number: they count from 0, in the order they're added.
+    pub fn add_tap(&mut self, node: NodeId) -> Result<usize, GraphError> {
+        self.check(node)?;
+        self.taps.push(node);
+        Ok(self.taps.len() - 1)
+    }
+
     /// Calls [`Node::prepare`] on each node, compensates for their latency,
     /// orders them and allocates their buffers.
     ///
@@ -157,7 +198,7 @@ impl Graph {
     /// paths of different lateness meet at a node, the earlier ones go
     /// through a [`Delay`] that lines them up with the latest. The cue
     /// output gets one to line it up with the output, or the output with it,
-    /// so the metronome clicks in time with what plays.
+    /// so the metronome clicks in time with what plays, and so do taps.
     /// [`PreparedGraph::latency`] says how late the output is in the end,
     /// at most [`MAX_LATENCY`](Graph::MAX_LATENCY). Notes sent with
     /// [`send_notes`](Graph::send_notes) aren't delayed, so an instrument's
@@ -225,10 +266,12 @@ impl Graph {
             plays_notes[player.node.0] = true;
             inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY);
         }
-        // Room for every parameter event the engine can hold, and for each
-        // player's notes to each of its targets.
+        // Room for every parameter event the engine can hold, for each
+        // player's notes to each of its targets, and for the automation
+        // the graph sends.
         let notes: usize = ordered.iter().map(|p| p.targets.len()).sum();
-        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY;
+        let feeds = self.feeds.len() * Feed::room(config.max_block);
+        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds;
         Ok(PreparedGraph {
             config: *config,
             event_ranges: vec![(0, 0); self.nodes.len()],
@@ -237,6 +280,7 @@ impl Graph {
             order,
             output,
             cue: self.cue,
+            taps: self.taps,
             buffers,
             by_key,
             delays,
@@ -247,6 +291,7 @@ impl Graph {
             plays_notes,
             inbox: Vec::with_capacity(inbox),
             inbox_events: Vec::with_capacity(inbox),
+            feeds: self.feeds,
             schedule,
         })
     }
@@ -254,7 +299,8 @@ impl Graph {
     /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
     /// describes, once the nodes are prepared. Returns the delays it added,
     /// with where they are, and how late the output is. `output` becomes the
-    /// delay after the output, if it needs one.
+    /// delay after the output, if it needs one, and so do the cue output and
+    /// each tap.
     fn compensate(
         &mut self,
         config: &EngineConfig,
@@ -293,22 +339,39 @@ impl Graph {
             }
         }
         let cue_late = self.cue.map_or(0, |cue| late[cue.0]);
-        let latency = late[output.0].max(cue_late);
-        if let Some(cue) = self.cue
-            && cue_late < latency
-        {
-            let delay = self.add_delay(cue, latency - cue_late, config);
-            self.outputs[cue.0].push(delay);
-            self.cue = Some(delay);
-            delays.push((Joint::Cue, delay));
+        let taps_late = self.taps.iter().map(|tap| late[tap.0]).max();
+        let latency = late[output.0].max(cue_late).max(taps_late.unwrap_or(0));
+        if let Some(cue) = self.cue {
+            self.cue = Some(self.line_up(cue, &late, latency, Joint::Cue, &mut delays, config));
         }
-        if late[output.0] < latency {
-            let delay = self.add_delay(*output, latency - late[output.0], config);
-            self.outputs[output.0].push(delay);
-            *output = delay;
-            delays.push((Joint::Output, delay));
+        *output = self.line_up(*output, &late, latency, Joint::Output, &mut delays, config);
+        for n in 0..self.taps.len() {
+            let joint = Joint::Tap(u32::try_from(n).unwrap_or(u32::MAX));
+            let tap = self.taps[n];
+            self.taps[n] = self.line_up(tap, &late, latency, joint, &mut delays, config);
         }
         (delays, latency)
+    }
+
+    /// Lines `node`'s output up with the graph's `latency`, through a delay
+    /// at `joint` if it's earlier, and returns the node whose output is
+    /// lined up: `node` or the delay.
+    fn line_up(
+        &mut self,
+        node: NodeId,
+        late: &[usize],
+        latency: usize,
+        joint: Joint,
+        delays: &mut Vec<(Joint, NodeId)>,
+        config: &EngineConfig,
+    ) -> NodeId {
+        if late[node.0] >= latency {
+            return node;
+        }
+        let delay = self.add_delay(node, latency - late[node.0], config);
+        self.outputs[node.0].push(delay);
+        delays.push((joint, delay));
+        delay
     }
 
     /// Adds a prepared [`Delay`] of `frames` that `from` feeds. It feeds
@@ -394,6 +457,8 @@ pub struct PreparedGraph {
     pub(crate) order: Vec<NodeId>,
     pub(crate) output: NodeId,
     pub(crate) cue: Option<NodeId>,
+    /// The nodes whose outputs are the taps, lined up with the output.
+    taps: Vec<NodeId>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -418,6 +483,9 @@ pub struct PreparedGraph {
     /// A player's notes as they're gathered for it, and then in order.
     inbox: Vec<Routed>,
     inbox_events: Vec<NodeEvent>,
+    /// The automation the graph sends nodes as events, by node and
+    /// parameter.
+    feeds: Vec<(NodeId, ParamId, Feed)>,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
 }
@@ -437,6 +505,8 @@ enum Joint {
     Cue,
     /// After the output.
     Output,
+    /// After the tap with this number.
+    Tap(u32),
 }
 
 /// A node event on its way into a graph, with its arrival order.
@@ -477,6 +547,10 @@ impl Notes<'_> {
     /// [`CAPACITY`](Self::CAPACITY) are dropped, and counted in
     /// [`Stats::events_dropped`](crate::Stats::events_dropped).
     pub fn send(&mut self, offset: usize, note: NoteEvent) -> bool {
+        self.send_kind(offset, NodeEventKind::Note(note))
+    }
+
+    fn send_kind(&mut self, offset: usize, kind: NodeEventKind) -> bool {
         debug_assert!(offset < self.frames, "notes are sent within the block");
         if self.room == 0 {
             self.dropped += 1;
@@ -488,13 +562,17 @@ impl Notes<'_> {
             self.routed.push(Routed {
                 node,
                 order,
-                event: NodeEvent {
-                    offset,
-                    kind: NodeEventKind::Note(note),
-                },
+                event: NodeEvent { offset, kind },
             });
         }
         true
+    }
+
+    /// Sends a controller's move to where this node's notes go, `offset`
+    /// frames into the block, in order with its notes. It takes room as a
+    /// note does, and returns whether there was some.
+    pub fn send_controller(&mut self, offset: usize, controller: Controller, value: f32) -> bool {
+        self.send_kind(offset, NodeEventKind::Controller { controller, value })
     }
 
     /// The block's length: notes are sent at offsets below it.
@@ -530,6 +608,17 @@ impl PreparedGraph {
     /// [`Graph::set_cue`]).
     pub fn cue(&self, frames: usize) -> Option<AudioRef<'_>> {
         self.cue.map(|cue| self.buffers[cue.0].view(frames))
+    }
+
+    /// Tap `n`'s most recent `frames` frames, if the graph has it (see
+    /// [`Graph::add_tap`]).
+    pub fn tap(&self, n: usize, frames: usize) -> Option<AudioRef<'_>> {
+        self.taps.get(n).map(|tap| self.buffers[tap.0].view(frames))
+    }
+
+    /// How many taps the graph has.
+    pub fn taps(&self) -> usize {
+        self.taps.len()
     }
 
     /// How many frames late the output plays, after delay compensation: the
@@ -570,6 +659,31 @@ impl PreparedGraph {
         true
     }
 
+    /// Queues the automation the graph sends as events for `block`
+    /// ([`Node::automate`]), after the events queued so far. Runs on the
+    /// audio thread, before the block's notes play.
+    pub(crate) fn feed_automation(&mut self, block: &Block<'_>) {
+        let Self {
+            config,
+            routed,
+            feeds,
+            ..
+        } = self;
+        for (node, param, feed) in feeds.iter_mut() {
+            let (node, param) = (*node, *param);
+            feed.block(block, config.sample_rate, |offset, value| {
+                let order = routed.len() as u32;
+                let kind = NodeEventKind::Param { param, value };
+                let event = NodeEvent { offset, kind };
+                debug_assert!(
+                    routed.len() < routed.capacity(),
+                    "a graph has room for its automation"
+                );
+                routed.push(Routed { node, order, event });
+            });
+        }
+    }
+
     /// Has each node that plays notes send its notes for `block`, and
     /// returns how many there was no room for. Runs on the audio thread,
     /// before the block renders.
@@ -584,7 +698,7 @@ impl PreparedGraph {
             inbox_events,
             ..
         } = self;
-        let is_note = |r: &Routed| matches!(r.event.kind, NodeEventKind::Note(_));
+        let is_played = |r: &Routed| r.event.kind.is_played();
         let mut dropped = 0;
         for player in players.iter() {
             // The notes sent to it so far, which is all of them: the engine
@@ -593,7 +707,7 @@ impl PreparedGraph {
             inbox.clear();
             let sent = routed
                 .iter()
-                .filter(|r| r.node == player.node && is_note(r));
+                .filter(|r| r.node == player.node && is_played(r));
             inbox.extend(sent);
             inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
             inbox_events.clear();
@@ -611,7 +725,7 @@ impl PreparedGraph {
         }
         // The players have had theirs.
         if !players.is_empty() {
-            routed.retain(|r| !(plays_notes[r.node.0] && is_note(r)));
+            routed.retain(|r| !(plays_notes[r.node.0] && is_played(r)));
         }
         dropped
     }
@@ -681,6 +795,7 @@ impl fmt::Debug for PreparedGraph {
             .field("nodes", &self.nodes.len())
             .field("output", &self.output)
             .field("cue", &self.cue)
+            .field("taps", &self.taps.len())
             .field("latency", &self.latency)
             .finish_non_exhaustive()
     }
@@ -1085,6 +1200,52 @@ mod tests {
             let (output, cue) = play(&mut graph, 0, 64, 16);
             assert_eq!(peaks(&output), [(5 + latency, 1.0)], "{latency}");
             assert_eq!(peaks(&cue), [(5 + latency, 1.0)], "{latency}");
+        }
+    }
+
+    #[test]
+    fn taps_line_up_with_the_output() {
+        // A dry source tapped before a latent path to the output, and a
+        // latent node off to the side that feeds nothing but its tap, which
+        // makes it the latest of all.
+        for side_latency in [0, 30] {
+            let mut g = Graph::new();
+            let source = g.add(NodeKey(0), impulse(5));
+            let wet = g.add(NodeKey(1), latent(20));
+            let side = g.add(NodeKey(2), latent(side_latency));
+            g.connect(source, wet).unwrap();
+            g.connect(source, side).unwrap();
+            g.set_output(wet).unwrap();
+            assert_eq!(g.add_tap(source), Ok(0));
+            assert_eq!(g.add_tap(side), Ok(1));
+            assert_eq!(
+                g.add_tap(NodeId(9)),
+                Err(GraphError::UnknownNode(NodeId(9)))
+            );
+            let mut graph = g.prepare(&CONFIG).unwrap();
+            let latency = 20.max(side_latency);
+            assert_eq!((graph.latency(), graph.taps()), (latency, 2));
+            let tempo = TempoMap::default();
+            let mut heard: [Vec<f32>; 3] = Default::default();
+            for from in (0..64).step_by(16) {
+                let block = Block {
+                    frames: 16,
+                    time: from,
+                    transport: TransportState::default(),
+                    tempo: &tempo,
+                    input: AudioRef::empty(16),
+                    midi: &[],
+                };
+                rt::scope(|| ReferenceRenderer.render(&mut graph, &block));
+                heard[0].extend_from_slice(graph.output(16).channel(0));
+                for n in 0..2 {
+                    heard[n + 1].extend_from_slice(graph.tap(n, 16).unwrap().channel(0));
+                }
+            }
+            assert!(graph.tap(2, 16).is_none());
+            for signal in &heard {
+                assert_eq!(peaks(signal), [(5 + latency, 1.0)], "{side_latency}");
+            }
         }
     }
 

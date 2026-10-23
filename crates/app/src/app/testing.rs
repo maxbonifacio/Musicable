@@ -11,7 +11,7 @@ use musicable_commands::KeyChord;
 
 use super::App;
 use crate::Output;
-use crate::settings::Settings;
+use crate::settings::{SETTINGS_FILE, Settings};
 
 /// A folder of its own for each test, empty to start with, and removed when
 /// the test ends.
@@ -43,7 +43,8 @@ pub(super) fn window(config_dir: &Path, project: Option<PathBuf>) -> Harness<'st
         .with_max_steps(40)
         .build_eframe(move |cc| {
             let (output, handle) = Output::none();
-            let settings = Settings::default();
+            let settings = Settings::read(&config_dir.join(SETTINGS_FILE))
+                .expect("the test's settings file reads");
             App::with_output(
                 project,
                 Some(config_dir),

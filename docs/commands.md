@@ -1,9 +1,9 @@
 # Commands and keymaps
 
 Every user action in Musicable is a named command, and key presses reach
-commands only through a keymap. Menus, the command palette and the
-arrangement's mouse gestures run the same commands, and scripts and agents
-will, so remapping a shortcut is just editing the keymap. This page covers
+commands only through a keymap. Menus, the command palette and the mouse
+gestures of the arrangement and the piano roll run the same commands, and
+scripts and agents will, so remapping a shortcut is just editing the keymap. This page covers
 the commands so far, the editor's state they read and change, the
 transactions they change the project through, undo and redo, how the app
 runs them, key chords and the keymap file. How the app's window hands key
@@ -18,16 +18,17 @@ command keeps its id once it has shipped. Each area registers its commands
 with the `Registry`, as `transport::register` does, and
 `musicable_commands::register_all` registers every area's. A running command
 gets a `Context`: the open project's `Document`, with the editor's state
-(below), the engine's `Transport`, and a list of `Request`s for what only
-the app can do, such as showing a file dialog.
+(below), the engine's `Transport`, the browser's `Library`, and a list of
+`Request`s for what only the app can do, such as showing a file dialog.
 
 ### Arguments and results
 
 A command can take arguments, and give back a result, so the arrangement's
 gestures, scripts and agents can say exactly what to change. Its `params`
 list them: each `Param` has a name, a `Type` (a bool, an integer, a number,
-text, a position in beats, a track, a clip, a locator, or a list of one of
-those), whether it's optional, and a line on what it's for.
+text, a position in beats, a track, a clip, a note, a locator, a device, a
+take, a parameter, or a list of one of those), whether it's optional, and a
+line on what it's for.
 
 - `Registry::run_with(id, &args, ctx)` runs a command with `Args`, built
   with `Args::new().with("clips", ids).with("by", Beats::new(4))`. It checks
@@ -43,17 +44,20 @@ those), whether it's optional, and a line on what it's for.
 - `Command::needs_arguments` says whether it has a required param. Keys,
   menus and the palette can't give arguments, so they leave those commands
   out: the keyboard shortcuts window and the palette don't list them. The
-  arrangement's context menus fill them in from where they were opened
-  ([app.md](app.md#the-arrangement)).
+  context menus of the arrangement and the piano roll fill them in from
+  where they were opened ([app.md](app.md#the-arrangement)).
 
 ### When a command applies
 
 A command's `when` says when it applies without arguments: always, or only
 with clips selected, with something to paste, and so on (`When`). Menus,
 context menus and the palette grey out a command that doesn't apply, and a
-key that runs one does nothing: `Registry::run` returns without running it,
-and `run_with` returns `CommandError::NotNow`. A command given arguments
-runs whatever is selected, as they say what it works on.
+key bound to one goes on to the window instead
+([app.md](app.md#keys)): `Registry::run` returns without running it, and
+`run_with` returns `CommandError::NotNow`. A command given arguments runs
+whatever is selected, as they say what it works on. What's selected depends
+on the focus ([below](#the-editors-state)): the edit commands' conditions
+mean the piano roll's notes while it has the focus.
 
 ### Transport
 
@@ -107,15 +111,21 @@ has run ([app.md](app.md#files)).
 | `file.save` | Save Project | Saves the project, asking where if it has no file yet | Ctrl+S |
 | `file.save_as` | Save Project As... | Asks where to save the project, and saves it there | Ctrl+Shift+S |
 | `file.import_audio` | Import Audio Files... | Asks for audio files, and puts them on the selected track | none |
+| `file.export_audio` | Export Audio... | Shows the export window, which renders the song to audio files ([app.md](app.md#exporting-audio)) | Ctrl+Shift+R |
 | `file.quit` | Quit | Closes Musicable | Ctrl+Q |
 
 New, New Demo, Open and Quit ask about unsaved changes first.
 
 ### Edit
 
-The edit commands work on the selection ([below](#the-editors-state)):
-the selected clips, or else the time selection, or else the selected
-tracks.
+The edit commands work on the selection where the focus is
+([below](#the-editors-state)). While the arrangement has it, that's the
+selected clips, or else the time selection, or else the selected tracks.
+While the piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select
+All act on its notes instead, as they do in Live's MIDI note editor: Paste
+puts the notes at the start marker, in the clip the piano roll shows, and
+Duplicate puts a copy just after the selected notes. Split always acts on
+clips, and doesn't apply while the piano roll has the focus.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -127,7 +137,7 @@ tracks.
 | `edit.duplicate` | Duplicate | Puts a copy of the selection just after it, and selects the copy | Ctrl+D | Ctrl+D |
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
-| `edit.select_all` | Select All | Selects every clip | Ctrl+A | Ctrl+A |
+| `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip | Ctrl+A | Ctrl+A |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 
 And for the arrangement's clicks, scripts and agents:
@@ -137,6 +147,10 @@ And for the arrangement's clicks, scripts and agents:
 | `edit.select_clips` | Select Clips | `clips`, `toggle`? | Selects the clips, or adds them to the selection or takes them away |
 | `edit.select_time` | Select Time | `start`, `end`, `tracks` | Selects a stretch of time on some tracks |
 | `edit.select_tracks` | Select Tracks | `tracks`, `toggle`? | Selects tracks |
+
+These give the arrangement the focus. Selecting clips also shows the last
+MIDI clip selected in the piano roll, without giving it the focus, as
+selecting a clip in Live shows it in the clip view.
 
 The Edit menu names the change, as in "Undo Tempo Up". Ctrl+Shift+Z is
 the other common key for redo. Clips that land where others are, by
@@ -167,6 +181,78 @@ clip on a MIDI track, they keep their tracks and only move in time. Moving
 clips before the start of the song stops at the start. Insert Audio needs each file's header read into
 the editor first ([below](#the-editors-state)): the app reads it when a file
 is dropped or imported.
+
+### Notes
+
+These edit the notes of a MIDI clip, for the piano roll's gestures,
+scripts and agents. Each takes the clip as `clip`, or edits the one the
+piano roll shows without it, and names notes by their ids in the clip.
+Positions are in the clip's own time, as the project file has them
+([project-format.md](project-format.md#track)): a note at the clip's offset
+plays at the clip's start. Each change is one transaction, so a drag is one
+step to undo, and each selects the notes it leaves, as in Live.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `notes.select` | Select Notes | `notes`, `clip`?, `toggle`? | Selects the notes, or adds them to the selection or takes them away, and gives the piano roll the focus |
+| `notes.add` | Add Note | `start`, `key`, `length`?, `velocity`?, `clip`? | Adds a note, a step of the piano roll's grid long and at velocity 100 without them; gives back its id |
+| `notes.draw` | Draw Notes | `starts`, `keys`, `length`?, `velocity`?, `clip`? | Adds a note at each start, on its key, as Draw Mode's drags do; gives back their ids |
+| `notes.delete` | Delete Notes | `notes`, `clip`? | Deletes notes |
+| `notes.move` | Move Notes | `notes`, `by`?, `keys`?, `copy`?, `clip`? | Moves notes, or copies them, some beats later or earlier and some semitones up or down; gives back the ids of the notes moved or the copies |
+| `notes.trim` | Trim Notes | `notes`, `start_by`?, `end_by`?, `clip`? | Moves notes' starts, keeping their ends, or their ends |
+| `notes.set_velocity` | Set Velocity | `notes`, `velocity`?, `by`?, `clip`? | Sets how hard notes start, from 0 to 1, or changes it by `by` |
+| `notes.open` | Open in Piano Roll | `clip` | Shows a MIDI clip in the piano roll, gives it the focus, and shows the piano roll |
+
+Notes keep their places relative to each other: a move stops at the song's
+start and at the lowest and the highest key, and a note never gets shorter
+than a tick. Two notes on one key can overlap, and play as two notes.
+
+And these act on the notes selected in the piano roll while it has the
+focus, with the keys of Live's MIDI note editor:
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `notes.quantize` | Quantize | Moves the selected notes' starts to the nearest line of the grid, or all the clip's notes if none are selected; while the arrangement has the focus, all the notes of the selected MIDI clips. `amount` moves them part of the way, and `ends` moves their ends too | Ctrl+U | Ctrl+U |
+| `notes.transpose_up` | Transpose Up | Moves them a semitone up | Up | Up |
+| `notes.transpose_down` | Transpose Down | A semitone down | Down | Down |
+| `notes.octave_up` | Octave Up | An octave up | Shift+Up | Shift+Up |
+| `notes.octave_down` | Octave Down | An octave down | Shift+Down | Shift+Down |
+| `notes.nudge_left` | Nudge Notes Left | A step of the grid earlier | Left | Left |
+| `notes.nudge_right` | Nudge Notes Right | A step of the grid later | Right | Right |
+| `notes.lengthen` | Lengthen Notes | A step of the grid longer | Shift+Right | Shift+Right |
+| `notes.shorten` | Shorten Notes | A step of the grid shorter, unless that's all they have | Shift+Left | Shift+Left |
+| `notes.velocity_up` | Velocity Up | Starts them harder, by 10 of 127 | Ctrl+Up | Ctrl+Up |
+| `notes.velocity_down` | Velocity Down | Starts them softer | Ctrl+Down | Ctrl+Down |
+| `notes.toggle_draw` | Draw Mode | Turns the piano roll's Draw Mode on or off | B | B |
+
+The grid's step is the one the piano roll shows at its zoom. With no notes
+selected, or the arrangement's focus, these don't apply, so the arrow keys
+go on to move the keyboard focus between controls ([app.md](app.md#keys)).
+
+### Controllers
+
+These choose what the lane under the piano roll's notes shows, and draw a
+controller's curve in a MIDI clip, such as the mod wheel's or the sustain
+pedal's ([project-format.md](project-format.md#track)). Like the
+note commands, they take the clip as `clip`, or edit the one the piano roll
+shows, and place points in the clip's own time. They take the controller as
+`controller`, its MIDI CC number from 0 to 119, or else the one the lane
+shows. A controller's values go from 0 to 1, a MIDI value over 127. Each
+change is one transaction.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `controllers.show` | Show Controller | `controller` | Shows a controller in the lane |
+| `controllers.show_velocities` | Show Velocities | | Shows the notes' velocities in the lane, as it does at first |
+| `controllers.draw` | Draw Controller | `start`, `end`, `at`, `values`, `controller`?, `clip`? | Draws over the stretch from `start` to `end`: a point at each of `at`, with the value in `values` in the same order, and shows the controller in the lane |
+| `controllers.erase` | Erase Controller | `start`, `end`, `controller`?, `clip`? | Erases the stretch, so what came before holds through it |
+| `controllers.clear` | Clear Controller | `controller`?, `clip`? | Takes away the whole curve, so the clip leaves the controller alone; it applies when the lane shows a controller the clip moves |
+
+Drawing and erasing keep the rest of the curve as it was: from the
+stretch's end on, it holds what it did, with a point there if it needs one
+(`clip::redraw`). A drawn point that holds what came before is left out.
+Show Velocities and Clear Controller are in the Notes menu, and the lane's
+context menu has Clear Controller.
 
 ### Locator
 
@@ -203,7 +289,9 @@ starts on the frame it was recorded at, whatever the tempo, and one that
 went on in another file, at WAV's 4 GB, is a take with a clip for each
 file. A MIDI track's pass (`Recorded::Midi`) is a take with a MIDI clip of
 the notes played, each starting and ending on its frames, with its
-expression; a pass without notes makes no take. Comping copies
+expression, and of how the controllers moved, as curves that start with
+what each held as the pass began; a pass without notes makes no take.
+Comping copies
 the take's clips, so the take keeps them. `view.toggle_take_lanes` (see
 below) shows the takes.
 
@@ -227,23 +315,99 @@ which needs a selection, so New Group Track has no key yet.
 ### Device
 
 Devices go on a track or on the master, in the order the signal goes
-through them. The devices panel and the plugin browser run these, with the
+through them. The devices panel and the browser run these, with the
 device's id as `device`.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
-| `device.set_param` | Set Plugin Parameter | Sets the parameter `param` of the plugin `device` to `value`, or leaves it to the plugin's state without one | none | none |
+| `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` on a new track named after it, as `device.add_plugin` does, with every parameter at its default. Returns the new device | none | Double-click in the browser |
+| `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` on a new track named after it: a MIDI track for an instrument, an audio track for an effect. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
+| `device.add_preset` | Add Preset | Adds the device the preset file `preset` holds, set as it was saved, where `device.add_plugin` puts one. Returns the new device | none | Double-click in the browser |
+| `device.save_preset` | Save Device as Preset | Saves the device `device` as a Musicable preset called `name`, or the device's name and a number, in the presets folder, and returns its path. A name the device has a preset for already is refused | none | Save Preset, on the device's title bar |
+| `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
+| `device.set_sample` | Set Sample | Gives the sampler `device` the audio file `file` to play, a path as clips name files ([project-format.md](project-format.md)), or takes its sample away without one | none | Drop a file on Simpler |
+| `device.load_sample` | Load Sample... | Asks for an audio file and gives it to the sampler `device` with `device.set_sample` | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
 | `device.hide_window` | Hide Plugin Window | Closes it | none | Ctrl+Alt+P |
 | `device.delete` | Delete Device | Deletes a device | none | Delete, with the device selected |
 
-Adding, changing and deleting are transactions named after the plugin, such
-as "Add Surge XT", "Change Surge XT" and "Delete Surge XT", so undo covers
-them. The window commands ask the app, with `Request::PluginWindow`; a
-plugin that isn't playing has no window to show, and the status bar says
-why. A new device starts with the plugin's own defaults. Its settings fill
+Adding, changing and deleting are transactions named after the device:
+a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
+plugin by its name, such as "Delete Surge XT"; adding a preset is named
+after the preset. So undo covers them, and dragging a control is one
+gesture, which one undo takes back. A preset of a VST3 plugin needs the
+plugin installed, and is refused without it. Giving a sampler its sample
+is "Load Sample", and taking it away "Remove Sample". `device.load_sample`
+asks the app, with `Request::LoadSample`, which shows a dialog in the
+project's folder; the sampler reads the file when the graph is next built,
+and the status bar says if it can't. The window commands ask the app, with
+`Request::PluginWindow`; a plugin that isn't playing has no window to show,
+and the status bar says why. A new device starts with the plugin's own
+defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
+
+### Automation
+
+Automation moves a parameter through points over the song
+([project-format.md](project-format.md#lane)). Each command names
+its parameter with an argument of type `param`, a `ParamAddress`, which
+scripts write as text: "track 3 volume", "master pan", "send 2" or
+"device 4 param 17" (`param_text`). A built-in device's parameter is its
+number in its kind's table, a plugin's its id in the plugin, and a test
+device's is 0.
+
+| Command | Title | Arguments | What it does | Default key | Live |
+|---|---|---|---|---|---|
+| `automation.show` | Show/Hide Automation | `track` or `master` | Shows the automation lanes of a track, the selected one without either, or the master, or hides them: a lane for each parameter it automates, or else one for its volume | A | A (Automation Mode) |
+| `automation.show_lane` | Show Automation Lane | `param`, `instead_of` | Shows a lane for a parameter, in place of the lane of `instead_of`, or under the others | none | none |
+| `automation.hide_lane` | Hide Automation Lane | `param` | Hides a parameter's lane | none | none |
+| `automation.set_points` | Edit Automation | `param`, `at`, `values` | Sets all of a parameter's points: where each is, and its value in the parameter's own units | none | none |
+| `automation.add_point` | Add Automation Point | `param`, `at`, `value` | Adds a point, after any already there, so it ends a step | none | none |
+| `automation.delete_points` | Delete Automation Points | `param`, `start`, `end` | Deletes the points from `start` to `end` | none | none |
+| `automation.clear` | Clear Automation | `param` | Deletes a parameter's automation, which leaves it with the value it had at the playhead | none | none |
+| `automation.re_enable` | Re-Enable Automation | `param` | Has a parameter follow its automation again after someone moved it by hand, or every overridden one without `param` | none | Re-Enable Automation, Back to Arrangement |
+
+Values are kept within the parameter's range where the project knows it,
+as it does for the mixer's, the built-in devices' and the test devices'
+parameters, and a switch's, a choice's, a note's or a count's are rounded
+to whole numbers; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
+gestures run these, and a drag of a point or a stretch of line, or a drag
+that draws, runs Edit Automation once, when it ends
+([app.md](app.md#the-arrangement)).
+
+Moving a control by hand overrides its automation, as in Live:
+`Transaction::set_param_by_hand` sets the value and marks the lane
+overridden in the same step, so one undo puts both back. The mixer's
+changes, `device.set_param` (and so the built-in devices' controls) and
+what plugins change in their own windows all do. An overridden lane keeps its points, which can be edited as
+usual, and the parameter holds the value it was moved to until Re-Enable
+Automation.
+
+### Browser
+
+The browser's library is the app's, as the transport is: the samples are
+on its disk, and its engine plays the previews. Commands reach it through
+the `Library` in their `Context`, which the app implements, and a session
+without one, such as an export's, says there's no library. What a search
+or Find Similar finds is what the browser lists, so an agent's search shows
+there too. A file is named by its full path.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `browser.search` | Search the Library | Finds the samples whose names, folders or tags have every word of `text`, best first, and returns the first `limit` of their paths, 100 without it | none | Typing in the browser's search field |
+| `browser.find_similar` | Find Similar Samples | Finds the samples most like `file`, most alike first, and returns the first `limit` | none | Show Similar Files |
+| `browser.preview` | Preview Sample | Plays the audio file `file` on its own, beside the song, in place of what was previewing | none | Clicking a sample, with Preview on |
+| `browser.stop_preview` | Stop Preview | Stops it | none | none |
+| `browser.tag` | Tag Sample | Gives `file` the tag `tag`, or with `on` false takes it away, and returns whether that changed it | none | Live 12's tags |
+| `browser.add_folder` | Add Folder to Library... | Adds `folder` to the library and looks through it, or asks which folder without it | none | Add Folder..., under Places |
+| `browser.remove_folder` | Remove Folder from Library | Takes `folder` out of the library, leaving its files where they are | none | Remove from Sidebar |
+| `browser.rescan` | Rescan Library | Looks through `folder` again, or every folder and the presets | none | none |
+| `browser.focus_search` | Search in Browser | Shows the browser, with the keys in the search field of the list showing | Ctrl+F | Ctrl+F |
+
+The library's changes aren't the project's, so they aren't in its undo
+history: a tag is taken away with `browser.tag` too. Add Folder without a
+folder and Search in Browser ask the app, with `Request::AddLibraryFolder`
+and `Request::FocusBrowserSearch`.
 
 ### The mixer's controls
 
@@ -299,11 +463,13 @@ other. They push a `Request`, as the file commands do.
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
-| `view.toggle_browser` | Plugin Browser | Shows or hides the plugin browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
+| `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in the devices' place | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
+| `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Shows the piano roll in place of the devices, or the devices in its place | F12 | F12, Shift+Tab |
+| `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
-| `view.zoom_in` | Zoom In | Zooms the arrangement in, around the start marker | Equals, NumpadAdd | + |
+| `view.zoom_in` | Zoom In | Zooms the view with the focus in, around the start marker | Equals, NumpadAdd | + |
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
-| `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement | Z | Z |
+| `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement, or the selected notes in the piano roll | Z | Z |
 | `view.toggle_follow` | Follow | Scrolls the arrangement to keep the playhead in sight, or stops | Ctrl+Shift+F | Ctrl+Shift+F |
 | `view.toggle_take_lanes` | Show/Hide Take Lanes | Shows the takes of the selected tracks, or of the track the panels show, in lanes under them, or hides them; `tracks` names other tracks | Ctrl+Alt+U | Ctrl+Alt+U |
 | `view.narrow_grid` | Narrow Grid | Brings the grid's lines closer | Ctrl+1 | Ctrl+1 |
@@ -314,16 +480,22 @@ other. They push a `Request`, as the file commands do.
 
 `view.set_viewport` (`start`, `zoom`, `top`, `width`) and
 `view.set_track_height` (`track`, `height`) carry the arrangement's
-scrolling, zooming and track heights. They and the take lanes change the
-editor's state, not the project, so undo leaves them alone. Live has no
-command palette. Ctrl+Shift+P is the usual key for one in other apps.
+scrolling, zooming and track heights, and `view.set_piano_roll_viewport`
+(`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
+roll's, with how tall its rows of keys are. `view.set_focus` gives the
+`arrangement` or the `piano_roll` the focus (`view`). They and the take
+lanes change the editor's state, not the project, so undo leaves them
+alone. Live has no command palette. Ctrl+Shift+P is the usual key for one
+in other apps. Live 12 also switches between its clip view and its device
+view with Shift+Tab; here Shift+Tab moves the keyboard focus back, as it
+does everywhere else.
 
 ## The editor's state
 
-What the arrangement edits besides the project lives in an `Editor`, kept
-with the `Document` (`Document::editor` and `editor_mut`), outside the
-widgets. Commands read and change it just as the UI does, and so will
-extensions and agents; the piano roll will share it. It isn't saved with the
+What the arrangement and the piano roll edit besides the project lives in
+an `Editor`, kept with the `Document` (`Document::editor` and
+`editor_mut`), outside the widgets. Commands read and change it just as the
+UI does, and so will extensions and agents. It isn't saved with the
 project, undo leaves it alone, and opening a project starts a new one, but
 for the behaviour settings.
 
@@ -342,15 +514,29 @@ for the behaviour settings.
   turns its pages while the playhead plays out of sight.
 - **Track heights** in points, between `view::MIN_TRACK_HEIGHT` and
   `MAX_TRACK_HEIGHT`, for the tracks whose height was changed.
+- **The focus** (`Focus`): the arrangement or the piano roll, where the
+  edit commands and the zoom act. Clicking in either view gives it the
+  focus, and so do its selection commands.
+- **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
+  selected notes, its own viewport (song positions across, as the
+  arrangement's, so the start marker, the playhead and the grid line up,
+  and how far down the keys are scrolled), how tall a key's row is, the
+  rows' height on screen, Draw Mode, what Cut and Copy took from it, and
+  what the lane under the notes shows (`Lane`: the velocities, or a
+  controller). The grid is the arrangement's, at the piano roll's zoom.
 - **Behaviour** (`Behaviour`): how editing behaves where people's habits
   differ, kept as settings so profiles can follow other DAWs. So far:
-  where Play/Stop plays from.
+  where Play/Stop plays from, and what middle C is called (`MiddleC`: C3 as
+  in Live, C4, or C5).
 - **Audio files** (`AudioFile`): the sample rate, length and channels of
   each file clips play, by the path the clips give. The app reads them
   ([app.md](app.md#audio-files)). Trimming keeps an audio clip inside its
   file, and positions inside a file count in the file's own frames.
-- **The clipboard**: what Cut and Copy took, for Paste.
+- **The clipboard**: the clips or time Cut and Copy took in the
+  arrangement, for Paste.
 - **Take lanes**: the tracks whose takes show in lanes under them.
+- **Automation lanes** (`Editor::automation`): the parameters whose lanes
+  each track, or the master, shows, top to bottom.
 
 ## Transactions
 
@@ -368,9 +554,11 @@ A `Transaction` has a setter for each part of the project that commands
 change: the tempo map, the loop region, looping, punching in and out and
 the metronome; adding and removing tracks and sends; each mixer setting of
 a track, its input and monitoring among them, a send and the master; adding
-and removing clips, and their timing, fades and names; adding, naming and
-removing takes; adding, moving, naming and removing locators; and adding
-and removing devices, and a plugin's parameters and settings.
+and removing clips, and their timing, fades and names; adding and removing
+notes, and their timing, keys and velocities; adding, naming and removing
+takes; adding, moving, naming and removing locators; adding and removing
+devices, and a plugin's parameters and settings; and each parameter's
+automation, and whether it's overridden.
 `Transaction::editor` reads the editor's state, such as the files' sample
 rates. Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
@@ -429,7 +617,8 @@ stops the transport at the start of the song. Then:
 
 - `Session::key_pressed` looks a chord up in the keymap and runs the command
   bound to it. It returns `false` if no command is bound, so the key can go
-  elsewhere.
+  elsewhere. `Session::takes_key` says whether a chord's command applies
+  now; the window leaves the keys it doesn't take to egui.
 - `Session::run` runs a command by id, for menus and the command palette,
   and `Session::run_with` runs one with arguments, for the arrangement's
   gestures and context menus, and returns its result.
@@ -447,6 +636,7 @@ stops the transport at the start of the song. Then:
   | Mute, solo, solo-safe | `Gain::MUTE` for each output stage and send whose mute changed |
   | Adding or removing a track or a send, an output, pre/post, a clip type | A new graph, which the compiler's thread builds |
   | Adding or removing a clip, its timing, its fades | A new graph |
+  | Adding or removing a note, its timing, key or velocity | A new graph, which lets go of a note that was sounding where it changed |
   | Adding or removing a device | A new graph, after its plugin loads or goes |
   | A plugin's parameters and settings | Nothing: the plugin gets them ([plugins.md](plugins.md#plugins-on-tracks)) |
   | Track and clip names, arm, locators | Nothing yet |
@@ -476,6 +666,12 @@ stops the transport at the start of the song. Then:
   tempo maps the engine is done with. And it polls the plugins: what they
   ask for, and the changes made in their windows, which it makes
   transactions of.
+- **The browser's library.** `Session::set_library` gives the session the
+  app's library, which the browser commands reach. `Session::tick` takes in
+  what its file work found, hands the engine the previews it opened, and
+  tells the library's queue whether the engine plays or records, so scans
+  slow down ([app.md](app.md#behind-the-browser)).
+  `Session::set_preview_gain` sets how loud previews play.
 - **Plugins.** `Session::set_installed_plugins` says which plugins are
   installed, from a scan, and loads the plugins of the project's devices
   among them. `Session::plugin` is a device's plugin instance, once it has
@@ -507,6 +703,9 @@ checks that a node that's slow to prepare doesn't hold up the session.
 [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) puts the
 test plugins on tracks, and checks that changes made in their windows
 undo and redo.
+[`crates/app/tests/piano_roll.rs`](../crates/app/tests/piano_roll.rs) edits
+notes with the piano roll's commands and keys, and checks that the test
+instrument plays them as they are after each change and each undo.
 
 ## Key chords
 

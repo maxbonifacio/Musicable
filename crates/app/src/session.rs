@@ -15,13 +15,16 @@ use musicable_engine::media::Media;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
-    NodeKey, ParamId, PreparedGraph, QueueFull, Stats, SwapError, TransportCommand,
-    compile_with_inputs,
+    NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError, TransportCommand,
+    compile_with_inputs, compile_with_stems,
 };
+use musicable_library::Busy;
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::{DeviceId, Input, Monitor, Project, TrackKind};
+use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
+use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::MediaPool;
 use crate::plugins::{Change, Plugins};
 use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report};
@@ -93,6 +96,10 @@ pub struct Session {
     requests: Vec<Request>,
     /// Counts the project's changes.
     revision: u64,
+    /// The browser's library, which previews through the engine.
+    library: Library,
+    /// How loud previews play: 1.0 as they are.
+    preview_gain: f32,
 }
 
 impl Session {
@@ -140,6 +147,38 @@ impl Session {
             media,
             Arc::new(compile_with_inputs),
         )
+    }
+
+    /// Like [`offline`](Self::offline), for an export: the plugins of
+    /// `project` load from `installed` before it plays, and the graphs tap
+    /// the tracks in `stems`, in that order, for the engine's
+    /// [`process_with_taps`](musicable_engine::Engine::process_with_taps)
+    /// (see [`compile_with_stems`]). Key presses do nothing.
+    pub fn exporting(
+        project: Project,
+        folder: Option<&Path>,
+        handle: EngineHandle,
+        installed: Vec<PluginInfo>,
+        stems: Vec<TrackId>,
+    ) -> Self {
+        let build = move |project: &Project,
+                          meters: &Meters,
+                          media: &Media,
+                          devices: &Devices,
+                          inputs: &InputLayout| {
+            compile_with_stems(project, meters, media, devices, inputs, &stems)
+        };
+        let media = MediaPool::new(true);
+        let mut session = Self::building(
+            project,
+            folder,
+            Keymap::new(),
+            handle,
+            media,
+            Arc::new(build),
+        );
+        session.set_installed_plugins(installed);
+        session
     }
 
     /// Like [`new`](Self::new), for a project without a folder, with `build`
@@ -211,6 +250,8 @@ impl Session {
             problems: Vec::new(),
             requests: Vec::new(),
             revision: 0,
+            library: Library::none(),
+            preview_gain: 1.0,
         };
         session.arm();
         session
@@ -277,6 +318,7 @@ impl Session {
         }
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
+        self.engine.handle.set_preview_gain(self.preview_gain);
         self.arm();
         old
     }
@@ -540,6 +582,14 @@ impl Session {
         self.engine.beats_at(position)
     }
 
+    /// Whether the keymap binds `chord` to a command that applies now, so a
+    /// press of it runs one. Other keys can go elsewhere.
+    pub fn takes_key(&self, chord: KeyChord) -> bool {
+        self.keymap
+            .lookup(chord)
+            .is_some_and(|id| self.commands.applies(id, &self.document))
+    }
+
     /// Runs the command the keymap binds to `chord`. Returns `false` if there
     /// is none, so the key can go elsewhere.
     pub fn key_pressed(&mut self, chord: KeyChord) -> bool {
@@ -554,10 +604,16 @@ impl Session {
     /// then sends the engine what it changed. A command that needs
     /// arguments, or doesn't apply now, does nothing.
     pub fn run(&mut self, id: &CommandId) -> Result<(), UnknownCommand> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
+        };
         let mut context = Context {
             document: &mut self.document,
             transport: &mut self.engine,
             requests: &mut self.requests,
+            library: &mut library,
         };
         self.commands.run(id, &mut context)?;
         self.sync();
@@ -568,10 +624,16 @@ impl Session {
     /// changed, and returns the command's result. See
     /// [`Registry::run_with`].
     pub fn run_with(&mut self, id: &CommandId, args: &Args) -> Result<Value, CommandError> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
+        };
         let mut context = Context {
             document: &mut self.document,
             transport: &mut self.engine,
             requests: &mut self.requests,
+            library: &mut library,
         };
         let result = self.commands.run_with(id, args, &mut context);
         self.sync();
@@ -614,6 +676,7 @@ impl Session {
     pub fn take_problems(&mut self) -> Vec<String> {
         let mut problems = self.engine.media.take_problems();
         problems.extend(self.plugins.take_problems());
+        problems.extend(self.library.take_problems());
         problems.append(&mut self.problems);
         problems
     }
@@ -684,8 +747,52 @@ impl Session {
             self.follow_plugins(changes);
         }
         self.take_recordings();
+        self.tick_library();
         self.engine.handle.collect_garbage();
         self.engine.flush();
+    }
+
+    /// Takes in what the library's jobs found, hands the engine the
+    /// previews it opened, and tells the library what the engine is doing.
+    fn tick_library(&mut self) {
+        self.library.tick();
+        for message in self.library.take_for_engine() {
+            // A preview the engine has no room for is dropped: the user can
+            // ask for it again.
+            let _ = match message {
+                ToEngine::Play { id, source } => {
+                    let preview = Preview::new(id, source, self.engine.handle.config());
+                    self.engine.handle.preview(preview).map_err(|_| ())
+                }
+                ToEngine::Stop => self.engine.handle.stop_preview().map_err(|_| ()),
+            };
+        }
+        let busy = match (self.engine.handle.stats().playing, self.engine.recording) {
+            (false, _) => Busy::Idle,
+            (true, false) => Busy::Playing,
+            (true, true) => Busy::Recording,
+        };
+        self.library.set_busy(busy);
+    }
+
+    /// The browser's library.
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    pub fn library_mut(&mut self) -> &mut Library {
+        &mut self.library
+    }
+
+    /// Uses `library` from now on, in place of one that has nothing.
+    pub fn set_library(&mut self, library: Library) {
+        self.library = library;
+    }
+
+    /// Plays previews at `gain` from now on: 1.0 plays them as they are.
+    pub fn set_preview_gain(&mut self, gain: f32) {
+        self.preview_gain = gain;
+        self.engine.handle.set_preview_gain(gain);
     }
 
     /// Adds the recordings that have finished as takes, and passes on what
@@ -734,8 +841,9 @@ impl Session {
             match change {
                 Change::GestureBegin => self.document.begin_gesture(),
                 Change::GestureEnd => self.document.end_gesture(),
+                // Moved by hand, so it overrides the parameter's automation.
                 Change::Param { param, value } => self.document.transact(&name, |tx| {
-                    tx.set_plugin_param(device, param, Some(value));
+                    tx.set_param_by_hand(ParamAddress::Device(device, param), value);
                 }),
                 Change::Settings(settings) => self.document.transact(&name, |tx| {
                     tx.set_plugin_settings(device, settings);
@@ -763,6 +871,22 @@ impl Session {
     /// ready.
     pub fn compiling(&self) -> bool {
         self.engine.received < self.engine.asked
+    }
+
+    /// Whether the engine has everything the session has sent it: no graph
+    /// is compiling, and nothing waits for one or for room in the engine's
+    /// queue. Call [`tick`](Self::tick) to get there.
+    pub fn is_caught_up(&self) -> bool {
+        !self.compiling() && self.engine.outbox.is_empty()
+    }
+
+    /// Stops the transport at engine time `time` (see [`Stats::time`]), to
+    /// the frame: for an offline render that knows when it ends, such as an
+    /// export. Like everything sent, it waits for the graph.
+    pub fn stop_at(&mut self, time: u64) {
+        let event = Event::Transport(TransportCommand::Stop);
+        self.engine.push(Message::EventAt { time, event });
+        self.engine.flush();
     }
 
     /// Waits for the graphs the session asked for, and sends them on, with
@@ -862,13 +986,24 @@ impl Session {
                     // The plugins have their settings, not the engine: the
                     // plugins follow below.
                     Edit::PluginParam { .. } | Edit::PluginSettings { .. } => {}
+                    // A built-in device's node has its parameters.
+                    Edit::NativeParam {
+                        device, param, to, ..
+                    } => self.engine.push(Message::Event(Event::Param {
+                        node: keys::device(device),
+                        param: ParamId(param),
+                        value: to,
+                    })),
+                    // A sampler reads its sample as the graph is built.
+                    Edit::NativeSample { .. } => recompile = true,
                     // Tracks and their inputs are compiled into the graph,
                     // and the recorder records the armed ones.
                     Edit::AddTrack { .. } | Edit::RemoveTrack { .. } | Edit::TrackInput { .. } => {
                         recompile = true;
                         armed_changed = true;
                     }
-                    // Clips are compiled into the graph.
+                    // Clips are compiled into the graph, notes and all. A
+                    // note edited while it sounds is let go.
                     Edit::TrackOutput { .. }
                     | Edit::TrackClipType { .. }
                     | Edit::AddSend { .. }
@@ -879,8 +1014,20 @@ impl Session {
                     | Edit::RemoveClip { .. }
                     | Edit::ClipTiming { .. }
                     | Edit::ClipFades { .. }
+                    | Edit::AddNote { .. }
+                    | Edit::RemoveNote { .. }
+                    | Edit::NoteTiming { .. }
+                    | Edit::NoteKey { .. }
+                    | Edit::NoteVelocity { .. }
+                    | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. } => recompile = true,
+                    // So is automation, and the plugins leave what it moves
+                    // to the engine.
+                    Edit::AddLane { .. }
+                    | Edit::RemoveLane { .. }
+                    | Edit::LanePoints { .. }
+                    | Edit::LaneOverridden { .. } => recompile = true,
                 }
             }
         }
@@ -972,6 +1119,11 @@ struct EngineLink {
 /// Something for the engine, in the order it was sent.
 enum Message {
     Event(Event),
+    /// An event for engine time `time`.
+    EventAt {
+        time: u64,
+        event: Event,
+    },
     Tempo(TempoMap),
     Graph(Box<PreparedGraph>),
     /// Holds back everything after it until the graph of this job, or of a
@@ -1106,6 +1258,10 @@ impl EngineLink {
                 .handle
                 .send(event)
                 .map_err(|QueueFull(event)| Message::Event(event)),
+            Message::EventAt { time, event } => self
+                .handle
+                .send_at(time, event)
+                .map_err(|QueueFull(event)| Message::EventAt { time, event }),
             Message::Tempo(tempo) => self
                 .handle
                 .set_tempo_map(tempo)

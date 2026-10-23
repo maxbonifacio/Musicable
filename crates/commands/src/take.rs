@@ -6,11 +6,14 @@
 //! Each pass is comped onto its track as it's added, later passes over
 //! earlier ones, so the track plays the last pass, as a tape machine
 //! would, and comping by hand picks other parts from there. A MIDI track's
-//! pass without notes makes no take.
+//! pass holds the notes played and how the controllers moved, such as the
+//! sustain pedal. One without notes makes no take.
 
 use std::collections::BTreeSet;
 
-use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Dimension, MidiClip, Point};
+use musicable_model::clip::{
+    AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, MidiClip, Point,
+};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{TakeId, TrackId, TrackKind};
 
@@ -124,7 +127,7 @@ pub struct Pass {
 }
 
 /// What a MIDI track recorded in one pass of the playhead over the song:
-/// the notes played over it.
+/// the notes played over it, and how the controllers moved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotePass {
     /// The song position it starts at, in frames at the recording's sample
@@ -134,6 +137,10 @@ pub struct NotePass {
     pub frames: u64,
     /// In the order they started.
     pub notes: Vec<PlayedNote>,
+    /// How the controllers moved, in order: where, which, and to what,
+    /// from 0.0 to 1.0. The moves at the start say what the controllers
+    /// held as the pass began.
+    pub controllers: Vec<(u64, Controller, f32)>,
 }
 
 /// A note played, at song positions in frames at the recording's sample
@@ -295,6 +302,21 @@ fn notes_of(tempo: &TempoMap, rate: u32, pass: &NotePass) -> Option<(BeatRange, 
         for &(frame, dimension, value) in &played.expression {
             let point = Point::new(at(frame).max(start) - start, value);
             note.expression.curve_mut(dimension).push(point);
+        }
+    }
+    for &(frame, controller, value) in &pass.controllers {
+        let position = at(frame).max(range.start);
+        if position >= range.end {
+            continue;
+        }
+        let point = Point::new(position - range.start, value);
+        let curve = midi.controllers.entry(controller).or_default();
+        // Of two moves on the same tick, the later holds, and a move that
+        // changes nothing is left out.
+        match curve.last_mut() {
+            Some(last) if last.at == point.at => *last = point,
+            Some(last) if last.value == value => {}
+            _ => curve.push(point),
         }
     }
     (!range.is_empty() && !midi.notes.is_empty()).then_some((range, midi))
@@ -665,6 +687,7 @@ mod tests {
             start: 2 * BEAT,
             frames: 4 * BEAT,
             notes: vec![note, played(5 * BEAT, 6 * BEAT)],
+            controllers: Vec::new(),
         };
         let recorded = Recorded::Midi {
             track: keys,
@@ -724,6 +747,7 @@ mod tests {
             start: 4 * BEAT,
             frames: 4 * BEAT,
             notes,
+            controllers: vec![(4 * BEAT, Controller::SUSTAIN, 1.0)],
         };
         let recorded = Recorded::Midi {
             track: keys,
@@ -750,6 +774,7 @@ mod tests {
             start: 100_001,
             frames: 100_000,
             notes: vec![played(start, end)],
+            controllers: vec![(start + 1, Controller::SUSTAIN, 1.0)],
         };
         let recorded = [
             Recorded::Midi {
@@ -773,6 +798,58 @@ mod tests {
         assert_eq!(frame(clip.start), 100_001);
         assert_eq!(frame(clip.start + note.start), start as i64);
         assert_eq!(frame(clip.start + note.end()), end as i64);
+        let pedal = midi.controller(Controller::SUSTAIN)[0];
+        assert_eq!(frame(clip.start + pedal.at), start as i64 + 1);
         assert!(project.track(vocal).unwrap().takes.is_empty());
+    }
+
+    #[test]
+    fn a_midi_pass_keeps_how_its_controllers_moved() {
+        let (mut setup, _, keys) = setup();
+        let half = BEAT / 2;
+        // From beat 2 to 6, with the pedal down from the start, and the mod
+        // wheel moving.
+        let (pedal, wheel) = (Controller::SUSTAIN, Controller::MOD_WHEEL);
+        let pass = NotePass {
+            start: 2 * BEAT,
+            frames: 4 * BEAT,
+            notes: vec![played(2 * BEAT, 3 * BEAT)],
+            controllers: vec![
+                (2 * BEAT, pedal, 1.0),
+                (2 * BEAT, wheel, 0.0),
+                (3 * BEAT, wheel, 0.25),
+                // On one tick, the later holds.
+                (3 * BEAT + half, wheel, 0.5),
+                (3 * BEAT + half, wheel, 0.75),
+                // One that changes nothing is left out.
+                (4 * BEAT, wheel, 0.75),
+                (5 * BEAT, pedal, 0.0),
+                // At the end, it's past the clip.
+                (6 * BEAT, pedal, 1.0),
+            ],
+        };
+        let recorded = Recorded::Midi {
+            track: keys,
+            passes: vec![pass],
+        };
+        let takes = add_recording(&mut setup.document, RATE, &[recorded]);
+        let (_, take) = setup.document.project().find_take(takes[0]).unwrap();
+        let ClipContent::Midi(midi) = &take.clips[0].content else {
+            panic!("a MIDI clip");
+        };
+        let beat = |b: f64| Beats::from_f64(b);
+        assert_eq!(
+            midi.controller(pedal),
+            [Point::new(beat(0.0), 1.0), Point::new(beat(3.0), 0.0)]
+        );
+        assert_eq!(
+            midi.controller(wheel),
+            [
+                Point::new(beat(0.0), 0.0),
+                Point::new(beat(1.0), 0.25),
+                Point::new(beat(1.5), 0.75),
+            ]
+        );
+        assert_eq!(midi.controllers.len(), 2);
     }
 }

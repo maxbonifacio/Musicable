@@ -1,12 +1,13 @@
-//! The audio files the open project's clips play: found from the project's
-//! folder, read with `musicable-io`'s decoders, and handed to the engine
-//! whole or streaming.
+//! The audio files the open project's clips and samplers play: found from
+//! the project's folder, read with `musicable-io`'s decoders, and handed to
+//! the engine whole or streaming.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use musicable_engine::devices::Sample;
 use musicable_engine::media::{AudioData, AudioReader, Media, Source, Stream, Streamer};
 use musicable_io::audio::Decoder;
 use musicable_model::Project;
@@ -18,7 +19,7 @@ use musicable_model::clip::{ClipContent, ClipId};
 const LOAD_WHOLE: u64 = 1 << 21;
 
 /// An audio file, as the engine reads it.
-struct FileReader(Decoder);
+pub(crate) struct FileReader(pub(crate) Decoder);
 
 impl AudioReader for FileReader {
     fn channels(&self) -> usize {
@@ -38,14 +39,15 @@ impl AudioReader for FileReader {
     }
 }
 
-/// The audio files of the open project's clips, kept while a graph plays
-/// them.
+/// The audio files of the open project's clips and samplers, kept while a
+/// graph plays them.
 ///
 /// Each graph the session builds gets its [`Media`] from here, on the
 /// compiler's thread. A file that a graph has already isn't read again, and
 /// a clip that streams keeps its stream, so rebuilding the graph for an edit
 /// doesn't interrupt the clips that play. What no graph holds any more is
-/// let go, and opening a project reads its files again.
+/// let go, and opening a project reads its files again. A sampler's sample
+/// loads whole, however long it is, as the sampler reads anywhere in it.
 pub(crate) struct MediaPool {
     /// Whether streams wait for the disk: see [`Streamer::spawn`].
     wait: bool,
@@ -59,6 +61,8 @@ pub(crate) struct MediaPool {
 struct Files {
     /// The files loaded whole, by path.
     whole: HashMap<PathBuf, Weak<AudioData>>,
+    /// The samplers' samples, by path.
+    samples: HashMap<PathBuf, Weak<Sample>>,
     /// Each streaming clip's stream, and the file it streams.
     streams: HashMap<ClipId, (PathBuf, Weak<Stream>)>,
     /// The files whose problems were reported.
@@ -100,13 +104,14 @@ impl MediaPool {
         }
     }
 
-    /// The audio of `project`'s audio clips, whose relative paths start from
-    /// `folder`. Clips whose files can't be read have none, and the problem
-    /// is reported.
+    /// The audio of `project`'s audio clips, and its samplers' samples,
+    /// whose relative paths start from `folder`. Clips and samplers whose
+    /// files can't be read have none, and the problem is reported.
     pub(crate) fn media(&self, project: &Project, folder: Option<&Path>) -> Media {
         {
             let mut files = self.files();
             files.whole.retain(|_, data| data.strong_count() > 0);
+            files.samples.retain(|_, sample| sample.strong_count() > 0);
             files
                 .streams
                 .retain(|_, (_, stream)| stream.strong_count() > 0);
@@ -116,19 +121,8 @@ impl MediaPool {
             let ClipContent::Audio(audio) = &clip.content else {
                 continue;
             };
-            let path = Path::new(&audio.file);
-            let path = match (path.is_absolute(), folder) {
-                (true, _) => path.to_owned(),
-                (false, Some(folder)) => folder.join(path),
-                (false, None) => {
-                    let problem = format!(
-                        "Couldn't find the audio file {}: it's in the project's folder, and \
-                         the project isn't saved.",
-                        audio.file
-                    );
-                    self.files().report(path, problem);
-                    continue;
-                }
+            let Some(path) = self.find(&audio.file, folder, "audio file") else {
+                continue;
             };
             match self.source(clip.id, &path) {
                 Ok(source) => media.insert(clip.id, source),
@@ -141,7 +135,45 @@ impl MediaPool {
                 }
             }
         }
+        for device in project.chains().flat_map(|(_, devices)| devices) {
+            let Some(file) = device.kind.native().and_then(|n| n.sample.as_ref()) else {
+                continue;
+            };
+            let Some(path) = self.find(file, folder, "sample") else {
+                continue;
+            };
+            match self.sample(&path) {
+                Ok(sample) => media.insert_sample(device.id, sample),
+                Err(error) => {
+                    let problem = format!(
+                        "Couldn't read the sample {}: {error}. Its sampler is silent.",
+                        path.display()
+                    );
+                    self.files().report(&path, problem);
+                }
+            }
+        }
         media
+    }
+
+    /// Where the file a project names `file` is: relative paths start from
+    /// `folder`. A project that isn't saved has no folder, so a relative
+    /// path leads nowhere, and the problem with the `what`, such as "audio
+    /// file", is reported.
+    fn find(&self, file: &str, folder: Option<&Path>, what: &str) -> Option<PathBuf> {
+        let path = Path::new(file);
+        match (path.is_absolute(), folder) {
+            (true, _) => Some(path.to_owned()),
+            (false, Some(folder)) => Some(folder.join(path)),
+            (false, None) => {
+                let problem = format!(
+                    "Couldn't find the {what} {file}: it's in the project's folder, and the \
+                     project isn't saved."
+                );
+                self.files().report(path, problem);
+                None
+            }
+        }
     }
 
     /// The audio `clip` plays from the file at `path`: what a graph has
@@ -164,6 +196,19 @@ impl MediaPool {
             self.files().streams.insert(clip, streaming);
             Ok(Source::Stream(stream))
         }
+    }
+
+    /// The sample in the file at `path`, for samplers: what a graph has
+    /// already, or the file read whole. The lock isn't held while it's read.
+    fn sample(&self, path: &Path) -> io::Result<Arc<Sample>> {
+        if let Some(sample) = self.files().samples.get(path).and_then(Weak::upgrade) {
+            return Ok(sample);
+        }
+        let mut reader = FileReader(Decoder::open(path)?);
+        let sample = Arc::new(Sample::new(&AudioData::read(&mut reader)?));
+        let weak = Arc::downgrade(&sample);
+        self.files().samples.insert(path.to_owned(), weak);
+        Ok(sample)
     }
 
     /// What went wrong reading files since the last call, for the app to
@@ -207,9 +252,10 @@ mod tests {
     use std::fs;
 
     use musicable_io::audio::{SampleFormat, save_wav};
-    use musicable_model::TrackKind;
     use musicable_model::clip::AudioClip;
+    use musicable_model::native::{NativeDevice, NativeKind};
     use musicable_model::time::{BeatRange, Beats};
+    use musicable_model::{DeviceId, DeviceKind, TrackKind};
 
     use super::*;
 
@@ -234,6 +280,25 @@ mod tests {
             project.track_mut(track).unwrap().clips.push(clip);
         }
         project
+    }
+
+    /// Adds a MIDI track with a sampler playing each of `files`, and one
+    /// without a sample, to `project`, and returns their ids.
+    fn samplers(project: &mut Project, files: &[&str]) -> Vec<DeviceId> {
+        let track = project.add_track("Samplers", TrackKind::Midi);
+        let mut devices = Vec::new();
+        for file in files
+            .iter()
+            .map(|file| Some(file.to_string()))
+            .chain([None])
+        {
+            let mut sampler = NativeDevice::new(NativeKind::Sampler);
+            sampler.sample = file;
+            devices.push(project.new_device(DeviceKind::Native(sampler)));
+        }
+        let ids = devices.iter().map(|device| device.id).collect();
+        project.track_mut(track).unwrap().devices = devices;
+        ids
     }
 
     fn ids(project: &Project) -> Vec<ClipId> {
@@ -331,6 +396,62 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.contains("isn't saved")),
             "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn samplers_load_their_samples_whole_once_for_each_file() {
+        let folder = folder("samples");
+        write(&folder.join("kick.wav"), 1000);
+        fs::write(folder.join("notes.txt"), "not audio").unwrap();
+        // A clip of the file too, which streams.
+        let mut project = project(&["kick.wav"]);
+        let files = ["kick.wav", "kick.wav", "missing.wav", "notes.txt"];
+        let [kick, same, missing, notes, none] = samplers(&mut project, &files)[..] else {
+            panic!("five samplers");
+        };
+        let mut pool = MediaPool::new(true);
+        pool.load_whole = 100;
+        let media = pool.media(&project, Some(&folder));
+        assert!(matches!(
+            media.get(ids(&project)[0]),
+            Some(Source::Stream(_))
+        ));
+        let sample = Arc::clone(media.sample(kick).unwrap());
+        assert_eq!((sample.frames(), sample.channels()), (1000, 1));
+        // Samplers of the same file share it, and so do rebuilt graphs.
+        assert!(Arc::ptr_eq(&sample, media.sample(same).unwrap()));
+        let rebuilt = pool.media(&project, Some(&folder));
+        assert!(Arc::ptr_eq(&sample, rebuilt.sample(kick).unwrap()));
+        assert!(
+            [missing, notes, none]
+                .iter()
+                .all(|&id| media.sample(id).is_none())
+        );
+        let problems = pool.take_problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems[0].contains("missing.wav") && problems[0].ends_with("Its sampler is silent."),
+            "{problems:?}"
+        );
+        assert!(problems[1].contains("notes.txt"), "{problems:?}");
+        // Once nothing holds it, it's read again.
+        drop((media, rebuilt, sample));
+        assert!(pool.files().samples.values().all(|s| s.strong_count() == 0));
+        let fresh = pool.media(&project, Some(&folder));
+        assert!(fresh.sample(kick).is_some());
+        assert_eq!(pool.files().samples.len(), 1);
+
+        // Without a folder, relative paths lead nowhere.
+        let mut unsaved = Project::new();
+        samplers(&mut unsaved, &["kick.wav"]);
+        assert!(pool.media(&unsaved, None).is_empty());
+        assert_eq!(
+            pool.take_problems(),
+            [
+                "Couldn't find the sample kick.wav: it's in the project's folder, and the project \
+              isn't saved."
+            ]
         );
     }
 }

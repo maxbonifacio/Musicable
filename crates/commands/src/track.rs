@@ -149,6 +149,7 @@ mod tests {
             document,
             transport: &mut StubTransport::default(),
             requests: &mut Vec::new(),
+            library: &mut crate::NoLibrary,
         };
         registry.run(id, &mut context).unwrap();
     }

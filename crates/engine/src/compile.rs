@@ -20,6 +20,10 @@
 //!
 //! Plugins process outside the engine, in plugin instances the app holds:
 //! [`Devices`] has the app's [`NodeMaker`] for each plugin device.
+//!
+//! Each lane of automation that isn't overridden goes to the node with its
+//! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
+//! song plays.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -30,7 +34,7 @@ use std::thread::{self, JoinHandle};
 use musicable_model::mixer::Bus;
 use musicable_model::{
     AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, MidiInput,
-    Project, Track, TrackKind,
+    Project, Track, TrackId, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
@@ -38,7 +42,7 @@ use crate::media::Media;
 use crate::meter::Meters;
 use crate::midi::MidiMonitor;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
-use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
+use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
 ///
@@ -53,10 +57,12 @@ use crate::{EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGrap
 /// role 9 for sends and 10 for devices. Keys with role 0 belong to no
 /// channel.
 pub mod keys {
-    use musicable_model::{DeviceId, SendId, TrackId};
+    use musicable_model::param::ParamAddress;
+    use musicable_model::{Chain, DeviceId, SendId, TrackId};
 
     use super::Slot;
-    use crate::NodeKey;
+    use crate::nodes::Gain;
+    use crate::{NodeKey, ParamId};
 
     /// The master bus, where the tracks that don't feed a group sum.
     pub const MASTER: NodeKey = NodeKey(0);
@@ -145,6 +151,23 @@ pub mod keys {
     /// output.
     pub fn master_output() -> NodeKey {
         track_output(MASTER_STRIP)
+    }
+
+    /// The node with the parameter at `address`, and the parameter: a
+    /// channel's fader's [`Gain::GAIN`] for its volume and [`Gain::PAN`] for
+    /// its pan, a send's [`Gain::GAIN`], and a device's parameter `n` as
+    /// `ParamId(n)`.
+    pub fn param(address: ParamAddress) -> (NodeKey, ParamId) {
+        let fader = |chain| match chain {
+            Chain::Track(track) => track_gain(track),
+            Chain::Master => master_gain(),
+        };
+        match address {
+            ParamAddress::Volume(chain) => (fader(chain), Gain::GAIN),
+            ParamAddress::Pan(chain) => (fader(chain), Gain::PAN),
+            ParamAddress::Send(send) => (self::send(send), Gain::GAIN),
+            ParamAddress::Device(device, n) => (self::device(device), ParamId(n)),
+        }
     }
 
     fn track_key(role: u64, track: TrackId) -> NodeKey {
@@ -250,8 +273,8 @@ pub fn compile(project: &Project) -> Graph {
     compile_metered(project, &Meters::new())
 }
 
-/// Builds the graph for `project`, without audio files: its audio clips are
-/// silent. See [`compile_with_media`].
+/// Builds the graph for `project`, without audio files: its audio clips and
+/// samplers are silent. See [`compile_with_media`].
 pub fn compile_metered(project: &Project, meters: &Meters) -> Graph {
     compile_with_media(project, meters, &Media::new())
 }
@@ -276,11 +299,11 @@ pub fn compile_with_devices(
 /// Builds the graph for `project`. Each channel's output stage measures
 /// into its meter in `meters`: call [`Meters::follow`] first, or channels
 /// without a meter there get one nobody reads. Audio clips play their audio
-/// from `media`, and clips it doesn't have are silent. Plugin devices
-/// process through the nodes `devices` makes for them, and the ones it has
-/// none for, such as a plugin that isn't installed, pass their signal
-/// through. Tracks monitor their inputs where `inputs` lays them out, and
-/// the ones it doesn't have are silent.
+/// from `media`, and samplers their samples, and the ones it doesn't have
+/// are silent. Plugin devices process through the nodes `devices` makes for
+/// them, and the ones it has none for, such as a plugin that isn't
+/// installed, pass their signal through. Tracks monitor their inputs where
+/// `inputs` lays them out, and the ones it doesn't have are silent.
 pub fn compile_with_inputs(
     project: &Project,
     meters: &Meters,
@@ -289,6 +312,22 @@ pub fn compile_with_inputs(
     inputs: &InputLayout,
 ) -> Graph {
     compile_with(project, meters, media, devices, inputs, native_stage)
+}
+
+/// Like [`compile_with_inputs`], with a tap ([`Graph::add_tap`]) on each
+/// track in `stems`, in that order, for an export's stems: the track as it
+/// feeds its bus, after its fader and its slots, and before its output
+/// stage, where mute and solo would cut it. Tracks the project hasn't got
+/// have no tap, so the taps after them move up.
+pub fn compile_with_stems(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+    inputs: &InputLayout,
+    stems: &[TrackId],
+) -> Graph {
+    build(project, meters, media, devices, inputs, stems, native_stage)
 }
 
 /// Where the audio inputs tracks take are among the engine's device inputs
@@ -468,6 +507,20 @@ pub(crate) fn compile_with(
     media: &Media,
     devices: &Devices,
     inputs: &InputLayout,
+    stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
+) -> Graph {
+    build(project, meters, media, devices, inputs, &[], stages)
+}
+
+/// [`compile_with`], tapping the tracks in `stems` as
+/// [`compile_with_stems`] does.
+fn build(
+    project: &Project,
+    meters: &Meters,
+    media: &Media,
+    devices: &Devices,
+    inputs: &InputLayout,
+    stems: &[TrackId],
     mut stages: impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -493,6 +546,7 @@ pub(crate) fn compile_with(
     }
 
     let silenced = project.silenced();
+    let mut tapped = HashMap::new();
     for track in &project.tracks {
         let player = clip_player(track, media).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
@@ -535,7 +589,7 @@ pub(crate) fn compile_with(
             graph: &mut graph,
             tail: head,
         };
-        let taps = strip.channel(Channel::Track(track), devices, &mut stages);
+        let taps = strip.channel(Channel::Track(track), devices, media, &mut stages);
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
         {
@@ -549,6 +603,9 @@ pub(crate) fn compile_with(
                     .send_notes(from, to)
                     .expect("the nodes were just added");
             }
+        }
+        if stems.contains(&track.id) {
+            tapped.insert(track.id, strip.tail.expect("the strip has its fader"));
         }
         // Mute and solo cut the output here, after the sends take their
         // signal, so they can cut each path on its own.
@@ -581,12 +638,36 @@ pub(crate) fn compile_with(
         graph: &mut graph,
         tail: Some(master),
     };
-    strip.channel(Channel::Master(&project.master), devices, &mut stages);
+    strip.channel(
+        Channel::Master(&project.master),
+        devices,
+        media,
+        &mut stages,
+    );
     let output = Gain::new(1.0).with_meter(meters.master().clone());
     strip.push(keys::master_output(), Box::new(output));
     let output = strip.tail.expect("the master's strip has its output stage");
     graph.set_output(output).expect("the output was just added");
     graph.set_cue(cue).expect("the cue bus was just added");
+    for node in stems.iter().filter_map(|track| tapped.get(track)) {
+        graph
+            .add_tap(*node)
+            .expect("the stems' nodes were just added");
+    }
+
+    // A parameter whose node isn't in the graph, such as a missing
+    // plugin's, has nothing to automate.
+    for lane in project.automation.iter().filter(|lane| !lane.overridden) {
+        let (key, param) = keys::param(lane.param);
+        let scale = project.param_scale(lane.param);
+        if let (Some(node), Some(automation)) =
+            (graph.find(key), Automation::new(&lane.points, scale))
+        {
+            graph
+                .automate(node, param, automation)
+                .expect("the node was found");
+        }
+    }
     graph
 }
 
@@ -628,12 +709,14 @@ fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
 }
 
 /// A device's node, if it has one: a plugin `devices` has nothing for has
-/// none.
-fn device_node(device: &Device, devices: &Devices) -> Option<Box<dyn Node>> {
+/// none, and nor has a built-in device whose DSP isn't built yet. A sampler
+/// plays the sample `media` has for it.
+fn device_node(device: &Device, devices: &Devices, media: &Media) -> Option<Box<dyn Node>> {
     match device.kind {
         DeviceKind::TestGain { gain } => Some(Box::new(Gain::new(gain))),
         DeviceKind::TestInstrument { level } => Some(Box::new(TestInstrument::new(level))),
         DeviceKind::Plugin(_) => devices.get(device.id).map(NodeMaker::make),
+        DeviceKind::Native(ref native) => crate::devices::node(native, media.sample(device.id)),
     }
 }
 
@@ -673,6 +756,7 @@ impl Strip<'_> {
         &mut self,
         channel: Channel<'_>,
         devices: &Devices,
+        media: &Media,
         stages: &mut impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
     ) -> Taps {
         let mut slot = |strip: &mut Self, at: Slot| {
@@ -686,8 +770,8 @@ impl Strip<'_> {
             if let Ok(position) = u16::try_from(position) {
                 slot(self, Slot::BeforeDevice(position));
             }
-            let node =
-                device_node(device, devices).map(|node| self.push(keys::device(device.id), node));
+            let node = device_node(device, devices, media)
+                .map(|node| self.push(keys::device(device.id), node));
             if device.kind.is_instrument() && instrument.is_none() {
                 instrument = Some(node);
             }
@@ -1489,6 +1573,51 @@ mod tests {
         assert_ne!(all, drums_only);
         assert!(drums_only.iter().any(|&s| s != 0.0));
         assert!(none.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn stems_are_tracks_as_they_feed_the_mix_before_mute_and_solo() {
+        // Muting the bass, or soloing the drums, leaves the drums alone in
+        // the mix, and the bass in its stem.
+        for solo in [false, true] {
+            let mut p = project();
+            let (drums, bass) = (p.tracks[0].id, p.tracks[1].id);
+            match solo {
+                true => p.track_mut(drums).unwrap().solo = true,
+                false => p.track_mut(bass).unwrap().muted = true,
+            }
+            let stems = [bass, TrackId(999), drums];
+            let graph = compile_with_stems(
+                &p,
+                &Meters::new(),
+                &Media::new(),
+                &Devices::new(),
+                &InputLayout::new(),
+                &stems,
+            )
+            .prepare(&CONFIG)
+            .unwrap();
+            assert_eq!(graph.taps(), 2, "no tap for a track the project hasn't got");
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            handle.swap_graph(graph).unwrap();
+            handle
+                .send(Event::Transport(TransportCommand::Play))
+                .unwrap();
+            let frames = 500;
+            let mut mix = vec![0.0; 2 * frames];
+            let mut taps = [vec![0.0; 2 * frames], vec![0.0; 2 * frames]];
+            let [bass_stem, drums_stem] = &mut taps;
+            engine.process_with_taps(
+                &mut AudioMut::from_planar(&mut mix, 2),
+                &mut [
+                    AudioMut::from_planar(bass_stem, 2),
+                    AudioMut::from_planar(drums_stem, 2),
+                ],
+            );
+            assert!(bass_stem.iter().any(|&s| s != 0.0), "{solo}");
+            assert_ne!(bass_stem, drums_stem);
+            assert_eq!(mix, *drums_stem, "{solo}");
+        }
     }
 
     #[test]

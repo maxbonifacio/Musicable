@@ -6,6 +6,11 @@
 //! a send to each return track, the pan, the fader beside the meter, the
 //! gain and the highest peak, mute, solo and arm, and the clip stage. Its
 //! controls hand back [`Change`]s for the app to make.
+//!
+//! An automated fader, pan or send shows the value its automation gives it
+//! at the playhead, with a dot in the automation's colour, grey once
+//! someone overrode it. Its context menu shows its automation lane, clears
+//! the automation, or re-enables it.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -17,9 +22,12 @@ use egui::{
     WidgetInfo, pos2, vec2,
 };
 use musicable_commands::mixer::Change;
+use musicable_commands::{Args, automation};
 use musicable_model::mixer::Bus;
+use musicable_model::param::ParamAddress;
+use musicable_model::time::Beats;
 use musicable_model::{
-    AudioInput, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
 };
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
@@ -106,14 +114,16 @@ const MARKS: [f32; 6] = [6.0, 0.0, -6.0, -12.0, -24.0, -48.0];
 const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and File > New Demo \
                          Project has a dozen test tones.";
 
-/// Shows the mixer for `project`, with the meters reading `levels` and the
-/// input menus offering `inputs`, and adds what the user changed to
-/// `actions`.
+/// Shows the mixer for `project`, with the meters reading `levels`, the
+/// input menus offering `inputs` and automated controls where `playhead`
+/// has them, and adds what the user changed to `actions`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ui: &mut Ui,
     project: &Project,
     levels: &Levels,
     inputs: Choices<'_>,
+    playhead: Beats,
     theme: &Theme,
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
@@ -133,6 +143,7 @@ pub(crate) fn show(
         project,
         returns,
         inputs,
+        playhead,
         fader,
         theme,
         mouse,
@@ -177,6 +188,8 @@ struct Mixer<'a> {
     returns: Vec<&'a Track>,
     /// The inputs the input menus offer.
     inputs: Choices<'a>,
+    /// Where automated controls show their automation's value.
+    playhead: Beats,
     /// How tall the faders are.
     fader: f32,
     theme: &'a Theme,
@@ -222,14 +235,22 @@ impl Mixer<'_> {
                     }
                 });
             }
+            let (volume, pan) = (
+                ParamAddress::Volume(Chain::Track(id)),
+                ParamAddress::Pan(Chain::Track(id)),
+            );
             self.row(ui, |ui| {
-                let pan = self.pan_control(ui, track.pan, &format!("{name} Pan"));
-                moved(pan, actions, |pan| Change::Pan(id, pan));
+                let shown = self.shown(pan, track.pan);
+                let control = self.pan_control(ui, shown, &format!("{name} Pan"));
+                self.automated(ui, &control.0, pan, actions);
+                moved(control, actions, |pan| Change::Pan(id, pan));
             });
-            let fader = self.channel(ui, track.gain, level, name);
+            let gain = self.shown(volume, track.gain);
+            let fader = self.channel(ui, gain, level, name);
+            self.automated(ui, &fader.0, volume, actions);
             moved(fader, actions, |gain| Change::Gain(id, gain));
             self.row(ui, |ui| {
-                self.readouts(ui, track.gain, level.highest, name, actions, |gain| {
+                self.readouts(ui, gain, level.highest, name, actions, |gain| {
                     Change::Gain(id, gain)
                 });
             });
@@ -253,16 +274,24 @@ impl Mixer<'_> {
             for _ in 0..3 + self.returns.len() {
                 self.row(ui, |_| ());
             }
+            let (volume, pan) = (
+                ParamAddress::Volume(Chain::Master),
+                ParamAddress::Pan(Chain::Master),
+            );
             self.row(ui, |ui| {
-                let pan = self.pan_control(ui, master.pan, "Master Pan");
-                moved(pan, actions, Change::MasterPan);
+                let shown = self.shown(pan, master.pan);
+                let control = self.pan_control(ui, shown, "Master Pan");
+                self.automated(ui, &control.0, pan, actions);
+                moved(control, actions, Change::MasterPan);
             });
-            let fader = self.channel(ui, master.gain, level, "Master");
+            let gain = self.shown(volume, master.gain);
+            let fader = self.channel(ui, gain, level, "Master");
+            self.automated(ui, &fader.0, volume, actions);
             moved(fader, actions, Change::MasterGain);
             self.row(ui, |ui| {
                 self.readouts(
                     ui,
-                    master.gain,
+                    gain,
                     level.highest,
                     "Master",
                     actions,
@@ -683,11 +712,16 @@ impl Mixer<'_> {
     fn send(&self, ui: &mut Ui, track: &Track, to: &Track, actions: &mut Vec<Action>) {
         let sizes = self.sizes();
         let send = track.sends.iter().find(|send| send.to == to.id);
-        let (level, pre_fader) = send.map_or((0.0, false), |send| (send.level, send.pre_fader));
+        let (level, pre_fader) = send.map_or((0.0, false), |send| {
+            let level = self.shown(ParamAddress::Send(send.id), send.level);
+            (level, send.pre_fader)
+        });
         let label = format!("{} Send to {}", track.name, to.name);
         let width = sizes.inner() - sizes.gap - sizes.pre_button;
         let control = self.send_control(ui, level, &to.name, &label, width);
-        if send.is_some() {
+        if let Some(send) = send {
+            let param = ParamAddress::Send(send.id);
+            self.mark(ui, &control.0, param);
             control.0.context_menu(|ui| {
                 if ui.button("Remove Send").clicked() {
                     let remove = Change::RemoveSend {
@@ -697,6 +731,8 @@ impl Mixer<'_> {
                     mix(actions, remove);
                     ui.close();
                 }
+                ui.separator();
+                self.automation_items(ui, param, actions);
             });
         }
         moved(control, actions, |level| Change::SendLevel {
@@ -724,6 +760,33 @@ impl Mixer<'_> {
             };
             mix(actions, pre);
         }
+    }
+
+    /// What a control for `param` shows: the value its automation gives it
+    /// at the playhead, unless someone overrode that, or else `own`.
+    fn shown(&self, param: ParamAddress, own: f32) -> f32 {
+        automated_value(self.project, param, self.playhead, f64::from(own)) as f32
+    }
+
+    /// Marks the control `response` if `param` has automation, and gives it
+    /// a menu of the automation's commands.
+    fn automated(
+        &self,
+        ui: &Ui,
+        response: &Response,
+        param: ParamAddress,
+        actions: &mut Vec<Action>,
+    ) {
+        self.mark(ui, response, param);
+        response.context_menu(|ui| self.automation_items(ui, param, actions));
+    }
+
+    fn mark(&self, ui: &Ui, response: &Response, param: ParamAddress) {
+        automation_mark(ui, self.theme, self.project, response, param);
+    }
+
+    fn automation_items(&self, ui: &mut Ui, param: ParamAddress, actions: &mut Vec<Action>) {
+        automation_items(ui, self.project, param, actions);
     }
 
     /// Mute, solo, and arm for audio and MIDI tracks.
@@ -1178,6 +1241,71 @@ fn paint_level(painter: &Painter, column: Rect, gain: f32, alpha: f32, theme: &T
     }
 }
 
+/// What a control for `param` shows: the value its automation gives it at
+/// `playhead`, unless someone overrode that, or else `own`, its own value.
+pub(crate) fn automated_value(
+    project: &Project,
+    param: ParamAddress,
+    playhead: Beats,
+    own: f64,
+) -> f64 {
+    match project.lane(param) {
+        Some(lane) if !lane.overridden => lane
+            .value_at(playhead, project.param_scale(param))
+            .unwrap_or(own),
+        _ => own,
+    }
+}
+
+/// A dot at the top left of the control `response` if `param` has
+/// automation: in the automation's colour while it follows it, and grey
+/// once someone overrode it.
+pub(crate) fn automation_mark(
+    ui: &Ui,
+    theme: &Theme,
+    project: &Project,
+    response: &Response,
+    param: ParamAddress,
+) {
+    let Some(lane) = project.lane(param) else {
+        return;
+    };
+    let colour = match lane.overridden {
+        true => theme.automation_off,
+        false => theme.automation,
+    };
+    let radius = theme.point;
+    let at = response.rect.left_top() + vec2(radius, radius);
+    ui.painter().circle_filled(at, radius, colour);
+}
+
+/// The commands for `param`'s automation, for a control's menu: showing its
+/// lane, re-enabling it once someone overrode it, and clearing it.
+pub(crate) fn automation_items(
+    ui: &mut Ui,
+    project: &Project,
+    param: ParamAddress,
+    actions: &mut Vec<Action>,
+) {
+    let lane = project.lane(param);
+    let items = [
+        (automation::SHOW_LANE, "Show Automation", true),
+        (
+            automation::RE_ENABLE,
+            "Re-Enable Automation",
+            lane.is_some_and(|lane| lane.overridden),
+        ),
+        (automation::CLEAR, "Clear Automation", lane.is_some()),
+    ];
+    for (command, title, enabled) in items {
+        if ui.add_enabled(enabled, egui::Button::new(title)).clicked() {
+            let args = Args::new().with("param", param);
+            actions.push(Action::RunWith(command, args));
+            ui.close();
+        }
+    }
+}
+
 /// The colour of a meter at `height` of the way up: the colour of the
 /// scale's zone there.
 pub(crate) fn meter_colour(height: f32, theme: &Theme) -> Color32 {
@@ -1241,7 +1369,7 @@ fn clip_hint(clip_type: ClipType) -> &'static str {
 
 /// Names the slider `response` for screen readers, and tells them its
 /// value in `range`. Returns the value one asked it to take.
-fn slider_info(
+pub(crate) fn slider_info(
     ui: &Ui,
     response: &Response,
     label: &str,
@@ -1271,7 +1399,7 @@ fn slider_info(
 }
 
 /// Names the combo box `response` for screen readers, showing `value`.
-fn name_menu(response: &Response, label: String, value: &str) {
+pub(crate) fn name_menu(response: &Response, label: String, value: &str) {
     response.widget_info(|| WidgetInfo {
         current_text_value: Some(value.to_owned()),
         ..WidgetInfo::labeled(Role::ComboBox, true, &label)
@@ -1306,7 +1434,7 @@ fn decibels_of(gain: f32) -> f32 {
 }
 
 /// A linear gain in decibels: "-6.0 dB".
-fn decibels(gain: f32) -> String {
+pub(crate) fn decibels(gain: f32) -> String {
     if gain > 0.0 {
         let db = 20.0 * gain.log10();
         // No "-0.0 dB" for gains a hair under unity.
@@ -1341,7 +1469,7 @@ fn parse_decibels(text: &str) -> Option<f64> {
 }
 
 /// A pan as Live shows it: "C", or from "50L" to "50R".
-fn pan_text(pan: f32) -> String {
+pub(crate) fn pan_text(pan: f32) -> String {
     let amount = (pan.abs() * 50.0).round();
     if amount == 0.0 {
         "C".to_owned()
@@ -1358,7 +1486,9 @@ mod tests {
     use egui::accesskit::Toggled;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::{Document, mixer};
+    use musicable_commands::{CommandId, Document, mixer};
+    use musicable_model::automation::{Lane, Point};
+    use musicable_model::param::Scale;
 
     use super::*;
 
@@ -1369,6 +1499,7 @@ mod tests {
         levels: Levels,
         inputs: Vec<InputChoice>,
         midi: Vec<MidiChoice>,
+        playhead: Beats,
         actions: Vec<Action>,
     }
 
@@ -1392,6 +1523,7 @@ mod tests {
             levels,
             inputs: vec![interface],
             midi: vec![keystep],
+            playhead: Beats::ZERO,
             actions: Vec::new(),
         };
         Harness::builder().with_size([900.0, 600.0]).build_ui_state(
@@ -1408,6 +1540,7 @@ mod tests {
                     project,
                     &state.levels,
                     inputs,
+                    state.playhead,
                     &theme,
                     &mouse,
                     &mut actions,
@@ -1674,6 +1807,78 @@ mod tests {
         ];
         assert_eq!(mixed(&harness), expected);
         assert!(harness.query_by_label("Lead").is_none());
+    }
+
+    #[test]
+    fn automated_controls_show_their_automation_and_its_commands() {
+        let (mut project, [lead, ..]) = project();
+        let volume = ParamAddress::Volume(Chain::Track(lead));
+        let send = ParamAddress::Send(project.track(lead).unwrap().sends[0].id);
+        let pan = ParamAddress::Pan(Chain::Master);
+        let lane = |param, points: &[(i64, f64)]| {
+            let points = points.iter().map(|&(at, v)| Point::new(Beats::new(at), v));
+            Lane::new(param, points.collect())
+        };
+        project.automation = vec![
+            lane(volume, &[(0, 1.0), (8, 0.25)]),
+            lane(send, &[(0, 0.25)]),
+            lane(pan, &[(0, -1.0), (8, 0.0)]),
+        ];
+        let mut harness = harness(project);
+        let value = |harness: &Harness<'_, State>, label: &str| {
+            let node = harness.get_by_role_and_label(Role::Slider, label);
+            node.accesskit_node().numeric_value().unwrap()
+        };
+        // The controls show their automation's values at the playhead.
+        harness.state_mut().playhead = Beats::new(4);
+        harness.run();
+        let project = harness.state().document.project();
+        let at = project
+            .lane(volume)
+            .unwrap()
+            .value_at(Beats::new(4), Scale::Fader);
+        let db = 20.0 * at.unwrap().log10();
+        assert!((value(&harness, "Lead Volume") - db).abs() < 0.01);
+        assert!((value(&harness, "Lead Send to Reverb") + 12.04).abs() < 0.01);
+        assert_eq!(value(&harness, "Master Pan"), -25.0);
+
+        // Their menus show the lane, and clear the automation.
+        let ran = |harness: &Harness<'_, State>, command: CommandId, param: ParamAddress| {
+            let run = Action::RunWith(command, Args::new().with("param", param));
+            harness.state().actions.contains(&run)
+        };
+        harness
+            .get_by_role_and_label(Role::Slider, "Lead Volume")
+            .click_secondary();
+        harness.run();
+        let re_enable = harness.get_by_label("Re-Enable Automation");
+        assert!(re_enable.accesskit_node().is_disabled());
+        harness.get_by_label("Show Automation").click();
+        harness.run();
+        assert!(ran(&harness, automation::SHOW_LANE, volume));
+        harness
+            .get_by_role_and_label(Role::Slider, "Master Pan")
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("Clear Automation").click();
+        harness.run();
+        assert!(ran(&harness, automation::CLEAR, pan));
+
+        // Moved by hand, a control overrides its automation, and holds where
+        // it was moved to until the automation is re-enabled.
+        let node = harness.get_by_role_and_label(Role::Slider, "Lead Volume");
+        node.set_value_accesskit(-12.0);
+        harness.run();
+        let project = harness.state().document.project();
+        assert!(project.lane(volume).unwrap().overridden);
+        assert!((value(&harness, "Lead Volume") + 12.0).abs() < 0.01);
+        harness
+            .get_by_role_and_label(Role::Slider, "Lead Volume")
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("Re-Enable Automation").click();
+        harness.run();
+        assert!(ran(&harness, automation::RE_ENABLE, volume));
     }
 
     #[test]

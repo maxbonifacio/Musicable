@@ -9,12 +9,19 @@
 //! someone turns a knob in its window, comes back from [`Plugins::poll`]
 //! for the session to make into transactions, so undo covers it. The
 //! plugin has those changes already, so they aren't sent back to it.
+//!
+//! The engine sends a plugin the values of its automated parameters as it
+//! plays, so those are left to it: the plugin isn't given their values
+//! here until their automation stops, and the values it reports for them
+//! are the automation's, which don't go into the project. Moving one in the
+//! plugin's window overrides its automation, as moving any control does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
+use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
 use musicable_model::{DeviceId, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
@@ -74,6 +81,9 @@ struct Hosted {
     /// The plugin's state as it started, which a state of `None` stands
     /// for. `None` for a plugin without state.
     fresh: Option<PluginState>,
+    /// The parameters that follow automation, which the engine gives the
+    /// plugin.
+    automated: BTreeSet<u32>,
     /// How many gestures are open in the plugin's window.
     gestures: u32,
     /// The plugin's state changed in a way its parameters don't say, and
@@ -113,25 +123,35 @@ impl Plugins {
 
     /// Brings the instances in line with `project`'s plugin devices: loads
     /// the plugins of new ones, drops the instances of ones that went, and
-    /// gives each plugin the settings that changed. Returns whether a device
-    /// gained or lost its instance, which needs a new graph.
+    /// gives each plugin the settings that changed. Returns whether that
+    /// needs a new graph: a device gained or lost its instance, or a plugin
+    /// with automation loaded a state, which moves the automated parameters
+    /// too, so the engine sends it their values afresh.
     pub fn sync(&mut self, project: &Project) -> bool {
         let devices: BTreeMap<DeviceId, &PluginDevice> = project
             .chains()
             .flat_map(|(_, devices)| devices)
             .filter_map(|d| Some((d.id, d.kind.plugin()?)))
             .collect();
+        let mut automated: BTreeMap<DeviceId, BTreeSet<u32>> = BTreeMap::new();
+        for lane in project.automation.iter().filter(|lane| !lane.overridden) {
+            if let ParamAddress::Device(device, param) = lane.param {
+                automated.entry(device).or_default().insert(param);
+            }
+        }
         let before = self.hosted.len();
         self.hosted.retain(|id, _| devices.contains_key(id));
         self.failed.retain(|id, _| devices.contains_key(id));
         let mut changed = self.hosted.len() != before;
         for (&id, &plugin) in &devices {
+            let automated = automated.remove(&id).unwrap_or_default();
             if let Some(hosted) = self.hosted.get_mut(&id) {
-                if let Err(problem) = hosted.apply(&plugin.settings) {
-                    self.problems.push(problem);
+                match hosted.apply(&plugin.settings, automated) {
+                    Ok(loaded) => changed |= loaded && !hosted.automated.is_empty(),
+                    Err(problem) => self.problems.push(problem),
                 }
             } else if self.installed.is_some() && !self.failed.contains_key(&id) {
-                match self.load(plugin) {
+                match self.load(plugin, automated) {
                     Ok(hosted) => {
                         self.hosted.insert(id, hosted);
                         changed = true;
@@ -146,8 +166,9 @@ impl Plugins {
         changed
     }
 
-    /// Loads `plugin` and gives it its settings.
-    fn load(&mut self, plugin: &PluginDevice) -> Result<Hosted, String> {
+    /// Loads `plugin` and gives it its settings, but for the `automated`
+    /// parameters.
+    fn load(&mut self, plugin: &PluginDevice, automated: BTreeSet<u32>) -> Result<Hosted, String> {
         let name = display_name(plugin);
         let Some(info) = self
             .installed()
@@ -171,10 +192,11 @@ impl Plugins {
             name,
             applied: PluginSettings::default(),
             fresh,
+            automated: BTreeSet::new(),
             gestures: 0,
             dirty: false,
         };
-        if let Err(problem) = hosted.apply(&plugin.settings) {
+        if let Err(problem) = hosted.apply(&plugin.settings, automated) {
             self.problems.push(problem);
         }
         if let Err(e) = hosted.instance.activate(self.config) {
@@ -279,10 +301,20 @@ impl Plugins {
 }
 
 impl Hosted {
-    /// Gives the plugin `settings`, as far as they differ from what it has.
-    fn apply(&mut self, settings: &PluginSettings) -> Result<(), String> {
-        let mut result = Ok(());
+    /// Gives the plugin `settings`, as far as they differ from what it has,
+    /// but for the `automated` parameters, which the engine gives it. A
+    /// parameter whose automation stopped gets its value back. Returns
+    /// whether the plugin loaded a state.
+    fn apply(
+        &mut self,
+        settings: &PluginSettings,
+        automated: BTreeSet<u32>,
+    ) -> Result<bool, String> {
+        let released: BTreeSet<u32> = self.automated.difference(&automated).copied().collect();
+        self.automated = automated;
+        let mut result = Ok(false);
         if settings.state != self.applied.state {
+            result = Ok(true);
             if let Some(state) = settings.state.as_ref().or(self.fresh.as_ref())
                 && let Err(e) = self.instance.load_state(state.bytes())
             {
@@ -299,15 +331,16 @@ impl Hosted {
         let ids: BTreeSet<u32> = (settings.params.iter())
             .chain(&self.applied.params)
             .map(|p| p.id)
+            .chain(released.iter().copied())
             .collect();
-        for id in ids {
-            let base = self.base.get(&id).copied();
-            let wanted = settings.param(id).or(base);
-            let had = self.applied.param(id).or(base);
+        for id in ids.difference(&self.automated) {
+            let base = self.base.get(id).copied();
+            let wanted = settings.param(*id).or(base);
+            let had = self.applied.param(*id).or(base);
             if let Some(value) = wanted
-                && wanted != had
+                && (wanted != had || released.contains(id))
             {
-                self.instance.set_param(id, value);
+                self.instance.set_param(*id, value);
             }
         }
         self.applied.params.clone_from(&settings.params);
@@ -326,6 +359,10 @@ impl Hosted {
                         changes.push(Change::GestureBegin);
                     }
                 }
+                // Automation moving the parameter, or the plugin echoing
+                // it: only someone moving it overrides the automation.
+                PluginEvent::ParamChanged { param, .. }
+                    if self.gestures == 0 && self.automated.contains(&param) => {}
                 PluginEvent::ParamChanged { param, value } => {
                     let had = self.applied.param(param).or(self.base.get(&param).copied());
                     // A plugin can echo a value the host set.
@@ -369,6 +406,9 @@ impl Hosted {
         }
         if self.fresh.is_none() {
             for (id, value) in values(&self.instance) {
+                if self.automated.contains(&id) {
+                    continue;
+                }
                 let had = self.applied.param(id).or(self.base.get(&id).copied());
                 if had != Some(value) {
                     self.applied.set_param(id, Some(value));

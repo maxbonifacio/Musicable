@@ -1,5 +1,5 @@
 use musicable_model::Monitor;
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::TempoMap;
 
 use super::*;
@@ -13,10 +13,26 @@ const CONFIG: EngineConfig = EngineConfig {
     max_block: 64,
 };
 
+/// What `bytes` does to notes, for a message that moves no controller.
 fn take(notes: &mut MidiNotes, bytes: [u8; 3]) -> Vec<NoteEvent> {
-    let mut events = Vec::new();
-    notes.take(bytes, |event| events.push(event));
-    events
+    play(notes, bytes)
+        .into_iter()
+        .map(|played| match played {
+            Played::Note(note) => note,
+            Played::Controller { .. } => panic!("{bytes:?} moves a controller"),
+        })
+        .collect()
+}
+
+/// What `bytes` plays.
+fn play(notes: &mut MidiNotes, bytes: [u8; 3]) -> Vec<Played> {
+    let mut played = Vec::new();
+    notes.take(bytes, |p| played.push(p));
+    played
+}
+
+fn moves(controller: Controller, value: f32) -> Played {
+    Played::Controller { controller, value }
 }
 
 fn on(note: u64, key: u8, velocity: f32) -> NoteEvent {
@@ -238,22 +254,91 @@ fn channel_mode_messages_end_notes_and_reset_expression() {
 }
 
 #[test]
+fn controllers_move_for_every_note_from_any_channel() {
+    let mut notes = MidiNotes::new(None, 0);
+    // The mod wheel on the master channel, the sustain pedal on a member.
+    let wheel = 64.0 / 127.0;
+    assert_eq!(
+        play(&mut notes, [0xB0, 1, 64]),
+        [moves(Controller::MOD_WHEEL, wheel)]
+    );
+    assert_eq!(
+        play(&mut notes, [0xB3, 64, 127]),
+        [moves(Controller::SUSTAIN, 1.0)]
+    );
+    // Slide is a note's expression, data entry and parameter numbers set
+    // parameters, and channel mode messages aren't controllers.
+    for bytes in [
+        [0xB1, 74, 10],
+        [0xB0, 101, 0],
+        [0xB0, 100, 0],
+        [0xB0, 6, 48],
+        [0xB0, 38, 0],
+        [0xB0, 96, 1],
+        [0xB0, 99, 1],
+        [0xB0, 123, 0],
+        [0xB0, 127, 0],
+    ] {
+        assert_eq!(play(&mut notes, bytes), [], "{bytes:?}");
+    }
+    let held = |notes: &MidiNotes| notes.controllers().collect::<Vec<_>>();
+    assert_eq!(
+        held(&notes),
+        [(Controller::MOD_WHEEL, wheel), (Controller::SUSTAIN, 1.0)]
+    );
+    // Reset All Controllers lets go of the switches held on, on any
+    // channel, and leaves the rest where they are.
+    assert_eq!(
+        play(&mut notes, [0xB5, 121, 0]),
+        [moves(Controller::SUSTAIN, 0.0)]
+    );
+    assert_eq!(play(&mut notes, [0xB5, 121, 0]), []);
+    assert_eq!(
+        held(&notes),
+        [(Controller::MOD_WHEEL, wheel), (Controller::SUSTAIN, 0.0)]
+    );
+
+    // Taking one channel, it takes that channel's alone.
+    let mut one = MidiNotes::new(Some(2), 0);
+    assert_eq!(play(&mut one, [0xB3, 64, 127]), []);
+    assert_eq!(
+        play(&mut one, [0xB2, 64, 127]),
+        [moves(Controller::SUSTAIN, 1.0)]
+    );
+}
+
+#[test]
 fn notes_held_can_be_let_go_or_forgotten() {
     let mut notes = MidiNotes::new(None, 0);
     take(&mut notes, [0x90, 60, 127]);
     take(&mut notes, [0x95, 61, 127]);
+    play(&mut notes, [0xB0, 64, 127]);
+    // Letting go lets go of the sustain pedal too, so nothing rings on.
     let mut released = Vec::new();
     notes.release_all(|event| released.push(event));
-    assert_eq!(released, [off(0, RELEASE), off(1, RELEASE)]);
+    assert_eq!(
+        released,
+        [
+            Played::Note(off(0, RELEASE)),
+            Played::Note(off(1, RELEASE)),
+            moves(Controller::SUSTAIN, 0.0)
+        ]
+    );
     assert_eq!(take(&mut notes, [0x80, 60, 0]), []);
+    // It still knows the pedal is down, as it is.
+    assert_eq!(
+        notes.controllers().collect::<Vec<_>>(),
+        [(Controller::SUSTAIN, 1.0)]
+    );
 
     take(&mut notes, [0x90, 60, 127]);
     notes.forget_notes();
     assert_eq!(take(&mut notes, [0x80, 60, 0]), []);
 }
 
-/// Plays notes at set engine times, as a clip player does.
-struct Clips(Vec<(u64, NoteEvent)>);
+/// Plays notes and moves controllers at set engine times, as a clip player
+/// does.
+struct Clips(Vec<(u64, NodeEventKind)>);
 
 impl Node for Clips {
     fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
@@ -262,23 +347,48 @@ impl Node for Clips {
 
     fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
         let block = ctx.time..ctx.time + ctx.frames as u64;
-        for &(time, note) in &self.0 {
-            if block.contains(&time) {
-                notes.send((time - ctx.time) as usize, note);
+        for &(time, kind) in &self.0 {
+            if !block.contains(&time) {
+                continue;
             }
+            let offset = (time - ctx.time) as usize;
+            match kind {
+                NodeEventKind::Note(note) => notes.send(offset, note),
+                NodeEventKind::Controller { controller, value } => {
+                    notes.send_controller(offset, controller, value)
+                }
+                _ => continue,
+            };
         }
     }
 }
 
-/// Keeps the notes it gets, at their engine times, as an instrument would
-/// play them.
-struct Keep(Vec<(u64, NoteEvent)>);
+/// Keeps the notes it gets and the controllers' moves, at their engine
+/// times, as an instrument would play them.
+struct Keep {
+    notes: Vec<(u64, NoteEvent)>,
+    moves: Vec<(u64, Controller, f32)>,
+}
+
+impl Keep {
+    fn new() -> Self {
+        Self {
+            notes: Vec::with_capacity(64),
+            moves: Vec::with_capacity(64),
+        }
+    }
+}
 
 impl Node for Keep {
     fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
         for event in ctx.events {
-            if let NodeEventKind::Note(note) = event.kind {
-                self.0.push((ctx.time + event.offset as u64, note));
+            let time = ctx.time + event.offset as u64;
+            match event.kind {
+                NodeEventKind::Note(note) => self.notes.push((time, note)),
+                NodeEventKind::Controller { controller, value } => {
+                    self.moves.push((time, controller, value));
+                }
+                _ => {}
             }
         }
         output.clear();
@@ -297,11 +407,11 @@ struct Rig {
 const MONITOR: NodeId = NodeId(1);
 const INSTRUMENT: NodeId = NodeId(2);
 
-fn graph(monitor: MidiMonitor, clips: Vec<(u64, NoteEvent)>) -> PreparedGraph {
+fn graph(monitor: MidiMonitor, clips: Vec<(u64, NodeEventKind)>) -> PreparedGraph {
     let mut g = Graph::new();
     let player = g.add(NodeKey(0), Clips(clips));
     let monitor = g.add(NodeKey(1), monitor);
-    let instrument = g.add(NodeKey(2), Keep(Vec::with_capacity(64)));
+    let instrument = g.add(NodeKey(2), Keep::new());
     assert_eq!((monitor, instrument), (MONITOR, INSTRUMENT));
     g.send_notes(player, monitor).unwrap();
     g.send_notes(monitor, instrument).unwrap();
@@ -310,7 +420,14 @@ fn graph(monitor: MidiMonitor, clips: Vec<(u64, NoteEvent)>) -> PreparedGraph {
 }
 
 impl Rig {
+    /// With clips that play `clips`' notes.
     fn new(monitor: MidiMonitor, clips: Vec<(u64, NoteEvent)>) -> Self {
+        let clips = clips.into_iter().map(|(t, n)| (t, NodeEventKind::Note(n)));
+        Self::with_clips(monitor, clips.collect())
+    }
+
+    /// With clips that play `clips`, notes and controllers.
+    fn with_clips(monitor: MidiMonitor, clips: Vec<(u64, NodeEventKind)>) -> Self {
         Self {
             graph: graph(monitor, clips),
             time: 0,
@@ -353,11 +470,19 @@ impl Rig {
         self.graph = new;
     }
 
+    fn instrument(&mut self) -> &mut Keep {
+        let node = self.graph.nodes[INSTRUMENT.0].as_mut();
+        node.downcast_mut::<Keep>().unwrap()
+    }
+
     /// The notes the instrument got since this was last asked.
     fn kept(&mut self) -> Vec<(u64, NoteEvent)> {
-        let node = self.graph.nodes[INSTRUMENT.0].as_mut();
-        let keep = node.downcast_mut::<Keep>().unwrap();
-        std::mem::replace(&mut keep.0, Vec::with_capacity(64))
+        std::mem::replace(&mut self.instrument().notes, Vec::with_capacity(64))
+    }
+
+    /// The controllers' moves the instrument got since this was last asked.
+    fn moved(&mut self) -> Vec<(u64, Controller, f32)> {
+        std::mem::replace(&mut self.instrument().moves, Vec::with_capacity(64))
     }
 }
 
@@ -583,4 +708,100 @@ fn a_swap_keeps_notes_held_on_the_same_input_and_ends_the_rest() {
             (330, on(LIVE_NOTES + 4, 67, 1.0))
         ]
     );
+}
+
+/// A controller's move, as a clip player sends it.
+fn controller(controller: Controller, value: f32) -> NodeEventKind {
+    NodeEventKind::Controller { controller, value }
+}
+
+#[test]
+fn controllers_go_on_from_the_input_and_the_clips_as_their_notes_do() {
+    let (wheel, pedal) = (Controller::MOD_WHEEL, Controller::SUSTAIN);
+    let clips = vec![(5, controller(wheel, 0.5)), (30, controller(pedal, 1.0))];
+    let midi = [
+        message(10, 0, [0xB0, 64, 127]),
+        message(40, 0, [0xB0, 1, 0]),
+    ];
+    // The input with In, the clips with Off, and both armed with Auto.
+    for (mode, armed, input, clip) in [
+        (Monitor::In, false, true, false),
+        (Monitor::Off, true, false, true),
+        (Monitor::Auto, true, true, true),
+    ] {
+        let mut rig = Rig::with_clips(monitor(mode, armed), clips.clone());
+        rig.transport = playing(false);
+        rig.block(&midi);
+        let mut expected = Vec::new();
+        if clip {
+            expected.push((5, wheel, 0.5));
+        }
+        if input {
+            expected.push((10, pedal, 1.0));
+        }
+        if clip {
+            expected.push((30, pedal, 1.0));
+        }
+        if input {
+            expected.push((40, wheel, 0.0));
+        }
+        assert_eq!(rig.moved(), expected, "{mode:?}");
+    }
+}
+
+#[test]
+fn switches_held_are_let_go_when_what_holds_them_stops_playing() {
+    let (wheel, pedal) = (Controller::MOD_WHEEL, Controller::SUSTAIN);
+    // The input's pedal, down as the track is disarmed, which takes effect
+    // from the next block. Its mod wheel stays where it was.
+    let mut rig = Rig::new(monitor(Monitor::Auto, true), Vec::new());
+    rig.block(&[
+        message(10, 0, [0xB0, 64, 127]),
+        message(20, 0, [0xB0, 1, 127]),
+    ]);
+    rig.set(MidiMonitor::ARMED, 0.0);
+    rig.block(&[]);
+    rig.block(&[]);
+    assert_eq!(
+        rig.moved(),
+        [(10, pedal, 1.0), (20, wheel, 1.0), (128, pedal, 0.0)]
+    );
+
+    // The clips' pedal, down as recording starts over them. Once it stops,
+    // the clips' controllers go back to what the clips hold, through a
+    // swap too.
+    let clips = vec![
+        (10, controller(pedal, 1.0)),
+        (20, controller(wheel, 0.25)),
+        (100, controller(wheel, 0.75)),
+    ];
+    let mut rig = Rig::with_clips(monitor(Monitor::Auto, true), clips);
+    rig.transport = playing(false);
+    rig.block(&[]);
+    rig.transport = playing(true);
+    rig.block(&[]);
+    assert_eq!(
+        rig.moved(),
+        [(10, pedal, 1.0), (20, wheel, 0.25), (64, pedal, 0.0)]
+    );
+    rig.swap(monitor(Monitor::Auto, true));
+    rig.transport = playing(false);
+    rig.block(&[]);
+    assert_eq!(rig.moved(), [(128, wheel, 0.75), (128, pedal, 1.0)]);
+
+    // A pedal held on an input the track no longer takes is let go as the
+    // new graph starts, as its notes end.
+    let from = |input| {
+        let source = MidiSource {
+            input,
+            channel: None,
+        };
+        MidiMonitor::new(Monitor::In, false).with_source(source)
+    };
+    let mut rig = Rig::new(from(Some(0)), Vec::new());
+    rig.block(&[message(10, 0, [0xB0, 64, 127])]);
+    assert_eq!(rig.moved(), [(10, pedal, 1.0)]);
+    rig.swap(from(Some(1)));
+    rig.block(&[]);
+    assert_eq!(rig.moved(), [(64, pedal, 0.0)]);
 }
