@@ -10,6 +10,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
+use musicable_model::automation::Lane;
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
@@ -1211,6 +1212,62 @@ fn automation_lanes_show_under_their_tracks_and_edit_as_breakpoints() {
     harness.run();
     assert!(harness.query_by_label(lane).is_none());
     assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_dragged_point_stays_where_it_was_let_go() {
+    let (mut project, ids) = project();
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let set = vec![
+        Point::new(Beats::new(4), 1.0),
+        Point::new(Beats::new(12), 0.0),
+    ];
+    project.automation.push(Lane::new(volume, set));
+    let mut harness = harness(project);
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    let (lane, spec) = ("Volume of Drums", ParamSpec::volume());
+    let area = across(&harness, lane);
+    let drawn = |harness: &Harness<'_, State>| -> Vec<Pos2> {
+        (painted(harness).into_iter())
+            .filter_map(|shape| match shape {
+                Shape::Circle(circle) if area.contains(circle.center) => Some(circle.center),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The frame that lets go draws the point where the drag left it, though
+    // the app moves it only after the frame, and so do the frames after.
+    let half = spec.scale.from_unit(0.5, spec.min, spec.max);
+    let from = on_lane(&harness, lane, &spec, 12.0, 0.0);
+    let to = on_lane(&harness, lane, &spec, 8.0, half);
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true, Modifiers::NONE);
+    for step in 1..=4 {
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.run();
+    }
+    let dragged = drawn(&harness);
+    assert_eq!(dragged.len(), 2);
+    assert!(
+        (dragged[1] - to).length() < 1.0,
+        "{dragged:?}, dragged to {to:?}"
+    );
+    harness.event(Event::PointerButton {
+        pos: to,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    harness.step();
+    assert_eq!(drawn(&harness), dragged);
+    harness.run();
+    assert_eq!(drawn(&harness), dragged);
+    assert_eq!(points(&harness, volume)[1].0, Beats::new(8));
 }
 
 #[test]
