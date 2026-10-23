@@ -1926,6 +1926,7 @@ dependencies = [
 name = "musicable-commands"
 version = "0.2.0"
 dependencies = [
+ "musicable-io",
  "musicable-model",
  "proptest",
  "serde",

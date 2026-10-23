@@ -12,6 +12,9 @@ serde.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# The undo tests check that each project a step makes saves, and loads back
+# as it was.
+musicable-io.workspace = true
 proptest.workspace = true
 
 [lints]
