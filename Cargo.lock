@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "musicable-engine",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-commands"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "musicable-model",
  "proptest",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "musicable-model",
@@ -1945,7 +1945,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "claxon",
@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "memchr",
  "musicable-io",
@@ -1969,11 +1969,11 @@ dependencies = [
 
 [[package]]
 name = "musicable-model"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "musicable-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-sys",
  "libloading 0.9.0",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-test-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-sys",
  "libloading 0.9.0",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "musicable-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui",
  "egui_kittest",

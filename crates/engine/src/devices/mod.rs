@@ -269,3 +269,33 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use musicable_model::native::NativeDevice;
+
+    use super::testing::{Run, param};
+    use super::{BUILT, node};
+
+    /// A swap sends a device every value set on it again, all on the next
+    /// block's first frame, so a device gets spans with an event and no
+    /// frames: every kind takes them in its stride.
+    #[test]
+    fn every_device_takes_events_on_the_same_frame() {
+        for &kind in BUILT {
+            let device = NativeDevice::new(kind);
+            let mut run = Run::new(node(&device, None).unwrap()).with_block(64);
+            let set = |at: usize, p: usize| param(at, p, device.values[p]);
+            let count = device.values.len();
+            let mut events: Vec<_> = (0..count).map(|p| set(0, p)).collect();
+            events.extend((0..count.min(3)).map(|p| set(40, p)));
+            events.extend((0..count.min(2)).map(|p| set(63, p)));
+            let input: Vec<f32> = (0..128).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
+            let output = run.render(&[input.clone(), input], &events);
+            for channel in &output {
+                assert_eq!(channel.len(), 128, "{kind:?}");
+                assert!(channel.iter().all(|s| s.is_finite()), "{kind:?}");
+            }
+        }
+    }
+}

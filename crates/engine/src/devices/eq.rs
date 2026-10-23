@@ -57,6 +57,10 @@ impl Node for Equalizer {
             sample_rate,
         } = self;
         params.run(ctx, |span| {
+            // Events on one frame make spans with no frames: nothing to do.
+            if span.frames.is_empty() {
+                return;
+            }
             let mut out = output.range_mut(span.frames.clone());
             for (b, band) in bands.iter_mut().enumerate() {
                 band.render(b, &span, &mut out, *sample_rate);
@@ -111,15 +115,12 @@ const FLAT: musicable_model::native::eq::Section = musicable_model::native::eq::
 };
 
 impl BandFilter {
-    /// Filters one span of the output in place as band `b`. A frame comes
-    /// out the same whichever way it goes, so the band sounds the same
-    /// however the blocks fall.
+    /// Filters one span of the output, which has a frame, in place as band
+    /// `b`. A frame comes out the same whichever way it goes, so the band
+    /// sounds the same however the blocks fall.
     fn render(&mut self, b: usize, span: &Span<'_>, out: &mut AudioMut<'_>, sample_rate: f64) {
         let values = span.values;
         let param = |p: usize| b * PER_BAND + p;
-        if span.frames.is_empty() {
-            return;
-        }
         let on = values.frames(param(ON));
         if values.steady(param(ON)) && on[0] == 0.0 {
             // Off, it starts afresh when it's next turned on.

@@ -725,7 +725,11 @@ parameters in `devices::Params`, which works each one out for every frame:
   without its ramp, or with automation the lane's value on the frame,
   without the glide after a jump (`automation::Param::render_with_targets`).
   An event applies before the span it starts, which gets the event too, for
-  a note or a note's modulation.
+  a note or a note's modulation. So events on one frame make spans without
+  frames, which every kind takes in its stride: a swap sends a node every
+  value set on it again, all on the next block's first frame
+  ([Graph swaps](#graph-swaps)), and `devices::tests` sends each kind
+  such spans.
 
 So a change or a modulation lands on its frame, and a device renders the
 same samples however the blocks fall, and on any thread: the parallel
@@ -1120,7 +1124,9 @@ These still hold for anything else that drives the engine.
 with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
 
-**Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
-where plugins, delay compensation, automation and recording go in the
-engine, and what's missing for them. The mixer and clips are built (see
-[The mixer](#the-mixer) and [Clips](#clips)).
+**Tier 1.** Done: [architecture.md](architecture.md#what-tier-1-built)
+says where each part is.
+
+**Tier 2.** [architecture.md](architecture.md#where-tier-2-starts) says
+where its parts go, in the engine and around it, and what Tier 1 left for
+them, such as the room for modulators and console mode.
