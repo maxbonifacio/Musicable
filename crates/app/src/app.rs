@@ -1,27 +1,32 @@
 //! The window: the UI crate's shell, wired to the session, the audio device
 //! and the project's file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Request, arrange};
+use musicable_commands::{Args, CommandError, Focus, Request, arrange, browser, device};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
+use musicable_library::Queue;
+use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
-use musicable_plugins::{PluginInfo, Waker};
+use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
-    PluginEntry, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, PIANO_ROLL,
+    Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::audio_window::AudioWindow;
+use crate::export::{self, Export, ExportSettings, Job, Report};
+use crate::export_window::{Asked, ExportWindow};
 use crate::keymap_file::UserKeymap;
+use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
@@ -34,8 +39,8 @@ const STOPPED_FRAME: Duration = Duration::from_millis(250);
 /// How often the app looks for a graph while one compiles, to send it to the
 /// engine soon after it's ready.
 const COMPILING_FRAME: Duration = Duration::from_millis(5);
-/// The audio files the Import Audio dialog shows. The app reads a file by
-/// what's in it, whatever it's called.
+/// The audio files the Import Audio and Load Sample dialogs show. The app
+/// reads a file by what's in it, whatever it's called.
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"];
 
 /// The app's window, and everything it drives.
@@ -49,6 +54,8 @@ pub struct App {
     plugin_entries: Vec<PluginEntry>,
     /// How each plugin device's plugin is doing, as of this frame.
     plugin_status: BTreeMap<DeviceId, PluginStatus>,
+    /// The parameters automation can move, for each loaded plugin.
+    plugin_params: BTreeMap<DeviceId, Listed>,
     output: Output,
     /// The output's stream whose inputs the session has.
     inputs_started: u64,
@@ -63,6 +70,11 @@ pub struct App {
     files_found: Option<u64>,
     keys: KeyPresses,
     audio_window: AudioWindow,
+    export_window: ExportWindow,
+    /// The export under way, if one is.
+    export: Option<Export>,
+    /// Where the last export went, where the next one's dialog starts.
+    export_folder: Option<PathBuf>,
     /// The project's file, once it has one.
     path: Option<PathBuf>,
     /// Where the file dialogs start: the folder a project was last opened
@@ -142,6 +154,17 @@ impl App {
         session.editor_mut().behaviour = settings.behaviour;
         session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_waker(waker(ctx));
+        // The browser's library, whose file work runs on a queue of its own.
+        let queue = Arc::new(Queue::for_this_machine());
+        let library_file = config_dir.as_ref().map(|dir| dir.join(LIBRARY_FILE));
+        let presets = (settings.browser.presets_folder.clone()).or_else(library::presets_folder);
+        session.set_library(Library::open(
+            library_file,
+            presets,
+            queue,
+            Some(waker(ctx)),
+        ));
+        session.set_preview_gain(settings.browser.preview_gain());
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         // What the last scan found, while the next one runs. Before the
         // first, plugin devices wait for it.
@@ -152,6 +175,7 @@ impl App {
             plugin_scan,
             plugin_entries: Vec::new(),
             plugin_status: BTreeMap::new(),
+            plugin_params: BTreeMap::new(),
             output,
             inputs_started: 0,
             input_choices: Vec::new(),
@@ -161,6 +185,9 @@ impl App {
             files_found: None,
             keys: KeyPresses::new(),
             audio_window: AudioWindow::new(),
+            export_window: ExportWindow::new(),
+            export: None,
+            export_folder: None,
             path,
             folder,
             messages,
@@ -205,7 +232,8 @@ impl App {
         self.session.set_installed_plugins(installed);
     }
 
-    /// How each plugin device's plugin is doing, for the devices panel.
+    /// How each plugin device's plugin is doing, for the devices panel, and
+    /// its parameters, for automation lanes.
     fn update_plugin_status(&mut self) {
         self.plugin_status.clear();
         let devices = self
@@ -215,14 +243,33 @@ impl App {
             .flat_map(|(_, devices)| devices);
         for device in devices.filter(|d| d.kind.plugin().is_some()) {
             let instance = self.session.plugin(device.id);
+            let params = match instance {
+                Some(instance) => {
+                    let list = instance.params();
+                    let from = (list.as_ptr() as usize, list.len());
+                    let listed = self.plugin_params.entry(device.id).or_default();
+                    if listed.from != from {
+                        *listed = Listed {
+                            from,
+                            params: automatable(list),
+                        };
+                    }
+                    listed.params.clone()
+                }
+                None => Arc::default(),
+            };
             let status = PluginStatus {
                 loaded: instance.is_some(),
                 has_window: instance.is_some_and(|i| i.has_window()),
                 window_open: self.plugin_windows.is_open(device.id),
                 problem: self.session.plugin_problem(device.id).map(str::to_owned),
+                params,
             };
             self.plugin_status.insert(device.id, status);
         }
+        let status = &self.plugin_status;
+        self.plugin_params
+            .retain(|device, _| status.get(device).is_some_and(|status| status.loaded));
     }
 
     /// The project's name: its file's name without the extension.
@@ -274,6 +321,16 @@ impl App {
             // file doesn't exist yet.
             Action::CreateKeymap => self.keymap_file.save(self.session.keymap()),
             Action::ResetDropouts => self.output.reset_dropouts(),
+            Action::SetAutoPreview(on) => {
+                self.settings.browser.auto_preview = on;
+                self.save_settings();
+            }
+            Action::SetPreviewVolume(volume) => {
+                self.settings.browser.preview_volume = volume;
+                self.session
+                    .set_preview_gain(self.settings.browser.preview_gain());
+                self.save_settings();
+            }
             Action::DismissMessages => self.messages.clear(),
         }
         self.handle_requests(ctx, frame);
@@ -330,7 +387,24 @@ impl App {
                     self.insert_audio(files, None, None);
                 }
             }
-            Request::TogglePanel(panel) => self.shell.toggle_panel(panel),
+            Request::ExportAudio => self.export_window.open(
+                &self.settings.export,
+                self.session.project(),
+                self.session.editor(),
+                self.export.is_some(),
+            ),
+            Request::TogglePanel(panel) => {
+                self.shell.toggle_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::ShowPanel(panel) => {
+                self.shell.show_panel(panel);
+                self.focus_in_sight();
+            }
+            Request::SwitchDevicesPianoRoll => {
+                self.shell.switch_devices_piano_roll();
+                self.focus_in_sight();
+            }
             Request::Rename(named) => self.shell.rename(named),
             Request::PluginWindow { device, show: true } => {
                 self.show_plugin_window(device, ctx, frame);
@@ -341,6 +415,48 @@ impl App {
             } => self.plugin_windows.hide(&mut self.session, device),
             Request::RescanPlugins => self.scan_plugins(true, ctx),
             Request::Capture => self.session.capture(),
+            Request::LoadSample(device) => {
+                if let Some(path) = self.audio_dialog(frame).pick_file() {
+                    self.set_sample(device, &path);
+                }
+            }
+            Request::AddLibraryFolder => self.add_library_folder(frame),
+            Request::FocusBrowserSearch => self.shell.focus_browser_search(),
+        }
+    }
+
+    /// Gives the sampler `device` the audio file at `path`, through
+    /// [`device::SET_SAMPLE`]. The sampler reads it when the graph is
+    /// built, and the status bar says if it can't.
+    fn set_sample(&mut self, device: DeviceId, path: &Path) {
+        let file = clip_path(path, self.project_folder());
+        let args = Args::new().with("device", device).with("file", file);
+        if let Err(error) = self.session.run_with(&device::SET_SAMPLE, &args) {
+            self.messages
+                .push(format!("Couldn't load the sample: {error}."));
+        }
+    }
+
+    /// Asks for a folder of samples, and adds it to the browser's library.
+    fn add_library_folder(&mut self, frame: &eframe::Frame) {
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .set_title("Add Folder to Library");
+        let Some(folder) = dialog.pick_folder() else {
+            return;
+        };
+        let args = Args::new().with("folder", folder.to_string_lossy().as_ref());
+        if let Err(error) = self.session.run_with(&browser::ADD_FOLDER, &args) {
+            self.messages.push(capital(&format!("{error}.")));
+        }
+    }
+
+    /// Gives the arrangement the focus when the piano roll has it but is
+    /// hidden, so the keys act on what's in sight.
+    fn focus_in_sight(&mut self) {
+        let editor = self.session.editor_mut();
+        if editor.focus == Focus::PianoRoll && !self.shell.panel_shown(PIANO_ROLL) {
+            editor.focus = Focus::Arrangement;
         }
     }
 
@@ -460,6 +576,88 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Asks where to export `range` of the song with `settings`, the tracks
+    /// `tracks` on their own if the settings want stems, and starts the
+    /// export. The settings are kept for the next one.
+    fn start_export(
+        &mut self,
+        range: BeatRange,
+        settings: ExportSettings,
+        tracks: &BTreeSet<TrackId>,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        let format = settings.format;
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .add_filter(format.name(), format.extensions())
+            .set_file_name(format!("{}.{}", self.name(), format.extensions()[0]));
+        let folder = self.export_folder.as_deref();
+        let dialog = match folder.or(self.project_folder()).or(self.folder.as_deref()) {
+            Some(folder) => dialog.set_directory(folder),
+            None => dialog,
+        };
+        if let Some(file) = dialog.save_file() {
+            self.export_to(&file, range, settings, tracks, ctx);
+        }
+    }
+
+    /// Exports as [`start_export`](Self::start_export) does, once the
+    /// dialog has said where: to `file`, and the stems next to it.
+    fn export_to(
+        &mut self,
+        file: &Path,
+        range: BeatRange,
+        settings: ExportSettings,
+        tracks: &BTreeSet<TrackId>,
+        ctx: &egui::Context,
+    ) {
+        self.export_folder = file.parent().map(Path::to_owned);
+        self.settings.export = settings;
+        self.save_settings();
+        let project = self.session.saved_project();
+        let (mixdown, stems) = export::files_for(file, &project, &settings, tracks);
+        let job = Job {
+            project,
+            folder: self.project_folder().map(Path::to_owned),
+            range,
+            settings,
+            config: self.session.engine_config(),
+            installed: self.session.installed_plugins().to_vec(),
+            waker: Some(waker(ctx)),
+            mixdown,
+            stems,
+        };
+        match Export::start(job) {
+            Ok(export) => self.export = Some(export),
+            Err(error) => self.export_window.finished(Report {
+                failed: Some(error),
+                ..Report::default()
+            }),
+        }
+    }
+
+    /// Carries the export under way on, and once it's finished, says how it
+    /// went.
+    fn tick_export(&mut self) {
+        let Some(export) = &mut self.export else {
+            return;
+        };
+        export.tick();
+        let Some(report) = export.report().cloned() else {
+            return;
+        };
+        self.export = None;
+        let message = match (&report.failed, report.cancelled, report.files.len()) {
+            (Some(failed), ..) => format!("The export stopped: {failed}."),
+            (None, true, _) => "The export was cancelled.".to_owned(),
+            (None, false, 1) => format!("Exported {}.", report.files[0].path.display()),
+            (None, false, files) => format!("Exported {files} files."),
+        };
+        self.messages.push(message);
+        self.export_window.finished(report);
     }
 
     /// A dialog for picking a project file, in the folder of the last one.
@@ -627,6 +825,8 @@ impl App {
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
+    /// A key whose command doesn't apply now goes on to egui: with no notes
+    /// selected, the arrow keys move the keyboard focus between controls.
     /// While the keyboard shortcuts window waits for the keys to give a
     /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
@@ -641,7 +841,7 @@ impl eframe::App for App {
         // commands while the command palette is open either.
         let asking = self.pending.is_some() || self.shell.asking();
         self.keys.take(ctx, input, |chord, repeat| {
-            if asking || session.keymap().lookup(chord).is_none() {
+            if asking || !session.takes_key(chord) {
                 return false;
             }
             if !repeat {
@@ -658,6 +858,7 @@ impl eframe::App for App {
         }
         self.session.tick();
         self.plugin_windows.tick(&mut self.session);
+        self.tick_export();
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         self.follow_inputs();
@@ -675,11 +876,20 @@ impl eframe::App for App {
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
-        } else if self.session.stats().playing || metering {
+        } else if self.session.stats().playing || self.session.stats().preview.is_some() || metering
+        {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
         };
+        // The export's progress, and its session, which sends its engine
+        // the graphs as they compile.
+        if let Some(export) = &self.export {
+            frame = frame.min(match export.stage() {
+                export::Stage::Preparing { .. } => COMPILING_FRAME,
+                _ => PLAYING_FRAME,
+            });
+        }
         // A plugin's timer.
         if let Some(due) = self.session.next_plugin_timer() {
             frame = frame.min(due.saturating_duration_since(Instant::now()));
@@ -706,6 +916,9 @@ impl eframe::App for App {
         let details = self.output.details();
         let name = self.name();
         let recordings = recordings(&self.session);
+        let library = self.session.library();
+        let scanning = library.scanning();
+        let (found, total) = library.found();
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -746,6 +959,32 @@ impl eframe::App for App {
                 scanning: self.plugin_scan.is_running(),
                 status: &self.plugin_status,
             },
+            native: musicable_engine::devices::BUILT,
+            library: musicable_ui::Library {
+                index: library.index(),
+                loaded: library.is_loaded(),
+                scanning: &scanning,
+                listing: match library.listing() {
+                    Listing::Search(text) => musicable_ui::Listing::Search(text),
+                    Listing::Similar(file) => musicable_ui::Listing::Similar(file),
+                },
+                found,
+                total,
+                presets: library.presets(),
+                finding_presets: library.is_finding_presets(),
+                preview: library
+                    .preview_playing()
+                    .map(|preview| musicable_ui::Preview {
+                        path: &preview.path,
+                        at: (stats.preview)
+                            .filter(|at| at.id == preview.id)
+                            .map(|at| at.frame),
+                        frames: preview.frames,
+                        peaks: preview.peaks.as_deref(),
+                    }),
+                auto_preview: self.settings.browser.auto_preview,
+                preview_volume: self.settings.browser.preview_volume,
+            },
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -754,9 +993,54 @@ impl eframe::App for App {
         if let Some(request) = self.audio_window.show(&ctx, &self.output) {
             self.apply_audio(request);
         }
+        let project = self.session.project();
+        let editor = self.session.editor();
+        let export = self.export.as_ref();
+        match self.export_window.show(&ctx, project, editor, rate, export) {
+            Some(Asked::Export {
+                range,
+                settings,
+                tracks,
+            }) => self.start_export(range, settings, &tracks, &ctx, frame),
+            Some(Asked::Cancel) => {
+                if let Some(export) = &mut self.export {
+                    export.cancel();
+                }
+                self.tick_export();
+            }
+            None => {}
+        }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
     }
+}
+
+/// A plugin's parameters that automation can move, as last listed.
+#[derive(Default)]
+struct Listed {
+    /// Where the plugin kept the list they came from, and how long it was,
+    /// to know when the plugin describes them again.
+    from: (usize, usize),
+    params: Arc<[PluginParam]>,
+}
+
+/// The parameters of `params` automation can move: those the plugin
+/// neither hides nor keeps to itself.
+fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
+    params
+        .iter()
+        .filter(|param| param.automatable && !param.hidden && !param.read_only)
+        .map(|param| PluginParam {
+            id: param.id,
+            spec: ParamSpec {
+                name: param.name.clone(),
+                min: param.min,
+                max: param.max,
+                default: param.default,
+                scale: Scale::Linear,
+            },
+        })
+        .collect()
 }
 
 /// The readings of the meters of `project`'s channels, for the mixer.
@@ -832,6 +1116,12 @@ fn with_extension(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod arranging;
+#[cfg(test)]
+mod browsing;
+#[cfg(test)]
+mod built_in_devices;
+#[cfg(test)]
+mod exporting;
 #[cfg(test)]
 mod plugins_on_tracks;
 #[cfg(test)]

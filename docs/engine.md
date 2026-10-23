@@ -13,9 +13,9 @@ of Musicable, and where Tier 1 work plugs in.
  Project ── snapshot ──► Compiler (own thread)
                              │ PreparedGraph
                              ▼
- EngineHandle ── message queue: events, swaps, tempo maps ──► Engine
-              ◄── garbage queue: old graphs and tempo maps ──
-              ◄── atomics: Stats ────────────────────────────
+ EngineHandle ── message queue: events, swaps, tempo maps, previews ──► Engine
+              ◄── garbage queue: old graphs, tempo maps, previews ──
+              ◄── atomics: Stats ───────────────────────────────────
 
  disk thread ── chunks of audio files, ahead of each clip ──► clip players
              ◄── hints: where each clip reads next ──────────
@@ -157,7 +157,10 @@ plays them as players expect of an instrument track: always with `In`,
 while the track is armed with `Auto`, whether the transport plays or not,
 and never with `Off`. The clips play too, except with `In` and while an
 armed `Auto` track records over them. The notes sounding end when either
-stops playing. It reads its parameters as it renders, after it has played
+stops playing. Controllers go on from whichever plays, as their notes do:
+when one stops, the switches it held on, such as the sustain pedal, are let
+go, and when the clips play again, their controllers go back to what the
+clips hold. It reads its parameters as it renders, after it has played
 the block's notes, so arming changes what plays from the next block. The
 layout lists the MIDI inputs (`InputLayout::add_midi`), and `find_midi`
 says which messages a track's `MidiInput` takes: one input's or every
@@ -215,6 +218,15 @@ exports the master will have it. `compile()` sums the metronome into a cue
 bus, `compile::keys::CUE`. It plays through the same two channels as the
 master until the engine has more (see
 [architecture.md](architecture.md#known-gaps)).
+
+**Taps.** A graph can also have taps, nodes whose output an offline render
+takes as well as the graph's: `Graph::add_tap`, numbered in the order
+they're added. `Engine::process_with_taps` renders the output, without the
+cue, into one buffer and each tap into one of its own. An export's stems
+are taps ([app.md](app.md#exporting-audio)): `compile_with_stems` taps the
+tracks it's given where they feed their bus, after their fader and their
+slots and before the output stage that mutes them, so mute and solo don't
+cut them. `Engine::process` and the device's callbacks leave taps alone.
 
 **Setting up from a project.** The graph carries the metronome setting. The
 tempo map and the loop are transport state, so send them when a project
@@ -295,7 +307,9 @@ late its output is: `Node::latency`, read once the node is prepared.
   latent plugin lines up with a dry track to the sample.
 - The cue output gets a delay that lines it up with the output, or the
   output one that lines it up with the cue, whichever is earlier, so the
-  metronome clicks in time with what plays.
+  metronome clicks in time with what plays. Taps line up the same way: the
+  output, the cue and each tap are delayed to the latest of them, so an
+  export's stems line up with its mix to the sample.
 - `PreparedGraph::latency` says how late the output is in the end, and
   `Stats::latency` reports the running graph's. The audio device adds its
   own output latency on top. So what you hear left the clip players that
@@ -336,6 +350,54 @@ tone's level, ramp this way.
 - A new node carries on the ramp of the node it replaces in a swap
   (`Smoothed::take_over`, from `Node::adopt`), so recompiling in the middle
   of a fade doesn't jump.
+
+## Automation
+
+A parameter's automation is compiled into the graph and read at the song
+position, never sent through the message queue, so it loops, locates and
+follows tempo changes as clips do.
+
+- `compile()` makes an `automation::Automation` for each lane that isn't
+  overridden: its points, in beats, and its `Scale`. `keys::param` says
+  which node has the parameter and which `ParamId` it is: a channel's
+  fader, a `Gain`, for its volume (`Gain::GAIN`) and its pan
+  (`Gain::PAN`), a send's `Gain` for its level, and a device's node for its
+  parameter `n` (`ParamId(n)`). `Graph::automate` gives it to the node.
+- Whoever reads it places the points through the block's tempo map
+  (`ProcessContext::tempo`), each on the frame `TempoMap::frame_at` gives.
+  Between two points the value moves in a straight line in the lane's
+  scale: in the fourth root of the gain for faders and sends, as their
+  faders spread, in ratios on a log scale, and evenly otherwise. Two points
+  at the same place make a step, and on its frame the value is the one
+  after it.
+- **A node that reads its own** keeps it (`Node::automate` returns `None`)
+  and works the value out frame by frame with an `automation::Param`, as
+  `Gain` does for its gain and pan, and the built-in devices for each of
+  their parameters ([Built-in devices](#built-in-devices)). A `Param` follows its automation in
+  place of the value set, which ramps over 10 ms as `Smoothed` does and
+  applies again once the automation goes. Between points it follows the
+  line exactly. Wherever the automation jumps, at a step, where the
+  playhead locates or loops, or where a new graph brings automation the
+  old one hadn't, the value glides there over 10 ms instead, so it doesn't
+  click. Modulation (`Param::modulate`, for Tier 2's modulators) is added
+  after the ramp and the glide, unsmoothed, and the sum kept within the
+  parameter's range, so automation, modulation, MIDI mapping and
+  extensions can all address the same parameter.
+- **Other nodes** hand their automation back, and the graph sends them its
+  values as `Param` events (`automation::Feed`): on the frame of each point
+  (up to 16 a block), every 32 frames of engine time between them, and on
+  a block's first frame when the playhead has jumped or the graph is new,
+  each only when the value changed. They come after the engine's own
+  events on the same frame, so they win. Plugins get theirs this way, and
+  smooth their parameters themselves: a CLAP plugin gets values in its own
+  range, a VST3 plugin its normalized ones.
+- The events fall on the same frames however the blocks fall, so the
+  renderers stay bit-identical with automation at any block size
+  (`crates/engine/tests/automation.rs`).
+- Moving an automated control by hand overrides its lane
+  ([commands.md](commands.md#automation)), and the next graph leaves the
+  lane out, so the parameter ramps from where the automation left it to
+  the value set.
 
 ## The mixer
 
@@ -500,6 +562,34 @@ and gives the engine an `AudioReader` for each (see
   each. A rebuilt graph gets the same sources (the app keeps them), so a
   stream carries on across swaps.
 
+## Previews
+
+The engine plays a sound on its own, beside the song, for the browser's
+previews (`preview.rs`). `EngineHandle::preview` sends it a `Preview`, made
+with `Preview::new(id, source, config)` off the audio thread, where it
+allocates what it needs, from a `Source` read whole or streaming, and
+`EngineHandle::stop_preview` stops it.
+
+- One preview plays at a time, once, from its start, at its file's own
+  speed: resampled as clips are, mono in both channels. Another, or
+  stopping, fades the one playing out over 128 frames, so it doesn't
+  click; the next starts at once.
+- The engine adds it to its output where it adds the cue output, after
+  the graph, so it plays whether the song does or not, never goes through
+  the master, and never reaches an export's taps
+  (`Engine::process_with_taps` leaves it out).
+- A preview that streams waits until the stream has its first frames in
+  memory. Where the disk falls behind after that, it plays silence, as a
+  clip does.
+- `EngineHandle::set_preview_gain` sets how loud previews play. A change
+  ramps over a block; the first block plays at the gain set.
+- `Stats::preview` says which preview is playing, by the id it was made
+  with, and the frame of its file it's at, for the browser's playhead.
+- A preview that has finished or faded out goes back through the garbage
+  queue, as a replaced graph does, to be dropped off the audio thread. The
+  engine takes a new one only when the queue has room for the two it may
+  let go of.
+
 ## Notes
 
 Notes are `NoteEvent`s, at sample offsets like other events:
@@ -509,6 +599,12 @@ expression (pitch bend in semitones, pressure and timbre from 0 to 1), and
 `Off` has the release velocity. Each names its note by `NoteId`, so notes on
 the same key can sound at once, each with its own expression, as MPE, VST3
 and CLAP allow.
+
+Controllers travel with the notes: `NodeEventKind::Controller` moves a MIDI
+controller, such as the mod wheel or the sustain pedal, to a value from 0 to
+1, for every note the node plays, and it holds until the next move. It goes
+where notes go (`Notes::send_controller`, and `NodeEventKind::is_played`
+for either), in order with them, and takes room in a block as a note does.
 
 - `Graph::send_notes(from, to)` sends a node's notes to another, with or
   without an audio connection between them. Before a block renders, each
@@ -522,8 +618,8 @@ and CLAP allow.
 - An instrument's voice can ring on after its note is let go. A node says
   which notes' voices it ended in the block it last rendered
   (`Node::ended_voices`), for modulators that run a copy for each voice,
-  which stop it when the voice ends. CLAP plugins say when their voices
-  end. Nothing reads it yet.
+  which stop it when the voice ends. CLAP plugins and the built-in
+  instruments say when their voices end. Nothing reads it yet.
 - A node can send `Notes::CAPACITY` (512) note events in a block. The rest
   are dropped, and counted in `Stats::events_dropped`.
 
@@ -540,6 +636,21 @@ their expression, to the track's first instrument (`Track::instrument`).
   rebuilt player takes over, it lets go of the notes it doesn't have
   sounding as they are: a note deleted, moved, transposed, or shortened to
   end before the playhead. A note made longer plays on.
+- A clip's controller curves move their controllers as it plays, from its
+  `offset` for its length. Unlike notes, controllers are chased: wherever
+  playback starts or jumps, the player first sends each controller the
+  value its last move before there left it at, from any clip, so the song
+  sounds as it does played from its start. Before a controller's first
+  move, the player leaves it alone.
+- Controllers keep their values when a clip ends or the transport stops,
+  as MIDI's do, but a switch (64 to 69, such as the sustain pedal) held on
+  is let go then, so no notes ring on. A recompiled player sends only what
+  its curves hold differently from what the last one sent, so drawing a
+  curve while the song plays moves the controller at once.
+- At the same moment, a switch a clip lets go of comes first, then
+  controllers' moves, then notes ending, then notes starting, with each
+  note's expression after its start. So the next clip's pedal holds, and a
+  note that starts with the pedal goes down held.
 
 **MIDI input.** `midi::MidiNotes` turns MIDI 1.0 channel messages into
 notes, each with an id of its own. A note takes its channel's pitch bend,
@@ -551,9 +662,13 @@ message (RPN 6) sets the zones. Members bend 48 semitones until they're told
 otherwise, and the master's bend bends every note in its zone on top of the
 note's own. Taking one channel, it reads that channel as a keyboard plays
 it. All Notes Off and All Sound Off (CC 123, 120) end a channel's notes,
-and Reset All Controllers (CC 121) takes its expression back to rest. The
-sustain pedal and other controllers play no part yet: they come with the
-piano roll's controller lanes.
+and Reset All Controllers (CC 121) takes its expression back to rest. Other
+control changes move controllers for every note (`Played::Controller`),
+from any channel it takes: all but slide, the registered and non-registered
+parameters and their data entry (6, 38 and 96 to 101), and the channel mode
+messages. Reset All Controllers lets go of the switches held on as well. It
+knows what each controller holds (`MidiNotes::controllers`), so a recording
+can start with them where they are.
 
 A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
 a swap gives a track another input, the notes held on the old one end at
@@ -565,8 +680,220 @@ know, so a note started before the monitor came along still ends.
 stands in for instruments until plugin hosting. It plays each note with a
 sine at its pitch, bent by its pitch bend, with its second harmonic blended
 in by its timbre, and louder with velocity and pressure. A note rises over
-2 ms and rings out over 30 ms once let go. It adds what it plays to what
-comes into it.
+2 ms and rings out over 30 ms once let go, and while the sustain pedal is
+down, notes let go sound on until it comes up. It adds what it plays to
+what comes into it.
+
+## Built-in devices
+
+Musicable's own devices (`DeviceKind::Native`) are nodes in
+`crates/engine/src/devices/`, one file for each kind. The model holds what
+each kind is (`musicable_model::native`): its parameter table, with each
+parameter's key, range, default, unit and scale, and what it does.
+`devices::node` makes a device's node from the device as the project has
+it, and a sampler's with the sample `Media` has for it, and `compile()`
+puts it where the device sits in its chain, as it does a plugin. `devices::BUILT` lists the kinds that have a node, which the
+browser offers; a kind without one passes the signal through, so a project
+that has one still plays.
+
+**Parameters.** A device's node takes `NodeEventKind::Param` with
+`ParamId(n)`, where `n` is the parameter's place in its kind's table, and
+the app sends one for each change (`Edit::NativeParam`). The node keeps its
+parameters in `devices::Params`, which works each one out for every frame:
+
+- The value set ramps to each new one over 10 ms, as `Smoothed` does
+  ([Parameter smoothing](#parameter-smoothing)), and a new node carries on
+  the ramps of the node it replaces (`Params::take_over`).
+- A parameter the table marks `modulated` takes `NodeEventKind::Modulation`
+  without a note: an amount in the parameter's units, added to the value
+  set on every frame from the event on, and kept in the parameter's range.
+  It applies at once, without a ramp, since a modulator moves smoothly by
+  itself. Modulation for one note is the instruments' to handle.
+- A parameter with automation follows it instead of the value set
+  ([Automation](#automation)): each is an `automation::Param`, and the
+  node's `Node::automate` hands the lane to `Params::automate`, which hands
+  it back for a parameter the kind hasn't got. A kind whose node doesn't
+  forward it gets its lanes as `Param` events instead, a value every 32
+  frames, each ramped to over 10 ms.
+- `Params::run` renders a block in spans that end where its events fall,
+  and hands each span the values for each of its frames (`Values::frames`),
+  and whether a parameter holds one value over the span
+  (`Values::steady`), for a fast path. A device that moves a value its own
+  way, as the delay fades to a new time and the reverb glides to a new
+  size, reads where the value is heading on each frame and its modulation
+  apart instead (`Values::target`, `Values::modulation`): the value set,
+  without its ramp, or with automation the lane's value on the frame,
+  without the glide after a jump (`automation::Param::render_with_targets`).
+  An event applies before the span it starts, which gets the event too, for
+  a note or a note's modulation.
+
+So a change or a modulation lands on its frame, and a device renders the
+same samples however the blocks fall, and on any thread: the parallel
+renderer stays bit-identical (`tests/devices.rs` checks it), and so do
+blocks of any size (`tests/automation.rs`). That holds only while a fast
+path for a steady span gives exactly what working frame by frame would: a
+frame on which a switch is off starts the EQ's band or the utility's DC
+filter afresh, as a span that's off throughout does, and a band's sections
+work in `f64` either way.
+
+**The utility** (`devices::Utility`): a DC filter (a one-pole high-pass at
+5 Hz), each side's polarity, the width (mid and side, exact at 100%), the
+pan (the mixer's pan law) and the gain, in that order, with the mute
+fading over the 10 ms ramp. Its tests check each stage exactly.
+
+**The EQ** (`devices::Equalizer`): eight bands of state-variable filters
+(Simper's trapezoidal SVF), whose responses equal the analog prototypes'
+of the RBJ cookbook under the bilinear transform, matched at each band's
+frequency; 24 and 48 dB cuts are Butterworth cascades of two and four
+sections. `musicable_model::native::eq::response` works out the design's
+response, and the test measures the node's, from its impulse response,
+to within 0.001 dB of it from 20 Hz to 20 kHz at 44.1 and 96 kHz. A band
+retunes on every frame while its shape, frequency, gain or Q moves, and
+fades in and out over 10 ms when it's switched on or off. A sample goes
+through all of a band's sections in `f64`, rounded to `f32` only after the
+last.
+
+**The compressor** (`devices::Compressor`): feed-forward, in decibels,
+after Giannoulis, Massberg and Reiss (JAES, 2012). On each frame it takes
+the louder channel's level, its peak or its power averaged over the attack
+time, and reads how far to turn it down off the static curve
+(`musicable_model::native::compressor::gain_reduction`: the ratio above
+the threshold, eased in across the knee by a parabola). A one-pole filter
+smooths that amount in dB, with the attack's coefficient while it grows
+and the release's while it shrinks, so each is a time constant whatever
+the level. Then the output gain, on the compressed signal only, and the
+mix with the dry; at 0% the output is the input exactly. The power is
+averaged in peak mode too, so the 10 ms fade of a switch to RMS finds it
+ready, and a NaN or infinity going in doesn't stick in the detector. The
+tests hold levels from -54 to 0 dB and find the node settled on the
+designed curve to within 0.001 dB, for both detectors, hard and soft
+knees; they follow the reduction frame by frame along the attack's and
+the release's exponentials; and RMS reads a sine 3 dB under its peak.
+
+**The gate** (`devices::Gate`): opens on the frame the louder channel's
+peak reaches the threshold, and closes once the peak has stayed more than
+`return` dB under it for the hold. Its gain fades in a straight line, from
+the floor to 1 over the attack and back over the release; a fade that
+starts part of the way takes that part of the time, and open, the signal
+passes untouched. A new gate starts open, so it lets a signal through
+until there's a quiet spell. Its tests check the hold, the fades, the
+floor and the return frame by frame, and that one loud channel opens both.
+
+**The delay** (`devices::Delay`): a line for each channel, long enough for
+the longest time, 5 s, read between frames by cubic (Catmull-Rom)
+interpolation, which is exact on a whole frame. A synced time is its
+note's length at the tempo where the playhead is (`ProcessContext::tempo`
+at the transport's position), and moves on the frame a tempo change plays.
+A new time, whether it's set or automated, synced to a new note or tempo,
+or switched between the two, fades in over 50 ms from a second read of the
+line as the first fades out, a raised cosine, and one that comes during a
+fade waits for it to end, so a lane sweeping the time steps it every 50
+ms; modulating the time moves both reads at once, which bends the echoes'
+pitch. What goes back into the lines goes through the cuts, the EQ's 12 dB
+cuts, and saturates softly above full scale only. `delay::repeat_response`
+in the model works out what each echo keeps of the last, and the reference
+test measures each echo of a click against it, to within 0.001 dB over the
+spectrum; the others check the times to the frame, across tempo changes
+too, that a new time never clicks, and that full feedback can't run away.
+
+**The reverb** (`devices::Reverb`): a feedback delay network of eight
+lines behind a diffuser, much as Geraint Luff builds one in "Let's Write a
+Reverb" (ADC 2021). Four steps of short delays, each step mixed by a
+Hadamard matrix, smear the low cut and pre-delayed signal into a dense
+wash, and the network's lines go round again through a Householder matrix.
+Both matrices are orthogonal, so the tail loses only what each line takes
+away on its way round: a gain for the decay, the same per second whatever
+the line's length, and a one-pole low pass that takes as much again at the
+damping frequency. The lines' lengths come to whole frames, and a new
+size, set or automated, glides them there by no more than a sixteenth of a
+frame a frame, bending the tail's pitch by about a semitone at most. The
+tail's level makes up for the size, so rooms of any size ring about as
+loud. The reference tests read the decay off the tail's energy decay curve
+(Schroeder's backward integral): to within 3% of the decay set in the
+octave around 250 Hz, from 0% to 100% size at 44.1 to 96 kHz, and to
+within 5% of half of it at the damping frequency. The low cut's effect on
+the tail matches its design to within 0.001 dB.
+
+**Instruments** (`devices/instrument.rs`): the synth and the sampler play
+the notes in `ctx.events`, each on a voice of its own, from its start until
+its sound ends. A note past the device's `voices` takes the place of the
+voice let go longest ago, or of the oldest if none is, and that voice fades
+out over 5 ms beside the new one, so taking it doesn't click: an instrument
+has a slot for each of its up to 32 voices and as many again for voices
+fading out, all made with the node. Each note bends on its own (its
+`Dimension::PitchBend` expression, in semitones), and modulation for one
+note (`Modulation` with its id) moves that note's voice alone, for the
+first 48 parameters of the table, added on every frame to the values the
+device has. A note's pressure and timbre move nothing yet: modulation for
+one note is how a modulator will bring them to a parameter. Controllers
+(`NodeEventKind::Controller`) move nothing yet either, the sustain pedal
+among them, so a note let go with the pedal down is released all the same.
+Each voice has an attack, decay, sustain and release envelope that curves
+as an analog one does, heading a little past each stage's end and stopping
+there, so every stage takes its time to the frame, and a 12 dB state
+variable filter (the EQ's SVF) whose resonance runs from a Q of 0.707 to
+25, retuned on every frame its cutoff moves. A voice renders the same
+whatever blocks it falls in: what it keeps from frame to frame, such as
+its filter's tuning, is a function of what it's from alone. When a voice's
+sound ends, the instrument says so (`Node::ended_voices`), as a CLAP plugin
+does, so the engine hears when each note is over. Their tests check each
+part against what it's meant to do: the filters' responses against the
+analog prototypes' to within 0.001 dB, the envelopes' stages to the frame.
+
+**The synth** (`devices::Synth`): two oscillators and white noise, mixed at
+their levels, through the filter (low pass 12 and 24 dB, the 24 a
+Butterworth cascade of two sections, high pass and band pass) into the amp
+envelope. The triangle, the saw and the square are band-limited with
+two-sample PolyBLEPs where the saw and the square jump and PolyBLAMPs where
+the triangle turns (Välimäki, Pekonen and Nam; Esqueda, Välimäki and
+Bilbao), which makes each wave its ideal wave smoothed by a triangle two
+samples wide: the test measures the first 19 harmonics of each at the
+ideal's level times sinc²(f/fs) to within 0.001 dB, and what folds back
+from above half the rate, for D#6 at 48 kHz, under −95 dB below 5 kHz for
+the triangle and −65 dB for the saw and the square. The filter envelope
+moves the cutoff by `filter_env` semitones at its peak, and key tracking
+by the note's distance from C4, on every frame of each voice. A note glides
+from the last note's pitch, in semitones, over `glide` ms. The noise starts
+from a seed of each note's own, so a session plays the same each time.
+
+**The sampler** (`devices::Sampler`) plays its `devices::Sample`, which the
+app loads whole from the device's file (`NativeDevice::sample`) when it
+builds a graph, on the compiler's thread, sharing it among samplers of the
+same file, and hands to `compile()` in `Media` by device: a sampler without
+one is silent. A voice reads the sample from `start` at a speed set by the
+note's distance from `root`, `transpose`, `detune` and its bend, and by the
+sample's rate against the engine's, between the sample's frames through a
+Kaiser-windowed sinc 32 frames wide; the sinc passes the frames themselves
+through exactly where a position falls on one, so a note at the root at
+the sample's own rate plays it bit for bit. Reading faster than the
+sample's rate, the sinc widens (as the clips' resampler does), so what
+wouldn't fit under half the engine's rate is filtered out rather than
+folded back; an octave or more up, the voice reads a copy of the sample
+made at half its rate, two octaves up one at a quarter, and so on, eight
+in all with the sample itself. The tests measure tones read slower and
+faster, from samples at 44.1 and 48 kHz, at their levels to within 0.001
+dB, with what images or folds back 80 dB down, and each copy's band to
+within 0.001 dB, with what's above it 85 dB down. Looping, a note plays on
+from `end` back to `loop_start` until its sound ends, crossfading with equal
+power over the last `loop_fade` ms of the sample into the material before
+`loop_start`, as far as the loop and that material allow, so the jump
+doesn't click; settings that move take effect at the next pass. In
+"One-Shot" mode a note plays from `start` to `end` whatever its length,
+without looping, as drums want. Then the filter, if it's on, and the amp
+envelope. Start, end and loop points fall on the sample's frames. A
+sample's first two channels play, and a mono one plays on both sides.
+
+**Adding a kind.** Write its node in a file of its own in `devices/`, make
+it in `devices::node`, add it to `BUILT`, and forward `Node::automate` to
+`Params::automate`. Its parameters are in its table already, and the
+format and commands handle them. Test it with `devices::testing::Run`,
+which renders a node over a signal in blocks of any length with events on
+given frames, under the real-time checks, at a given tempo and with the
+transport playing if it follows the song (`Run::with_tempo`,
+`Run::playing`), and measure it against what it's meant to do, as the EQ's
+test does: a reference test, not a snapshot of what it happens to do. Give
+its parameters lanes in `tests/automation.rs` too, which plays them in
+blocks of any size.
 
 ## Parallel rendering
 

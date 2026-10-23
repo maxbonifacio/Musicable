@@ -4,7 +4,7 @@ use musicable_audio::InputWriter;
 use musicable_commands::take::{NotePass, PlayedNote};
 use musicable_io::audio::Decoder;
 use musicable_model::MidiInput;
-use musicable_model::clip::{Dimension, Note};
+use musicable_model::clip::{Controller, Dimension, Note};
 
 use super::*;
 
@@ -564,6 +564,7 @@ fn pass(start: u64, frames: u64, notes: Vec<PlayedNote>) -> NotePass {
         start,
         frames,
         notes,
+        controllers: Vec::new(),
     }
 }
 
@@ -674,6 +675,40 @@ fn notes_are_recorded_with_their_expression_from_the_tracks_channel() {
         ..note(200, 500, 60, 127)
     };
     assert_eq!(recorded, takes(vec![pass(0, 1000, vec![bent])]));
+}
+
+#[test]
+fn controllers_are_recorded_from_where_they_are_as_each_pass_starts() {
+    let (buffer, mut writer) = MidiBuffer::new(64);
+    let mut tape = midi_tape(&buffer, vec![keys("", None, 0)]);
+    let (pedal, wheel) = (Controller::SUSTAIN, Controller::MOD_WHEEL);
+    // Round a loop from 100 to 600, with the pedal down from before the
+    // recording started: the mod wheel goes up the first time round, and
+    // the pedal comes up the second.
+    writer.push(50, [0xB0, 64, 127]);
+    writer.push(200, on(60, 100));
+    writer.push(300, [0xB0, 1, 127]);
+    writer.push(400, off(60));
+    writer.push(650, on(62, 100));
+    writer.push(700, [0xB0, 64, 0]);
+    writer.push(750, off(62));
+    drop(writer);
+    let segments = [
+        stopped(0, 0),
+        recording(100, 100, 0),
+        recording(600, 100, 0),
+        stopped(1100, 600),
+    ];
+    let (recorded, _) = finished(run(&mut tape, &segments, 1200));
+    let first = NotePass {
+        controllers: vec![(100, pedal, 1.0), (300, wheel, 1.0)],
+        ..pass(100, 500, vec![note(200, 400, 60, 100)])
+    };
+    let second = NotePass {
+        controllers: vec![(100, wheel, 1.0), (100, pedal, 1.0), (200, pedal, 0.0)],
+        ..pass(100, 500, vec![note(150, 250, 62, 100)])
+    };
+    assert_eq!(recorded, takes(vec![first, second]));
 }
 
 #[test]

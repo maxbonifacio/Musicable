@@ -3,16 +3,17 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::preview::{Preview, Previews};
 use crate::timeline::{Segment, Timeline, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
-    AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent,
-    NodeEventKind, NodeKey, ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
+    AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent, NodeEventKind, NodeKey,
+    ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
 /// Messages the control thread can have in flight.
@@ -38,12 +39,15 @@ enum Message {
     },
     Swap(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
+    /// A preview to play, or `None` to stop the one playing.
+    Preview(Option<Box<Preview>>),
 }
 
 /// What the engine hands back to be dropped off the audio thread.
 enum Garbage {
     Graph(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
+    Preview(Box<Preview>),
 }
 
 struct Pending {
@@ -62,6 +66,12 @@ struct Counters {
     events_dropped: AtomicU64,
     events_unmatched: AtomicU64,
     xruns: AtomicU64,
+    /// The preview playing's id, or 0, and the file frame it's at.
+    preview: AtomicU64,
+    preview_frame: AtomicU64,
+    /// The previews' gain, as an `f32`'s bits, which the control thread
+    /// sets.
+    preview_gain: AtomicU32,
 }
 
 /// The engine's counters, as of its last block.
@@ -89,6 +99,17 @@ pub struct Stats {
     pub events_unmatched: u64,
     /// Device underruns and overruns, as reported by the audio backend.
     pub xruns: u64,
+    /// The preview playing, if one is: see [`EngineHandle::preview`].
+    pub preview: Option<PreviewAt>,
+}
+
+/// Where the preview playing is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewAt {
+    /// The id it was made with: see [`Preview::new`].
+    pub id: u64,
+    /// The file frame it's at.
+    pub frame: u64,
 }
 
 impl Counters {
@@ -103,6 +124,13 @@ impl Counters {
             events_dropped: self.events_dropped.load(Relaxed),
             events_unmatched: self.events_unmatched.load(Relaxed),
             xruns: self.xruns.load(Relaxed),
+            preview: match self.preview.load(Relaxed) {
+                0 => None,
+                id => Some(PreviewAt {
+                    id,
+                    frame: self.preview_frame.load(Relaxed),
+                }),
+            },
         }
     }
 }
@@ -141,10 +169,9 @@ pub struct Engine {
     garbage: Producer<Garbage>,
     /// Events not yet due, by time and then in arrival order.
     pending: Vec<Pending>,
-    /// What plays before the first graph arrives.
-    silence: AudioBuffer,
     counters: Arc<Counters>,
     timeline: TimelineWriter,
+    previews: Previews,
 }
 
 impl Engine {
@@ -169,6 +196,7 @@ impl Engine {
         let (message_tx, message_rx) = RingBuffer::new(QUEUE_CAPACITY);
         let (garbage_tx, garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
         let counters = Arc::new(Counters::default());
+        counters.preview_gain.store(1.0f32.to_bits(), Relaxed);
         let (timeline, timeline_reader) = crate::timeline::timeline();
         let engine = Engine {
             config,
@@ -179,9 +207,9 @@ impl Engine {
             messages: message_rx,
             garbage: garbage_tx,
             pending: Vec::with_capacity(EVENT_CAPACITY),
-            silence: AudioBuffer::new(1, config.max_block),
             counters: counters.clone(),
             timeline,
+            previews: Previews::new(config),
         };
         let handle = EngineHandle {
             config,
@@ -214,8 +242,8 @@ impl Engine {
     }
 
     /// Renders `output.frames()` frames into `output`: the graph's output,
-    /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)).
-    /// Real-time safe.
+    /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)),
+    /// and the preview playing, if one is. Real-time safe.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
         let frames = output.frames();
         self.process_with_input(AudioRef::empty(frames), &[], output);
@@ -240,13 +268,68 @@ impl Engine {
         output: &mut AudioMut<'_>,
     ) {
         rt::scope(|| {
-            self.run(input, midi, output.frames(), |start, block, cue| {
-                let mut part = output.range_mut(start..start + block.frames());
-                part.copy_from(block);
-                if let Some(cue) = cue {
-                    part.add_from(cue);
-                }
-            });
+            self.run(
+                input,
+                midi,
+                output.frames(),
+                |start, frames, graph, preview| {
+                    let mut part = output.range_mut(start..start + frames);
+                    match graph {
+                        Some(graph) => {
+                            part.copy_from(graph.output(frames));
+                            if let Some(cue) = graph.cue(frames) {
+                                part.add_from(cue);
+                            }
+                        }
+                        None => part.clear(),
+                    }
+                    if let Some(preview) = preview {
+                        part.add_from(preview);
+                    }
+                },
+            );
+        });
+    }
+
+    /// Renders `output.frames()` frames for an offline render, such as an
+    /// export: the graph's output into `output`, without its cue output or
+    /// a preview, and
+    /// each of its taps into the buffer of `taps` with the same number (see
+    /// [`Graph::add_tap`](crate::Graph::add_tap)). Taps the graph hasn't
+    /// got, and everything before the first graph arrives, are silent.
+    /// Real-time safe.
+    ///
+    /// # Panics
+    ///
+    /// If a buffer in `taps` isn't as long as `output`.
+    pub fn process_with_taps(&mut self, output: &mut AudioMut<'_>, taps: &mut [AudioMut<'_>]) {
+        let frames = output.frames();
+        assert!(
+            taps.iter().all(|tap| tap.frames() == frames),
+            "the taps aren't all {frames} frames long"
+        );
+        rt::scope(|| {
+            self.run(
+                AudioRef::empty(frames),
+                &[],
+                frames,
+                |start, frames, graph, _| {
+                    let range = start..start + frames;
+                    match graph {
+                        Some(graph) => output
+                            .range_mut(range.clone())
+                            .copy_from(graph.output(frames)),
+                        None => output.range_mut(range.clone()).clear(),
+                    }
+                    for (n, tap) in taps.iter_mut().enumerate() {
+                        let mut part = tap.range_mut(range.clone());
+                        match graph.and_then(|graph| graph.tap(n, frames)) {
+                            Some(source) => part.copy_from(source),
+                            None => part.clear(),
+                        }
+                    }
+                },
+            );
         });
     }
 
@@ -284,25 +367,40 @@ impl Engine {
             output.len()
         );
         rt::scope(|| {
-            self.run(input, midi, output.len() / channels, |start, block, cue| {
-                let part = &mut output[start * channels..(start + block.frames()) * channels];
-                block.write_interleaved(part, channels);
-                if let Some(cue) = cue {
-                    cue.add_interleaved(part, channels);
-                }
-            });
+            self.run(
+                input,
+                midi,
+                output.len() / channels,
+                |start, frames, graph, preview| {
+                    let part = &mut output[start * channels..(start + frames) * channels];
+                    match graph {
+                        Some(graph) => {
+                            graph.output(frames).write_interleaved(part, channels);
+                            if let Some(cue) = graph.cue(frames) {
+                                cue.add_interleaved(part, channels);
+                            }
+                        }
+                        None => part.fill(0.0),
+                    }
+                    if let Some(preview) = preview {
+                        preview.add_interleaved(part, channels);
+                    }
+                },
+            );
         });
     }
 
     /// Renders `frames` frames block by block, with `input` holding the
     /// device inputs for them and `midi` the MIDI inputs' messages, handing
-    /// each block's offset, output and cue output to `write`.
+    /// each block's offset and length to `write`, with the graph that
+    /// rendered it, if there is one yet, and what the previews played, if
+    /// one did.
     fn run(
         &mut self,
         input: AudioRef<'_>,
         mut midi: &[MidiMessage],
         frames: usize,
-        mut write: impl FnMut(usize, AudioRef<'_>, Option<AudioRef<'_>>),
+        mut write: impl FnMut(usize, usize, Option<&PreparedGraph>, Option<AudioRef<'_>>),
     ) {
         assert_eq!(
             input.frames(),
@@ -311,15 +409,23 @@ impl Engine {
             input.frames()
         );
         self.receive();
+        let gain = f32::from_bits(self.counters.preview_gain.load(Relaxed));
         let mut done = 0;
         while done < frames {
             let block = self.render(input, &mut midi, done, frames - done);
-            match &self.graph {
-                Some(graph) => write(done, graph.output(block), graph.cue(block)),
-                None => write(done, self.silence.view(block), None),
-            }
+            let preview = self.previews.play(block, gain);
+            write(done, block, self.graph.as_deref(), preview);
             done += block;
         }
+        while !self.garbage.is_full()
+            && let Some(finished) = self.previews.take_finished()
+        {
+            let returned = self.garbage.push(Garbage::Preview(finished));
+            debug_assert!(returned.is_ok(), "the garbage queue has room");
+        }
+        let (preview, frame) = self.previews.at().unwrap_or((0, 0));
+        self.counters.preview.store(preview, Relaxed);
+        self.counters.preview_frame.store(frame, Relaxed);
         let transport = self.transport.state();
         self.counters.time.store(self.time, Relaxed);
         self.counters.position.store(transport.position, Relaxed);
@@ -334,6 +440,8 @@ impl Engine {
                 // Hold a swap until there is room to hand back what it replaces.
                 Ok(Message::Swap(_)) if self.graph.is_some() && self.garbage.is_full() => break,
                 Ok(Message::Tempo(_)) if self.garbage.is_full() => break,
+                // Room for the two previews a new one can let go of.
+                Ok(Message::Preview(_)) if self.garbage.slots() < 2 => break,
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -350,6 +458,13 @@ impl Engine {
                 }
                 Ok(Message::Resend { time, event }) => {
                     self.schedule(time.map_or(self.time, |t| t.max(self.time)), event)
+                }
+                Ok(Message::Preview(preview)) => {
+                    for gone in self.previews.replace(preview).into_iter().flatten() {
+                        // `receive` checked there is room.
+                        let returned = self.garbage.push(Garbage::Preview(gone));
+                        debug_assert!(returned.is_ok(), "the garbage queue has room");
+                    }
                 }
                 Err(_) => break,
             }
@@ -484,6 +599,7 @@ impl Engine {
                 input: input.range(offset..offset + frames),
                 midi: messages,
             };
+            graph.feed_automation(&block);
             let dropped = graph.play_notes(&block);
             if dropped > 0 {
                 self.counters.events_dropped.fetch_add(dropped, Relaxed);
@@ -628,15 +744,43 @@ impl EngineHandle {
         Ok(())
     }
 
-    /// Drops the graphs and tempo maps the engine has replaced, and returns
-    /// how many there were. Call it regularly, for example once per UI frame:
-    /// the engine holds off swaps while too many are waiting.
+    /// Plays `preview` from the start of the engine's next `process` call,
+    /// fading out the preview playing, if one is: see [`Preview`].
+    pub fn preview(&mut self, preview: Preview) -> Result<(), QueueFull<Box<Preview>>> {
+        match self
+            .messages
+            .push(Message::Preview(Some(Box::new(preview))))
+        {
+            Ok(()) => Ok(()),
+            Err(rtrb::PushError::Full(Message::Preview(Some(preview)))) => Err(QueueFull(preview)),
+            Err(_) => unreachable!("the message pushed was a preview"),
+        }
+    }
+
+    /// Fades out the preview playing, if one is.
+    pub fn stop_preview(&mut self) -> Result<(), QueueFull<()>> {
+        self.messages
+            .push(Message::Preview(None))
+            .map_err(|_| QueueFull(()))
+    }
+
+    /// Plays previews at `gain` from the engine's next `process` call on:
+    /// 1.0 plays them as they are. The engine ramps to it over a block.
+    pub fn set_preview_gain(&self, gain: f32) {
+        self.counters.preview_gain.store(gain.to_bits(), Relaxed);
+    }
+
+    /// Drops the graphs, tempo maps and previews the engine has replaced or
+    /// finished with, and returns how many there were. Call it regularly,
+    /// for example once per UI frame: the engine holds off swaps while too
+    /// many are waiting.
     pub fn collect_garbage(&mut self) -> usize {
         let mut dropped = 0;
         while let Ok(garbage) = self.garbage.pop() {
             match garbage {
                 Garbage::Graph(graph) => drop(graph),
                 Garbage::Tempo(tempo) => drop(tempo),
+                Garbage::Preview(preview) => drop(preview),
             }
             dropped += 1;
         }
@@ -881,6 +1025,45 @@ mod tests {
         engine.process_interleaved(&mut out, 2);
         assert!(out.iter().all(|&s| s == 0.0));
         assert_eq!(handle.stats().time, 300);
+    }
+
+    #[test]
+    fn offline_renders_take_the_taps_and_leave_the_cue_out() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let mut g = Graph::new();
+        let counter = g.add(NodeKey(0), Counter(0.0));
+        let half = g.add(NodeKey(1), Level(0.5));
+        let click = g.add(NodeKey(2), Constant::new(1000.0).with_channels(1));
+        g.connect(counter, half).unwrap();
+        g.set_output(half).unwrap();
+        g.set_cue(click).unwrap();
+        g.add_tap(counter).unwrap();
+        let frames = 300;
+        let mut output = vec![-1.0; frames];
+        let mut taps = [vec![-1.0; frames], vec![-1.0; frames]];
+        let render = |engine: &mut Engine, output: &mut [f32], taps: &mut [Vec<f32>; 2]| {
+            let [first, second] = taps;
+            let mut taps = [
+                AudioMut::from_planar(first, 1),
+                AudioMut::from_planar(second, 1),
+            ];
+            engine.process_with_taps(&mut AudioMut::from_planar(output, 1), &mut taps);
+        };
+        // Silence, before the graph.
+        render(&mut engine, &mut output, &mut taps);
+        assert!(
+            output
+                .iter()
+                .chain(taps.iter().flatten())
+                .all(|&s| s == 0.0)
+        );
+        handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+        render(&mut engine, &mut output, &mut taps);
+        // The counter counts from the graph's first frame.
+        let count = |scale: f32| -> Vec<f32> { (0..300).map(|i| i as f32 * scale).collect() };
+        assert_eq!(output, count(0.5), "without the cue");
+        assert_eq!(taps[0], count(1.0));
+        assert!(taps[1].iter().all(|&s| s == 0.0), "no second tap");
     }
 
     #[test]

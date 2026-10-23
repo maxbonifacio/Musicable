@@ -30,8 +30,8 @@ use clap_sys::ext::gui::{
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_host_latency, clap_plugin_latency};
 use clap_sys::ext::log::{CLAP_EXT_LOG, clap_host_log};
 use clap_sys::ext::note_ports::{
-    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI, clap_note_port_info,
-    clap_plugin_note_ports,
+    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI,
+    CLAP_NOTE_DIALECT_MIDI_MPE, clap_note_port_info, clap_plugin_note_ports,
 };
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_MODULATABLE,
@@ -56,7 +56,7 @@ use clap_sys::process::{
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
-use crate::{ALIVE, gui, violation};
+use crate::{ALIVE, MPE, gui, violation};
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
 pub const SYNTH_ID: &CStr = c"org.musicable.test.synth";
@@ -186,6 +186,12 @@ const VOICES: usize = 16;
 /// How many threads running thread pool tasks the synth tells apart.
 const POOL_THREADS: usize = 16;
 
+/// How many MIDI messages the synth's log holds.
+const MIDI_LOG: usize = 4096;
+
+/// MIDI's pitch bend at rest.
+const CENTRE: u16 = 8192;
+
 /// A number of the calling thread's own, to tell threads apart. Not the
 /// address of a thread-local: a library loaded at run time may allocate a
 /// thread's copy of those the first time the thread touches one, as glibc
@@ -250,6 +256,39 @@ struct Voice {
     modulation: f64,
     /// In cycles.
     phase: f64,
+    /// Let go while the sustain pedal was down: it sounds until the pedal
+    /// comes up.
+    held: bool,
+}
+
+/// What MIDI set on one of its channels, which shapes the notes on it.
+#[derive(Debug, Clone, Copy)]
+struct MidiChannel {
+    /// Pitch bend, MIDI's 14 bits.
+    bend: u16,
+    /// How far it bends either way, in semitones.
+    range: f64,
+    pressure: f64,
+    /// Controller 74's.
+    brightness: f64,
+    /// The registered parameter data entry sets, coarse then fine: none is
+    /// 127 and 127.
+    rpn: [u8; 2],
+}
+
+impl MidiChannel {
+    const DEFAULT: Self = Self {
+        bend: CENTRE,
+        range: 2.0,
+        pressure: 0.0,
+        brightness: 0.0,
+        rpn: [127, 127],
+    };
+
+    /// Its pitch bend, in semitones.
+    fn tuning(&self) -> f64 {
+        (f64::from(self.bend) - f64::from(CENTRE)) / f64::from(CENTRE) * self.range
+    }
 }
 
 /// What only the thread processing the plugin touches, or the main thread
@@ -272,6 +311,11 @@ struct Audio {
     modulation: f64,
     /// The frames of the block the thread pool's tasks render.
     job: (usize, usize),
+    /// The MIDI channels, as MIDI set them.
+    channels: [MidiChannel; 16],
+    /// Whether the sustain pedal is down. It holds every note, whatever its
+    /// channel, as MPE's master channel does.
+    sustain: bool,
 }
 
 /// What the plugin's pretend window holds.
@@ -288,6 +332,8 @@ struct Window {
 pub(crate) struct TestPlugin {
     clap: clap_plugin,
     kind: Kind,
+    /// Whether it's the synth taking notes only as MIDI with MPE.
+    mpe: bool,
     host: *const clap_host,
     /// Written once, in `init`, on the main thread.
     ext: UnsafeCell<HostExtensions>,
@@ -319,6 +365,13 @@ pub(crate) struct TestPlugin {
     /// Whether the pretend window has actions waiting, so processing only
     /// looks at the lock when it has to.
     gui_waiting: AtomicBool,
+    /// The MIDI messages the synth got, oldest first, each as its status
+    /// and two data bytes, from the lowest byte up: up to [`MIDI_LOG`] of
+    /// them. Atomic, as the thread processing writes it.
+    midi_log: [AtomicU32; MIDI_LOG],
+    /// How many messages it got since a test last took them, which can be
+    /// more than the log holds.
+    midi_logged: AtomicUsize,
     audio: UnsafeCell<Audio>,
 }
 
@@ -363,6 +416,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
             on_main_thread: Some(plugin_on_main_thread),
         },
         kind,
+        mpe: kind == Kind::Synth && MPE.load(Ordering::SeqCst),
         host,
         ext: UnsafeCell::new(HostExtensions::NONE),
         initialized: AtomicBool::new(false),
@@ -379,6 +433,8 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         transport: std::array::from_fn(|_| AtomicU64::new(0)),
         has_transport: AtomicBool::new(false),
         gui_waiting: AtomicBool::new(false),
+        midi_log: std::array::from_fn(|_| AtomicU32::new(0)),
+        midi_logged: AtomicUsize::new(0),
         audio: UnsafeCell::new(Audio {
             sample_rate: 0.0,
             max_frames: 0,
@@ -392,6 +448,8 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
             buffers: std::array::from_fn(|_| Vec::new()),
             modulation: 0.0,
             job: (0, 0),
+            channels: [MidiChannel::DEFAULT; 16],
+            sustain: false,
         }),
     });
     ALIVE.fetch_add(1, Ordering::SeqCst);
@@ -614,6 +672,30 @@ impl TestPlugin {
         self.has_transport.store(true, Ordering::SeqCst);
     }
 
+    /// Takes the MIDI messages logged since the last time, oldest first,
+    /// into `buffer`, and returns how many there were, which can be more
+    /// than the log or the buffer holds. Called between blocks.
+    pub(crate) fn take_midi(&self, buffer: &mut [u32]) -> usize {
+        let logged = self.midi_logged.swap(0, Ordering::SeqCst);
+        for (slot, message) in buffer
+            .iter_mut()
+            .zip(&self.midi_log[..logged.min(MIDI_LOG)])
+        {
+            *slot = message.load(Ordering::SeqCst);
+        }
+        logged
+    }
+
+    fn log_midi(&self, data: [u8; 3]) {
+        let index = self.midi_logged.fetch_add(1, Ordering::SeqCst);
+        if let Some(slot) = self.midi_log.get(index) {
+            slot.store(
+                u32::from_le_bytes([data[0], data[1], data[2], 0]),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
     /// The plugin's state, as text.
     fn save_state(&self) -> String {
         let kind = match self.kind {
@@ -808,6 +890,8 @@ impl TestPlugin {
                         event.velocity,
                     );
                 } else {
+                    // A choked note ends at once, pedal or not.
+                    let choke = header.type_ == CLAP_EVENT_NOTE_CHOKE;
                     // SAFETY: the caller's promise.
                     unsafe {
                         note_off(
@@ -816,6 +900,7 @@ impl TestPlugin {
                             event.port_index,
                             event.channel,
                             event.key,
+                            choke,
                             out,
                         );
                     }
@@ -845,26 +930,9 @@ impl TestPlugin {
             CLAP_EVENT_MIDI => {
                 // SAFETY: as above.
                 let event = unsafe { &*event.cast::<clap_event_midi>() };
-                let [status, key, velocity] = event.data;
-                let channel = i16::from(status & 0x0f);
-                let key = i16::from(key);
-                match status & 0xf0 {
-                    0x90 if velocity > 0 => {
-                        note_on(
-                            audio,
-                            -1,
-                            event.port_index as i16,
-                            channel,
-                            key,
-                            f64::from(velocity) / 127.0,
-                        );
-                    }
-                    0x80 | 0x90 => {
-                        // SAFETY: the caller's promise.
-                        unsafe { note_off(audio, -1, event.port_index as i16, channel, key, out) };
-                    }
-                    _ => {}
-                }
+                self.log_midi(event.data);
+                // SAFETY: the caller's promise.
+                unsafe { apply_midi(audio, event.port_index as i16, event.data, out) };
             }
             CLAP_EVENT_TRANSPORT => {
                 // SAFETY: as above.
@@ -1023,7 +1091,15 @@ fn matches_note(voice: &Voice, note_id: i32, port: i16, channel: i16, key: i16) 
         && (key == -1 || voice.key == key)
 }
 
-fn note_on(audio: &mut Audio, note_id: i32, port: i16, channel: i16, key: i16, velocity: f64) {
+/// Starts a voice for a note, and returns it.
+fn note_on(
+    audio: &mut Audio,
+    note_id: i32,
+    port: i16,
+    channel: i16,
+    key: i16,
+    velocity: f64,
+) -> &mut Voice {
     let voice = audio.voices.iter().position(|v| !v.active).unwrap_or(0);
     audio.voices[voice] = Voice {
         active: true,
@@ -1034,9 +1110,11 @@ fn note_on(audio: &mut Audio, note_id: i32, port: i16, channel: i16, key: i16, v
         velocity,
         ..Voice::default()
     };
+    &mut audio.voices[voice]
 }
 
-/// Ends the voices playing a note at once, and tells the host they ended.
+/// Lets go of a note: its voices end, and the host hears they did, unless
+/// the sustain pedal holds them and the note isn't choked.
 ///
 /// # Safety
 ///
@@ -1047,28 +1125,159 @@ unsafe fn note_off(
     port: i16,
     channel: i16,
     key: i16,
+    choke: bool,
     out: *const clap_output_events,
 ) {
+    let held = audio.sustain && !choke;
     for voice in &mut audio.voices {
         if voice.active && matches_note(voice, note_id, port, channel, key) {
-            voice.active = false;
-            let end = clap_event_note {
-                header: clap_event_header {
-                    size: size_of::<clap_event_note>() as u32,
-                    time: 0,
-                    space_id: CLAP_CORE_EVENT_SPACE_ID,
-                    type_: CLAP_EVENT_NOTE_END,
-                    flags: 0,
-                },
-                note_id: voice.note_id,
-                port_index: voice.port,
-                channel: voice.channel,
-                key: voice.key,
-                velocity: 0.0,
-            };
-            // SAFETY: the caller's promise.
-            unsafe { push(out, &end.header) };
+            if held {
+                voice.held = true;
+            } else {
+                // SAFETY: the caller's promise.
+                unsafe { end_voice(voice, out) };
+            }
         }
+    }
+}
+
+/// Ends a voice at once, and tells the host it ended.
+///
+/// # Safety
+///
+/// `out` must be the host's output events.
+unsafe fn end_voice(voice: &mut Voice, out: *const clap_output_events) {
+    voice.active = false;
+    voice.held = false;
+    let end = clap_event_note {
+        header: clap_event_header {
+            size: size_of::<clap_event_note>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_NOTE_END,
+            flags: 0,
+        },
+        note_id: voice.note_id,
+        port_index: voice.port,
+        channel: voice.channel,
+        key: voice.key,
+        velocity: 0.0,
+    };
+    // SAFETY: the caller's promise.
+    unsafe { push(out, &end.header) };
+}
+
+/// Plays a MIDI message that came in on `port`.
+///
+/// # Safety
+///
+/// `out` must be the host's output events.
+unsafe fn apply_midi(audio: &mut Audio, port: i16, data: [u8; 3], out: *const clap_output_events) {
+    let [status, first, second] = data;
+    let index = usize::from(status & 0x0f);
+    let channel = index as i16;
+    let value = f64::from(second) / 127.0;
+    let on_channel = |voice: &Voice| voice.active && voice.channel == channel;
+    match status & 0xf0 {
+        0x90 if second > 0 => {
+            // A note starts as its channel is.
+            let state = audio.channels[index];
+            let voice = note_on(audio, -1, port, channel, i16::from(first), value);
+            voice.tuning = state.tuning();
+            voice.pressure = state.pressure;
+            voice.brightness = state.brightness;
+        }
+        0x80 | 0x90 => {
+            // SAFETY: the caller's promise.
+            unsafe { note_off(audio, -1, port, channel, i16::from(first), false, out) };
+        }
+        0xA0 => {
+            for voice in audio
+                .voices
+                .iter_mut()
+                .filter(|v| on_channel(v) && v.key == i16::from(first))
+            {
+                voice.pressure = value;
+            }
+        }
+        0xB0 => {
+            // SAFETY: the caller's promise.
+            unsafe { apply_controller(audio, index, first, second, out) };
+        }
+        0xD0 => {
+            let pressure = f64::from(first) / 127.0;
+            audio.channels[index].pressure = pressure;
+            for voice in audio.voices.iter_mut().filter(|v| on_channel(v)) {
+                voice.pressure = pressure;
+            }
+        }
+        0xE0 => {
+            let state = &mut audio.channels[index];
+            state.bend = u16::from(first) | u16::from(second) << 7;
+            let tuning = state.tuning();
+            for voice in audio.voices.iter_mut().filter(|v| on_channel(v)) {
+                voice.tuning = tuning;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Moves controller `number` on channel `index` to `value`.
+///
+/// # Safety
+///
+/// `out` must be the host's output events.
+unsafe fn apply_controller(
+    audio: &mut Audio,
+    index: usize,
+    number: u8,
+    value: u8,
+    out: *const clap_output_events,
+) {
+    let state = &mut audio.channels[index];
+    match number {
+        // Data entry, for the registered parameter selected.
+        6 => match state.rpn {
+            // The pitch bend range, in semitones. Its cents, in data
+            // entry's fine part, are left alone.
+            [0, 0] => state.range = f64::from(value),
+            // MPE's configuration, on a lower zone's master channel: its
+            // member channels bend 48 semitones, and it bends 2.
+            [0, 6] if index == 0 => {
+                for (channel, state) in audio.channels.iter_mut().enumerate() {
+                    if channel <= usize::from(value.min(15)) {
+                        state.range = if channel == 0 { 2.0 } else { 48.0 };
+                    }
+                }
+            }
+            _ => {}
+        },
+        // The sustain pedal: up lets go of the notes it held.
+        64 => {
+            audio.sustain = value >= 64;
+            if !audio.sustain {
+                for voice in audio.voices.iter_mut().filter(|v| v.active && v.held) {
+                    // SAFETY: the caller's promise.
+                    unsafe { end_voice(voice, out) };
+                }
+            }
+        }
+        74 => {
+            let brightness = f64::from(value) / 127.0;
+            state.brightness = brightness;
+            let channel = index as i16;
+            for voice in audio
+                .voices
+                .iter_mut()
+                .filter(|v| v.active && v.channel == channel)
+            {
+                voice.brightness = brightness;
+            }
+        }
+        100 => state.rpn[1] = value,
+        101 => state.rpn[0] = value,
+        _ => {}
     }
 }
 
@@ -1198,6 +1407,8 @@ unsafe extern "C" fn plugin_activate(
     audio.position = 0;
     audio.voices = [Voice::default(); VOICES];
     audio.buffers = std::array::from_fn(|_| vec![0.0; max_frames as usize]);
+    audio.channels = [MidiChannel::DEFAULT; 16];
+    audio.sustain = false;
     let previous = this
         .active_latency
         .swap(audio.latency as u32, Ordering::SeqCst);
@@ -1264,6 +1475,8 @@ unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
         line.fill(0.0);
     }
     audio.voices = [Voice::default(); VOICES];
+    audio.channels = [MidiChannel::DEFAULT; 16];
+    audio.sustain = false;
 }
 
 unsafe extern "C" fn plugin_process(
@@ -1684,12 +1897,20 @@ unsafe extern "C" fn note_ports_get(
     let mut name = [0; 256];
     // SAFETY: the array holds as much as it says.
     unsafe { copy_str("Notes", name.as_mut_ptr(), name.len()) };
+    let (supported_dialects, preferred_dialect) = if this.mpe {
+        (CLAP_NOTE_DIALECT_MIDI_MPE, CLAP_NOTE_DIALECT_MIDI_MPE)
+    } else {
+        (
+            CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI,
+            CLAP_NOTE_DIALECT_CLAP,
+        )
+    };
     // SAFETY: the host passes somewhere to write.
     unsafe {
         info.write(clap_note_port_info {
             id: 0,
-            supported_dialects: CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI,
-            preferred_dialect: CLAP_NOTE_DIALECT_CLAP,
+            supported_dialects,
+            preferred_dialect,
             name,
         });
     }

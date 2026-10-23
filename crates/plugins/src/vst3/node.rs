@@ -7,7 +7,7 @@ use std::sync::Arc;
 use musicable_engine::{
     AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, ProcessContext,
 };
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use vst3::ComRef;
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
     kNoteExpressionValueEvent, kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent,
@@ -42,6 +42,8 @@ pub(crate) struct Audio {
     pub(crate) outputs: Buses,
     /// Whether the plugin takes notes: it has an event input.
     pub(crate) takes_notes: bool,
+    /// The parameter each MIDI controller moves, if any.
+    pub(crate) controllers: Controllers,
     pub(crate) changes: InputChanges,
     pub(crate) out_changes: OutputChanges,
     pub(crate) events: Events,
@@ -66,6 +68,7 @@ impl Audio {
             inputs: Buses::default(),
             outputs: Buses::default(),
             takes_notes: false,
+            controllers: [None; CONTROLLERS],
             changes: InputChanges::new(),
             out_changes: OutputChanges::new(),
             events: Events::new(EVENT_CAPACITY, false),
@@ -86,11 +89,13 @@ impl Audio {
         inputs: &BusInfo,
         outputs: &BusInfo,
         takes_notes: bool,
+        controllers: Controllers,
     ) {
         self.config = Some(config);
         self.inputs = Buses::new(inputs, config.max_block);
         self.outputs = Buses::new(outputs, config.max_block);
         self.takes_notes = takes_notes;
+        self.controllers = controllers;
         self.changes.clear();
         self.events.clear();
         self.sounding.clear();
@@ -98,6 +103,12 @@ impl Audio {
         self.steady_time = 0;
     }
 }
+
+/// How many MIDI controllers there are.
+pub(crate) const CONTROLLERS: usize = Controller::MAX as usize + 1;
+
+/// The parameter each MIDI controller moves, by number.
+pub(crate) type Controllers = [Option<u32>; CONTROLLERS];
 
 /// A plugin's audio buses on one side: their channel counts, and which is
 /// the main one.
@@ -368,6 +379,12 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
                 audio.changes.push(param.0, offset, value, true);
             }
             NodeEventKind::Note(note) => note_events(audio, offset, note),
+            // A controller moves the parameter the plugin maps it to.
+            NodeEventKind::Controller { controller, value } => {
+                if let Some(id) = audio.controllers[usize::from(controller.number())] {
+                    audio.changes.push(id, offset, value.into(), true);
+                }
+            }
             // VST3 has no modulation.
             _ => {}
         }

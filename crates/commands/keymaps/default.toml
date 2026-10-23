@@ -40,7 +40,7 @@ version = 1
 
 # Live's keys for the arrangement's zoom, the grid and Follow, for showing
 # take lanes, for showing the mixer and the devices (Live's Detail View)
-# under the arrangement, and for showing the browser.
+# under the arrangement, and for showing the browser and searching in it.
 "view.zoom_in" = ["Equals", "NumpadAdd"]
 "view.zoom_out" = ["Minus", "NumpadSubtract"]
 "view.zoom_to_selection" = ["Z"]
@@ -54,6 +54,34 @@ version = 1
 "view.toggle_mixer" = ["Ctrl+Alt+M"]
 "view.toggle_devices" = ["Ctrl+Alt+L"]
 "view.toggle_browser" = ["Ctrl+Alt+B"]
+"browser.focus_search" = ["Ctrl+F"]
+
+# Live's keys for its clip view, which the piano roll stands in for: Live 12
+# shows and hides it with Ctrl+Alt+3, and switches between it and the device
+# view with F12 or Shift+Tab. Shift+Tab is left to move the keyboard focus
+# back, as it does everywhere else.
+"view.toggle_piano_roll" = ["Ctrl+Alt+3"]
+"view.switch_devices_piano_roll" = ["F12"]
+
+# Live's keys for its MIDI note editor. The arrow keys act on the notes
+# selected in the piano roll while it has the focus; with none selected,
+# they move the keyboard focus between controls instead.
+"notes.toggle_draw" = ["B"]
+"notes.quantize" = ["Ctrl+U"]
+"notes.transpose_up" = ["Up"]
+"notes.transpose_down" = ["Down"]
+"notes.octave_up" = ["Shift+Up"]
+"notes.octave_down" = ["Shift+Down"]
+"notes.nudge_left" = ["Left"]
+"notes.nudge_right" = ["Right"]
+"notes.shorten" = ["Shift+Left"]
+"notes.lengthen" = ["Shift+Right"]
+"notes.velocity_up" = ["Ctrl+Up"]
+"notes.velocity_down" = ["Ctrl+Down"]
+
+# Live's A shows every track's automation in Automation Mode. Here it shows
+# the selected track's automation lanes, or hides them.
+"automation.show" = ["A"]
 
 # Live's keys for new tracks. Live has no key for a new group track: Ctrl+G
 # groups the selected tracks, which needs a selection.
@@ -66,6 +94,7 @@ version = 1
 "file.open" = ["Ctrl+O"]
 "file.save" = ["Ctrl+S"]
 "file.save_as" = ["Ctrl+Shift+S"]
+"file.export_audio" = ["Ctrl+Shift+R"]
 "file.quit" = ["Ctrl+Q"]
 
 # The app's windows. Live opens its settings with Ctrl+Comma, and Ctrl+K is

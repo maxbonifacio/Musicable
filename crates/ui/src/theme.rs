@@ -16,6 +16,8 @@ pub struct Theme {
     pub arm: Color32,
     /// Input monitoring's buttons, when they're on.
     pub monitor: Color32,
+    /// Built-in devices' switches, when they're on.
+    pub switch: Color32,
     pub ink: Color32,
     /// The meters' colours, from quiet to loud to over full scale.
     pub meter_quiet: Color32,
@@ -81,6 +83,12 @@ pub struct Theme {
     pub take_clip: Color32,
     /// What the armed tracks have recorded so far, while they record.
     pub recording: Color32,
+    /// Automation lanes, under the tracks, and the lines and points on
+    /// them: grey where someone overrode the automation by hand, and for a
+    /// parameter's own value where it has none.
+    pub automation_lane: Color32,
+    pub automation: Color32,
+    pub automation_off: Color32,
     pub header: Color32,
     pub header_selected: Color32,
     pub header_text: Color32,
@@ -88,6 +96,23 @@ pub struct Theme {
     pub divider: Color32,
     /// The devices panel's boxes, one for each device.
     pub device: Color32,
+    /// The waveform of the sample previewing, in the browser.
+    pub preview_wave: Color32,
+
+    // The piano roll's colours. Its notes take their track's colour, and
+    // its grid lines, start marker and playhead are the arrangement's.
+    /// The rows of the white keys and of the black keys, behind the notes.
+    pub white_row: Color32,
+    pub black_row: Color32,
+    /// The keyboard beside them, and the names of its Cs.
+    pub white_key: Color32,
+    pub black_key: Color32,
+    pub key_text: Color32,
+    /// Laid over the rows before the clip's start and after its end, where
+    /// notes don't play.
+    pub outside_clip: Color32,
+    /// The rectangle that selects the notes in it, while it's dragged.
+    pub area: Color32,
 
     // The arrangement's sizes, in points.
     /// The ruler over the tracks, and the strip at its top for the loop
@@ -100,6 +125,12 @@ pub struct Theme {
     pub track_height: f32,
     /// A take lane's height.
     pub take_height: f32,
+    /// An automation lane's height.
+    pub automation_height: f32,
+    /// The radius of an automation lane's points, and how near a point or
+    /// the line through them a press takes it.
+    pub point: f32,
+    pub point_grab: f32,
     /// The bar with a clip's name, when the clip is tall enough for one.
     pub clip_title: f32,
     /// How near a clip's edge a drag trims it.
@@ -126,6 +157,26 @@ pub struct Theme {
 
     pub mixer: MixerSizes,
     pub devices: DeviceSizes,
+    pub piano_roll: PianoRollSizes,
+    pub browser: BrowserSizes,
+}
+
+/// The piano roll's sizes, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PianoRollSizes {
+    /// The piano roll panel's height until the user drags its edge.
+    pub panel: f32,
+    /// The keyboard's width, beside the rows of keys.
+    pub keys: f32,
+    /// The ruler over the rows.
+    pub ruler: f32,
+    /// The lane under the rows, of the notes' velocities or a controller.
+    pub lane: f32,
+    /// How near a note's start or end a drag trims it.
+    pub edge_grab: f32,
+    /// How far a drag up or down a note goes to change its velocity from
+    /// the softest to the hardest.
+    pub velocity_drag: f32,
 }
 
 /// The mixer's sizes, in points.
@@ -157,18 +208,30 @@ pub struct MixerSizes {
     pub scale_text: f32,
 }
 
-/// The devices panel's and the plugin browser's sizes, in points.
+/// The devices panel's and the browser's sizes, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceSizes {
     /// The devices panel's height until the user drags its edge.
     pub panel: f32,
-    /// A device's box's width.
+    /// A plugin device's box's width.
     pub device: f32,
+    /// The width of a built-in device's controls, and of their columns.
+    pub control: f32,
     /// The space around what's in a device's box, and between the boxes.
     pub margin: f32,
     pub gap: f32,
-    /// The plugin browser's width until the user drags its edge.
+    /// The browser's width until the user drags its edge.
     pub browser: f32,
+}
+
+/// The browser's sizes, in points. Its width is in [`DeviceSizes`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrowserSizes {
+    /// How far in a folder's rows are from its own, and the space for its
+    /// arrow.
+    pub indent: f32,
+    /// The height of the waveform of the sample previewing.
+    pub waveform: f32,
 }
 
 impl MixerSizes {
@@ -186,6 +249,7 @@ impl Default for Theme {
             solo: Color32::from_rgb(80, 160, 235),
             arm: Color32::from_rgb(230, 75, 65),
             monitor: Color32::from_rgb(95, 190, 160),
+            switch: Color32::from_rgb(236, 190, 60),
             ink: Color32::from_gray(24),
             meter_quiet: Color32::from_rgb(90, 190, 110),
             meter_loud: Color32::from_rgb(230, 200, 70),
@@ -235,17 +299,32 @@ impl Default for Theme {
             take_lane: Color32::from_gray(33),
             take_clip: Color32::from_gray(96),
             recording: Color32::from_rgba_unmultiplied(230, 75, 65, 110),
+            automation_lane: Color32::from_gray(35),
+            automation: Color32::from_rgb(240, 95, 85),
+            automation_off: Color32::from_gray(125),
             header: Color32::from_gray(46),
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),
             divider: Color32::from_gray(24),
             device: Color32::from_gray(46),
+            preview_wave: Color32::from_rgb(150, 200, 255),
+
+            white_row: Color32::from_gray(44),
+            black_row: Color32::from_gray(36),
+            white_key: Color32::from_gray(205),
+            black_key: Color32::from_gray(40),
+            key_text: Color32::from_gray(60),
+            outside_clip: Color32::from_rgba_unmultiplied(0, 0, 0, 90),
+            area: Color32::from_rgba_unmultiplied(150, 200, 255, 36),
 
             ruler_height: 40.0,
             ruler_strip: 18.0,
             header_width: 190.0,
             track_height: 60.0,
             take_height: 36.0,
+            automation_height: 48.0,
+            point: 3.0,
+            point_grab: 5.0,
             clip_title: 14.0,
             edge_grab: 6.0,
             fade_handle: 7.0,
@@ -276,11 +355,24 @@ impl Default for Theme {
                 scale_text: 9.0,
             },
             devices: DeviceSizes {
-                panel: 130.0,
+                panel: 190.0,
                 device: 170.0,
+                control: 96.0,
                 margin: 4.0,
                 gap: 6.0,
-                browser: 220.0,
+                browser: 260.0,
+            },
+            browser: BrowserSizes {
+                indent: 14.0,
+                waveform: 44.0,
+            },
+            piano_roll: PianoRollSizes {
+                panel: 320.0,
+                keys: 56.0,
+                ruler: 22.0,
+                lane: 60.0,
+                edge_grab: 4.0,
+                velocity_drag: 127.0,
             },
         }
     }

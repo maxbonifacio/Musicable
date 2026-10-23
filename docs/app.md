@@ -21,9 +21,11 @@ console, and are much slower: the engine checks every allocation, and egui
 runs unoptimised.
 
 `musicable keymap [FILE]` still prints the keys, as
-[commands.md](commands.md#trying-it-out) describes, and
+[commands.md](commands.md#trying-it-out) describes,
 `musicable null-test [PROJECT]` checks the parallel scheduler against the
-reference renderer (see [The null test](#the-null-test)).
+reference renderer (see [The null test](#the-null-test)), and
+`musicable export PROJECT FILE` renders a project to audio files (see
+[Exporting audio](#exporting-audio)).
 
 ## The Tier 0 demo
 
@@ -104,14 +106,15 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Locator, Transport, View and Options. Undo and Redo name the
-  change they would make, as in "Undo Set Tempo", and are greyed out when
-  there's nothing to undo or redo, as is any command that doesn't apply
-  now, such as Split with nothing selected. Toggles, such as Follow and
-  Snap to Grid, are ticked while on. A command in an area with no menu yet
-  gets a menu named after its area, before View, so every command can be
-  reached; commands that need arguments are left out, as menus can't give
-  them. On the right are the CPU meter and the dropout counter.
+  Track, Clip, Notes, Automation, Locator, Transport, Browser, View and
+  Options. Undo and Redo name the change they would make, as in "Undo Set
+  Tempo", and are greyed out when there's nothing to undo or redo, as is any
+  command that doesn't apply now, such as Split with nothing selected.
+  Toggles, such as Follow and Snap to Grid, are ticked while on. A command
+  in an area with no menu yet gets a menu named after its area, before
+  Browser, so every command can be reached; commands that need arguments
+  are left out, as menus can't give them. On the right are the CPU meter and
+  the dropout counter.
 - **The transport bar** has go to start, play, stop, record, loop, punch in
   and punch out, the metronome, the tempo, the time signature, and the
   playhead in bars, beats and sixteenths and in minutes and seconds.
@@ -125,10 +128,17 @@ That's what `ParallelOptions::inline_below` is for
 - **The arrangement** fills the middle of the window: the tracks over time,
   with their clips, under a ruler ([below](#the-arrangement)).
 - **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Plugin to open the plugin browser (see
-  [Plugins](#plugins)). **View > Devices** (Ctrl+Alt+L) hides or shows it.
-- **The plugin browser** is a panel on the left, hidden until Add Plugin or
-  **View > Plugin Browser** (Ctrl+Alt+B) shows it.
+  devices, or the master's, with Add Device to open the browser's devices
+  (see [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
+  **View > Devices** (Ctrl+Alt+L) hides or shows it.
+- **The piano roll** takes the devices panel's place, as Live's clip view
+  takes its device view's: showing one hides the other. Double-clicking a
+  MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
+  switches between the two ([below](#the-piano-roll)).
+- **The browser** is a panel on the left with the samples, the devices and
+  the presets ([The browser](#the-browser)), hidden until Add Device,
+  **Browser > Search in Browser** (Ctrl+F) or **View > Browser**
+  (Ctrl+Alt+B) shows it.
 - **The mixer** is a panel under them, with a strip for each track and the
   master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
   make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
@@ -173,6 +183,19 @@ undo history and the engine rebuilds its graph once.
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).
+- **Automation** shows in lanes under a track's lanes after the A button in
+  its header, **Automation > Show/Hide Automation** (A), or the same in the
+  header's menu: a lane for each parameter the track automates, or else
+  one for its volume. The master's lanes go under the last track; the
+  master strip's controls show them, in the mixer. A lane's header names
+  the parameter, with its value at the playhead, or "Overridden" once
+  someone moved its control by hand, and has three buttons: ▾ chooses the
+  parameter the lane shows (the track's volume, pan and sends, then each
+  device's parameters, a submenu for each device, the automated ones in
+  red), + adds a lane for the next parameter, and × hides the lane. The
+  line through a lane's points is red, or grey while its automation is
+  overridden; a lane without automation shows the parameter's own value as
+  a dashed line ([commands.md](commands.md#automation)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
@@ -185,6 +208,7 @@ The mouse does what it does in Live:
 | | Drag; Ctrl-drag; Alt-drag | Moves the selected clips, also to other tracks of their kind; copies them; moves them off the grid |
 | | Double-click | Renames the clip |
 | A clip's body | Click | Selects the clip and puts the start marker there, so Ctrl+E splits it there |
+| | Double-click | Opens a MIDI clip in the piano roll |
 | | Drag | Selects time, as on an empty lane |
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
 | A fade handle | Drag | Makes the fade longer or shorter |
@@ -199,6 +223,11 @@ The mouse does what it does in Live:
 | A track's bottom edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
+| An automation lane | Click; double-click | Selects the track and puts the start marker there; adds a point there |
+| | Drag; Alt-drag | Draws a value for each step of the grid crossed, as Live's Draw Mode does; draws freely, off the grid, as it does with Snap to Grid off |
+| An automation lane's line | Click; drag | Adds a point on the line, on the grid; moves that stretch of the line, with its points, up or down |
+| An automation point | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
+| An automation lane's header | Click | Selects the track |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
@@ -206,9 +235,12 @@ Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
 header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
-locator, and Comp, Rename, Delete Take and Show/Hide Take Lanes on a take. Each shows its keys, and takes its arguments from where the
-menu was opened: the clip, the track, or the position. Rename, from a menu,
-a key or a double-click, opens a box for the new name.
+locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
+and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
+automation lane. Each shows its keys, and takes its arguments from where
+the menu was opened: the clip, the track, the parameter, or the position.
+Rename, from a menu, a key or a double-click, opens a box for the new
+name.
 
 Audio files dropped on the window become clips, one after another, where
 they're dropped: on that track if it's an audio track, or else the
@@ -217,12 +249,13 @@ transport plays, **Follow** (Ctrl+Shift+F) turns the page when the playhead
 leaves the view; scrolling away pauses it until the playhead is in sight
 again.
 
-**Themes and mouse maps.** The arrangement and the mixer draw every colour
-and size from a `musicable_ui::Theme`, and look up what each gesture does,
-from where it starts and the modifiers held, in a `MouseMap`.
-`MouseMap::live()` is the table above. `Shell::set_theme` and
-`set_mouse_map` change them, for the profiles of Tier 2. Each view is a
-panel with its own id, such as `musicable_ui::MIXER`.
+**Themes and mouse maps.** The arrangement, the piano roll and the mixer
+draw every colour and size from a `musicable_ui::Theme`, and look up what
+each gesture does, from where it starts and the modifiers held, in a
+`MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
+`Shell::set_theme` and `set_mouse_map` change them, for the profiles of
+Tier 2. Each view is a panel with its own id, such as
+`musicable_ui::MIXER` and `PIANO_ROLL`.
 
 ### How fast it draws
 
@@ -261,6 +294,91 @@ triangles, such as automation of hundreds of tracks zoomed out, the lanes'
 drawing (`crates/ui/src/arrangement/paint.rs`) can move into an
 `egui_wgpu::Callback` with a render pass of its own, with the gestures left
 as they are.
+
+## The piano roll
+
+The piano roll shows the notes of a MIDI clip, as Live's MIDI note editor
+does: rows of keys beside a keyboard, under a ruler, over a lane of the
+notes' velocities or a controller's curve. It shows the MIDI clip selected
+last in the arrangement,
+or opened with a double-click. Across, it shows song positions, as the
+arrangement does, so the start marker, the playhead and the grid line up
+with it; its zoom and scrolling are its own. Everything it does runs a
+command ([commands.md](commands.md#notes) and
+[controllers](commands.md#controllers)), and a drag runs one when it ends,
+so it's one step to undo.
+
+- **Notes** take their track's colour, fainter the softer they start, with
+  their names on them when there's room. Selected notes are outlined. While
+  a drag lasts, ghosts show where notes will go.
+- **The rows** of the black keys are darker, with a line under each C,
+  where an octave starts. The clip's notes before its start or after its
+  end are shaded, as they don't play.
+- **The keyboard** names the Cs: middle C, MIDI note 60, is C3, as in
+  Live, unless the `middle_c` setting says otherwise
+  ([below](#settings-and-your-keymap)).
+- **The velocities** are stems at the notes' starts, as tall as the notes
+  start hard.
+- **The lane's name**, under the keyboard, opens a menu of what the lane
+  can show: the velocities; the controllers the clip moves; those
+  keyboards and pedals have, such as the mod wheel, the sustain pedal and
+  CC 74, MPE's slide; then the rest of MIDI's 120.
+- **A controller's curve** shows how the clip moves it: each point's value
+  held until the next, filled under, in the track's colour, from the first
+  point, as the clip leaves the controller alone before it. A drawing
+  drag shows the curve as it will be. The curve before the clip's start
+  and after its end is shaded.
+- **Draw Mode** (B) turns clicks and drags on the rows into drawing, as in
+  Live, and its button is in the Notes menu and the rows' context menu.
+
+| Where | Gesture | What it does |
+|---|---|---|
+| A note | Click; Ctrl- or Shift-click | Selects the note; adds it to the selection or takes it out |
+| | Drag; Ctrl-drag; Alt-drag | Moves the selected notes in time and to other keys, on the grid; copies them; changes their velocity |
+| | Double-click | Deletes the note |
+| A note's start or end | Drag; Alt-drag | Trims the selected notes, on the grid; off it |
+| A row | Click | Clears the selection and puts the start marker there |
+| | Double-click | Adds a note, a step of the grid long, on the line before the pointer |
+| | Drag | Selects the notes in the rectangle dragged over |
+| A row, in Draw Mode | Click; drag | Adds a note; draws a note at each step of the grid dragged over, on the key under the pointer |
+| A note, in Draw Mode | Click | Deletes the note |
+| A key | Click; Ctrl- or Shift-click | Selects the notes on the key; adds them |
+| | Wheel; Ctrl-wheel | Scrolls up and down; makes the rows taller or shorter around the pointer |
+| The velocities | Drag | Changes the velocity of the note dragged, or the selected notes |
+| A controller's lane | Click; drag | Draws the curve, a step of the grid at a time, at the pointer's height: the steps a fast drag skips get the values on the way. In MIDI's 128 steps, and off or on for a switch such as the sustain pedal, on from halfway up |
+| | Alt-click; Alt-drag | Erases the curve there, so what came before holds through it |
+| The ruler | Click; drag | Puts the start marker and the playhead there; zooms |
+| Anywhere else | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
+
+Live turns off the grid with Alt while a drag goes, but Alt-dragging a note
+changes its velocity there, so moving notes off the grid is Snap to Grid
+(Ctrl+4) turned off. Escape cancels a drag. A right-click opens a context
+menu of commands from the registry, as the arrangement's do: Cut, Copy,
+Paste, Duplicate, Delete, Quantize and Zoom to Selection on a note; Paste,
+Select All, Draw Mode and Quantize on the rows; the grid on both; Clear
+Controller and the grid on a controller's lane; and Locate and Follow on
+the ruler. With Snap to Grid off, drawing a controller fills steps of three
+points.
+
+**The focus.** Clicking in the piano roll gives it the focus, and clicking
+in the arrangement gives the arrangement the focus back. While the piano
+roll has it, the edit commands (Ctrl+X, C, V, D, A and Delete), Zoom and the
+arrow keys act on its notes: Up and Down transpose, Shift with them by
+octaves, Left and Right nudge by the grid, Shift+Left and Shift+Right
+shorten and lengthen, Ctrl+Up and Ctrl+Down change velocities, and Ctrl+U
+quantizes ([commands.md](commands.md#notes)). Hiding the piano roll gives
+the arrangement the focus.
+
+**For Tier 2's extensions and profiles.** What the piano roll shows, its
+selection, its zoom and the focus are the `Editor`'s, beside the
+arrangement's, where commands and agents read and change them; its context
+menus list commands from the registry; its colours and sizes are in the
+`Theme` (`theme.piano_roll` and the piano roll's colours); its gestures are
+the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
+`DrawGrid`, `PianoKey`, `VelocityLane` and `ControllerLane`; what its lane
+shows is the editor's too (`PianoRoll::lane`); its panel's id is
+`musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
+setting.
 
 ## The command palette
 
@@ -350,6 +468,13 @@ the pan to centre it. A whole drag is one step in the undo history. The
 faders, sends, pans, buttons, menus and meters are named for screen readers,
 such as "Lead Volume", which is how the tests drive them.
 
+**Automation.** A fader, a send or a pan with automation follows it, showing
+its value at the playhead, and has a red dot at its top left; the dot is
+grey once the control is moved by hand, which overrides the automation
+until it's re-enabled, as in Live. Right-clicking one of them has **Show
+Automation**, which shows its lane in the arrangement, **Re-Enable
+Automation** and **Clear Automation**.
+
 **Meters.** Each strip's meter shows its channel's output, after mute and
 solo, left and right: the peak in a light shade, and the RMS level, averaged
 over about 0.3 s, solid. They're green up to -6 dB, yellow to 0 dB and red
@@ -433,9 +558,11 @@ slide, each note's own with MPE. Each pass with notes is a take with a MIDI
 clip as long as the pass; a pass without notes makes no take. A note held
 as recording punches in isn't recorded, and one held as it punches out or
 stops ends there. Round a loop, a note held over the loop's end ends there
-and starts again at the loop's start, in the next pass. The sustain pedal
-and other controllers aren't recorded yet: they come with the piano roll's
-controller lanes.
+and starts again at the loop's start, in the next pass. It records how the
+controllers moved too, such as the sustain pedal and the mod wheel, as the
+clip's [controller curves](#the-piano-roll), each pass starting with them
+where they are: a pedal held down as a pass starts holds its notes in the
+take as it did while recording.
 
 **Files.** Recordings are 32-bit float WAV files at the engine's sample
 rate, in a `Recordings` folder in the project's folder, named after the
@@ -470,9 +597,13 @@ buffers, the MIDI inputs' too, `Session::wanted_inputs` and
 arrangement. `crates/app/tests/recording.rs` records a second of a ramp
 through the session, checks it landed on the frame, and undoes it, and
 records a note on a MIDI track the same way;
+`crates/app/tests/mpe.rs` records an MPE performance, with the sustain pedal
+and the mod wheel, into a synth that takes only MPE MIDI, and checks the
+take plays back into it as it played, to the sample;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping, for audio and MIDI
-tracks, and the notes held over loops and punches.
+tracks, the notes held over loops and punches, and where the controllers
+start each pass.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks
@@ -551,6 +682,66 @@ loops, leaving out what was recorded, the last run, waiting for inputs and
 the timeline, how far back inputs are held, new streams, shared and
 refused inputs, and why there's nothing to take, for audio and MIDI.
 
+## Built-in devices
+
+Musicable has devices of its own, which play without plugins: an EQ, a
+compressor, a gate, a delay, a reverb, a utility, a sampler and a synth.
+Each is a node in the engine ([engine.md](engine.md#built-in-devices)),
+and the project saves its settings ([project-format.md](project-format.md)).
+The sampler and the synth play their track's notes, from its clips or its
+MIDI input, each note bent on its own, as MPE bends them; a note's
+pressure and slide don't move them yet, and nor do controllers, such as
+the sustain pedal.
+
+The plugin browser lists them under **Built-in**, above the plugins, and
+finds them by name; All, Instruments and Effects pick among them too. A
+double-click puts one at the end of the selected track's devices, or the
+master's, with every control at its default.
+
+In the devices panel, a built-in device shows its controls in columns, a
+column for each group of them, such as one of the EQ's bands, under the
+group's name, and more columns, side by side, for a group of more than
+five:
+
+- **A bar** for each number, filled as far as the value is along its range
+  (from zero, for a range either side of it, such as a gain in dB), with
+  its name and value on it. Drag it sideways, or Ctrl-drag (Cmd on a Mac)
+  to move it a tenth as far; the mouse map's `DeviceControl` target says
+  which. A double-click gives the default, and the right-click menu takes a
+  typed value: a number with or without its unit ("1.2k", "1.2 kHz",
+  "-6 dB", "250 ms"), a note's name ("C#3") or a pan ("20L"), applied on
+  Enter. Controls with whole steps, such as the synth's voices, move in
+  whole steps however slowly they're dragged.
+- **A button** for each switch, lit while it's on.
+- **A menu** for each choice, such as a band's shape.
+
+Every change is a step in the undo history named after the device, such
+as "Change EQ", and a whole drag is one. The engine hears each as it's
+made, and smooths it over 10 ms, or moves it its device's own way: the
+delay fades in a new time over 50 ms, and the reverb glides to a new
+size. Screen readers find each control by the device's name and the
+control's, such as "EQ Band 3 Freq", and can set a bar to a number.
+
+A sampler shows the name of its sample's file beside its own, and **Load
+Sample...** asks for an audio file for it to play (WAV, AIFF or FLAC), in
+the project's folder; right-click the name to remove it. As for an audio
+clip, the project keeps the file's path relative to its folder if it's in
+there. The sampler reads the whole file when the graph is next built, and
+samplers playing the same file share it; if it can't, it plays nothing,
+and the status bar says why. Loading and removing a sample are steps in
+the undo history: "Load Sample" and "Remove Sample".
+
+**Automation.** Every control of a built-in device can be automated. One
+with automation follows it, showing its value at the playhead, with the
+mixer's dot at its top left: red, or grey once the control is moved by
+hand, which overrides the automation until it's re-enabled
+([commands.md](commands.md#automation)). Right-clicking a button or a menu has **Show
+Automation**, **Re-Enable Automation** and **Clear Automation**, and a
+bar's right-click menu has them under the typed value. In the
+arrangement, a lane's ▾ lists every parameter of a track's built-in
+devices, and the lane spreads the values as the control does (a frequency
+on a log scale, say) and names them as it does ("1.20 kHz").
+
 ## Plugins
 
 The app finds CLAP and VST3 plugins in each format's usual places, and in
@@ -561,21 +752,26 @@ loads only the libraries that are new or changed since. A library that
 crashes, hangs or fails as it loads is left out, and the status bar says
 which; **Options > Rescan Plugins** tries those again too.
 
-**The plugin browser** lists the plugins found by name: all of them, or
-only the instruments or the effects. Hovering one shows its vendor, its
+**The browser's Devices** list Musicable's own devices under **Built-in**,
+then the plugins found by name under **Plugins**: all of them, or only the
+instruments or the effects. Hovering one shows its vendor, its
 kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
-best matches first. Double-click a plugin to put it at the end of the
-selected track's devices, or the master's while the devices panel shows
-those. The browser's foot says how many plugins there are, and has Rescan,
-or says "Scanning..." while a scan runs.
+best matches first. Double-click a device or a plugin to put it at the end
+of the selected track's devices, or the master's while the devices panel
+shows those. Or drag it: into the devices panel, onto a track for the end of
+its devices, or below the tracks for a new track named after it, a MIDI
+track for an instrument and an audio track for an effect. The list's foot
+says how many plugins there are, and has Rescan, or says "Scanning..."
+while a scan runs.
 
 **The devices panel** shows the devices of the selected track, which a
 click on its header selects, in the order the signal goes through them,
 left to right. The buttons above them pick the selected track's or the
-master's. Each device has its name, its kind and format ("Instrument ·
-CLAP"), and:
+master's. A built-in device has its name and its controls
+([above](#built-in-devices)). A plugin device has its name, its kind and
+format ("Instrument · CLAP"), and:
 
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live. On Windows
@@ -597,13 +793,161 @@ one, so a plugin that looks ahead doesn't put its track out of time
 ([engine.md](engine.md#delay-compensation)). [plugins.md](plugins.md)
 has how the app hosts plugins.
 
+## The browser
+
+The browser is the panel on the left, with three lists: Samples, Devices
+and Presets. Ctrl+F shows it with the keys in the search field of the list
+showing, and Up and Down there move through what it lists. What the browser
+does is commands (`browser.*` and the device commands,
+[commands.md](commands.md#browser)), so keys, the command palette and
+agents reach it too, and a search an agent runs shows in the browser.
+
+### Samples
+
+**The library** is the folders of samples you add, with the + at the foot
+of the list, or **Browser > Add Folder to Library...**. The app looks
+through each folder and the folders in it for WAV, AIFF and FLAC files,
+reading each one's header, and keeps what it finds in `library.json` in
+the config folder ([Settings](#settings-and-your-keymap)), so the next
+start has the library at once. Each start looks through the folders again
+in the background, reading only the files whose size or time of change
+differ, and **Browser > Rescan Library** does it when asked; a file that
+moved within its folder keeps its tags. A folder's right-click menu has
+Rescan and Remove from Library, which leaves the files where they are. A
+folder can't be added twice, nor one inside a folder of the library.
+
+**Browsing and searching.** With the search field empty, the list is the
+folders of the library, which a click opens and closes: each folder's
+folders first, then its files, each in order of name. Typing in the field
+searches as you type: every word has to be in a file's name, its folders
+or its tags, and the best matches come first, those whose names have the
+words before those whose folders do, and a word that starts a word of the
+name before one inside it, so "kick" finds "Kick_01" before "Sidekick".
+The list shows the first thousand files found, with their folders, and the
+foot says how many there are in all. Searches of a quarter of a million
+files take a few milliseconds ([below](#how-fast-it-finds-things)).
+
+**A sample's menu** has Preview, Insert, Find Similar, and its tags. Find
+Similar lists the files most like it, "Like Kick 01" above them, until ×
+goes back to the search: those whose names share the most words with its
+name, then those in the same folder, then those nearest its length. The
+names and lengths are all it goes on, until analysis
+([below](#not-done-yet)) gives sounds an embedding to compare. The tags
+are yours: type one in New tag and press Enter to give it, and click one
+to take it away. Searches find them, and the library file keeps them. They
+aren't in the project's undo history, as they aren't the project's.
+
+**Previews.** Clicking a sample plays it, beside the song, while Auto, at
+the foot, is on. The strip there shows its waveform with where it's
+playing, which a click plays from the start again; Stop stops it, and the
+slider sets how loud previews play, from -60 to +6 dB. Previews play after
+the master, so they're never in an export, and a file at another sample
+rate is resampled. A file up to about twelve seconds long at 44.1 kHz is
+read whole to preview it, and a longer one streams. The browser remembers
+Auto and the volume in `settings.toml`.
+
+**Onto tracks.** Double-click a sample, or pick Insert, to put it on the
+selected audio track at the start marker, or on a new audio track named
+after it, as an imported file goes
+([Audio files](#audio-files)). Or drag it onto a track, where it starts
+at the grid line nearest where it's dropped, or below the tracks for a new
+track there. While a sample, a device or a preset is dragged, the place it
+would go is outlined, and "New track" shows below the tracks.
+
+### Devices
+
+The Devices list is Musicable's own devices and the plugins the scans
+found, which go on tracks as the samples do ([Plugins](#plugins)).
+
+### Presets
+
+**Presets** are a device's settings in a file, a plugin's state and all.
+**Save as Preset...** in a device's right-click menu in the devices panel
+asks for a name, and saves the device as a Musicable preset: a
+`.musicable-preset` file in a folder named after the device in the
+Presets folder, `Music/Musicable/Presets` in your home folder, or the
+`[browser]` settings' `presets_folder`. A name the device has a preset for
+already is refused. The Presets list also finds the VST3 presets
+(`.vstpreset`) in VST3's preset folders:
+
+| System | Folders |
+|---|---|
+| Windows | `Documents\VST3 Presets`, `%PROGRAMDATA%\VST3 Presets` |
+| macOS | `~/Library/Audio/Presets`, `/Library/Audio/Presets`, `/Network/Library/Audio/Presets` |
+| Linux | `~/.vst3/presets`, `/usr/share/vst3/presets`, `/usr/local/share/vst3/presets` |
+
+The list groups presets by device, finds them by name and device as the
+samples are found, and leaves out those for plugins that aren't
+installed, which its foot counts. Double-click a preset to add its device
+to the chain the devices panel shows, set as it was saved, or drag it
+there, onto a track, or below the tracks for a new track. Adding a preset
+is a step in the undo history named after it. A sampler's preset names its
+sample in full, so it plays in any project; added to a project whose folder
+has the sample, the sampler names it from there, as clips name their files.
+
+### Behind the browser
+
+**One queue for file work.** Reading the library file, looking through
+folders, finding presets, opening the files to preview and drawing their
+waveforms all happen on one queue of the library's own
+(`musicable_library::Queue`), never on the window's thread or the
+engine's workers. It has a thread for every two cores, one to four of
+them, called `musicable-files-1` and up, which run below normal priority.
+A preview comes first, then a waveform, then scans. Scans run on every
+thread while the transport is stopped and on one while it plays, and
+while recording they rest as long as they work, so the disk and the cores
+are left to the recorder and the engine. On Windows and macOS they also
+run in the system's background mode, which puts their reads behind
+others. Analysis will run on it too.
+
+**The library file** has a record for each file, with room for what
+analysis will add: tags with where each came from (the name, a
+measurement, a model or you) and how sure it is, measured values, an
+embedding for finding similar sounds, and the version of the analyser that
+made them. The browser fills in only the names, the file's size and time
+of change, and its header: format, sample rate, channels and length. It's
+saved a couple of seconds after a change, so tagging a run of files saves
+it once, and when the app closes. A library file that can't be read is
+kept beside the new one as `library.json.broken`, and the status bar says
+so.
+
+### How fast it finds things
+
+`cargo bench -p musicable-library --bench large` builds a made-up library
+of a quarter of a million files, named as sample packs name them (pass
+`-- 1000000` for a million), and prints how long each step takes. On a
+four-core cloud machine:
+
+| What | Time |
+|---|---|
+| Writing the index file (44.1 MB) | 179 ms |
+| Reading the index file | 161 ms |
+| Preparing the index for search | 157 ms |
+| Preparing one folder of the library, of 62,500 files | 37 ms |
+| Searching for "kick" (38,874 found) | 3.9 ms |
+| Searching for "dark pad" (625 found) | 3.2 ms |
+| Searching for "deep house kick 120" (146 found) | 5.7 ms |
+| Searching for "ha" (64,375 found) | 4.2 ms |
+| Searching for "nothing like it" (none found) | 3.4 ms |
+| Finding files like one | 62 ms |
+| Scanning 20,000 files the first time | 133 ms |
+| Scanning them again, unchanged | 62 ms |
+
+The scan is of 20,000 small WAV files the bench writes, which the system
+has cached, so it measures Musicable's work, not the disk's. A search goes
+through every file's name and folders, in lower case, one after the other
+in a single string for each folder of the library, so there's no index of
+words to keep up to date.
+
 ## Keys
 
 Every key press goes to the keymap before egui sees it, through
 `musicable_ui::KeyPresses`. A bound chord runs its command through
 `Session::key_pressed` and goes no further, so Space plays even when a button
-has keyboard focus. Unbound keys go on to egui. Key presses never reach the
-engine any other way.
+has keyboard focus. Unbound keys go on to egui, and so do keys whose command
+doesn't apply now (`Session::takes_key`): with no notes selected in the
+piano roll, the arrow keys move the keyboard focus between controls, as
+egui does with them. Key presses never reach the engine any other way.
 
 - While a text field has focus, such as the tempo field being typed into,
   every key goes to it instead. Ctrl+C, Ctrl+X and Ctrl+V reach the keymap
@@ -718,6 +1062,77 @@ fading in and out, and chords on the test instrument that swell with
 pressure and bend at the end of each bar. The null test plays it too:
 `musicable null-test "target/clips-demo/Clips demo.musicable"`.
 
+## Exporting audio
+
+**File > Export Audio...** (Ctrl+Shift+R, as in Live) opens the export
+window, which renders the song to audio files faster than real time, on a
+thread of its own, while the app plays on:
+
+| Setting | What it does |
+|---|---|
+| Render | The song, from its start to the end of its last clip; the loop region; or the selection: the time selection, or else from the first selected clip to the end of the last. It starts on the selection when there is one. |
+| Files | The mix, as you hear it, mute and solo too; and each track ticked on its own (stems): the track after its fader, pan and slots, as it feeds its bus, before mute and solo. A return track's file is its return; a group's, what its unmuted tracks feed it. Sends aren't in a track's file, and the master's devices aren't in any but the mix's. |
+| Format | WAV, AIFF or FLAC, 16-bit or 24-bit, or 32-bit float in WAV and AIFF, which keeps what goes over full scale. FLAC files carry the samples' MD5, as libFLAC's do. |
+| Sample rate | The engine's, or another: the song then renders at that rate, its plugins too, and audio files at other rates are converted as they play. |
+| Dither | Adds triangular noise of one step as integer samples are rounded, so quiet sounds fade out smoothly. Exact silence stays silent, and every export of the same song is the same, bit for bit. |
+| Normalise | Raises or lowers each file so its loudest sample is at 0 dBFS. |
+| Render the tail | Renders on after the end until everything has been quiet, below -96 dBFS, for two seconds, for 30 seconds at most, and leaves the quiet end off, so reverbs and releases ring out. |
+
+**Export...** asks where to save the mix, and the stems go next to it,
+named after it and their track's number: `Song.wav`, `Song 01 Drums.wav`,
+`Song 02 Bass.wav`. The window then shows how far along the export is and
+how many times faster than real time it renders, and Cancel stops it.
+Closing the window leaves it running, and the status bar says when it's
+done. The window then lists each file with its peak, and warns about
+samples over full scale, which clip in integer files. The window's
+settings are kept in `settings.toml` for the next export.
+
+An export renders exactly what the app plays. It plays a copy of the
+project as it would be saved, with each plugin's state saved afresh, in a
+session of its own (`Session::exporting`), as the null test's player does:
+its own engine, whose parallel scheduler's workers don't take real-time
+priority, and its own instances of the project's plugins, loaded on the
+main thread, which serves what they ask of it while the export runs. The
+copy plays without the metronome, looping or punching in, from the start of
+the range, and the transport stops at its end, to the frame. The render
+thread asks the engine for 4,096 frames at a time and skips the frames the
+graph's latency delays the output by, so a file starts with the range,
+lined up to the sample however late the plugins are. Stems are taps on the
+graph ([engine.md](engine.md#delay-compensation)), lined up with the mix by
+delay compensation, and render with solo cleared, so a group's stem has all
+its unmuted tracks; when solo is on and the mix is wanted too, the mix
+renders as it's heard, in a pass of its own.
+
+Files are written by `musicable_io::audio::Writer`, which streams WAV, AIFF
+and FLAC files with our own FLAC encoder, and named `NAME.part` until
+they're whole, so a cancelled or failed export leaves no half-written files.
+Normalising renders to a float file first, `NAME.float.part`, then writes
+the file from it.
+
+`musicable export` does the same from the command line, with the plugins
+the app's last plugin scan found:
+
+```sh
+cargo run --release -p musicable-app -- export song.musicable out/Song.flac --stems
+cargo run --release -p musicable-app -- export song.musicable Song.wav --bits 16 --rate 44100 --normalize
+```
+
+`--help` lists its options: the loop instead of the song, the format (the
+file's extension by default), the bits, the rate, the block size, stems
+with or without the mix, normalising, and no dither or no tail. On a 4-core
+cloud VM, the clips demo below, 38.4 seconds and four tracks, exports at 54
+times real time to a WAV file, 39 times to FLAC, and 22 times with the mix
+and the four stems in FLAC. The engine sets the pace: the null test renders
+it at 46 times real time.
+
+[`crates/app/tests/export.rs`](../crates/app/tests/export.rs) is the done
+test: an exported mixdown is what the app plays live, sample for sample,
+with a latent plugin, an audio file at 44.1 kHz, a test instrument and a
+muted track, the live render asked for in 441-frame buffers. Each stem is
+its track soloed, the tail is the release the live render plays, and
+normalised, 16-bit, AIFF, FLAC and 96 kHz files hold the same samples,
+scaled or rounded. A cancelled or failed export leaves no files behind.
+
 ## Settings and your keymap
 
 The app keeps its settings and your keymap in its config folder:
@@ -734,6 +1149,10 @@ is handy for testing.
 `plugins.json` is what the plugin scans found, so the next start has the
 plugins at once and scans only what changed. Deleting it makes the next
 scan load every library again.
+
+`library.json` is the browser's library: the folders of samples you
+added, what's in them, and your tags ([The browser](#the-browser)).
+Deleting it empties the library, tags and all.
 
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
 describes. The app reads it at startup and when you click Reload in
@@ -758,7 +1177,8 @@ backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, how editing behaves, and how long Capture holds the inputs:
+ones, how editing behaves, the export window's and the browser's settings
+as they were last used, and how long Capture holds the inputs:
 
 ```toml
 format = "musicable-settings"
@@ -771,6 +1191,20 @@ buffer_size = 128
 
 [behaviour]
 play_from = "start_marker"
+middle_c = "c3"
+
+[export]
+format = "wav"
+bits = 24
+dither = true
+normalize = false
+tail = true
+mixdown = true
+stems = false
+
+[browser]
+auto_preview = true
+preview_volume = -6
 
 [recording]
 capture_minutes = 5
@@ -780,10 +1214,19 @@ Every setting is optional: no device is the default output, no
 `sample_rate` is the rate the device runs at, and no `buffer_size` is the
 smallest the device supports, or an ASIO driver's preferred size. `play_from`
 is where Space plays from: the start marker (`start_marker`), as in Live, or
-wherever the playhead stopped (`playhead`). `capture_minutes` is how long
-[Capture](#capture) holds the inputs, 5 minutes if it's left out; 0 turns
-Capture off. The app reads it at startup;
-there's no window for it yet. Fields this version doesn't know are ignored.
+wherever the playhead stopped (`playhead`). `middle_c` is what the piano
+roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
+as in scientific pitch notation and Reaper, or `c5`, as in FL Studio.
+`capture_minutes`, under `[recording]`, is how long [Capture](#capture)
+holds the inputs, 5 minutes if it's left out; 0 turns Capture off. The app
+reads them at startup; there's no window for them yet. `[export]` is
+the export window's settings as it was last used: `format` is `wav`, `aiff`
+or `flac`, `bits` is 16, 24, or 32 for floats, and a `sample_rate` there
+renders at that rate instead of the engine's. `[browser]` has Auto, which
+plays a sample when it's picked, and the previews' volume in dB, from -60
+to 6; a `presets_folder` there saves presets somewhere other than
+`Music/Musicable/Presets` in your home folder. Fields this version doesn't
+know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
@@ -837,10 +1280,15 @@ for, since those builds are distributed under it.
 
 ## How it's built
 
-- `crates/ui` draws the shell with egui. It depends on the model and the
-  commands only. The app hands it a `View` of what to show each frame, and
-  carries out the `Action`s it hands back. Its tests drive the shell with
-  `egui_kittest`.
+- `crates/ui` draws the shell with egui. It depends on the model, the
+  commands and the library's types only. The app hands it a `View` of what
+  to show each frame, and carries out the `Action`s it hands back. Its
+  tests drive the shell with `egui_kittest`.
+- `crates/library` is the browser's library: the index and its file,
+  scanning folders, searching, presets, and the queue for file work, with
+  no app or UI in it. `crates/app/src/library.rs` puts it to work for the
+  app: it runs the library's file work on the queue, hands the engine the
+  previews, and reaches the commands through `LibraryLink`.
 - `crates/app` has the eframe app (`App`), which holds the `Session`, the
   `Output`, the audio settings window and the user's keymap file
   (`UserKeymap`), and the binary. Debug builds install the engine's
@@ -858,14 +1306,24 @@ for, since those builds are distributed under it.
   zooms, undoes every step and redoes it, then saves and opens the project
   again.
   [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
-  puts the test plugins on a track from the plugin browser, opens and
+  puts the test plugins on a track from the browser, opens and
   closes a plugin's window from the devices panel, turns a knob in it,
   undoes, deletes a device, saves, and opens the project again. It also
   puts a VST3 plugin on a track and opens its window.
+  [`crates/app/src/app/browsing.rs`](../crates/app/src/app/browsing.rs)
+  adds a folder of samples to the library, searches it with Ctrl+F,
+  previews a sample through the engine at the settings' volume, puts it on
+  a new track with a double-click, tags it, and starts the app again to
+  find the tag and the settings kept.
   `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that
   only what's in sight of a hundred tracks is laid out.
+  `crates/ui/src/piano_roll/tests.rs` does the same for the piano roll's
+  gestures, Draw Mode, keyboard, wheel and context menus.
+- [`crates/app/tests/piano_roll.rs`](../crates/app/tests/piano_roll.rs)
+  edits notes with the piano roll's commands and keys, and checks that the
+  test instrument plays them as they are after each change and undo.
 - [`crates/app/tests/app_shell.rs`](../crates/app/tests/app_shell.rs) checks
   what the shell asks of the session: file requests, opening projects, the
   tempo field and undoing a drag of it, and a new engine taking over. The
@@ -883,6 +1341,12 @@ for, since those builds are distributed under it.
   graph.
 - `musicable_app::null_test` plays projects offline for the null test and
   for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
+- `musicable_app::export` renders exports, and
+  [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) checks them
+  against what the app plays live (see [Exporting audio](#exporting-audio)).
+  [`crates/app/src/app/exporting.rs`](../crates/app/src/app/exporting.rs)
+  opens the export window with Ctrl+Shift+R and exports from it in the
+  background.
 - [`crates/app/tests/clips.rs`](../crates/app/tests/clips.rs) saves a
   project whose audio clips play WAV, AIFF and FLAC files from its folder,
   one of them streaming, and whose MIDI clip plays the test instrument. It
@@ -900,15 +1364,36 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 
 ## Not done yet
 
+- Automation: selecting points to move or delete several at once, curves
+  between points, automation moving and copying with its clips, and a
+  "Back to Arrangement" button in the transport bar, as Live has (for now
+  **Automation > Re-Enable Automation** re-enables every overridden lane).
+  Lanes of switches and choices drawn and edited as steps: for now their
+  points take whole values, but the value passes through the ones between
+  two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
-- Dragging plugins from the browser onto tracks, moving devices along a
-  chain, and a device's parameters in the devices panel.
+- Moving devices along a chain, and a device's parameters in the devices
+  panel.
+- In the browser: analysis, which will tag sounds by how they sound and
+  find similar ones by an embedding; previews in time with the song;
+  dragging a sample onto a sampler, as onto Live's Simpler (Load Sample...
+  gives it one for now); watching the library's folders, which are looked
+  through at each start and on Rescan; CLAP presets, which need the
+  plugins' preset discovery; renaming and deleting presets, and saving
+  VST3 presets; and tags in the undo history. Taking a folder out of the
+  library forgets its files' tags.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
+- In the piano roll: the notes' MPE expression, shown and edited (Tier 2),
+  drawing velocities across the lane, folding to the keys in use, scales,
+  and repeating the arrow keys while they're held.
 - Keymaps in the style of other DAWs (Logic, Cubase, Pro Tools). Each would
   be a keymap file to import.
 - A macOS default keymap with Cmd.
 - Following the default output when it changes.
 - An icon, and opening `.musicable` files from the file manager.
+- Exporting to MP3 or other lossy formats, stems with the returns' and the
+  master's effects (Live's "Include Return and Master Effects"), and
+  remembering which tracks were ticked for stems.

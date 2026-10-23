@@ -101,7 +101,7 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
     let mut harness = window(&config.0, Some(path.clone()));
 
     // A click on the track's header selects it, and the devices panel
-    // shows its devices, none yet. Add Plugin opens the plugin browser,
+    // shows its devices, none yet. Add Device opens the plugin browser,
     // with what the last scan found.
     harness.get_by_label("Select a track to see its devices, or pick Master.");
     let header = harness.get_by_label("Track Keys").rect();
@@ -110,7 +110,7 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
         pos2(header.left() + 12.0, header.center().y),
         1,
     );
-    click(&mut harness, "Add Plugin...");
+    click(&mut harness, "Add Device...");
     harness.get_by_label("2 plugins");
 
     // A double-click puts a plugin on the track, after what's there.
@@ -213,7 +213,7 @@ fn a_vst3_plugin_goes_on_a_track_and_its_window_opens_inside_musicables() {
         pos2(header.left() + 12.0, header.center().y),
         1,
     );
-    click(&mut harness, "Add Plugin...");
+    click(&mut harness, "Add Device...");
     harness.get_by_label("2 plugins");
     double_click(&mut harness, "Test Gain");
     assert_eq!(names(&harness, "Keys"), ["Test Gain"]);

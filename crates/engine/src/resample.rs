@@ -43,7 +43,7 @@ impl Kernel {
             let table = (0..points)
                 .map(|i| {
                     let t = i as f64 / RESOLUTION as f64 - HALF_WIDTH as f64;
-                    (CUTOFF * sinc(CUTOFF * t) * kaiser(t / HALF_WIDTH as f64)) as f32
+                    (CUTOFF * sinc(CUTOFF * t) * kaiser(t / HALF_WIDTH as f64, BETA)) as f32
                 })
                 .collect();
             Kernel { table }
@@ -64,7 +64,7 @@ impl Kernel {
     }
 }
 
-fn sinc(x: f64) -> f64 {
+pub(crate) fn sinc(x: f64) -> f64 {
     if x == 0.0 {
         1.0
     } else {
@@ -72,9 +72,9 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
-/// The Kaiser window at `u`, from −1 to 1.
-fn kaiser(u: f64) -> f64 {
-    bessel_i0(BETA * (1.0 - u * u).max(0.0).sqrt()) / bessel_i0(BETA)
+/// The Kaiser window of shape `beta` at `u`, from −1 to 1.
+pub(crate) fn kaiser(u: f64, beta: f64) -> f64 {
+    bessel_i0(beta * (1.0 - u * u).max(0.0).sqrt()) / bessel_i0(beta)
 }
 
 /// The zeroth-order modified Bessel function of the first kind, from its
@@ -114,7 +114,13 @@ impl std::fmt::Debug for Kernel {
 impl Resampler {
     /// Reads a file at `from` Hz for a device at `to` Hz.
     pub fn new(from: u32, to: u32) -> Self {
-        let step = f64::from(from) / f64::from(to);
+        Self::with_step(f64::from(from) / f64::from(to))
+    }
+
+    /// Reads `step` file frames for each device frame, above 0: as the
+    /// sampler halves a sample's rate, for the copies of it that notes
+    /// pitched up play.
+    pub fn with_step(step: f64) -> Self {
         let scale = step.recip().min(1.0);
         Self {
             kernel: Kernel::get(),

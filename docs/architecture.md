@@ -12,13 +12,14 @@ reference renderer bit for bit. This page is the map. The detail is in
 
 | Crate | Depends on | Holds |
 |---|---|---|
-| `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time |
+| `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
 | `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
-| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the real-time checker |
+| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
-| `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
-| `ui` | `model`, `commands` | What the window shows, drawn with egui: the arrangement, the mixer, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
+| `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
+| `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
+| `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
 
 Cargo enforces the directions that matter. The engine knows nothing of
@@ -35,8 +36,9 @@ compiler, a node and the UI, in that order.
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
 | ASIO driver's (instead, in ASIO streams) | `Engine::process`, once per buffer half. The stream's own thread, `musicable-asio`, makes the driver's other calls | The driver's: real-time, as ASIO asks of drivers |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
-| Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
+| Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them. A second one streams long previews | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
+| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
 | Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
 | Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
 
@@ -125,7 +127,7 @@ Tier 1 has to keep these. The tests check most of them.
   that depends on time, such as the test tone's phase or the metronome's
   clicks, works it out from the block's song position and the tempo map. So
   loops, locates and any block size give the same samples. Clip players and
-  automation should work the same way.
+  automation work the same way.
 - **What would click when it jumps ramps instead**, with
   `nodes::Smoothed`, as gain stages do. A ramp counts frames from its
   event, never blocks, so it lands on the same samples however the blocks
@@ -155,17 +157,18 @@ Tier 1 of the feature list, and where each part should go. None of this is
 built yet, except where it says so.
 
 - **Clips.** Built: audio clips of WAV, AIFF and FLAC files, and MIDI
-  clips of notes with per-note expression (MPE), on `Track` in format
-  version 3. A clip player heads each audio and MIDI track's strip and
-  renders from the song position. Short files load whole as the graph
-  builds, and longer ones stream from the disk thread through lock-free
-  chunks, ahead of the playhead and at the loop start. Files at other
-  sample rates are resampled, and clips fade and crossfade. Notes are
-  `NodeEventKind::Note`s at sample offsets, and can pass through a chain of
-  nodes, such as a MIDI effect, on their way to an instrument
-  ([engine.md](engine.md#clips), [app.md](app.md#audio-files)). The
-  arrangement view makes and edits them (below); editing notes comes with
-  the piano roll.
+  clips of notes with per-note expression (MPE) and controller curves, on
+  `Track` in format version 7. A clip player heads each audio and MIDI
+  track's strip and renders from the song position. Short files load whole
+  as the graph builds, and longer ones stream from the disk thread through
+  lock-free chunks, ahead of the playhead and at the loop start. Files at
+  other sample rates are resampled, and clips fade and crossfade. Notes are
+  `NodeEventKind::Note`s at sample offsets, and controllers' moves
+  `NodeEventKind::Controller`s, chased wherever playback starts. Both can
+  pass through a chain of nodes, such as a MIDI effect, on their way to an
+  instrument ([engine.md](engine.md#clips),
+  [app.md](app.md#audio-files)). The arrangement view makes and edits them
+  (below), and the piano roll edits their notes and controllers.
 - **The arrangement view.** Built: tracks with headers, clips with
   waveforms and notes, the ruler with locators, the start marker and the
   loop brace, drawn with egui's painter, only what's in sight, so a hundred
@@ -174,9 +177,22 @@ built yet, except where it says so.
   commands say when they apply (`When`). What it edits besides the project
   (the selection, the start marker, the grid, the zoom, the behaviour
   settings) is the `Editor`, kept with the `Document` outside the widgets,
-  where the piano roll, extensions and agents will find it too
+  where the piano roll, extensions and agents find it too
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
+- **The piano roll.** Built: a MIDI clip's notes on rows of keys beside a
+  keyboard, over a lane of their velocities or a controller's curve, in the
+  devices panel's place, drawn and tested as the arrangement is. Its
+  gestures run the note and controller commands (`notes.move`,
+  `controllers.draw` and the rest) and Live's keys, which act where the
+  `Editor`'s focus is; it shares the arrangement's grid and song positions,
+  and has a viewport of its own ([app.md](app.md#the-piano-roll)). Plugins
+  get notes as CLAP's own or VST3's note expression, or as MPE MIDI, and
+  controllers as MIDI or, for VST3, through the plugin's MIDI mapping
+  ([plugins.md](plugins.md#notes-and-the-transport)). Recording takes the
+  controllers' moves as the clip's curves, so a recorded MPE performance
+  plays back into an MPE synth as it played, to the sample
+  (`crates/app/tests/mpe.rs`).
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
   pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There
@@ -191,6 +207,13 @@ built yet, except where it says so.
   doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) checks plugin
   code in CI for what our allocation checker can't see.
+- **Built-in devices.** Built: eight kinds, each with a parameter table in
+  `musicable_model::native` that the format, the commands and the devices
+  panel's controls all work from, in format version 8. The engine's
+  `devices` module has the nodes, with each parameter worked out per frame
+  from the value set or its automation, and any modulation
+  (`devices::Params`); all eight play
+  ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
 - **Plugin delay compensation.** Built: nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
   paths of different latency meet, lines the cue output up with the output,
@@ -202,13 +225,16 @@ built yet, except where it says so.
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
   peak and RMS meters in atomics, shown in the app's mixer
   ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)).
-- **Automation.** Parameter events are already sample-accurate, but a lane
-  belongs in the graph, not in the message queue, which holds 1,024
-  messages. Compile each lane into its node, or into an automation node, and
-  read it at the song position, so it loops and locates like everything
-  else. A lane can give its node a value per frame, which needs no
-  smoothing; values that arrive as events ramp over 10 ms
-  (`nodes::Smoothed`).
+- **Automation.** Built, in format version 9: each lane is compiled into
+  the node with its parameter, not sent through the message queue, and
+  read at the song position, so it loops and locates like everything else.
+  The mixer's `Gain` and the built-in devices read their lanes frame by
+  frame with an `automation::Param`, which glides over jumps and adds
+  modulation after its smoothing, and plugins get theirs as parameter
+  events on the points' frames and on a 32-frame grid. Moving a control by
+  hand overrides its lane until it's re-enabled
+  ([engine.md](engine.md#automation), [commands.md](commands.md#automation),
+  [app.md](app.md#the-arrangement)). Tempo automation is Tier 2.
 - **Recording.** Built: the backend captures inputs, system loopback on
   Windows among them, lined up with the output frame for frame
   ([audio.md](audio.md#inputs)), and stamps each MIDI message with the
@@ -223,10 +249,13 @@ built yet, except where it says so.
   other. A new kind of edit is undoable once it has its inverse
   ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's, is
   a gesture (`Action::BeginGesture` and `EndGesture`), so it's one step.
-- **Export.** Rendering faster than real time is the engine without a
-  device. `null_test::Player` already plays a project offline, block by
-  block, with either renderer, its streams waiting for the disk; export
-  does the same on a background thread and writes the samples to a file.
+- **Export.** Built: an export plays the project offline in a session of
+  its own, as `null_test::Player` does, on a background thread, faster than
+  real time, and writes WAV, AIFF or FLAC files through
+  `musicable_io::audio::Writer`. Stems are taps on the graph, lined up with
+  the mix by delay compensation, and the tests check that an exported mix
+  is what the app plays live, sample for sample
+  ([app.md](app.md#exporting-audio)).
 - **The clip stage.** Built: Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.

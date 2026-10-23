@@ -1,6 +1,6 @@
 [package]
 name = "musicable-ui"
-description = "User interface. Depends on the model and commands, never the engine directly."
+description = "User interface. Depends on the model, commands and library, never the engine directly."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 musicable-model.workspace = true
 musicable-commands.workspace = true
+musicable-library.workspace = true
 egui.workspace = true
 
 [dev-dependencies]

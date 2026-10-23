@@ -1,14 +1,16 @@
-//! The view commands: what the window shows, and the arrangement's zoom,
-//! scrolling and grid.
+//! The view commands: what the window shows, the arrangement's and the
+//! piano roll's zoom and scrolling, the grid, and which of the two has the
+//! focus.
 //!
 //! Commands can't show a window, so the command palette and the mixer ask
 //! the app to, with a [`Request`]. The zoom, the scrolling and the grid are
-//! the arrangement's, in the [`Editor`](crate::Editor).
+//! in the [`Editor`](crate::Editor). Zooming acts on the view with the focus:
+//! the arrangement, or the piano roll.
 
 use musicable_model::TrackId;
 use musicable_model::time::Beats;
 
-use crate::editor::{Editor, Step, Viewport};
+use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
 use crate::{
     Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When,
 };
@@ -20,13 +22,20 @@ pub const TOGGLE_MIXER: CommandId = CommandId::new("view.toggle_mixer");
 /// Shows or hides the devices of the selected track, or the master's, under
 /// the arrangement: Live's Detail View.
 pub const TOGGLE_DEVICES: CommandId = CommandId::new("view.toggle_devices");
-/// Shows or hides the plugin browser, beside the arrangement.
+/// Shows or hides the browser, beside the arrangement.
 pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
-/// Zooms the arrangement in, around the start marker.
+/// Shows or hides the piano roll, in place of the devices: Live's clip view.
+pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll");
+/// Shows the piano roll in place of the devices, or the devices in place of
+/// the piano roll: Live's Toggle Between Device/Clip View.
+pub const SWITCH_DEVICES_PIANO_ROLL: CommandId = CommandId::new("view.switch_devices_piano_roll");
+/// Zooms the arrangement in, or the piano roll while it has the focus,
+/// around the start marker.
 pub const ZOOM_IN: CommandId = CommandId::new("view.zoom_in");
-/// Zooms the arrangement out, around the start marker.
+/// Zooms the arrangement out, or the piano roll, around the start marker.
 pub const ZOOM_OUT: CommandId = CommandId::new("view.zoom_out");
-/// Zooms the arrangement to show the selection across it.
+/// Zooms the arrangement to show the selection across it, or the piano roll
+/// to show its selected notes.
 pub const ZOOM_TO_SELECTION: CommandId = CommandId::new("view.zoom_to_selection");
 /// Turns on or off scrolling the arrangement to keep the playhead in sight.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
@@ -46,6 +55,11 @@ pub const FIXED_GRID: CommandId = CommandId::new("view.fixed_grid");
 pub const SET_VIEWPORT: CommandId = CommandId::new("view.set_viewport");
 /// Sets the height of a track in the arrangement.
 pub const SET_TRACK_HEIGHT: CommandId = CommandId::new("view.set_track_height");
+/// Sets the piano roll's zoom, scrolling and key height.
+pub const SET_PIANO_ROLL_VIEWPORT: CommandId = CommandId::new("view.set_piano_roll_viewport");
+/// Gives the arrangement or the piano roll the focus, where the edit
+/// commands and the keys act.
+pub const SET_FOCUS: CommandId = CommandId::new("view.set_focus");
 
 /// How much Zoom In and Zoom Out zoom by.
 const ZOOM_STEP: f64 = 2.0;
@@ -66,7 +80,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
     (
         ZOOM_TO_SELECTION,
         "Zoom to Selection",
-        When::ClipsOrTimeSelected,
+        When::CanCopy,
         zoom_to_selection,
     ),
     (TOGGLE_FOLLOW, "Follow", When::Always, |ctx| {
@@ -91,7 +105,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 4] = [
+const REQUESTS: [(CommandId, &str, Request); 6] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -99,10 +113,16 @@ const REQUESTS: [(CommandId, &str, Request); 4] = [
     ),
     (TOGGLE_MIXER, "Mixer", Request::TogglePanel("mixer")),
     (TOGGLE_DEVICES, "Devices", Request::TogglePanel("devices")),
+    (TOGGLE_BROWSER, "Browser", Request::TogglePanel("browser")),
     (
-        TOGGLE_BROWSER,
-        "Plugin Browser",
-        Request::TogglePanel("browser"),
+        TOGGLE_PIANO_ROLL,
+        "Piano Roll",
+        Request::TogglePanel("piano_roll"),
+    ),
+    (
+        SWITCH_DEVICES_PIANO_ROLL,
+        "Switch Devices and Piano Roll",
+        Request::SwitchDevicesPianoRoll,
     ),
 ];
 
@@ -179,6 +199,72 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_PIANO_ROLL_VIEWPORT, "Set Piano Roll Viewport").with_params(&[
+            Param::required("start", Type::Beats, "The song position at the left edge."),
+            Param::required("zoom", Type::Number, "How many points a beat takes."),
+            Param::required(
+                "top",
+                Type::Number,
+                "How far down the keys are scrolled from the top of the highest.",
+            ),
+            Param::required(
+                "width",
+                Type::Number,
+                "How wide the notes are shown, in points.",
+            ),
+            Param::required(
+                "height",
+                Type::Number,
+                "How tall the rows of keys are on screen together, in points.",
+            ),
+            Param::optional("key_height", Type::Number, "How tall each key's row is."),
+        ]),
+        |ctx, args| {
+            let zoom: f64 = args.get("zoom")?;
+            let top: f64 = args.get("top")?;
+            let width: f64 = args.get("width")?;
+            let height: f64 = args.get("height")?;
+            let key_height: Option<f64> = args.opt("key_height")?;
+            if zoom <= 0.0 || width < 0.0 || height < 0.0 {
+                return Err(CommandError::invalid(
+                    "the zoom, the width and the height can't be negative",
+                ));
+            }
+            let roll = &mut ctx.document.editor_mut().piano_roll;
+            if let Some(key_height) = key_height {
+                let (min, max) = (PianoRoll::MIN_KEY_HEIGHT, PianoRoll::MAX_KEY_HEIGHT);
+                roll.key_height = (key_height as f32).clamp(min, max);
+            }
+            roll.height = height as f32;
+            let rows = roll.key_height * (f32::from(musicable_model::clip::Note::MAX_KEY) + 1.0);
+            roll.viewport = Viewport {
+                start: Beats::max(args.get("start")?, Beats::ZERO),
+                zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
+                top: (top as f32).clamp(0.0, (rows - roll.height).max(0.0)),
+                width: width as f32,
+            };
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SET_FOCUS, "Set Focus").with_params(&[Param::required(
+            "view",
+            Type::Text,
+            "\"arrangement\" or \"piano_roll\".",
+        )]),
+        |ctx, args| {
+            let view: String = args.get("view")?;
+            let editor = ctx.document.editor_mut();
+            editor.focus = match view.as_str() {
+                "arrangement" => Focus::Arrangement,
+                "piano_roll" if editor.piano_roll.clip.is_some() => Focus::PianoRoll,
+                "piano_roll" => return Err(CommandError::invalid("the piano roll shows no clip")),
+                _ => return Err(CommandError::invalid(format!("there's no view {view}"))),
+            };
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(SET_TRACK_HEIGHT, "Set Track Height").with_params(&[
             Param::required("track", Type::Track, "The track."),
             Param::required("height", Type::Number, "Its height, in points."),
@@ -200,13 +286,17 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-/// Zooms by `factor` around the start marker, or the middle of the timeline
-/// if the start marker is out of sight.
+/// Zooms the view with the focus by `factor` around the start marker, or
+/// the middle of the view if the start marker is out of sight.
 fn zoom(ctx: &mut Context<'_>, factor: f64) {
     let editor = ctx.document.editor_mut();
-    let viewport = &mut editor.viewport;
-    let at = match viewport.visible().contains(editor.start_marker) {
-        true => editor.start_marker,
+    let start_marker = editor.start_marker;
+    let viewport = match editor.focus {
+        Focus::Arrangement => &mut editor.viewport,
+        Focus::PianoRoll => &mut editor.piano_roll.viewport,
+    };
+    let at = match viewport.visible().contains(start_marker) {
+        true => start_marker,
         false => viewport.beats_at(viewport.width / 2.0),
     };
     viewport.zoom_around(factor, at);
@@ -214,8 +304,17 @@ fn zoom(ctx: &mut Context<'_>, factor: f64) {
 
 fn zoom_to_selection(ctx: &mut Context<'_>) {
     let (project, editor) = ctx.document.parts();
-    if let Some(range) = editor.selected_range(project) {
-        editor.viewport.show(range);
+    match editor.focus {
+        Focus::Arrangement => {
+            if let Some(range) = editor.selected_range(project) {
+                editor.viewport.show(range);
+            }
+        }
+        Focus::PianoRoll => {
+            if let Some((range, low, high)) = crate::notes::selected_range(project, editor) {
+                editor.piano_roll.show_notes(range, low, high);
+            }
+        }
     }
 }
 
@@ -383,13 +482,99 @@ mod tests {
         setup.run(&TOGGLE_MIXER);
         setup.run(&TOGGLE_DEVICES);
         setup.run(&TOGGLE_BROWSER);
+        setup.run(&TOGGLE_PIANO_ROLL);
+        setup.run(&SWITCH_DEVICES_PIANO_ROLL);
         assert_eq!(
             setup.requests,
             [
                 Request::TogglePanel("mixer"),
                 Request::TogglePanel("devices"),
-                Request::TogglePanel("browser")
+                Request::TogglePanel("browser"),
+                Request::TogglePanel("piano_roll"),
+                Request::SwitchDevicesPianoRoll,
             ]
         );
+    }
+
+    /// Keys, a MIDI track with a clip from beat 8 to 16 holding notes on D3
+    /// (62) from 1 to 2 in its own time, and on A3 (69) from 3 to 4.
+    fn with_notes() -> (Setup, musicable_model::clip::ClipId) {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut midi = MidiClip::default();
+        for (start, key) in [(1, 62), (3, 69)] {
+            midi.add_note(Beats::new(start), Beats::new(1), key, 0.5);
+        }
+        let range = BeatRange::new(Beats::new(8), Beats::new(16));
+        let clip = project.new_clip("K", range, ClipContent::Midi(midi));
+        let id = clip.id;
+        project.track_mut(keys).unwrap().clips.push(clip);
+        (Setup::new(project), id)
+    }
+
+    #[test]
+    fn zooming_acts_on_the_view_with_the_focus() {
+        let (mut setup, clip) = with_notes();
+        let args = Args::new()
+            .with("notes", vec![musicable_model::clip::NoteId(1)])
+            .with("clip", clip);
+        setup.run_with(&crate::notes::SELECT, args).unwrap();
+        let arrangement = setup.document.editor().viewport;
+        let roll = setup.document.editor().piano_roll.viewport;
+        setup.run(&ZOOM_IN);
+        let editor = setup.document.editor();
+        assert_eq!(editor.viewport, arrangement);
+        assert_eq!(editor.piano_roll.viewport.zoom, roll.zoom * 2.0);
+        // A3 alone, from song position 11 to 12, across the piano roll, with
+        // its key in the middle.
+        assert!(setup.applies(&ZOOM_TO_SELECTION));
+        setup.run(&ZOOM_TO_SELECTION);
+        let roll = &setup.document.editor().piano_roll;
+        let visible = roll.viewport.visible();
+        assert!(visible.start < Beats::new(11) && Beats::new(12) < visible.end);
+        assert!(visible.len() < Beats::new(2), "{visible:?}");
+        let middle = roll.viewport.top + roll.height / 2.0;
+        let a3 = (127.0 - 69.0) * roll.key_height;
+        assert!((a3..a3 + roll.key_height).contains(&middle), "{middle}");
+
+        let focus = |view: &str| Args::new().with("view", view);
+        setup.run_with(&SET_FOCUS, focus("arrangement")).unwrap();
+        setup.run(&ZOOM_IN);
+        assert_eq!(
+            setup.document.editor().viewport.zoom,
+            arrangement.zoom * 2.0
+        );
+        assert_eq!(
+            setup.run_with(&SET_FOCUS, focus("mixer")),
+            Err(CommandError::invalid("there's no view mixer"))
+        );
+        setup.document.transact("Delete", |tx| {
+            tx.remove_clip(clip);
+        });
+        assert_eq!(
+            setup.run_with(&SET_FOCUS, focus("piano_roll")),
+            Err(CommandError::invalid("the piano roll shows no clip"))
+        );
+    }
+
+    #[test]
+    fn the_piano_roll_sets_its_viewport() {
+        let mut setup = Setup::new(Project::new());
+        let args = Args::new()
+            .with("start", Beats::new(-4))
+            .with("zoom", 80.0)
+            .with("top", 1e6)
+            .with("width", 700.0)
+            .with("height", 300.0)
+            .with("key_height", 100.0);
+        setup.run_with(&SET_PIANO_ROLL_VIEWPORT, args).unwrap();
+        let roll = &setup.document.editor().piano_roll;
+        assert_eq!(roll.key_height, PianoRoll::MAX_KEY_HEIGHT);
+        assert_eq!(roll.height, 300.0);
+        let viewport = roll.viewport;
+        assert_eq!((viewport.start, viewport.zoom), (Beats::ZERO, 80.0));
+        // Scrolled down to the lowest key, and no further.
+        assert_eq!(viewport.top, 128.0 * PianoRoll::MAX_KEY_HEIGHT - 300.0);
+        assert_eq!(setup.document.take_committed(), []);
     }
 }

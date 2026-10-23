@@ -55,6 +55,7 @@ mod tests {
                 document: &mut document,
                 transport: &mut StubTransport::default(),
                 requests: &mut requests,
+                library: &mut crate::NoLibrary,
             };
             registry.run(&id, &mut ctx).unwrap();
         }
