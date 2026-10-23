@@ -241,10 +241,12 @@ undo history and the engine rebuilds its graph once.
   the headers says what the grid is, such as "Grid 1/16".
 - **Takes** show in lanes under their track, each named in its header,
   after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
-  track header's menu. A take's clips are grey where the track doesn't play
-  them, and in the track's colour where it does. Dragging across a take
-  copies that stretch of it to the track, replacing what the track has
-  there, and clicking one of its clips copies all of the clip: that's
+  track header's menu. A take's clips show their waveforms or their notes,
+  grey where the track doesn't play them, and in the track's colour where
+  it does: where its own clips play the same audio or the same notes from
+  the same place, until one is moved or its notes change. Dragging across
+  a take copies that stretch of it to the track, replacing what the track
+  has there, and clicking one of its clips copies all of the clip: that's
   comping ([commands.md](commands.md#take)).
 - **What tracks are recording** shows in red over their lanes, growing as
   they record, until each pass becomes a take ([Recording](#recording)).

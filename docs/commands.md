@@ -292,8 +292,11 @@ the notes played, each starting and ending on its frames, with its
 expression, and of how the controllers moved, as curves that start with
 what each held as the pass began; a pass without notes makes no take.
 Comping copies
-the take's clips, so the take keeps them. `view.toggle_take_lanes` (see
-below) shows the takes.
+the take's clips, so the take keeps them. `take::comped` says where a
+track plays a take's clip: where its own clips play the same audio or the
+same notes from the same place in the song, as comping copies them, and
+not a copy moved since or whose notes changed. `view.toggle_take_lanes`
+(see below) shows the takes.
 
 ### Track
 

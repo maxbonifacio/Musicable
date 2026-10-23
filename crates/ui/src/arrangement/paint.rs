@@ -6,6 +6,7 @@
 use egui::{
     Align2, CornerRadius, FontId, Mesh, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
+use musicable_commands::take::comped;
 use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
 use musicable_model::time::Beats;
@@ -208,12 +209,13 @@ fn takes(painter: &Painter, scene: &Scene<'_>) {
             painter.rect_filled(rect, theme.corner, theme.take_clip);
             let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
             let colour = theme.clip(lane.track_index);
-            for (start, end) in played(scene, track, clip) {
-                let x = layout.x_of(start)..=layout.x_of(end);
+            for played in comped(scene.project(), scene.editor(), track, clip) {
+                let x = layout.x_of(played.start)..=layout.x_of(played.end);
                 painter.rect_filled(Rect::from_x_y_ranges(x, rect.y_range()), 0.0, colour);
             }
-            if let ClipContent::Audio(audio) = &clip.content {
-                waveform(&painter, scene, rect, clip, audio);
+            match &clip.content {
+                ClipContent::Audio(audio) => waveform(&painter, scene, rect, clip, audio),
+                ClipContent::Midi(midi) => notes(&painter, scene, rect, clip, midi),
             }
         }
     }
@@ -312,33 +314,6 @@ fn envelope(
         };
         painter.circle(at(point), theme.point, fill, Stroke::new(1.5, colour));
     }
-}
-
-/// Where `track` plays `clip`, one of its takes' clips: where its own clips
-/// play the same audio, lined up with it, as comping copies it.
-fn played(scene: &Scene<'_>, track: &Track, clip: &Clip) -> Vec<(Beats, Beats)> {
-    let ClipContent::Audio(audio) = &clip.content else {
-        return Vec::new();
-    };
-    let tempo = &scene.project().tempo;
-    let rate = scene.editor().sample_rate_of(&audio.file);
-    // The song's frame that the file's first frame plays on, by a clip.
-    let first = |c: &Clip, offset: u64| tempo.frame_at(c.start, rate) - offset as i64;
-    let take_first = first(clip, audio.offset);
-    track
-        .clips
-        .iter()
-        .filter_map(|own| {
-            let ClipContent::Audio(a) = &own.content else {
-                return None;
-            };
-            let start = own.start.max(clip.start);
-            let end = own.end().min(clip.end());
-            // A frame either way, as the clips' edges fall on ticks.
-            let lined_up = a.file == audio.file && (first(own, a.offset) - take_first).abs() <= 1;
-            (lined_up && start < end).then_some((start, end))
-        })
-        .collect()
 }
 
 /// What the armed tracks have recorded so far, while they record, over

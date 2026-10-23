@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::accesskit::Toggled;
-use egui::{DroppedFile, Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+use egui::{DroppedFile, Event, Modifiers, PointerButton, Pos2, Shape, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::AudioFile;
@@ -293,6 +293,51 @@ fn width(harness: &Harness<'_, State>, beats: f64) -> f32 {
 fn clip(harness: &Harness<'_, State>, id: ClipId) -> (TrackId, musicable_model::clip::Clip) {
     let (track, clip) = harness.state().project().find_clip(id).unwrap();
     (track.id, clip.clone())
+}
+
+/// The shapes the last frame painted, those in groups too.
+fn painted(harness: &Harness<'_, State>) -> Vec<Shape> {
+    fn add(shape: &Shape, shapes: &mut Vec<Shape>) {
+        match shape {
+            Shape::Vec(group) => group.iter().for_each(|shape| add(shape, shapes)),
+            shape => shapes.push(shape.clone()),
+        }
+    }
+    let mut shapes = Vec::new();
+    for clipped in &harness.output().shapes {
+        add(&clipped.shape, &mut shapes);
+    }
+    shapes
+}
+
+/// The rectangles the last frame filled with `colour` inside `area`.
+fn filled(harness: &Harness<'_, State>, colour: Color32, area: Rect) -> Vec<Rect> {
+    (painted(harness).into_iter())
+        .filter_map(|shape| match shape {
+            Shape::Rect(rect) if rect.fill == colour && area.contains_rect(rect.rect) => {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the last frame drew a mesh in `colour` inside `area`, as
+/// notes and waveforms are drawn.
+fn meshed(harness: &Harness<'_, State>, colour: Color32, area: Rect) -> bool {
+    painted(harness).iter().any(|shape| match shape {
+        Shape::Mesh(mesh) => {
+            (mesh.vertices.iter()).any(|v| v.color == colour && area.contains(v.pos))
+        }
+        _ => false,
+    })
+}
+
+/// The row of the track or take with the label `label`, across the lanes.
+fn across(harness: &Harness<'_, State>, label: &str) -> Rect {
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let row = harness.get_by_label(label).rect();
+    Rect::from_x_y_ranges(lanes.x_range(), row.y_range())
 }
 
 fn selected(harness: &Harness<'_, State>) -> Vec<ClipId> {
@@ -825,6 +870,31 @@ fn with_takes() -> (Project, Ids, [TakeId; 2]) {
     (project, ids, ids_of)
 }
 
+/// Keys, with two takes of its two bars: Take 1, with each note of Chords
+/// two keys higher, and Take 2, which Chords is the comp of, as recording
+/// leaves it.
+fn with_midi_takes() -> (Project, Ids) {
+    let (mut project, ids) = project();
+    let (_, chords) = project.find_clip(ids.chords).unwrap();
+    let (range, played) = (chords.range(), chords.content.clone());
+    let mut higher = played.clone();
+    let ClipContent::Midi(midi) = &mut higher else {
+        panic!("Chords is MIDI");
+    };
+    for note in &mut midi.notes {
+        note.key += 2;
+    }
+    let mut takes = Vec::new();
+    for (name, content) in [("Take 1", higher), ("Take 2", played)] {
+        let clip = project.new_clip("Chords", range, content);
+        let mut take = project.new_take(name);
+        take.clips.push(clip);
+        takes.push(take);
+    }
+    project.track_mut(ids.keys).unwrap().takes = takes;
+    (project, ids)
+}
+
 /// Somewhere in the lane of the take called `name`, at `at`.
 fn in_take(harness: &Harness<'_, State>, name: &str, at: f64) -> Pos2 {
     let row = harness.get_by_label(name).rect();
@@ -916,6 +986,37 @@ fn takes_show_in_lanes_and_dragging_or_clicking_comps_them() {
     assert!(harness.query_by_label("Take 1 of Bass").is_none());
     assert!(harness.query_by_label("Take 2 of Bass").is_some());
     assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn midi_takes_show_their_notes_and_where_the_track_plays_them() {
+    let (project, ids) = with_midi_takes();
+    let mut harness = harness(project);
+    harness.get_by_label("Track Keys").click_secondary();
+    harness.run();
+    harness
+        .get_by_label("Show/Hide Take Lanes Ctrl+Alt+U")
+        .click();
+    harness.run();
+    let theme = Theme::default();
+    let keys = harness.state().project().track_index(ids.keys).unwrap();
+    let chords = (x_of(&harness, 8.0), x_of(&harness, 16.0));
+    for (take, plays) in [("Take 1 of Keys", false), ("Take 2 of Keys", true)] {
+        let lane = across(&harness, take);
+        assert!(meshed(&harness, theme.notes, lane), "{take}'s notes");
+        // In the track's colour where the track plays it.
+        let coloured = filled(&harness, theme.clip(keys), lane);
+        let spans: Vec<_> = coloured.iter().map(|r| (r.left(), r.right())).collect();
+        match plays {
+            false => assert!(spans.is_empty(), "{take}: {spans:?}"),
+            true => {
+                let [(left, right)] = spans[..] else {
+                    panic!("{take}: {spans:?}");
+                };
+                assert!((left - chords.0).abs() < 0.5 && (right - chords.1).abs() < 0.5);
+            }
+        }
+    }
 }
 
 /// Where `value` of a parameter like `spec` is on the automation lane
