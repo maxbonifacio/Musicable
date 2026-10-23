@@ -1,12 +1,14 @@
 # The app
 
-`musicable` opens a window with the app shell from the Tier 0 plan, and the
-arrangement view and the mixer from Tier 1. It plays a project through the
-audio device with the parallel scheduler, runs the commands from keys,
-menus, the command palette and the mouse, arranges clips, mixes the tracks,
-and opens and saves project files. Every command's keys can be changed in
-the app. Undo and redo cover every change to the project: the clips, the
-locators, the loop, the tempo, the tracks and the mix.
+`musicable` opens a window with the arrangement, the piano roll, the mixer,
+the devices panel and the browser. It plays a project through the audio
+device with the parallel scheduler, records audio and MIDI into takes,
+plays CLAP and VST3 plugins and eight devices of its own, runs the commands
+from keys, menus, the command palette and the mouse, and opens, saves and
+exports projects. Every command's keys can be changed in the app. Undo and
+redo cover every change to the project: the clips and their notes, the
+takes, the locators, the loop, the tempo, the tracks, the devices, the
+automation and the mix.
 
 ## Running it
 
@@ -49,6 +51,57 @@ the same demo offline in every CI run, on Windows, macOS and Linux: it opens
 the saved demo, plays it past the end of the loop with both renderers, and
 saves it and opens it again.
 
+## The Tier 1 demo
+
+Record a MIDI part into a synth plugin and an audio take, comp the best
+take, arrange the clips, mix with an EQ, a compressor and a reverb send,
+automate a fader, undo and redo freely, save and reopen, and export a WAV
+faster than real time:
+
+1. **File > New Project** (Ctrl+N), then **File > Save Project As**
+   (Ctrl+Shift+S), so the recordings go in the project's folder.
+2. **Track > New MIDI Track** (Ctrl+Shift+T). With it selected, double-click
+   a synth in the browser's Devices (Ctrl+Alt+B shows the browser), such as
+   "Surge XT (CLAP)". Then **Track > New Audio Track** (Ctrl+T): it records
+   from the default input, and its strip's input menu picks another.
+3. Arm both tracks, drag a loop of a bar or two on the ruler's strip, which
+   turns looping on, and press **Record** (F9). Play the part on a MIDI
+   keyboard or an MPE controller, sing or play the audio part two or three
+   times round the loop, and press Space to stop. Each time round is a take.
+4. **View > Show/Hide Take Lanes** (Ctrl+Alt+U), and drag across the best
+   stretch of each take, to copy it to the track: that's the comp.
+5. Arrange: drag clips to move them, Ctrl-drag to copy them, Ctrl+D
+   duplicates, Ctrl+E splits at the start marker, and Delete deletes.
+6. With the audio track selected, double-click **EQ** and then
+   **Compressor** under Built-in in the browser's Devices, and set them in
+   the devices panel (Ctrl+Alt+L). **Track > New Return Track**
+   (Ctrl+Alt+T), give it the **Reverb** the same way, with its Mix at 100%,
+   and drag each track's send to it in the mixer (Ctrl+Alt+M).
+7. Press A for a track's volume lane, and draw in it: a dip, or a fade at
+   the end.
+8. Undo (Ctrl+Z) back to the empty project, recording and all, and redo
+   (Ctrl+Y) all the way again: the song plays as it did.
+9. **File > Save Project** (Ctrl+S), open another project, and **File > Open
+   Project** (Ctrl+O) this one again. It plays as it did.
+10. **File > Export Audio...** (Ctrl+Shift+R) writes the mix to a WAV file,
+    and says how many times faster than real time it rendered.
+
+[`crates/app/tests/tier1_demo.rs`](../crates/app/tests/tier1_demo.rs) runs
+the same demo offline in every CI run, on Windows, macOS and Linux, through
+the session and its commands, once with the test plugins' CLAP synth and
+once with their VST3 one. Two times round a loop, it sings a phrase into
+an input, with a cough in each take, and plays an arpeggio on a MIDI input,
+then comps the takes around the coughs, arranges, mixes and automates,
+undoes every step and redoes them, saves and reopens, and exports. It
+checks what listening can't: that the takes hold what was played, on the
+frame; that the comp plays the parts picked, to the sample; that undoing
+everything leaves an empty project, and redoing it plays the song as a
+fresh open of it does; that the project comes back from its file as it was
+saved; that the parallel scheduler plays it as the reference renderer
+does, sample for sample, with the CLAP synth's voices on the scheduler's
+threads; and that the exported file is what the app plays. It prints how
+fast the export rendered, which says little in a debug build.
+
 ## The null test
 
 `musicable null-test` plays a project offline from the start of the song
@@ -78,6 +131,13 @@ different after saving. `--seconds`, `--rate` and `--buffer` set how long
 it plays, the sample rate and the buffer size: 20 seconds at 48 kHz in
 128-frame buffers by default. A debug build checks the renders for
 allocations too, as the tests do.
+
+The null test doesn't load plugins: a plugin's device passes its signal
+through, as a plugin that isn't installed does. Plugins may not render the
+same every time they play the same, so only ones that do, such as the test
+plugins, can be checked this way, as
+[`crates/app/tests/tier1_demo.rs`](../crates/app/tests/tier1_demo.rs) checks
+them ([The Tier 1 demo](#the-tier-1-demo)).
 
 Audio clips play their files from the project file's folder, as in the app
 (see [Audio files](#audio-files)). Clips that stream wait for the disk here
@@ -1366,7 +1426,9 @@ for, since those builds are distributed under it.
   session, and that what you do meanwhile reaches the engine with the
   graph.
 - `musicable_app::null_test` plays projects offline for the null test and
-  for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs).
+  for [`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs)
+  and [`tier1_demo.rs`](../crates/app/tests/tier1_demo.rs), which load the
+  test plugins into its players (`Player::with_plugins`).
 - `musicable_app::export` renders exports, and
   [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) checks them
   against what the app plays live (see [Exporting audio](#exporting-audio)).

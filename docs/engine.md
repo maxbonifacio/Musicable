@@ -1124,7 +1124,9 @@ These still hold for anything else that drives the engine.
 with the `ParallelRenderer`, and `Session::replace_engine` sets up a new
 engine as the notes above describe, when the audio device needs one.
 
-**Tier 1.** [architecture.md](architecture.md#where-tier-1-starts) says
-where plugins, delay compensation, automation and recording go in the
-engine, and what's missing for them. The mixer and clips are built (see
-[The mixer](#the-mixer) and [Clips](#clips)).
+**Tier 1.** Done: [architecture.md](architecture.md#what-tier-1-built)
+says where each part is.
+
+**Tier 2.** [architecture.md](architecture.md#where-tier-2-starts) says
+where its parts go, in the engine and around it, and what Tier 1 left for
+them, such as the room for modulators and console mode.

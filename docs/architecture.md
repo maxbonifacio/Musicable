@@ -1,6 +1,6 @@
 # Architecture
 
-How Musicable fits together at the end of Tier 0, and where Tier 1 work
+How Musicable fits together at the end of Tier 1, and where Tier 2 work
 plugs in. A project model changes only through commands and transactions.
 It's compiled into a graph of nodes, which a real-time engine plays through
 the audio device, with a parallel scheduler that matches a single-threaded
@@ -103,7 +103,7 @@ frame.
 
 ## Rules that hold it together
 
-Tier 1 has to keep these. The tests check most of them.
+Tier 2 has to keep these. The tests check most of them.
 
 - **Every change to the project is a command and a transaction.**
   `Document` hands out `&Project` only. That's what makes every action
@@ -137,7 +137,10 @@ Tier 1 has to keep these. The tests check most of them.
   in the key.
 - **Every parameter change goes through `EngineHandle::send` or
   `send_at`**, even when it's also written to the model, so a value sent
-  while a new graph was compiling isn't lost.
+  while a new graph was compiling isn't lost. It comes again after every
+  swap, on the next block's first frame, with every other value set on its
+  node, so **a node takes several events on one frame**
+  ([engine.md](engine.md#graph-swaps)).
 - **The mouse runs commands too.** A gesture in the arrangement or the
   mixer runs a command with arguments, not code of its own, and a drag runs
   one when it ends, so it's one step to undo. Context menus list commands
@@ -151,12 +154,12 @@ Tier 1 has to keep these. The tests check most of them.
   about it, and the commands crate until undo knows how to take it back
   ([commands.md](commands.md#undo-and-redo)).
 
-## Where Tier 1 starts
+## What Tier 1 built
 
-Tier 1 of the feature list, and where each part should go. None of this is
-built yet, except where it says so.
+Tier 1 of the feature list, the minimum usable DAW, and where each part
+lives. What each still lacks is in its doc's "Not done yet".
 
-- **Clips.** Built: audio clips of WAV, AIFF and FLAC files, and MIDI
+- **Clips.** Audio clips of WAV, AIFF and FLAC files, and MIDI
   clips of notes with per-note expression (MPE) and controller curves, on
   `Track` in format version 7. A clip player heads each audio and MIDI
   track's strip and renders from the song position. Short files load whole
@@ -169,7 +172,7 @@ built yet, except where it says so.
   instrument ([engine.md](engine.md#clips),
   [app.md](app.md#audio-files)). The arrangement view makes and edits them
   (below), and the piano roll edits their notes and controllers.
-- **The arrangement view.** Built: tracks with headers, clips with
+- **The arrangement view.** Tracks with headers, clips with
   waveforms and notes, the ruler with locators, the start marker and the
   loop brace, drawn with egui's painter, only what's in sight, so a hundred
   tracks of clips take 3 to 4 ms a frame ([app.md](app.md#the-arrangement)).
@@ -180,7 +183,7 @@ built yet, except where it says so.
   where the piano roll, extensions and agents find it too
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
-- **The piano roll.** Built: a MIDI clip's notes on rows of keys beside a
+- **The piano roll.** A MIDI clip's notes on rows of keys beside a
   keyboard, over a lane of their velocities or a controller's curve, in the
   devices panel's place, drawn and tested as the arrangement is. Its
   gestures run the note and controller commands (`notes.move`,
@@ -207,25 +210,25 @@ built yet, except where it says so.
   doesn't take the app with it.
   [RTSan](https://clang.llvm.org/docs/RealtimeSanitizer.html) checks plugin
   code in CI for what our allocation checker can't see.
-- **Built-in devices.** Built: eight kinds, each with a parameter table in
+- **Built-in devices.** Eight kinds, each with a parameter table in
   `musicable_model::native` that the format, the commands and the devices
   panel's controls all work from, in format version 8. The engine's
   `devices` module has the nodes, with each parameter worked out per frame
   from the value set or its automation, and any modulation
   (`devices::Params`); all eight play
   ([engine.md](engine.md#built-in-devices), [app.md](app.md#built-in-devices)).
-- **Plugin delay compensation.** Built: nodes report their latency
+- **Plugin delay compensation.** Nodes report their latency
   (`Node::latency`), and `Graph::prepare` delays the earlier paths wherever
   paths of different latency meet, lines the cue output up with the output,
   and reports the graph's total (`PreparedGraph::latency`, `Stats::latency`;
   [engine.md](engine.md#delay-compensation)). Oversampled native stages will
   report their latency the same way.
-- **The mixer.** Built: group and return tracks are buses with strips of
+- **The mixer.** Group and return tracks are buses with strips of
   their own, summing through `compile::Summing`; sends before or after the
   fader; pan, mute, solo, solo-safe and arm; a clip stage per channel; and
   peak and RMS meters in atomics, shown in the app's mixer
   ([engine.md](engine.md#the-mixer), [app.md](app.md#the-mixer)).
-- **Automation.** Built, in format version 9: each lane is compiled into
+- **Automation.** In format version 9, each lane is compiled into
   the node with its parameter, not sent through the message queue, and
   read at the song position, so it loops and locates like everything else.
   The mixer's `Gain` and the built-in devices read their lanes frame by
@@ -235,7 +238,7 @@ built yet, except where it says so.
   hand overrides its lane until it's re-enabled
   ([engine.md](engine.md#automation), [commands.md](commands.md#automation),
   [app.md](app.md#the-arrangement)). Tempo automation is Tier 2.
-- **Recording.** Built: the backend captures inputs, system loopback on
+- **Recording.** The backend captures inputs, system loopback on
   Windows among them, lined up with the output frame for frame
   ([audio.md](audio.md#inputs)), and stamps each MIDI message with the
   frame heard as it came in ([audio.md](audio.md#midi-inputs)); each audio
@@ -243,20 +246,20 @@ built yet, except where it says so.
   track through a `MidiMonitor`; and the app's recorder thread reads the
   inputs' lock-free buffers and the engine's timeline, and writes takes
   ([engine.md](engine.md#recording), [app.md](app.md#recording)).
-- **Undo and redo.** Built: every committed transaction is a step in the
+- **Undo and redo.** Every committed transaction is a step in the
   document's history, and undo applies its edits' old values as a
   transaction of its own, which `Session::sync` sends to the engine like any
   other. A new kind of edit is undoable once it has its inverse
   ([commands.md](commands.md#undo-and-redo)). A drag, such as a fader's, is
   a gesture (`Action::BeginGesture` and `EndGesture`), so it's one step.
-- **Export.** Built: an export plays the project offline in a session of
+- **Export.** An export plays the project offline in a session of
   its own, as `null_test::Player` does, on a background thread, faster than
   real time, and writes WAV, AIFF or FLAC files through
   `musicable_io::audio::Writer`. Stems are taps on the graph, lined up with
   the mix by delay compensation, and the tests check that an exported mix
   is what the app plays live, sample for sample
   ([app.md](app.md#exporting-audio)).
-- **The clip stage.** Built: Hard and Soft clip types, in format version 2,
+- **The clip stage.** Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.
 - **Keys** are done: the keyboard shortcuts window changes any command's
@@ -267,6 +270,169 @@ built yet, except where it says so.
 - **ASIO** is built: our own host, behind `musicable_audio::open` like the
   other backends, in builds with the opt-in `asio` feature, which are
   distributed under the GPLv3 ([audio.md](audio.md#asio)).
+
+Audio Units and macOS were out of Tier 1's scope, since Windows comes
+first, so VST3 plugins' windows and audio and MIDI inputs on macOS and
+Linux are still to come, and so are MIDI outputs to devices. The rest of
+what Tier 1 left is in each doc's "Not done yet"
+([app.md](app.md#not-done-yet), [plugins.md](plugins.md#not-done-yet),
+[audio.md](audio.md#not-done-yet)).
+
+## Where Tier 2 starts
+
+Tier 2 of the feature list, a studio replacement, and where each part
+should go. None of it is built yet. Where Tier 1 left room for a part, this
+says what's there.
+
+- **ARA 2**, for Melodyne and the like. ARA rides on a plugin's instance,
+  so it starts in `crates/plugins`, beside `Instance` on the main thread.
+  The project holds what ARA calls the document already: audio clips, with
+  their ids, are its playback regions, and their files its audio sources.
+  Its change notifications go out from `Document::take_committed`, which
+  says what each committed transaction changed
+  ([commands.md](commands.md#transactions)), and each plugin's archive is
+  saved with the project, in a new format version. A plugin reads an audio
+  source from any thread, whenever it likes, so it needs a reader of its
+  own over `musicable_io::audio::Decoder`, not the engine's streams. A
+  plugin that plays its regions itself takes their clips' place, so the
+  compiler leaves those clips out of the track's clip player.
+- **Hybrid buffering, CPU meters per plugin, and multithreaded export.**
+  [engine.md](engine.md#parallel-rendering) sketches hybrid buffering: the
+  tracks nobody hears live render ahead in larger blocks on the same
+  workers, into lock-free queues that the live graph reads. Nothing times
+  nodes yet: a time for each node, kept in atomics as `Meters` keeps
+  levels, would give each plugin its meter. Exports render on the parallel
+  scheduler's workers already, in the app engine's block size
+  (`export::Job`).
+- **Plugin sandboxing.** Scanning loads each new library in a process of
+  its own already (`plugins::scan`). Hosting a plugin in another process is
+  another kind of `Instance`, which drives the plugin in a process that
+  hosts it, with a node that hands it each block through shared memory. A
+  process for each plugin, one for a group of them, or none differ only in
+  how many plugins share one.
+- **Warping and time-stretch.** A clip player plays its file at the file's
+  own speed, from the song position, resampled only for the file's sample
+  rate ([engine.md](engine.md#clips)). Warping adds warp markers to
+  `AudioClip`, in a new format version, and a player that reads the file
+  through them. A stretch that carries state from frame to frame, as a
+  phase vocoder does, can't start at any song position at once, as every
+  node must, so it would play from stretched segments rendered ahead, on
+  the disk thread that streams files now. Tempo, beats and transients come
+  from analysing the file, on the library's background queue
+  (`musicable_library::Queue`), and the project keeps what playback reads,
+  such as the onsets a slicing mode plays from.
+- **Sidechains, multi-output instruments and routing.** A node gets its
+  inputs in the order they're connected (`Graph::connect`), and the nodes
+  so far mix them together. A sidechain is a second connection into a
+  device's node, which reads it apart from the first; plugins need their
+  audio ports beyond the main ones for it
+  ([plugins.md](plugins.md#not-done-yet)). A node's output is one buffer of
+  `Node::channels()` channels, so a multi-output instrument is a node with
+  more of them, and a node for each of its outputs picks that output's
+  channels out for a strip of its own. In the model, a track feeds the
+  master or a group (`Track::output`) and records from an input
+  (`Track::input`), and flexible routing adds to both, such as another
+  track's output as an input.
+- **Per-app loopback on Windows 11.** System loopback is an input of its
+  own kind (`musicable_audio::InputKind::Loopback`, whose id `loopback_id`
+  makes), lined up with the output and resampled when its device runs on
+  another clock ([audio.md](audio.md#inputs)). One app's sound, or
+  everything but Musicable's, is a third kind, captured with WASAPI's
+  process loopback, on the same path.
+- **MPE editing in the piano roll.** Each note keeps its expression from
+  the start (`clip::Expression`: curves of pitch bend, pressure and timbre,
+  timed from the note's start), so moving, quantising and transposing a
+  note keep it already. What's missing is showing and drawing the curves:
+  lanes like the piano roll's for velocities and controllers, and note
+  commands for them ([commands.md](commands.md#notes)).
+- **Modelled clip types and console mode.** The clip stage's types are
+  `ClipType` values, and `native_stage()` in `compile.rs` puts each one's
+  node in its slot, so modelled types are more of both. Console mode fills
+  the strip's other slots (`compile::Slot`) from `Track::console` and
+  `Master::console`, which project files hold already, empty, and sums buses
+  through a modelled `compile::Summing` ([engine.md](engine.md#the-mixer)).
+  Oversampled stages report their latency (`Node::latency`), which delay
+  compensation lines up, and each channel's variation seed is a new field of
+  `console` ([project-format.md](project-format.md#coming-later)).
+- **Freeze and flatten, and bounce in place.** An export renders any track
+  on its own already, as a stem, from a tap on the graph
+  (`compile_with_stems`). Freezing renders a track that way, from a tap
+  after its devices, into a file that the track then plays in place of its
+  devices, and flattening swaps the devices for the file's clip for good.
+  A sidechained track's sources play along while it renders.
+- **Folders, hidden tracks, VCAs, colours and templates.** Group tracks are
+  buses already. Folders, hiding and colours are new `Track` fields, in a
+  format version, for the arrangement and the mixer to draw. A VCA moves its
+  tracks' faders without summing them, so it's the compiler's: a factor on
+  each member's fader (`nodes::Gain`). A template is a project file to start
+  from.
+- **Tempo and time-signature automation, and tempo from audio.** The tempo
+  map holds changes of tempo and of time signature already
+  (`TempoMap::insert_tempo`, `insert_signature`), and everything that plays
+  reads it, but nothing in the app adds one yet. Ramps are a new kind of
+  change inside `TempoMap` ([engine.md](engine.md#musical-time)), and a
+  format version. Tempo from audio is the beats that analysis finds (see
+  warping), made into a map.
+- **Windows, panels, workspaces, themes and profiles.** Each view is a
+  panel with its own id (`musicable_ui::MIXER`, `PIANO_ROLL` and the
+  others), which `Shell` shows and hides: a workspace saves which show and
+  where, and egui's viewports put a panel in a window of its own. Every view
+  draws from a `Theme` and takes its gestures from a `MouseMap`
+  (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
+  so a theme file fills a `Theme`, and a profile is a keymap file, a mouse
+  map, a theme, workspaces and the behaviour settings (`Editor::behaviour`)
+  together, each saved as what differs from its base. Configurable views
+  need the transport bar, the toolbars, the track headers and the strips
+  built from lists of parts, which they aren't yet.
+- **Visible undo history.** The history names each step, and undo and redo
+  move through it a step at a time (`Document::undo_name` and `redo_name`;
+  [commands.md](commands.md#undo-and-redo)). A panel of the steps needs
+  every step's name, and jumps to one by undoing or redoing up to it.
+- **MIDI learn.** MIDI inputs reach the engine stamped with their frames
+  (`ProcessContext::midi`), and every parameter has one address
+  (`ParamAddress`), which automation uses, and modulation and MIDI mapping
+  can use too. A mapping turns a controller's moves into its parameter's
+  changes: on the main thread, as a fader's drag does, or in the graph, on
+  their frames.
+- **Extensions.** They build on what Tier 1 made shareable: commands with
+  typed arguments and results, which say when they apply
+  ([commands.md](commands.md#arguments-and-results)), the `Editor`'s state
+  outside the widgets ([commands.md](commands.md#the-editors-state)),
+  context menus from the registry, panels with ids, the theme and the
+  mouse map. An extension's device is a third kind of device beside
+  Musicable's own and plugins: the compiler takes its node from
+  `compile::Devices`, which holds plugins' node makers now, and its
+  parameters have addresses as any device's do (`ParamAddress::Device`).
+  Its WebAssembly gets its memory in `Node::prepare`, where every node
+  allocates.
+- **Modulators.** Tier 1 left room for them in the engine.
+  `NodeEventKind::Modulation` offsets a parameter without changing its
+  value, for every voice or for one note. The built-in devices' parameters
+  say whether they can be modulated (`ParamInfo::modulated`), and add
+  modulation frame by frame, after their smoothing
+  (`automation::Param::modulate`). CLAP plugins get it as CLAP's parameter
+  modulation, for one note too, and VST3 plugins keep their base values in
+  the project, to get it as plain parameter changes. CLAP plugins and the
+  built-in instruments say when their voices end (`Node::ended_voices`), for
+  modulators that run a copy for each voice. The modulators themselves are
+  new: in the model, on tracks, groups and the master, and in the graph, a
+  node for each track that sends their targets the modulation.
+- **Online sounds and services.** The browser's library keeps a `Record`
+  for each file, with room for analysis: tags, measurements, and the
+  embedding that searching with a sound compares.
+  Online sounds add sources beside folders, an origin on each record, and
+  each sound's origin and licence in the project, a format version; export
+  writes the credits beside the mix. Freesound's previews need an Ogg
+  Vorbis decoder beside the others in `musicable_io::audio`. A store plugin
+  docked in the browser plays through the previews' path, which never
+  reaches an export ([engine.md](engine.md#previews)).
+- **Import and export.** Live's `.als` arrangements, DAWproject and MIDI
+  files are formats of their own in `crates/io`, beside the project format,
+  not versions of it ([project-format.md](project-format.md#coming-later)).
+- **Tags and favourites in the browser.** The library keeps users' tags
+  already, each saying who gave it (`TagSource`), so analysis's can join
+  them; favourites are another field of `Record`. Tags aren't in the undo
+  history yet ([app.md](app.md#not-done-yet)).
 
 ## Known gaps
 
@@ -287,15 +453,18 @@ built yet, except where it says so.
 
 - `cargo test --workspace` runs in a debug build, so the allocation checker
   is on. It covers the equivalence tests, the real-time checks, file round
-  trips, the commands and the shell, and the Tier 0 demo itself
-  ([`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs)).
-  CI runs it on Windows, macOS and Linux.
+  trips, the commands and the shell, plugin hosting with the test plugins,
+  recording and export, and the Tier 0 and Tier 1 demos themselves
+  ([`crates/app/tests/tier0_demo.rs`](../crates/app/tests/tier0_demo.rs),
+  [`tier1_demo.rs`](../crates/app/tests/tier1_demo.rs)), whose songs play
+  the same with both renderers. CI runs it on Windows, macOS and Linux.
 - The RTSan workflow (`.github/workflows/rtsan.yml`) runs the engine's and
   the plugins' tests with RealtimeSanitizer on Linux when they change, for
   what the allocation checker can't see, such as plugins' C and C++ code
   ([engine.md](engine.md#how-its-checked)).
 - `musicable null-test [PROJECT]` plays a project with both renderers and
-  compares them, on whatever machine it runs on.
+  compares them, on whatever machine it runs on, without its plugins
+  ([app.md](app.md#the-null-test)).
 - The scheduler benchmarks run in CI on Windows when the engine changes
   (`.github/workflows/bench.yml`). Hosted runners have few cores, so tune on
   real hardware ([CONTRIBUTING.md](../CONTRIBUTING.md#testing-and-measuring-the-scheduler)).
