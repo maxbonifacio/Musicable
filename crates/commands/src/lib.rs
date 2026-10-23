@@ -27,6 +27,8 @@ pub mod device;
 mod document;
 pub mod edit;
 pub mod editor;
+#[cfg(test)]
+mod every_command;
 pub mod file;
 mod history;
 mod key;

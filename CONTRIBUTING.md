@@ -72,6 +72,14 @@ cargo clippy --workspace --all-targets --features musicable-app/asio -- -D warni
 cargo test -p musicable-audio --features asio
 ```
 
+## Commands
+
+Every command needs an example in
+[`crates/commands/src/every_command.rs`](crates/commands/src/every_command.rs),
+which the tests undo and redo on its own and in random runs with the
+others. [docs/commands.md](docs/commands.md#testing-every-command) says what
+they check.
+
 ## Project files
 
 Changing what a project file holds changes the file format, so it needs a

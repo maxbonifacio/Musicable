@@ -16,7 +16,9 @@ A command has a dotted id, `area.action` in lower case, and a title in title
 case for menus and the palette. Keymap files name commands by id, so a
 command keeps its id once it has shipped. Each area registers its commands
 with the `Registry`, as `transport::register` does, and
-`musicable_commands::register_all` registers every area's. A running command
+`musicable_commands::register_all` registers every area's. A new command
+also needs an example for the undo tests
+([below](#testing-every-command)). A running command
 gets a `Context`: the open project's `Document`, with the editor's state
 (below), the engine's `Transport`, the browser's `Library`, and a list of
 `Request`s for what only the app can do, such as showing a file dialog.
@@ -619,6 +621,36 @@ A new kind of edit needs an arm in each match in
 `Edit::absorb` merges two in a row for gestures, and `Edit::is_noop` says
 when merged ones cancel out. Add an example to `one_of_each` in
 `history.rs`, and the tests undo and redo it with every other kind.
+
+### Testing every command
+
+Every command has an example in
+[`crates/commands/src/every_command.rs`](../crates/commands/src/every_command.rs):
+arguments that act on its test project, which has something of each kind,
+and what the command does. It changes the project as one step; or it leaves
+the project and its history alone, as selecting, playing and asking the app
+for something do; or it steps through the history, as undo and redo do. A
+command without an example fails `every_command_has_an_example`, and one
+that works more than one way, such as on clips or on notes, or with
+arguments or without, has an example of each.
+
+The tests run each example on its own, then 256 random runs of up to 80 of
+them, with undo and redo in between, each acting on what the ones before
+left and made. They check that:
+
+- undo takes each step back, and redo makes it again, exactly, but for the
+  counters that hand out ids, which never go back, so no id is used twice;
+- the commands that don't edit leave the project and the history alone;
+- the Edit menu's names and the unsaved-changes flag follow the history;
+- a copy of the project that only applies the committed edits, as the
+  engine follows them, stays in step;
+- each project a step makes saves, and loads back as it was.
+
+To try more runs:
+
+```sh
+PROPTEST_CASES=5000 cargo test -p musicable-commands --lib every_command
+```
 
 ## Running commands in the app
 
