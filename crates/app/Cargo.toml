@@ -21,6 +21,7 @@ musicable-commands.workspace = true
 musicable-engine.workspace = true
 musicable-plugins.workspace = true
 musicable-io.workspace = true
+musicable-library.workspace = true
 musicable-ui.workspace = true
 musicable-audio.workspace = true
 eframe.workspace = true

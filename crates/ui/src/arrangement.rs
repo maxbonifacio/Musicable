@@ -40,6 +40,7 @@ use musicable_model::param::{ParamAddress, ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, DeviceKind, LocatorId, Project, TakeId, TrackId, TrackKind};
 
+use crate::browser::{Destination, Dragged};
 use crate::devices::describe;
 use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
@@ -664,6 +665,31 @@ impl Scene<'_> {
     /// The song position at `x`, snapped to the grid.
     fn snapped(&self, x: f32) -> Beats {
         self.snap(self.layout.beats_at(x), false).max(Beats::ZERO)
+    }
+
+    /// Where something dragged from the browser goes if it's let go at
+    /// `pos`: on the track there, from the time there over the lanes, or on
+    /// a new track under the tracks.
+    fn destination(&self, pos: Pos2) -> Option<Destination> {
+        let layout = &self.layout;
+        let in_lanes = layout.lanes.contains(pos);
+        if !in_lanes && !layout.headers.contains(pos) {
+            return None;
+        }
+        let at = in_lanes.then(|| self.snapped(pos.x));
+        let row = (layout.row_at(pos.y).map(|row| (row.index, row.id))).or_else(|| {
+            layout
+                .take_at(pos.y)
+                .map(|take| (take.track_index, take.track))
+        });
+        Some(match row {
+            Some((index, track)) => Destination::Track {
+                track,
+                audio: self.project().tracks[index].kind == TrackKind::Audio,
+                at,
+            },
+            None => Destination::NewTrack { at },
+        })
     }
 
     /// What's under `pos` in `area`.
@@ -1520,6 +1546,12 @@ impl Arrangement {
         }
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene, plan.as_ref());
+        // What's dragged from the browser, and where it would go.
+        let dropping = scene.pointer.and_then(|pos| {
+            let dragged = egui::DragAndDrop::payload::<Dragged>(ui.ctx())?;
+            let to = scene.destination(pos)?;
+            dragged.dropped(&to).map(|action| (action, to))
+        });
 
         let painter = ui.painter_at(rect);
         paint::lanes(
@@ -1540,6 +1572,9 @@ impl Arrangement {
         paint::corner(&painter.with_clip_rect(scene.layout.corner), &scene);
         if ui.input(|i| !i.raw.hovered_files.is_empty()) {
             paint::drop_hint(&painter, &scene);
+        }
+        if let Some((_, to)) = &dropping {
+            paint::destination(&painter, &scene, to);
         }
         name_for_screen_readers(ui, &scene, id);
 
@@ -1570,6 +1605,12 @@ impl Arrangement {
             });
         }
         self.drop_files(ui, &scene, actions);
+        if let Some((action, _)) = dropping
+            && ui.input(|i| i.pointer.any_released())
+        {
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            actions.push(action);
+        }
     }
 
     /// Handles the clicks and drags on `area`, whose response is
@@ -2135,6 +2176,8 @@ impl Arrangement {
                 (MouseAction::Copy, _) => Some(CursorIcon::Copy),
                 (action, _) => icon(drag.hit, Some(action)),
             },
+            // egui's while something's dragged from the browser.
+            None if egui::DragAndDrop::has_any_payload(ui.ctx()) => return,
             None => {
                 let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
                     return;

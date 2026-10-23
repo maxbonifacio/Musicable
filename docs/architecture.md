@@ -17,8 +17,9 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend on Windows, and ASIO with the `asio` feature; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
-| `io` | `model` | Project files, and audio files: reading WAV, AIFF and FLAC, writing WAV and AIFF. MIDI files later |
-| `ui` | `model`, `commands` | What the window shows, drawn with egui: the arrangement, the mixer, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
+| `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
+| `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
+| `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
 
 Cargo enforces the directions that matter. The engine knows nothing of
@@ -35,8 +36,9 @@ compiler, a node and the UI, in that order.
 | Audio (`musicable-audio` on Windows, cpal's elsewhere) | `Engine::process_interleaved`, once per device period | MMCSS "Pro Audio", critical |
 | ASIO driver's (instead, in ASIO streams) | `Engine::process`, once per buffer half. The stream's own thread, `musicable-asio`, makes the driver's other calls | The driver's: real-time, as ASIO asks of drivers |
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
-| Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them | Normal |
+| Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them. A second one streams long previews | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
+| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
 | Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
 | Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
 

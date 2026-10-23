@@ -6,12 +6,13 @@
 //! keymap through [`KeyPresses`] before egui sees them.
 //!
 //! The window has a menu bar and a transport bar over the arrangement, with
-//! the mixer and the devices or the piano roll in panels under it, the plugin
+//! the mixer and the devices or the piano roll in panels under it, the
 //! browser beside it, and the keyboard shortcuts window and the command
 //! palette over them. Views draw from a [`Theme`], and look mouse gestures up
 //! in a [`MouseMap`]. `docs/app.md` describes it all.
 
 mod arrangement;
+mod browser;
 mod devices;
 mod keys;
 mod menus;
@@ -30,6 +31,7 @@ mod timeline;
 mod waveform;
 mod widgets;
 
+pub use browser::{Library, Listing, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Preview};
 pub use devices::{BROWSER, DEVICES, PluginEntry, PluginParam, PluginStatus, Plugins};
 pub use keys::{KeyPresses, chord};
 pub use mixer::{InputChoice, Level, Levels, MidiChoice};
@@ -38,6 +40,6 @@ pub use piano_roll::PIANO_ROLL;
 pub use shell::{
     Action, Audio, KeymapStatus, MIXER, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
 };
-pub use theme::{DeviceSizes, MixerSizes, PianoRollSizes, Theme};
+pub use theme::{BrowserSizes, DeviceSizes, MixerSizes, PianoRollSizes, Theme};
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};

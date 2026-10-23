@@ -13,9 +13,9 @@ of Musicable, and where Tier 1 work plugs in.
  Project ── snapshot ──► Compiler (own thread)
                              │ PreparedGraph
                              ▼
- EngineHandle ── message queue: events, swaps, tempo maps ──► Engine
-              ◄── garbage queue: old graphs and tempo maps ──
-              ◄── atomics: Stats ────────────────────────────
+ EngineHandle ── message queue: events, swaps, tempo maps, previews ──► Engine
+              ◄── garbage queue: old graphs, tempo maps, previews ──
+              ◄── atomics: Stats ───────────────────────────────────
 
  disk thread ── chunks of audio files, ahead of each clip ──► clip players
              ◄── hints: where each clip reads next ──────────
@@ -561,6 +561,34 @@ and gives the engine an `AudioReader` for each (see
 - A stream follows one clip, so two clips of the same long file get one
   each. A rebuilt graph gets the same sources (the app keeps them), so a
   stream carries on across swaps.
+
+## Previews
+
+The engine plays a sound on its own, beside the song, for the browser's
+previews (`preview.rs`). `EngineHandle::preview` sends it a `Preview`, made
+with `Preview::new(id, source, config)` off the audio thread, where it
+allocates what it needs, from a `Source` read whole or streaming, and
+`EngineHandle::stop_preview` stops it.
+
+- One preview plays at a time, once, from its start, at its file's own
+  speed: resampled as clips are, mono in both channels. Another, or
+  stopping, fades the one playing out over 128 frames, so it doesn't
+  click; the next starts at once.
+- The engine adds it to its output where it adds the cue output, after
+  the graph, so it plays whether the song does or not, never goes through
+  the master, and never reaches an export's taps
+  (`Engine::process_with_taps` leaves it out).
+- A preview that streams waits until the stream has its first frames in
+  memory. Where the disk falls behind after that, it plays silence, as a
+  clip does.
+- `EngineHandle::set_preview_gain` sets how loud previews play. A change
+  ramps over a block; the first block plays at the gain set.
+- `Stats::preview` says which preview is playing, by the id it was made
+  with, and the frame of its file it's at, for the browser's playhead.
+- A preview that has finished or faded out goes back through the garbage
+  queue, as a replaced graph does, to be dropped off the audio thread. The
+  engine takes a new one only when the queue has room for the two it may
+  let go of.
 
 ## Notes
 

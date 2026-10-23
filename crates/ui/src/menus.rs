@@ -3,8 +3,8 @@
 
 use egui::{Button, Ui};
 use musicable_commands::{
-    Args, Command, CommandId, Registry, arrange, automation, controllers, edit, file, locator,
-    notes, options, track, transport, view,
+    Args, Command, CommandId, Registry, arrange, automation, browser, controllers, edit, file,
+    locator, notes, options, track, transport, view,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -131,7 +131,19 @@ const MENUS: [MenuSpec; 8] = [
 ];
 
 /// The menus that come last, after those for other areas.
-const LAST_MENUS: [MenuSpec; 2] = [
+const LAST_MENUS: [MenuSpec; 3] = [
+    (
+        "Browser",
+        "browser",
+        &[
+            Some(browser::FOCUS_SEARCH),
+            None,
+            Some(browser::ADD_FOLDER),
+            Some(browser::RESCAN),
+            None,
+            Some(browser::STOP_PREVIEW),
+        ],
+    ),
     (
         "View",
         "view",
@@ -327,6 +339,7 @@ mod tests {
                 "Locator",
                 "Transport",
                 "Macro",
+                "Browser",
                 "View",
                 "Options"
             ]

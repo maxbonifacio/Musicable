@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Focus, Request, arrange, device};
+use musicable_commands::{Args, CommandError, Focus, Request, arrange, browser, device};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
+use musicable_library::Queue;
 use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
@@ -25,6 +26,7 @@ use crate::audio_window::AudioWindow;
 use crate::export::{self, Export, ExportSettings, Job, Report};
 use crate::export_window::{Asked, ExportWindow};
 use crate::keymap_file::UserKeymap;
+use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
@@ -151,6 +153,17 @@ impl App {
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
         session.editor_mut().behaviour = settings.behaviour;
         session.set_plugin_waker(waker(ctx));
+        // The browser's library, whose file work runs on a queue of its own.
+        let queue = Arc::new(Queue::for_this_machine());
+        let library_file = config_dir.as_ref().map(|dir| dir.join(LIBRARY_FILE));
+        let presets = (settings.browser.presets_folder.clone()).or_else(library::presets_folder);
+        session.set_library(Library::open(
+            library_file,
+            presets,
+            queue,
+            Some(waker(ctx)),
+        ));
+        session.set_preview_gain(settings.browser.preview_gain());
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         // What the last scan found, while the next one runs. Before the
         // first, plugin devices wait for it.
@@ -307,6 +320,16 @@ impl App {
             // file doesn't exist yet.
             Action::CreateKeymap => self.keymap_file.save(self.session.keymap()),
             Action::ResetDropouts => self.output.reset_dropouts(),
+            Action::SetAutoPreview(on) => {
+                self.settings.browser.auto_preview = on;
+                self.save_settings();
+            }
+            Action::SetPreviewVolume(volume) => {
+                self.settings.browser.preview_volume = volume;
+                self.session
+                    .set_preview_gain(self.settings.browser.preview_gain());
+                self.save_settings();
+            }
             Action::DismissMessages => self.messages.clear(),
         }
         self.handle_requests(ctx, frame);
@@ -395,6 +418,8 @@ impl App {
                     self.set_sample(device, &path);
                 }
             }
+            Request::AddLibraryFolder => self.add_library_folder(frame),
+            Request::FocusBrowserSearch => self.shell.focus_browser_search(),
         }
     }
 
@@ -407,6 +432,20 @@ impl App {
         if let Err(error) = self.session.run_with(&device::SET_SAMPLE, &args) {
             self.messages
                 .push(format!("Couldn't load the sample: {error}."));
+        }
+    }
+
+    /// Asks for a folder of samples, and adds it to the browser's library.
+    fn add_library_folder(&mut self, frame: &eframe::Frame) {
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .set_title("Add Folder to Library");
+        let Some(folder) = dialog.pick_folder() else {
+            return;
+        };
+        let args = Args::new().with("folder", folder.to_string_lossy().as_ref());
+        if let Err(error) = self.session.run_with(&browser::ADD_FOLDER, &args) {
+            self.messages.push(capital(&format!("{error}.")));
         }
     }
 
@@ -835,7 +874,8 @@ impl eframe::App for App {
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
-        } else if self.session.stats().playing || metering {
+        } else if self.session.stats().playing || self.session.stats().preview.is_some() || metering
+        {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
@@ -874,6 +914,9 @@ impl eframe::App for App {
         let details = self.output.details();
         let name = self.name();
         let recordings = recordings(&self.session);
+        let library = self.session.library();
+        let scanning = library.scanning();
+        let (found, total) = library.found();
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -915,6 +958,31 @@ impl eframe::App for App {
                 status: &self.plugin_status,
             },
             native: musicable_engine::devices::BUILT,
+            library: musicable_ui::Library {
+                index: library.index(),
+                loaded: library.is_loaded(),
+                scanning: &scanning,
+                listing: match library.listing() {
+                    Listing::Search(text) => musicable_ui::Listing::Search(text),
+                    Listing::Similar(file) => musicable_ui::Listing::Similar(file),
+                },
+                found,
+                total,
+                presets: library.presets(),
+                finding_presets: library.is_finding_presets(),
+                preview: library
+                    .preview_playing()
+                    .map(|preview| musicable_ui::Preview {
+                        path: &preview.path,
+                        at: (stats.preview)
+                            .filter(|at| at.id == preview.id)
+                            .map(|at| at.frame),
+                        frames: preview.frames,
+                        peaks: preview.peaks.as_deref(),
+                    }),
+                auto_preview: self.settings.browser.auto_preview,
+                preview_volume: self.settings.browser.preview_volume,
+            },
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -1046,6 +1114,8 @@ fn with_extension(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod arranging;
+#[cfg(test)]
+mod browsing;
 #[cfg(test)]
 mod built_in_devices;
 #[cfg(test)]

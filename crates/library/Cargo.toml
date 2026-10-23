@@ -1,0 +1,22 @@
+[package]
+name = "musicable-library"
+description = "The browser's library: folders of samples indexed file by file, presets, search, and the background queue for file work."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memchr.workspace = true
+musicable-io.workspace = true
+musicable-model.workspace = true
+num_cpus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "large"
+harness = false

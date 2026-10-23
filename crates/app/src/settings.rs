@@ -22,6 +22,10 @@
 //! tail = true
 //! mixdown = true
 //! stems = false
+//!
+//! [browser]
+//! auto_preview = true
+//! preview_volume = -6
 //! ```
 //!
 //! Every setting is optional, and fields this version doesn't know are
@@ -34,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_audio::{Mode, StreamRequest};
 use musicable_commands::editor::Behaviour;
+use musicable_ui::{MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
@@ -80,6 +85,42 @@ pub struct Settings {
     /// How the export window writes files, as it was last used: see
     /// [`ExportSettings`].
     pub export: ExportSettings,
+    pub browser: BrowserSettings,
+}
+
+/// How the browser previews samples, and where Musicable's own presets go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSettings {
+    /// Whether picking a sample in the browser plays it.
+    pub auto_preview: bool,
+    /// How loud previews play, in dB, from [`MIN_PREVIEW_VOLUME`] to
+    /// [`MAX_PREVIEW_VOLUME`].
+    pub preview_volume: i32,
+    /// Where presets are saved, if not in the Presets folder of the
+    /// Musicable folder in the user's music folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presets_folder: Option<PathBuf>,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            auto_preview: true,
+            preview_volume: 0,
+            presets_folder: None,
+        }
+    }
+}
+
+impl BrowserSettings {
+    /// The gain previews play at.
+    pub fn preview_gain(&self) -> f32 {
+        let db = self
+            .preview_volume
+            .clamp(MIN_PREVIEW_VOLUME, MAX_PREVIEW_VOLUME);
+        10f32.powf(db as f32 / 20.0)
+    }
 }
 
 /// The audio device to play through, and how.
@@ -240,6 +281,11 @@ mod tests {
                 stems: true,
                 ..ExportSettings::default()
             },
+            browser: BrowserSettings {
+                auto_preview: false,
+                preview_volume: -12,
+                presets_folder: Some(PathBuf::from("/music/presets")),
+            },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -268,6 +314,13 @@ mod tests {
             .export;
         assert_eq!(export.format, FileFormat::Flac);
         assert_eq!(export.bits, ExportSettings::default().bits);
+        // Previews play when a sample's picked unless the file says not.
+        let browser = Settings::parse("[browser]\npreview_volume = -6\n")
+            .unwrap()
+            .browser;
+        assert!(browser.auto_preview);
+        assert!((browser.preview_gain() - 0.501).abs() < 0.001);
+        assert_eq!(BrowserSettings::default().preview_gain(), 1.0);
     }
 
     #[test]

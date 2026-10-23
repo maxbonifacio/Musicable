@@ -161,6 +161,17 @@ impl Output {
         (output, handle)
     }
 
+    /// Renders `frames` frames of the engine while no stream plays it, as a
+    /// device would, and returns them, interleaved in stereo. For the app's
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn play_idle(&mut self, frames: usize) -> Vec<f32> {
+        let engine = self.idle.as_mut().expect("the engine waits for a stream");
+        let mut played = vec![0.0; frames * 2];
+        engine.process_interleaved(&mut played, 2);
+        played
+    }
+
     /// Call once per frame. Notices a stream that ended by itself, tries the
     /// device again when it's time, and updates the CPU meter. `notices`
     /// says what happened.

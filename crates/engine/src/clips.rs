@@ -200,7 +200,7 @@ impl AudioClips {
 /// Reads `channels` channels of `source` from file frame `start` into
 /// `out`, a channel after another, as many frames as fit. Frames before the
 /// file starts or after it ends are silent.
-fn read(source: &Source, start: i64, out: &mut [f32], channels: usize) {
+pub(crate) fn read(source: &Source, start: i64, out: &mut [f32], channels: usize) {
     let frames = out.len() / channels;
     // Frames before the file.
     let skip = (-start).clamp(0, frames as i64) as usize;

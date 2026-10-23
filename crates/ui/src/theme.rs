@@ -96,6 +96,8 @@ pub struct Theme {
     pub divider: Color32,
     /// The devices panel's boxes, one for each device.
     pub device: Color32,
+    /// The waveform of the sample previewing, in the browser.
+    pub preview_wave: Color32,
 
     // The piano roll's colours. Its notes take their track's colour, and
     // its grid lines, start marker and playhead are the arrangement's.
@@ -156,6 +158,7 @@ pub struct Theme {
     pub mixer: MixerSizes,
     pub devices: DeviceSizes,
     pub piano_roll: PianoRollSizes,
+    pub browser: BrowserSizes,
 }
 
 /// The piano roll's sizes, in points.
@@ -205,7 +208,7 @@ pub struct MixerSizes {
     pub scale_text: f32,
 }
 
-/// The devices panel's and the plugin browser's sizes, in points.
+/// The devices panel's and the browser's sizes, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceSizes {
     /// The devices panel's height until the user drags its edge.
@@ -217,8 +220,18 @@ pub struct DeviceSizes {
     /// The space around what's in a device's box, and between the boxes.
     pub margin: f32,
     pub gap: f32,
-    /// The plugin browser's width until the user drags its edge.
+    /// The browser's width until the user drags its edge.
     pub browser: f32,
+}
+
+/// The browser's sizes, in points. Its width is in [`DeviceSizes`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrowserSizes {
+    /// How far in a folder's rows are from its own, and the space for its
+    /// arrow.
+    pub indent: f32,
+    /// The height of the waveform of the sample previewing.
+    pub waveform: f32,
 }
 
 impl MixerSizes {
@@ -294,6 +307,7 @@ impl Default for Theme {
             header_text: Color32::from_gray(225),
             divider: Color32::from_gray(24),
             device: Color32::from_gray(46),
+            preview_wave: Color32::from_rgb(150, 200, 255),
 
             white_row: Color32::from_gray(44),
             black_row: Color32::from_gray(36),
@@ -346,7 +360,11 @@ impl Default for Theme {
                 control: 96.0,
                 margin: 4.0,
                 gap: 6.0,
-                browser: 220.0,
+                browser: 260.0,
+            },
+            browser: BrowserSizes {
+                indent: 14.0,
+                waveform: 44.0,
             },
             piano_roll: PianoRollSizes {
                 panel: 320.0,

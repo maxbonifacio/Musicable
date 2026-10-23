@@ -8,6 +8,7 @@ mod audio_window;
 pub mod export;
 mod export_window;
 mod keymap_file;
+pub mod library;
 mod media;
 pub mod null_test;
 mod output;

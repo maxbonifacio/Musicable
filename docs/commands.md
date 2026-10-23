@@ -18,8 +18,8 @@ command keeps its id once it has shipped. Each area registers its commands
 with the `Registry`, as `transport::register` does, and
 `musicable_commands::register_all` registers every area's. A running command
 gets a `Context`: the open project's `Document`, with the editor's state
-(below), the engine's `Transport`, and a list of `Request`s for what only
-the app can do, such as showing a file dialog.
+(below), the engine's `Transport`, the browser's `Library`, and a list of
+`Request`s for what only the app can do, such as showing a file dialog.
 
 ### Arguments and results
 
@@ -314,13 +314,15 @@ which needs a selection, so New Group Track has no key yet.
 ### Device
 
 Devices go on a track or on the master, in the order the signal goes
-through them. The devices panel and the plugin browser run these, with the
+through them. The devices panel and the browser run these, with the
 device's id as `device`.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, with every parameter at its default. Returns the new device | none | Double-click in the browser |
-| `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
+| `device.add` | Add Device | Adds one of Musicable's own devices, `kind` (`eq`, `compressor`, `gate`, `delay`, `reverb`, `utility`, `sampler` or `synth`), at `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` on a new track named after it, as `device.add_plugin` does, with every parameter at its default. Returns the new device | none | Double-click in the browser |
+| `device.add_plugin` | Add Plugin | Adds the plugin `plugin` of the format `format` (`clap` or `vst3`), called `name`, at `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` on a new track named after it: a MIDI track for an instrument, an audio track for an effect. `instrument` says it plays notes. Returns the new device | none | Double-click in the browser |
+| `device.add_preset` | Add Preset | Adds the device the preset file `preset` holds, set as it was saved, where `device.add_plugin` puts one. Returns the new device | none | Double-click in the browser |
+| `device.save_preset` | Save Device as Preset | Saves the device `device` as a Musicable preset called `name`, or the device's name and a number, in the presets folder, and returns its path. A name the device has a preset for already is refused | none | Save Preset, on the device's title bar |
 | `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
 | `device.set_sample` | Set Sample | Gives the sampler `device` the audio file `file` to play, a path as clips name files ([project-format.md](project-format.md)), or takes its sample away without one | none | Drop a file on Simpler |
 | `device.load_sample` | Load Sample... | Asks for an audio file and gives it to the sampler `device` with `device.set_sample` | none | none |
@@ -330,14 +332,17 @@ device's id as `device`.
 
 Adding, changing and deleting are transactions named after the device:
 a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
-plugin by its name, such as "Delete Surge XT". So undo covers them, and
-dragging a control is one gesture, which one undo takes back. Giving a
-sampler its sample is "Load Sample", and taking it away "Remove Sample".
-`device.load_sample` asks the app, with `Request::LoadSample`, which shows
-a dialog in the project's folder; the sampler reads the file when the
-graph is next built, and the status bar says if it can't. The window
-commands ask the app, with `Request::PluginWindow`; a plugin that isn't
-playing has no window to show, and the status bar says why. A new device starts with the plugin's own defaults. Its settings fill
+plugin by its name, such as "Delete Surge XT"; adding a preset is named
+after the preset. So undo covers them, and dragging a control is one
+gesture, which one undo takes back. A preset of a VST3 plugin needs the
+plugin installed, and is refused without it. Giving a sampler its sample
+is "Load Sample", and taking it away "Remove Sample". `device.load_sample`
+asks the app, with `Request::LoadSample`, which shows a dialog in the
+project's folder; the sampler reads the file when the graph is next built,
+and the status bar says if it can't. The window commands ask the app, with
+`Request::PluginWindow`; a plugin that isn't playing has no window to show,
+and the status bar says why. A new device starts with the plugin's own
+defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
 ### Automation
@@ -376,6 +381,32 @@ changes, `device.set_param` (and so the built-in devices' controls) and
 what plugins change in their own windows all do. An overridden lane keeps its points, which can be edited as
 usual, and the parameter holds the value it was moved to until Re-Enable
 Automation.
+
+### Browser
+
+The browser's library is the app's, as the transport is: the samples are
+on its disk, and its engine plays the previews. Commands reach it through
+the `Library` in their `Context`, which the app implements, and a session
+without one, such as an export's, says there's no library. What a search
+or Find Similar finds is what the browser lists, so an agent's search shows
+there too. A file is named by its full path.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `browser.search` | Search the Library | Finds the samples whose names, folders or tags have every word of `text`, best first, and returns the first `limit` of their paths, 100 without it | none | Typing in the browser's search field |
+| `browser.find_similar` | Find Similar Samples | Finds the samples most like `file`, most alike first, and returns the first `limit` | none | Show Similar Files |
+| `browser.preview` | Preview Sample | Plays the audio file `file` on its own, beside the song, in place of what was previewing | none | Clicking a sample, with Preview on |
+| `browser.stop_preview` | Stop Preview | Stops it | none | none |
+| `browser.tag` | Tag Sample | Gives `file` the tag `tag`, or with `on` false takes it away, and returns whether that changed it | none | Live 12's tags |
+| `browser.add_folder` | Add Folder to Library... | Adds `folder` to the library and looks through it, or asks which folder without it | none | Add Folder..., under Places |
+| `browser.remove_folder` | Remove Folder from Library | Takes `folder` out of the library, leaving its files where they are | none | Remove from Sidebar |
+| `browser.rescan` | Rescan Library | Looks through `folder` again, or every folder and the presets | none | none |
+| `browser.focus_search` | Search in Browser | Shows the browser, with the keys in the search field of the list showing | Ctrl+F | Ctrl+F |
+
+The library's changes aren't the project's, so they aren't in its undo
+history: a tag is taken away with `browser.tag` too. Add Folder without a
+folder and Search in Browser ask the app, with `Request::AddLibraryFolder`
+and `Request::FocusBrowserSearch`.
 
 ### The mixer's controls
 
@@ -433,7 +464,7 @@ other. They push a `Request`, as the file commands do.
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
 | `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in the devices' place | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
 | `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Shows the piano roll in place of the devices, or the devices in its place | F12 | F12, Shift+Tab |
-| `view.toggle_browser` | Plugin Browser | Shows or hides the plugin browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
+| `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
 | `view.zoom_in` | Zoom In | Zooms the view with the focus in, around the start marker | Equals, NumpadAdd | + |
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
@@ -634,6 +665,12 @@ stops the transport at the start of the song. Then:
   tempo maps the engine is done with. And it polls the plugins: what they
   ask for, and the changes made in their windows, which it makes
   transactions of.
+- **The browser's library.** `Session::set_library` gives the session the
+  app's library, which the browser commands reach. `Session::tick` takes in
+  what its file work found, hands the engine the previews it opened, and
+  tells the library's queue whether the engine plays or records, so scans
+  slow down ([app.md](app.md#behind-the-browser)).
+  `Session::set_preview_gain` sets how loud previews play.
 - **Plugins.** `Session::set_installed_plugins` says which plugins are
   installed, from a scan, and loads the plugins of the project's devices
   among them. `Session::plugin` is a device's plugin instance, once it has

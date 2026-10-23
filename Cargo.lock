@@ -1900,6 +1900,7 @@ dependencies = [
  "musicable-commands",
  "musicable-engine",
  "musicable-io",
+ "musicable-library",
  "musicable-model",
  "musicable-plugins",
  "musicable-test-plugins",
@@ -1955,6 +1956,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "musicable-library"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "musicable-io",
+ "musicable-model",
+ "num_cpus",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "musicable-model"
 version = "0.1.0"
 
@@ -1989,6 +2002,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "musicable-commands",
+ "musicable-library",
  "musicable-model",
 ]
 
