@@ -33,9 +33,9 @@ pub struct Editor {
     /// Whether the arrangement scrolls to keep the playhead in sight while
     /// the transport plays.
     pub follow: bool,
-    /// The height of each track in the arrangement, in points, where it
-    /// isn't the theme's.
-    pub track_heights: BTreeMap<TrackId, f32>,
+    /// The height of each track in the arrangement, and of the master's
+    /// row, in points, where it isn't the theme's.
+    pub track_heights: BTreeMap<Chain, f32>,
     pub behaviour: Behaviour,
     /// What the app has read about the audio files that clips play, by the
     /// path the clips give.
@@ -162,7 +162,7 @@ impl Editor {
         selection.tracks.retain(|id| tracks.contains(id));
         if let Some(time) = &mut selection.time {
             time.tracks.retain(|id| tracks.contains(id));
-            if time.tracks.is_empty() {
+            if time.tracks.is_empty() && !time.master {
                 selection.time = None;
             }
         }
@@ -171,7 +171,7 @@ impl Editor {
         {
             self.selected_track = None;
         }
-        self.track_heights.retain(|id, _| tracks.contains(id));
+        (self.track_heights).retain(|chain, _| chain.track().is_none_or(|id| tracks.contains(&id)));
         self.take_lanes.retain(|id| tracks.contains(id));
         self.automation.retain(|&chain, params| {
             params.retain(|&param| project.param_chain(param) == Some(chain));
@@ -390,12 +390,17 @@ impl Selection {
     }
 }
 
-/// A stretch of time on some tracks.
+/// A stretch of time on some tracks, or on the master, or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeSelection {
     /// Never empty.
     pub range: BeatRange,
+    /// Empty only when it's on the master alone.
     pub tracks: BTreeSet<TrackId>,
+    /// Whether it's on the master too: the master has no clips for the
+    /// edit commands to act on, but its stretch is looped, zoomed to and
+    /// exported as the tracks' is.
+    pub master: bool,
 }
 
 /// The arrangement's horizontal zoom and where it's scrolled to.
@@ -895,19 +900,37 @@ mod tests {
                 time: Some(TimeSelection {
                     range,
                     tracks: [gone].into(),
+                    master: false,
                 }),
             },
             selected_track: Some(Chain::Track(gone)),
             ..Editor::default()
         };
-        editor.track_heights.insert(gone, 80.0);
+        editor.track_heights.insert(Chain::Track(gone), 80.0);
+        editor.track_heights.insert(Chain::Master, 90.0);
         project.tracks.retain(|t| t.id != gone);
         editor.prune(&project);
         assert_eq!(editor.selection.clips, [kept].into());
         assert_eq!(editor.selection.tracks, [keys].into());
         assert_eq!(editor.selection.time, None);
         assert_eq!(editor.selected_track, None);
-        assert!(editor.track_heights.is_empty());
+        // The master's stays.
+        let heights: Vec<_> = editor.track_heights.iter().collect();
+        assert_eq!(heights, [(&Chain::Master, &90.0)]);
+        // A time selection on the master stays without its tracks.
+        let time = TimeSelection {
+            range,
+            tracks: [keys].into(),
+            master: true,
+        };
+        editor.selection.time = Some(time.clone());
+        project.tracks.clear();
+        editor.prune(&project);
+        let left = TimeSelection {
+            tracks: BTreeSet::new(),
+            ..time
+        };
+        assert_eq!(editor.selection.time, Some(left));
 
         editor.files.insert(
             "a.wav".into(),

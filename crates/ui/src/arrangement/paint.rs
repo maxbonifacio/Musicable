@@ -101,8 +101,9 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
 
 /// The master's part of the lanes: its row, lit while it's selected, and
 /// its automation lanes under it, with the grid and the loop region over
-/// them, and a line along its top that sets it apart from the tracks.
-/// Returns where its row and lanes are.
+/// them, the time selection over its row if it's on the master, and a line
+/// along its top that sets it apart from the tracks. Returns where its row
+/// and lanes are.
 fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -139,6 +140,11 @@ fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
     for bottom in bottoms {
         let y = painter.round_to_pixel_center(bottom - 0.5);
         painter.hline(across, y, Stroke::new(1.0, theme.divider));
+    }
+    if let Some(time) = (editor.selection.time.as_ref()).filter(|time| time.master) {
+        let x = layout.x_of(time.range.start)..=layout.x_of(time.range.end);
+        let rect = Rect::from_x_y_ranges(x, row.top..=row.bottom());
+        painter.rect_filled(rect, 0.0, theme.time_selection);
     }
     master_line(painter, scene, across);
     filled

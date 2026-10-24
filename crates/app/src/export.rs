@@ -1185,9 +1185,11 @@ mod tests {
         let clip = Some(BeatRange::new(at(4), at(10)));
         assert_eq!(Span::Selection.range(&project, &editor), clip);
         assert_eq!(Span::default_for(&project, &editor), Span::Selection);
+        // On the master alone, as the master's lane selects it.
         editor.selection.time = Some(TimeSelection {
             range: BeatRange::new(at(1), at(2)),
             tracks: BTreeSet::new(),
+            master: true,
         });
         let time = Some(BeatRange::new(at(1), at(2)));
         assert_eq!(Span::Selection.range(&project, &editor), time);

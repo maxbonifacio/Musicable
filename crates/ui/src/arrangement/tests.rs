@@ -697,7 +697,7 @@ fn the_wheel_scrolls_and_ctrl_wheel_zooms_around_the_pointer() {
     let mut harness = harness(project);
     for track in [ids.drums, ids.keys, ids.bass] {
         let heights = &mut harness.state_mut().document.editor_mut().track_heights;
-        heights.insert(track, 150.0);
+        heights.insert(Chain::Track(track), 150.0);
     }
     harness.run();
     let at = in_lane(&harness, "Drums", 20.0);
@@ -813,8 +813,112 @@ fn dragging_a_tracks_edge_changes_its_height() {
     let header = harness.get_by_label("Track Drums").rect();
     let from = pos2(header.center().x, header.bottom() - 1.0);
     drag(&mut harness, from, from + vec2(0.0, 40.0), Modifiers::NONE);
-    let height = harness.state().editor().track_heights[&ids.drums];
+    let height = harness.state().editor().track_heights[&Chain::Track(ids.drums)];
     assert_eq!(height, Theme::default().track_height + 40.0);
+}
+
+#[test]
+fn dragging_the_masters_top_edge_changes_its_height() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let theme = Theme::default();
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let edge = |harness: &Harness<'_, State>| {
+        let header = harness.get_by_label("Master track").rect();
+        pos2(header.center().x, header.top() + 1.0)
+    };
+    let height =
+        |harness: &Harness<'_, State>| harness.state().editor().track_heights[&Chain::Master];
+    // It's pinned along the bottom, so up makes it taller.
+    let from = edge(&harness);
+    drag(&mut harness, from, from - vec2(0.0, 30.0), Modifiers::NONE);
+    assert_eq!(height(&harness), theme.track_height + 30.0);
+    let master = harness.get_by_label("Master track").rect();
+    assert_eq!(master.height(), theme.track_height + 30.0);
+    assert_eq!(master.bottom(), lanes.bottom());
+    // As far up as the master's part goes, half the arrangement.
+    let from = edge(&harness);
+    drag(
+        &mut harness,
+        from,
+        pos2(from.x, lanes.top()),
+        Modifiers::NONE,
+    );
+    assert_eq!(height(&harness), lanes.height() / 2.0);
+    let master = harness.get_by_label("Master track").rect();
+    assert_eq!(master.top(), lanes.bottom() - lanes.height() / 2.0);
+    // And down, no shorter than a track can be.
+    let from = edge(&harness);
+    drag(
+        &mut harness,
+        from,
+        pos2(from.x, lanes.bottom()),
+        Modifiers::NONE,
+    );
+    assert_eq!(height(&harness), views::MIN_TRACK_HEIGHT);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn time_is_selected_on_the_master_and_across_to_it() {
+    let (project, ids) = project();
+    let reverb = project.tracks[3].id;
+    let mut harness = harness(project);
+    let theme = Theme::default();
+    let master = across(&harness, "Master track");
+    let on_master = |harness: &Harness<'_, State>, at| pos2(x_of(harness, at), master.center().y);
+    // On the master alone, which is selected, and playing starts there.
+    let (from, to) = (on_master(&harness, 4.3), on_master(&harness, 8.4));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let editor = harness.state().editor();
+    let time = editor.selection.time.clone().expect("a time selection");
+    assert_eq!(time.range, BeatRange::new(Beats::new(4), Beats::new(8)));
+    assert!(time.tracks.is_empty() && time.master);
+    assert_eq!(editor.selected_track, Some(Chain::Master));
+    assert_eq!(editor.start_marker, Beats::new(4));
+    // It's shaded over the master's row.
+    let shaded = filled(&harness, theme.time_selection, master);
+    let spans: Vec<_> = shaded.iter().map(|r| (r.left(), r.right())).collect();
+    let [(left, right)] = spans[..] else {
+        panic!("{spans:?}");
+    };
+    assert!((left - x_of(&harness, 4.0)).abs() < 0.5 && (right - x_of(&harness, 8.0)).abs() < 0.5);
+    // From a track down to the master, it's on the tracks from there down,
+    // and on the master.
+    let (from, to) = (in_lane(&harness, "Bass", 2.0), on_master(&harness, 6.0));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let time = harness.state().editor().selection.time.clone().unwrap();
+    assert_eq!(time.range, BeatRange::new(Beats::new(2), Beats::new(6)));
+    assert_eq!(
+        time.tracks.into_iter().collect::<Vec<_>>(),
+        [ids.bass, reverb]
+    );
+    assert!(time.master);
+    // And up from the master.
+    let (from, to) = (on_master(&harness, 10.0), in_lane(&harness, "Keys", 4.0));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let time = harness.state().editor().selection.time.clone().unwrap();
+    assert_eq!(time.range, BeatRange::new(Beats::new(4), Beats::new(10)));
+    let tracks: Vec<_> = time.tracks.into_iter().collect();
+    assert_eq!(tracks, [ids.keys, ids.bass, reverb]);
+    assert!(time.master);
+    // A right-click on the master's lane keeps it, as it would on a
+    // track's.
+    let at = on_master(&harness, 2.0);
+    harness.hover_at(at);
+    harness.run();
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+    let time = harness.state().editor().selection.time.clone();
+    assert!(time.is_some_and(|time| time.master && time.tracks.len() == 3));
+    assert!(harness.state().errors.is_empty());
 }
 
 #[test]
@@ -1460,9 +1564,10 @@ fn the_master_track_is_pinned_under_the_tracks() {
     let editor = harness.state().editor();
     assert_eq!(editor.selected_track, Some(Chain::Master));
     assert_eq!(editor.start_marker, Beats::new(4));
-    // A drag there selects no time.
+    // A drag there selects time on it.
     drag(&mut harness, lane, lane + vec2(80.0, 0.0), Modifiers::NONE);
-    assert_eq!(harness.state().editor().selection.time, None);
+    let time = harness.state().editor().selection.time.clone();
+    assert!(time.is_some_and(|time| time.master && time.tracks.is_empty()));
 
     // Its A button shows its automation lanes, under its row, and the row
     // goes up to make room.
@@ -1483,7 +1588,7 @@ fn the_master_track_is_pinned_under_the_tracks() {
     // The tracks scroll over it, and it stays where it is.
     for track in [ids.drums, ids.keys, ids.bass] {
         let heights = &mut harness.state_mut().document.editor_mut().track_heights;
-        heights.insert(track, 150.0);
+        heights.insert(Chain::Track(track), 150.0);
     }
     harness.run();
     // Out of sight, under the master.

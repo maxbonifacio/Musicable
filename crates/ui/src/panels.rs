@@ -127,8 +127,9 @@ impl Registry {
                 framed(ui, |ui| {
                     let (project, levels, at) = (view.project, view.levels, view.playback.playhead);
                     let (theme, mouse, parts) = (cx.theme, cx.mouse, cx.parts);
+                    let editor = view.editor;
                     mixer::show(
-                        ui, project, levels, inputs, at, theme, mouse, parts, cx.actions,
+                        ui, project, editor, levels, inputs, at, theme, mouse, parts, cx.actions,
                     );
                 });
             },

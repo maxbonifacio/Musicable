@@ -403,10 +403,15 @@ undo history and the engine rebuilds its graph once.
 - **The master track** is pinned along the bottom, as Live's Main track
   is, and the tracks scroll over it, with room under the last one for a
   new track. Its header has its name, A and its meter, the same parts as
-  the tracks' but for mute, solo and arm. Clicking its header or its lane
-  selects it, alone, so the devices panel shows the master's devices, and
-  **Edit > Select Master Track** does the same. Devices dragged onto it go
-  on the master. With its automation lanes it takes at most half the
+  the tracks' but for mute, solo and arm. Clicking its header, its lane or
+  its strip in the mixer selects it, alone, so the devices panel shows the
+  master's devices, and **Edit > Select Master Track** does the same.
+  Devices dragged onto it go on the master. Dragging its top edge makes
+  its row taller or shorter, and a drag on its lane selects time on it, as
+  on a track's: from a track down into it, on the tracks from there down
+  and on the master. The master has no clips for Cut, Copy or Delete to
+  act on, but Toggle Loop, Zoom to Selection and exporting the selection
+  take its time. With its automation lanes it takes at most half the
   arrangement's height, and the wheel over it scrolls them when they need
   more; in a short arrangement the tracks keep a track's height first.
 - **Takes** show in lanes under their track, each named in its header,
@@ -452,14 +457,14 @@ page changes it ([your mouse map file](#settings-and-your-keymap)):
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
 | A fade handle | Drag | Makes the fade longer or shorter |
 | A lane | Click | Selects the track, or the master, and puts the start marker there |
-| | Drag | Selects the time dragged over, on the tracks dragged over |
+| | Drag | Selects the time dragged over, on the tracks dragged over, and on the master's lane too if it's dragged over |
 | The ruler | Click | Puts the start marker and the playhead there |
 | | Drag | Zooms up and down, and scrolls sideways |
 | The ruler's strip | Drag | Draws a new loop region, and turns looping on |
 | The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
-| A track's header | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header selects the master |
-| A track's bottom edge | Drag | Makes the track taller or shorter |
+| A track's header or strip, where the mixer strip has no control | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header and strip select the master |
+| A track's edge: its header's bottom edge, or the master's top edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
 | An automation lane | Click; double-click | Selects the track, or the master, and puts the start marker there; adds a point there |
@@ -836,8 +841,14 @@ strip is on the right. Tracks scroll sideways when they don't fit, and only
 the strips in sight are drawn. From the top, a strip has these parts, which
 can be hidden and moved ([Configurable views](#configurable-views)):
 
-- **The name.** Hovering it shows the track's kind and test tone.
-  Right-clicking it has **Solo-Safe** and **Delete Track**.
+- **The name.** Clicking it selects the track, as clicking its header in
+  the arrangement does, and so does clicking the strip where it has no
+  control: Ctrl-click (Cmd-click on a Mac) or Shift-click adds the track
+  to the selection or takes it out, a double-click renames it, and the
+  master's selects the master, for the devices panel to show its devices.
+  A selected track's strip is lit, as its header is. Hovering the name
+  shows the track's kind and test tone. Right-clicking it has
+  **Solo-Safe** and **Delete Track**.
 - **The input**, on audio and MIDI tracks: what the track records from
   ([Recording](#recording)).
 - **Monitoring**, on audio and MIDI tracks: **In**, **Auto** or **Off**.
@@ -1176,9 +1187,10 @@ says how many plugins there are, and has Rescan, or says "Scanning..."
 while a scan runs.
 
 **The devices panel** shows the devices of the selected track, which a
-click on its header selects, in the order the signal goes through them,
-left to right, with the track's name over them. Clicking the master track's
-header, at the bottom of the arrangement, shows the master's. A built-in
+click on its header or its mixer strip selects, in the order the signal
+goes through them, left to right, with the track's name over them.
+Clicking the master track's header, at the bottom of the arrangement, or
+the master's strip shows the master's. A built-in
 device has its name and its controls
 ([above](#built-in-devices)). A plugin device has its name, its kind and
 format ("Instrument · CLAP"), and:
@@ -2010,8 +2022,7 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   points take whole values, but the value passes through the ones between
   two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
-  devices in the mixer. Resizing the master track's row, selecting time on
-  it, and selecting the master by clicking its mixer strip.
+  devices in the mixer.
 - Moving devices along a chain, and a device's parameters in the devices
   panel.
 - In the browser: analysis, which will tag sounds by how they sound and

@@ -9,6 +9,10 @@
 //! parts, so their faders line up. Its controls hand back [`Change`]s for
 //! the app to make.
 //!
+//! Clicking a strip where it has no control selects its track, or the
+//! master, as clicking its header in the arrangement does, and a selected
+//! track's strip is lit, as its header is.
+//!
 //! An automated fader, pan or send shows the value its automation gives it
 //! at the playhead, with a dot in the automation's colour, grey once
 //! someone overrode it. Its context menu shows its automation lane, clears
@@ -20,11 +24,12 @@ use std::ops::RangeInclusive;
 use egui::accesskit::{Action as Request, ActionData};
 use egui::{
     Align, Align2, AsIdSalt, Color32, ComboBox, DragValue, FontId, Frame, Label, Layout, Painter,
-    Rangef, Rect, Response, RichText, Role, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2,
-    WidgetInfo, pos2, vec2,
+    Rangef, Rect, Response, RichText, Role, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Vec2, WidgetInfo, pos2, vec2,
 };
+use musicable_commands::editor::Editor;
 use musicable_commands::mixer::Change;
-use musicable_commands::{Args, automation};
+use musicable_commands::{Args, automation, edit};
 use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
@@ -117,14 +122,15 @@ const MARKS: [f32; 6] = [6.0, 0.0, -6.0, -12.0, -24.0, -48.0];
 const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and File > New Demo \
                          Project has a dozen test tones.";
 
-/// Shows the mixer for `project`, with the meters reading `levels`, the
-/// input menus offering `inputs`, automated controls where `playhead` has
-/// them and the strips' parts as `parts` has them, and adds what the user
-/// changed to `actions`.
+/// Shows the mixer for `project`, with the strips of the tracks `editor`
+/// selects lit, the meters reading `levels`, the input menus offering
+/// `inputs`, automated controls where `playhead` has them and the strips'
+/// parts as `parts` has them, and adds what the user changed to `actions`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ui: &mut Ui,
     project: &Project,
+    editor: &Editor,
     levels: &Levels,
     inputs: Choices<'_>,
     playhead: Beats,
@@ -141,6 +147,7 @@ pub(crate) fn show(
         .collect();
     let mut mixer = Mixer {
         project,
+        editor,
         returns,
         inputs,
         playhead,
@@ -337,6 +344,8 @@ fn part(
 /// What every strip needs to know.
 pub(crate) struct Mixer<'a> {
     project: &'a Project,
+    /// What's selected, for the selected tracks' strips to be lit.
+    editor: &'a Editor,
     /// The return tracks. Each strip has a row of sends with one for each.
     returns: Vec<&'a Track>,
     /// The inputs the input menus offer.
@@ -401,9 +410,10 @@ impl Mixer<'_> {
         &self.theme.mixer
     }
 
-    /// The strip of `channel`, with the parts in `lineup`. Right-clicking
-    /// a part that has no menu of its own offers to hide it, or to
-    /// customise the strips.
+    /// The strip of `channel`, with the parts in `lineup`, lit while its
+    /// track is selected. Clicking it where it has no control selects the
+    /// track. Right-clicking a part that has no menu of its own offers to
+    /// hide it, or to customise the strips.
     fn strip(
         &self,
         ui: &mut Ui,
@@ -411,9 +421,10 @@ impl Mixer<'_> {
         channel: &Channel<'_>,
         actions: &mut Vec<Action>,
     ) {
+        let selected = self.selected(channel);
         // Where each part is down the strip, by id.
         let mut spans = Vec::with_capacity(lineup.len());
-        let rect = self.frame(ui, |ui| {
+        let strip = self.frame(ui, selected, |ui| {
             for shown in lineup {
                 let Draw::Strip { rows, draw } = shown.part.draw else {
                     continue;
@@ -427,7 +438,9 @@ impl Mixer<'_> {
                 spans.push((shown.part.id, part.rect.y_range()));
             }
         });
-        let strip = ui.interact(rect, ui.scope_id().with("strip"), Sense::hover());
+        let name = format!("{} Strip", channel.name());
+        strip.widget_info(|| WidgetInfo::selected(Role::Group, true, selected, &name));
+        self.select(ui, &strip, channel, actions);
         let clicked = strip.container_secondary_clicked().then(|| {
             let y = ui.input(|input| input.pointer.interact_pos())?.y;
             let (id, _) = spans.iter().find(|(_, span)| span.contains(y))?;
@@ -436,33 +449,83 @@ impl Mixer<'_> {
         self.parts.context_menu(&strip, MIXER_STRIP, clicked);
     }
 
-    /// The strip's name, which can be right-clicked: a track's has a menu.
+    /// Whether `channel`'s strip is lit: its track is selected, or is the
+    /// track the devices panel shows, which the master can be.
+    fn selected(&self, channel: &Channel<'_>) -> bool {
+        let editor = self.editor;
+        let chain = channel.chain();
+        editor.selected_track == Some(chain)
+            || (chain.track()).is_some_and(|id| editor.selection.tracks.contains(&id))
+    }
+
+    /// Selects `channel`'s track, or the master, if `response` was clicked,
+    /// as a click on its header in the arrangement does: see
+    /// [`Target::TrackHeader`].
+    fn select(
+        &self,
+        ui: &Ui,
+        response: &Response,
+        channel: &Channel<'_>,
+        actions: &mut Vec<Action>,
+    ) {
+        let mods = modifiers(ui.input(|input| input.modifiers));
+        let action = |gesture| self.mouse.action(Target::TrackHeader, gesture, mods);
+        // The second click of a double click is a click too.
+        let action = match action(Gesture::DoubleClick) {
+            Some(action) if response.double_clicked() => action,
+            _ if response.clicked() => match action(Gesture::Click) {
+                Some(action) => action,
+                None => return,
+            },
+            _ => return,
+        };
+        let (id, args) = match (action, channel) {
+            (MouseAction::Select | MouseAction::ToggleSelect, Channel::Track(track, _)) => {
+                let toggle = action == MouseAction::ToggleSelect;
+                let args = Args::new().with("tracks", vec![track.id]);
+                (edit::SELECT_TRACKS, args.with("toggle", toggle))
+            }
+            // The master is selected alone.
+            (MouseAction::Select | MouseAction::ToggleSelect, Channel::Master(_)) => {
+                (edit::SELECT_MASTER, Args::new())
+            }
+            (MouseAction::Rename, Channel::Track(track, _)) => {
+                (edit::RENAME, Args::new().with("track", track.id))
+            }
+            _ => return,
+        };
+        actions.push(Action::RunWith(id, args));
+    }
+
+    /// The strip's name, which selects its track when clicked, and can be
+    /// right-clicked: a track's has a menu.
     fn name(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
         let Channel::Track(track, _) = channel else {
-            self.row(ui, |ui| self.title(ui, "Master")).on_hover_text(
+            let title = self.row(ui, |ui| self.title(ui, "Master")).on_hover_text(
                 "The master: every track ends up here, and it plays out of the audio device.",
             );
+            self.select(ui, &title, channel, actions);
             return;
         };
         let id = track.id;
-        self.row(ui, |ui| self.title(ui, &track.name))
-            .on_hover_text(about(track))
-            .context_menu(|ui| {
-                let mut safe = track.solo_safe;
-                let toggle = ui
-                    .checkbox(&mut safe, "Solo-Safe")
-                    .on_hover_text("Soloing other tracks doesn't silence this one.");
-                if toggle.changed() {
-                    mix(actions, Change::SoloSafe(id, safe));
-                }
-                ui.separator();
-                if ui.button("Delete Track").clicked() {
-                    mix(actions, Change::Delete(id));
-                    ui.close();
-                }
-                ui.separator();
-                self.parts.menu_items(ui, MIXER_STRIP, Some("name"));
-            });
+        let title = self.row(ui, |ui| self.title(ui, &track.name));
+        self.select(ui, &title, channel, actions);
+        title.on_hover_text(about(track)).context_menu(|ui| {
+            let mut safe = track.solo_safe;
+            let toggle = ui
+                .checkbox(&mut safe, "Solo-Safe")
+                .on_hover_text("Soloing other tracks doesn't silence this one.");
+            if toggle.changed() {
+                mix(actions, Change::SoloSafe(id, safe));
+            }
+            ui.separator();
+            if ui.button("Delete Track").clicked() {
+                mix(actions, Change::Delete(id));
+                ui.close();
+            }
+            ui.separator();
+            self.parts.menu_items(ui, MIXER_STRIP, Some("name"));
+        });
     }
 
     /// The pan, with its automation.
@@ -868,23 +931,31 @@ fn about(track: &Track) -> String {
 }
 
 impl Mixer<'_> {
-    /// Lays out a strip: a column a strip wide, in a frame, where the layout
-    /// puts the next widget. Returns where the frame is.
-    fn frame(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui)) -> Rect {
+    /// Lays out a strip: a column a strip wide, in a frame, lit if it's
+    /// `selected`, where the layout puts the next widget. Returns the
+    /// frame's response, which has the clicks its controls don't take.
+    fn frame(&self, ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui)) -> Response {
         let sizes = self.sizes();
         let size = vec2(sizes.strip, ui.available_height());
+        let fill = match selected {
+            true => self.theme.header_selected,
+            false => ui.visuals().faint_bg_color,
+        };
         ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
-            Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(self.theme.corner)
-                .inner_margin(sizes.margin)
-                .show(ui, |ui| {
-                    ui.set_width(sizes.inner());
-                    ui.spacing_mut().item_spacing = vec2(sizes.gap, sizes.gap);
-                    add(ui);
-                })
-                .response
-                .rect
+            // Under the controls, so they keep their clicks.
+            let clicks = UiBuilder::new().sense(Sense::click());
+            ui.scope_builder(clicks, |ui| {
+                Frame::new()
+                    .fill(fill)
+                    .corner_radius(self.theme.corner)
+                    .inner_margin(sizes.margin)
+                    .show(ui, |ui| {
+                        ui.set_width(sizes.inner());
+                        ui.spacing_mut().item_spacing = vec2(sizes.gap, sizes.gap);
+                        add(ui);
+                    });
+            })
+            .response
         })
         .inner
     }
@@ -1692,22 +1763,29 @@ mod tests {
     use egui::accesskit::Toggled;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::{CommandId, Document, mixer};
+    use musicable_commands::{
+        CommandError, CommandId, Context, Document, Named, NoLibrary, Request, mixer,
+    };
     use musicable_model::automation::{Lane, Point};
     use musicable_model::param::Scale;
 
     use super::*;
+    use crate::testing::Player;
 
-    /// The mixer, on a document its changes go to, as the app would make
-    /// them, and the actions it handed back.
+    /// The mixer, on a document its changes go to and its commands run on,
+    /// as the app would make and run them, and the actions it handed back.
     struct State {
         document: Document,
+        commands: musicable_commands::Registry,
+        player: Player,
         levels: Levels,
         inputs: Vec<InputChoice>,
         midi: Vec<MidiChoice>,
         playhead: Beats,
         parts: Parts,
         actions: Vec<Action>,
+        requests: Vec<Request>,
+        errors: Vec<CommandError>,
     }
 
     fn harness(project: Project) -> Harness<'static, State> {
@@ -1725,16 +1803,26 @@ mod tests {
             id: "keystep".to_owned(),
             name: "Keystep".to_owned(),
         };
+        let mut commands = musicable_commands::Registry::new();
+        musicable_commands::register_all(&mut commands);
         let state = State {
             document: Document::new(project),
+            commands,
+            player: Player::default(),
             levels,
             inputs: vec![interface],
             midi: vec![keystep],
             playhead: Beats::ZERO,
             parts: Parts::default(),
             actions: Vec::new(),
+            requests: Vec::new(),
+            errors: Vec::new(),
         };
-        Harness::builder().with_size([900.0, 600.0]).build_ui_state(
+        // Frames as quick as a screen's, so two clicks make a double click,
+        // and enough of them for a tooltip to settle.
+        let builder = Harness::builder().with_step_dt(1.0 / 60.0);
+        let builder = builder.with_max_steps(40).with_size([900.0, 600.0]);
+        builder.build_ui_state(
             |ui, state: &mut State| {
                 let mut actions = Vec::new();
                 let (theme, mouse) = (Theme::default(), MouseMap::live());
@@ -1746,6 +1834,7 @@ mod tests {
                 show(
                     ui,
                     project,
+                    state.document.editor(),
                     &state.levels,
                     inputs,
                     state.playhead,
@@ -1762,6 +1851,17 @@ mod tests {
                         }
                         Action::BeginGesture => state.document.begin_gesture(),
                         Action::EndGesture => state.document.end_gesture(),
+                        Action::RunWith(id, args) => {
+                            let mut ctx = Context {
+                                document: &mut state.document,
+                                transport: &mut state.player,
+                                requests: &mut state.requests,
+                                library: &mut NoLibrary,
+                            };
+                            if let Err(error) = state.commands.run_with(id, args, &mut ctx) {
+                                state.errors.push(error);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -2019,6 +2119,75 @@ mod tests {
         harness.get_by_label("Solo Lead").click();
         harness.run();
         assert!(!soloed(&harness, lead) && soloed(&harness, keys));
+    }
+
+    #[test]
+    fn clicking_a_strip_selects_its_track_and_lights_it() {
+        let (project, [lead, keys, ..]) = project();
+        let mut harness = harness(project);
+        let lit = |harness: &Harness<'_, State>, name: &str| {
+            let label = format!("{name} Strip");
+            let strip = harness.get_by_label(&label);
+            strip.accesskit_node().toggled() == Some(Toggled::True)
+        };
+        let selected = |harness: &Harness<'_, State>| {
+            let editor = harness.state().document.editor();
+            let tracks: Vec<_> = editor.selection.tracks.iter().copied().collect();
+            (editor.selected_track, tracks)
+        };
+        // Its name selects its track, for the devices panel to show.
+        harness.get_by_label("Lead").click();
+        harness.run();
+        assert_eq!(selected(&harness), (Some(Chain::Track(lead)), vec![lead]));
+        assert!(lit(&harness, "Lead") && !lit(&harness, "Keys"));
+        // Ctrl-click adds another, as in the arrangement's headers.
+        harness
+            .get_by_label("Keys")
+            .click_modifiers(Modifiers::COMMAND);
+        harness.run();
+        assert_eq!(
+            selected(&harness),
+            (Some(Chain::Track(keys)), vec![lead, keys])
+        );
+        assert!(lit(&harness, "Lead") && lit(&harness, "Keys"));
+        // So does a click where it has no control, and the master's selects
+        // the master, alone.
+        let strip = harness.get_by_label("Master Strip").rect();
+        let at = pos2(strip.center().x, strip.bottom() - 1.0);
+        harness.hover_at(at);
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+        assert_eq!(selected(&harness), (Some(Chain::Master), vec![]));
+        assert!(lit(&harness, "Master") && !lit(&harness, "Lead"));
+        // The controls keep their clicks.
+        harness.get_by_label("Solo Keys").click();
+        harness.run();
+        assert_eq!(selected(&harness).0, Some(Chain::Master));
+        // A double click on a track's name renames it, once the clicks before
+        // are long enough ago not to make it a triple click.
+        let at = harness.get_by_label("Keys").rect().center();
+        harness.hover_at(at);
+        harness.run_steps(60);
+        for pressed in [true, false, true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+        let renamed = Request::Rename(Named::Track(keys));
+        assert!(harness.state().requests.contains(&renamed));
+        assert!(harness.state().errors.is_empty());
     }
 
     #[test]

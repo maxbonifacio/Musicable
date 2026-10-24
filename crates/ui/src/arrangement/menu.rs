@@ -128,7 +128,7 @@ fn items(hit: Hit) -> Vec<Option<CommandId>> {
         Hit::Empty => &[EMPTY],
         Hit::Header(_) | Hit::TrackEdge(_) => &[HEADER],
         Hit::Master => &[MASTER_LANE, GRID],
-        Hit::MasterHeader => &[MASTER_HEADER],
+        Hit::MasterHeader | Hit::MasterEdge => &[MASTER_HEADER],
         Hit::Ruler | Hit::Strip | Hit::LoopBrace | Hit::LoopEdge(_) => &[RULER],
         Hit::Locator(_) => &[LOCATOR],
         Hit::Take { .. } | Hit::TakeHeader { .. } => &[TAKE],
@@ -159,7 +159,7 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
     }
     context_menu(ui, view, &entries, actions);
     // A track's header is made of parts, which the user can hide.
-    if let Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader = spot.hit {
+    if let Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader | Hit::MasterEdge = spot.hit {
         ui.separator();
         scene.parts.menu_items(ui, TRACK_HEADER, spot.part);
     }
