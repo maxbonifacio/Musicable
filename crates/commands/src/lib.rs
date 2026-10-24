@@ -228,8 +228,8 @@ pub enum Request {
     TogglePanel(&'static str),
     /// Show the panel with this id, such as the piano roll, if it's hidden.
     ShowPanel(&'static str),
-    /// Show the piano roll in place of the devices, or the devices in place
-    /// of the piano roll.
+    /// Bring the piano roll in front of the devices, or the devices in
+    /// front of the piano roll.
     SwitchDevicesPianoRoll,
     /// Let the user type a new name for this.
     Rename(Named),

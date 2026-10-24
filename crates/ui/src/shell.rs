@@ -1,6 +1,5 @@
-//! The app shell: the menu bar, the transport bar, the arrangement with the
-//! mixer and the devices or the piano roll under it and the browser beside
-//! it, and a status bar, with the keyboard shortcuts window, the command
+//! The app shell: the menu bar, the transport bar, the panels docked under
+//! them, and a status bar, with the keyboard shortcuts window, the command
 //! palette, and the box that renames things.
 
 use std::collections::BTreeSet;
@@ -11,27 +10,26 @@ use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
-    controllers, edit, locator, notes, options, take, track, transport, view,
+    controllers, device, edit, locator, notes, options, take, track, transport, view,
 };
+use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TrackId};
 
-use crate::arrangement::Arrangement;
-use crate::browser::{self, BrowserPanel, Destination, Library};
-use crate::devices::{BROWSER, DEVICES, DevicesPanel, Plugins};
+use crate::browser::{self, Library};
+use crate::devices::Plugins;
+use crate::dock::{Dock, Draw};
 use crate::menus::menus;
-use crate::mixer::{self, Choices, InputChoice, Levels, MidiChoice};
+use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
-use crate::piano_roll::{PIANO_ROLL, PianoRoll};
+use crate::panels::{self, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::waveform::Waveforms;
 use crate::widgets::{Icon, clock, icon_button, meter, name_box, position};
-
-/// The mixer's panel, under the arrangement.
-pub const MIXER: &str = "mixer";
+use crate::workspace::Workspace;
 
 /// What the shell shows. The app fills one in for each frame.
 pub struct View<'a> {
@@ -199,35 +197,45 @@ pub enum SaveChoice {
 pub struct Shell {
     shortcuts: Shortcuts,
     palette: Palette,
-    arrangement: Arrangement,
-    devices: DevicesPanel,
-    piano_roll: PianoRoll,
-    browser: BrowserPanel,
+    /// The kinds of panel there are.
+    registry: panels::Registry,
+    panels: Panels,
+    /// How the panels are laid out.
+    dock: Dock,
     theme: Theme,
     mouse: MouseMap,
-    /// The panels hidden, by id.
-    hidden: BTreeSet<&'static str>,
+    /// What the devices and the piano roll follow, as last seen.
+    followed: Option<Followed>,
     /// What's being renamed, and the name typed so far.
     rename: Option<Rename>,
 }
 
 impl Default for Shell {
     fn default() -> Self {
+        let registry = panels::Registry::new();
         Self {
             shortcuts: Shortcuts::default(),
             palette: Palette::default(),
-            arrangement: Arrangement::default(),
-            devices: DevicesPanel::default(),
-            piano_roll: PianoRoll::default(),
-            browser: BrowserPanel::default(),
+            dock: Dock::new(&registry),
+            registry,
+            panels: Panels::default(),
             theme: Theme::default(),
             mouse: MouseMap::live(),
-            // The browser waits to be asked for, and the piano roll for a
-            // MIDI clip to be opened in it.
-            hidden: BTreeSet::from([BROWSER, PIANO_ROLL]),
+            followed: None,
             rename: None,
         }
     }
+}
+
+/// What the tabs of the devices and the piano roll follow: selecting the
+/// MIDI clip the piano roll shows brings it forward, and selecting another
+/// track the devices.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Followed {
+    /// The clip the piano roll shows, and whether it's selected.
+    clip: Option<ClipId>,
+    selected: bool,
+    track: Option<TrackId>,
 }
 
 /// A rename in progress.
@@ -249,9 +257,14 @@ impl Shell {
     /// asked for.
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
+        self.follow(view.editor);
+        let shown: BTreeSet<_> = (self.registry.iter())
+            .map(|panel| panel.id)
+            .filter(|id| self.dock.shown(id))
+            .collect();
         let theme = &self.theme;
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            menu_bar(ui, view, &self.hidden, theme, &mut actions);
+            menu_bar(ui, view, &shown, theme, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
             ui.add_space(4.0);
@@ -261,75 +274,40 @@ impl Shell {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
         });
-        let chain = self.devices.chain(view.project, view.editor.selected_track);
-        if !self.hidden.contains(BROWSER) {
-            egui::Panel::left(BROWSER)
-                .resizable(true)
-                .default_size(theme.devices.browser)
-                .min_size(theme.devices.browser / 2.0)
-                .show(ui, |ui| {
-                    self.browser.show(ui, view, chain, theme, &mut actions);
-                });
-        }
-        // Under the mixer, as Live's Detail View is: the devices, or the
-        // piano roll in their place, as Live's clip view takes its device
-        // view's.
-        if !self.hidden.contains(PIANO_ROLL) {
-            egui::Panel::bottom(PIANO_ROLL)
-                .resizable(true)
-                .default_size(theme.piano_roll.panel)
-                .min_size(theme.piano_roll.panel / 3.0)
-                .show(ui, |ui| {
-                    self.piano_roll
-                        .show(ui, view, theme, &self.mouse, &mut actions);
-                });
-        } else if !self.hidden.contains(DEVICES) {
-            let panel = egui::Panel::bottom(DEVICES)
-                .resizable(true)
-                .default_size(theme.devices.panel)
-                .min_size(theme.devices.panel / 2.0)
-                .show(ui, |ui| {
-                    let mouse = &self.mouse;
-                    self.devices
-                        .show(ui, view, chain, theme, mouse, &mut actions)
-                });
-            if panel.inner {
-                self.browser.show_devices();
-                if self.hidden.remove(BROWSER) {
-                    ui.ctx().request_repaint();
-                }
+        let chain = (self.panels.devices).chain(view.project, view.editor.selected_track);
+        let mut draw = Draw {
+            registry: &self.registry,
+            panels: &mut self.panels,
+            cx: Cx {
+                view,
+                theme,
+                mouse: &self.mouse,
+                chain,
+                actions: &mut actions,
+                browse: false,
+            },
+            edited: false,
+            closed: Vec::new(),
+        };
+        let dock = &mut self.dock;
+        egui::CentralPanel::no_frame().show(ui, |ui| dock.show(ui, &mut draw));
+        // Add Device shows the browser's devices.
+        if draw.cx.browse {
+            self.panels.browser.show_devices();
+            if !self.dock.shown(BROWSER) {
+                self.dock.show_panel(BROWSER);
+                ui.ctx().request_repaint();
             }
-            // Devices and presets dragged from the browser go in the chain
-            // the panel shows.
-            let target = Destination::Chain(chain);
-            let rect = panel.response.rect;
-            actions.extend(browser::drop_in(ui.ctx(), rect, &target, theme));
         }
-        if !self.hidden.contains(MIXER) {
-            egui::Panel::bottom(MIXER)
-                .resizable(true)
-                .default_size(theme.mixer.panel)
-                .min_size(theme.mixer.min_fader)
-                .show(ui, |ui| {
-                    mixer::show(
-                        ui,
-                        view.project,
-                        view.levels,
-                        Choices {
-                            audio: view.inputs,
-                            midi: view.midi_inputs,
-                        },
-                        view.playback.playhead,
-                        theme,
-                        &self.mouse,
-                        &mut actions,
-                    );
-                });
-        }
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.arrangement
-                .show(ui, view, theme, &self.mouse, &mut actions);
+        // A device added from the browser brings the devices forward.
+        let adds = [device::ADD, device::ADD_PLUGIN, device::ADD_PRESET];
+        let added = (actions.iter()).any(|action| match action {
+            Action::Run(id) | Action::RunWith(id, _) => adds.contains(id),
+            _ => false,
         });
+        if added {
+            self.dock.bring_forward(DEVICES);
+        }
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
         self.show_rename(ui.ctx(), view, &mut actions);
@@ -339,29 +317,52 @@ impl Shell {
         actions
     }
 
-    /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden, or
-    /// hides it. The devices and the piano roll take turns in the same
-    /// place: showing one hides the other.
-    pub fn toggle_panel(&mut self, id: &'static str) {
+    /// Brings the piano roll forward when the clip it shows is selected,
+    /// and the devices when another track is, if they're not hidden.
+    fn follow(&mut self, editor: &Editor) {
+        let clip = editor.piano_roll.clip;
+        let now = Followed {
+            clip,
+            selected: clip.is_some_and(|clip| editor.selection.clips.contains(&clip)),
+            track: editor.selected_track,
+        };
+        let Some(last) = self.followed.replace(now) else {
+            return;
+        };
+        if now.selected && (!last.selected || now.clip != last.clip) {
+            self.dock.bring_forward(PIANO_ROLL);
+        } else if now.track != last.track {
+            self.dock.bring_forward(DEVICES);
+        }
+    }
+
+    /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden or
+    /// behind another tab, or else hides it. A hidden panel comes back
+    /// where it was.
+    pub fn toggle_panel(&mut self, id: &str) {
         if self.panel_shown(id) {
-            self.hidden.insert(id);
+            self.hide_panel(id);
         } else {
             self.show_panel(id);
         }
     }
 
-    /// Shows the panel with id `id`, if it's hidden.
-    pub fn show_panel(&mut self, id: &'static str) {
-        if self.hidden.remove(id)
-            && let Some(other) = sharing(id)
-        {
-            self.hidden.insert(other);
+    /// Shows the panel with id `id`, in front of the tabs beside it.
+    pub fn show_panel(&mut self, id: &str) {
+        self.dock.show_panel(id);
+    }
+
+    /// Hides the panel with id `id`, unless it's one that stays, such as
+    /// the arrangement.
+    pub fn hide_panel(&mut self, id: &str) {
+        if self.registry.get(id).is_some_and(|panel| panel.hides) {
+            self.dock.hide_panel(id);
         }
     }
 
-    /// Shows the piano roll in the devices' place, or the devices in the
-    /// piano roll's, as Live's F12 switches between its clip view and its
-    /// device view.
+    /// Brings the piano roll forward, or the devices if the piano roll is
+    /// in front, as Live's F12 switches between its clip view and its
+    /// device view. Either comes back if it's hidden.
     pub fn switch_devices_piano_roll(&mut self) {
         if self.panel_shown(PIANO_ROLL) {
             self.show_panel(DEVICES);
@@ -370,15 +371,38 @@ impl Shell {
         }
     }
 
+    /// Whether the panel with id `id` is in sight: not hidden, nor behind
+    /// another tab.
     pub fn panel_shown(&self, id: &str) -> bool {
-        !self.hidden.contains(id)
+        self.dock.shown(id)
     }
 
     /// Shows the browser, and puts the keys in the search field of the list
     /// it shows.
     pub fn focus_browser_search(&mut self) {
-        self.hidden.remove(BROWSER);
-        self.browser.focus_search();
+        self.dock.show_panel(BROWSER);
+        self.panels.browser.focus_search();
+    }
+
+    /// How the panels are laid out, for the app to save.
+    pub fn workspace(&self) -> Workspace {
+        Workspace {
+            windows: vec![self.dock.layout(&self.registry, &self.theme)],
+        }
+    }
+
+    /// The layout of the panels, if the user changed it since this was
+    /// last asked, for the app to save.
+    pub fn changed_workspace(&mut self) -> Option<Workspace> {
+        self.dock.take_changed().then(|| self.workspace())
+    }
+
+    /// Lays the panels out as `workspace` says.
+    pub fn set_workspace(&mut self, workspace: &Workspace) {
+        self.dock = match workspace.windows.first() {
+            Some(window) => Dock::from_layout(window, &self.registry, &self.theme),
+            None => Dock::new(&self.registry),
+        };
     }
 
     /// Asks the user for a new name for `named`.
@@ -489,25 +513,16 @@ impl Shell {
         self.palette.is_open()
             || self.shortcuts.asking()
             || self.rename.is_some()
-            || self.devices.asking()
-    }
-}
-
-/// The panel that takes turns with the panel `id` in the same place, if one
-/// does.
-fn sharing(id: &str) -> Option<&'static str> {
-    match id {
-        DEVICES => Some(PIANO_ROLL),
-        PIANO_ROLL => Some(DEVICES),
-        _ => None,
+            || self.panels.devices.asking()
     }
 }
 
 /// The menus, with every command and its keys, and the meters on the right.
+/// `shown` has the ids of the panels in sight.
 fn menu_bar(
     ui: &mut Ui,
     view: &View<'_>,
-    hidden: &BTreeSet<&'static str>,
+    shown: &BTreeSet<&str>,
     theme: &Theme,
     actions: &mut Vec<Action>,
 ) {
@@ -516,7 +531,7 @@ fn menu_bar(
             ui.menu_button(menu.title.as_str(), |ui| {
                 for item in &menu.items {
                     match item {
-                        Some(command) => command_button(ui, view, hidden, command, actions),
+                        Some(command) => command_button(ui, view, shown, command, actions),
                         None => {
                             ui.separator();
                         }
@@ -536,7 +551,7 @@ fn menu_bar(
 fn command_button(
     ui: &mut Ui,
     view: &View<'_>,
-    hidden: &BTreeSet<&'static str>,
+    shown: &BTreeSet<&str>,
     command: &Command,
     actions: &mut Vec<Action>,
 ) {
@@ -556,10 +571,10 @@ fn command_button(
     };
     let mut button = with_keys(Button::new(title), view.keymap, id);
     let on = match id {
-        id if *id == view::TOGGLE_MIXER => Some(!hidden.contains(MIXER)),
-        id if *id == view::TOGGLE_DEVICES => Some(!hidden.contains(DEVICES)),
-        id if *id == view::TOGGLE_PIANO_ROLL => Some(!hidden.contains(PIANO_ROLL)),
-        id if *id == view::TOGGLE_BROWSER => Some(!hidden.contains(BROWSER)),
+        id if *id == view::TOGGLE_MIXER => Some(shown.contains(MIXER)),
+        id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
+        id if *id == view::TOGGLE_PIANO_ROLL => Some(shown.contains(PIANO_ROLL)),
+        id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
         id => toggled(view, id),
     };
     if let Some(on) = on {
@@ -839,7 +854,46 @@ mod tests {
     use musicable_model::{TrackId, TrackKind};
 
     use super::*;
-    use crate::testing::harness;
+    use crate::panels::ARRANGEMENT;
+    use crate::testing::{State, harness};
+    use crate::workspace::{Layout, Split, WindowLayout};
+
+    type Harness = egui_kittest::Harness<'static, State>;
+
+    /// Drags with the mouse from `from` to `to`, a few steps at a time.
+    fn drag(harness: &mut Harness, from: egui::Pos2, to: egui::Pos2) {
+        harness.hover_at(from);
+        harness.run();
+        harness.drag_at(from);
+        harness.run();
+        for step in 1..=5 {
+            harness.hover_at(from + (to - from) * step as f32 / 5.0);
+            harness.run();
+        }
+        harness.drop_at(to);
+        harness.run();
+    }
+
+    /// The main window's layout.
+    fn layout(harness: &Harness) -> WindowLayout {
+        let mut workspace = harness.state().shell.workspace();
+        workspace.windows.remove(0)
+    }
+
+    fn tabs(ids: &[&str], front: &str) -> Layout {
+        Layout {
+            front: Some(front.to_owned()),
+            ..Layout::new(Split::Tabs(ids.iter().map(|&id| id.to_owned()).collect()))
+        }
+    }
+
+    fn across(parts: Vec<Layout>) -> Layout {
+        Layout::new(Split::Across(parts))
+    }
+
+    fn down(parts: Vec<Layout>) -> Layout {
+        Layout::new(Split::Down(parts))
+    }
 
     #[test]
     fn the_transport_bar_runs_commands() {
@@ -991,26 +1045,204 @@ mod tests {
     }
 
     #[test]
-    fn the_piano_roll_takes_turns_with_the_devices() {
+    fn the_piano_roll_and_the_devices_share_tabs() {
         let mut shell = Shell::new();
         assert!(shell.panel_shown(DEVICES));
         assert!(!shell.panel_shown(PIANO_ROLL));
+        // F12 brings one forward, then the other.
         shell.switch_devices_piano_roll();
         assert!(shell.panel_shown(PIANO_ROLL));
         assert!(!shell.panel_shown(DEVICES));
         shell.switch_devices_piano_roll();
         assert!(shell.panel_shown(DEVICES));
         assert!(!shell.panel_shown(PIANO_ROLL));
+        // Its toggle brings the piano roll forward, and then hides it, and
+        // the devices are in front again.
         shell.toggle_panel(PIANO_ROLL);
+        assert!(shell.panel_shown(PIANO_ROLL));
         assert!(!shell.panel_shown(DEVICES));
         shell.toggle_panel(PIANO_ROLL);
         assert!(!shell.panel_shown(PIANO_ROLL));
-        assert!(!shell.panel_shown(DEVICES));
+        assert!(shell.panel_shown(DEVICES));
         // With neither shown, switching shows the piano roll.
+        shell.toggle_panel(DEVICES);
+        assert!(!shell.panel_shown(DEVICES));
         shell.switch_devices_piano_roll();
         assert!(shell.panel_shown(PIANO_ROLL));
         shell.show_panel(MIXER);
         assert!(shell.panel_shown(PIANO_ROLL));
+        // The arrangement stays.
+        shell.toggle_panel(ARRANGEMENT);
+        assert!(shell.panel_shown(ARRANGEMENT));
+    }
+
+    #[test]
+    fn panels_drag_into_splits_and_tabs() {
+        let mut harness = harness(Project::new());
+        // The mixer to the right of the arrangement.
+        let lanes = harness.get_by_label("Arrangement").rect();
+        let tab = harness.get_by_label("Mixer panel").rect().center();
+        drag(
+            &mut harness,
+            tab,
+            egui::pos2(lanes.right() - 10.0, lanes.center().y),
+        );
+        let devices = tabs(&[DEVICES, PIANO_ROLL], DEVICES);
+        let beside = across(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]);
+        let expected = WindowLayout {
+            hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
+            layout: across(vec![Layout::panel(BROWSER), down(vec![beside, devices])]),
+        };
+        assert_eq!(layout(&harness), expected);
+        assert!(harness.state_mut().shell.changed_workspace().is_some());
+        // And into a tab beside the devices.
+        let tab = harness.get_by_label("Mixer panel").rect().center();
+        let devices = harness.get_by_label("Devices panel").rect();
+        let to = egui::pos2(devices.right() + 20.0, devices.center().y);
+        drag(&mut harness, tab, to);
+        let expected = WindowLayout {
+            hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
+            layout: across(vec![
+                Layout::panel(BROWSER),
+                down(vec![
+                    Layout::panel(ARRANGEMENT),
+                    tabs(&[DEVICES, PIANO_ROLL, MIXER], MIXER),
+                ]),
+            ]),
+        };
+        assert_eq!(layout(&harness), expected);
+        assert!(harness.state().shell.panel_shown(MIXER));
+        assert!(!harness.state().shell.panel_shown(DEVICES));
+    }
+
+    #[test]
+    fn panels_keep_their_sizes_as_the_window_grows() {
+        let mut harness = harness(Project::new());
+        // Tall enough for the panels to have their sizes, with room left
+        // for the arrangement.
+        harness.set_size(egui::vec2(1100.0, 900.0));
+        harness.run();
+        let window = harness.ctx.content_rect();
+        let from_bottom = |harness: &Harness| {
+            let top = harness.get_by_label("Mixer panel").rect().top();
+            harness.ctx.content_rect().bottom() - top
+        };
+        let mixer = from_bottom(&harness);
+        harness.set_size(window.size() + egui::vec2(200.0, 300.0));
+        harness.run();
+        assert_eq!(from_bottom(&harness), mixer);
+        // Dragging the edge over the mixer makes it taller, from then on.
+        let edge = harness.get_by_label("Mixer panel").rect().top() - 1.0;
+        let x = harness.get_by_label("Arrangement").rect().center().x;
+        drag(
+            &mut harness,
+            egui::pos2(x, edge),
+            egui::pos2(x, edge - 50.0),
+        );
+        let taller = from_bottom(&harness);
+        assert!((taller - mixer - 50.0).abs() < 2.0, "{mixer} to {taller}");
+        harness.set_size(window.size());
+        harness.run();
+        assert_eq!(from_bottom(&harness), taller);
+        let layout = layout(&harness).layout;
+        let Split::Across(parts) = &layout.split else {
+            panic!("{layout:?}");
+        };
+        let Split::Down(parts) = &parts[1].split else {
+            panic!("{layout:?}");
+        };
+        let tab_bar = Theme::default().dock.tab_bar;
+        // Within a point: the edge goes where the pointer is, between
+        // pixels.
+        let size = 300.0 + tab_bar + taller - mixer;
+        let written = parts[1].size.expect("the mixer's size") as f32;
+        assert!((written - size).abs() <= 1.0, "{written} for {size}");
+    }
+
+    #[test]
+    fn a_closed_tab_hides_its_panel_until_the_view_menu_shows_it() {
+        let mut harness = harness(Project::new());
+        let tab = harness.get_by_label("Mixer panel").rect();
+        let close = harness
+            .get_all_by_label("Close")
+            .find(|close| tab.contains_rect(close.rect()))
+            .unwrap();
+        close.click();
+        harness.run();
+        assert!(!harness.state().shell.panel_shown(MIXER));
+        assert!(harness.query_by_label("Mixer panel").is_none());
+        assert_eq!(layout(&harness).hidden, [BROWSER, MIXER, PIANO_ROLL]);
+        // The arrangement's tab has no close button.
+        let tab = harness.get_by_label("Arrangement panel").rect();
+        let closes = harness.get_all_by_label("Close");
+        assert!(
+            closes
+                .into_iter()
+                .all(|close| !tab.contains_rect(close.rect()))
+        );
+        harness.state_mut().shell.toggle_panel(MIXER);
+        harness.run();
+        assert!(harness.state().shell.panel_shown(MIXER));
+        harness.get_by_label("Mixer panel");
+    }
+
+    #[test]
+    fn the_devices_and_the_piano_roll_follow_the_selection() {
+        let mut project = Project::new();
+        let drums = project.add_track("Drums", TrackKind::Audio);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+        let content = musicable_model::clip::ClipContent::Midi(Default::default());
+        let chords = project.new_clip("Chords", range, content);
+        let id = chords.id;
+        project.track_mut(keys).unwrap().clips.push(chords);
+        let mut harness = harness(project);
+        // A hidden piano roll stays hidden.
+        let select = |harness: &mut Harness, track, clips: &[ClipId]| {
+            let editor = &mut harness.state_mut().editor;
+            editor.selected_track = Some(track);
+            editor.selection = musicable_commands::editor::Selection::clips(clips.to_vec());
+            if let Some(&clip) = clips.first() {
+                editor.piano_roll.clip = Some(clip);
+            }
+            harness.run();
+        };
+        select(&mut harness, keys, &[id]);
+        assert!(!harness.state().shell.panel_shown(PIANO_ROLL));
+        harness.state_mut().shell.switch_devices_piano_roll();
+        select(&mut harness, drums, &[]);
+        assert!(harness.state().shell.panel_shown(DEVICES));
+        select(&mut harness, keys, &[id]);
+        assert!(harness.state().shell.panel_shown(PIANO_ROLL));
+        select(&mut harness, drums, &[]);
+        assert!(harness.state().shell.panel_shown(DEVICES));
+    }
+
+    #[test]
+    fn workspaces_lay_the_panels_out() {
+        let mut harness = harness(Project::new());
+        let window = WindowLayout {
+            hidden: vec![MIXER.into()],
+            layout: across(vec![
+                down(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]),
+                Layout {
+                    size: Some(300),
+                    ..tabs(&[BROWSER, DEVICES, PIANO_ROLL], DEVICES)
+                },
+            ]),
+        };
+        let workspace = Workspace {
+            windows: vec![window.clone()],
+        };
+        harness.state_mut().shell.set_workspace(&workspace);
+        harness.run();
+        assert_eq!(layout(&harness), window);
+        // The devices are on the right.
+        let devices = harness.get_by_label("Devices panel").rect();
+        assert!(devices.left() > harness.get_by_label("Arrangement").rect().center().x);
+        assert!(harness.query_by_label("Mixer panel").is_none());
+        // Setting it isn't a change to save.
+        assert!(harness.state_mut().shell.changed_workspace().is_none());
     }
 
     #[test]
@@ -1020,7 +1252,7 @@ mod tests {
         let mut harness = harness(project);
         harness.state_mut().shell.toggle_panel(PIANO_ROLL);
         harness.run();
-        // The piano roll is in the devices' place, with nothing to show.
+        // The piano roll is in front of the devices, with nothing to show.
         harness.get_by_label("Piano Roll");
         harness.get_by_label("View").click();
         harness.run();

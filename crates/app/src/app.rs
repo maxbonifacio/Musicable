@@ -33,7 +33,7 @@ use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER};
 use crate::theme_file::{Choice, UserTheme};
-use crate::{Output, Session, capital};
+use crate::{Output, Session, capital, workspaces};
 
 /// How often the window redraws while the transport plays or the mixer's
 /// meters move, and while neither does, to update the CPU meter.
@@ -88,7 +88,7 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
-    /// Where the settings and the user's keymap live.
+    /// Where the settings, the user's keymap, themes and workspaces live.
     config_dir: Option<PathBuf>,
     settings: Settings,
     /// The user's keymap file, which every change of keys is saved to.
@@ -221,7 +221,41 @@ impl App {
             app.set_installed_plugins(known);
         }
         app.list_inputs();
+        app.read_workspace();
         app
+    }
+
+    /// Lays the panels out as the user left them, as the default
+    /// workspace's file has it.
+    fn read_workspace(&mut self) {
+        let Some(path) = self.config_dir.as_deref().map(workspaces::default_file) else {
+            return;
+        };
+        match workspaces::read(&path) {
+            Ok(Some(workspace)) => self.shell.set_workspace(&workspace),
+            Ok(None) => {}
+            Err(error) => self.messages.push(format!(
+                "{}; Musicable lays the panels out as it does at first.",
+                capital(error.to_string().trim_end())
+            )),
+        }
+    }
+
+    /// Saves the panels' layout to the default workspace's file, if the user
+    /// changed it since it was last saved.
+    fn save_workspace(&mut self) {
+        let Some(workspace) = self.shell.changed_workspace() else {
+            return;
+        };
+        let Some(path) = self.config_dir.as_deref().map(workspaces::default_file) else {
+            return;
+        };
+        if let Err(error) = workspaces::write(&path, &workspace) {
+            self.messages.push(format!(
+                "Couldn't save the panels' layout to {}: {error}",
+                path.display()
+            ));
+        }
     }
 
     /// Scans for plugins in the background, unless a scan is running.
@@ -995,6 +1029,7 @@ impl eframe::App for App {
     /// there.
     fn on_exit(&mut self) {
         self.plugin_windows.close_all(&mut self.session);
+        self.save_workspace();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1083,6 +1118,11 @@ impl eframe::App for App {
         let actions = self.shell.show(ui, &view);
         for action in actions {
             self.act(action, &ctx, frame);
+        }
+        // The layout, once the user lets go of the tab or the edge they're
+        // dragging.
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.save_workspace();
         }
         let offset = self.session.recording_offset();
         match self.audio_window.show(&ctx, &self.output, offset) {
@@ -1245,6 +1285,8 @@ mod browsing;
 mod built_in_devices;
 #[cfg(test)]
 mod exporting;
+#[cfg(test)]
+mod laying_out;
 #[cfg(test)]
 mod plugins_on_tracks;
 #[cfg(test)]

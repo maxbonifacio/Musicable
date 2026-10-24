@@ -184,8 +184,8 @@ lives. What each still lacks is in its doc's "Not done yet".
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
   from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
 - **The piano roll.** A MIDI clip's notes on rows of keys beside a
-  keyboard, over a lane of their velocities or a controller's curve, in the
-  devices panel's place, drawn and tested as the arrangement is. Its
+  keyboard, over a lane of their velocities or a controller's curve, in a
+  tab beside the devices panel, drawn and tested as the arrangement is. Its
   gestures run the note and controller commands (`notes.move`,
   `controllers.draw` and the rest) and Live's keys, which act where the
   `Editor`'s focus is; it shares the arrangement's grid and song positions,
@@ -374,8 +374,12 @@ says what's there.
   warping), made into a map.
 - **Windows, panels, workspaces, themes and profiles.** Each view is a
   panel with its own id (`musicable_ui::MIXER`, `PIANO_ROLL` and the
-  others), which `Shell` shows and hides: a workspace saves which show and
-  where, and egui's viewports put a panel in a window of its own. Every view
+  others), which the shell's panel registry holds with its title, its place
+  and its size, docked in splits and tabs the user drags about
+  ([egui_tiles](https://docs.rs/egui_tiles); [app.md](app.md#the-panels)).
+  The layout is a `musicable_ui::Workspace`, kept in the config folder;
+  workspaces to switch between, and egui's viewports putting panels in
+  windows of their own, come next. Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
   so a theme file fills a `Theme` ([app.md](app.md#themes)), and a

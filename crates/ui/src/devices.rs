@@ -23,10 +23,6 @@ use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::name_box;
 
-/// The devices panel's id, for [`Shell::toggle_panel`](crate::Shell::toggle_panel).
-pub const DEVICES: &str = "devices";
-/// The browser's id.
-pub const BROWSER: &str = "browser";
 /// The plugin search field's id, so a key can focus it.
 pub(crate) const PLUGIN_SEARCH: &str = "plugin search";
 
@@ -684,6 +680,7 @@ mod tests {
     use musicable_model::plugin::{PluginDevice, PluginSettings};
 
     use super::*;
+    use crate::panels::{BROWSER, DEVICES};
     use crate::testing::{State, quick_harness as harness};
 
     fn id(name: &str) -> String {

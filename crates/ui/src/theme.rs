@@ -229,8 +229,22 @@ pub struct Theme {
     pub devices: DeviceSizes,
     pub piano_roll: PianoRollSizes,
     pub browser: BrowserSizes,
+    pub dock: DockSizes,
     pub widgets: Widgets,
     pub fonts: Fonts,
+}
+
+/// The sizes of the dock the panels are in, in points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DockSizes {
+    /// The height of the bar of tabs over each group of panels.
+    pub tab_bar: f32,
+    /// The gap between panels side by side or one over another.
+    pub gap: f32,
+    /// The smallest a panel gets when the user drags its edge, and what
+    /// the arrangement keeps at least when the window's too small for the
+    /// panels around it.
+    pub min_panel: f32,
 }
 
 /// The piano roll's sizes, in points.
@@ -638,6 +652,11 @@ impl Theme {
                 lane: 60.0,
                 edge_grab: 4.0,
                 velocity_drag: 127.0,
+            },
+            dock: DockSizes {
+                tab_bar: 22.0,
+                gap: 1.0,
+                min_panel: 96.0,
             },
             widgets: Widgets::dark(),
             fonts: Fonts::default(),

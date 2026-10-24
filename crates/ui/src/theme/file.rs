@@ -44,7 +44,7 @@ const GROUPS: [(&str, &str); 5] = [
 ];
 
 /// The comments over the sections.
-const SECTIONS: [(&str, &str); 12] = [
+const SECTIONS: [(&str, &str); 13] = [
     ("mixer", "The mixer's sizes."),
     (
         "devices",
@@ -52,6 +52,10 @@ const SECTIONS: [(&str, &str); 12] = [
     ),
     ("piano_roll", "The piano roll's sizes."),
     ("browser", "The browser's sizes."),
+    (
+        "dock",
+        "The sizes of the panels' tab bars and the gaps between panels.",
+    ),
     (
         "widgets",
         "Menus, buttons, text fields, windows and the panels they're in.",
