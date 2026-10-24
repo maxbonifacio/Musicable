@@ -38,8 +38,8 @@ reference renderer (see [The null test](#the-null-test)), and
    metronome on.
 2. Press Space. It plays, loops and clicks.
 3. **Options > Audio Settings** picks the device, shared or exclusive mode,
-   and the buffer size. The corner of the menu bar shows the CPU load and
-   counts dropouts.
+   and the buffer size. The right end of the transport bar shows the CPU
+   load and counts dropouts.
 4. **File > Save Project As**, then **File > Open Project**: the project comes
    back as it was. Saving the demo writes the same bytes as the fixture.
 5. `musicable null-test` checks what you can't hear: that the parallel
@@ -175,14 +175,14 @@ That's what `ParallelOptions::inline_below` is for
   Toggles, such as Follow and Snap to Grid, are ticked while on. A command
   in an area with no menu yet gets a menu named after its area, before
   Browser, so every command can be reached; commands that need arguments
-  are left out, as menus can't give them. On the right are the CPU meter and
-  the dropout counter.
-- **The transport bar** has go to start, play, stop, record, loop, punch in
-  and punch out, the metronome, the tempo, the time signature, and the
-  playhead in bars, beats and sixteenths and in minutes and seconds.
-  Hovering a button shows its command and keys, hovering Loop shows the
-  loop region, and Punch In and Punch Out where they punch
-  ([Recording](#recording)).
+  are left out, as menus can't give them.
+- **The transport bar** has go to start, play, stop, record, Capture, loop,
+  punch in and punch out, the metronome, the tempo, the time signature, and
+  the playhead in bars, beats and sixteenths and in minutes and seconds, and
+  at its right end the CPU meter and the dropout counter
+  ([Meters](#meters)). Hovering a button shows its command and keys,
+  hovering Loop shows the loop region, and Punch In and Punch Out where
+  they punch ([Recording](#recording)).
 - **The tempo field** sets the tempo where the playhead is, and moves any
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
@@ -265,7 +265,9 @@ chain wherever the panel is.
 ### Workspaces
 
 A workspace is a layout of the panels, with where the window is: its
-corner, its size, and whether it's maximized. What you change goes into
+corner, its size, and whether it's maximized. It keeps the parts the
+transport bar, the track headers and the mixer strips show, too
+([Configurable views](#configurable-views)). What you change goes into
 the workspace in use as you change it, so the window opens as you left it
 ([Settings](#settings-and-your-keymap)). The **Workspaces** menu lists your
 workspaces, up to nine, with a tick on the one in use:
@@ -273,15 +275,15 @@ workspaces, up to nine, with a tick on the one in use:
 - **Alt and a workspace's number** switch to it (`workspace.switch_1` to
   `workspace.switch_9`), Alt+1 being Default. A new workspace takes the
   lowest number free, and keeps it as others come and go.
-- **Save Workspace As...** keeps the layout as a new workspace, under the
-  name you type, and uses it from then on; the workspace you were in keeps
+- **Save Workspace As...** keeps the layout and the views' parts as a new
+  workspace, under the name you type, and uses it from then on; the workspace you were in keeps
   what it had. A name can't be another workspace's, in any letters, or
   have characters a file name can't.
 - **Rename Workspace...** and **Delete Workspace...** rename or delete the
   workspace in use. Deleting asks first, then switches to Default. Default
   keeps its name and can't be deleted.
-- **Reset Workspace** lays the panels out as at first, and leaves the
-  window where it is.
+- **Reset Workspace** lays the panels out and shows the views' parts as at
+  first, and leaves the window where it is.
 
 The zoom and the scrolling are the project's: switching workspaces leaves
 them as they are. A project remembers the workspace it was saved with,
@@ -290,6 +292,43 @@ and opening it switches there, if you have a workspace by that name
 the monitor it was on, if that monitor's still there, and stays on the
 one it's on if not. A window you move or resize is saved once it's stayed
 put for a second.
+
+### Configurable views
+
+The transport bar, the track headers and the mixer strips are made of
+parts, and each part can be hidden, shown again and moved, and some
+resized:
+
+- **Right-click a part** for **Hide** with the part's name, and
+  **Customise...** for its view. A control with a menu of its own, such as
+  a track's header or a send, has them at the end of its menu.
+  Right-clicking between the parts of the transport bar or of a strip has
+  Customise alone.
+- **The Customise window** lists the view's parts in order. Tick a part to
+  show it or untick it to hide it, drag it by its handle to move it, and
+  give a size in points to those that can take one: the width of the CPU
+  meter, and of the headers' colour and meter. **Reset** shows the view as
+  Musicable does at first, and Escape closes the window.
+
+| View | Its parts, in the order they show at first |
+| --- | --- |
+| The transport bar (`transport_bar`) | Go to Start (`go_to_start`) · Play and Stop (`play_stop`) · Record (`record`) · Capture (`capture`) · Loop and Punch (`loop_punch`) · Metronome (`metronome`) · Tempo (`tempo`) · Time Signature (`signature`) · Position (`position`) · Flexible Space (`space`) · CPU Meter (`cpu`) |
+| The track headers (`track_header`) | Colour (`colour`) · Name (`name`) · Automation Button, A (`automation`) · Mute, Solo and Arm (`buttons`) · Meter (`meter`) |
+| The mixer strips (`mixer_strip`) | Name (`name`) · Input (`input`) · Monitoring (`monitor`) · Output (`output`) · Sends (`sends`) · Pan (`pan`) · Fader and Meter (`fader`) · Gain and Peak (`readouts`) · Mute, Solo and Arm (`buttons`) · Clip Type (`clip_type`) |
+
+The ids in brackets are what the workspace file calls them.
+
+The transport bar's Flexible Space takes the room the other parts leave,
+which keeps the parts after it at the bar's right end. Across a header the
+name takes what's left, and down a strip the fader does, so a hidden part
+gives the fader its room. Each part takes as many rows in every strip, so
+the faders line up even where a track has no input or sends, and return
+and group tracks keep M and S where the other tracks have them, with an
+empty place for the arm button.
+
+The views come back as they were left: the app keeps what you change about
+them in the workspace in use, with the panels' layout, so each workspace
+can have its own ([Workspaces](#workspaces)).
 
 ## The arrangement
 
@@ -309,9 +348,11 @@ undo history and the engine rebuilds its graph once.
   waveform, with its fades and their handles, or a MIDI clip's notes. A
   clip takes the colour of its track's place in the list. Selected clips
   are outlined. While a drag lasts, a ghost shows where the clips will go.
-- **Track headers** have the track's name, M, S and the arm button, and a
-  meter. A selected track's header and lane are lighter. The corner over
-  the headers says what the grid is, such as "Grid 1/16".
+- **Track headers** have the track's colour, its name, A, M, S and the arm
+  button, and a meter, which can be hidden, moved and some resized
+  ([Configurable views](#configurable-views)). A selected track's header
+  and lane are lighter. The corner over the headers says what the grid is,
+  such as "Grid 1/16".
 - **Takes** show in lanes under their track, each named in its header,
   after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
   track header's menu. A take's clips show their waveforms or their notes,
@@ -593,7 +634,8 @@ Under the list:
 
 Each track has a channel strip, in the project's order, and the master's
 strip is on the right. Tracks scroll sideways when they don't fit, and only
-the strips in sight are drawn. From the top, a strip has:
+the strips in sight are drawn. From the top, a strip has these parts, which
+can be hidden and moved ([Configurable views](#configurable-views)):
 
 - **The name.** Hovering it shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
@@ -1347,14 +1389,22 @@ set still work until the app closes.
 
 `workspaces` holds a file for each workspace ([Workspaces](#workspaces)),
 named after it, such as `Mixing.toml`: `Default.toml` once you've changed
-Default. The workspace in use is written whenever you change its layout,
-once you let go of the tab or the edge you're dragging, and the one the
-app opens with is read at startup:
+Default. The workspace in use is written whenever you change its layout or
+its views' parts ([Configurable views](#configurable-views)), once you let
+go of the tab, the edge or the part you're dragging, and the one the app
+opens with is read at startup:
 
 ```toml
 format = "musicable-workspace"
 version = 1
 slot = 2
+
+[views.mixer_strip]
+hidden = ["monitor"]
+parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
+
+[views.track_header.sizes]
+meter = 14
 
 [[windows]]
 at = [-1912, 120]
@@ -1384,6 +1434,13 @@ takes what's left. `hidden` lists the panels hidden, which keep their
 place. Panels the file doesn't have go where they go at first, hidden, and
 a file that can't be used leaves the layout as it was, and says why.
 Deleting Default's file brings back the first layout.
+
+`views` has only the views you changed, by the ids in the table under
+[Configurable views](#configurable-views). A view's `parts` are its parts
+in order, hidden ones too, `hidden` lists those hidden, and `sizes` the
+sizes given in the Customise window, in points. Parts the file doesn't name
+go after the part before them in the first order, and parts Musicable
+doesn't have are left out.
 
 `settings.toml` holds the audio settings, written whenever you apply new
 ones, how editing behaves, the theme, the workspace in use, the export
@@ -1579,6 +1636,11 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   commands and the library's types only. The app hands it a `View` of what
   to show each frame, and carries out the `Action`s it hands back. Its
   tests drive the shell with `egui_kittest`.
+- `crates/ui/src/parts.rs` keeps the views made of parts. Each kind of part
+  registers its id, title, size, the views it fits and what draws it, in
+  `transport_bar.rs`, `arrangement/header.rs` and `mixer.rs`, so a feature
+  adds a part in one place. The views ask it which parts to show, in what
+  order and at what sizes, and `Views` is what a workspace keeps of them.
 - `crates/library` is the browser's library: the index and its file,
   scanning folders, searching, presets, and the queue for file work, with
   no app or UI in it. `crates/app/src/library.rs` puts it to work for the

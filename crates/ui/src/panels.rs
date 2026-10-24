@@ -13,6 +13,7 @@ use crate::browser::{self, BrowserPanel, Destination};
 use crate::devices::DevicesPanel;
 use crate::mixer::{self, Choices};
 use crate::mouse::MouseMap;
+use crate::parts::Parts;
 use crate::piano_roll::PianoRoll;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -105,7 +106,7 @@ impl Registry {
             hides: false,
             show: |panels, ui, cx| {
                 let (view, theme, mouse) = (cx.view, cx.theme, cx.mouse);
-                panels.arrangement.show(ui, view, theme, mouse, cx.actions);
+                (panels.arrangement).show(ui, view, theme, mouse, cx.parts, cx.actions);
             },
         });
         registry.register(Panel {
@@ -123,8 +124,10 @@ impl Registry {
                 };
                 framed(ui, |ui| {
                     let (project, levels, at) = (view.project, view.levels, view.playback.playhead);
-                    let (theme, mouse) = (cx.theme, cx.mouse);
-                    mixer::show(ui, project, levels, inputs, at, theme, mouse, cx.actions);
+                    let (theme, mouse, parts) = (cx.theme, cx.mouse, cx.parts);
+                    mixer::show(
+                        ui, project, levels, inputs, at, theme, mouse, parts, cx.actions,
+                    );
                 });
             },
         });
@@ -205,6 +208,9 @@ pub(crate) struct Cx<'a, 'v> {
     pub view: &'a View<'v>,
     pub theme: &'a Theme,
     pub mouse: &'a MouseMap,
+    /// The parts of the transport bar, the track headers and the mixer
+    /// strips, as the user has them.
+    pub parts: &'a Parts,
     /// The chain the devices panel shows, which the browser adds to.
     pub chain: Option<Chain>,
     pub actions: &'a mut Vec<Action>,

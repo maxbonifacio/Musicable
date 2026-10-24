@@ -374,6 +374,7 @@ mod tests {
                 ])),
                 ..WindowLayout::default()
             }],
+            ..Workspace::default()
         }
     }
 

@@ -4,8 +4,10 @@
 //! A strip has, from the top: the track's name, where an audio or MIDI
 //! track records from and when it plays its input, where its output goes,
 //! a send to each return track, the pan, the fader beside the meter, the
-//! gain and the highest peak, mute, solo and arm, and the clip stage. Its
-//! controls hand back [`Change`]s for the app to make.
+//! gain and the highest peak, mute, solo and arm, and the clip stage. Each
+//! is a part the user can hide or move, and every strip shows the same
+//! parts, so their faders line up. Its controls hand back [`Change`]s for
+//! the app to make.
 //!
 //! An automated fader, pan or send shows the value its automation gives it
 //! at the playhead, with a dot in the automation's colour, grey once
@@ -31,6 +33,7 @@ use musicable_model::{
 };
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
+use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
 use crate::shell::Action;
 use crate::theme::{MixerSizes, Theme};
 use crate::widgets::{Face, toggle};
@@ -115,8 +118,9 @@ const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and Fi
                          Project has a dozen test tones.";
 
 /// Shows the mixer for `project`, with the meters reading `levels`, the
-/// input menus offering `inputs` and automated controls where `playhead`
-/// has them, and adds what the user changed to `actions`.
+/// input menus offering `inputs`, automated controls where `playhead` has
+/// them and the strips' parts as `parts` has them, and adds what the user
+/// changed to `actions`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ui: &mut Ui,
@@ -126,6 +130,7 @@ pub(crate) fn show(
     playhead: Beats,
     theme: &Theme,
     mouse: &MouseMap,
+    parts: &Parts,
     actions: &mut Vec<Action>,
 ) {
     let sizes = &theme.mixer;
@@ -134,22 +139,31 @@ pub(crate) fn show(
         .iter()
         .filter(|track| track.kind == TrackKind::Return)
         .collect();
-    // Every strip has the same rows, so the faders line up, and the faders
-    // take the height the rows leave.
-    let rows = 8 + returns.len();
-    let fixed = rows as f32 * (sizes.row + sizes.gap) + 2.0 * sizes.margin + sizes.scroll_bar;
-    let fader = (ui.available_height() - fixed).max(sizes.min_fader);
-    let mixer = Mixer {
+    let mut mixer = Mixer {
         project,
         returns,
         inputs,
         playhead,
-        fader,
+        fader: 0.0,
         theme,
         mouse,
+        parts,
     };
+    // Every strip has the same rows, so the faders line up, and the faders
+    // take the height the rows leave.
+    let lineup = parts.shown(MIXER_STRIP, theme);
+    let rows: usize = (lineup.iter())
+        .map(|shown| match shown.part.draw {
+            Draw::Strip { rows, .. } => rows(&mixer),
+            _ => 0,
+        })
+        .sum();
+    let fixed = rows as f32 * (sizes.row + sizes.gap) + 2.0 * sizes.margin + sizes.scroll_bar;
+    mixer.fader = (ui.available_height() - fixed).max(sizes.min_fader);
+    let mixer = mixer;
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-        mixer.master_strip(ui, levels.master, actions);
+        let master = Channel::Master(levels.master);
+        ui.push_id("master", |ui| mixer.strip(ui, &lineup, &master, actions));
         ui.separator();
         if project.tracks.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -172,17 +186,156 @@ pub(crate) fn show(
                             ui.allocate_space(vec2(sizes.strip, 0.0));
                             continue;
                         }
-                        ui.push_id(track.id, |ui| {
-                            mixer.track_strip(ui, track, levels.track(track.id), actions);
-                        });
+                        let channel = Channel::Track(track, levels.track(track.id));
+                        ui.push_id(track.id, |ui| mixer.strip(ui, &lineup, &channel, actions));
                     }
                 });
             });
     });
 }
 
+/// Registers the parts of the mixer's strips, in the order strips show
+/// them at first.
+pub(crate) fn register(registry: &mut Registry) {
+    let one: fn(&Mixer<'_>) -> usize = |_| 1;
+    registry.register(part(
+        "name",
+        "Name",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.name(ui, channel, actions);
+        },
+    ));
+    registry.register(part(
+        "input",
+        "Input",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| {
+                if let Channel::Track(track, _) = channel {
+                    mixer.input(ui, track, actions);
+                }
+            });
+        },
+    ));
+    registry.register(part(
+        "monitor",
+        "Monitoring",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| {
+                if let Channel::Track(track, _) = channel {
+                    mixer.monitor(ui, track, actions);
+                }
+            });
+        },
+    ));
+    registry.register(part(
+        "output",
+        "Output",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| {
+                if let Channel::Track(track, _) = channel
+                    && let Some(bus) = mixer.output(ui, track)
+                {
+                    mix(actions, Change::Output(track.id, bus));
+                }
+            });
+        },
+    ));
+    registry.register(part(
+        "sends",
+        "Sends",
+        Size::Natural,
+        |mixer| mixer.returns.len(),
+        |ui, mixer, channel, actions| {
+            for to in &mixer.returns {
+                mixer.row(ui, |ui| {
+                    // A return track doesn't send to the returns.
+                    if let Channel::Track(track, _) = channel
+                        && track.kind != TrackKind::Return
+                    {
+                        mixer.send(ui, track, to, actions);
+                    }
+                });
+            }
+        },
+    ));
+    registry.register(part(
+        "pan",
+        "Pan",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| mixer.pan(ui, channel, actions));
+        },
+    ));
+    registry.register(part(
+        "fader",
+        "Fader and Meter",
+        Size::Rest,
+        |_| 0,
+        |ui, mixer, channel, actions| mixer.fader_and_meter(ui, channel, actions),
+    ));
+    registry.register(part(
+        "readouts",
+        "Gain and Peak",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| mixer.readouts(ui, channel, actions));
+        },
+    ));
+    registry.register(part(
+        "buttons",
+        "Mute, Solo and Arm",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| {
+                if let Channel::Track(track, _) = channel {
+                    mixer.buttons(ui, track, actions);
+                }
+            });
+        },
+    ));
+    registry.register(part(
+        "clip_type",
+        "Clip Type",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, actions| {
+            mixer.row(ui, |ui| mixer.clip_type(ui, channel, actions));
+        },
+    ));
+}
+
+/// A part of the mixer's strips, shown at first, that takes `rows` of a
+/// strip's rows: the fader takes the height the others leave.
+fn part(
+    id: &'static str,
+    title: &'static str,
+    size: Size,
+    rows: fn(&Mixer<'_>) -> usize,
+    draw: fn(&mut Ui, &Mixer<'_>, &Channel<'_>, &mut Vec<Action>),
+) -> Part {
+    Part {
+        id,
+        title,
+        shown: true,
+        size,
+        fits: &[MIXER_STRIP],
+        draw: Draw::Strip { rows, draw },
+    }
+}
+
 /// What every strip needs to know.
-struct Mixer<'a> {
+pub(crate) struct Mixer<'a> {
     project: &'a Project,
     /// The return tracks. Each strip has a row of sends with one for each.
     returns: Vec<&'a Track>,
@@ -194,6 +347,53 @@ struct Mixer<'a> {
     fader: f32,
     theme: &'a Theme,
     mouse: &'a MouseMap,
+    /// The strips' parts, as the user has them.
+    parts: &'a Parts,
+}
+
+/// What a strip is the channel of, with its meter's readings.
+pub(crate) enum Channel<'a> {
+    Track(&'a Track, Level),
+    Master(Level),
+}
+
+impl Channel<'_> {
+    fn chain(&self) -> Chain {
+        match self {
+            Channel::Track(track, _) => Chain::Track(track.id),
+            Channel::Master(_) => Chain::Master,
+        }
+    }
+
+    /// What the strip's controls are called after: "Lead Pan".
+    fn name(&self) -> &str {
+        match self {
+            Channel::Track(track, _) => &track.name,
+            Channel::Master(_) => "Master",
+        }
+    }
+
+    fn level(&self) -> Level {
+        match self {
+            Channel::Track(_, level) | Channel::Master(level) => *level,
+        }
+    }
+
+    /// The channel's own gain and pan, without automation.
+    fn gain_and_pan(&self, project: &Project) -> (f32, f32) {
+        match self {
+            Channel::Track(track, _) => (track.gain, track.pan),
+            Channel::Master(_) => (project.master.gain, project.master.pan),
+        }
+    }
+
+    /// The change that sets the channel's gain to `gain`.
+    fn gain(&self, gain: f32) -> Change {
+        match self {
+            Channel::Track(track, _) => Change::Gain(track.id, gain),
+            Channel::Master(_) => Change::MasterGain(gain),
+        }
+    }
 }
 
 impl Mixer<'_> {
@@ -201,112 +401,110 @@ impl Mixer<'_> {
         &self.theme.mixer
     }
 
-    fn track_strip(&self, ui: &mut Ui, track: &Track, level: Level, actions: &mut Vec<Action>) {
-        let id = track.id;
-        let name = &track.name;
-        self.strip(ui, |ui| {
-            self.row(ui, |ui| self.title(ui, name))
-                .on_hover_text(about(track))
-                .context_menu(|ui| {
-                    let mut safe = track.solo_safe;
-                    let toggle = ui
-                        .checkbox(&mut safe, "Solo-Safe")
-                        .on_hover_text("Soloing other tracks doesn't silence this one.");
-                    if toggle.changed() {
-                        mix(actions, Change::SoloSafe(id, safe));
-                    }
-                    ui.separator();
-                    if ui.button("Delete Track").clicked() {
-                        mix(actions, Change::Delete(id));
-                        ui.close();
-                    }
-                });
-            self.row(ui, |ui| self.input(ui, track, actions));
-            self.row(ui, |ui| self.monitor(ui, track, actions));
-            self.row(ui, |ui| {
-                if let Some(bus) = self.output(ui, track) {
-                    mix(actions, Change::Output(id, bus));
+    /// The strip of `channel`, with the parts in `lineup`. Right-clicking
+    /// a part that has no menu of its own offers to hide it, or to
+    /// customise the strips.
+    fn strip(
+        &self,
+        ui: &mut Ui,
+        lineup: &[Shown<'_>],
+        channel: &Channel<'_>,
+        actions: &mut Vec<Action>,
+    ) {
+        // Where each part is down the strip, by id.
+        let mut spans = Vec::with_capacity(lineup.len());
+        let rect = self.frame(ui, |ui| {
+            for shown in lineup {
+                let Draw::Strip { rows, draw } = shown.part.draw else {
+                    continue;
+                };
+                // A part without rows, such as the sends when there are no
+                // return tracks, takes no room.
+                if rows(self) == 0 && !matches!(shown.part.size, Size::Rest) {
+                    continue;
                 }
-            });
-            for to in &self.returns {
-                self.row(ui, |ui| {
-                    if track.kind != TrackKind::Return {
-                        self.send(ui, track, to, actions);
-                    }
-                });
+                let part = ui.scope(|ui| draw(ui, self, channel, actions)).response;
+                spans.push((shown.part.id, part.rect.y_range()));
             }
-            let (volume, pan) = (
-                ParamAddress::Volume(Chain::Track(id)),
-                ParamAddress::Pan(Chain::Track(id)),
-            );
-            self.row(ui, |ui| {
-                let shown = self.shown(pan, track.pan);
-                let control = self.pan_control(ui, shown, &format!("{name} Pan"));
-                self.automated(ui, &control.0, pan, actions);
-                moved(control, actions, |pan| Change::Pan(id, pan));
-            });
-            let gain = self.shown(volume, track.gain);
-            let fader = self.channel(ui, gain, level, name);
-            self.automated(ui, &fader.0, volume, actions);
-            moved(fader, actions, |gain| Change::Gain(id, gain));
-            self.row(ui, |ui| {
-                self.readouts(ui, gain, level.highest, name, actions, |gain| {
-                    Change::Gain(id, gain)
-                });
-            });
-            self.row(ui, |ui| self.buttons(ui, track, actions));
-            self.row(ui, |ui| {
-                let label = format!("{name} Clip Type");
-                if let Some(clip_type) = self.clip_menu(ui, ("clip", id), track.clip_type, label) {
-                    mix(actions, Change::ClipType(id, clip_type));
-                }
-            });
         });
+        let strip = ui.interact(rect, ui.scope_id().with("strip"), Sense::hover());
+        let clicked = strip.container_secondary_clicked().then(|| {
+            let y = ui.input(|input| input.pointer.interact_pos())?.y;
+            let (id, _) = spans.iter().find(|(_, span)| span.contains(y))?;
+            Some(*id)
+        });
+        self.parts.context_menu(&strip, MIXER_STRIP, clicked);
     }
 
-    fn master_strip(&self, ui: &mut Ui, level: Level, actions: &mut Vec<Action>) {
-        let master = &self.project.master;
-        self.strip(ui, |ui| {
+    /// The strip's name, which can be right-clicked: a track's has a menu.
+    fn name(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
+        let Channel::Track(track, _) = channel else {
             self.row(ui, |ui| self.title(ui, "Master")).on_hover_text(
                 "The master: every track ends up here, and it plays out of the audio device.",
             );
-            // The master has no input, no output to choose, and no sends.
-            for _ in 0..3 + self.returns.len() {
-                self.row(ui, |_| ());
+            return;
+        };
+        let id = track.id;
+        self.row(ui, |ui| self.title(ui, &track.name))
+            .on_hover_text(about(track))
+            .context_menu(|ui| {
+                let mut safe = track.solo_safe;
+                let toggle = ui
+                    .checkbox(&mut safe, "Solo-Safe")
+                    .on_hover_text("Soloing other tracks doesn't silence this one.");
+                if toggle.changed() {
+                    mix(actions, Change::SoloSafe(id, safe));
+                }
+                ui.separator();
+                if ui.button("Delete Track").clicked() {
+                    mix(actions, Change::Delete(id));
+                    ui.close();
+                }
+                ui.separator();
+                self.parts.menu_items(ui, MIXER_STRIP, Some("name"));
+            });
+    }
+
+    /// The pan, with its automation.
+    fn pan(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
+        let param = ParamAddress::Pan(channel.chain());
+        let (_, own) = channel.gain_and_pan(self.project);
+        let shown = self.shown(param, own);
+        let control = self.pan_control(ui, shown, &format!("{} Pan", channel.name()));
+        self.automated(ui, &control.0, param, "pan", actions);
+        moved(control, actions, |pan| match channel {
+            Channel::Track(track, _) => Change::Pan(track.id, pan),
+            Channel::Master(_) => Change::MasterPan(pan),
+        });
+    }
+
+    /// The fader beside the meter, with the fader's automation.
+    fn fader_and_meter(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
+        let param = ParamAddress::Volume(channel.chain());
+        let (own, _) = channel.gain_and_pan(self.project);
+        let gain = self.shown(param, own);
+        let fader = self.channel(ui, gain, channel.level(), channel.name());
+        self.automated(ui, &fader.0, param, "fader", actions);
+        moved(fader, actions, |gain| channel.gain(gain));
+    }
+
+    /// The clip stage's type.
+    fn clip_type(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
+        let label = format!("{} Clip Type", channel.name());
+        match channel {
+            Channel::Track(track, _) => {
+                let id = ("clip", track.id);
+                if let Some(clip_type) = self.clip_menu(ui, id, track.clip_type, label) {
+                    mix(actions, Change::ClipType(track.id, clip_type));
+                }
             }
-            let (volume, pan) = (
-                ParamAddress::Volume(Chain::Master),
-                ParamAddress::Pan(Chain::Master),
-            );
-            self.row(ui, |ui| {
-                let shown = self.shown(pan, master.pan);
-                let control = self.pan_control(ui, shown, "Master Pan");
-                self.automated(ui, &control.0, pan, actions);
-                moved(control, actions, Change::MasterPan);
-            });
-            let gain = self.shown(volume, master.gain);
-            let fader = self.channel(ui, gain, level, "Master");
-            self.automated(ui, &fader.0, volume, actions);
-            moved(fader, actions, Change::MasterGain);
-            self.row(ui, |ui| {
-                self.readouts(
-                    ui,
-                    gain,
-                    level.highest,
-                    "Master",
-                    actions,
-                    Change::MasterGain,
-                );
-            });
-            self.row(ui, |_| ());
-            self.row(ui, |ui| {
-                let label = "Master Clip Type".to_owned();
-                if let Some(clip_type) = self.clip_menu(ui, "master_clip", master.clip_type, label)
-                {
+            Channel::Master(_) => {
+                let current = self.project.master.clip_type;
+                if let Some(clip_type) = self.clip_menu(ui, "master_clip", current, label) {
                     mix(actions, Change::MasterClipType(clip_type));
                 }
-            });
-        });
+            }
+        }
     }
 
     /// Where the track's output goes: a menu of the master and the groups
@@ -671,8 +869,8 @@ fn about(track: &Track) -> String {
 
 impl Mixer<'_> {
     /// Lays out a strip: a column a strip wide, in a frame, where the layout
-    /// puts the next widget.
-    fn strip(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    /// puts the next widget. Returns where the frame is.
+    fn frame(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui)) -> Rect {
         let sizes = self.sizes();
         let size = vec2(sizes.strip, ui.available_height());
         ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
@@ -684,8 +882,11 @@ impl Mixer<'_> {
                     ui.set_width(sizes.inner());
                     ui.spacing_mut().item_spacing = vec2(sizes.gap, sizes.gap);
                     add(ui);
-                });
-        });
+                })
+                .response
+                .rect
+        })
+        .inner
     }
 
     /// Lays out one of a strip's rows: a row high and as wide as the strip,
@@ -733,6 +934,8 @@ impl Mixer<'_> {
                 }
                 ui.separator();
                 self.automation_items(ui, param, actions);
+                ui.separator();
+                self.parts.menu_items(ui, MIXER_STRIP, Some("sends"));
             });
         }
         moved(control, actions, |level| Change::SendLevel {
@@ -769,16 +972,22 @@ impl Mixer<'_> {
     }
 
     /// Marks the control `response` if `param` has automation, and gives it
-    /// a menu of the automation's commands.
+    /// a menu of the automation's commands, and the menu of the strips'
+    /// `part` it's in.
     fn automated(
         &self,
         ui: &Ui,
         response: &Response,
         param: ParamAddress,
+        part: &'static str,
         actions: &mut Vec<Action>,
     ) {
         self.mark(ui, response, param);
-        response.context_menu(|ui| self.automation_items(ui, param, actions));
+        response.context_menu(|ui| {
+            self.automation_items(ui, param, actions);
+            ui.separator();
+            self.parts.menu_items(ui, MIXER_STRIP, Some(part));
+        });
     }
 
     fn mark(&self, ui: &Ui, response: &Response, param: ParamAddress) {
@@ -875,20 +1084,17 @@ impl Mixer<'_> {
     }
 
     /// The gain field and the highest peak under the fader. A gain typed or
-    /// dragged into the field makes the `change`.
-    fn readouts(
-        &self,
-        ui: &mut Ui,
-        gain: f32,
-        highest: f32,
-        name: &str,
-        actions: &mut Vec<Action>,
-        change: impl FnOnce(f32) -> Change,
-    ) {
+    /// dragged into the field sets the channel's.
+    fn readouts(&self, ui: &mut Ui, channel: &Channel<'_>, actions: &mut Vec<Action>) {
         let sizes = self.sizes();
         let size = vec2((sizes.inner() - sizes.gap) / 2.0, sizes.row - 2.0);
-        moved(gain_field(ui, gain, size), actions, change);
-        let peak = self.peak_readout(ui, highest, &format!("{name} Highest Peak"), size);
+        let (own, _) = channel.gain_and_pan(self.project);
+        let gain = self.shown(ParamAddress::Volume(channel.chain()), own);
+        moved(gain_field(ui, gain, size), actions, |gain| {
+            channel.gain(gain)
+        });
+        let label = format!("{} Highest Peak", channel.name());
+        let peak = self.peak_readout(ui, channel.level().highest, &label, size);
         if peak.clicked() {
             actions.push(Action::ClearPeaks);
         }
@@ -1500,6 +1706,7 @@ mod tests {
         inputs: Vec<InputChoice>,
         midi: Vec<MidiChoice>,
         playhead: Beats,
+        parts: Parts,
         actions: Vec<Action>,
     }
 
@@ -1524,6 +1731,7 @@ mod tests {
             inputs: vec![interface],
             midi: vec![keystep],
             playhead: Beats::ZERO,
+            parts: Parts::default(),
             actions: Vec::new(),
         };
         Harness::builder().with_size([900.0, 600.0]).build_ui_state(
@@ -1543,8 +1751,10 @@ mod tests {
                     state.playhead,
                     &theme,
                     &mouse,
+                    &state.parts,
                     &mut actions,
                 );
+                state.parts.carry_out();
                 for action in &actions {
                     match action {
                         Action::Mixer(change) => {
@@ -1639,6 +1849,39 @@ mod tests {
         let harness = harness(Project::new());
         harness.get_by_label_contains("No tracks yet");
         harness.get_by_role_and_label(Role::Slider, "Master Volume");
+    }
+
+    #[test]
+    fn hidden_parts_leave_the_faders_their_room() {
+        let (project, _) = project();
+        let mut harness = harness(project);
+        let fader = |harness: &Harness<'_, State>| {
+            let fader = harness.get_by_role_and_label(Role::Slider, "Lead Volume");
+            fader.rect().height()
+        };
+        let before = fader(&harness);
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Lead Output")
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("Hide Output").click();
+        harness.run();
+        // Every strip loses the row, and its fader grows into it.
+        for name in ["Lead", "Keys", "Drums", "Reverb"] {
+            let label = format!("{name} Output");
+            assert!(harness.query_by_label(&label).is_none(), "{name}");
+        }
+        let sizes = Theme::default().mixer;
+        let grown = fader(&harness) - before;
+        assert!((grown - sizes.row - sizes.gap).abs() < 0.5, "{grown}");
+        // The faders still line up.
+        let top = |label: &str| {
+            harness
+                .get_by_role_and_label(Role::Slider, label)
+                .rect()
+                .top()
+        };
+        assert_eq!(top("Lead Volume"), top("Master Volume"));
     }
 
     #[test]

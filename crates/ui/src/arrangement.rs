@@ -16,6 +16,7 @@
 //! time, as Live's Draw Mode does. Each edit sets the lane's points with
 //! one command.
 
+mod header;
 mod menu;
 mod paint;
 #[cfg(test)]
@@ -26,10 +27,9 @@ use std::path::PathBuf;
 
 use egui::{
     Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rect, Response, RichText,
-    Role, ScrollArea, Sense, Ui, WidgetInfo, pos2, vec2,
+    Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::Viewport;
-use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views,
@@ -44,9 +44,12 @@ use crate::browser::{Destination, Dragged};
 use crate::devices::describe;
 use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
+use crate::parts::{Parts, TRACK_HEADER};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::{Face, paint_toggle};
+
+pub(crate) use header::{HeaderPart, register};
 
 /// How much a point of the wheel, or of a drag up or down the ruler,
 /// zooms: the zoom changes by `e` to the power of this many points.
@@ -304,6 +307,8 @@ struct Spot {
     hit: Hit,
     /// The song position clicked, snapped to the grid.
     at: Beats,
+    /// The part of the track's header clicked, if it was one.
+    part: Option<&'static str>,
 }
 
 /// A track's row: where its lane and its header are.
@@ -640,6 +645,8 @@ struct Scene<'s> {
     view: &'s View<'s>,
     theme: &'s Theme,
     mouse: &'s MouseMap,
+    /// The parts of the tracks' headers, as the user has them.
+    parts: &'s Parts,
     layout: Layout,
     /// Where the pointer is, if it's over the arrangement and nothing's in
     /// the way.
@@ -1492,14 +1499,16 @@ fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport) {
 }
 
 impl Arrangement {
-    /// Shows the arrangement in the rest of `ui`, and adds what the user
-    /// asked for to `actions`.
+    /// Shows the arrangement in the rest of `ui`, with the tracks' headers
+    /// made of the parts `parts` has, and adds what the user asked for to
+    /// `actions`.
     pub(crate) fn show(
         &mut self,
         ui: &mut Ui,
         view: &View<'_>,
         theme: &Theme,
         mouse: &MouseMap,
+        parts: &Parts,
         actions: &mut Vec<Action>,
     ) {
         let rect = ui.available_rect_before_wrap();
@@ -1513,6 +1522,7 @@ impl Arrangement {
             view,
             theme,
             mouse,
+            parts,
             layout,
             pointer,
         };
@@ -1538,7 +1548,7 @@ impl Arrangement {
             Sense::click_and_drag(),
         );
         // Over the headers, so they take their clicks.
-        let buttons = self.header_buttons(ui, &scene, actions);
+        let buttons = self.lane_buttons(ui, &scene, actions);
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             self.drag = None;
         }
@@ -1576,7 +1586,14 @@ impl Arrangement {
             &scene,
             plan.as_ref(),
         );
-        paint::headers(&painter.with_clip_rect(scene.layout.headers), &scene);
+        let headers_painter = painter.with_clip_rect(scene.layout.headers);
+        paint::headers(&headers_painter, &scene);
+        // The headers' parts, in columns down the headers. Their buttons
+        // go over the headers, so they take their clicks.
+        let lineup = parts.shown(TRACK_HEADER, theme);
+        let columns = header::columns(&scene, &lineup);
+        header::paint(ui, &headers_painter, &scene, &columns, actions);
+        paint::over_headers(&headers_painter, &scene);
         for button in &buttons {
             let (face, on, colour) = (button.face, button.on, button.colour);
             paint_toggle(ui, button.rect, &button.response, face, on, colour, theme);
@@ -1595,22 +1612,40 @@ impl Arrangement {
             (&ruler, Area::Ruler),
             (&headers, Area::Headers),
         ] {
-            if response.secondary_clicked()
-                && let Some(pos) = response.interact_pointer_pos()
+            // A header's buttons take their right-clicks, which open the
+            // headers' menu all the same, unless another menu is open.
+            let ctx = ui.ctx();
+            let taken = area == Area::Headers
+                && !response.secondary_clicked()
+                && response.container_secondary_clicked()
+                && (!Popup::is_any_open(ctx)
+                    || Popup::is_id_open(ctx, Popup::default_response_id(response)));
+            if (response.secondary_clicked() || taken)
+                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
             {
                 let hit = scene.hit(area, pos);
                 let at = match hit {
                     Hit::Locator(id) => scene.project().locator(id).map(|l| l.at),
                     _ => None,
                 };
+                let part = match hit {
+                    Hit::Header(_) | Hit::TrackEdge(_) => header::part_at(&columns, pos.x),
+                    _ => None,
+                };
                 let spot = Spot {
                     hit,
                     at: at.unwrap_or_else(|| scene.snapped(pos.x)),
+                    part,
                 };
                 self.menu = Some(spot);
                 select_for_menu(&scene, spot, actions);
             }
-            response.context_menu(|ui| {
+            let menu = Popup::context_menu(response);
+            let menu = match taken {
+                true => menu.open_memory(SetOpenCommand::Bool(true)),
+                false => menu,
+            };
+            menu.show(|ui| {
                 if let Some(spot) = self.menu {
                     menu::show(ui, &scene, spot, actions);
                 }
@@ -1966,85 +2001,16 @@ impl Arrangement {
         Some(plan)
     }
 
-    /// Mute, solo and arm in each header in sight, as buttons. Returns
+    /// The buttons in the header of each automation lane in sight. Returns
     /// them, to be drawn over the headers.
-    fn header_buttons(
+    fn lane_buttons(
         &mut self,
         ui: &mut Ui,
         scene: &Scene<'_>,
         actions: &mut Vec<Action>,
     ) -> Vec<Button> {
-        let project = scene.project();
         let theme = scene.theme;
-        let mods = modifiers(ui.input(|i| i.modifiers));
         let mut buttons = Vec::new();
-        for row in scene.layout.visible_rows() {
-            let track = &project.tracks[row.index];
-            for (button, rect) in paint::header_buttons(scene, row, track) {
-                let name = &track.name;
-                let (face, on, colour, label) = match button {
-                    HeaderButton::Mute => (
-                        Face::Text("M"),
-                        track.muted,
-                        theme.mute,
-                        format!("Mute track {name}"),
-                    ),
-                    HeaderButton::Solo => (
-                        Face::Text("S"),
-                        track.solo,
-                        theme.solo,
-                        format!("Solo track {name}"),
-                    ),
-                    HeaderButton::Arm => (
-                        Face::Dot,
-                        track.armed,
-                        theme.arm,
-                        format!("Arm track {name}"),
-                    ),
-                    HeaderButton::Automation => (
-                        Face::Text("A"),
-                        scene
-                            .editor()
-                            .automation
-                            .contains_key(&Chain::Track(track.id)),
-                        theme.automation,
-                        format!("Show automation of track {name}"),
-                    ),
-                };
-                let id = Id::unique(("header button", track.id, button));
-                let response = ui.interact(rect, id, Sense::click());
-                response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, &label));
-                let clicked = response.clicked();
-                buttons.push(Button {
-                    rect,
-                    response,
-                    face,
-                    on,
-                    colour,
-                });
-                if !clicked {
-                    continue;
-                }
-                let change = match button {
-                    HeaderButton::Automation => {
-                        let args = Args::new().with("track", track.id);
-                        run(actions, automation::SHOW, args);
-                        continue;
-                    }
-                    HeaderButton::Mute => Change::Muted(track.id, !on),
-                    HeaderButton::Arm => Change::Armed(track.id, !on),
-                    HeaderButton::Solo => {
-                        let action = scene.mouse.action(Target::SoloButton, Gesture::Click, mods);
-                        Change::Solo {
-                            track: track.id,
-                            solo: !on,
-                            exclusive: !on && action != Some(MouseAction::AddSolo),
-                        }
-                    }
-                };
-                actions.push(Action::Mixer(change));
-            }
-        }
         for lane in scene.layout.visible_automation() {
             let name = scene.lane_label(lane);
             for (button, rect) in paint::lane_buttons(scene, lane) {
@@ -2248,16 +2214,6 @@ impl Arrangement {
     }
 }
 
-/// The buttons in a track's header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum HeaderButton {
-    /// Shows the track's automation lanes, or hides them.
-    Automation,
-    Mute,
-    Solo,
-    Arm,
-}
-
 /// The buttons in an automation lane's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LaneButton {
@@ -2304,7 +2260,7 @@ fn choose_param(ui: &mut Ui, scene: &Scene<'_>, lane: &AutoRow, actions: &mut Ve
     }
 }
 
-/// A header's button, to be drawn once the headers are.
+/// An automation lane's button, to be drawn once the headers are.
 struct Button {
     rect: Rect,
     response: Response,

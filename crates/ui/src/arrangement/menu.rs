@@ -17,6 +17,7 @@ use musicable_model::{Chain, TrackKind};
 
 use super::{Hit, Scene, Spot};
 use crate::menus::context_menu;
+use crate::parts::TRACK_HEADER;
 use crate::shell::Action;
 
 /// A context menu's commands, in order. `None` is a separator.
@@ -149,6 +150,11 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
         }
     }
     context_menu(ui, view, &entries, actions);
+    // A track's header is made of parts, which the user can hide.
+    if let Hit::Header(_) | Hit::TrackEdge(_) = spot.hit {
+        ui.separator();
+        scene.parts.menu_items(ui, TRACK_HEADER, spot.part);
+    }
 }
 
 /// The arguments `command` takes from `spot`, or `None` if it needs one

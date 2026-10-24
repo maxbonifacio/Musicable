@@ -1,11 +1,12 @@
 //! The workspace commands: switching between the user's layouts of the
 //! panels, and saving, renaming, deleting and resetting them.
 //!
-//! A workspace keeps where every panel is, in each window. The user has up
-//! to nine, in numbered slots: Default is always the first, and a new one
-//! takes the lowest slot free, so its switch command, and the key that runs
-//! it, stay the same as others come and go. Workspaces are the app's, not
-//! the project's, so these ask the app, with a [`Request`].
+//! A workspace keeps where every panel is, in each window, and the parts
+//! the transport bar, the track headers and the mixer strips show. The
+//! user has up to nine, in numbered slots: Default is always the first, and
+//! a new one takes the lowest slot free, so its switch command, and the key
+//! that runs it, stay the same as others come and go. Workspaces are the
+//! app's, not the project's, so these ask the app, with a [`Request`].
 
 use crate::{CommandId, Registry, Request};
 
@@ -24,16 +25,16 @@ pub const SWITCH_9: CommandId = CommandId::new("workspace.switch_9");
 pub const SWITCH: [CommandId; SLOTS as usize] = [
     SWITCH_1, SWITCH_2, SWITCH_3, SWITCH_4, SWITCH_5, SWITCH_6, SWITCH_7, SWITCH_8, SWITCH_9,
 ];
-/// Asks for a name, and keeps the panels' layout as a new workspace under
-/// it, which is the one in use from then on.
+/// Asks for a name, and keeps the panels' layout and the views' parts as a
+/// new workspace under it, which is the one in use from then on.
 pub const SAVE_AS: CommandId = CommandId::new("workspace.save_as");
 /// Asks for a new name for the workspace in use. Default keeps its name.
 pub const RENAME: CommandId = CommandId::new("workspace.rename");
 /// Deletes the workspace in use, once the user says so, and switches to
 /// Default, which can't be deleted.
 pub const DELETE: CommandId = CommandId::new("workspace.delete");
-/// Lays the panels of the workspace in use out as at first: all in the
-/// main window, where they start.
+/// Lays the panels of the workspace in use out as at first, all in the
+/// main window, where they start, and shows the views' parts as at first.
 pub const RESET: CommandId = CommandId::new("workspace.reset");
 
 /// How many workspaces there can be.

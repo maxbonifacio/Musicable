@@ -392,9 +392,10 @@ says what's there.
   so a theme file fills a `Theme` ([app.md](app.md#themes)), and a
   profile is a keymap file, a mouse map, a theme, workspaces and the
   behaviour settings (`Editor::behaviour`) together, each saved as what
-  differs from its base. Configurable views need the transport bar, the
-  toolbars, the track headers and the strips built from lists of parts,
-  which they aren't yet.
+  differs from its base. The transport bar, the track headers and the
+  mixer strips are lists of parts, which the user hides, moves and resizes
+  (`parts.rs`; [app.md](app.md#configurable-views)), and each workspace
+  keeps how they show them.
 - **Visible undo history.** The history names each step, and undo and redo
   move through it a step at a time (`Document::undo_name` and `redo_name`;
   [commands.md](commands.md#undo-and-redo)). A panel of the steps needs

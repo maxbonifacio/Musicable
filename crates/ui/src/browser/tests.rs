@@ -569,6 +569,7 @@ fn devices_dropped_in_the_devices_panel_go_in_its_chain_wherever_it_is() {
             ])),
             ..WindowLayout::default()
         }],
+        ..Workspace::default()
     };
     let state = harness.state_mut();
     state.shell.set_workspace(&workspace);

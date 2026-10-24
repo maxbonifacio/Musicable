@@ -1,10 +1,15 @@
 //! Workspaces: how the panels are laid out, in splits and tabs, in each
-//! window, as the app keeps it in a file in the config folder.
+//! window, and the parts of the transport bar, the track headers and the
+//! mixer strips, as the app keeps them in a file in the config folder.
 //!
 //! ```toml
 //! format = "musicable-workspace"
 //! version = 1
 //! slot = 2
+//!
+//! [views.mixer_strip]
+//! hidden = ["monitor"]
+//! parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
 //!
 //! [[windows]]
 //! at = [-1912, 120]
@@ -33,16 +38,19 @@
 //! default size. The part with the arrangement takes what the others leave.
 //! Hidden panels keep their place, to come back to. Panels the file doesn't
 //! know are left out, and panels it doesn't have go where they go in the
-//! default layout, hidden.
+//! default layout, hidden. `views` has only the views the user changed
+//! ([`Views`]).
 
 use std::fmt::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
 
+use crate::parts::Views;
+
 const FORMAT: &str = "musicable-workspace";
 const VERSION: u32 = 1;
 
-/// The layout of each window's panels.
+/// The layout of each window's panels, and the views' parts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Workspace {
@@ -50,6 +58,10 @@ pub struct Workspace {
     /// it goes by. Default is always in the first, so its file needn't say.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<u8>,
+    /// What the user changed about the transport bar, the track headers
+    /// and the mixer strips, which look the same in every window.
+    #[serde(skip_serializing_if = "Views::is_empty")]
+    pub views: Views,
     /// The main window's first.
     pub windows: Vec<WindowLayout>,
 }
@@ -292,7 +304,10 @@ impl std::error::Error for WorkspaceError {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::parts::Lineup;
 
     fn sized(size: u32, layout: Layout) -> Layout {
         Layout {
@@ -323,6 +338,7 @@ mod tests {
                     ])),
                 ])),
             }],
+            ..Workspace::default()
         };
         let text = workspace.to_toml();
         let written = r#"format = "musicable-workspace"
@@ -350,6 +366,42 @@ layout = { across = [
             Workspace::parse(&Workspace::default().to_toml()).unwrap(),
             Workspace::default()
         );
+    }
+
+    #[test]
+    fn the_views_parts_go_before_the_windows() {
+        let lineup = Lineup {
+            parts: vec!["cpu".into(), "position".into()],
+            hidden: vec!["capture".into()],
+            sizes: BTreeMap::from([("cpu".into(), 80)]),
+        };
+        let workspace = Workspace {
+            views: Views(BTreeMap::from([("transport_bar".into(), lineup)])),
+            windows: vec![WindowLayout {
+                layout: Layout::panel("arrangement"),
+                ..WindowLayout::default()
+            }],
+            ..Workspace::default()
+        };
+        let text = workspace.to_toml();
+        let written = r#"format = "musicable-workspace"
+version = 1
+
+[views.transport_bar]
+hidden = ["capture"]
+parts = [
+    "cpu",
+    "position",
+]
+
+[views.transport_bar.sizes]
+cpu = 80
+
+[[windows]]
+layout = { panel = "arrangement" }
+"#;
+        assert_eq!(text, written);
+        assert_eq!(Workspace::parse(&text).unwrap(), workspace);
     }
 
     #[test]

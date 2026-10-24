@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Button, DragValue, Layout, RichText, Ui};
+use egui::{Align, Button, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
@@ -15,7 +15,7 @@ use musicable_commands::{
 };
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
-use musicable_model::time::{BeatRange, Beats, TempoMap};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackId};
 
 use crate::browser::{self, Library};
@@ -26,10 +26,12 @@ use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::panels::{self, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
+use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
+use crate::transport_bar;
 use crate::waveform::Waveforms;
-use crate::widgets::{Icon, checked_name_box, clock, icon_button, meter, name_box, position};
+use crate::widgets::{checked_name_box, name_box};
 use crate::workspace::{WindowLayout, Workspace, check_name};
 
 /// What the shell shows. The app fills one in for each frame.
@@ -243,6 +245,9 @@ pub struct Shell {
     dock: Dock,
     theme: Theme,
     mouse: MouseMap,
+    /// The parts of the transport bar, the track headers and the mixer
+    /// strips, as the user has them.
+    parts: Parts,
     /// What the devices and the piano roll follow, as last seen.
     followed: Option<Followed>,
     /// What's being renamed, and the name typed so far.
@@ -272,6 +277,7 @@ impl Default for Shell {
             panels: Panels::default(),
             theme: Theme::default(),
             mouse: MouseMap::live(),
+            parts: Parts::default(),
             followed: None,
             rename: None,
             asking_workspace: None,
@@ -406,13 +412,12 @@ impl Shell {
             .filter(|id| self.dock.shown(id))
             .collect();
         let theme = &self.theme;
+        let parts = &self.parts;
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            menu_bar(ui, view, &shown, theme, &mut actions);
+            menu_bar(ui, view, &shown, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
-            ui.add_space(4.0);
-            transport_bar(ui, view, theme, &mut actions);
-            ui.add_space(4.0);
+            transport_bar::show(ui, view, theme, parts, &mut actions);
         });
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
@@ -426,6 +431,7 @@ impl Shell {
                 view,
                 theme,
                 mouse: &self.mouse,
+                parts,
                 chain,
                 actions: &mut actions,
                 browse: false,
@@ -456,6 +462,7 @@ impl Shell {
         if added {
             self.dock.bring_forward(DEVICES);
         }
+        self.parts.carry_out();
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
         self.show_rename(ui.ctx(), view, &mut actions);
@@ -463,6 +470,7 @@ impl Shell {
         self.palette.show(ui.ctx(), view, &mut actions);
         self.shortcuts
             .show(ui.ctx(), view, &self.registry, &mut actions);
+        self.parts.show_customise(ui.ctx(), &self.theme);
         browser::show_dragged(ui.ctx());
         actions
     }
@@ -547,31 +555,37 @@ impl Shell {
         self.saved_place.get_or_insert(place);
     }
 
-    /// How the panels are laid out, and where the window is, for the app to
-    /// save. The app gives it its slot.
+    /// How the panels are laid out, where the window is, and the parts of
+    /// the transport bar, the track headers and the mixer strips, for the
+    /// app to save. The app gives it its slot.
     pub fn workspace(&self) -> Workspace {
         let mut main = self.dock.layout(&self.registry, &self.theme);
         self.place.put_in(&mut main);
         Workspace {
             slot: None,
+            views: self.parts.views(),
             windows: vec![main],
         }
     }
 
-    /// The workspace, if the user changed the layout or moved the window
-    /// since it was last handed out, for the app to save. A window being
-    /// moved or resized is saved once it has stayed put for a second.
+    /// The workspace, if the user changed the layout or the views' parts,
+    /// or moved the window, since it was last handed out, for the app to
+    /// save. A window being moved or resized is saved once it has stayed
+    /// put for a second.
     pub fn changed_workspace(&mut self) -> Option<Workspace> {
         let moved = self.saved_place.is_some_and(|saved| saved != self.place)
             && self.now - self.placed_at >= SETTLE;
-        (self.dock.take_changed() | moved).then(|| self.take_workspace())
+        // Both are asked, so neither tells of the same change again.
+        let changed = self.dock.take_changed() | self.parts.take_changed();
+        (changed | moved).then(|| self.take_workspace())
     }
 
     /// The same, without waiting for the window to stay put: before the
     /// app switches to another workspace, or closes.
     pub fn unsaved_workspace(&mut self) -> Option<Workspace> {
         let moved = self.saved_place.is_some_and(|saved| saved != self.place);
-        (self.dock.take_changed() | moved).then(|| self.take_workspace())
+        let changed = self.dock.take_changed() | self.parts.take_changed();
+        (changed | moved).then(|| self.take_workspace())
     }
 
     fn take_workspace(&mut self) -> Workspace {
@@ -579,14 +593,16 @@ impl Shell {
         self.workspace()
     }
 
-    /// Lays the panels out as `workspace` says, and takes the main window's
-    /// place from it, which the app moves the window to.
+    /// Lays the panels out and shows the views' parts as `workspace` says,
+    /// and takes the main window's place from it, which the app moves the
+    /// window to.
     pub fn set_workspace(&mut self, workspace: &Workspace) {
         let main = workspace.windows.first();
         self.dock = match main {
             Some(window) => Dock::from_layout(window, &self.registry, &self.theme),
             None => Dock::new(&self.registry),
         };
+        self.parts.set_views(&workspace.views);
         if let Some(window) = main.filter(|window| window.at.is_some() || window.size.is_some()) {
             self.place = Place::of(window);
         }
@@ -594,14 +610,16 @@ impl Shell {
     }
 
     /// Lays the panels out as at first, with all of them in the main window,
-    /// which stays where it is, and saves that as the workspace in use.
+    /// which stays where it is, shows the views' parts as at first, and
+    /// saves that as the workspace in use.
     pub fn reset_workspace(&mut self) {
         self.dock = Dock::new(&self.registry);
         self.dock.mark_changed();
+        self.parts.set_views(&Views::default());
     }
 
-    /// Asks for a name to keep the panels' layout under, as a new
-    /// workspace.
+    /// Asks for a name to keep the panels' layout and the views' parts
+    /// under, as a new workspace.
     pub fn save_workspace_as(&mut self) {
         self.asking_workspace = Some(WorkspaceBox::SaveAs(String::new()));
     }
@@ -802,15 +820,9 @@ impl Shell {
     }
 }
 
-/// The menus, with every command and its keys, and the meters on the right.
-/// `shown` has the ids of the panels in sight.
-fn menu_bar(
-    ui: &mut Ui,
-    view: &View<'_>,
-    shown: &BTreeSet<&str>,
-    theme: &Theme,
-    actions: &mut Vec<Action>,
-) {
+/// The menus, with every command and its keys. `shown` has the ids of the
+/// panels in sight.
+fn menu_bar(ui: &mut Ui, view: &View<'_>, shown: &BTreeSet<&str>, actions: &mut Vec<Action>) {
     egui::MenuBar::new().ui(ui, |ui| {
         for menu in menus(view.commands) {
             ui.menu_button(menu.title.as_str(), |ui| {
@@ -824,9 +836,6 @@ fn menu_bar(
                 }
             });
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            meters(ui, &view.audio, theme, actions);
-        });
     });
 }
 
@@ -929,144 +938,6 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         .map(|(_, on)| on)
 }
 
-fn transport_bar(ui: &mut Ui, view: &View<'_>, theme: &Theme, actions: &mut Vec<Action>) {
-    let project = view.project;
-    let tempo = &project.tempo;
-    let playhead = view.playback.playhead;
-    // Runs `id` when `response` was clicked, with its keys in the tooltip.
-    let run = |response: egui::Response, id: CommandId, actions: &mut Vec<Action>| {
-        if response.on_hover_text(hint(view, &id)).clicked() {
-            actions.push(Action::Run(id));
-        }
-    };
-    ui.horizontal(|ui| {
-        let start = icon_button(ui, Icon::ToStart, false, theme);
-        run(start, transport::GO_TO_START, actions);
-        let play = icon_button(ui, Icon::Play, view.playback.playing, theme);
-        run(play, transport::PLAY, actions);
-        let stop = icon_button(ui, Icon::Stop, false, theme);
-        run(stop, transport::STOP, actions);
-        let record = icon_button(ui, Icon::Record, view.playback.record, theme);
-        run(record, transport::RECORD, actions);
-        let capture = ui.add(Button::new("Capture"));
-        run(capture, transport::CAPTURE, actions);
-        ui.separator();
-
-        // Punching in and out happens at the loop's ends.
-        let region = project.loop_region;
-        let ends = |toggle: &CommandId, what: &str| {
-            format!(
-                "{}\n{what} {} to {}",
-                hint(view, toggle),
-                position(tempo, region.start),
-                position(tempo, region.end)
-            )
-        };
-        let looping = ui
-            .add(Button::selectable(project.looping, "Loop"))
-            .on_hover_text(ends(&transport::TOGGLE_LOOP, "Loops"));
-        if looping.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_LOOP));
-        }
-        let punch_in = ui
-            .add(Button::selectable(project.punch_in, "Punch In"))
-            .on_hover_text(format!(
-                "{}\nRecords from {} on",
-                hint(view, &transport::TOGGLE_PUNCH_IN),
-                position(tempo, region.start)
-            ));
-        if punch_in.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_PUNCH_IN));
-        }
-        let punch_out = ui
-            .add(Button::selectable(project.punch_out, "Punch Out"))
-            .on_hover_text(format!(
-                "{}\nRecords up to {}",
-                hint(view, &transport::TOGGLE_PUNCH_OUT),
-                position(tempo, region.end)
-            ));
-        if punch_out.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_PUNCH_OUT));
-        }
-        ui.separator();
-
-        let metronome = ui.add(Button::selectable(project.metronome, "Metronome"));
-        run(metronome, transport::TOGGLE_METRONOME, actions);
-        ui.separator();
-
-        let mut bpm = tempo.bpm_at(playhead);
-        let field = ui
-            .add(
-                DragValue::new(&mut bpm)
-                    .speed(0.1)
-                    .range(TempoMap::MIN_BPM..=TempoMap::MAX_BPM)
-                    .fixed_decimals(2)
-                    .suffix(" BPM")
-                    // A typed tempo applies on Enter, not at each digit.
-                    .update_while_editing(false),
-            )
-            .on_hover_text("Drag, or click and type, to set the tempo");
-        // One drag is one step in the undo history.
-        if field.drag_started() {
-            actions.push(Action::BeginGesture);
-        }
-        if field.changed() {
-            actions.push(Action::SetTempo(bpm));
-        }
-        if field.drag_stopped() {
-            actions.push(Action::EndGesture);
-        }
-        run(ui.small_button("\u{2212}"), transport::TEMPO_DOWN, actions);
-        run(ui.small_button("+"), transport::TEMPO_UP, actions);
-        let signature = tempo.signature_at(playhead);
-        ui.label(format!(
-            "{}/{}",
-            signature.numerator(),
-            signature.denominator()
-        ));
-        ui.separator();
-
-        ui.label(
-            RichText::new(position(tempo, playhead))
-                .monospace()
-                .size(theme.position_text)
-                .strong(),
-        )
-        .on_hover_text("Bars, beats and sixteenths");
-        ui.label(
-            RichText::new(clock(view.playback.seconds))
-                .monospace()
-                .weak(),
-        );
-    });
-}
-
-/// The CPU meter and the dropout counter, laid out right to left.
-fn meters(ui: &mut Ui, audio: &Audio<'_>, theme: &Theme, actions: &mut Vec<Action>) {
-    let dropouts = if audio.dropouts == 0 {
-        RichText::new("No dropouts")
-    } else {
-        let plural = if audio.dropouts == 1 { "" } else { "s" };
-        RichText::new(format!("{} dropout{plural}", audio.dropouts)).color(theme.warning)
-    };
-    let counter = ui
-        .add(Button::new(dropouts).frame(false))
-        .on_hover_text(format!(
-            "{}\n\nClick to count from zero again.",
-            audio.details
-        ));
-    if counter.clicked() {
-        actions.push(Action::ResetDropouts);
-    }
-    ui.separator();
-    meter(ui, audio.load, theme).on_hover_text(audio.details);
-    let load = audio.load.map_or("CPU --".to_owned(), |load| {
-        format!("CPU {:.0}%", load * 100.0)
-    });
-    ui.label(RichText::new(load).monospace())
-        .on_hover_text(audio.details);
-}
-
 fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         match view.messages {
@@ -1160,18 +1031,6 @@ fn confirm_box(ctx: &egui::Context, question: &str, detail: &str, confirm: &str)
         return Some(false);
     }
     modal.inner
-}
-
-/// A command's title and keys, for a tooltip: "Play (Shift+Space)".
-fn hint(view: &View<'_>, id: &CommandId) -> String {
-    let title = view
-        .commands
-        .get(id)
-        .map_or(id.as_str(), |c| c.title.as_str());
-    match chords(view, id).as_str() {
-        "" => title.to_owned(),
-        chords => format!("{title} ({chords})"),
-    }
 }
 
 /// The chords that run `id` in the panel with the focus, as keymap files
@@ -1657,6 +1516,7 @@ mod tests {
         let workspace = Workspace {
             slot: None,
             windows: vec![window.clone()],
+            ..Workspace::default()
         };
         harness.state_mut().shell.set_workspace(&workspace);
         harness.run();
