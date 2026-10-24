@@ -18,6 +18,7 @@ mod plugins;
 mod recorder;
 mod session;
 mod settings;
+mod workspaces;
 
 pub use app::App;
 pub use output::Output;

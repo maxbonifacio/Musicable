@@ -187,24 +187,25 @@ That's what `ParallelOptions::inline_below` is for
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
   Tempo" transaction, and a whole drag is one step in the undo history.
-- **The arrangement** fills the middle of the window: the tracks over time,
-  with their clips, under a ruler ([below](#the-arrangement)).
-- **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Device to open the browser's devices
-  (see [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
-  **View > Devices** (Ctrl+Alt+L) hides or shows it.
-- **The piano roll** takes the devices panel's place, as Live's clip view
-  takes its device view's: showing one hides the other. Double-clicking a
-  MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
-  switches between the two ([below](#the-piano-roll)).
+- **The panels** fill the rest of the window, each with its tab, and can be
+  moved about, sized and hidden ([below](#the-panels)).
+- **The arrangement** is in the middle: the tracks over time, with their
+  clips, under a ruler ([below](#the-arrangement)).
+- **The mixer** is under the arrangement, with a strip for each track and
+  the master's on the right (see [The mixer](#the-mixer)). **View > Mixer**
+  (Ctrl+Alt+M) hides or shows it.
+- **The devices panel** is under the mixer: the selected track's devices,
+  or the master's, with Add Device to open the browser's devices (see
+  [Built-in devices](#built-in-devices) and [Plugins](#plugins)). **View >
+  Devices** (Ctrl+Alt+L) hides or shows it.
+- **The piano roll** is in a tab beside the devices panel, as Live's clip
+  view takes its device view's place. Double-clicking a MIDI clip, or
+  **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12 switches between
+  the two ([below](#the-piano-roll)).
 - **The browser** is a panel on the left with the samples, the devices and
   the presets ([The browser](#the-browser)), hidden until Add Device,
   **Browser > Search in Browser** (Ctrl+F) or **View > Browser**
   (Ctrl+Alt+B) shows it.
-- **The mixer** is a panel under them, with a strip for each track and the
-  master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
-  make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
-  shows it.
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
   measures it (click it for the audio settings), and the project's name,
@@ -219,6 +220,32 @@ That's what `ParallelOptions::inline_below` is for
 first: on Windows, within the double-click time in its mouse settings, as
 in other Windows apps, which the app reads as it starts; elsewhere, within
 egui's 0.3 seconds.
+
+### The panels
+
+The arrangement, the mixer, the devices panel, the piano roll and the
+browser are docked panels, laid out in splits and tabs
+([egui_tiles](https://docs.rs/egui_tiles)):
+
+- **Drag a tab** onto another panel to split it, beside, over or under,
+  where the blue preview shows, or onto a tab bar to join its tabs. A
+  group of tabs moves together by its tab bar.
+- **Drag the edge** between two panels to size them. A panel keeps its
+  size as the window grows and shrinks, and when it moves, and the part
+  with the arrangement takes what's left. A group of tabs is as big as the
+  tab in front, until its edge is dragged, which sizes them all.
+- **A tab's ×** hides its panel, as the View menu's command does, and the
+  panel keeps its place: the View menu shows it there again, in front of
+  the tabs beside it. The arrangement stays.
+- **The devices and the piano roll follow the selection**: selecting the
+  clip the piano roll shows brings it forward, selecting another track
+  brings the devices forward, and so does adding a device. Neither comes
+  back from hidden by itself.
+
+Devices and presets dragged from the browser go in the devices panel's
+chain wherever the panel is. The window opens laid out as it was left:
+the app saves the layout to the default workspace's file as it changes
+([Settings](#settings-and-your-keymap)).
 
 ## The arrangement
 
@@ -324,7 +351,10 @@ each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
 `Shell::set_theme` and `set_mouse_map` change them, for the profiles of
 Tier 2. Each view is a panel with its own id, such as
-`musicable_ui::MIXER` and `PIANO_ROLL`.
+`musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel registry
+(`crates/ui/src/panels.rs`) holds with its title, its place and size in
+the default layout, and how it's drawn: the dock lays the panels out by
+id, and the workspace file names them by it.
 
 ### How fast it draws
 
@@ -1214,7 +1244,8 @@ scaled or rounded. A cancelled or failed export leaves no files behind.
 
 ## Settings and your keymap
 
-The app keeps its settings and your keymap in its config folder:
+The app keeps its settings, your keymap and the panels' layout in its
+config folder:
 
 | System | Folder |
 |---|---|
@@ -1254,6 +1285,34 @@ Single changes to a file without mistakes make no backup: there's nothing to
 lose. Without a config folder, changes last until the app closes. If the
 backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
+
+`workspaces/Default.toml` is how the window's panels are laid out
+([The panels](#the-panels)), written whenever you change the layout, once
+you let go of the tab or the edge you're dragging, and read at startup:
+
+```toml
+format = "musicable-workspace"
+version = 1
+
+[[windows]]
+hidden = ["browser", "piano_roll"]
+layout = { across = [
+    { panel = "browser" },
+    { down = [
+        { panel = "arrangement" },
+        { panel = "mixer", size = 372 },
+        { tabs = ["devices", "piano_roll"], front = "devices" },
+    ] },
+] }
+```
+
+A part's `size` is its width in a row of parts (`across`) or its height in
+a column (`down`), in points; parts without one take their panels' default
+sizes, and the part with the arrangement takes what's left. `hidden` lists
+the panels hidden, which keep their place. Panels the file doesn't have go
+where they go at first, hidden, and a file that can't be used leaves the
+first layout, and says why. Deleting the file brings back the first
+layout.
 
 `settings.toml` holds the audio settings, written whenever you apply new
 ones, how editing behaves, the export window's and the browser's settings

@@ -24,9 +24,10 @@ pub const TOGGLE_MIXER: CommandId = CommandId::new("view.toggle_mixer");
 pub const TOGGLE_DEVICES: CommandId = CommandId::new("view.toggle_devices");
 /// Shows or hides the browser, beside the arrangement.
 pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
-/// Shows or hides the piano roll, in place of the devices: Live's clip view.
+/// Shows or hides the piano roll, in a tab beside the devices: Live's clip
+/// view.
 pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll");
-/// Shows the piano roll in place of the devices, or the devices in place of
+/// Brings the piano roll in front of the devices, or the devices in front of
 /// the piano roll: Live's Toggle Between Device/Clip View.
 pub const SWITCH_DEVICES_PIANO_ROLL: CommandId = CommandId::new("view.switch_devices_piano_roll");
 /// Zooms the arrangement in, or the piano roll while it has the focus,
