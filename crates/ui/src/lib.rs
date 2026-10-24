@@ -22,6 +22,7 @@ mod browser;
 mod carry;
 mod devices;
 mod dock;
+mod ghost;
 mod history;
 mod keys;
 mod menus;

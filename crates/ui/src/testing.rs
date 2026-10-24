@@ -486,6 +486,35 @@ fn show_own(ctx: &egui::Context, viewport: ImmediateViewport<'_>) {
     let id = ids.this;
     let mut viewports = ctx.input(|i| i.raw.viewports.clone());
     let time = ctx.input(|i| i.time);
+    if id == crate::ghost::id() {
+        // The ghost of a dragged tab isn't a window of its own: the tests
+        // find it in the shell. It's drawn all the same.
+        OWN.with_borrow(|windows| {
+            for window in windows {
+                viewports.insert(window.id, window.info.clone());
+            }
+        });
+        let size = builder.inner_size.unwrap_or(vec2(100.0, 30.0));
+        let at = builder.position.unwrap_or_default();
+        let rect = Rect::from_min_size(at, size);
+        let info = ViewportInfo {
+            inner_rect: Some(rect),
+            outer_rect: Some(rect),
+            native_pixels_per_point: Some(1.0),
+            ..ViewportInfo::default()
+        };
+        viewports.insert(id, info);
+        let input = RawInput {
+            viewport_id: id,
+            viewports,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(time),
+            ..RawInput::default()
+        };
+        let output = ctx.run_ui(input, |ui| viewport_ui_cb(ui));
+        output.drop_without_applying_deltas();
+        return;
+    }
     let input = OWN.with_borrow_mut(|windows| {
         if !windows.iter().any(|window| window.id == id) {
             let at = builder.position.unwrap_or(pos2(1200.0, 0.0));

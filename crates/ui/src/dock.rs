@@ -12,20 +12,24 @@
 //!
 //! Each window has a tree of its own. A panel moved to a window of its own,
 //! from its tab's menu or by dragging its tab out past the window's edge,
-//! keeps its place in the main window's tree, hidden, to go back to.
+//! keeps its place in the main window's tree, hidden, to go back to. A tab
+//! dragged from one window over another goes there as if it were dragged
+//! about in that window: it shows where the panel would go, and puts it
+//! there.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::{
-    Event, Id, Order, Pos2, Rect, Response, Role, Stroke, StrokeKind, Ui, Vec2, Visuals,
-    WidgetInfo, WidgetText, pos2, vec2,
+    Context, DragAndDrop, Event, Id, Order, Pos2, Rect, Response, Role, Stroke, StrokeKind, Ui,
+    Vec2, ViewportId, WidgetInfo, WidgetText, pos2, vec2,
 };
 use egui_tiles::{
     Behavior, Container, EditAction, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId,
     Tiles, Tree, UiResponse,
 };
 
+use crate::carry::window_under;
 use crate::panels::{Cx, Panel, Panels, Place, Registry};
 use crate::theme::Theme;
 use crate::workspace::{Layout, Split, WindowLayout};
@@ -33,6 +37,26 @@ use crate::workspace::{Layout, Split, WindowLayout};
 /// A panel in the tree, by id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pane(pub &'static str);
+
+/// A panel's tab the user drags, and the window it's dragged from, as
+/// egui's drag and drop has it while the tab is dragged, for the other
+/// windows to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tab {
+    pub panel: &'static str,
+    pub from: ViewportId,
+}
+
+/// The tile of the panel whose tab the user drags over the window from
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Visit {
+    panel: &'static str,
+    tile: TileId,
+    /// Whether it was added for the visit, rather than being the panel's
+    /// place in the main window, which it keeps while it's elsewhere.
+    added: bool,
+}
 
 /// Panels' widths and heights in points, by id, as the user dragged them:
 /// across first.
@@ -64,6 +88,11 @@ pub(crate) struct Dock {
     /// Where the pointer was last seen while a tab was dragged, for when
     /// the release comes with none.
     dragged_to: Option<Pos2>,
+    /// The tile and panel of a tab dragged out past the window's edge,
+    /// whose drag egui_tiles doesn't see while it's out there.
+    dragged_out: Option<(TileId, &'static str)>,
+    /// The tab dragged over the window from another, if one is.
+    visit: Option<Visit>,
 }
 
 impl Dock {
@@ -148,6 +177,8 @@ impl Dock {
             changed: false,
             keyboard: None,
             dragged_to: None,
+            dragged_out: None,
+            visit: None,
         }
     }
 
@@ -176,7 +207,9 @@ impl Dock {
     /// down, as `dir` says.
     fn part(&self, id: TileId, dir: Option<LinearDir>, measure: &Measure<'_>) -> Option<Layout> {
         let tiles = &self.tree.tiles;
+        let visiting = self.added_visit();
         let mut layout = match tiles.get(id)? {
+            Tile::Pane(pane) if Some(pane.0) == visiting => return None,
             Tile::Pane(pane) => Layout::panel(pane.0),
             Tile::Container(Container::Linear(linear)) => {
                 let mut parts: Vec<_> = (linear.children.iter())
@@ -197,6 +230,7 @@ impl Dock {
             Tile::Container(container) => {
                 let mut panes = Vec::new();
                 collect_panes(tiles, id, &mut panes);
+                panes.retain(|pane| Some(pane.0) != visiting);
                 // The tab in front, or with them all hidden, the one that was.
                 let front = match container {
                     Container::Tabs(tabs) => (tabs.next_active(tiles).or(tabs.active))
@@ -437,11 +471,25 @@ impl Dock {
         }
     }
 
-    /// The tile of the panel with id `id`.
+    /// The tile of the panel with id `id`. A tab dragged over the window
+    /// from another doesn't have its panel here until it's let go of.
     fn find(&self, id: &str) -> Option<TileId> {
+        let visiting = (self.visit)
+            .filter(|visit| visit.added)
+            .map(|visit| visit.tile);
         (self.tree.tiles.iter())
-            .find(|(_, tile)| matches!(tile, Tile::Pane(pane) if pane.0 == id))
+            .find(|&(&tile, kind)| {
+                Some(tile) != visiting && matches!(kind, Tile::Pane(pane) if pane.0 == id)
+            })
             .map(|(&tile, _)| tile)
+    }
+
+    /// The panel of a tab dragged over the window from another, if a tile
+    /// was added for it.
+    fn added_visit(&self) -> Option<&'static str> {
+        (self.visit)
+            .filter(|visit| visit.added)
+            .map(|visit| visit.panel)
     }
 
     /// Whether the panel with id `id` is in sight: not hidden, nor behind
@@ -585,6 +633,8 @@ impl Dock {
     /// Lays the panels out in `ui`'s space and draws them with `draw`.
     pub fn show(&mut self, ui: &mut Ui, draw: &mut Draw<'_, '_>) {
         let (registry, theme) = (draw.registry, draw.cx.theme);
+        // First, as a tab dragged here from another window may add a tile.
+        self.visit(ui, draw);
         // Tidied before the sizes are worked out, so the tree shows as
         // they're worked out for.
         self.tree.simplify(&TIDY);
@@ -598,6 +648,7 @@ impl Dock {
         }
         self.drag_out(ui, draw);
         self.tree.ui(draw, ui);
+        self.land(ui, draw);
         for tile in draw.closed.drain(..) {
             self.tree.set_visible(tile, false);
             self.changed = true;
@@ -622,33 +673,199 @@ impl Dock {
         self.changed |= std::mem::take(&mut draw.edited);
     }
 
-    /// A tab let go of past the edge of the window, `draw.bounds`, moves its
-    /// panel to a new window there, rather than to the nearest place in the
-    /// tree, as egui_tiles would put it. While it's out there, `draw` shows
-    /// no place for it.
+    /// A tab dragged out past the edge of the window, `draw.bounds`, leaves
+    /// it: egui_tiles, which would put it at the nearest place in the tree,
+    /// stops seeing the drag until it comes back in, and the shell shows
+    /// its ghost by the pointer. Let go of over another of the app's
+    /// windows, it goes where that window shows (see
+    /// [`visit`](Self::visit)), and elsewhere its panel moves to a new
+    /// window there, if it can.
     fn drag_out(&mut self, ui: &Ui, draw: &mut Draw<'_, '_>) {
-        let dragged = (self.tree.dragged_id(ui.ctx()))
-            .and_then(|tile| self.tree.tiles.get_pane(&tile).map(|pane| pane.0));
-        let Some(panel) = dragged else {
+        let ctx = ui.ctx();
+        let tree = self.tree.id();
+        let visiting = self.visit.map(|visit| visit.tile);
+        let held = (self.tree.dragged_id(ctx))
+            .filter(|&tile| Some(tile) != visiting)
+            .and_then(|tile| Some((tile, self.tree.tiles.get_pane(&tile)?.0)));
+        let Some((tile, panel)) = held.or(self.dragged_out) else {
             self.dragged_to = None;
-            draw.outside = false;
             return;
         };
+        // What's dragged, for the other windows, which can take it, from
+        // when egui starts dragging it until it's let go of or Escape is
+        // pressed, which drops it.
+        let tab = Tab {
+            panel,
+            from: ctx.viewport_id(),
+        };
+        let dragging = DragAndDrop::payload::<Tab>(ctx).is_some_and(|dragged| *dragged == tab);
+        if self.dragged_out.is_some() && !dragging {
+            self.dragged_out = None;
+            self.dragged_to = None;
+            return;
+        }
+        if ctx.dragged_id() == Some(tile.egui_id(tree)) && !dragging {
+            DragAndDrop::set_payload(ctx, tab);
+        }
         let (pointer, released) = ui.input(|i| {
             let pointer = i.pointer.interact_pos().or(i.pointer.latest_pos());
             (pointer, i.pointer.any_released())
         });
         let at = pointer.or(self.dragged_to);
         self.dragged_to = at;
-        draw.outside = at.is_some_and(|at| !draw.bounds.contains(at)) && draw.movable(panel);
-        if draw.outside && released {
-            ui.ctx().stop_dragging();
-            let size = self.panel_size(panel, draw.cx.theme);
-            draw.moves.push(Move::ToNewWindow { panel, at, size });
+        let outside = at.is_some_and(|at| !draw.bounds.contains(at));
+        if outside && self.dragged_out.is_none() {
+            forget_drag(ctx, tile.egui_id(tree));
+            forget_preview(ctx, tile);
+            self.dragged_out = Some((tile, panel));
+        } else if !outside && self.dragged_out.take().is_some() {
+            // Back in, where egui_tiles shows where it would go again.
+            drag(ctx, tile.egui_id(tree), released);
+        }
+        if !outside {
+            return;
+        }
+        draw.ghost = at.map(|at| (panel, at));
+        if released {
+            self.dragged_out = None;
             self.dragged_to = None;
-            draw.outside = false;
+            let elsewhere = at.and_then(|at| window_under(ctx, at)).is_some();
+            if !elsewhere && draw.movable(panel) {
+                let size = self.panel_size(panel, draw.cx.theme);
+                draw.moves.push(Move::ToNewWindow { panel, at, size });
+            }
         }
     }
+
+    /// A tab dragged over the window from another, as [`Carry`] passes the
+    /// pointer on here: egui_tiles shows where its panel would go and puts
+    /// it there when it's let go of, as if it were dragged about here, with
+    /// a tile of its own here. That's the panel's place in the main window,
+    /// which it keeps while it's elsewhere, or else one added for it,
+    /// hidden, until the tab leaves.
+    ///
+    /// [`Carry`]: crate::carry::Carry
+    fn visit(&mut self, ui: &Ui, draw: &mut Draw<'_, '_>) {
+        let ctx = ui.ctx();
+        let here = ctx.viewport_id();
+        let over = (ctx.pointer_latest_pos()).is_some_and(|at| draw.bounds.contains(at));
+        let tab = (DragAndDrop::payload::<Tab>(ctx).map(|tab| *tab))
+            .filter(|tab| tab.from != here && over && draw.takes(tab.panel));
+        let staying = self
+            .visit
+            .filter(|visit| tab.is_some_and(|tab| tab.panel == visit.panel));
+        if staying.is_none() {
+            self.leave(ctx);
+        }
+        let Some(tab) = tab else {
+            return;
+        };
+        let Some(visit) = staying.or_else(|| self.arrive(tab.panel)) else {
+            return;
+        };
+        self.visit = Some(visit);
+        // egui drags it until it's let go of, which stops the drag for the
+        // pass.
+        let id = visit.tile.egui_id(self.tree.id());
+        if ctx.dragged_id() != Some(id) && ctx.drag_stopped_id() != Some(id) {
+            let released = ui.input(|i| i.pointer.any_released());
+            drag(ctx, id, released);
+        }
+        draw.visited = true;
+    }
+
+    /// The tile for the panel `panel`, whose tab is dragged over the window
+    /// from another: its place here, if it has one, or else a new one out
+    /// of the way, either hidden. `None` if it's shown here already.
+    fn arrive(&mut self, panel: &'static str) -> Option<Visit> {
+        if let Some(tile) = self.find(panel) {
+            let hidden = !self.tree.tiles.is_visible(tile);
+            return hidden.then_some(Visit {
+                panel,
+                tile,
+                added: false,
+            });
+        }
+        let tile = self.tree.tiles.insert_pane(Pane(panel));
+        self.tree.set_visible(tile, false);
+        // In the tree, as egui_tiles drops the tiles it can't reach: behind
+        // the tabs of a group, where it changes nothing, as every panel
+        // has a tab.
+        let tiles = &mut self.tree.tiles;
+        let group = (tiles.iter_mut()).find_map(|(_, kind)| match kind {
+            Tile::Container(Container::Tabs(tabs)) => Some(tabs),
+            _ => None,
+        });
+        match group {
+            Some(tabs) => tabs.children.push(tile),
+            None => self.add_to_root(tile, LinearDir::Horizontal, false),
+        }
+        Some(Visit {
+            panel,
+            tile,
+            added: true,
+        })
+    }
+
+    /// The tab dragged over the window from another left, or was let go
+    /// of elsewhere: a tile added for it goes.
+    fn leave(&mut self, ctx: &Context) {
+        let Some(visit) = self.visit.take() else {
+            return;
+        };
+        forget_drag(ctx, visit.tile.egui_id(self.tree.id()));
+        forget_preview(ctx, visit.tile);
+        if visit.added {
+            self.tree.remove_recursively(visit.tile);
+            self.tree.simplify(&TIDY);
+        }
+    }
+
+    /// The tab dragged over the window from another let go of here:
+    /// egui_tiles put its tile where it showed, and the panel is here now.
+    fn land(&mut self, ui: &Ui, draw: &mut Draw<'_, '_>) {
+        let Some(visit) = self.visit else {
+            return;
+        };
+        if !ui.input(|i| i.pointer.any_released()) {
+            return;
+        }
+        self.visit = None;
+        self.tree.set_visible(visit.tile, true);
+        self.tree.make_active(|tile, _| tile == visit.tile);
+        self.changed = true;
+        draw.moves.push(Move::Into(visit.panel));
+    }
+}
+
+/// Has egui drag the widget `id`, from this pass, or, let go of in this
+/// pass, `released`, have its drag stop in it, as egui would have, which
+/// egui_tiles takes as a drop: started now, the drag would go on after.
+fn drag(ctx: &Context, id: Id, released: bool) {
+    ctx.set_dragged_id(id);
+    if released {
+        ctx.stop_dragging();
+    }
+}
+
+/// Ends the drag of the widget `id` there and then. egui_tiles takes a
+/// tile whose drag stopped this pass as dragged still, and puts it where it
+/// would go, so another widget is taken to have stopped instead.
+fn forget_drag(ctx: &Context, id: Id) {
+    if ctx.dragged_id() == Some(id) || ctx.drag_stopped_id() == Some(id) {
+        ctx.set_dragged_id(Id::unique("dragged elsewhere"));
+        ctx.stop_dragging();
+    }
+}
+
+/// Forgets where egui_tiles last showed that the tile `tile` would go,
+/// which it eases towards the next place it shows. It keeps that by the
+/// tile's id alone, which a tile of another window's tree can have too, so
+/// a drag that ends elsewhere would leave the place for that tile to ease
+/// from, from the other window.
+fn forget_preview(ctx: &Context, tile: TileId) {
+    let id = Id::unique((tile, "smoothed_preview_rect"));
+    ctx.data_mut(|data| data.remove::<Rect>(id));
 }
 
 /// Which of a panel's [`Sizes`] goes across or down.
@@ -945,8 +1162,12 @@ pub(crate) struct Draw<'a, 'v> {
     pub shown: usize,
     /// The window's area: a tab dragged past it goes to a new window.
     pub bounds: Rect,
-    /// Whether a tab is dragged out past `bounds`.
-    pub outside: bool,
+    /// The panel whose tab is dragged out past `bounds`, and where the
+    /// pointer is, in the window's points, for the shell to show its ghost
+    /// there.
+    pub ghost: Option<(&'static str, Pos2)>,
+    /// Whether a tab is dragged over the window from another.
+    pub visited: bool,
 }
 
 /// A panel the user moved to another window.
@@ -961,6 +1182,8 @@ pub(crate) enum Move {
     },
     /// Back to where it was in the main window.
     ToMainWindow(&'static str),
+    /// Here, its tab dragged from another window, out of that one.
+    Into(&'static str),
 }
 
 impl Draw<'_, '_> {
@@ -969,6 +1192,13 @@ impl Draw<'_, '_> {
     pub fn movable(&self, id: &str) -> bool {
         let hides = self.registry.get(id).is_some_and(|panel| panel.hides);
         hides && (!self.detached || self.shown > 1)
+    }
+
+    /// Whether the panel `id`, its tab dragged from another window, can
+    /// come here: one the user can hide, as only those leave the main
+    /// window.
+    pub fn takes(&self, id: &str) -> bool {
+        self.registry.get(id).is_some_and(|panel| panel.hides)
     }
 }
 
@@ -1076,23 +1306,16 @@ impl Behavior<Pane> for Draw<'_, '_> {
         false
     }
 
-    /// A tab dragged out past the window's edge has no place in the tree.
-    fn paint_drag_preview(
-        &self,
-        visuals: &Visuals,
-        painter: &egui::Painter,
-        parent_rect: Option<Rect>,
-        preview_rect: Rect,
-    ) {
-        if self.outside {
+    /// The ghost of a dragged tab, by the pointer, as egui_tiles draws it,
+    /// but for a tab dragged here from another window: the shell shows its
+    /// ghost in a window of its own, which follows it over the others.
+    fn drag_ui(&mut self, tiles: &Tiles<Pane>, ui: &mut Ui, tile: TileId) {
+        if self.visited {
             return;
         }
-        let stroke = self.drag_preview_stroke(visuals);
-        if let Some(parent_rect) = parent_rect {
-            painter.rect_stroke(parent_rect, 1.0, stroke, StrokeKind::Inside);
-        }
-        let color = self.drag_preview_color(visuals);
-        painter.rect(preview_rect, 1.0, color, stroke, StrokeKind::Inside);
+        let mut frame = egui::Frame::popup(ui.style());
+        frame.fill = frame.fill.gamma_multiply(0.5);
+        frame.show(ui, |ui| ui.label(self.tab_title_for_tile(tiles, tile)));
     }
 
     fn on_edit(&mut self, edit: EditAction) {
