@@ -470,8 +470,8 @@ other. They push a `Request`, as the file commands do.
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
-| `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in the devices' place | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
-| `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Shows the piano roll in place of the devices, or the devices in its place | F12 | F12, Shift+Tab |
+| `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in a tab beside the devices | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
+| `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Brings the piano roll in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
 | `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
 | `view.zoom_in` | Zoom In | Zooms the view with the focus in, around the start marker | Equals, NumpadAdd | + |

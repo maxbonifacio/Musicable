@@ -20,6 +20,7 @@ mod recorder;
 mod session;
 mod settings;
 mod theme_file;
+mod workspaces;
 
 pub use app::App;
 pub use output::Output;

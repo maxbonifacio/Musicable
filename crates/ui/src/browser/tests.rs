@@ -10,8 +10,9 @@ use musicable_model::{DeviceKind, Project, TrackKind};
 
 use super::*;
 use crate::PeaksBuilder;
-use crate::devices::BROWSER;
+use crate::panels::BROWSER;
 use crate::testing::{Previewing, State, quick_harness};
+use crate::{Layout, Split, WindowLayout, Workspace};
 
 /// A record of a second of 44.1 kHz stereo WAV at `path`.
 fn record(path: &str) -> Record {
@@ -542,6 +543,46 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
     let from = harness.get_by_label("Kick 02").rect().center();
     drag(&mut harness, from, panel.center());
     assert!(actions(&mut harness).is_empty());
+}
+
+#[test]
+fn devices_dropped_in_the_devices_panel_go_in_its_chain_wherever_it_is() {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let mut harness = harness(project, samples());
+    // The devices right of the arrangement and the mixer, as tall as the
+    // window.
+    let workspace = Workspace {
+        windows: vec![WindowLayout {
+            hidden: Vec::new(),
+            layout: Layout::new(Split::Across(vec![
+                Layout::panel(BROWSER),
+                Layout::new(Split::Down(vec![
+                    Layout::panel(crate::ARRANGEMENT),
+                    Layout::panel(crate::MIXER),
+                ])),
+                Layout {
+                    size: Some(320),
+                    ..Layout::panel(crate::DEVICES)
+                },
+            ])),
+        }],
+        ..Workspace::default()
+    };
+    let state = harness.state_mut();
+    state.shell.set_workspace(&workspace);
+    state.editor.selected_track = Some(keys);
+    harness.run();
+    click(&mut harness, "Devices");
+    actions(&mut harness);
+
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let panel = harness.get_by_label_contains("No devices.").rect();
+    assert!(panel.left() > lanes.right(), "{panel:?} beside {lanes:?}");
+    let from = harness.get_by_label("EQ").rect().center();
+    drag(&mut harness, from, panel.center());
+    let eq = Args::new().with("kind", "eq").with("track", keys);
+    assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, eq)]);
 }
 
 #[test]

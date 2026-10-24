@@ -508,8 +508,8 @@ fn read_lineup(registry: &Registry, view: &str, lineup: &Lineup) -> Vec<Entry> {
 ///
 /// ```toml
 /// [views.mixer_strip]
-/// parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
 /// hidden = ["monitor"]
+/// parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
 ///
 /// [views.track_header.sizes]
 /// meter = 14
@@ -548,6 +548,7 @@ mod tests {
     use musicable_model::{Project, TrackKind};
 
     use super::*;
+    use crate::Workspace;
     use crate::testing::{State, harness};
 
     type Harness = egui_kittest::Harness<'static, State>;
@@ -566,10 +567,10 @@ mod tests {
         harness.run();
     }
 
-    /// The lineup of `view` the shell keeps for the workspace, if the
-    /// user changed it.
+    /// The lineup of `view` the shell keeps in the workspace, if the user
+    /// changed it.
     fn lineup(harness: &Harness, view: &str) -> Option<Lineup> {
-        harness.state().shell.views().0.remove(view)
+        harness.state().shell.workspace().views.0.remove(view)
     }
 
     fn strings(ids: &[&str]) -> Vec<String> {
@@ -596,8 +597,8 @@ mod tests {
         let hidden = lineup(&harness, TRANSPORT_BAR).unwrap().hidden;
         assert_eq!(hidden, ["metronome"]);
         let shell = &mut harness.state_mut().shell;
-        assert!(shell.changed_views().is_some());
-        assert!(shell.changed_views().is_none(), "it was asked already");
+        assert!(shell.changed_workspace().is_some());
+        assert!(shell.changed_workspace().is_none(), "it was asked already");
 
         // A mixer strip's controls, and the track headers' buttons, which
         // take their own clicks.
@@ -616,7 +617,7 @@ mod tests {
         harness.get_by_label("Show automation of track Lead");
         // The mixer's own buttons stay.
         harness.get_by_label("Mute Lead");
-        let views = harness.state().shell.views();
+        let views = harness.state().shell.workspace().views;
         assert_eq!(views.0[MIXER_STRIP].hidden, ["input"]);
         assert_eq!(views.0[TRACK_HEADER].hidden, ["buttons"]);
     }
@@ -743,7 +744,12 @@ mod tests {
                 sizes: BTreeMap::from([("cpu".to_owned(), 100)]),
             },
         )]));
-        harness.state_mut().shell.set_views(&views);
+        let shell = &mut harness.state_mut().shell;
+        let workspace = Workspace {
+            views,
+            ..shell.workspace()
+        };
+        shell.set_workspace(&workspace);
         harness.run();
         let meter = harness
             .get_by_role_and_label(Role::Meter, "CPU load")
@@ -757,7 +763,7 @@ mod tests {
         assert!(harness.query_by_label("Capture").is_none());
         harness.get_by_label("Loop");
         // Setting them isn't a change to save.
-        assert!(harness.state_mut().shell.changed_views().is_none());
+        assert!(harness.state_mut().shell.changed_workspace().is_none());
     }
 
     #[test]

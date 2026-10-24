@@ -37,10 +37,6 @@ use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::position;
 
-/// The piano roll's panel, in place of the devices under the mixer, as
-/// Live's clip view takes the place of its device view.
-pub const PIANO_ROLL: &str = "piano_roll";
-
 /// How much a point of the wheel, or of a drag up or down the ruler,
 /// zooms: the zoom changes by `e` to the power of this many points.
 const ZOOM_SPEED: f32 = 0.005;

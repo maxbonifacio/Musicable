@@ -187,24 +187,25 @@ That's what `ParallelOptions::inline_below` is for
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
   Tempo" transaction, and a whole drag is one step in the undo history.
-- **The arrangement** fills the middle of the window: the tracks over time,
-  with their clips, under a ruler ([below](#the-arrangement)).
-- **The devices panel** is under the arrangement: the selected track's
-  devices, or the master's, with Add Device to open the browser's devices
-  (see [Built-in devices](#built-in-devices) and [Plugins](#plugins)).
-  **View > Devices** (Ctrl+Alt+L) hides or shows it.
-- **The piano roll** takes the devices panel's place, as Live's clip view
-  takes its device view's: showing one hides the other. Double-clicking a
-  MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
-  switches between the two ([below](#the-piano-roll)).
+- **The panels** fill the rest of the window, each with its tab, and can be
+  moved about, sized and hidden ([below](#the-panels)).
+- **The arrangement** is in the middle: the tracks over time, with their
+  clips, under a ruler ([below](#the-arrangement)).
+- **The mixer** is under the arrangement, with a strip for each track and
+  the master's on the right (see [The mixer](#the-mixer)). **View > Mixer**
+  (Ctrl+Alt+M) hides or shows it.
+- **The devices panel** is under the mixer: the selected track's devices,
+  or the master's, with Add Device to open the browser's devices (see
+  [Built-in devices](#built-in-devices) and [Plugins](#plugins)). **View >
+  Devices** (Ctrl+Alt+L) hides or shows it.
+- **The piano roll** is in a tab beside the devices panel, as Live's clip
+  view takes its device view's place. Double-clicking a MIDI clip, or
+  **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12 switches between
+  the two ([below](#the-piano-roll)).
 - **The browser** is a panel on the left with the samples, the devices and
   the presets ([The browser](#the-browser)), hidden until Add Device,
   **Browser > Search in Browser** (Ctrl+F) or **View > Browser**
   (Ctrl+Alt+B) shows it.
-- **The mixer** is a panel under them, with a strip for each track and the
-  master's on the right (see [The mixer](#the-mixer)). Drag its top edge to
-  make it taller or shorter, and **View > Mixer** (Ctrl+Alt+M) hides or
-  shows it.
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
   measures it (click it for the audio settings), and the project's name,
@@ -221,6 +222,32 @@ That's what `ParallelOptions::inline_below` is for
 first: on Windows, within the double-click time in its mouse settings, as
 in other Windows apps, which the app reads as it starts; elsewhere, within
 egui's 0.3 seconds.
+
+### The panels
+
+The arrangement, the mixer, the devices panel, the piano roll and the
+browser are docked panels, laid out in splits and tabs
+([egui_tiles](https://docs.rs/egui_tiles)):
+
+- **Drag a tab** onto another panel to split it, beside, over or under,
+  where the blue preview shows, or onto a tab bar to join its tabs. A
+  group of tabs moves together by its tab bar.
+- **Drag the edge** between two panels to size them. A panel keeps its
+  size as the window grows and shrinks, and when it moves, and the part
+  with the arrangement takes what's left. A group of tabs is as big as the
+  tab in front, until its edge is dragged, which sizes them all.
+- **A tab's ×** hides its panel, as the View menu's command does, and the
+  panel keeps its place: the View menu shows it there again, in front of
+  the tabs beside it. The arrangement stays.
+- **The devices and the piano roll follow the selection**: selecting the
+  clip the piano roll shows brings it forward, selecting another track
+  brings the devices forward, and so does adding a device. Neither comes
+  back from hidden by itself.
+
+Devices and presets dragged from the browser go in the devices panel's
+chain wherever the panel is. The window opens laid out as it was left:
+the app saves the layout to the default workspace's file as it changes
+([Settings](#settings-and-your-keymap)).
 
 ### Configurable views
 
@@ -241,9 +268,11 @@ resized:
 
 | View | Its parts, in the order they show at first |
 | --- | --- |
-| The transport bar | Go to Start · Play and Stop · Record · Capture · Loop and Punch · Metronome · Tempo · Time Signature · Position · Flexible Space · CPU Meter |
-| The track headers | Colour · Name · Automation Button (A) · Mute, Solo and Arm · Meter |
-| The mixer strips | Name · Input · Monitoring · Output · Sends · Pan · Fader and Meter · Gain and Peak · Mute, Solo and Arm · Clip Type |
+| The transport bar (`transport_bar`) | Go to Start (`go_to_start`) · Play and Stop (`play_stop`) · Record (`record`) · Capture (`capture`) · Loop and Punch (`loop_punch`) · Metronome (`metronome`) · Tempo (`tempo`) · Time Signature (`signature`) · Position (`position`) · Flexible Space (`space`) · CPU Meter (`cpu`) |
+| The track headers (`track_header`) | Colour (`colour`) · Name (`name`) · Automation Button, A (`automation`) · Mute, Solo and Arm (`buttons`) · Meter (`meter`) |
+| The mixer strips (`mixer_strip`) | Name (`name`) · Input (`input`) · Monitoring (`monitor`) · Output (`output`) · Sends (`sends`) · Pan (`pan`) · Fader and Meter (`fader`) · Gain and Peak (`readouts`) · Mute, Solo and Arm (`buttons`) · Clip Type (`clip_type`) |
+
+The ids in brackets are what the workspace file calls them.
 
 The transport bar's Flexible Space takes the room the other parts leave,
 which keeps the parts after it at the bar's right end. Across a header the
@@ -252,6 +281,10 @@ gives the fader its room. Each part takes as many rows in every strip, so
 the faders line up even where a track has no input or sends, and return
 and group tracks keep M and S where the other tracks have them, with an
 empty place for the arm button.
+
+The views come back as they were left: the app keeps what you change about
+them in the workspace, with the panels' layout
+([Settings](#settings-and-your-keymap)).
 
 ## The arrangement
 
@@ -359,8 +392,11 @@ each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
 `Shell::set_theme` and `set_mouse_map` change them: the app sets the theme
 from Options > Appearance and theme files ([Themes](#themes)), and the
-mouse map is for the profiles of Tier 2. Each view is a panel with its own id, such as
-`musicable_ui::MIXER` and `PIANO_ROLL`.
+mouse map is for the profiles of Tier 2. Each view is a panel with its own
+id, such as `musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel
+registry (`crates/ui/src/panels.rs`) holds with its title, its place and
+size in the default layout, and how it's drawn: the dock lays the panels
+out by id, and the workspace file names them by it.
 
 ### How fast it draws
 
@@ -1251,8 +1287,8 @@ scaled or rounded. A cancelled or failed export leaves no files behind.
 
 ## Settings and your keymap
 
-The app keeps its settings, your keymap and your themes in its config
-folder:
+The app keeps its settings, your keymap, your themes and the panels'
+layout in its config folder:
 
 | System | Folder |
 |---|---|
@@ -1292,6 +1328,50 @@ Single changes to a file without mistakes make no backup: there's nothing to
 lose. Without a config folder, changes last until the app closes. If the
 backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
+
+`workspaces/Default.toml` is how the window's panels are laid out
+([The panels](#the-panels)) and the parts of the transport bar, the track
+headers and the mixer strips ([Configurable views](#configurable-views)),
+written whenever you change them, once you let go of the tab, the edge or
+the part you're dragging, and read at startup:
+
+```toml
+format = "musicable-workspace"
+version = 1
+
+[views.mixer_strip]
+hidden = ["monitor"]
+parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
+
+[views.track_header.sizes]
+meter = 14
+
+[[windows]]
+hidden = ["browser", "piano_roll"]
+layout = { across = [
+    { panel = "browser" },
+    { down = [
+        { panel = "arrangement" },
+        { panel = "mixer", size = 372 },
+        { tabs = ["devices", "piano_roll"], front = "devices" },
+    ] },
+] }
+```
+
+A part's `size` is its width in a row of parts (`across`) or its height in
+a column (`down`), in points; parts without one take their panels' default
+sizes, and the part with the arrangement takes what's left. `hidden` lists
+the panels hidden, which keep their place. Panels the file doesn't have go
+where they go at first, hidden, and a file that can't be used leaves the
+first layout, and says why. Deleting the file brings back the first
+layout.
+
+`views` has only the views you changed, by the ids in the table under
+[Configurable views](#configurable-views). A view's `parts` are its parts
+in order, hidden ones too, `hidden` lists those hidden, and `sizes` the
+sizes given in the Customise window, in points. Parts the file doesn't name
+go after the part before them in the first order, and parts Musicable
+doesn't have are left out.
 
 `settings.toml` holds the audio settings, written whenever you apply new
 ones, how editing behaves, the theme, the export window's and the
@@ -1402,7 +1482,9 @@ save it. Reload reads it again, and its fonts.
 
 Most entries colour or size Musicable's views: the arrangement's, the
 transport bar's, and those under `[mixer]`, `[devices]`, `[piano_roll]` and
-`[browser]`. `[widgets]` is egui's: the fill of panels and of windows and
+`[browser]`. `[dock]` sizes the panels' tab bars (`tab_bar`), the gaps
+between panels (`gap`) and the least a panel's edge can be dragged to
+(`min_panel`). `[widgets]` is egui's: the fill of panels and of windows and
 menus, their outline and shadow, text fields (`field`), the selection,
 links, warnings, corners and spacing. Under it, `[widgets.passive]` is what
 can't be clicked, such as labels and separators, and `resting`, `hovered`,
@@ -1588,8 +1670,6 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
-- Keeping the views' parts with the workspace: for now they come back as
-  Musicable shows them at first each time it starts.
 - Editing a theme in the Appearance window, with colour pickers: theme
   files are edited in a text editor for now. Plugins' own windows keep
   their own look.

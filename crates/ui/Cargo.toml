@@ -11,7 +11,8 @@ musicable-model.workspace = true
 musicable-commands.workspace = true
 musicable-library.workspace = true
 egui.workspace = true
-# Theme files.
+egui_tiles.workspace = true
+# Theme and workspace files.
 serde.workspace = true
 toml.workspace = true
 
