@@ -1,5 +1,5 @@
-//! Finding commands by what the user types, in the command palette and the
-//! keyboard shortcuts window.
+//! Finding commands by what the user types, in the command palette and on
+//! the Keys page.
 
 use musicable_commands::KeyChord;
 

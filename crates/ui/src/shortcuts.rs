@@ -1,18 +1,19 @@
-//! The keyboard shortcuts window, where every command's keys can be changed.
+//! The keyboard shortcuts: the Settings window's Keys page, where every
+//! command's keys can be changed.
 //!
 //! Each command shows its keys, a row for each place they work: everywhere,
 //! or in one panel while it has the focus, where they win over the keys
 //! that work everywhere. Clicking a key changes it, and + adds one: the
-//! window waits for the keys to be pressed, lets the user pick where they
+//! page waits for the keys to be pressed, lets the user pick where they
 //! work, says whether another command has them there, and gives them to the
 //! command on Assign. The app saves every change to the user's keymap file.
 
 use egui::{
-    Align, Align2, Button, Event, Label, Layout, RichText, Role, ScrollArea, TextEdit, Ui,
-    WidgetInfo, vec2,
+    Align, Button, Label, Layout, RichText, Role, ScrollArea, TextEdit, Ui, WidgetInfo, vec2,
 };
 use musicable_commands::{Command, CommandId, KeyChord, Problem, Scope};
 
+use crate::keys::first_press;
 use crate::menus::{label, menus};
 use crate::panels::Registry;
 use crate::search::score;
@@ -23,13 +24,15 @@ const TITLE_WIDTH: f32 = 200.0;
 /// How wide the column that says where the keys work is.
 const WHERE_WIDTH: f32 = 90.0;
 
-/// The keyboard shortcuts window's own state.
+/// The Keys page's own state.
 #[derive(Debug, Default)]
 pub(crate) struct Shortcuts {
-    open: bool,
+    /// Whether the page was in sight when it was last drawn.
+    shown: bool,
     /// What the commands are filtered by.
     search: String,
-    /// Set when the window opens, so the search field takes the focus.
+    /// Set when the page comes into sight, so the search field takes the
+    /// focus.
     focus_search: bool,
     /// The command getting new keys, while it does.
     editing: Option<Editing>,
@@ -52,22 +55,22 @@ struct Editing {
 }
 
 impl Shortcuts {
-    pub(crate) fn open(&mut self) {
-        self.open = true;
-        self.focus_search = true;
-    }
-
-    /// Whether the window waits for the keys to give a command.
+    /// Whether the page waits for the keys to give a command.
     pub(crate) fn capturing(&self) -> bool {
-        self.open && self.editing.as_ref().is_some_and(|e| e.chord.is_none())
+        self.shown && self.editing.as_ref().is_some_and(|e| e.chord.is_none())
     }
 
-    /// Whether the window asks whether to give a command the keys pressed.
+    /// Whether the page asks whether to give a command the keys pressed.
     pub(crate) fn asking(&self) -> bool {
-        self.open && self.editing.as_ref().is_some_and(|e| e.chord.is_some())
+        self.shown && self.editing.as_ref().is_some_and(|e| e.chord.is_some())
     }
 
-    /// The keys pressed, while the window waits for them.
+    /// Whether the page is giving a command keys.
+    pub(crate) fn editing(&self) -> bool {
+        self.shown && self.editing.is_some()
+    }
+
+    /// The keys pressed, while the page waits for them.
     pub(crate) fn captured(&mut self, chord: KeyChord) {
         if let Some(editing) = self.editing.as_mut().filter(|e| e.chord.is_none()) {
             editing.chord = Some(chord);
@@ -79,35 +82,25 @@ impl Shortcuts {
         self.editing = None;
     }
 
-    /// Shows the window, if it's open, naming the panels as `panels` does.
+    /// Draws the page in `ui`, naming the panels as `panels` does.
     pub(crate) fn show(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut Ui,
         view: &View<'_>,
         panels: &Registry,
         actions: &mut Vec<Action>,
     ) {
-        // Escape closes the window, unless it's giving a command keys: then
-        // it stops that.
-        if self.open && self.editing.is_none() {
-            self.open = !ctx.input_mut(|i| first_press(i, egui::Key::Escape));
+        if !self.shown {
+            self.shown = true;
+            self.focus_search = true;
         }
-        let mut open = self.open;
-        let places = Places(panels);
-        // It opens below the transport bar, where the command palette does.
-        let top = ctx.content_rect().center_top() + vec2(0.0, 72.0);
-        let window = egui::Window::new("Keyboard Shortcuts")
-            .open(&mut open)
-            .pivot(Align2::CENTER_TOP)
-            .default_pos(top)
-            .default_width(680.0)
-            .show(ctx, |ui| self.contents(ui, view, &places, actions));
-        // Clicking anywhere else stops the editing, as closing the window does.
-        let elsewhere = window.is_some_and(|w| w.response.clicked_elsewhere());
-        if !open || elsewhere {
-            self.editing = None;
-        }
-        self.open = open;
+        self.contents(ui, view, &Places(panels), actions);
+    }
+
+    /// The page went out of sight, so it stops giving a command keys.
+    pub(crate) fn hide(&mut self) {
+        self.shown = false;
+        self.editing = None;
     }
 
     fn contents(
@@ -523,7 +516,7 @@ impl Places<'_> {
         }
     }
 
-    /// Everywhere, then each panel, in the order the window places them.
+    /// Everywhere, then each panel, in the order the page places them.
     fn all(&self) -> impl Iterator<Item = Scope> + '_ {
         let panels = self.0.iter().filter_map(|panel| Scope::panel(panel.id));
         std::iter::once(Scope::Everywhere).chain(panels)
@@ -687,16 +680,6 @@ fn named(response: &egui::Response, name: String) {
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
 }
 
-/// Takes the first press of `key` without modifiers out of the input, if it
-/// isn't a repeat.
-pub(crate) fn first_press(input: &mut egui::InputState, key: egui::Key) -> bool {
-    let at = input.events.iter().position(|event| {
-        matches!(event, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. }
-            if *k == key && modifiers.is_none())
-    });
-    at.map(|at| input.events.remove(at)).is_some()
-}
-
 /// "A", "A and B", "A, B and C".
 fn joined(items: &[String]) -> String {
     match items {
@@ -728,10 +711,11 @@ mod tests {
         keymap.chords_for(id).map(|c| c.to_string()).collect()
     }
 
-    /// The shell with the keyboard shortcuts window open.
+    /// The shell with the keys page in a window of its own, as the app's
+    /// Settings window shows it.
     fn window() -> Harness<'static, State> {
         let mut harness = harness(Project::new());
-        harness.state_mut().shell.open_shortcuts();
+        harness.state_mut().keys_page = true;
         harness.run();
         harness
     }
@@ -744,7 +728,7 @@ mod tests {
         harness.run();
     }
 
-    /// Presses `chord` while the window waits for keys.
+    /// Presses `chord` while the page waits for keys.
     fn press(harness: &mut Harness<'static, State>, chord: &str) {
         assert!(harness.state().shell.capturing());
         harness.state_mut().shell.captured(self::chord(chord));
@@ -816,18 +800,8 @@ mod tests {
         harness.get_by_label("runs Play already.");
         assert!(harness.query_by_label("Assign").is_none());
         click(&mut harness, "Cancel");
-        // So does clicking elsewhere, while it waits for keys.
-        click(&mut harness, "Add keys to Play");
-        harness
-            .get_by_role_and_label(Role::Button, "Go to Start")
-            .click();
-        harness.run();
-        assert!(!harness.state().shell.capturing());
+        assert!(!harness.state().shell.giving_keys());
         assert_eq!(harness.state().keymap, Keymap::default_keymap());
-        assert_eq!(
-            harness.state().actions,
-            [Action::Run(transport::GO_TO_START)]
-        );
     }
 
     #[test]
@@ -871,7 +845,7 @@ mod tests {
             .collect::<Vec<_>>()
         };
         assert_eq!(shown(&harness).len(), 4);
-        // The search field has the focus when the window opens.
+        // The search field has the focus when the page comes into sight.
         harness.get_by_role(Role::TextInput).type_text("metro");
         harness.run();
         assert_eq!(shown(&harness), ["Toggle Metronome"]);
@@ -1098,15 +1072,24 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_window() {
+    fn hiding_the_page_stops_waiting_for_keys() {
         let mut harness = window();
-        harness.key_press(egui::Key::Escape);
+        click(&mut harness, "Add keys to Play");
+        let shell = &harness.state().shell;
+        assert!(shell.capturing() && shell.giving_keys());
+        harness.state_mut().keys_page = false;
         harness.run();
-        assert!(harness.query_by_label("Keyboard Shortcuts").is_none());
+        let shell = &harness.state().shell;
+        assert!(!shell.capturing() && !shell.giving_keys());
+        // Back in sight, its search field has the focus again.
+        harness.state_mut().keys_page = true;
+        harness.run();
+        assert!(harness.get_by_role(Role::TextInput).is_focused());
+        assert!(!harness.state().shell.giving_keys());
     }
 
     #[test]
-    fn closing_the_window_stops_waiting_for_keys() {
+    fn opening_the_palette_stops_waiting_for_keys() {
         let mut harness = window();
         click(&mut harness, "Add keys to Play");
         assert!(harness.state().shell.capturing());

@@ -263,7 +263,7 @@ lives. What each still lacks is in its doc's "Not done yet".
 - **The clip stage.** Hard and Soft clip types, in format version 2,
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.
-- **Keys** are done: the keyboard shortcuts window changes any command's
+- **Keys** are done: the Settings window's Keys page changes any command's
   keys, everywhere or in one panel, shows conflicts and saves them to the
   keymap file, and the command
   palette runs any command ([app.md](app.md#changing-keys),
@@ -402,7 +402,10 @@ says what's there.
   differs from its base. The transport bar, the track headers and the
   mixer strips are lists of parts, which the user hides, moves and resizes
   (`parts.rs`; [app.md](app.md#configurable-views)), and each workspace
-  keeps how they show them.
+  keeps how they show them. The Settings window, outside the workspaces,
+  has a page for each area of the settings, applies each change at once
+  and keeps it (`crates/app/src/settings_window.rs`;
+  [app.md](app.md#the-settings-window)).
 - **Visible undo history.** The history names each step, and undo and redo
   move through it a step at a time (`Document::undo_name` and `redo_name`;
   [commands.md](commands.md#undo-and-redo)). A panel of the steps needs

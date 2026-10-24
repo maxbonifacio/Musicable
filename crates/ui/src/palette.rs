@@ -295,19 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_palette_and_not_the_window_under_it() {
-        let mut harness = harness(Project::new());
-        harness.state_mut().shell.open_shortcuts();
-        harness.state_mut().shell.open_palette();
-        harness.run();
-        press(&mut harness, Key::Escape);
-        assert!(!harness.state().shell.asking());
-        harness.get_by_label("Keyboard Shortcuts");
-        press(&mut harness, Key::Escape);
-        assert!(harness.query_by_label("Keyboard Shortcuts").is_none());
-    }
-
-    #[test]
     fn the_last_commands_run_come_first() {
         let mut harness = palette();
         type_text(&mut harness, "tempo down");

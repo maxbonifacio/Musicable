@@ -198,6 +198,8 @@ const LAST_MENUS: [MenuSpec; 4] = [
         "Options",
         "options",
         &[
+            Some(options::SETTINGS),
+            None,
             Some(options::AUDIO_SETTINGS),
             Some(options::KEYBOARD_SHORTCUTS),
             Some(options::APPEARANCE),

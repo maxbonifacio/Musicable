@@ -82,6 +82,11 @@ impl Workspaces {
         }
     }
 
+    /// The folder of the workspaces' files, if there's a config folder.
+    pub fn folder(&self) -> Option<&Path> {
+        self.folder.as_deref()
+    }
+
     /// The name of each slot's workspace, the first being Default's.
     pub fn slots(&self) -> &[Option<String>] {
         &self.slots

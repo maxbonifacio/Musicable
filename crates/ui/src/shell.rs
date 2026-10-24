@@ -1,6 +1,6 @@
 //! The app shell: the menu bar, the transport bar, the panels docked under
-//! them, and a status bar, with the keyboard shortcuts window, the command
-//! palette, and the box that renames things.
+//! them, and a status bar, with the command palette, the box that renames
+//! things, and the Keys page of the app's Settings window.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -125,7 +125,7 @@ pub struct Audio<'a> {
     pub details: &'a str,
 }
 
-/// The user's keymap file, as the keyboard shortcuts window shows it.
+/// The user's keymap file, as the Keys page shows it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct KeymapStatus<'a> {
     /// Where the file goes, if Musicable found a place for it.
@@ -199,7 +199,7 @@ pub enum Action {
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
     /// Use this keymap from now on, and save how it differs from the default
-    /// keymap: the user changed keys in the keyboard shortcuts window.
+    /// keymap: the user changed keys on the Keys page.
     SetKeymap(Keymap),
     /// Give every command its default keys again.
     ResetKeymap,
@@ -447,8 +447,6 @@ impl Shell {
         self.show_rename(&ctx, view, &mut actions);
         self.show_workspace_box(&ctx, view, &mut actions);
         self.palette.show(&ctx, view, &mut actions);
-        self.shortcuts
-            .show(&ctx, view, &self.registry, &mut actions);
         self.parts.show_customise(&ctx, &self.theme);
         browser::show_dragged(&ctx);
         actions
@@ -1115,20 +1113,40 @@ impl Shell {
         self.palette.open();
     }
 
-    /// Shows the keyboard shortcuts window, where keys are changed.
-    pub fn open_shortcuts(&mut self) {
-        self.shortcuts.open();
+    /// Draws the Settings window's Keys page in `ui`: every command's keys,
+    /// to change, and the user's keymap file. The app draws it in each frame
+    /// the page is in sight, and calls [`hide_keys`](Self::hide_keys) in
+    /// those it isn't.
+    pub fn show_keys(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        (self.shortcuts).show(ui, view, &self.registry, &mut actions);
+        actions
     }
 
-    /// Whether the keyboard shortcuts window waits for the keys to give a
-    /// command. The next chord pressed goes to [`captured`](Self::captured)
-    /// then, not to the keymap: [`KeyPresses::capture`](crate::KeyPresses::capture)
-    /// takes it.
+    /// The Keys page is out of sight: it stops giving a command keys.
+    pub fn hide_keys(&mut self) {
+        self.shortcuts.hide();
+    }
+
+    /// Whether the Keys page is giving a command keys, which Escape and a
+    /// click outside the window stop, rather than closing it.
+    pub fn giving_keys(&self) -> bool {
+        self.shortcuts.editing()
+    }
+
+    /// Stops giving a command keys.
+    pub fn stop_giving_keys(&mut self) {
+        self.shortcuts.cancel();
+    }
+
+    /// Whether the Keys page waits for the keys to give a command. The next
+    /// chord pressed goes to [`captured`](Self::captured) then, not to the
+    /// keymap: [`KeyPresses::capture`](crate::KeyPresses::capture) takes it.
     pub fn capturing(&self) -> bool {
         self.shortcuts.capturing()
     }
 
-    /// The chord pressed while the keyboard shortcuts window waited for one.
+    /// The chord pressed while the Keys page waited for one.
     pub fn captured(&mut self, chord: KeyChord) {
         self.shortcuts.captured(chord);
     }
@@ -1314,8 +1332,8 @@ fn focus_window(window: &Window, editor: &Editor, actions: &mut Vec<Action>) {
 /// Hands the keys pressed in `window` to the keymap before its panels see
 /// them, as the app hands it the main window's: a chord bound in the panel
 /// the keys go to, or everywhere, runs its command, unless a text field
-/// has the focus or the shell is `asking` something. While the keyboard
-/// shortcuts window waits for keys, they go to it instead.
+/// has the focus or the shell is `asking` something. While the Settings
+/// window's Keys page waits for keys, they go to it instead.
 fn take_keys(
     ctx: &egui::Context,
     window: &mut Window,
@@ -1655,13 +1673,13 @@ mod tests {
         assert_eq!(harness.state().actions, []);
 
         // Not through a window over the panels, though.
-        harness.state_mut().shell.open_shortcuts();
+        harness.state_mut().keys_page = true;
         harness.run();
         let window = harness.get_by_label("Keyboard Shortcuts").rect();
         let at = window.center_top() + vec2(0.0, 40.0);
         click_at(&mut harness, at);
         assert_eq!(focus(&harness), Focus::MIXER);
-        harness.key_press(egui::Key::Escape);
+        harness.state_mut().keys_page = false;
         harness.run();
         // Without it, that's the arrangement.
         click_at(&mut harness, at);

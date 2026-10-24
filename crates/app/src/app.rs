@@ -23,9 +23,8 @@ use musicable_ui::{
     SaveChoice, Shell, View,
 };
 
-use crate::appearance_window::{AppearanceWindow, Asked as AppearanceAsked};
+use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
-use crate::audio_window::{AudioWindow, Change};
 use crate::export::{self, Export, ExportSettings, Job, Report};
 use crate::export_window::{Asked, ExportWindow};
 use crate::frame_times::FrameTimes;
@@ -34,7 +33,8 @@ use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER};
-use crate::theme_file::{Choice, UserTheme};
+use crate::settings_window::{self, SettingsWindow};
+use crate::theme_file::{Choice, UserTheme, show_folder};
 use crate::workspaces::{self, Place, ReadError, Workspaces};
 use crate::{Output, Session, capital};
 
@@ -77,8 +77,7 @@ pub struct App {
     /// The session's revision whose audio files were asked for.
     files_found: Option<u64>,
     keys: KeyPresses,
-    audio_window: AudioWindow,
-    appearance_window: AppearanceWindow,
+    settings_window: SettingsWindow,
     export_window: ExportWindow,
     /// The export under way, if one is.
     export: Option<Export>,
@@ -224,8 +223,7 @@ impl App {
             audio_files: AudioFiles::new(),
             files_found: None,
             keys: KeyPresses::new(),
-            audio_window: AudioWindow::new(),
-            appearance_window: AppearanceWindow::new(),
+            settings_window: SettingsWindow::new(),
             export_window: ExportWindow::new(),
             export: None,
             export_folder: None,
@@ -577,9 +575,10 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Request::CommandPalette => self.shell.open_palette(),
-            Request::AudioSettings => self.audio_window.open(&self.output),
-            Request::KeyboardShortcuts => self.shell.open_shortcuts(),
-            Request::Appearance => self.appearance_window.open(),
+            Request::Settings => self.settings_window.open(None),
+            Request::AudioSettings => self.settings_window.open(Some(settings_window::AUDIO)),
+            Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),
+            Request::Appearance => self.settings_window.open(Some(settings_window::APPEARANCE)),
             Request::ImportAudio => {
                 if let Some(files) = self.audio_dialog(frame).pick_files() {
                     self.insert_audio(files, None, None);
@@ -968,7 +967,62 @@ impl App {
                 "The device didn't open with these settings: {error}. The ones before are back."
             )),
         };
-        self.audio_window.applied(outcome);
+        self.settings_window.applied(outcome);
+    }
+
+    /// Carries out what the user changed or asked for in the Settings
+    /// window, and keeps the settings.
+    fn settings_asked(
+        &mut self,
+        asked: settings_window::Asked,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        use settings_window::Asked;
+        match asked {
+            Asked::Stream(request) => self.apply_audio(request),
+            Asked::RecordingOffset(frames) => self.set_recording_offset(frames),
+            Asked::CaptureMinutes(minutes) => {
+                self.settings.recording.capture_minutes = minutes;
+                self.session.set_capture_seconds(u64::from(minutes) * 60);
+                self.save_settings();
+            }
+            Asked::Behaviour(behaviour) => {
+                self.settings.behaviour = behaviour;
+                self.session.editor_mut().behaviour = behaviour;
+                self.save_settings();
+            }
+            Asked::Appearance(asked) => self.appearance(asked, ctx, frame),
+            Asked::ChoosePresetsFolder => {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_parent(frame)
+                    .set_title("Save Presets In");
+                if let Some(folder) = self.session.library().presets_folder() {
+                    dialog = dialog.set_directory(folder);
+                }
+                if let Some(folder) = dialog.pick_folder() {
+                    self.set_presets_folder(Some(folder));
+                }
+            }
+            Asked::DefaultPresetsFolder => self.set_presets_folder(None),
+            Asked::OpenWorkspacesFolder => {
+                let Some(folder) = self.workspaces.folder() else {
+                    return;
+                };
+                if let Err(error) = fs::create_dir_all(folder).and_then(|()| show_folder(folder)) {
+                    (self.messages).push(format!("Couldn't open {}: {error}.", folder.display()));
+                }
+            }
+        }
+    }
+
+    /// Saves presets in `folder` from now on, or in the one Musicable picks
+    /// if none, and keeps that in the settings.
+    fn set_presets_folder(&mut self, folder: Option<PathBuf>) {
+        let presets = folder.clone().or_else(library::presets_folder);
+        self.session.library_mut().set_presets_folder(presets);
+        self.settings.browser.presets_folder = folder;
+        self.save_settings();
     }
 
     /// Sets how late recordings through the device playing land, and keeps
@@ -1072,7 +1126,7 @@ impl App {
         ctx.request_repaint();
     }
 
-    /// Does what the user asked for in the appearance window, and keeps the
+    /// Does what the user asked for on the Appearance page, and keeps the
     /// theme picked in the settings.
     fn appearance(&mut self, asked: AppearanceAsked, ctx: &egui::Context, frame: &eframe::Frame) {
         match asked {
@@ -1170,7 +1224,7 @@ impl eframe::App for App {
     /// runs its command wherever the focus is, unless a text field has it.
     /// A key whose command doesn't apply now goes on to egui: with no notes
     /// selected, the arrow keys move the keyboard focus between controls.
-    /// While the keyboard shortcuts window waits for the keys to give a
+    /// While the Settings window's Keys page waits for the keys to give a
     /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         if self.pending.is_none() && self.shell.capturing() {
@@ -1343,9 +1397,24 @@ impl eframe::App for App {
             },
             monitors: &self.monitors,
         };
-        let actions = self.shell.show(ui, &view);
+        let mut actions = self.shell.show(ui, &view);
+        // The Settings window, whose Keys page the shell draws.
+        let settings = settings_window::Cx {
+            view: &view,
+            shell: &mut self.shell,
+            output: &self.output,
+            offset: self.session.recording_offset(),
+            theme: &self.theme_file,
+            settings: &self.settings,
+            presets_folder: library.presets_folder(),
+            workspaces_folder: self.workspaces.folder(),
+        };
+        let asked = self.settings_window.show(&ctx, settings, &mut actions);
         for action in actions {
             self.act(action, &ctx, frame);
+        }
+        if let Some(asked) = asked {
+            self.settings_asked(asked, &ctx, frame);
         }
         // Plugin windows go with the devices to the window they're in, and
         // before the window they were in closes.
@@ -1365,15 +1434,6 @@ impl eframe::App for App {
         // The window, where the workspace switched to has it.
         if let (Some(place), Some(window)) = (self.unplaced.take(), frame.winit_window()) {
             place.apply(window);
-        }
-        let offset = self.session.recording_offset();
-        match self.audio_window.show(&ctx, &self.output, offset) {
-            Some(Change::Stream(request)) => self.apply_audio(request),
-            Some(Change::RecordingOffset(frames)) => self.set_recording_offset(frames),
-            None => {}
-        }
-        if let Some(asked) = self.appearance_window.show(&ctx, &self.theme_file) {
-            self.appearance(asked, &ctx, frame);
         }
         let project = self.session.project();
         let editor = self.session.editor();
@@ -1548,6 +1608,8 @@ mod arranging;
 mod browsing;
 #[cfg(test)]
 mod built_in_devices;
+#[cfg(test)]
+mod configuring;
 #[cfg(test)]
 mod exporting;
 #[cfg(test)]

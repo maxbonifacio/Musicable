@@ -157,8 +157,9 @@ fn named(key: egui::Key) -> Option<Key> {
 /// press the keymap binds runs its command and never reaches egui, so a
 /// focused button can't act on Space as well. While a text field has focus,
 /// every key press goes to the text field instead: typing a space in a name
-/// types a space. While the keyboard shortcuts window waits for the keys to
-/// give a command, [`capture`](Self::capture) takes the next chord instead.
+/// types a space. While the Settings window's Keys page waits for the keys
+/// to give a command, [`capture`](Self::capture) takes the next chord
+/// instead.
 #[derive(Debug, Default)]
 pub struct KeyPresses {
     /// Keys held down, by egui's name for them, to tell a key's first press
@@ -259,8 +260,8 @@ impl KeyPresses {
         took
     }
 
-    /// Takes every key press out of `input`, for the keyboard shortcuts
-    /// window while it waits for the keys to give a command, and returns the
+    /// Takes every key press out of `input`, for the Settings window's Keys
+    /// page while it waits for the keys to give a command, and returns the
     /// first chord pressed. Any key can be part of it, Escape, Enter and Tab
     /// too. Repeats, a modifier pressed on its own and keys keymaps have no
     /// name for are skipped. Text goes nowhere either, so a text field with
@@ -311,6 +312,17 @@ impl KeyPresses {
         self.held.remove(&key);
         self.taken.remove(&key);
     }
+}
+
+/// Takes the first press of `key` without modifiers out of the input, if it
+/// isn't a repeat. A window that closes on Escape takes it so: holding the
+/// key down closes that window, and not the one under it as well.
+pub fn first_press(input: &mut egui::InputState, key: egui::Key) -> bool {
+    let at = input.events.iter().position(|event| {
+        matches!(event, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. }
+            if *k == key && modifiers.is_none())
+    });
+    at.map(|at| input.events.remove(at)).is_some()
 }
 
 enum Clipboard {

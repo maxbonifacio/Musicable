@@ -3,9 +3,9 @@
 //! `docs/app.md` describes it.
 
 mod app;
-mod appearance_window;
+mod appearance_page;
 mod audio_files;
-mod audio_window;
+mod audio_page;
 pub mod export;
 mod export_window;
 mod frame_times;
@@ -20,6 +20,7 @@ mod plugins;
 mod recorder;
 mod session;
 mod settings;
+mod settings_window;
 mod theme_file;
 mod workspaces;
 

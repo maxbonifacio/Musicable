@@ -51,6 +51,9 @@ pub(crate) struct State {
     /// The workspaces' names, by slot, and the slot of the one in use.
     pub workspaces: Vec<Option<String>>,
     pub workspace: usize,
+    /// Whether the Keys page shows, in a window of its own, as the app's
+    /// Settings window would show it.
+    pub keys_page: bool,
     pub actions: Vec<Action>,
 }
 
@@ -243,6 +246,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         library: LibraryState::default(),
         workspaces: vec![Some(DEFAULT_WORKSPACE.to_owned())],
         workspace: 0,
+        keys_page: false,
         actions: Vec::new(),
     };
     builder.with_size([1100.0, 720.0]).build_ui_state(
@@ -296,6 +300,18 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 monitors: &[],
             };
             let mut actions = state.shell.show(ui, &view);
+            if state.keys_page {
+                let shell = &mut state.shell;
+                // Below the transport bar, where the app's window opens.
+                let top = ui.ctx().content_rect().center_top() + egui::vec2(0.0, 72.0);
+                egui::Window::new("Keyboard Shortcuts")
+                    .pivot(egui::Align2::CENTER_TOP)
+                    .default_pos(top)
+                    .default_width(680.0)
+                    .show(ui.ctx(), |ui| actions.extend(shell.show_keys(ui, &view)));
+            } else {
+                state.shell.hide_keys();
+            }
             for action in &actions {
                 match action {
                     Action::SetKeymap(keymap) => {

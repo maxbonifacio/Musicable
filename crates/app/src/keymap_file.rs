@@ -1,5 +1,5 @@
-//! The user's keymap file: their changes to the default keys, made in the
-//! keyboard shortcuts window or by editing the file. `docs/commands.md`
+//! The user's keymap file: their changes to the default keys, made on the
+//! Settings window's Keys page or by editing the file. `docs/commands.md`
 //! describes the file.
 
 use std::fs;

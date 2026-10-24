@@ -225,11 +225,14 @@ pub enum Request {
     ExportAudio,
     /// Show the command palette.
     CommandPalette,
-    /// Show the audio settings.
+    /// Show the Settings window, at the page it showed last.
+    Settings,
+    /// Show the Settings window's Audio page.
     AudioSettings,
-    /// Show the keyboard shortcuts, where keys are changed.
+    /// Show the Settings window's Keys page, where keys are changed.
     KeyboardShortcuts,
-    /// Show the appearance window, where the theme is picked.
+    /// Show the Settings window's Appearance page, where the theme is
+    /// picked.
     Appearance,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),

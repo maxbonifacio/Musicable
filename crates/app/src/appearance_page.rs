@@ -1,18 +1,18 @@
-//! The appearance window: the theme Musicable draws with, what was wrong
-//! with its file, and where theme files go.
+//! The Settings window's Appearance page: the theme Musicable draws with,
+//! what was wrong with its file, and where theme files go.
 
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Button, Label, RichText, Ui};
+use eframe::egui::{Button, Label, RichText, Ui};
 use musicable_ui::Base;
 
 use crate::theme_file::{Choice, UserTheme};
 
-/// How often the window lists the themes folder again while it's open, to
-/// offer files as they're added.
+/// How often the page lists the themes folder again while it's in sight,
+/// to offer files as they're added.
 const LIST_EVERY: Duration = Duration::from_secs(1);
 
-/// What the user asked for in the window.
+/// What the user asked for on the page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Asked {
     /// Draw with this theme from now on.
@@ -25,45 +25,29 @@ pub enum Asked {
     Reload,
 }
 
-/// The appearance window. A theme picked in it is used at once.
+/// The Appearance page. A theme picked on it is used at once.
 #[derive(Default)]
-pub struct AppearanceWindow {
-    open: bool,
+pub struct AppearancePage {
     /// The theme files in the themes folder, as last listed.
     files: Vec<String>,
     /// When they were listed.
     listed: Option<Instant>,
 }
 
-impl AppearanceWindow {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn open(&mut self) {
-        self.open = true;
+impl AppearancePage {
+    /// Lists the themes folder again: the page came into sight.
+    pub fn reset(&mut self) {
         self.listed = None;
     }
 
-    /// Shows the window, if it's open, for the theme in use. Returns what
-    /// the user asked for.
-    pub fn show(&mut self, ctx: &egui::Context, theme: &UserTheme) -> Option<Asked> {
-        if !self.open {
-            return None;
-        }
+    /// Draws the page for the theme in use. Returns what the user asked
+    /// for.
+    pub fn show(&mut self, ui: &mut Ui, theme: &UserTheme) -> Option<Asked> {
         if self.listed.is_none_or(|at| at.elapsed() >= LIST_EVERY) {
             self.files = theme.files();
             self.listed = Some(Instant::now());
         }
-        let mut open = true;
-        let mut asked = None;
-        egui::Window::new("Appearance")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(420.0)
-            .show(ctx, |ui| asked = contents(ui, theme, &self.files));
-        self.open = open;
+        let asked = contents(ui, theme, &self.files);
         if asked.is_some() {
             // An export or a look at the folder may have added a file.
             self.listed = None;

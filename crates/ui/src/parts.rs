@@ -17,9 +17,9 @@ use egui::{
 use serde::{Deserialize, Serialize};
 
 use crate::arrangement::HeaderPart;
+use crate::keys::first_press;
 use crate::mixer::{Channel, Mixer};
 use crate::shell::Action;
-use crate::shortcuts::first_press;
 use crate::theme::Theme;
 use crate::transport_bar::Bar;
 
@@ -283,8 +283,8 @@ impl Parts {
             return;
         };
         let mut open = !ctx.input_mut(|input| first_press(input, Key::Escape));
-        // It opens below the transport bar, where the keyboard shortcuts
-        // window does, out of the way of the views it customises.
+        // It opens below the transport bar, where the Settings window does,
+        // out of the way of the views it customises.
         let top = ctx.content_rect().center_top() + vec2(0.0, 72.0);
         egui::Window::new(format!("Customise {}", title(view)))
             .id(Id::unique("customise parts"))

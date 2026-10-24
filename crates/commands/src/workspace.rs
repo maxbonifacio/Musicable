@@ -50,8 +50,8 @@ const COMMANDS: [(CommandId, &str, Request); 4] = [
 ];
 
 /// The titles of the switch commands, by slot, as the command palette and
-/// the keyboard shortcuts window show them. The Workspaces menu shows the
-/// workspaces' names instead.
+/// the Keys page show them. The Workspaces menu shows the workspaces' names
+/// instead.
 const TITLES: [&str; SLOTS as usize] = [
     "Switch to Workspace 1",
     "Switch to Workspace 2",

@@ -1061,7 +1061,8 @@ fn held_inputs_stay_within_their_memory() {
     tape.held_bytes = 1 << 19;
     let segments = [playing(0, 0, 0), stopped(100, 100)];
     let refused = "Capture doesn't hold Vox's input: holding it would take Capture past 512 KiB \
-                   of memory. A shorter capture_minutes in the settings holds more inputs.";
+                   of memory. A shorter length, on the Recording page of Settings, holds more \
+                   inputs.";
     let (_, problems) = split(run(&mut tape, &segments, 200));
     assert_eq!(problems, [refused]);
     // It says so once.
@@ -1086,7 +1087,7 @@ fn capture_says_why_it_has_nothing_to_take() {
         problems
     };
     let mut tape = holding(&folder, &buffer, Vec::new(), vec![lead(0)], 0);
-    let off = "Capture is off: its length, capture_minutes in the settings, is 0.";
+    let off = "Capture is off: its length, on the Recording page of Settings, is 0.";
     assert_eq!(problem(&mut tape, 100), [off]);
     tape.set_held(Vec::new(), 1);
     let trackless = "Nothing to capture: no track is armed or monitoring In.";
@@ -1221,8 +1222,8 @@ fn held_midi_inputs_stay_within_their_memory() {
     tape.held_bytes = 1 << 19;
     let segments = [playing(0, 0, 0), stopped(100, 100)];
     let refused = "Capture doesn't hold Keys's MIDI input: holding it would take Capture past \
-                   512 KiB of memory. A shorter capture_minutes in the settings holds more \
-                   inputs.";
+                   512 KiB of memory. A shorter length, on the Recording page of Settings, holds \
+                   more inputs.";
     let (_, problems) = split(run(&mut tape, &segments, 200));
     assert_eq!(problems, [refused]);
     assert!(tape.held.midi.iter().all(|input| input.held.is_none()));
