@@ -202,12 +202,14 @@ pub(crate) fn drop_in(
     dragged.dropped(target)
 }
 
-/// Shows the name of what's dragged from the browser by the pointer.
+/// Shows the name of what's dragged from the browser by the pointer, if
+/// it's in this window: past its edge, the window it's over shows it.
 pub(crate) fn show_dragged(ctx: &Context) {
     let Some(dragged) = egui::DragAndDrop::payload::<Dragged>(ctx) else {
         return;
     };
-    let Some(pos) = ctx.pointer_latest_pos() else {
+    let pos = ctx.pointer_latest_pos();
+    let Some(pos) = pos.filter(|&pos| ctx.content_rect().contains(pos)) else {
         return;
     };
     Area::new(Id::unique("dragged from the browser"))

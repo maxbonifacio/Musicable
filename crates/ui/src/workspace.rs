@@ -10,7 +10,7 @@
 //! at = [-1912, 120]
 //! size = [1600, 900]
 //! maximized = true
-//! hidden = ["piano_roll"]
+//! hidden = ["mixer", "piano_roll"]
 //! layout = { across = [
 //!     { panel = "browser", size = 260 },
 //!     { down = [
@@ -19,6 +19,11 @@
 //!         { tabs = ["devices", "piano_roll"], front = "devices" },
 //!     ] },
 //! ] }
+//!
+//! [[windows]]
+//! at = [3880, 200]
+//! size = [1200, 400]
+//! layout = { panel = "mixer" }
 //! ```
 //!
 //! `slot` is the workspace's slot, which the key that switches to it goes
@@ -31,9 +36,14 @@
 //! A part's `size` is its width in a row of parts (`across`), or its height
 //! in a column (`down`), in points; without one it takes its panel's
 //! default size. The part with the arrangement takes what the others leave.
-//! Hidden panels keep their place, to come back to. Panels the file doesn't
-//! know are left out, and panels it doesn't have go where they go in the
-//! default layout, hidden.
+//! Hidden panels keep their place, to come back to.
+//!
+//! The windows after the first are windows of their own, with the panels
+//! the user moved out of the main window, which keeps them hidden in their
+//! place there. A panel in two windows goes in the first, and the
+//! arrangement only in the main window. Panels the file doesn't know are
+//! left out, and panels it doesn't have go where they go in the default
+//! layout, hidden.
 
 use std::fmt::{self, Write as _};
 
@@ -309,20 +319,28 @@ mod tests {
         };
         let workspace = Workspace {
             slot: Some(3),
-            windows: vec![WindowLayout {
-                at: Some([-1280, 40]),
-                size: Some([1280, 800]),
-                maximized: true,
-                hidden: vec!["browser".into()],
-                layout: Layout::new(Split::Across(vec![
-                    sized(260, Layout::panel("browser")),
-                    Layout::new(Split::Down(vec![
-                        Layout::panel("arrangement"),
-                        sized(300, Layout::panel("mixer")),
-                        sized(240, tabs),
+            windows: vec![
+                WindowLayout {
+                    at: Some([-1280, 40]),
+                    size: Some([1280, 800]),
+                    maximized: true,
+                    hidden: vec!["browser".into()],
+                    layout: Layout::new(Split::Across(vec![
+                        sized(260, Layout::panel("browser")),
+                        Layout::new(Split::Down(vec![
+                            Layout::panel("arrangement"),
+                            sized(300, Layout::panel("mixer")),
+                            sized(240, tabs),
+                        ])),
                     ])),
-                ])),
-            }],
+                },
+                WindowLayout {
+                    at: Some([3880, 200]),
+                    size: Some([480, 900]),
+                    layout: Layout::panel("browser"),
+                    ..WindowLayout::default()
+                },
+            ],
         };
         let text = workspace.to_toml();
         let written = r#"format = "musicable-workspace"
@@ -343,6 +361,11 @@ layout = { across = [
         { tabs = ["devices", "piano_roll"], size = 240, front = "piano_roll" },
     ] },
 ] }
+
+[[windows]]
+at = [3880, 200]
+size = [480, 900]
+layout = { panel = "browser" }
 "#;
         assert_eq!(text, written);
         assert_eq!(Workspace::parse(&text).unwrap(), workspace);

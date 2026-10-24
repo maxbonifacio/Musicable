@@ -248,6 +248,7 @@ impl Bench {
                 native: &[],
                 library: Library::default(),
                 workspaces: Workspaces::default(),
+                monitors: &[],
             };
             actions = self.shell.show(ui, &view);
         });

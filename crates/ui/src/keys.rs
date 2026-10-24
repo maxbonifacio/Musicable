@@ -187,10 +187,24 @@ impl KeyPresses {
         &mut self,
         ctx: &egui::Context,
         input: &mut RawInput,
-        mut keymap: impl FnMut(KeyChord, bool) -> bool,
+        keymap: impl FnMut(KeyChord, bool) -> bool,
     ) {
         let text_field = ctx.text_edit_focused();
-        input.events.retain_mut(|event| match *event {
+        self.take_events(ctx, &mut input.events, text_field, keymap);
+    }
+
+    /// The same for `events`, as a window of its own has them once its pass
+    /// has begun, when `text_field` says whether a text field there has
+    /// focus. Returns whether the keymap took any.
+    pub fn take_events(
+        &mut self,
+        ctx: &egui::Context,
+        events: &mut Vec<Event>,
+        text_field: bool,
+        mut keymap: impl FnMut(KeyChord, bool) -> bool,
+    ) -> bool {
+        let mut took = false;
+        events.retain_mut(|event| match *event {
             Event::Key {
                 key,
                 physical_key,
@@ -223,6 +237,7 @@ impl KeyPresses {
                 if taken {
                     self.taken.insert(key);
                 }
+                took |= taken;
                 !taken
             }
             Event::Key {
@@ -241,6 +256,7 @@ impl KeyPresses {
             }
             _ => true,
         });
+        took
     }
 
     /// Takes every key press out of `input`, for the keyboard shortcuts
@@ -250,8 +266,14 @@ impl KeyPresses {
     /// name for are skipped. Text goes nowhere either, so a text field with
     /// focus doesn't type the keys.
     pub fn capture(&mut self, input: &mut RawInput) -> Option<KeyChord> {
+        self.capture_events(&mut input.events)
+    }
+
+    /// The same for `events`, as a window of its own has them once its pass
+    /// has begun.
+    pub fn capture_events(&mut self, events: &mut Vec<Event>) -> Option<KeyChord> {
         let mut captured = None;
-        input.events.retain(|event| match *event {
+        events.retain(|event| match *event {
             Event::Key {
                 key,
                 physical_key,
