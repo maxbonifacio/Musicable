@@ -2,7 +2,7 @@
 //! its keys, and run with Enter.
 
 use egui::{Align2, Button, Id, Key, Modal, Modifiers, RichText, ScrollArea, TextEdit, vec2};
-use musicable_commands::{Command, CommandId};
+use musicable_commands::{Command, CommandId, workspace};
 
 use crate::menus::label;
 use crate::search::score;
@@ -113,7 +113,7 @@ impl Palette {
             .iter()
             .filter(|command| !command.needs_arguments())
             .filter_map(|command| {
-                let label = label(command);
+                let label = named(command, view)?;
                 let chords = view.keymap.chords_focused(&command.id, view.editor.focus);
                 let score = score(&self.query, &label, command.id.as_str(), &chords)?;
                 Some((command, label, score))
@@ -130,6 +130,17 @@ impl Palette {
             .map(|(command, label, _)| (command, label))
             .collect()
     }
+}
+
+/// A command as the palette names it, with its area. The switch commands
+/// are named by the workspace they switch to, and left out for a slot
+/// without one.
+fn named(command: &Command, view: &View<'_>) -> Option<String> {
+    let Some(slot) = workspace::slot_of(&command.id) else {
+        return Some(label(command));
+    };
+    let name = view.workspaces.name(usize::from(slot) - 1)?;
+    Some(format!("Workspace: Switch to {name}"))
 }
 
 #[cfg(test)]
@@ -168,7 +179,9 @@ mod tests {
     fn every_command_is_listed_with_its_keys() {
         let harness = palette();
         let state = harness.state();
-        for command in state.commands.iter().filter(|c| !c.needs_arguments()) {
+        let switches = |c: &&Command| workspace::slot_of(&c.id).is_some();
+        let listed = (state.commands.iter()).filter(|c| !c.needs_arguments() && !switches(c));
+        for command in listed {
             let chords = (state.keymap).chords_focused(&command.id, state.editor.focus);
             let keys: Vec<_> = chords.iter().map(ToString::to_string).collect();
             let row = match keys.join(", ") {
@@ -180,6 +193,9 @@ mod tests {
         harness.get_by_label("File: New Demo Project");
         harness.get_by_label("Transport: Toggle Loop Ctrl+L");
         harness.get_by_label("View: Command Palette... Ctrl+Shift+P");
+        // The workspaces by name, those there are.
+        harness.get_by_label("Workspace: Switch to Default Alt+1");
+        assert!(harness.query_by_label_contains("Workspace 2").is_none());
         // The palette can't say which clips to move.
         assert!(harness.query_by_label_contains("Move Clips").is_none());
         assert!(harness.state().shell.asking(), "keys don't run commands");
@@ -317,5 +333,16 @@ mod tests {
             ran(&harness),
             [tempo_down.clone(), tempo_down.clone(), tempo_down]
         );
+    }
+
+    #[test]
+    fn workspaces_are_found_by_name() {
+        let mut harness = palette();
+        let names = [Some("Default"), None, Some("Mixing")];
+        harness.state_mut().workspaces = names.map(|name| name.map(str::to_owned)).to_vec();
+        type_text(&mut harness, "mixing");
+        harness.get_by_label("Workspace: Switch to Mixing Alt+3");
+        press(&mut harness, Key::Enter);
+        assert_eq!(ran(&harness), [Action::Run(workspace::SWITCH_3)]);
     }
 }

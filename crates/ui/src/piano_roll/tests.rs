@@ -223,6 +223,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),
+                        workspaces: crate::Workspaces::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state.piano_roll.show(ui, &view, theme, mouse, &mut actions);

@@ -1,16 +1,20 @@
-//! Workspaces: how the window's panels are laid out, in splits and tabs,
-//! and the parts of the transport bar, the track headers and the mixer
-//! strips, as the app keeps them in a file in the config folder.
+//! Workspaces: how the panels are laid out, in splits and tabs, in each
+//! window, and the parts of the transport bar, the track headers and the
+//! mixer strips, as the app keeps them in a file in the config folder.
 //!
 //! ```toml
 //! format = "musicable-workspace"
 //! version = 1
+//! slot = 2
 //!
 //! [views.mixer_strip]
 //! hidden = ["monitor"]
 //! parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
 //!
 //! [[windows]]
+//! at = [-1912, 120]
+//! size = [1600, 900]
+//! maximized = true
 //! hidden = ["piano_roll"]
 //! layout = { across = [
 //!     { panel = "browser", size = 260 },
@@ -21,6 +25,13 @@
 //!     ] },
 //! ] }
 //! ```
+//!
+//! `slot` is the workspace's slot, which the key that switches to it goes
+//! by. A window's `at` is where its top left corner was left on the
+//! desktop, in pixels, which a monitor left of the main one makes negative.
+//! `size` is how big the inside of it was, in pixels at 100% scaling, which
+//! its monitor's scaling makes bigger. `maximized` says it filled its
+//! monitor, and then `at` and `size` are where it goes back to.
 //!
 //! A part's `size` is its width in a row of parts (`across`), or its height
 //! in a column (`down`), in points; without one it takes its panel's
@@ -43,6 +54,10 @@ const VERSION: u32 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Workspace {
+    /// The slot the workspace is in, from 1, which the key that switches to
+    /// it goes by. Default is always in the first, so its file needn't say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u8>,
     /// What the user changed about the transport bar, the track headers
     /// and the mixer strips, which look the same in every window.
     #[serde(skip_serializing_if = "Views::is_empty")]
@@ -51,9 +66,19 @@ pub struct Workspace {
     pub windows: Vec<WindowLayout>,
 }
 
-/// How a window's panels are laid out.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Where a window is, and how its panels are laid out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowLayout {
+    /// Where the window's top left corner is on the desktop, in pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[i32; 2]>,
+    /// How big the inside of the window is, in pixels at 100% scaling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[u32; 2]>,
+    /// Whether the window fills its monitor. `at` and `size` are where it
+    /// goes back to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maximized: bool,
     /// The panels hidden, by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<String>,
@@ -85,6 +110,13 @@ pub enum Split {
     Across(Vec<Layout>),
     /// Parts one over another, top to bottom.
     Down(Vec<Layout>),
+}
+
+impl Default for Layout {
+    /// No panels.
+    fn default() -> Self {
+        Self::new(Split::Across(Vec::new()))
+    }
 }
 
 impl Layout {
@@ -139,6 +171,15 @@ impl Workspace {
         // show.
         for window in &self.windows {
             text.push_str("\n[[windows]]\n");
+            if let Some([x, y]) = window.at {
+                let _ = writeln!(text, "at = [{x}, {y}]");
+            }
+            if let Some([width, height]) = window.size {
+                let _ = writeln!(text, "size = [{width}, {height}]");
+            }
+            if window.maximized {
+                text.push_str("maximized = true\n");
+            }
             if !window.hidden.is_empty() {
                 let hidden = toml::Value::from(window.hidden.clone());
                 let _ = writeln!(text, "hidden = {hidden}");
@@ -185,6 +226,52 @@ fn write_layout(text: &mut String, layout: &Layout, depth: usize) {
         let _ = write!(text, ", front = {}", quoted(front));
     }
     text.push_str(" }");
+}
+
+/// The longest a workspace's name can be, in characters.
+pub const MAX_NAME: usize = 64;
+
+/// `name` trimmed, if it can name a workspace, the file it's kept in being
+/// named after it: or else why it can't. `taken` has the names of the
+/// workspaces there are, which it can't be, whatever their case, as
+/// Windows doesn't tell file names apart by case.
+pub fn check_name<'a>(
+    name: &str,
+    mut taken: impl Iterator<Item = &'a str>,
+) -> Result<String, String> {
+    let name = name.trim();
+    let reserved = ["CON", "PRN", "AUX", "NUL"];
+    let numbered = ["COM", "LPT"];
+    let upper = name.to_uppercase();
+    let mut chars = upper.chars();
+    let last = chars.next_back();
+    let device = reserved.contains(&upper.as_str())
+        || (numbered.contains(&chars.as_str()) && last.is_some_and(|c| matches!(c, '1'..='9')));
+    if name.is_empty() {
+        Err("Type a name.".to_owned())
+    } else if let Some(c) = name
+        .chars()
+        .find(|&c| "\\/:*?\"<>|".contains(c) || c.is_control())
+    {
+        let shown = if c.is_control() {
+            "a control character".to_owned()
+        } else {
+            c.to_string()
+        };
+        Err(format!("A name can't have {shown} in it."))
+    } else if name.ends_with('.') {
+        Err("A name can't end in a dot.".to_owned())
+    } else if device {
+        Err(format!("Windows keeps the name {name} for itself."))
+    } else if name.chars().count() > MAX_NAME {
+        Err(format!(
+            "A name can't be longer than {MAX_NAME} characters."
+        ))
+    } else if taken.any(|other| other.to_lowercase() == name.to_lowercase()) {
+        Err(format!("There's a workspace called {name} already."))
+    } else {
+        Ok(name.to_owned())
+    }
 }
 
 /// Why a workspace file can't be used.
@@ -236,7 +323,11 @@ mod tests {
             ..Layout::new(Split::Tabs(vec!["devices".into(), "piano_roll".into()]))
         };
         let workspace = Workspace {
+            slot: Some(3),
             windows: vec![WindowLayout {
+                at: Some([-1280, 40]),
+                size: Some([1280, 800]),
+                maximized: true,
                 hidden: vec!["browser".into()],
                 layout: Layout::new(Split::Across(vec![
                     sized(260, Layout::panel("browser")),
@@ -253,7 +344,12 @@ mod tests {
         let written = r#"format = "musicable-workspace"
 version = 1
 
+slot = 3
+
 [[windows]]
+at = [-1280, 40]
+size = [1280, 800]
+maximized = true
 hidden = ["browser"]
 layout = { across = [
     { panel = "browser", size = 260 },
@@ -282,9 +378,10 @@ layout = { across = [
         let workspace = Workspace {
             views: Views(BTreeMap::from([("transport_bar".into(), lineup)])),
             windows: vec![WindowLayout {
-                hidden: Vec::new(),
                 layout: Layout::panel("arrangement"),
+                ..WindowLayout::default()
             }],
+            ..Workspace::default()
         };
         let text = workspace.to_toml();
         let written = r#"format = "musicable-workspace"
@@ -316,9 +413,37 @@ layout = { panel = "arrangement" }
         assert_eq!(
             workspace.windows,
             [WindowLayout {
-                hidden: Vec::new(),
-                layout
+                layout,
+                ..WindowLayout::default()
             }]
+        );
+    }
+
+    #[test]
+    fn names_are_names_files_can_have() {
+        let taken = ["Default", "Mixing"];
+        let check = |name| check_name(name, taken.into_iter());
+        assert_eq!(check("  Editing "), Ok("Editing".to_owned()));
+        assert_eq!(check("Vocals 2.0"), Ok("Vocals 2.0".to_owned()));
+        let problems = [
+            ("", "Type a name."),
+            ("   ", "Type a name."),
+            ("mixing", "There's a workspace called mixing already."),
+            ("Mix/Edit", "A name can't have / in it."),
+            ("What?", "A name can't have ? in it."),
+            ("Tab\there", "A name can't have a control character in it."),
+            ("Final.", "A name can't end in a dot."),
+            ("con", "Windows keeps the name con for itself."),
+            ("LPT3", "Windows keeps the name LPT3 for itself."),
+        ];
+        for (name, problem) in problems {
+            assert_eq!(check(name), Err(problem.to_owned()), "{name:?}");
+        }
+        assert!(check("COM10").is_ok());
+        let long = "x".repeat(MAX_NAME + 1);
+        assert_eq!(
+            check(&long),
+            Err("A name can't be longer than 64 characters.".to_owned())
         );
     }
 

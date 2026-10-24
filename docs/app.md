@@ -168,8 +168,8 @@ That's what `ParallelOptions::inline_below` is for
 ## The window
 
 - **The menu bar** lists the commands with their keys, under File, Edit,
-  Track, Clip, Notes, Automation, Locator, Transport, Browser, View and
-  Options. Undo and Redo name the change they would make, as in "Undo Set
+  Track, Clip, Notes, Automation, Locator, Transport, Browser, View,
+  Workspaces and Options. Undo and Redo name the change they would make, as in "Undo Set
   Tempo", and are greyed out when there's nothing to undo or redo, as is any
   command that doesn't apply now, such as Split with nothing selected.
   Toggles, such as Follow and Snap to Grid, are ticked while on. A command
@@ -217,6 +217,8 @@ That's what `ParallelOptions::inline_below` is for
   keys, and changes them ([below](#changing-keys)).
 - **Options > Appearance** picks the theme Musicable draws with
   ([Themes](#themes)).
+- **The Workspaces menu** switches between layouts of the panels
+  ([below](#workspaces)).
 
 **Double-clicks** count when the second click comes soon enough after the
 first: on Windows, within the double-click time in its mouse settings, as
@@ -258,9 +260,38 @@ browser are docked panels, laid out in splits and tabs
   takes it.
 
 Devices and presets dragged from the browser go in the devices panel's
-chain wherever the panel is. The window opens laid out as it was left:
-the app saves the layout to the default workspace's file as it changes
-([Settings](#settings-and-your-keymap)).
+chain wherever the panel is.
+
+### Workspaces
+
+A workspace is a layout of the panels, with where the window is: its
+corner, its size, and whether it's maximized. It keeps the parts the
+transport bar, the track headers and the mixer strips show, too
+([Configurable views](#configurable-views)). What you change goes into
+the workspace in use as you change it, so the window opens as you left it
+([Settings](#settings-and-your-keymap)). The **Workspaces** menu lists your
+workspaces, up to nine, with a tick on the one in use:
+
+- **Alt and a workspace's number** switch to it (`workspace.switch_1` to
+  `workspace.switch_9`), Alt+1 being Default. A new workspace takes the
+  lowest number free, and keeps it as others come and go.
+- **Save Workspace As...** keeps the layout and the views' parts as a new
+  workspace, under the name you type, and uses it from then on; the workspace you were in keeps
+  what it had. A name can't be another workspace's, in any letters, or
+  have characters a file name can't.
+- **Rename Workspace...** and **Delete Workspace...** rename or delete the
+  workspace in use. Deleting asks first, then switches to Default. Default
+  keeps its name and can't be deleted.
+- **Reset Workspace** lays the panels out and shows the views' parts as at
+  first, and leaves the window where it is.
+
+The zoom and the scrolling are the project's: switching workspaces leaves
+them as they are. A project remembers the workspace it was saved with,
+and opening it switches there, if you have a workspace by that name
+([project-format.md](project-format.md#the-file)). A window goes back to
+the monitor it was on, if that monitor's still there, and stays on the
+one it's on if not. A window you move or resize is saved once it's stayed
+put for a second.
 
 ### Configurable views
 
@@ -296,8 +327,8 @@ and group tracks keep M and S where the other tracks have them, with an
 empty place for the arm button.
 
 The views come back as they were left: the app keeps what you change about
-them in the workspace, with the panels' layout
-([Settings](#settings-and-your-keymap)).
+them in the workspace in use, with the panels' layout, so each workspace
+can have its own ([Workspaces](#workspaces)).
 
 ## The arrangement
 
@@ -1356,15 +1387,17 @@ lose. Without a config folder, changes last until the app closes. If the
 backup or the file can't be written, the window says so, and the keys you
 set still work until the app closes.
 
-`workspaces/Default.toml` is how the window's panels are laid out
-([The panels](#the-panels)) and the parts of the transport bar, the track
-headers and the mixer strips ([Configurable views](#configurable-views)),
-written whenever you change them, once you let go of the tab, the edge or
-the part you're dragging, and read at startup:
+`workspaces` holds a file for each workspace ([Workspaces](#workspaces)),
+named after it, such as `Mixing.toml`: `Default.toml` once you've changed
+Default. The workspace in use is written whenever you change its layout or
+its views' parts ([Configurable views](#configurable-views)), once you let
+go of the tab, the edge or the part you're dragging, and the one the app
+opens with is read at startup:
 
 ```toml
 format = "musicable-workspace"
 version = 1
+slot = 2
 
 [views.mixer_strip]
 hidden = ["monitor"]
@@ -1374,6 +1407,9 @@ parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readout
 meter = 14
 
 [[windows]]
+at = [-1912, 120]
+size = [1600, 900]
+maximized = true
 hidden = ["browser", "piano_roll"]
 layout = { across = [
     { panel = "browser" },
@@ -1385,13 +1421,19 @@ layout = { across = [
 ] }
 ```
 
-A part's `size` is its width in a row of parts (`across`) or its height in
-a column (`down`), in points; parts without one take their panels' default
-sizes, and the part with the arrangement takes what's left. `hidden` lists
-the panels hidden, which keep their place. Panels the file doesn't have go
-where they go at first, hidden, and a file that can't be used leaves the
-first layout, and says why. Deleting the file brings back the first
-layout.
+`slot` is the workspace's number in the Workspaces menu, which Alt and
+the number switch to: a file without one, or with one another file has,
+takes the lowest free. The window's `at` is where its top left corner is
+on the desktop, in pixels, which a monitor left of the main one makes
+negative, and `size` how big its inside is, in pixels at 100% scaling,
+which its monitor's scaling makes bigger; while it's `maximized`, they're
+where it goes back to. A part's `size` is its width in a row of parts
+(`across`) or its height in a column (`down`), in points; parts without
+one take their panels' default sizes, and the part with the arrangement
+takes what's left. `hidden` lists the panels hidden, which keep their
+place. Panels the file doesn't have go where they go at first, hidden, and
+a file that can't be used leaves the layout as it was, and says why.
+Deleting Default's file brings back the first layout.
 
 `views` has only the views you changed, by the ids in the table under
 [Configurable views](#configurable-views). A view's `parts` are its parts
@@ -1401,9 +1443,9 @@ go after the part before them in the first order, and parts Musicable
 doesn't have are left out.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, how editing behaves, the theme, the export window's and the
-browser's settings as they were last used, how long Capture holds the
-inputs, and the devices' recording offsets:
+ones, how editing behaves, the theme, the workspace in use, the export
+window's and the browser's settings as they were last used, how long
+Capture holds the inputs, and the devices' recording offsets:
 
 ```toml
 format = "musicable-settings"
@@ -1420,6 +1462,9 @@ middle_c = "c3"
 
 [appearance]
 theme = "Studio.toml"
+
+[workspaces]
+current = "Mixing"
 
 [export]
 format = "wav"
@@ -1456,7 +1501,9 @@ holds the inputs, 5 minutes if it's left out; 0 turns Capture off. The app
 reads them at startup; there's no window for them yet. `theme`, under
 `[appearance]`, is the theme Musicable draws with: `dark`, `light`, or the
 name of a file in the `themes` folder ([Themes](#themes)), which Options >
-Appearance writes. Each of
+Appearance writes. `current`, under `[workspaces]`, is the workspace in
+use, by name, which the app opens with unless the project it opens was
+saved with another; Default if it's left out. Each of
 `recording.offsets` is the [recording offset](#recording), in `frames`, of
 a `device`, by its id, in exclusive mode or not (`exclusive`, false if it's
 left out), at a `sample_rate`. Audio Settings writes them; an offset of 0

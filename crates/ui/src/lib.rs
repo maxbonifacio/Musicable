@@ -11,9 +11,9 @@
 //! browser beside it. The keyboard shortcuts window and the command palette
 //! go over them. The transport bar, the track headers and the mixer strips
 //! are made of parts the user can hide, move and resize. The layout and the
-//! parts are a [`Workspace`], which the app saves. Views draw from a
-//! [`Theme`], and look mouse gestures up in a [`MouseMap`]. `docs/app.md`
-//! describes it all.
+//! parts are one of the user's [`Workspace`]s, which the app saves and
+//! switches between. Views draw from a [`Theme`], and look mouse gestures
+//! up in a [`MouseMap`]. `docs/app.md` describes it all.
 
 mod arrangement;
 mod browser;
@@ -48,7 +48,8 @@ pub use mouse::{Gesture, MouseAction, MouseMap, Target};
 pub use panels::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use shell::{
-    Action, Audio, KeymapStatus, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
+    Workspaces, ask_to_save,
 };
 pub use theme::{
     Base, BrowserSizes, DeviceSizes, DockSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes,
@@ -56,4 +57,4 @@ pub use theme::{
 };
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};
-pub use workspace::{Layout, Split, WindowLayout, Workspace, WorkspaceError};
+pub use workspace::{Layout, MAX_NAME, Split, WindowLayout, Workspace, WorkspaceError, check_name};

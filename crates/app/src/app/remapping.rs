@@ -10,7 +10,7 @@ use std::fs;
 use eframe::egui::Event;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use musicable_commands::{CommandId, KeyChord, Keymap, transport};
+use musicable_commands::{CommandId, KeyChord, Keymap, transport, workspace};
 
 use super::App;
 use super::testing::{TempDir, chord, press, send, window};
@@ -25,18 +25,23 @@ fn click(harness: &mut Harness<'static, App>, label: &str) {
 }
 
 /// A command as the command palette lists it: its area and title, then its
-/// keys.
-fn palette_row(app: &App, id: &CommandId) -> String {
+/// keys. The palette names a workspace switch by the workspace it switches
+/// to, and leaves out those for slots without one.
+fn palette_row(app: &App, id: &CommandId) -> Option<String> {
     let command = app.session.commands().get(id).unwrap();
     let area = id.as_str().split('.').next().unwrap();
     let area = area[..1].to_uppercase() + &area[1..];
+    let title = match workspace::slot_of(id) {
+        Some(slot) => format!("Switch to {}", app.workspaces.name(usize::from(slot) - 1)?),
+        None => command.title.clone(),
+    };
     let keys: Vec<_> = app
         .session
         .keymap()
         .chords_for(id)
         .map(|chord| chord.to_string())
         .collect();
-    format!("{area}: {} {}", command.title, keys.join(", "))
+    Some(format!("{area}: {title} {}", keys.join(", ")))
 }
 
 /// Chords no command has by default, one for each command.
@@ -113,7 +118,9 @@ fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
     press(&mut harness, chord("Ctrl+Shift+P"));
     assert!(harness.state().shell.asking(), "the palette is open");
     for id in &ids {
-        harness.get_by_label(&palette_row(harness.state(), id));
+        if let Some(row) = palette_row(harness.state(), id) {
+            harness.get_by_label(&row);
+        }
     }
     // Typing finds a command, and Enter runs it.
     send(&mut harness, vec![Event::Text("metronome".to_owned())]);

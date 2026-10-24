@@ -21,7 +21,7 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackKind};
 use musicable_ui::{
     Action, Audio, KeymapStatus, Level, Levels, Library, MIXER, PeaksBuilder, Playback, Plugins,
-    Shell, View, Waveforms,
+    Shell, View, Waveforms, Workspaces,
 };
 
 const TRACKS: usize = 100;
@@ -247,6 +247,7 @@ impl Bench {
                 plugins: Plugins::default(),
                 native: &[],
                 library: Library::default(),
+                workspaces: Workspaces::default(),
             };
             actions = self.shell.show(ui, &view);
         });

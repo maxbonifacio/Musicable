@@ -553,6 +553,7 @@ fn devices_dropped_in_the_devices_panel_go_in_its_chain_wherever_it_is() {
     // The devices right of the arrangement and the mixer, as tall as the
     // window.
     let workspace = Workspace {
+        slot: None,
         windows: vec![WindowLayout {
             hidden: Vec::new(),
             layout: Layout::new(Split::Across(vec![
@@ -566,6 +567,7 @@ fn devices_dropped_in_the_devices_panel_go_in_its_chain_wherever_it_is() {
                     ..Layout::panel(crate::DEVICES)
                 },
             ])),
+            ..WindowLayout::default()
         }],
         ..Workspace::default()
     };

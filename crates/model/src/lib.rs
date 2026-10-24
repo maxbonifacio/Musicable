@@ -452,6 +452,10 @@ pub struct Project {
     pub next_locator_id: u32,
     /// The same for takes.
     pub next_take_id: u32,
+    /// The name of the workspace the project was saved with, which lays the
+    /// app's panels out, for the app to switch to when it opens the
+    /// project. Edits leave it alone: the app sets it as it saves.
+    pub workspace: Option<String>,
 }
 
 impl Default for Project {
@@ -475,6 +479,7 @@ impl Default for Project {
             next_clip_id: 0,
             next_locator_id: 0,
             next_take_id: 0,
+            workspace: None,
         }
     }
 }

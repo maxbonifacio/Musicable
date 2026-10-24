@@ -17,6 +17,9 @@
 //! [appearance]
 //! theme = "Studio.toml"
 //!
+//! [workspaces]
+//! current = "Mixing"
+//!
 //! [export]
 //! format = "wav"
 //! bits = 24
@@ -50,7 +53,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
-use musicable_ui::{Base, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
+use musicable_ui::{Base, DEFAULT_WORKSPACE, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
@@ -97,6 +100,7 @@ pub struct Settings {
     /// or wherever the playhead stopped (`playhead`).
     pub behaviour: Behaviour,
     pub appearance: AppearanceSettings,
+    pub workspaces: WorkspaceSettings,
     /// How the export window writes files, as it was last used: see
     /// [`ExportSettings`].
     pub export: ExportSettings,
@@ -118,6 +122,23 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme: Base::Dark.name().to_owned(),
+        }
+    }
+}
+
+/// Which workspace lays the panels out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSettings {
+    /// The workspace in use, by name: the window opens with it, unless the
+    /// project opened was saved with another.
+    pub current: String,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            current: DEFAULT_WORKSPACE.to_owned(),
         }
     }
 }
@@ -387,6 +408,9 @@ mod tests {
             appearance: AppearanceSettings {
                 theme: "Studio.toml".into(),
             },
+            workspaces: WorkspaceSettings {
+                current: "Mixing".into(),
+            },
             export: ExportSettings {
                 format: FileFormat::Aiff,
                 bits: Bits::Int16,
@@ -426,6 +450,7 @@ mod tests {
         assert_eq!(settings.behaviour, Behaviour::default());
         assert_eq!(settings.recording.capture_minutes, 5);
         assert_eq!(settings.appearance.theme, "dark");
+        assert_eq!(settings.workspaces.current, "Default");
         assert_eq!(
             settings.audio.request(),
             StreamRequest {

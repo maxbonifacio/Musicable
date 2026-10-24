@@ -685,7 +685,8 @@ mod tests {
             ]
         );
         assert_eq!(theme.theme().playhead, ORANGE, "the rest applies");
-        folder.write("Studio.toml", &text.replace("ff8800", "00ff00"));
+        // Longer, so it looks changed even within a tick of the file clock.
+        folder.write("Studio.toml", &text.replace("#ff8800", "#00ff0080"));
         look_now(&mut theme);
         assert!(theme.poll());
         assert_eq!(theme.take_fonts(), None);

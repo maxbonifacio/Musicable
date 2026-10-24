@@ -11,6 +11,7 @@ use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Value,
     arrange, controllers, device, edit, locator, notes, options, take, track, transport, view,
+    workspace,
 };
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
@@ -25,13 +26,13 @@ use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::panels::{self, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
-use crate::parts::Parts;
+use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::transport_bar;
 use crate::waveform::Waveforms;
-use crate::widgets::name_box;
-use crate::workspace::Workspace;
+use crate::widgets::{checked_name_box, name_box};
+use crate::workspace::{WindowLayout, Workspace, check_name};
 
 /// What the shell shows. The app fills one in for each frame.
 pub struct View<'a> {
@@ -78,6 +79,8 @@ pub struct View<'a> {
     pub native: &'a [NativeKind],
     /// The browser's library of samples and presets, and the preview.
     pub library: Library<'a>,
+    /// The user's workspaces, for the Workspaces menu.
+    pub workspaces: Workspaces<'a>,
 }
 
 /// The transport, as the engine last reported it.
@@ -129,6 +132,35 @@ pub struct KeymapStatus<'a> {
     /// How the last change to the keys went, or the last import or export.
     pub notice: Option<&'a str>,
 }
+
+/// The user's workspaces, as the Workspaces menu lists them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Workspaces<'a> {
+    /// The name of each slot's workspace, the first being Default's, or
+    /// `None` where a slot has none.
+    pub slots: &'a [Option<String>],
+    /// The slot of the workspace in use, from 0.
+    pub current: usize,
+}
+
+impl Workspaces<'_> {
+    /// The name of the workspace in slot `slot`, from 0, if it has one.
+    pub fn name(&self, slot: usize) -> Option<&str> {
+        self.slots.get(slot)?.as_deref()
+    }
+
+    /// The name of the workspace in use.
+    fn current_name(&self) -> &str {
+        self.name(self.current).unwrap_or(DEFAULT_WORKSPACE)
+    }
+
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.slots.iter().flatten().map(String::as_str)
+    }
+}
+
+/// The name of the first workspace, which every user has.
+pub const DEFAULT_WORKSPACE: &str = "Default";
 
 /// Something the user asked for, for the app to carry out.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +215,13 @@ pub enum Action {
     SetPreviewVolume(i32),
     /// Clear the messages.
     DismissMessages,
+    /// Keep the panels' layout as a new workspace with this name, and use
+    /// it from now on.
+    SaveWorkspaceAs(String),
+    /// Give the workspace in use this name.
+    RenameWorkspace(String),
+    /// Delete the workspace in use, as the user said to.
+    DeleteWorkspace,
 }
 
 /// What to do with changes that haven't been saved.
@@ -213,6 +252,18 @@ pub struct Shell {
     followed: Option<Followed>,
     /// What's being renamed, and the name typed so far.
     rename: Option<Rename>,
+    /// What the box asking about a workspace asks, while it's open.
+    asking_workspace: Option<WorkspaceBox>,
+    /// Where the main window is, as last seen, for the workspace.
+    place: Place,
+    /// When the main window got there, in egui's time.
+    placed_at: f64,
+    /// Where the main window was when the workspace was last handed out to
+    /// be saved: `None` until the window has been seen since it was laid
+    /// out.
+    saved_place: Option<Place>,
+    /// The time of the frame drawn last, in egui's time.
+    now: f64,
 }
 
 impl Default for Shell {
@@ -229,7 +280,98 @@ impl Default for Shell {
             parts: Parts::default(),
             followed: None,
             rename: None,
+            asking_workspace: None,
+            place: Place::default(),
+            placed_at: 0.0,
+            saved_place: None,
+            now: 0.0,
         }
+    }
+}
+
+/// What the box that asks about a workspace asks for.
+#[derive(Debug)]
+enum WorkspaceBox {
+    /// A name for a new workspace, and the name typed so far.
+    SaveAs(String),
+    /// A new name for the workspace in use: `None` until the box has shown
+    /// the current one.
+    Rename(Option<String>),
+    /// Whether to delete the workspace in use.
+    Delete,
+}
+
+/// How long a window that the user moves or resizes stays put before its
+/// place is saved, in seconds, so it isn't saved at every step.
+const SETTLE: f64 = 1.0;
+
+/// Where a window is, and how big: its place in its [`WindowLayout`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Place {
+    /// Where its top left corner is on the desktop, in pixels.
+    at: Option<[i32; 2]>,
+    /// How big its inside is, in pixels at 100% scaling: its monitor's
+    /// scaling makes it bigger.
+    size: Option<[u32; 2]>,
+    maximized: bool,
+}
+
+impl Place {
+    /// Where the window egui describes as `viewport` is, now that egui
+    /// zooms by `zoom`, when it was at `self` before. A minimized window
+    /// stays where it was, and a maximized one keeps the place it goes back
+    /// to, but for the monitor: one moved to another monitor while it was
+    /// maximized goes back there.
+    fn seen(self, viewport: &egui::ViewportInfo, zoom: f32) -> Self {
+        if viewport.minimized == Some(true) {
+            return self;
+        }
+        // Pixels to an egui point, on the window's monitor.
+        let scale = viewport.native_pixels_per_point.unwrap_or(1.0);
+        let pixels = scale * zoom;
+        let outer = viewport.outer_rect.map(|rect| rect * pixels);
+        let at = outer.map(|rect| [rect.min.x.round() as i32, rect.min.y.round() as i32]);
+        let size = (viewport.inner_rect).map(|rect| {
+            let size = (rect.size() * zoom).round();
+            [size.x.max(1.0) as u32, size.y.max(1.0) as u32]
+        });
+        if viewport.maximized != Some(true) {
+            return Self {
+                at: at.or(self.at),
+                size: size.or(self.size),
+                maximized: false,
+            };
+        }
+        let mut back = Self {
+            at: self.at.or(at),
+            size: self.size.or(size),
+            maximized: true,
+        };
+        if let (Some(outer), Some([x, y]), Some([width, height])) = (outer, back.at, back.size) {
+            let middle = egui::pos2(
+                x as f32 + width as f32 * scale / 2.0,
+                y as f32 + height as f32 * scale / 2.0,
+            );
+            if !outer.contains(middle) {
+                let corner = (outer.min + egui::vec2(40.0, 40.0) * scale).round();
+                back.at = Some([corner.x as i32, corner.y as i32]);
+            }
+        }
+        back
+    }
+
+    fn of(window: &WindowLayout) -> Self {
+        Self {
+            at: window.at,
+            size: window.size,
+            maximized: window.maximized,
+        }
+    }
+
+    fn put_in(self, window: &mut WindowLayout) {
+        window.at = self.at;
+        window.size = self.size;
+        window.maximized = self.maximized;
     }
 }
 
@@ -264,6 +406,7 @@ impl Shell {
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
         self.follow(view.editor);
+        self.follow_place(ui.ctx());
         let shown: BTreeSet<_> = (self.registry.iter())
             .map(|panel| panel.id)
             .filter(|id| self.dock.shown(id))
@@ -323,6 +466,7 @@ impl Shell {
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
         self.show_rename(ui.ctx(), view, &mut actions);
+        self.show_workspace_box(ui.ctx(), view, &mut actions);
         self.palette.show(ui.ctx(), view, &mut actions);
         self.shortcuts
             .show(ui.ctx(), view, &self.registry, &mut actions);
@@ -398,30 +542,96 @@ impl Shell {
         self.panels.browser.focus_search();
     }
 
-    /// How the panels are laid out, and the parts of the transport bar,
-    /// the track headers and the mixer strips, for the app to save.
+    /// Follows where the main window is, as egui says in `ctx`.
+    fn follow_place(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        let (place, now) = ctx.input(|input| (self.place.seen(input.viewport(), zoom), input.time));
+        self.now = now;
+        if place != self.place {
+            self.place = place;
+            self.placed_at = now;
+        }
+        // Where the window is once it's laid out is where it was saved.
+        self.saved_place.get_or_insert(place);
+    }
+
+    /// How the panels are laid out, where the window is, and the parts of
+    /// the transport bar, the track headers and the mixer strips, for the
+    /// app to save. The app gives it its slot.
     pub fn workspace(&self) -> Workspace {
+        let mut main = self.dock.layout(&self.registry, &self.theme);
+        self.place.put_in(&mut main);
         Workspace {
+            slot: None,
             views: self.parts.views(),
-            windows: vec![self.dock.layout(&self.registry, &self.theme)],
+            windows: vec![main],
         }
     }
 
-    /// The workspace, if the user changed the panels' layout or the views'
-    /// parts since this was last asked, for the app to save.
+    /// The workspace, if the user changed the layout or the views' parts,
+    /// or moved the window, since it was last handed out, for the app to
+    /// save. A window being moved or resized is saved once it has stayed
+    /// put for a second.
     pub fn changed_workspace(&mut self) -> Option<Workspace> {
+        let moved = self.saved_place.is_some_and(|saved| saved != self.place)
+            && self.now - self.placed_at >= SETTLE;
         // Both are asked, so neither tells of the same change again.
         let changed = self.dock.take_changed() | self.parts.take_changed();
-        changed.then(|| self.workspace())
+        (changed | moved).then(|| self.take_workspace())
     }
 
-    /// Lays the panels out and shows the views' parts as `workspace` says.
+    /// The same, without waiting for the window to stay put: before the
+    /// app switches to another workspace, or closes.
+    pub fn unsaved_workspace(&mut self) -> Option<Workspace> {
+        let moved = self.saved_place.is_some_and(|saved| saved != self.place);
+        let changed = self.dock.take_changed() | self.parts.take_changed();
+        (changed | moved).then(|| self.take_workspace())
+    }
+
+    fn take_workspace(&mut self) -> Workspace {
+        self.saved_place = Some(self.place);
+        self.workspace()
+    }
+
+    /// Lays the panels out and shows the views' parts as `workspace` says,
+    /// and takes the main window's place from it, which the app moves the
+    /// window to.
     pub fn set_workspace(&mut self, workspace: &Workspace) {
-        self.dock = match workspace.windows.first() {
+        let main = workspace.windows.first();
+        self.dock = match main {
             Some(window) => Dock::from_layout(window, &self.registry, &self.theme),
             None => Dock::new(&self.registry),
         };
         self.parts.set_views(&workspace.views);
+        if let Some(window) = main.filter(|window| window.at.is_some() || window.size.is_some()) {
+            self.place = Place::of(window);
+        }
+        self.saved_place = None;
+    }
+
+    /// Lays the panels out as at first, with all of them in the main window,
+    /// which stays where it is, shows the views' parts as at first, and
+    /// saves that as the workspace in use.
+    pub fn reset_workspace(&mut self) {
+        self.dock = Dock::new(&self.registry);
+        self.dock.mark_changed();
+        self.parts.set_views(&Views::default());
+    }
+
+    /// Asks for a name to keep the panels' layout and the views' parts
+    /// under, as a new workspace.
+    pub fn save_workspace_as(&mut self) {
+        self.asking_workspace = Some(WorkspaceBox::SaveAs(String::new()));
+    }
+
+    /// Asks for a new name for the workspace in use.
+    pub fn rename_workspace(&mut self) {
+        self.asking_workspace = Some(WorkspaceBox::Rename(None));
+    }
+
+    /// Asks whether to delete the workspace in use.
+    pub fn delete_workspace(&mut self) {
+        self.asking_workspace = Some(WorkspaceBox::Delete);
     }
 
     /// Asks the user for a new name for `named`.
@@ -502,6 +712,79 @@ impl Shell {
         self.rename = None;
     }
 
+    /// The box that asks for a workspace's name, or whether to delete it,
+    /// while it's open.
+    fn show_workspace_box(
+        &mut self,
+        ctx: &egui::Context,
+        view: &View<'_>,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(asking) = &mut self.asking_workspace else {
+            return;
+        };
+        let workspaces = view.workspaces;
+        let current = workspaces.current_name();
+        // A name the others don't have.
+        let others = || workspaces.names().filter(|&name| name != current);
+        let done = match asking {
+            WorkspaceBox::SaveAs(text) => {
+                let full = workspaces.names().count() >= usize::from(workspace::SLOTS);
+                let check = |text: &str| match full {
+                    true => Err(format!(
+                        "There's room for {} workspaces: delete one first.",
+                        workspace::SLOTS
+                    )),
+                    false => check_name(text, workspaces.names()),
+                };
+                let title = "Save Workspace As";
+                let problem = |text: &str| check(text).err();
+                checked_name_box(ctx, "workspace name", title, "Save", text, false, problem).map(
+                    |confirmed| {
+                        if let (true, Ok(name)) = (confirmed, check(text)) {
+                            actions.push(Action::SaveWorkspaceAs(name));
+                        }
+                    },
+                )
+            }
+            WorkspaceBox::Rename(text) => {
+                let first = text.is_none();
+                let text = text.get_or_insert_with(|| current.to_owned());
+                let title = format!("Rename {current}");
+                let problem = |text: &str| check_name(text, others()).err();
+                checked_name_box(
+                    ctx,
+                    "workspace name",
+                    &title,
+                    "Rename",
+                    text,
+                    first,
+                    problem,
+                )
+                .map(|confirmed| match (confirmed, check_name(text, others())) {
+                    (true, Ok(name)) if name != current => {
+                        actions.push(Action::RenameWorkspace(name));
+                    }
+                    _ => {}
+                })
+            }
+            WorkspaceBox::Delete => confirm_box(
+                ctx,
+                &format!("Delete the workspace {current}?"),
+                &format!("Its layout is lost, and the window switches to {DEFAULT_WORKSPACE}."),
+                "Delete",
+            )
+            .map(|confirmed| {
+                if confirmed {
+                    actions.push(Action::DeleteWorkspace);
+                }
+            }),
+        };
+        if done.is_some() {
+            self.asking_workspace = None;
+        }
+    }
+
     /// Shows the command palette, which finds any command and runs it.
     pub fn open_palette(&mut self) {
         self.shortcuts.cancel();
@@ -532,6 +815,7 @@ impl Shell {
         self.palette.is_open()
             || self.shortcuts.asking()
             || self.rename.is_some()
+            || self.asking_workspace.is_some()
             || self.panels.devices.asking()
     }
 }
@@ -571,10 +855,21 @@ fn command_button(
         id if *id == edit::REDO => Some(view.redo),
         _ => None,
     };
-    let (title, enabled) = match step {
-        Some(Some(name)) => (format!("{} {name}", command.title), true),
-        Some(None) => (command.title.clone(), false),
-        None => (
+    let workspaces = view.workspaces;
+    let slot = workspace::slot_of(id).map(|slot| usize::from(slot) - 1);
+    let (title, enabled) = match (step, slot) {
+        (Some(Some(name)), _) => (format!("{} {name}", command.title), true),
+        (Some(None), _) => (command.title.clone(), false),
+        // Each slot with a workspace shows its name.
+        (None, Some(slot)) => match workspaces.name(slot) {
+            Some(name) => (name.to_owned(), true),
+            None => return,
+        },
+        // Default keeps its name and can't be deleted.
+        (None, None) if *id == workspace::RENAME || *id == workspace::DELETE => {
+            (command.title.clone(), workspaces.current != 0)
+        }
+        (None, None) => (
             command.title.clone(),
             command.when.applies(view.project, view.editor),
         ),
@@ -585,6 +880,7 @@ fn command_button(
         id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
         id if *id == view::TOGGLE_PIANO_ROLL => Some(shown.contains(PIANO_ROLL)),
         id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
+        _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
         id => toggled(view, id),
     };
     if let Some(on) = on {
@@ -707,6 +1003,32 @@ pub fn ask_to_save(ctx: &egui::Context, name: &str) -> Option<SaveChoice> {
     });
     if modal.inner.is_none() && modal.should_close() {
         return Some(SaveChoice::Cancel);
+    }
+    modal.inner
+}
+
+/// A box over the window that asks `question`, with `detail` under it,
+/// and buttons to `confirm` or cancel. Escape or a click outside cancels.
+/// Returns whether the user confirmed, once they have or have cancelled.
+fn confirm_box(ctx: &egui::Context, question: &str, detail: &str, confirm: &str) -> Option<bool> {
+    let modal = egui::Modal::new(egui::Id::unique(question)).show(ctx, |ui| {
+        ui.set_width(340.0);
+        ui.heading(question);
+        ui.label(detail);
+        ui.add_space(10.0);
+        let mut choice = None;
+        ui.horizontal(|ui| {
+            if ui.button(confirm).clicked() {
+                choice = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(false);
+            }
+        });
+        choice
+    });
+    if modal.inner.is_none() && modal.should_close() {
+        return Some(false);
     }
     modal.inner
 }
@@ -1049,6 +1371,7 @@ mod tests {
         let expected = WindowLayout {
             hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
             layout: across(vec![Layout::panel(BROWSER), down(vec![beside, devices])]),
+            ..WindowLayout::default()
         };
         assert_eq!(layout(&harness), expected);
         assert!(harness.state_mut().shell.changed_workspace().is_some());
@@ -1066,6 +1389,7 @@ mod tests {
                     tabs(&[DEVICES, PIANO_ROLL, MIXER], MIXER),
                 ]),
             ]),
+            ..WindowLayout::default()
         };
         assert_eq!(layout(&harness), expected);
         assert!(harness.state().shell.panel_shown(MIXER));
@@ -1187,8 +1511,10 @@ mod tests {
                     ..tabs(&[BROWSER, DEVICES, PIANO_ROLL], DEVICES)
                 },
             ]),
+            ..WindowLayout::default()
         };
         let workspace = Workspace {
+            slot: None,
             windows: vec![window.clone()],
             ..Workspace::default()
         };
@@ -1243,5 +1569,206 @@ mod tests {
             harness.state().actions,
             [Action::Run(track::NEW_AUDIO_TRACK)]
         );
+    }
+
+    /// The shell with the workspaces Default, Mixing in the third slot and
+    /// Editing in the fourth, Mixing in use.
+    fn with_workspaces() -> Harness {
+        let mut harness = harness(Project::new());
+        let state = harness.state_mut();
+        let names = ["Default", "", "Mixing", "Editing"];
+        state.workspaces = (names.iter())
+            .map(|name| (!name.is_empty()).then(|| (*name).to_owned()))
+            .collect();
+        state.workspace = 2;
+        harness.run();
+        harness
+    }
+
+    fn type_name(harness: &mut Harness, text: &str) {
+        harness.get_by_role(Role::TextInput).type_text(text);
+        harness.run();
+    }
+
+    #[test]
+    fn the_workspaces_menu_switches_between_them_by_name() {
+        let mut harness = with_workspaces();
+        harness.get_by_label("Workspaces").click();
+        harness.run();
+        // Each slot's workspace, with Alt and the slot's number, and a tick
+        // on the one in use.
+        let ticked =
+            |harness: &Harness, label| harness.get_by_label(label).accesskit_node().toggled();
+        assert_eq!(ticked(&harness, "Default Alt+1"), Some(Toggled::False));
+        assert_eq!(ticked(&harness, "Mixing Alt+3"), Some(Toggled::True));
+        assert!(harness.query_by_label_contains("Workspace 2").is_none());
+        harness.get_by_label("Editing Alt+4").click();
+        harness.run();
+        assert_eq!(harness.state().actions, [Action::Run(workspace::SWITCH_4)]);
+
+        // Default can't be renamed or deleted.
+        harness.state_mut().workspace = 0;
+        harness.get_by_label("Workspaces").click();
+        harness.run();
+        for label in ["Rename Workspace...", "Delete Workspace..."] {
+            assert!(harness.get_by_label(label).accesskit_node().is_disabled());
+        }
+        assert!(
+            !harness
+                .get_by_label("Reset Workspace")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn a_new_workspace_needs_a_name_the_others_dont_have() {
+        let mut harness = with_workspaces();
+        harness.state_mut().shell.save_workspace_as();
+        harness.run();
+        assert!(harness.state().shell.asking(), "keys don't run commands");
+        type_name(&mut harness, "mixing");
+        harness.get_by_label("There's a workspace called mixing already.");
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().actions, []);
+        type_name(&mut harness, " 2");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [Action::SaveWorkspaceAs("mixing 2".to_owned())]
+        );
+        assert!(!harness.state().shell.asking());
+
+        // With every slot taken, there's no room for another.
+        let state = harness.state_mut();
+        state.workspaces = (1..=9).map(|n| Some(format!("Mine {n}"))).collect();
+        state.shell.save_workspace_as();
+        harness.run();
+        type_name(&mut harness, "Tracking");
+        harness.get_by_label("There's room for 9 workspaces: delete one first.");
+        assert!(harness.get_by_label("Save").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn renaming_starts_from_the_name_and_deleting_asks_first() {
+        let mut harness = with_workspaces();
+        harness.state_mut().shell.rename_workspace();
+        harness.run();
+        harness.get_by_label("Rename Mixing");
+        // Its own name in other letters is no clash.
+        type_name(&mut harness, "MIXING");
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [Action::RenameWorkspace("MIXING".to_owned())]
+        );
+        harness.state_mut().actions.clear();
+        // Nor is it a change.
+        harness.state_mut().shell.rename_workspace();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().actions, []);
+
+        harness.state_mut().shell.delete_workspace();
+        harness.run();
+        harness.get_by_label("Delete the workspace Mixing?");
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert_eq!(harness.state().actions, []);
+        harness.state_mut().shell.delete_workspace();
+        harness.run();
+        harness.get_by_label("Delete").click();
+        harness.run();
+        assert_eq!(harness.state().actions, [Action::DeleteWorkspace]);
+    }
+
+    #[test]
+    fn a_window_keeps_the_place_it_goes_back_to() {
+        let viewport = |min: [f32; 2], size: [f32; 2], maximized| egui::ViewportInfo {
+            native_pixels_per_point: Some(1.5),
+            outer_rect: Some(egui::Rect::from_min_size(min.into(), size.into())),
+            inner_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(min[0] + 5.0, min[1] + 20.0),
+                egui::vec2(size[0] - 10.0, size[1] - 25.0),
+            )),
+            maximized: Some(maximized),
+            ..egui::ViewportInfo::default()
+        };
+        // Its corner in pixels, and its inside's size at 100% scaling.
+        let place = Place::default().seen(&viewport([100.0, 50.0], [810.0, 625.0], false), 1.0);
+        let normal = Place {
+            at: Some([150, 75]),
+            size: Some([800, 600]),
+            maximized: false,
+        };
+        assert_eq!(place, normal);
+        // Maximized on the same monitor, it goes back to where it was.
+        let maximized = place.seen(&viewport([-5.0, -5.0], [1290.0, 700.0], true), 1.0);
+        assert_eq!(
+            maximized,
+            Place {
+                maximized: true,
+                ..normal
+            }
+        );
+        // Minimized, it's where it was.
+        let minimized = egui::ViewportInfo {
+            minimized: Some(true),
+            ..viewport([-32000.0, -32000.0], [160.0, 28.0], false)
+        };
+        assert_eq!(maximized.seen(&minimized, 1.0), maximized);
+        // Maximized on another monitor, it goes back to that one.
+        let moved = maximized.seen(&viewport([1275.0, -5.0], [1290.0, 700.0], true), 1.0);
+        assert_eq!(moved.at, Some([1973, 53]), "40 points in from its corner");
+        assert_eq!(moved.size, normal.size);
+        // egui's zoom makes points bigger, but not pixels.
+        let zoomed = Place::default().seen(&viewport([100.0, 50.0], [810.0, 625.0], false), 2.0);
+        assert_eq!(zoomed.at, Some([300, 150]));
+        assert_eq!(zoomed.size, Some([1600, 1200]));
+    }
+
+    #[test]
+    fn a_window_moved_about_is_saved_once_it_stays_put() {
+        let mut harness = harness(Project::new());
+        harness.run();
+        let shell = &mut harness.state_mut().shell;
+        assert!(shell.changed_workspace().is_none(), "nothing's changed");
+        let place = Place {
+            at: Some([200, 100]),
+            size: Some([1000, 700]),
+            maximized: false,
+        };
+        shell.place = place;
+        shell.placed_at = shell.now;
+        assert!(shell.changed_workspace().is_none(), "it's still moving");
+        shell.now += SETTLE;
+        let saved = shell.changed_workspace().expect("it stayed put");
+        assert_eq!(saved.windows[0].at, Some([200, 100]));
+        assert_eq!(saved.windows[0].size, Some([1000, 700]));
+        assert!(shell.changed_workspace().is_none(), "it's saved");
+        // Before switching, it's saved at once.
+        shell.place.at = Some([300, 100]);
+        shell.placed_at = shell.now;
+        assert!(shell.changed_workspace().is_none());
+        assert!(shell.unsaved_workspace().is_some());
+        assert!(shell.unsaved_workspace().is_none());
+        // Laid out from a workspace, it's where the workspace has it.
+        let mut workspace = shell.workspace();
+        workspace.windows[0].at = Some([-1500, 20]);
+        shell.set_workspace(&workspace);
+        assert_eq!(shell.workspace().windows[0].at, Some([-1500, 20]));
+        assert!(shell.changed_workspace().is_none());
+        // Reset, the panels are as at first, and that's saved.
+        shell.toggle_panel(MIXER);
+        shell.reset_workspace();
+        let reset = shell.changed_workspace().expect("a reset is saved");
+        let first = Shell::new().workspace();
+        assert_eq!(reset.windows[0].layout, first.windows[0].layout);
+        assert_eq!(reset.windows[0].hidden, first.windows[0].hidden);
     }
 }

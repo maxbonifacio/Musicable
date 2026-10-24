@@ -1,8 +1,8 @@
 //! Small widgets for the shell, and how it writes positions and times.
 
 use egui::{
-    Align2, Color32, FontId, Id, Key, Modal, Modifiers, Rect, Response, Role, Sense, Shape, Stroke,
-    StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Rect, Response, Role, Sense, Shape,
+    Stroke, StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use musicable_model::time::{Beats, TempoMap};
 
@@ -231,6 +231,20 @@ pub(crate) fn name_box(
     text: &mut String,
     first: bool,
 ) -> Option<bool> {
+    checked_name_box(ctx, id, title, confirm, text, first, |_| None)
+}
+
+/// [`name_box`], which says under the field what `problem` finds wrong
+/// with the name typed, and can't be confirmed while it finds something.
+pub(crate) fn checked_name_box(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    confirm: &str,
+    text: &mut String,
+    first: bool,
+    problem: impl Fn(&str) -> Option<String>,
+) -> Option<bool> {
     let (enter, escape) = ctx.input_mut(|i| {
         (
             i.consume_key(Modifiers::NONE, Key::Enter),
@@ -238,6 +252,7 @@ pub(crate) fn name_box(
         )
     });
     let mut done = None;
+    // Whether the name can be confirmed.
     let modal = Modal::new(Id::unique(id)).show(ctx, |ui| {
         ui.set_width(ui.spacing().text_edit_width);
         let heading = ui.heading(title);
@@ -255,16 +270,24 @@ pub(crate) fn name_box(
             }
         }
         field.request_focus();
+        let problem = problem(text);
+        if let Some(problem) = &problem {
+            ui.colored_label(ui.visuals().warn_fg_color, problem);
+        }
         ui.horizontal(|ui| {
-            if ui.button(confirm).clicked() {
+            if ui
+                .add_enabled(problem.is_none(), Button::new(confirm))
+                .clicked()
+            {
                 done = Some(true);
             }
             if ui.button("Cancel").clicked() {
                 done = Some(false);
             }
         });
+        problem.is_none()
     });
-    if enter {
+    if enter && modal.inner {
         done = Some(true);
     } else if escape || modal.backdrop_response.clicked() {
         done = done.or(Some(false));
