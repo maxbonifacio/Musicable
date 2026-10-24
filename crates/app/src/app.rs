@@ -1336,6 +1336,7 @@ impl eframe::App for App {
         let settings = settings_window::Cx {
             view: &view,
             shell: &mut self.shell,
+            actions: &mut actions,
             output: &self.output,
             offset: self.session.recording_offset(),
             theme: &self.theme_file,
@@ -1343,7 +1344,7 @@ impl eframe::App for App {
             presets_folder: library.presets_folder(),
             workspaces_folder: self.workspaces.folder(),
         };
-        let asked = self.settings_window.show(&ctx, settings, &mut actions);
+        let asked = self.settings_window.show(&ctx, settings);
         for action in actions {
             self.act(action, &ctx, frame);
         }
