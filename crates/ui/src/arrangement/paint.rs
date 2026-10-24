@@ -924,7 +924,7 @@ pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination
         Destination::Chain(Some(Chain::Master)) => {
             (layout.master.top..=layout.master.bottom(), None)
         }
-        Destination::Chain(_) => return,
+        Destination::Chain(_) | Destination::Sampler(_) => return,
     };
     let rect = Rect::from_x_y_ranges(across, rows.clone());
     painter.rect_stroke(rect.shrink(1.0), 0.0, outline, StrokeKind::Inside);

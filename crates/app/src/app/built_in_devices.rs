@@ -1,7 +1,8 @@
 //! Musicable's own devices in the app's window: the browser lists the ones
 //! that play, a double-click puts one on the selected track, its controls
 //! change it a step at a time in the undo history, and it comes back from
-//! the project's file as it was saved.
+//! the project's file as it was saved. One added while the piano roll is in
+//! the devices' place brings them forward.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -9,8 +10,11 @@ use eframe::egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_io::project;
+use musicable_model::clip::{ClipContent, MidiClip};
 use musicable_model::native::{NativeDevice, NativeKind, eq};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackKind};
+use musicable_ui::{DEVICES, PIANO_ROLL};
 
 use super::App;
 use super::testing::{TempDir, chord, press, window};
@@ -115,4 +119,47 @@ fn an_eq_goes_on_a_track_and_its_controls_change_it() {
     let harness = window(&config.0, Some(path));
     let eq = &natives(harness.state().session.project(), "Keys")[0];
     assert_eq!(eq.values[freq], moved);
+}
+
+#[test]
+fn a_device_added_with_the_piano_roll_open_comes_into_sight() {
+    let folder = TempDir::new("piano-roll-device-song");
+    let config = TempDir::new("piano-roll-device-config");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+    let riff = song.new_clip("Riff", range, ClipContent::Midi(MidiClip::default()));
+    song.track_mut(keys).unwrap().clips.push(riff);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path));
+
+    // A double-click on the clip opens it in the piano roll, in the
+    // devices' place.
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let row = harness.get_by_label("Track Keys").rect();
+    let x = harness
+        .state()
+        .session
+        .editor()
+        .viewport
+        .x_of(Beats::new(1));
+    click_at(&mut harness, pos2(lanes.left() + x, row.bottom() - 6.0), 2);
+    let shell = &harness.state().shell;
+    assert!(shell.panel_shown(PIANO_ROLL) && !shell.panel_shown(DEVICES));
+
+    // A synth double-clicked in the browser goes on the clip's track, and
+    // the devices come forward with it.
+    press(&mut harness, chord("Ctrl+Alt+B"));
+    harness.get_by_label("Devices").click();
+    harness.run();
+    let at = harness.get_by_label("Synth").rect().center();
+    click_at(&mut harness, at, 2);
+    assert_eq!(
+        natives(harness.state().session.project(), "Keys"),
+        [NativeDevice::new(NativeKind::Synth)]
+    );
+    let shell = &harness.state().shell;
+    assert!(shell.panel_shown(DEVICES) && !shell.panel_shown(PIANO_ROLL));
+    harness.get_by_label("Device Synth");
 }

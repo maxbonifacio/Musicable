@@ -15,7 +15,7 @@ use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Controller, Dimension};
 use musicable_model::native::sampler::{
     ATTACK, CUTOFF, DECAY, DETUNE, END, FILTER, LOOP, LOOP_FADE, LOOP_START, MODE, RELEASE,
     RESONANCE, ROOT, START, SUSTAIN, TRANSPOSE, VELOCITY, VOICES, VOLUME,
@@ -377,8 +377,8 @@ impl Node for Sampler {
     }
 }
 
-/// Applies a note, or modulation for one, with the values on its frame.
-/// Without a sample, notes start no voices.
+/// Applies a note, modulation for one or the sustain pedal, with the
+/// values on its frame. Without a sample, notes start no voices.
 fn handle(
     event: &NodeEvent,
     values: &Values,
@@ -404,9 +404,7 @@ fn handle(
             }
         }
         NodeEventKind::Note(NoteEvent::Off { note, .. }) => {
-            for voice in voices.with_note(note) {
-                voice.release(one_shot);
-            }
+            voices.let_go(note, |voice| voice.release(one_shot));
         }
         NodeEventKind::Note(NoteEvent::Expression {
             note,
@@ -422,6 +420,10 @@ fn handle(
             amount,
             note: Some(note),
         } => voices.modulate(note, param.0 as usize, amount as f32, info),
+        NodeEventKind::Controller {
+            controller: Controller::SUSTAIN,
+            value,
+        } => voices.pedal(value, |voice| voice.release(one_shot)),
         _ => {}
     }
 }
@@ -725,7 +727,9 @@ mod tests {
     use musicable_model::native::NativeKind;
 
     use super::*;
-    use crate::devices::instrument::tests::{bend, for_note, frequency, hz, level_at, off, on};
+    use crate::devices::instrument::tests::{
+        bend, for_note, frequency, hz, level_at, off, on, pedal,
+    };
     use crate::devices::testing::{Run, context, modulation, param};
 
     /// A sample of `channels` at `rate`.
@@ -995,6 +999,36 @@ mod tests {
         assert!(out[10 + 47..].iter().all(|&s| s == 0.0));
     }
 
+    #[test]
+    fn the_sustain_pedal_holds_notes_let_go_until_it_comes_up() {
+        let counting = sample(48_000, vec![ramp(1000)]);
+        let classic = device(&[(LOOP, 1.0), (LOOP_START, 50.0), (RELEASE, 1.0)]);
+        // Let go at once with the pedal down, a note loops on until the
+        // pedal comes up, as one let go then does.
+        let late = mono(
+            &classic,
+            &counting,
+            3000,
+            &[on(0, 1, 69, 1.0), off(2000, 1)],
+        );
+        assert!(late[2000 + 46] > 0.0);
+        assert!(late[2000 + 47..].iter().all(|&s| s == 0.0));
+        let events = [
+            pedal(0, true),
+            on(0, 1, 69, 1.0),
+            off(10, 1),
+            pedal(2000, false),
+        ];
+        assert_eq!(mono(&classic, &counting, 3000, &events), late);
+        // A one-shot let go plays to its end either way.
+        let shot = device(&[(MODE, 1.0), (RELEASE, 1.0)]);
+        let short = [on(0, 1, 69, 1.0), off(10, 1)];
+        let events = [pedal(0, true), on(0, 1, 69, 1.0), off(10, 1)];
+        let out = mono(&shot, &counting, 1200, &events);
+        assert_eq!(out, mono(&shot, &counting, 1200, &short));
+        assert!(out[999] > 0.0 && out[1000..].iter().all(|&s| s == 0.0));
+    }
+
     /// The amp envelope, velocity and volume set each note's level: with a
     /// sample that holds at 0.5, on every frame.
     #[test]
@@ -1149,6 +1183,7 @@ mod tests {
             modulation(1200, DETUNE, 30.0),
             on(1500, 4, 84, 0.3),
             for_note(1500, 4, CUTOFF, 3000.0),
+            pedal(1800, true),
             off(2100, 1),
             param(2500, FILTER, 2.0),
             param(2600, LOOP_START, 50.0),
@@ -1158,6 +1193,7 @@ mod tests {
             off(5000, 4),
             off(5000, 5),
             off(5001, 2),
+            pedal(5500, false),
         ];
         (sampler, noisy, events)
     }

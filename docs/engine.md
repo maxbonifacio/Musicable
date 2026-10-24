@@ -820,23 +820,24 @@ the tail matches its design to within 0.001 dB.
 
 **Instruments** (`devices/instrument.rs`): the synth and the sampler play
 the notes in `ctx.events`, each on a voice of its own, from its start until
-its sound ends. A note past the device's `voices` takes the place of the
-voice let go longest ago, or of the oldest if none is, and that voice fades
+its sound ends. While the sustain pedal is down (`Controller::SUSTAIN`, from
+0.5), a note let go plays on as if held until the pedal comes up. A note
+past the device's `voices` takes the place of the voice let go longest ago,
+then of one the pedal holds on, or else of the oldest, and that voice fades
 out over 5 ms beside the new one, so taking it doesn't click: an instrument
 has a slot for each of its up to 32 voices and as many again for voices
 fading out, all made with the node. Each note bends on its own (its
 `Dimension::PitchBend` expression, in semitones), and modulation for one
 note (`Modulation` with its id) moves that note's voice alone, for the
 first 48 parameters of the table, added on every frame to the values the
-device has. A note's pressure and timbre move nothing yet: modulation for
-one note is how a modulator will bring them to a parameter. Controllers
-(`NodeEventKind::Controller`) move nothing yet either, the sustain pedal
-among them, so a note let go with the pedal down is released all the same.
-Each voice has an attack, decay, sustain and release envelope that curves
-as an analog one does, heading a little past each stage's end and stopping
-there, so every stage takes its time to the frame, and a 12 dB state
-variable filter (the EQ's SVF) whose resonance runs from a Q of 0.707 to
-25, retuned on every frame its cutoff moves. A voice renders the same
+device has. A note's pressure and timbre move nothing yet, and nor do the
+other controllers: modulation for one note is how a modulator will bring
+pressure and timbre to a parameter. Each voice has an attack, decay,
+sustain and release envelope that curves as an analog one does, heading a
+little past each stage's end and stopping there, so every stage takes its
+time to the frame, and a 12 dB state variable filter (the EQ's SVF) whose
+resonance runs from a Q of 0.707 to 25, retuned on every frame its cutoff
+moves. A voice renders the same
 whatever blocks it falls in: what it keeps from frame to frame, such as
 its filter's tuning, is a function of what it's from alone. When a voice's
 sound ends, the instrument says so (`Node::ended_voices`), as a CLAP plugin

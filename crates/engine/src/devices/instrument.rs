@@ -2,15 +2,17 @@
 //! voices play, with modulation for one note, their envelopes and their
 //! filter.
 //!
-//! Each voice plays a note, from its start until its sound ends. A note
-//! past the instrument's `voices` takes the place of the voice let go
-//! longest ago, or of the oldest if none is, and that voice fades out over
-//! [`STEAL_SECONDS`] beside it, so taking it doesn't click: an instrument
-//! has a slot for each voice it plays and as many again for voices fading
-//! out.
+//! Each voice plays a note, from its start until its sound ends. While the
+//! sustain pedal is down, a note let go plays on as if held until the pedal
+//! comes up. A note past the instrument's `voices` takes the place of the
+//! voice let go longest ago, then of one the pedal holds on, or else of the
+//! oldest, and that voice fades out over [`STEAL_SECONDS`] beside it, so
+//! taking it doesn't click: an instrument has a slot for each voice it
+//! plays and as many again for voices fading out.
 
 use std::f64::consts::PI;
 
+use musicable_model::clip::Controller;
 use musicable_model::native::ParamInfo;
 
 use super::{Span, Values};
@@ -82,6 +84,9 @@ pub(crate) struct Playing {
     pub(crate) velocity: f32,
     /// The note's pitch bend, in semitones.
     pub(crate) bend: f32,
+    /// Whether its note was let go while the sustain pedal was down, so it
+    /// plays on as if held until the pedal comes up.
+    pedal: bool,
     /// Its level while it fades out once stolen, from 1.0 to 0.0.
     pub(crate) fade: f32,
     /// The modulation for its note alone of each of the first
@@ -100,6 +105,7 @@ impl Default for Playing {
             key: 0,
             velocity: 0.0,
             bend: 0.0,
+            pedal: false,
             fade: 1.0,
             modulation: [0.0; VOICE_PARAMS],
             modulated: false,
@@ -172,6 +178,8 @@ pub(crate) struct Voices<V> {
     pub(crate) slots: [V; SLOTS],
     /// Notes started so far, to tell which voice is oldest.
     started: u64,
+    /// Whether the sustain pedal is down.
+    sustain: bool,
     /// The notes whose voices ended in the block being rendered.
     ended: Vec<NoteId>,
 }
@@ -182,6 +190,7 @@ impl<V: Voice> Voices<V> {
         Self {
             slots: [V::default(); SLOTS],
             started: 0,
+            sustain: false,
             ended: Vec::with_capacity(ENDED),
         }
     }
@@ -191,6 +200,7 @@ impl<V: Voice> Voices<V> {
     pub(crate) fn take_over(&mut self, previous: &Self) {
         self.slots = previous.slots;
         self.started = previous.started;
+        self.sustain = previous.sustain;
     }
 
     /// The notes whose voices ended in the block last rendered.
@@ -211,11 +221,11 @@ impl<V: Voice> Voices<V> {
 
     /// Takes a slot for `note`, which starts on `key` at `velocity`, with
     /// at most `limit` voices sounding, counting it. The voices beyond
-    /// that are stolen: the one let go longest ago, or the oldest if none
-    /// is. Returns the slot, whose voice is set up but for what's the
-    /// instrument's own, which the caller sets up. A voice already playing
-    /// the note must be let go first: a note's id means the new voice from
-    /// now on.
+    /// that are stolen: the one let go longest ago, then one the sustain
+    /// pedal holds on, or else the oldest. Returns the slot, whose voice
+    /// is set up but for what's the instrument's own, which the caller
+    /// sets up. A voice already playing the note must be let go first: a
+    /// note's id means the new voice from now on.
     pub(crate) fn start(&mut self, note: NoteId, key: u8, velocity: f32, limit: usize) -> usize {
         let limit = limit.clamp(1, MAX_VOICES);
         loop {
@@ -225,13 +235,14 @@ impl<V: Voice> Voices<V> {
             if sounding < limit {
                 break;
             }
-            let oldest = |state: State| {
+            let oldest = |stealable: fn(&Playing) -> bool| {
                 (0..SLOTS)
-                    .filter(|&s| self.slots[s].playing().state == state)
+                    .filter(|&s| stealable(self.slots[s].playing()))
                     .min_by_key(|&s| self.slots[s].playing().started)
             };
-            let stolen = oldest(State::Released)
-                .or_else(|| oldest(State::Held))
+            let stolen = oldest(|p| p.state == State::Released)
+                .or_else(|| oldest(|p| p.state == State::Held && p.pedal))
+                .or_else(|| oldest(|p| p.state == State::Held))
                 .expect("a voice sounds");
             self.slots[stolen].playing_mut().state = State::Stolen;
         }
@@ -261,6 +272,32 @@ impl<V: Voice> Voices<V> {
         };
         self.slots[slot] = voice;
         slot
+    }
+
+    /// Lets `note` go: its voices release, with `release`, or play on while
+    /// the sustain pedal is down, until it comes up.
+    pub(crate) fn let_go(&mut self, note: NoteId, mut release: impl FnMut(&mut V)) {
+        let sustain = self.sustain;
+        for voice in self.with_note(note) {
+            if sustain && voice.playing().state == State::Held {
+                voice.playing_mut().pedal = true;
+            } else {
+                release(voice);
+            }
+        }
+    }
+
+    /// Moves the sustain pedal to `value`, from 0.0 to 1.0: it's down from
+    /// halfway, as MIDI's switches are. Coming up, it lets go of the notes
+    /// it held on, with `release`.
+    pub(crate) fn pedal(&mut self, value: f32, mut release: impl FnMut(&mut V)) {
+        self.sustain = Controller::is_on(value);
+        if !self.sustain {
+            for voice in self.slots.iter_mut().filter(|v| v.playing().pedal) {
+                voice.playing_mut().pedal = false;
+                release(voice);
+            }
+        }
     }
 
     /// Modulates parameter `param` of the voices playing `note` by
@@ -587,6 +624,19 @@ pub(crate) mod tests {
                 value: semitones,
             }),
         }
+    }
+
+    /// Controller `controller` moving to `value` on frame `at`.
+    pub(crate) fn controller(at: usize, controller: Controller, value: f32) -> NodeEvent {
+        NodeEvent {
+            offset: at,
+            kind: NodeEventKind::Controller { controller, value },
+        }
+    }
+
+    /// The sustain pedal going down on frame `at`, or coming up.
+    pub(crate) fn pedal(at: usize, down: bool) -> NodeEvent {
+        controller(at, Controller::SUSTAIN, if down { 1.0 } else { 0.0 })
     }
 
     /// Modulation of parameter `param` by `amount` for note `note` alone,

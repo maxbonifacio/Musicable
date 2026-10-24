@@ -10,6 +10,7 @@ use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, TrackId, TrackKind};
 
+use crate::editor::Selection;
 use crate::{
     Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value,
 };
@@ -306,7 +307,10 @@ pub fn register(registry: &mut Registry) {
 }
 
 /// Adds a device of `kind` where `args` say, as the change `name`, and
-/// returns its id. A new track it goes on is selected.
+/// returns its id. The track it goes on, new or not, or the master, is
+/// selected, and the app is asked to show the device there, so it doesn't
+/// go out of sight: behind the piano roll, or on a track the devices panel
+/// doesn't show.
 fn add(
     ctx: &mut Context<'_>,
     args: &Args,
@@ -334,22 +338,26 @@ fn add(
         false => TrackKind::Audio,
     };
     let track_name = device_name(&kind).to_owned();
-    let (device, new) = ctx.document.transact(name, |tx| {
-        let (chain, new) = match chain {
-            Some(chain) => (chain, None),
-            None => {
-                let id = crate::track::add_track(tx, track_name, track);
-                (Chain::Track(id), Some(id))
-            }
+    let (device, chain) = ctx.document.transact(name, |tx| {
+        let chain = match chain {
+            Some(chain) => chain,
+            None => Chain::Track(crate::track::add_track(tx, track_name, track)),
         };
         let device = tx.new_device(kind);
         let id = device.id;
         tx.add_device(chain, index, device);
-        (id, new)
+        (id, chain)
     });
-    if new.is_some() {
-        ctx.document.editor_mut().selected_track = new.map(Chain::Track);
+    let editor = ctx.document.editor_mut();
+    if editor.selected_track != Some(chain) {
+        // As a click on its header selects it.
+        editor.selection = Selection {
+            tracks: chain.track().into_iter().collect(),
+            ..Selection::default()
+        };
+        editor.selected_track = Some(chain);
     }
+    ctx.requests.push(Request::ShowDevice(device));
     Ok(device.into())
 }
 
@@ -435,8 +443,12 @@ fn plugin_name(plugin: &PluginDevice) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use musicable_model::clip::ClipContent;
     use musicable_model::native::eq;
     use musicable_model::plugin::PluginParam;
+    use musicable_model::time::{BeatRange, Beats};
     use musicable_model::{Project, TrackKind};
 
     use super::*;
@@ -518,6 +530,55 @@ mod tests {
     }
 
     #[test]
+    fn a_device_added_is_shown_where_it_went() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let bass = project.add_track("Bass", TrackKind::Audio);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+        let riff = project.new_clip("Riff", range, ClipContent::Midi(Default::default()));
+        let riff_id = riff.id;
+        project.track_mut(keys).unwrap().clips.push(riff);
+        let mut setup = Setup::new(project);
+        setup.select_clips(&[riff_id]);
+        fn added(setup: &mut Setup, command: &CommandId, args: Args) -> DeviceId {
+            match setup.run_with(command, args) {
+                Ok(Value::Device(device)) => device,
+                other => panic!("a device, not {other:?}"),
+            }
+        }
+        let editor = |setup: &Setup| setup.document.editor().clone();
+
+        // On the selected track, the selection stays as it was.
+        let eq = added(&mut setup, &ADD, Args::new().with("kind", "eq"));
+        let before = editor(&setup);
+        assert_eq!(before.selected_track, Some(Chain::Track(keys)));
+        assert_eq!(before.selection, Selection::clips([riff_id]));
+        // Dropped on another track or the master, that's selected, as a
+        // click on its header selects it, so the devices panel shows it.
+        let gate = Args::new().with("kind", "gate").with("track", bass);
+        let gate = added(&mut setup, &ADD, gate);
+        let after = editor(&setup);
+        assert_eq!(after.selected_track, Some(Chain::Track(bass)));
+        assert_eq!(after.selection.tracks, BTreeSet::from([bass]));
+        assert!(after.selection.clips.is_empty());
+        let limiter = added(&mut setup, &ADD_PLUGIN, add("Limiter").with("master", true));
+        let after = editor(&setup);
+        assert_eq!(after.selected_track, Some(Chain::Master));
+        assert!(after.selection.is_empty());
+        let synth = Args::new().with("kind", "synth").with("new_track", true);
+        let synth = added(&mut setup, &ADD, synth);
+        let new = setup.document.project().tracks[2].id;
+        assert_eq!(editor(&setup).selected_track, Some(Chain::Track(new)));
+        // Each asks the app to show it, in front of the piano roll.
+        let shown = [eq, gate, limiter, synth].map(Request::ShowDevice);
+        assert_eq!(setup.requests, shown);
+        // One that can't go on asks for nothing.
+        let gone = Args::new().with("kind", "eq").with("track", TrackId(9));
+        assert!(setup.run_with(&ADD, gone).is_err());
+        assert_eq!(setup.requests, shown);
+    }
+
+    #[test]
     fn parameters_windows_and_deleting() {
         let mut project = Project::new();
         let keys = project.add_track("Keys", TrackKind::Midi);
@@ -562,6 +623,7 @@ mod tests {
         assert_eq!(
             setup.requests,
             [
+                Request::ShowDevice(device),
                 Request::PluginWindow { device, show: true },
                 Request::PluginWindow {
                     device,
@@ -756,7 +818,9 @@ mod tests {
             Some("Samples/kick.wav")
         );
 
-        // Loading asks the app for the file.
+        // Loading asks the app for the file. (Adding them asked it to show
+        // them.)
+        setup.requests.clear();
         setup.run_with(&LOAD_SAMPLE, sample(sampler, None)).unwrap();
         assert_eq!(
             setup.run_with(&LOAD_SAMPLE, sample(synth, None)),
