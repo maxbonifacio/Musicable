@@ -95,7 +95,7 @@ fn theme_files_change_the_window_as_they_are_saved() {
 }
 
 #[test]
-fn the_theme_picked_in_the_appearance_window_is_used_and_kept() {
+fn the_theme_picked_on_the_appearance_page_is_used_and_kept() {
     let dir = TempDir::new("appearance");
     let mut harness = window(&dir.0, None);
     harness.run();

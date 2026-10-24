@@ -45,7 +45,7 @@ line on what it's for.
   command palette do.
 - `Command::needs_arguments` says whether it has a required param. Keys,
   menus and the palette can't give arguments, so they leave those commands
-  out: the keyboard shortcuts window and the palette don't list them. The
+  out: the Keys page and the palette don't list them. The
   context menus of the arrangement and the piano roll fill them in from
   where they were opened ([app.md](app.md#the-arrangement)).
 
@@ -474,8 +474,10 @@ other. They push a `Request`, as the file commands do.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `options.audio_settings` | Audio Settings... | Shows the audio settings | Ctrl+Comma | Ctrl+Comma (Preferences) |
-| `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the keys, where they're changed | Ctrl+K | Ctrl+K (Key Map Mode) |
+| `options.settings` | Settings... | Shows the Settings window, at the page it showed last | Ctrl+Comma | Ctrl+Comma (Preferences) |
+| `options.audio_settings` | Audio Settings... | Shows the Settings window's Audio page | none | none |
+| `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the Settings window's Keys page, where keys are changed | Ctrl+K | Ctrl+K (Key Map Mode) |
+| `options.appearance` | Appearance... | Shows the Settings window's Appearance page, where the theme is picked | none | none |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
@@ -873,8 +875,9 @@ command keeps its default chords. A chord that two lines of one table claim
 runs neither command there. A table for a panel Musicable doesn't have, or a
 panel's entry that isn't a table, is skipped too. Musicable reports both and loads the rest of the file. A binding for
 a command that doesn't exist is kept, in case a later version or a plugin
-adds it, and reported too. Options > Keyboard Shortcuts lists them all, with
-a button to give a chord two lines claim to one of them.
+adds it, and reported too. The Settings window's Keys page (Options >
+Keyboard Shortcuts) lists them all, with a button to give a chord two lines
+claim to one of them.
 
 A file that isn't valid TOML, has an unknown field or comes from a newer
 version is ignored as a whole: Musicable uses the default keymap and shows
@@ -883,10 +886,11 @@ the error.
 ### Trying it out
 
 The app reads your keymap file from its config folder at startup
-([app.md](app.md#settings-and-your-keymap)). Options > Keyboard Shortcuts
-shows the keys and any mistakes, and saves every change you make there to
-the file ([app.md](app.md#changing-keys)). Without opening the window, this
-prints the bindings a keymap file gives, along with any mistakes in it:
+([app.md](app.md#settings-and-your-keymap)). The Settings window's Keys
+page (Options > Keyboard Shortcuts) shows the keys and any mistakes, and
+saves every change you make there to the file
+([app.md](app.md#changing-keys)). Without opening the window, this prints
+the bindings a keymap file gives, along with any mistakes in it:
 
 ```sh
 cargo run -p musicable-app -- keymap path/to/keymap.toml
@@ -897,10 +901,10 @@ only say which, as in `Up in piano_roll`.
 
 ## Changing keys in the app
 
-The keyboard shortcuts window ([app.md](app.md#changing-keys)) builds on
+The Settings window's Keys page ([app.md](app.md#changing-keys)) builds on
 these:
 
-- `Keymap::bind` returns the command a chord had, which the window warns
+- `Keymap::bind` returns the command a chord had, which the page warns
   about before it takes the chord, and `bind_in` binds one in a panel
   (`Scope::Panel`). `Keymap::reset_command` gives a command its default
   chords back, everywhere and in each panel, taking them from whichever
@@ -913,12 +917,11 @@ these:
   file with `UserKeymap` (`crates/app/src/keymap_file.rs`), which also makes
   the backup copy.
 - `musicable_ui::KeyPresses::capture` takes the next chord pressed, any key
-  at all, while the window waits for one.
+  at all, while the page waits for one.
 - `Keymap::dangling` lists the chords bound to commands this version doesn't
-  have, which the window shows with a Remove button.
+  have, which the page shows with a Remove button.
 
 [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
 drives the whole window as eframe would: it gives every command that takes
-no arguments new keys in the keyboard shortcuts window, finds each in the
-command palette with its keys, and starts the app again to see they're
-kept.
+no arguments new keys on the Keys page, finds each in the command palette
+with its keys, and starts the app again to see they're kept.

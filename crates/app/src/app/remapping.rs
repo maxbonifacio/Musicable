@@ -1,6 +1,6 @@
 //! The done test for key remapping (N3 in the Tier 1 plan): every command
-//! can be found in the command palette and given new keys in the keyboard
-//! shortcuts window, without editing a file. The app saves the keys to the
+//! can be found in the command palette and given new keys on the Settings
+//! window's Keys page, without editing a file. The app saves the keys to the
 //! user's keymap file, and they work the next time it starts.
 //!
 //! It drives the app's window as eframe would, without an audio device.
@@ -83,10 +83,11 @@ fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
         .collect();
     let chords = new_chords(ids.len());
 
-    // Ctrl+K opens the keyboard shortcuts window. Each command gets a new
-    // chord: click its +, press the chord, and Enter assigns it.
+    // Ctrl+K opens the Settings window at its Keys page. Each command gets a
+    // new chord: click its +, press the chord, and Enter assigns it.
     press(&mut harness, chord("Ctrl+K"));
-    harness.get_by_label("Keyboard Shortcuts");
+    harness.get_by_label("Settings");
+    harness.get_by_label("Keys page");
     for (id, &new) in ids.iter().zip(&chords) {
         let title = harness
             .state()
@@ -98,7 +99,7 @@ fn every_command_is_found_in_the_palette_and_rebound_from_the_app() {
             .clone();
         click(&mut harness, &format!("Add keys to {title}"));
         assert!(harness.state().shell.capturing(), "{id} waits for keys");
-        // The keys go to the window, not to the command they run.
+        // The keys go to the page, not to the command they run.
         press(&mut harness, new);
         harness.get_by_label("isn't used yet.");
         press(&mut harness, chord("Enter"));
@@ -147,8 +148,8 @@ fn keys_that_run_commands_can_be_given_to_others() {
     let config = TempDir::new("remapping-reassign");
     let mut harness = window(&config.0, None);
     press(&mut harness, chord("Ctrl+K"));
-    // Escape and Enter can be pressed as keys too: the window waits for
-    // them, and they run nothing.
+    // Escape and Enter can be pressed as keys too: the page waits for them,
+    // and they run nothing.
     click(&mut harness, "Add keys to Toggle Metronome");
     press(&mut harness, chord("Escape"));
     harness.get_by_label("isn't used yet.");
@@ -165,7 +166,7 @@ fn keys_that_run_commands_can_be_given_to_others() {
         Some(&transport::TOGGLE_METRONOME)
     );
     assert_eq!(keymap.chords_for(&transport::TOGGLE_LOOP).count(), 0);
-    // The window's search field doesn't have the focus any more, so the keys
+    // The page's search field doesn't have the focus any more, so the keys
     // run the command.
     press(&mut harness, chord("Ctrl+L"));
     assert!(harness.state().session.project().metronome);

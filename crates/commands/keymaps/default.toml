@@ -102,7 +102,7 @@ version = 1
 # The app's windows. Live opens its settings with Ctrl+Comma, and Ctrl+K is
 # its key map mode, the nearest it has to changing keys. Live has no command
 # palette, and Ctrl+Shift+P is the usual key for one elsewhere.
-"options.audio_settings" = ["Ctrl+Comma"]
+"options.settings" = ["Ctrl+Comma"]
 "options.keyboard_shortcuts" = ["Ctrl+K"]
 "view.command_palette" = ["Ctrl+Shift+P"]
 
