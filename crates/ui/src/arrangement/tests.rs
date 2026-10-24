@@ -30,6 +30,7 @@ struct State {
     waveforms: Waveforms,
     theme: Theme,
     mouse: MouseMap,
+    parts: Parts,
     /// What the arrangement asked for, and what the commands asked of the
     /// app.
     actions: Vec<Action>,
@@ -145,6 +146,7 @@ fn harness(project: Project) -> Harness<'static, State> {
         waveforms: Waveforms::default(),
         theme: Theme::default(),
         mouse: MouseMap::live(),
+        parts: Parts::default(),
         actions: Vec::new(),
         requests: Vec::new(),
         errors: Vec::new(),
@@ -196,11 +198,12 @@ fn harness(project: Project) -> Harness<'static, State> {
                         workspaces: crate::Workspaces::default(),
                         monitors: &[],
                     };
-                    let (theme, mouse) = (&state.theme, &state.mouse);
+                    let (theme, mouse, parts) = (&state.theme, &state.mouse, &state.parts);
                     state
                         .arrangement
-                        .show(ui, &view, theme, mouse, &mut actions);
+                        .show(ui, &view, theme, mouse, parts, &mut actions);
                 }
+                state.parts.carry_out();
                 for action in &actions {
                     state.carry_out(action);
                 }

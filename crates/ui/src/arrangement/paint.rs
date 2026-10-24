@@ -10,13 +10,9 @@ use musicable_commands::take::comped;
 use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
 use musicable_model::time::Beats;
-use musicable_model::{Track, TrackKind};
 
-use super::{
-    AutoRow, Envelope, HeaderButton, Hit, LaneButton, Plan, Row, Scene, Side, TakeRow, find,
-};
+use super::{AutoRow, Envelope, Hit, LaneButton, Plan, Row, Scene, Side, TakeRow, find};
 use crate::browser::Destination;
-use crate::mixer::{meter_colour, meter_height};
 use crate::timeline::{self, Timeline};
 
 /// The fewest keys a MIDI clip's notes are spread over, so a clip of a few
@@ -601,9 +597,8 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     painter.hline(ruler.x_range(), y, Stroke::new(1.0, theme.divider));
 }
 
-/// The tracks' headers: each track's name, colour and meter, with a line
-/// between them, and the names of the takes in lanes under them. Mute, solo
-/// and arm are buttons, which the arrangement draws after this.
+/// The tracks' headers, for their parts to paint over: each track's, lit
+/// while it's selected, over the room under the tracks.
 pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -611,7 +606,6 @@ pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
     let headers = layout.headers;
     painter.rect_filled(headers, 0.0, theme.empty);
     for row in layout.visible_rows() {
-        let track = &scene.project().tracks[row.index];
         let rect = Rect::from_x_y_ranges(headers.x_range(), row.top..=row.bottom());
         let selected =
             editor.selection.tracks.contains(&row.id) || editor.selected_track == Some(row.id);
@@ -621,36 +615,19 @@ pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
             theme.header
         };
         painter.rect_filled(rect, 0.0, fill);
-        let strip = Rect::from_min_size(rect.left_top(), vec2(theme.colour_strip, rect.height()));
-        painter.rect_filled(strip, 0.0, theme.clip(row.index));
-        let meter = header_meter(scene, row);
-        let level = scene.view.levels.track(track.id);
-        let height = meter_height(level.peak[0].max(level.peak[1]));
-        painter.rect_filled(meter, 0.0, theme.divider);
-        if height > 0.0 {
-            let mut filled = meter;
-            filled.set_top(meter.bottom() - meter.height() * height);
-            painter.rect_filled(filled, 0.0, meter_colour(height, theme));
-        }
-        let buttons = header_buttons(scene, row, track);
-        let right = buttons
-            .first()
-            .map_or(meter.left(), |(_, rect)| rect.left());
-        let name = Rect::from_min_max(
-            pos2(strip.right() + theme.padding, rect.top() + theme.padding),
-            pos2(right - theme.padding, rect.bottom()),
-        );
-        painter
-            .with_clip_rect(name.intersect(painter.clip_rect()))
-            .text(
-                name.left_top(),
-                Align2::LEFT_TOP,
-                &track.name,
-                FontId::proportional(theme.text),
-                theme.header_text,
-            );
+    }
+}
+
+/// What goes over the tracks' headers once their parts are painted: a
+/// line under each, the names of the takes in lanes under them, and the
+/// automation lanes' headers. Their buttons are drawn after this.
+pub(super) fn over_headers(painter: &Painter, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let headers = layout.headers;
+    for row in layout.visible_rows() {
         let y = painter.round_to_pixel_center(row.bottom() - 0.5);
-        painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
+        painter.hline(headers.x_range(), y, Stroke::new(1.0, theme.divider));
     }
     for lane in layout.visible_takes() {
         let take = &scene.project().tracks[lane.track_index].takes[lane.index];
@@ -761,59 +738,6 @@ pub(super) fn lane_buttons(scene: &Scene<'_>, lane: &AutoRow) -> Vec<(LaneButton
     let fits = placed.iter().all(|(_, rect)| {
         headers.contains_rect(*rect)
             && rect.bottom() <= lane.bottom()
-            && rect.left() > headers.left()
-    });
-    if fits { placed } else { Vec::new() }
-}
-
-/// A track's meter, down the right of its header.
-fn header_meter(scene: &Scene<'_>, row: &Row) -> Rect {
-    let theme = scene.theme;
-    let right = scene.layout.headers.right() - theme.padding;
-    Rect::from_x_y_ranges(
-        right - theme.header_meter..=right,
-        row.top + theme.padding..=(row.bottom() - theme.padding).max(row.top + theme.padding),
-    )
-}
-
-/// Where the automation button, mute, solo and arm go in a track's header:
-/// along its top, left of its meter. Return and group tracks have no arm. A
-/// row partly scrolled away has none.
-pub(super) fn header_buttons(
-    scene: &Scene<'_>,
-    row: &Row,
-    track: &Track,
-) -> Vec<(HeaderButton, Rect)> {
-    let theme = scene.theme;
-    let headers = scene.layout.headers;
-    let size = theme.button;
-    let mut right = header_meter(scene, row).left() - theme.padding;
-    let buttons: &[HeaderButton] = match track.kind {
-        TrackKind::Audio | TrackKind::Midi => &[
-            HeaderButton::Automation,
-            HeaderButton::Mute,
-            HeaderButton::Solo,
-            HeaderButton::Arm,
-        ],
-        TrackKind::Return | TrackKind::Group => &[
-            HeaderButton::Automation,
-            HeaderButton::Mute,
-            HeaderButton::Solo,
-        ],
-    };
-    let mut placed: Vec<(HeaderButton, Rect)> = buttons
-        .iter()
-        .rev()
-        .map(|&button| {
-            let rect = Rect::from_min_size(pos2(right - size.x, row.top + theme.padding), size);
-            right = rect.left() - theme.padding / 2.0;
-            (button, rect)
-        })
-        .collect();
-    placed.reverse();
-    let fits = placed.iter().all(|(_, rect)| {
-        headers.contains_rect(*rect)
-            && rect.bottom() <= row.bottom()
             && rect.left() > headers.left()
     });
     if fits { placed } else { Vec::new() }

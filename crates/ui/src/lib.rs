@@ -9,10 +9,12 @@
 //! splits and tabs the user drags about: the arrangement in the middle,
 //! with the mixer and the devices or the piano roll under it and the
 //! browser beside it. The keyboard shortcuts window and the command palette
-//! go over them. The layout is one of the user's [`Workspace`]s, which the
-//! app saves and switches between, and panels move out to windows of their
-//! own, which it keeps too. Views draw from a [`Theme`], and look mouse
-//! gestures up in a [`MouseMap`]. `docs/app.md` describes it all.
+//! go over them. The transport bar, the track headers and the mixer strips
+//! are made of parts the user can hide, move and resize. The layout and the
+//! parts are one of the user's [`Workspace`]s, which the app saves and
+//! switches between, and panels move out to windows of their own, which it
+//! keeps too. Views draw from a [`Theme`], and look mouse gestures up in a
+//! [`MouseMap`]. `docs/app.md` describes it all.
 
 mod arrangement;
 mod browser;
@@ -26,6 +28,7 @@ mod mouse;
 mod native;
 mod palette;
 mod panels;
+mod parts;
 mod piano_roll;
 mod search;
 mod shell;
@@ -34,6 +37,7 @@ mod shortcuts;
 mod testing;
 mod theme;
 mod timeline;
+mod transport_bar;
 mod waveform;
 mod widgets;
 mod windows;
@@ -45,6 +49,7 @@ pub use keys::{KeyPresses, chord};
 pub use mixer::{InputChoice, Level, Levels, MidiChoice};
 pub use mouse::{Gesture, MouseAction, MouseMap, Target};
 pub use panels::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
+pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use shell::{
     Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
     Workspaces, ask_to_save,

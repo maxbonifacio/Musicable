@@ -1,6 +1,7 @@
-//! The panels' layout in the app's windows: the app saves it to the file of
-//! the workspace in use as the user changes it, switches between the
-//! user's workspaces, and the windows come back laid out as they were left.
+//! The panels' layout in the app's windows, and the parts of its transport
+//! bar, track headers and mixer strips: the app saves them to the file of
+//! the workspace in use as the user changes them, switches between the
+//! user's workspaces, and the windows come back as they were left.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -11,7 +12,7 @@ use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_commands::{Args, file, view, workspace};
-use musicable_ui::{BROWSER, DEVICES, Layout, MIXER, Workspace};
+use musicable_ui::{BROWSER, DEVICES, Layout, MIXER, TRANSPORT_BAR, Workspace};
 
 use super::App;
 use super::testing::{TempDir, chord, press, window};
@@ -40,6 +41,22 @@ fn save_as(harness: &mut Harness<'static, App>, name: &str) {
     field.type_text(name);
     harness.run();
     press(harness, chord("Enter"));
+}
+
+/// Hides the transport bar's `part` from its menu, as the user does.
+fn hide(harness: &mut Harness<'static, App>, part: &str) {
+    harness.get_by_label(part).click_secondary();
+    harness.run();
+    harness.get_by_label(&format!("Hide {part}")).click();
+    harness.run();
+}
+
+/// The transport bar's parts the file of the workspace called `name` hides.
+fn hidden_parts(config: &Path, name: &str) -> Vec<String> {
+    let text = fs::read_to_string(workspace_file(config, name)).unwrap();
+    let mut workspace = Workspace::parse(&text).unwrap();
+    let lineup = workspace.views.0.remove(TRANSPORT_BAR);
+    lineup.map(|lineup| lineup.hidden).unwrap_or_default()
 }
 
 /// Which of the browser and the mixer are shown.
@@ -75,6 +92,49 @@ fn the_window_comes_back_laid_out_as_it_was_left() {
         "{:?}",
         harness.state().messages
     );
+}
+
+#[test]
+fn the_parts_come_back_as_they_were_left() {
+    let config = TempDir::new("laying-out-parts");
+    let mut harness = window(&config.0, None);
+    harness.run();
+    hide(&mut harness, "Metronome");
+    assert!(harness.query_by_label("Metronome").is_none());
+    assert_eq!(hidden_parts(&config.0, "Default"), ["metronome"]);
+    drop(harness);
+
+    let mut harness = window(&config.0, None);
+    harness.run();
+    assert!(harness.query_by_label("Metronome").is_none());
+    harness.get_by_label("Loop");
+    // The panels are laid out as at first.
+    assert!(harness.state().shell.panel_shown(MIXER));
+}
+
+#[test]
+fn each_workspace_has_parts_of_its_own() {
+    let config = TempDir::new("laying-out-parts-each");
+    let mut harness = window(&config.0, None);
+    harness.run();
+    save_as(&mut harness, "Mixing");
+    hide(&mut harness, "Metronome");
+    assert_eq!(hidden_parts(&config.0, "Mixing"), ["metronome"]);
+    // Default shows it, and Mixing hides it again.
+    press(&mut harness, chord("Alt+1"));
+    harness.get_by_label("Metronome");
+    assert!(!default_file(&config.0).exists());
+    press(&mut harness, chord("Alt+2"));
+    assert!(harness.query_by_label("Metronome").is_none());
+    // A copy keeps them.
+    save_as(&mut harness, "Tracking");
+    assert_eq!(hidden_parts(&config.0, "Tracking"), ["metronome"]);
+    // Reset shows them as at first, and saves that.
+    harness.state_mut().session.run(&workspace::RESET).unwrap();
+    harness.run();
+    harness.get_by_label("Metronome");
+    assert!(hidden_parts(&config.0, "Tracking").is_empty());
+    assert_eq!(hidden_parts(&config.0, "Mixing"), ["metronome"]);
 }
 
 #[test]

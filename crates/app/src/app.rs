@@ -297,8 +297,9 @@ impl App {
         }
     }
 
-    /// Lays the panels out as the workspace in `slot` has them, and uses it
-    /// from now on. The main window goes where the workspace has it.
+    /// Lays the panels out and shows the views' parts as the workspace in
+    /// `slot` has them, and uses it from now on. The main window goes where
+    /// the workspace has it.
     fn use_workspace(&mut self, slot: usize) -> Result<(), ReadError> {
         let workspace = self.workspaces.read(slot)?.unwrap_or_default();
         self.shell.set_workspace(&workspace);
@@ -319,10 +320,10 @@ impl App {
         }
     }
 
-    /// Saves the panels' layout, and where the window is, to the file of the
-    /// workspace in use, if the user changed them since they were last
-    /// saved. A window being moved about is saved once it stays put, unless
-    /// `now`.
+    /// Saves the panels' layout, the views' parts and where the window is
+    /// to the file of the workspace in use, if the user changed them since
+    /// they were last saved. A window being moved about is saved once it
+    /// stays put, unless `now`.
     fn save_workspace(&mut self, now: bool) {
         let changed = if now {
             self.shell.unsaved_workspace()
@@ -358,8 +359,9 @@ impl App {
         }
     }
 
-    /// Keeps the panels' layout as a new workspace called `name`, which is
-    /// in use from then on, and the one in use before keeps what it has.
+    /// Keeps the panels' layout and the views' parts as a new workspace
+    /// called `name`, which is in use from then on, and the one in use
+    /// before keeps what it has.
     fn save_workspace_as(&mut self, name: &str) {
         self.save_workspace(true);
         let workspace = self.shell.workspace();

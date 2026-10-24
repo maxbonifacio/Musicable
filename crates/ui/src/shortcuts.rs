@@ -689,7 +689,7 @@ fn named(response: &egui::Response, name: String) {
 
 /// Takes the first press of `key` without modifiers out of the input, if it
 /// isn't a repeat.
-fn first_press(input: &mut egui::InputState, key: egui::Key) -> bool {
+pub(crate) fn first_press(input: &mut egui::InputState, key: egui::Key) -> bool {
     let at = input.events.iter().position(|event| {
         matches!(event, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. }
             if *k == key && modifiers.is_none())
