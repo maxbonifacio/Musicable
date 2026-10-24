@@ -9,18 +9,21 @@ use crate::{CommandId, Registry, Request};
 pub const AUDIO_SETTINGS: CommandId = CommandId::new("options.audio_settings");
 /// Shows the keyboard shortcuts, where every command's keys can be changed.
 pub const KEYBOARD_SHORTCUTS: CommandId = CommandId::new("options.keyboard_shortcuts");
+/// Shows the appearance window, where the theme is picked.
+pub const APPEARANCE: CommandId = CommandId::new("options.appearance");
 /// Scans for plugins again, loading the libraries that were left out as bad
 /// too.
 pub const RESCAN_PLUGINS: CommandId = CommandId::new("options.rescan_plugins");
 
 /// Every options command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 3] = [
+const COMMANDS: [(CommandId, &str, Request); 4] = [
     (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
     (
         KEYBOARD_SHORTCUTS,
         "Keyboard Shortcuts...",
         Request::KeyboardShortcuts,
     ),
+    (APPEARANCE, "Appearance...", Request::Appearance),
     (RESCAN_PLUGINS, "Rescan Plugins", Request::RescanPlugins),
 ];
 
@@ -47,6 +50,7 @@ mod tests {
         let ids = [
             AUDIO_SETTINGS,
             KEYBOARD_SHORTCUTS,
+            APPEARANCE,
             RESCAN_PLUGINS,
             view::COMMAND_PALETTE,
         ];
@@ -64,6 +68,7 @@ mod tests {
             [
                 Request::AudioSettings,
                 Request::KeyboardShortcuts,
+                Request::Appearance,
                 Request::RescanPlugins,
                 Request::CommandPalette
             ]
