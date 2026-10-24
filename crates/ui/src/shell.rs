@@ -182,6 +182,10 @@ pub enum Action {
         track: Option<TrackId>,
         at: Option<Beats>,
     },
+    /// Give the sampler `device` the audio file at `file`, with
+    /// [`device::SET_SAMPLE`](musicable_commands::device::SET_SAMPLE): it
+    /// was dropped on it.
+    LoadSample { device: DeviceId, file: PathBuf },
     /// Set the tempo at the playhead, from the tempo field.
     SetTempo(f64),
     /// The user started dragging a control, such as the tempo field. Until

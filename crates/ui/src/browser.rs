@@ -2,7 +2,8 @@
 //! folders added to the library, the devices to put on tracks, and the
 //! presets, each with a search. Picking a sample previews it, a double-click
 //! puts it on the selected track, and samples, devices and presets drag onto
-//! the arrangement's tracks, or into the devices panel.
+//! the arrangement's tracks, or into the devices panel: a sample onto a
+//! sampler there.
 //!
 //! What the browser does, it does with the library's commands, and what it
 //! lists is what the library's last search or Find Similar found, so a
@@ -20,7 +21,7 @@ use musicable_commands::{Args, browser, device};
 use musicable_library::{FileId, Index, Preset, PresetKind, Record};
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
-use musicable_model::{Chain, PluginFormat, TrackId};
+use musicable_model::{Chain, DeviceId, PluginFormat, TrackId};
 
 use crate::devices::{self, PluginEntry, onto};
 use crate::search::score;
@@ -132,6 +133,8 @@ pub(crate) enum Destination {
     /// The devices of the chain the devices panel shows, or of the selected
     /// track.
     Chain(Option<Chain>),
+    /// A sampler in the devices panel, which takes a sample as its own.
+    Sampler(DeviceId),
 }
 
 impl Dragged {
@@ -146,7 +149,8 @@ impl Dragged {
     }
 
     /// What letting it go at `target` asks for, if it can go there. A sample
-    /// goes on an audio track, or else where Insert Audio puts it.
+    /// goes on an audio track, or else where Insert Audio puts it, or into
+    /// a sampler.
     pub(crate) fn dropped(&self, target: &Destination) -> Option<Action> {
         let args = match self {
             Self::Sample(file) => {
@@ -154,6 +158,10 @@ impl Dragged {
                     Destination::Track { track, audio, at } => (audio.then_some(track), at),
                     Destination::NewTrack { at } => (None, at),
                     Destination::Chain(_) => return None,
+                    Destination::Sampler(device) => {
+                        let file = file.clone();
+                        return Some(Action::LoadSample { device, file });
+                    }
                 };
                 let files = vec![file.clone()];
                 return Some(Action::DropFiles { files, track, at });
@@ -167,6 +175,7 @@ impl Dragged {
             Destination::Track { track, .. } => args.with("track", track),
             Destination::NewTrack { .. } => args.with("new_track", true),
             Destination::Chain(chain) => onto(args, chain),
+            Destination::Sampler(_) => return None,
         };
         Some(Action::RunWith(command, args))
     }

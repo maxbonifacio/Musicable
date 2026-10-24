@@ -373,8 +373,9 @@ roll and scroll it to the device. A preset of a VST3 plugin needs the
 plugin installed, and is refused without it. Giving a sampler its sample
 is "Load Sample", and taking it away "Remove Sample". `device.load_sample`
 asks the app, with `Request::LoadSample`, which shows a dialog in the
-project's folder; the sampler reads the file when the graph is next built,
-and the status bar says if it can't. The window commands ask the app, with
+project's folder, and a sample dragged from the browser onto a sampler
+runs `device.set_sample` too; the sampler reads the file when the graph is
+next built, and the status bar says if it can't. The window commands ask the app, with
 `Request::PluginWindow`; a plugin that isn't playing has no window to show,
 and the status bar says why. A new device starts with the plugin's own
 defaults. Its settings fill

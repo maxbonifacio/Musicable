@@ -662,6 +662,7 @@ impl App {
                 Err(error) => self.messages.push(capital(&format!("{error}."))),
             },
             Action::DropFiles { files, track, at } => self.insert_audio(files, track, at),
+            Action::LoadSample { device, file } => self.set_sample(device, &file),
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
             Action::BeginGesture => self.session.begin_gesture(),
             Action::EndGesture => self.session.end_gesture(),

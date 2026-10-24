@@ -1129,7 +1129,9 @@ control's, such as "EQ Band 3 Freq", and can set a bar to a number.
 
 A sampler shows the name of its sample's file beside its own, and **Load
 Sample...** asks for an audio file for it to play (WAV, AIFF or FLAC), in
-the project's folder; right-click the name to remove it. As for an audio
+the project's folder; right-click the name to remove it. Or drag a sample
+from the browser onto the sampler, which is outlined while it's over it,
+as Live's Simpler takes a file dropped on it. As for an audio
 clip, the project keeps the file's path relative to its folder if it's in
 there. The sampler reads the whole file when the graph is next built, and
 samplers playing the same file share it; if it can't, it plays nothing,
@@ -1262,8 +1264,10 @@ selected audio track at the start marker, or on a new audio track named
 after it, as an imported file goes
 ([Audio files](#audio-files)). Or drag it onto a track, where it starts
 at the grid line nearest where it's dropped, or below the tracks for a new
-track there. While a sample, a device or a preset is dragged, the place it
-would go is outlined, and "New track" shows below the tracks.
+track there. Dragged onto a sampler in the devices panel, it's the
+sampler's sample ([Built-in devices](#built-in-devices)). While a sample,
+a device or a preset is dragged, the place it would go is outlined, and
+"New track" shows below the tracks.
 
 ### Devices
 
@@ -2012,12 +2016,14 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   panel.
 - In the browser: analysis, which will tag sounds by how they sound and
   find similar ones by an embedding; previews in time with the song;
-  dragging a sample onto a sampler, as onto Live's Simpler (Load Sample...
-  gives it one for now); watching the library's folders, which are looked
-  through at each start and on Rescan; CLAP presets, which need the
+  watching the library's folders, which are looked through at each start
+  and on Rescan; CLAP presets, which need the
   plugins' preset discovery; renaming and deleting presets, and saving
   VST3 presets; and tags in the undo history. Taking a folder out of the
   library forgets its files' tags.
+- Dropping an audio file from the file manager onto a sampler, as one
+  from the browser goes: files dropped on the window become clips, wherever
+  they're let go.
 - VST3 plugins' windows on macOS and Linux.
 - Dragging a tab from one window into another's splits and tabs: a tab
   dragged out of a window gets a new window of its own, and Move to Main

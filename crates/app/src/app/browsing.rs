@@ -3,7 +3,8 @@
 //! field, picking a sample previews it through the engine at the volume the
 //! settings say, and a double-click puts it on a new track. The library
 //! keeps its folders and tags, and the browser its settings, when the app
-//! starts again. A sampler's preset finds its sample from any project.
+//! starts again. A sample dragged onto a sampler loads into it, and a
+//! sampler's preset finds its sample from any project.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -18,7 +19,7 @@ use musicable_commands::{Args, Value, browser, device};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_library::presets::{self, Loaded};
 use musicable_model::native::{NativeDevice, NativeKind};
-use musicable_model::{DeviceKind, Project, TrackKind};
+use musicable_model::{Chain, DeviceKind, Project, TrackKind};
 
 use super::App;
 use super::testing::{TempDir, chord, press, send, window};
@@ -71,6 +72,27 @@ fn double_click_at(harness: &mut Harness<'static, App>, at: Pos2) {
         });
     }
     harness.run();
+}
+
+/// Drags from `from` to `to` with the mouse, in a few moves.
+fn drag(harness: &mut Harness<'static, App>, from: Pos2, to: Pos2) {
+    let button = |harness: &mut Harness<'static, App>, pos, pressed| {
+        harness.event(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run();
+    };
+    harness.hover_at(from);
+    harness.run();
+    button(harness, from, true);
+    for step in 1..=4 {
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.run();
+    }
+    button(harness, to, false);
 }
 
 /// The loudest sample in `played`.
@@ -185,6 +207,56 @@ fn samples_are_found_previewed_and_put_on_tracks_from_the_browser() {
         "{:?}",
         harness.state().messages
     );
+}
+
+#[test]
+fn a_sample_dragged_onto_a_sampler_loads_into_it() {
+    let dir = TempDir::new("sample-onto-sampler");
+    let settings = Settings {
+        browser: BrowserSettings {
+            presets_folder: Some(dir.0.join("Presets")),
+            ..BrowserSettings::default()
+        },
+        ..Settings::default()
+    };
+    settings.write(&dir.0.join(SETTINGS_FILE)).unwrap();
+    let song = dir.0.join("Song");
+    let samples = song.join("Samples");
+    wav(&samples.join("Kick 01.wav"));
+    let mut project = Project::new();
+    let drums = project.add_track("Drums", TrackKind::Midi);
+    let sampler = NativeDevice::new(NativeKind::Sampler);
+    let sampler = project.new_device(DeviceKind::Native(sampler));
+    let id = sampler.id;
+    project.track_mut(drums).unwrap().devices.push(sampler);
+    let path = song.join("Song.musicable");
+    musicable_io::project::save(&path, &project).unwrap();
+    let mut harness = window(&dir.0, Some(path));
+    settle(&mut harness);
+    let folder = Args::new().with("folder", samples.to_string_lossy().as_ref());
+    let session = &mut harness.state_mut().session;
+    session.run_with(&browser::ADD_FOLDER, &folder).unwrap();
+    // The devices panel shows the drums', as a click on their header does.
+    session.editor_mut().selected_track = Some(Chain::Track(drums));
+    settle(&mut harness);
+
+    // The sample, dragged from the browser onto the sampler, is its sample,
+    // named from the song's folder as clips name their files, in one step.
+    press(&mut harness, chord("Ctrl+F"));
+    send(&mut harness, vec![Event::Text("kick".into())]);
+    let from = harness.get_by_label("Kick 01").rect().center();
+    let to = harness
+        .get_by_label("Sampler Sample: No sample")
+        .rect()
+        .center();
+    drag(&mut harness, from, to);
+    let state = harness.state();
+    let (_, _, device) = state.session.project().find_device(id).unwrap();
+    let sample = device.kind.native().and_then(|n| n.sample.as_deref());
+    assert_eq!(sample, Some("Samples/Kick 01.wav"));
+    assert_eq!(state.session.undo_name(), Some("Load Sample"));
+    assert!(state.messages.is_empty(), "{:?}", state.messages);
+    harness.get_by_label("Sampler Sample: Kick 01.wav");
 }
 
 #[test]

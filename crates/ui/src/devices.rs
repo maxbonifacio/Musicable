@@ -16,7 +16,7 @@ use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
-use crate::browser::Dragged;
+use crate::browser::{self, Destination, Dragged};
 use crate::mouse::MouseMap;
 use crate::native;
 use crate::search::score;
@@ -214,7 +214,8 @@ impl DevicesPanel {
 
 /// A device: its name, and a built-in device's controls, or a plugin's
 /// kind and how its plugin is doing. Its name's menu saves it as a preset,
-/// which `saving` asks the name of. Returns its box.
+/// which `saving` asks the name of, and a sampler takes a sample dragged
+/// onto it from the browser. Returns its box.
 fn device_box(
     ui: &mut Ui,
     device: &Device,
@@ -230,7 +231,7 @@ fn device_box(
         Some(native) => native::width(native, theme),
         None => sizes.device - 2.0 * sizes.margin,
     };
-    Frame::new()
+    let shown = Frame::new()
         .fill(theme.device)
         .stroke(Stroke::new(1.0, theme.divider))
         .corner_radius(theme.corner)
@@ -254,7 +255,15 @@ fn device_box(
                 }
             });
         })
-        .response
+        .response;
+    // A sample dragged from the browser onto a sampler loads into it, where
+    // the box is in sight.
+    if (device.kind.native()).is_some_and(|native| native.kind == NativeKind::Sampler) {
+        let rect = shown.rect.intersect(ui.clip_rect());
+        let target = Destination::Sampler(device.id);
+        actions.extend(browser::drop_in(ui.ctx(), rect, &target, theme));
+    }
+    shown
 }
 
 /// A device's name, which shows its plugin's window when double-clicked, as
@@ -324,9 +333,9 @@ fn sample(
     actions: &mut Vec<Action>,
 ) {
     let args = Args::new().with("device", device);
-    let load = ui
-        .small_button("Load Sample...")
-        .on_hover_text("Asks for an audio file for it to play");
+    let load = ui.small_button("Load Sample...").on_hover_text(
+        "Asks for an audio file for it to play. Or drag a sample onto it from the browser.",
+    );
     let label = format!("{name} Load Sample");
     load.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
     if load.clicked() {
@@ -1086,6 +1095,56 @@ mod tests {
                 Action::RunWith(device::SET_SAMPLE, on(&kick)),
             ]
         );
+    }
+
+    #[test]
+    fn a_sample_dragged_onto_a_sampler_loads_into_it() {
+        let mut project = Project::new();
+        let sampler = native(&mut project, NativeKind::Sampler);
+        let synth = native(&mut project, NativeKind::Synth);
+        let mut harness = showing(vec![sampler.clone(), synth], project);
+        let keys = harness.state().project.tracks[0].id;
+        // Wide enough for both.
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.run();
+        let drop_on = |harness: &mut Harness<'static, State>, label: &str, dragged| {
+            let at = harness.get_by_label(label).rect().center();
+            egui::DragAndDrop::set_payload(&harness.ctx, dragged);
+            harness.hover_at(at);
+            harness.run();
+            harness.event(Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run();
+        };
+
+        // Let go over the sampler, it's the sampler's.
+        let kick = std::path::PathBuf::from("/samples/kick.wav");
+        drop_on(
+            &mut harness,
+            "Sampler Sample: No sample",
+            Dragged::Sample(kick.clone()),
+        );
+        let load = Action::LoadSample {
+            device: sampler.id,
+            file: kick.clone(),
+        };
+        assert_eq!(actions(&mut harness), [load]);
+        // Over the synth, it goes nowhere.
+        drop_on(&mut harness, "Device Synth", Dragged::Sample(kick));
+        assert_eq!(actions(&mut harness), []);
+        // A device let go over the sampler goes in the chain, as anywhere in
+        // the panel.
+        drop_on(
+            &mut harness,
+            "Device Sampler",
+            Dragged::Native(NativeKind::Eq),
+        );
+        let args = Args::new().with("kind", "eq").with("track", keys);
+        assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, args)]);
     }
 
     #[test]
