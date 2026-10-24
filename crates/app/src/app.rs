@@ -781,6 +781,10 @@ impl App {
                 self.shell.switch_devices_piano_roll();
                 self.focus_in_sight();
             }
+            Request::ShowDevice(device) => {
+                self.shell.show_device(device);
+                self.focus_in_sight();
+            }
             Request::MoveToNewWindow => {
                 let panel = self.session.editor().focus.panel();
                 if let Err(problem) = self.shell.move_to_new_window(panel) {

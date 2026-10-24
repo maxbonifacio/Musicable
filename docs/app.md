@@ -251,8 +251,9 @@ tabs ([egui_tiles](https://docs.rs/egui_tiles)):
   the tabs beside it. The arrangement stays.
 - **The devices and the piano roll follow the selection**: selecting the
   clip the piano roll shows brings it forward, selecting another track
-  brings the devices forward, and so does adding a device. Neither comes
-  back from hidden by itself.
+  brings the devices forward, and so does adding a device, however it's
+  added, which also scrolls the panel to it. Neither comes back from
+  hidden by itself.
 - **The focus** is on one panel, outlined in the theme's `focus` colour.
   Clicking in a panel or on its tab gives it the focus, and so does moving
   the keyboard focus into it with Tab; a click in a menu or a window over
@@ -1167,7 +1168,8 @@ of the selected track's devices, the master's while the master track is
 selected. Or drag it: into the devices panel, onto a track for the end of
 its devices, onto the master track for the master's, or below the tracks
 for a new track named after it, a MIDI
-track for an instrument and an audio track for an effect. The list's foot
+track for an instrument and an audio track for an effect. The track it
+goes on is selected, so the devices panel shows it there. The list's foot
 says how many plugins there are, and has Rescan, or says "Scanning..."
 while a scan runs.
 

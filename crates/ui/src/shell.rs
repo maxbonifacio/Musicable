@@ -10,13 +10,13 @@ use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Steps,
-    Value, arrange, controllers, device, edit, locator, notes, options, take, track, transport,
-    view, workspace,
+    Value, arrange, controllers, edit, locator, notes, options, take, track, transport, view,
+    workspace,
 };
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Chain, Project, TrackId};
+use musicable_model::{Chain, DeviceId, Project, TrackId};
 
 use crate::browser::{self, Library};
 use crate::carry::Carry;
@@ -432,15 +432,6 @@ impl Shell {
                 ctx.request_repaint();
             }
         }
-        // A device added from the browser brings the devices forward.
-        let adds = [device::ADD, device::ADD_PLUGIN, device::ADD_PRESET];
-        let added = (actions.iter()).any(|action| match action {
-            Action::Run(id) | Action::RunWith(id, _) => adds.contains(id),
-            _ => false,
-        });
-        if added {
-            self.bring_forward(DEVICES);
-        }
         self.parts.carry_out();
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
@@ -651,6 +642,16 @@ impl Shell {
             Some(index) => self.windows[index].dock.bring_forward(id),
             None => self.dock.bring_forward(id),
         }
+    }
+
+    /// Brings the devices forward, unless they're hidden, scrolled to
+    /// `device`, which was just added, in case it went behind the piano
+    /// roll or past the end of the panel. The window they're in stays
+    /// where it is, so the keys stay where they were, such as in the
+    /// browser.
+    pub fn show_device(&mut self, device: DeviceId) {
+        self.bring_forward(DEVICES);
+        self.panels.devices.reveal(device);
     }
 
     /// Brings the piano roll forward, or the devices if the piano roll is
@@ -1509,7 +1510,8 @@ mod tests {
     use egui::vec2;
     use egui_kittest::kittest::{NodeT, Queryable};
     use musicable_commands::{Scope, file, track, view};
-    use musicable_model::{TrackId, TrackKind};
+    use musicable_model::native::NativeDevice;
+    use musicable_model::{DeviceKind, TrackId, TrackKind};
 
     use super::*;
     use crate::browser::Dragged;
@@ -1948,6 +1950,43 @@ mod tests {
         assert!(harness.state().shell.panel_shown(PIANO_ROLL));
         select(&mut harness, drums, &[]);
         assert!(harness.state().shell.panel_shown(DEVICES));
+    }
+
+    #[test]
+    fn a_device_added_comes_forward_scrolled_into_sight() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        // More than fit across the panel, the synth last.
+        let devices: Vec<_> = (NativeKind::ALL.iter())
+            .map(|&kind| project.new_device(DeviceKind::Native(NativeDevice::new(kind))))
+            .collect();
+        let synth = devices.last().unwrap().id;
+        project.track_mut(keys).unwrap().devices = devices;
+        let mut harness = harness(project);
+        harness.state_mut().editor.selected_track = Some(Chain::Track(keys));
+        harness.run();
+        let width = harness.ctx.content_rect().width();
+        let in_sight = |harness: &Harness| {
+            let title = harness.get_by_label("Device Synth").rect();
+            title.left() >= 0.0 && title.right() <= width
+        };
+        assert!(!in_sight(&harness));
+
+        // Behind the piano roll, the devices come forward, scrolled to it.
+        harness.state_mut().shell.switch_devices_piano_roll();
+        harness.run();
+        assert!(!harness.state().shell.panel_shown(DEVICES));
+        harness.state_mut().shell.show_device(synth);
+        harness.run();
+        assert!(harness.state().shell.panel_shown(DEVICES));
+        assert!(!harness.state().shell.panel_shown(PIANO_ROLL));
+        assert!(in_sight(&harness));
+
+        // Hidden, they stay hidden.
+        harness.state_mut().shell.toggle_panel(DEVICES);
+        harness.state_mut().shell.show_device(synth);
+        harness.run();
+        assert!(!harness.state().shell.panel_shown(DEVICES));
     }
 
     #[test]

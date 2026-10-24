@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use egui::{
-    Align, Button, Frame, Id, Label, Layout, RichText, Role, ScrollArea, Sense, Stroke, TextEdit,
-    Ui, WidgetInfo, vec2,
+    Align, Button, Frame, Id, Label, Layout, Response, RichText, Role, ScrollArea, Sense, Stroke,
+    TextEdit, Ui, WidgetInfo, vec2,
 };
 use musicable_commands::{Args, device};
 use musicable_model::native::NativeKind;
@@ -99,6 +99,8 @@ pub(crate) struct DevicesPanel {
     /// The device being saved as a preset, while the box asks for the
     /// preset's name.
     saving: Option<Saving>,
+    /// The device to scroll to, the next time the panel shows.
+    reveal: Option<DeviceId>,
 }
 
 /// A device being saved as a preset.
@@ -159,18 +161,27 @@ impl DevicesPanel {
             });
             return browse;
         }
+        let reveal = self.reveal.take();
         ScrollArea::both().auto_shrink(false).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = theme.devices.gap;
                 for device in devices {
                     ui.push_id(device.id, |ui| {
                         let saving = &mut self.saving;
-                        device_box(ui, device, view, theme, mouse, saving, actions);
+                        let shown = device_box(ui, device, view, theme, mouse, saving, actions);
+                        if reveal == Some(device.id) {
+                            shown.scroll_to_me(None);
+                        }
                     });
                 }
             });
         });
         browse
+    }
+
+    /// Scrolls to `device` the next time the panel shows, if it shows it.
+    pub fn reveal(&mut self, device: DeviceId) {
+        self.reveal = Some(device);
     }
 
     /// Whether the panel asks the name of a preset, as keys answer.
@@ -203,7 +214,7 @@ impl DevicesPanel {
 
 /// A device: its name, and a built-in device's controls, or a plugin's
 /// kind and how its plugin is doing. Its name's menu saves it as a preset,
-/// which `saving` asks the name of.
+/// which `saving` asks the name of. Returns its box.
 fn device_box(
     ui: &mut Ui,
     device: &Device,
@@ -212,7 +223,7 @@ fn device_box(
     mouse: &MouseMap,
     saving: &mut Option<Saving>,
     actions: &mut Vec<Action>,
-) {
+) -> Response {
     let sizes = &theme.devices;
     let (name, kind) = describe(device);
     let width = match device.kind.native() {
@@ -242,7 +253,8 @@ fn device_box(
                     }
                 }
             });
-        });
+        })
+        .response
 }
 
 /// A device's name, which shows its plugin's window when double-clicked, as

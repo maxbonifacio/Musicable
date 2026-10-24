@@ -365,7 +365,11 @@ Adding, changing and deleting are transactions named after the device:
 a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
 plugin by its name, such as "Delete Surge XT"; adding a preset is named
 after the preset. So undo covers them, and dragging a control is one
-gesture, which one undo takes back. A preset of a VST3 plugin needs the
+gesture, which one undo takes back. A device added goes in sight: the
+track it goes on, or the master, becomes the selected track, as a click on
+its header makes it, if it isn't already, and the app is asked, with
+`Request::ShowDevice`, to bring the devices panel in front of the piano
+roll and scroll it to the device. A preset of a VST3 plugin needs the
 plugin installed, and is refused without it. Giving a sampler its sample
 is "Load Sample", and taking it away "Remove Sample". `device.load_sample`
 asks the app, with `Request::LoadSample`, which shows a dialog in the

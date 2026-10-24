@@ -249,6 +249,9 @@ pub enum Request {
     /// Bring the piano roll in front of the devices, or the devices in
     /// front of the piano roll.
     SwitchDevicesPianoRoll,
+    /// Bring the devices panel in front of the piano roll, unless it's
+    /// hidden, with this device in sight: it was just added.
+    ShowDevice(DeviceId),
     /// Move the panel with the focus to a new window of its own.
     MoveToNewWindow,
     /// Send the panel with the focus back to the main window.
