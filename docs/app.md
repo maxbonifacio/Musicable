@@ -280,9 +280,15 @@ monitor say:
   for the panel with the focus (`view.move_to_new_window`), puts the panel
   in a new window, a little down and right of the one it was in, as big as
   it was. **Dragging a tab out** past the window's edge does the same, with
-  the new window's title bar where you let go. The arrangement stays in
-  the main window, and so does a window's last panel. A window is named
+  the new window's title bar where you let go: out there, the tab's ghost
+  follows the pointer in a little window of its own. The arrangement stays
+  in the main window, and so does a window's last panel. A window is named
   after its panels and the project.
+- **Dragging a tab into another window** puts its panel in that window's
+  splits and tabs, where the window shows it would go, as dragging it
+  about in that window does: back in the main window, or in another window
+  of its own. A window whose last panel goes closes. A panel out of the
+  main window keeps its place there, hidden, for Move to Main Window.
 - In a window of its own, panels split and join tabs as in the main
   window, and their tabs can be dragged out to windows of their own again.
 - **Move to Main Window**, in the tab's menu or the View menu
@@ -2036,9 +2042,6 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   from the browser goes: files dropped on the window become clips, wherever
   they're let go.
 - VST3 plugins' windows on macOS and Linux.
-- Dragging a tab from one window into another's splits and tabs: a tab
-  dragged out of a window gets a new window of its own, and Move to Main
-  Window sends a panel back.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips.
 - Editing a theme on the Appearance page, with colour pickers: theme

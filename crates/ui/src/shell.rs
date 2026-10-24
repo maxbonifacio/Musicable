@@ -22,6 +22,7 @@ use crate::browser::{self, Library};
 use crate::carry::Carry;
 use crate::devices::Plugins;
 use crate::dock::{Dock, Draw, Move};
+use crate::ghost;
 use crate::menus::menus;
 use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
@@ -276,6 +277,10 @@ pub struct Shell {
     /// The panels commands asked to move to another window since the last
     /// frame.
     asked: Vec<Move>,
+    /// The panel whose tab is dragged out past the edge of its window, and
+    /// where the pointer is on the desktop, in pixels, as of the last
+    /// frame: the shell shows its ghost there.
+    ghost: Option<(&'static str, [i32; 2])>,
 }
 
 impl Default for Shell {
@@ -299,6 +304,7 @@ impl Default for Shell {
             windows: Vec::new(),
             opened: 0,
             asked: Vec::new(),
+            ghost: None,
         }
     }
 }
@@ -342,6 +348,9 @@ enum Moving {
     Out(&'static str, Place),
     /// Back to where it was in the main window.
     Back(&'static str),
+    /// Into the window with that viewport, its tab dragged there, which
+    /// put it where it was let go of.
+    In(&'static str, egui::ViewportId),
 }
 
 impl Shell {
@@ -415,7 +424,8 @@ impl Shell {
             detached: false,
             shown: self.dock.count_shown(),
             bounds: ctx.content_rect(),
-            outside: false,
+            ghost: None,
+            visited: false,
         };
         let dock = &mut self.dock;
         egui::CentralPanel::no_frame().show(ui, |ui| dock.show(ui, &mut draw));
@@ -423,10 +433,19 @@ impl Shell {
             focus_on(panel, view.editor, drawn, draw.cx.actions);
         }
         let mut browse = draw.cx.browse;
-        let mut moves = moving(draw.moves, &main, self.main.place, zoom);
+        // A tab dragged out past the edge of the window it's in has its
+        // ghost by the pointer, in a window of its own.
+        let ghost = draw.ghost;
+        self.ghost = ghost.and_then(|(panel, at)| Some((panel, on_desktop(at, &main, zoom)?)));
+        let root = egui::ViewportId::ROOT;
+        let mut moves = moving(draw.moves, root, &main, self.main.place, zoom);
         self.show_windows(&ctx, view, chain, &mut actions, &mut browse, &mut moves);
         for moving in moves {
             self.carry(moving);
+        }
+        if let Some((panel, at)) = self.ghost {
+            let title = self.registry.get(panel).map_or(panel, |panel| panel.title);
+            ghost::show(&ctx, title, at);
         }
         // Add Device shows the browser's devices.
         if browse {
@@ -476,6 +495,7 @@ impl Shell {
             mouse,
             parts,
             shortcuts,
+            ghost,
             ..
         } = self;
         let (registry, theme, mouse, parts) = (&*registry, &*theme, &*mouse, &*parts);
@@ -533,15 +553,21 @@ impl Shell {
                     } else {
                         ui.max_rect()
                     },
-                    outside: false,
+                    ghost: None,
+                    visited: false,
                 };
                 window.dock.show(ui, &mut draw);
                 if let Some(panel) = draw.focused {
                     focus_on(panel, editor, drawn, draw.cx.actions);
                 }
                 *browse |= draw.cx.browse;
+                if let Some((panel, at)) = draw.ghost
+                    && let Some(at) = on_desktop(at, &viewport, zoom)
+                {
+                    *ghost = Some((panel, at));
+                }
                 let from = window.placement.place;
-                moves.extend(moving(draw.moves, &viewport, from, zoom));
+                moves.extend(moving(draw.moves, window.id, &viewport, from, zoom));
                 if own {
                     browser::show_dragged(&ctx);
                 }
@@ -765,7 +791,9 @@ impl Shell {
         let mut moves = Vec::new();
         for asked in std::mem::take(&mut self.asked) {
             let panel = match asked {
-                Move::ToNewWindow { panel, .. } | Move::ToMainWindow(panel) => panel,
+                Move::ToNewWindow { panel, .. } | Move::ToMainWindow(panel) | Move::Into(panel) => {
+                    panel
+                }
             };
             let (viewport, from, dock) = match self.window_of(panel) {
                 Some(index) => {
@@ -783,7 +811,8 @@ impl Shell {
                 },
                 back => back,
             };
-            moves.extend(moving(vec![asked], &viewport, from, zoom));
+            let here = self.viewport_of(panel);
+            moves.extend(moving(vec![asked], here, &viewport, from, zoom));
         }
         moves
     }
@@ -793,6 +822,7 @@ impl Shell {
         match moving {
             Moving::Out(panel, place) => self.open_window(panel, place),
             Moving::Back(panel) => self.send_back(panel),
+            Moving::In(panel, into) => self.take_in(panel, into),
         }
     }
 
@@ -828,6 +858,26 @@ impl Shell {
         }
         if self.windows[index].shown() == 0 {
             self.close_window(index);
+        }
+        self.dock.mark_changed();
+    }
+
+    /// Takes the panel `panel` out of the window it was in, now that its tab
+    /// was dragged into the window with viewport `into`, which put it where
+    /// it was let go of. Into a window of its own from the main window, it
+    /// keeps its place there, hidden, to go back to. The window it was in
+    /// closes if it has nothing else to show.
+    fn take_in(&mut self, panel: &'static str, into: egui::ViewportId) {
+        let from =
+            (self.windows.iter()).position(|window| window.id != into && window.dock.has(panel));
+        if let Some(index) = from {
+            self.windows[index].dock.remove_panel(panel);
+            if self.windows[index].shown() == 0 {
+                self.close_window(index);
+            }
+        }
+        if into != egui::ViewportId::ROOT {
+            self.dock.hide_panel(panel);
         }
         self.dock.mark_changed();
     }
@@ -1275,11 +1325,18 @@ fn focus_on(id: &'static str, editor: &Editor, drawn: usize, actions: &mut Vec<A
 }
 
 /// Where the panels `moves` moved out of the window egui describes as
-/// `viewport` go, the window being at `from` and egui zooming by `zoom`. A
-/// tab dragged out goes where it was let go of, with the new window's title
-/// bar under the pointer, and a panel moved from its tab's menu goes a
-/// little down and right of the window. Either is as big as it was.
-fn moving(moves: Vec<Move>, viewport: &egui::ViewportInfo, from: Place, zoom: f32) -> Vec<Moving> {
+/// `viewport` go, or into it, the window being `here` and at `from`, and
+/// egui zooming by `zoom`. A tab dragged out goes where it was let go of,
+/// with the new window's title bar under the pointer, and a panel moved
+/// from its tab's menu goes a little down and right of the window. Either
+/// is as big as it was.
+fn moving(
+    moves: Vec<Move>,
+    here: egui::ViewportId,
+    viewport: &egui::ViewportInfo,
+    from: Place,
+    zoom: f32,
+) -> Vec<Moving> {
     // Title bars and the like are in pixels the monitor scales.
     let scale = viewport.native_pixels_per_point.unwrap_or(1.0);
     let pixels = |points: f32| (points * scale).round() as i32;
@@ -1298,6 +1355,7 @@ fn moving(moves: Vec<Move>, viewport: &egui::ViewportInfo, from: Place, zoom: f3
                 Moving::Out(panel, place)
             }
             Move::ToMainWindow(panel) => Moving::Back(panel),
+            Move::Into(panel) => Moving::In(panel, here),
         })
         .collect()
 }
@@ -2266,6 +2324,213 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_dragged_out_of_the_main_window_keeps_its_place_there() {
+        let mut harness = harness(Project::new());
+        let before = layout(&harness);
+        // Let go of past the left edge, nearer the browser's place than its
+        // own.
+        let tab = harness.get_by_label("Devices panel").rect().center();
+        drag(&mut harness, tab, egui::pos2(-40.0, 60.0));
+        assert_eq!(harness.state().shell.windows(), 1);
+        // Back from its window, it's where it was.
+        let shell = &mut harness.state_mut().shell;
+        shell.move_to_main_window(DEVICES).unwrap();
+        harness.run();
+        assert_eq!(harness.state().shell.windows(), 0);
+        assert_eq!(layout(&harness).layout, before.layout);
+    }
+
+    /// A window of its own with the mixer, right of the main window, which
+    /// is 1100 points wide: at 1200, 0, and 400 by 300 points.
+    fn mixer_window(harness: &mut Harness) -> egui::ViewportId {
+        harness.state_mut().shell.move_to_new_window(MIXER).unwrap();
+        harness.run();
+        let window = own_windows()[0].id;
+        with_own(harness, window, |own| {
+            let rect = egui::Rect::from_min_size(egui::pos2(1200.0, 0.0), vec2(400.0, 300.0));
+            own.info.inner_rect = Some(rect);
+            own.info.outer_rect = Some(rect);
+        });
+        harness.run();
+        window
+    }
+
+    /// Moves the pointer in the window of its own `window` to `at`, in its
+    /// points, and presses or lets go of the mouse button there.
+    fn pointer_in(
+        harness: &mut Harness,
+        window: egui::ViewportId,
+        at: egui::Pos2,
+        pressed: Option<bool>,
+    ) {
+        with_own(harness, window, |own| {
+            own.events.push(egui::Event::PointerMoved(at));
+            if let Some(pressed) = pressed {
+                own.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_tab_dragged_from_a_window_of_its_own_goes_in_the_main_window() {
+        let mut harness = own_windows_harness(Project::new());
+        let window = mixer_window(&mut harness);
+        // The mixer's tab, at the left of its window's tab bar, dragged
+        // over the main window, after the arrangement's tab, in the mixer's
+        // window's points, as the system has the drag there.
+        let tab = egui::pos2(20.0, 11.0);
+        let arrangement = harness.get_by_label("Arrangement panel").rect();
+        let after = egui::pos2(arrangement.right() + 6.0, arrangement.center().y);
+        let corner = vec2(1200.0, 0.0);
+        pointer_in(&mut harness, window, tab, Some(true));
+        for step in 1..=5 {
+            let at = tab + (after - corner - tab) * step as f32 / 5.0;
+            pointer_in(&mut harness, window, at, None);
+        }
+        // Out of its window, its ghost follows the pointer on the desktop.
+        let ghost = [after.x.round() as i32, after.y.round() as i32];
+        assert_eq!(harness.state().shell.ghost, Some((MIXER, ghost)));
+        pointer_in(&mut harness, window, after - corner, Some(false));
+        let shell = &harness.state().shell;
+        assert_eq!(shell.windows(), 0, "its window had nothing else");
+        assert_eq!(shell.ghost, None);
+        // In a tab after the arrangement's, in front.
+        let Split::Across(parts) = layout(&harness).layout.split else {
+            panic!("a split across");
+        };
+        let Split::Down(column) = &parts[1].split else {
+            panic!("a split down");
+        };
+        assert_eq!(column[0], tabs(&[ARRANGEMENT, MIXER], MIXER));
+    }
+
+    /// A window of its own with the mixer, and the browser beside it,
+    /// hidden, right of the main window: at 1200, 0, and 400 by 300 points.
+    fn mixer_and_browser_window(harness: &mut Harness) -> egui::ViewportId {
+        let mut workspace = Shell::new().workspace();
+        workspace.windows.push(WindowLayout {
+            at: Some([1200, 0]),
+            size: Some([400, 300]),
+            hidden: vec![BROWSER.into()],
+            layout: Layout::new(Split::Across(vec![
+                Layout::panel(MIXER),
+                Layout::panel(BROWSER),
+            ])),
+            ..WindowLayout::default()
+        });
+        harness.state_mut().shell.set_workspace(&workspace);
+        harness.run();
+        // The main window learns where it is.
+        let window = own_windows()[0].id;
+        with_own(harness, window, |_| {});
+        harness.run();
+        window
+    }
+
+    #[test]
+    fn a_tab_dragged_from_the_main_window_goes_in_a_window_of_its_own() {
+        let mut harness = own_windows_harness(Project::new());
+        mixer_and_browser_window(&mut harness);
+        let tab = harness.get_by_label("Devices panel").rect().center();
+        // Right of the mixer's tab, in its window.
+        let over = egui::pos2(1270.0, 11.0);
+        let before = layout(&harness);
+        drag(&mut harness, tab, over);
+        // In a tab after the mixer's, in front, and the browser stays
+        // hidden beside them.
+        let shell = &harness.state().shell;
+        assert_eq!(shell.ghost, None);
+        let window = &shell.workspace().windows[1];
+        let mixer = tabs(&[MIXER, DEVICES], DEVICES);
+        let across = Split::Across(vec![mixer, Layout::panel(BROWSER)]);
+        assert_eq!(window.layout, Layout::new(across));
+        assert_eq!(window.hidden, [BROWSER]);
+        assert_eq!(shell.viewport_of(DEVICES), shell.viewport_of(MIXER));
+        // It keeps its place in the main window, to go back to.
+        let shell = &mut harness.state_mut().shell;
+        shell.move_to_main_window(DEVICES).unwrap();
+        harness.run();
+        assert_eq!(layout(&harness).layout, before.layout);
+    }
+
+    #[test]
+    fn a_tab_dragged_over_a_window_of_its_own_and_away_leaves_it_as_it_was() {
+        let mut harness = own_windows_harness(Project::new());
+        mixer_and_browser_window(&mut harness);
+        let before = harness.state().shell.workspace();
+        let tab = harness.get_by_label("Devices panel").rect().center();
+        let over = egui::pos2(1270.0, 11.0);
+        harness.hover_at(tab);
+        harness.run();
+        harness.drag_at(tab);
+        harness.run();
+        for step in 1..=5 {
+            harness.hover_at(tab + (over - tab) * step as f32 / 5.0);
+            harness.run();
+        }
+        // Out there, its ghost follows the pointer on the desktop.
+        assert_eq!(harness.state().shell.ghost, Some((DEVICES, [1270, 11])));
+        // Back in the main window, and let go of where it was.
+        harness.hover_at(tab);
+        harness.run();
+        assert_eq!(harness.state().shell.ghost, None);
+        harness.drop_at(tab);
+        harness.run();
+        assert_eq!(harness.state().shell.workspace(), before);
+        // Over it again, and Escape pressed.
+        harness.drag_at(tab);
+        harness.run();
+        for step in 1..=5 {
+            harness.hover_at(tab + (over - tab) * step as f32 / 5.0);
+            harness.run();
+        }
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert_eq!(harness.state().shell.ghost, None);
+        harness.drop_at(over);
+        harness.run();
+        assert_eq!(harness.state().shell.workspace(), before);
+    }
+
+    #[test]
+    fn a_tab_let_go_of_as_it_gets_to_a_window_of_its_own_goes_in_it() {
+        let mut harness = own_windows_harness(Project::new());
+        mixer_and_browser_window(&mut harness);
+        let tab = harness.get_by_label("Devices panel").rect().center();
+        harness.hover_at(tab);
+        harness.run();
+        harness.drag_at(tab);
+        harness.run();
+        harness.hover_at(tab - vec2(0.0, 20.0));
+        harness.run();
+        // Over the window and let go of there in one go, before it could
+        // show where the panel would go.
+        let over = egui::pos2(1270.0, 11.0);
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(over),
+            egui::Event::PointerButton {
+                pos: over,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.run();
+        let shell = &harness.state().shell;
+        assert_eq!(shell.viewport_of(DEVICES), shell.viewport_of(MIXER));
+        // It's dropped there and then, and not dragged on in the window, to
+        // go wherever the button is let go of next.
+        harness.run();
+        assert!(!egui::DragAndDrop::has_any_payload(&harness.ctx));
+    }
+
+    #[test]
     fn a_tab_dragged_out_of_the_window_gets_a_window_of_its_own() {
         let mut harness = harness(Project::new());
         let tab = harness.get_by_label("Mixer panel").rect().center();
@@ -2459,6 +2724,8 @@ mod tests {
         let row = harness.get_by_label("Track Drums").rect();
         let over = egui::pos2(lanes.center().x, row.center().y) - vec2(1200.0, 0.0);
         let sample = PathBuf::from("/samples/kick.wav");
+        // Pressed in the browser's window, where the drag starts.
+        pointer_in(&mut harness, window, egui::pos2(200.0, 300.0), Some(true));
         egui::DragAndDrop::set_payload(&harness.ctx, Dragged::Sample(sample.clone()));
         with_own(&mut harness, window, |own| {
             own.events.push(egui::Event::PointerMoved(over))

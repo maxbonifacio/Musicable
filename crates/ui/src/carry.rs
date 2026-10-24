@@ -1,9 +1,12 @@
-//! Drags from the browser between windows. While the user drags, the system
-//! sends the pointer only to the window the drag started in, so the window
-//! under the pointer never sees it: a sample dragged from a browser in a
-//! window of its own couldn't go on a track in the main window. [`Carry`]
-//! passes the pointer on to the window it's over, as if it moved there, and
-//! lets go there, with what's dragged.
+//! Drags between windows, of things from the browser and of panels' tabs.
+//! While the user drags, the system sends the pointer only to the window
+//! the drag started in, so the window under the pointer never sees it: a
+//! sample dragged from a browser in a window of its own couldn't go on a
+//! track in the main window, nor a panel's tab go back in the main window.
+//! [`Carry`] passes the pointer on to the window it's over, as if it moved
+//! there, and lets go there, with what's dragged.
+
+use std::sync::Arc;
 
 use egui::{
     Context, DragAndDrop, Event, Plugin, Pos2, RawInput, Rect, Ui, ViewportId, ViewportIdMap,
@@ -11,8 +14,10 @@ use egui::{
 };
 
 use crate::browser::Dragged;
+use crate::dock::Tab;
+use crate::ghost;
 
-/// The egui plugin that carries drags from the browser between windows.
+/// The egui plugin that carries drags between windows.
 #[derive(Default)]
 pub(crate) struct Carry {
     /// The pointer's moves for windows other than the one it's in, as
@@ -23,7 +28,30 @@ pub(crate) struct Carry {
     /// What was let go of over another window, and which: for that
     /// window's next pass, as the window the drag started in drops it at
     /// the end of its own, which may come first.
-    dropped: Option<(ViewportId, Dragged)>,
+    dropped: Option<(ViewportId, Payload)>,
+}
+
+/// What's dragged between windows, as egui's drag and drop has it.
+#[derive(Debug, Clone)]
+enum Payload {
+    Browser(Arc<Dragged>),
+    Tab(Tab),
+}
+
+impl Payload {
+    /// What's dragged, if it's something that goes between windows.
+    fn of(ctx: &Context) -> Option<Self> {
+        (DragAndDrop::payload::<Dragged>(ctx).map(Self::Browser))
+            .or_else(|| DragAndDrop::payload::<Tab>(ctx).map(|tab| Self::Tab(*tab)))
+    }
+
+    /// Has egui's drag and drop drag it again.
+    fn set(self, ctx: &Context) {
+        match self {
+            Self::Browser(dragged) => DragAndDrop::set_payload(ctx, (*dragged).clone()),
+            Self::Tab(tab) => DragAndDrop::set_payload(ctx, tab),
+        }
+    }
 }
 
 impl Plugin for Carry {
@@ -32,10 +60,22 @@ impl Plugin for Carry {
     }
 
     fn input_hook(&mut self, ctx: &Context, input: &mut RawInput) {
+        // The ghost of a dragged tab is under the pointer, but the drag
+        // isn't in its window.
+        if input.viewport_id == ghost::id() {
+            return;
+        }
         self.waiting
             .retain(|id, _| input.viewports.contains_key(id));
-        match DragAndDrop::payload::<Dragged>(ctx) {
-            Some(dragged) => self.carry(ctx, input, &dragged),
+        let held = ctx.input_for(input.viewport_id, |i| i.pointer.any_down());
+        match Payload::of(ctx) {
+            // The drag is in the window the pointer is held down in.
+            Some(dragged) if held => self.carry(ctx, input, &dragged),
+            // The others see the pointer as it's passed on, and not as the
+            // system has it come and go, as some do while the ghost of a
+            // dragged tab goes over them under it.
+            Some(_) => (input.events)
+                .retain(|event| !matches!(event, Event::PointerMoved(_) | Event::PointerGone)),
             // Dropped, or Escape pressed.
             None => {
                 if let Some(left) = self.over.take() {
@@ -54,7 +94,7 @@ impl Plugin for Carry {
         if self.dropped.as_ref().is_some_and(|(to, _)| *to == here)
             && let Some((_, dragged)) = self.dropped.take()
         {
-            DragAndDrop::set_payload(ctx, dragged);
+            dragged.set(ctx);
         }
     }
 }
@@ -63,7 +103,7 @@ impl Carry {
     /// Passes the pointer's moves in `input`, from the window the drag of
     /// `dragged` is in, on to the window under the pointer, if it's not
     /// over the window it's in, and lets go there.
-    fn carry(&mut self, ctx: &Context, input: &RawInput, dragged: &Dragged) {
+    fn carry(&mut self, ctx: &Context, input: &RawInput, dragged: &Payload) {
         let from = input.viewport_id;
         let zoom = ctx.zoom_factor();
         let Some(source) = input.viewports.get(&from) else {
@@ -114,6 +154,18 @@ impl Carry {
     }
 }
 
+/// The other window that `at`, in the points of the window this pass is
+/// for, is over, if it's over one, as the pointer is passed on there.
+pub(crate) fn window_under(ctx: &Context, at: Pos2) -> Option<ViewportId> {
+    let from = ctx.viewport_id();
+    let zoom = ctx.zoom_factor();
+    ctx.input(|i| {
+        let windows = &i.raw.viewports;
+        let at = desktop(at, windows.get(&from)?, zoom)?;
+        under(at, from, windows, zoom).map(|(id, _)| id)
+    })
+}
+
 /// Where `pos`, in the points of the window egui describes as `window`, is
 /// on the desktop, in pixels, egui zooming by `zoom`.
 fn desktop(pos: Pos2, window: &ViewportInfo, zoom: f32) -> Option<Pos2> {
@@ -133,7 +185,8 @@ fn inside(at: Pos2, window: &ViewportInfo, zoom: f32) -> Option<Pos2> {
 /// The window other than `from` that the desktop's pixel `at` is in, of
 /// `windows`, and where in it, unless it's in `from` itself. Windows of
 /// their own go before the main window, which they're more likely to be
-/// in front of.
+/// in front of. The ghost of a dragged tab, which is under the pointer,
+/// isn't one.
 fn under(
     at: Pos2,
     from: ViewportId,
@@ -143,7 +196,10 @@ fn under(
     if (windows.get(&from)).is_some_and(|window| inside(at, window, zoom).is_some()) {
         return None;
     }
-    let mut others: Vec<_> = (windows.iter()).filter(|(id, _)| **id != from).collect();
+    let ghost = ghost::id();
+    let mut others: Vec<_> = (windows.iter())
+        .filter(|(id, _)| **id != from && **id != ghost)
+        .collect();
     others.sort_by_key(|(id, _)| **id == ViewportId::ROOT);
     (others.into_iter()).find_map(|(id, window)| Some((*id, inside(at, window, zoom)?)))
 }
@@ -176,6 +232,15 @@ mod tests {
         windows
     }
 
+    /// egui with [`Carry`], with windows of their own as the system shows
+    /// them.
+    fn context() -> Context {
+        let ctx = Context::default();
+        ctx.set_embed_viewports(false);
+        ctx.add_plugin(Carry::default());
+        ctx
+    }
+
     /// Runs a pass of the window `id`, with `events`, and returns what
     /// `inside` reads from it once the pass has begun.
     fn pass<R>(
@@ -193,6 +258,13 @@ mod tests {
         let mut inside = Some(inside);
         let mut read = None;
         let output = ctx.run_ui(input, |ui| {
+            // The main window shows the other, as the shell does, or egui
+            // forgets it, and that the pointer is held down in it.
+            if id == ViewportId::ROOT {
+                let builder = egui::ViewportBuilder::default();
+                ui.ctx()
+                    .show_viewport_deferred(window(), builder, |_, _| ());
+            }
             if let Some(inside) = inside.take() {
                 read = Some(inside(ui.ctx()));
             }
@@ -205,21 +277,28 @@ mod tests {
         Dragged::Sample(PathBuf::from("kick.wav"))
     }
 
-    fn release(pos: Pos2) -> Event {
+    fn button(pos: Pos2, pressed: bool) -> Event {
         Event::PointerButton {
             pos,
             button: PointerButton::Primary,
-            pressed: false,
+            pressed,
             modifiers: egui::Modifiers::NONE,
         }
     }
 
+    fn press(pos: Pos2) -> Event {
+        button(pos, true)
+    }
+
+    fn release(pos: Pos2) -> Event {
+        button(pos, false)
+    }
+
     #[test]
     fn a_sample_let_go_of_over_another_window_is_dropped_there() {
-        let ctx = Context::default();
-        ctx.add_plugin(Carry::default());
+        let ctx = context();
         // Dragged in the window of its own...
-        pass(&ctx, window(), Vec::new(), |ctx| {
+        pass(&ctx, window(), vec![press(pos2(100.0, 100.0))], |ctx| {
             DragAndDrop::set_payload(ctx, sample());
         });
         // ...to the left of it, over the main window, at 600, 300 in
@@ -250,12 +329,45 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_leaves_a_window_it_was_passed_on_to() {
-        let ctx = Context::default();
-        ctx.add_plugin(Carry::default());
-        pass(&ctx, ViewportId::ROOT, Vec::new(), |ctx| {
-            DragAndDrop::set_payload(ctx, sample());
+    fn a_tab_let_go_of_over_another_window_is_dropped_there() {
+        let ctx = context();
+        let tab = Tab {
+            panel: "mixer",
+            from: window(),
+        };
+        pass(&ctx, window(), vec![press(pos2(20.0, 10.0))], |ctx| {
+            DragAndDrop::set_payload(ctx, tab);
         });
+        // Over the main window, and let go of there.
+        let out = pos2(-400.0, 100.0);
+        pass(
+            &ctx,
+            window(),
+            vec![Event::PointerMoved(out), release(out)],
+            |_| (),
+        );
+        assert!(DragAndDrop::payload::<Tab>(&ctx).is_none());
+        let seen = |ctx: &Context| {
+            let payload = DragAndDrop::payload::<Tab>(ctx).map(|tab| *tab);
+            (ctx.input(|i| i.pointer.any_released()), payload)
+        };
+        assert_eq!(
+            pass(&ctx, ViewportId::ROOT, Vec::new(), seen),
+            (true, Some(tab))
+        );
+    }
+
+    #[test]
+    fn the_pointer_leaves_a_window_it_was_passed_on_to() {
+        let ctx = context();
+        pass(
+            &ctx,
+            ViewportId::ROOT,
+            vec![press(pos2(500.0, 300.0))],
+            |ctx| {
+                DragAndDrop::set_payload(ctx, sample());
+            },
+        );
         // From the main window over the other, at 1500, 300 in pixels.
         let over = pos2(1500.0, 300.0);
         pass(
@@ -290,6 +402,38 @@ mod tests {
     }
 
     #[test]
+    fn a_window_the_drag_isnt_in_sees_the_pointer_only_as_its_passed_on() {
+        let ctx = context();
+        pass(
+            &ctx,
+            ViewportId::ROOT,
+            vec![press(pos2(500.0, 300.0))],
+            |ctx| {
+                DragAndDrop::set_payload(ctx, sample());
+            },
+        );
+        // From the main window over the other, at 1500, 300 in pixels.
+        let over = pos2(1500.0, 300.0);
+        pass(
+            &ctx,
+            ViewportId::ROOT,
+            vec![Event::PointerMoved(over)],
+            |_| (),
+        );
+        let pointer = |ctx: &Context| ctx.input(|i| i.pointer.latest_pos());
+        let there = Some(pos2(200.0, 100.0));
+        assert_eq!(pass(&ctx, window(), Vec::new(), pointer), there);
+        // Some systems have the pointer leave it as the ghost of a dragged
+        // tab goes over it under the pointer, and come back as the ghost
+        // goes on, but it's there all along.
+        let gone = vec![Event::PointerGone];
+        assert_eq!(pass(&ctx, window(), gone, pointer), there);
+        let back = vec![Event::PointerMoved(pos2(200.0, 100.0))];
+        assert_eq!(pass(&ctx, window(), back, pointer), there);
+        assert_eq!(pass(&ctx, window(), Vec::new(), pointer), there);
+    }
+
+    #[test]
     fn a_point_is_found_in_the_window_its_in() {
         let windows = windows();
         assert_eq!(
@@ -298,6 +442,18 @@ mod tests {
         );
         assert_eq!(
             under(pos2(600.0, 300.0), window(), &windows, 1.0),
+            Some((ViewportId::ROOT, pos2(600.0, 300.0)))
+        );
+        // The ghost of a dragged tab under the pointer isn't one.
+        let mut ghosted = windows.clone();
+        let ghost = ViewportInfo {
+            inner_rect: Some(Rect::from_min_size(pos2(550.0, 280.0), vec2(100.0, 40.0))),
+            native_pixels_per_point: Some(1.0),
+            ..ViewportInfo::default()
+        };
+        ghosted.insert(ghost::id(), ghost);
+        assert_eq!(
+            under(pos2(600.0, 300.0), window(), &ghosted, 1.0),
             Some((ViewportId::ROOT, pos2(600.0, 300.0)))
         );
         // In the window it's from, or in none.

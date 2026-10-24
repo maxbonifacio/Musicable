@@ -389,12 +389,16 @@ says what's there.
   egui immediate viewports that the shell draws in the main window's
   pass, each with its own tree of panels, its own focus, and the keys
   pressed in it, which the shell hands the keymap itself. While a drag
-  from the browser is on, an egui plugin (`crates/ui/src/carry.rs`)
-  passes the pointer on to the window under it, as the system sends it
-  only to the window the drag started in. The layout, with where each
-  window is, is a `musicable_ui::Workspace`, a file in the config folder
-  for each of the user's workspaces, which the app switches between
-  ([app.md](app.md#workspaces)). Every view
+  from the browser or of a panel's tab is on, an egui plugin
+  (`crates/ui/src/carry.rs`) passes the pointer on to the window under
+  it, as the system sends it only to the window the drag started in. A
+  tab dragged over another window goes there as if it were dragged about
+  in that window, where egui_tiles shows where it would go, and out past
+  the edge of its own window, its ghost is a little window of its own
+  that follows the pointer (`crates/ui/src/ghost.rs`). The layout, with
+  where each window is, is a `musicable_ui::Workspace`, a file in the
+  config folder for each of the user's workspaces, which the app switches
+  between ([app.md](app.md#workspaces)). Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
   so a theme file fills a `Theme` ([app.md](app.md#themes)), a mouse map
