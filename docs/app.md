@@ -265,14 +265,48 @@ browser are docked panels, laid out in splits and tabs
 Devices and presets dragged from the browser go in the devices panel's
 chain wherever the panel is.
 
+### Windows of their own
+
+Any panel but the arrangement can go in a window of its own, on another
+monitor say:
+
+- **Move to New Window**, in a tab's right-click menu, or in the View menu
+  for the panel with the focus (`view.move_to_new_window`), puts the panel
+  in a new window, a little down and right of the one it was in, as big as
+  it was. **Dragging a tab out** past the window's edge does the same, with
+  the new window's title bar where you let go. The arrangement stays in
+  the main window, and so does a window's last panel. A window is named
+  after its panels and the project.
+- In a window of its own, panels split and join tabs as in the main
+  window, and their tabs can be dragged out to windows of their own again.
+- **Move to Main Window**, in the tab's menu or the View menu
+  (`view.move_to_main_window`), sends the panel back to where it was in the
+  main window. **Closing the window** sends all its panels back. Hiding
+  its last panel closes it.
+- **Each window has its own focus.** Coming back to a window gives the
+  focus to the panel that last had it there, the first panel in it at
+  first. The keys go to the window you're in: a panel's own keys work in
+  its window, the keys that work everywhere, such as Space for play, work
+  in every window, and a text field with the keyboard focus, such as the
+  browser's search, still takes every key.
+- **Drags cross windows**: samples, devices and presets dragged from a
+  browser in a window of its own go on a track, below the tracks or in the
+  devices panel in another window, as they do in the main window.
+- **Plugin windows** open over the window the devices panel is in, on its
+  monitor, and stay in front of that window (on Windows: [Plugins](#plugins)).
+- Each window draws at its own monitor's scaling, and keeps its size as it
+  moves between monitors.
+
 ### Workspaces
 
-A workspace is a layout of the panels, with where the window is: its
-corner, its size, and whether it's maximized. It keeps the parts the
-transport bar, the track headers and the mixer strips show, too
-([Configurable views](#configurable-views)). What you change goes into
-the workspace in use as you change it, so the window opens as you left it
-([Settings](#settings-and-your-keymap)). The **Workspaces** menu lists your
+A workspace is a layout of the panels, in the main window and in windows
+of their own, with where each window is: its corner, its size, and whether
+it's maximized. It keeps the parts the transport bar, the track headers and
+the mixer strips show, too ([Configurable views](#configurable-views)).
+What you change goes into the workspace in use as you change it, so the
+windows open as you left them ([Settings](#settings-and-your-keymap)).
+Switching workspaces closes the windows of the one you leave and opens
+those of the one you switch to. The **Workspaces** menu lists your
 workspaces, up to nine, with a tick on the one in use:
 
 - **Alt and a workspace's number** switch to it (`workspace.switch_1` to
@@ -286,7 +320,7 @@ workspaces, up to nine, with a tick on the one in use:
   workspace in use. Deleting asks first, then switches to Default. Default
   keeps its name and can't be deleted.
 - **Reset Workspace** lays the panels out and shows the views' parts as at
-  first, and leaves the window where it is.
+  first, with every panel back in the main window, which stays where it is.
 
 The [Settings window](#the-settings-window)'s Workspaces page lists them
 too, with the same commands, and opens the folder of their files.
@@ -295,9 +329,10 @@ The zoom and the scrolling are the project's: switching workspaces leaves
 them as they are. A project remembers the workspace it was saved with,
 and opening it switches there, if you have a workspace by that name
 ([project-format.md](project-format.md#the-file)). A window goes back to
-the monitor it was on, if that monitor's still there, and stays on the
-one it's on if not. A window you move or resize is saved once it's stayed
-put for a second.
+the monitor it was on, if that monitor's still there. If not, the main
+window stays on the one it's on, and a window of its own opens in the
+middle of the main monitor. A window you move or resize is saved once it's
+stayed put for a second.
 
 ### Configurable views
 
@@ -486,6 +521,25 @@ triangles, such as automation of hundreds of tracks zoomed out, the lanes'
 drawing (`crates/ui/src/arrangement/paint.rs`) can move into an
 `egui_wgpu::Callback` with a render pass of its own, with the gestures left
 as they are.
+
+Windows of their own ([above](#windows-of-their-own)) draw in the same
+frame as the main window, so every window draws whenever one does. To see
+how long frames take in the app itself, start it with the
+`MUSICABLE_FRAME_TIMES` environment variable set, as in
+`$env:MUSICABLE_FRAME_TIMES = 1` in PowerShell. The window then draws all
+the time, as fast as the monitor takes frames, and every five seconds the
+console it was started from shows how far apart frames were, and how long
+they took on the CPU with every window drawn, as eframe measures it. A
+debug build drawing in software (Mesa's lavapipe) under Xvfb, with three
+windows open, printed:
+
+```text
+225 frames, 3 windows: 22.29 ms apart, at most 56.03; 17.54 ms on the CPU, at most 47.69
+```
+
+and about 7 ms on the CPU with the main window alone. Software drawing is
+far slower than a GPU's, so a release build on a real monitor is the one to
+go by: at 144 Hz, a frame has 6.9 ms.
 
 ## The piano roll
 
@@ -1021,10 +1075,11 @@ format ("Instrument · CLAP"), and:
 
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live. On Windows
-  the plugin's window goes inside a window of Musicable's that stays in
-  front of the main window and minimizes with it; elsewhere it's a window
-  of the plugin's own. VST3 plugins have no windows of their own, so
-  theirs open only on Windows so far.
+  the plugin's window goes inside a window of Musicable's that opens over
+  the window the devices panel is in, on its monitor, stays in front of it
+  and minimizes with it; elsewhere it's a window of the plugin's own. VST3
+  plugins have no windows of their own, so theirs open only on Windows so
+  far.
 - **×**, which deletes the device.
 - Why the plugin isn't playing, when it isn't: it isn't installed, it
   didn't load, or the scan that finds it hasn't finished. A device whose
@@ -1460,6 +1515,11 @@ layout = { across = [
         { tabs = ["devices", "piano_roll"], front = "devices" },
     ] },
 ] }
+
+[[windows]]
+at = [3880, 200]
+size = [480, 900]
+layout = { panel = "browser" }
 ```
 
 `slot` is the workspace's number in the Workspaces menu, which Alt and
@@ -1472,9 +1532,13 @@ where it goes back to. A part's `size` is its width in a row of parts
 (`across`) or its height in a column (`down`), in points; parts without
 one take their panels' default sizes, and the part with the arrangement
 takes what's left. `hidden` lists the panels hidden, which keep their
-place. Panels the file doesn't have go where they go at first, hidden, and
-a file that can't be used leaves the layout as it was, and says why.
-Deleting Default's file brings back the first layout.
+place. The windows after the first are windows of their own, laid out the
+same way, with the panels moved out of the main window, which has them
+hidden, keeping their place there. A panel in two windows goes in the
+first, and the arrangement only in the main window. Panels the file
+doesn't have go where they go at first, hidden, and a file that can't be
+used leaves the layout as it was, and says why. Deleting Default's file
+brings back the first layout.
 
 `views` has only the views you changed, by the ids in the table under
 [Configurable views](#configurable-views). A view's `parts` are its parts
@@ -1792,6 +1856,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   VST3 presets; and tags in the undo history. Taking a folder out of the
   library forgets its files' tags.
 - VST3 plugins' windows on macOS and Linux.
+- Dragging a tab from one window into another's splits and tabs: a tab
+  dragged out of a window gets a new window of its own, and Move to Main
+  Window sends a panel back.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips.
 - The Settings window's Mouse page, for what the mouse does where, and

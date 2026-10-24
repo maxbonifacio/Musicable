@@ -8,6 +8,7 @@ mod audio_files;
 mod audio_page;
 pub mod export;
 mod export_window;
+mod frame_times;
 mod keymap_file;
 pub mod library;
 mod media;
@@ -24,6 +25,7 @@ mod theme_file;
 mod workspaces;
 
 pub use app::App;
+pub use frame_times::FRAME_TIMES;
 pub use output::Output;
 pub use plugin_scan::{PLUGINS_FILE, SCAN_PLUGIN};
 pub use plugins::PLUGIN_SETTLING;

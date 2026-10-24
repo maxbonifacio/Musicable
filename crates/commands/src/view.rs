@@ -30,6 +30,12 @@ pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll"
 /// Brings the piano roll in front of the devices, or the devices in front of
 /// the piano roll: Live's Toggle Between Device/Clip View.
 pub const SWITCH_DEVICES_PIANO_ROLL: CommandId = CommandId::new("view.switch_devices_piano_roll");
+/// Moves the panel with the focus to a new window of its own, as its tab's
+/// menu does. The arrangement stays in the main window.
+pub const MOVE_TO_NEW_WINDOW: CommandId = CommandId::new("view.move_to_new_window");
+/// Sends the panel with the focus back to where it was in the main window,
+/// from the window of its own it's in.
+pub const MOVE_TO_MAIN_WINDOW: CommandId = CommandId::new("view.move_to_main_window");
 /// Zooms the arrangement in, or the piano roll while it has the focus,
 /// around the start marker.
 pub const ZOOM_IN: CommandId = CommandId::new("view.zoom_in");
@@ -105,7 +111,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 6] = [
+const REQUESTS: [(CommandId, &str, Request); 8] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -123,6 +129,16 @@ const REQUESTS: [(CommandId, &str, Request); 6] = [
         SWITCH_DEVICES_PIANO_ROLL,
         "Switch Devices and Piano Roll",
         Request::SwitchDevicesPianoRoll,
+    ),
+    (
+        MOVE_TO_NEW_WINDOW,
+        "Move Panel to New Window",
+        Request::MoveToNewWindow,
+    ),
+    (
+        MOVE_TO_MAIN_WINDOW,
+        "Move Panel to Main Window",
+        Request::MoveToMainWindow,
     ),
 ];
 
@@ -484,6 +500,8 @@ mod tests {
         setup.run(&TOGGLE_BROWSER);
         setup.run(&TOGGLE_PIANO_ROLL);
         setup.run(&SWITCH_DEVICES_PIANO_ROLL);
+        setup.run(&MOVE_TO_NEW_WINDOW);
+        setup.run(&MOVE_TO_MAIN_WINDOW);
         assert_eq!(
             setup.requests,
             [
@@ -492,6 +510,8 @@ mod tests {
                 Request::TogglePanel("browser"),
                 Request::TogglePanel("piano_roll"),
                 Request::SwitchDevicesPianoRoll,
+                Request::MoveToNewWindow,
+                Request::MoveToMainWindow,
             ]
         );
     }

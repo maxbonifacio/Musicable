@@ -241,6 +241,10 @@ pub enum Request {
     /// Bring the piano roll in front of the devices, or the devices in
     /// front of the piano roll.
     SwitchDevicesPianoRoll,
+    /// Move the panel with the focus to a new window of its own.
+    MoveToNewWindow,
+    /// Send the panel with the focus back to the main window.
+    MoveToMainWindow,
     /// Let the user type a new name for this.
     Rename(Named),
     /// Show this plugin's own window, or close it.

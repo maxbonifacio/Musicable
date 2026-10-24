@@ -1,7 +1,7 @@
-//! The panels' layout in the app's window, and the parts of its transport
+//! The panels' layout in the app's windows, and the parts of its transport
 //! bar, track headers and mixer strips: the app saves them to the file of
 //! the workspace in use as the user changes them, switches between the
-//! user's workspaces, and the window comes back as it was left.
+//! user's workspaces, and the windows come back as they were left.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use musicable_commands::{file, view, workspace};
-use musicable_ui::{BROWSER, DEVICES, MIXER, TRANSPORT_BAR, Workspace};
+use musicable_commands::{Args, file, view, workspace};
+use musicable_ui::{BROWSER, DEVICES, Layout, MIXER, TRANSPORT_BAR, Workspace};
 
 use super::App;
 use super::testing::{TempDir, chord, press, window};
 use crate::settings::SETTINGS_FILE;
-use crate::workspaces::WORKSPACES_FOLDER;
+use crate::workspaces::{self, WORKSPACES_FOLDER};
 
 /// The file of the workspace called `name`, in the config folder `config`.
 fn workspace_file(config: &Path, name: &str) -> PathBuf {
@@ -195,6 +195,50 @@ fn workspaces_switch_with_a_key_and_the_app_opens_in_the_last_one() {
         settings.contains("[workspaces]\ncurrent = \"Mixing\"\n"),
         "{settings}"
     );
+    assert!(
+        harness.state().messages.is_empty(),
+        "{:?}",
+        harness.state().messages
+    );
+}
+
+#[test]
+fn a_workspace_keeps_a_window_of_its_own_where_it_was_left() {
+    let config = TempDir::new("laying-out-windows");
+    let mut harness = window(&config.0, None);
+    harness.run();
+    save_as(&mut harness, "Mixing");
+    // Mixing has the mixer in a window of its own.
+    let session = &mut harness.state_mut().session;
+    let mixer = Args::new().with("panel", MIXER);
+    session.run_with(&view::SET_FOCUS, &mixer).unwrap();
+    session.run(&view::MOVE_TO_NEW_WINDOW).unwrap();
+    harness.run();
+    assert_eq!(harness.state().shell.windows(), 1);
+    let path = workspace_file(&config.0, "Mixing");
+    let mut mixing = workspaces::read(&path).unwrap().unwrap();
+    assert_eq!(mixing.windows.len(), 2);
+    assert_eq!(mixing.windows[1].layout, Layout::panel(MIXER));
+    // Default has it in the main window.
+    press(&mut harness, chord("Alt+1"));
+    assert_eq!(harness.state().shell.windows(), 0);
+    assert_eq!(shown(&harness), [false, true]);
+    // The user left it on the second monitor, right of the first, which
+    // the tests' windows can't be moved to.
+    mixing.windows[1].at = Some([4000, 200]);
+    workspaces::write(&path, &mixing).unwrap();
+    // Alt+2 opens it there again.
+    press(&mut harness, chord("Alt+2"));
+    let shell = &harness.state().shell;
+    assert_eq!(shell.windows(), 1);
+    assert_eq!(shell.workspace().windows[1].at, Some([4000, 200]));
+    drop(harness);
+
+    // So does opening the app in Mixing.
+    let harness = window(&config.0, None);
+    let shell = &harness.state().shell;
+    assert_eq!(shell.windows(), 1);
+    assert_eq!(shell.workspace().windows[1].at, Some([4000, 200]));
     assert!(
         harness.state().messages.is_empty(),
         "{:?}",

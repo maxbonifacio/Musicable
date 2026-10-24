@@ -1,9 +1,9 @@
 //! Plugins' own windows. On Windows, a plugin's window goes inside a window
-//! of Musicable's, which the main window owns, so it stays in front of it
-//! and minimizes with it. Elsewhere, and for a CLAP plugin that can't go
-//! inside another window, the plugin opens a window of its own. VST3
-//! plugins' windows only go inside another, so they open only on Windows
-//! so far.
+//! of Musicable's, which the window the devices are in owns, so it opens
+//! over it, on its monitor, stays in front of it and minimizes with it.
+//! Elsewhere, and for a CLAP plugin that can't go inside another window,
+//! the plugin opens a window of its own. VST3 plugins' windows only go
+//! inside another, so they open only on Windows so far.
 
 use std::collections::BTreeMap;
 
@@ -29,10 +29,10 @@ enum Window {
 
 impl PluginWindows {
     /// Shows the window of the plugin device `device`'s plugin, inside a
-    /// window that `owner`, the app's main window, owns where it can. It
-    /// comes to the front if it's open already. `scale` is the display's
-    /// pixels per point, and `wake` wakes the app when the user closes the
-    /// window.
+    /// window that `owner`, the window the devices are in, owns where it
+    /// can, over it on its monitor. It comes to the front if it's open
+    /// already. `scale` is that monitor's pixels per point, and `wake`
+    /// wakes the app when the user closes the window.
     pub fn show(
         &mut self,
         session: &mut Session,
@@ -76,6 +76,20 @@ impl PluginWindows {
     /// Whether the device `device`'s plugin window is open.
     pub fn is_open(&self, device: DeviceId) -> bool {
         self.open.contains_key(&device)
+    }
+
+    /// Whether any plugin window is open.
+    pub fn any_open(&self) -> bool {
+        !self.open.is_empty()
+    }
+
+    /// Has `owner` own the windows the plugins' windows are inside from now
+    /// on: the window the devices are in, whose panels moved, before the
+    /// window they were in closes and takes them with it.
+    pub fn set_owner(&self, owner: isize) {
+        for window in self.open.values() {
+            window.set_owner(owner);
+        }
     }
 
     /// Follows what the plugins' windows asked for, and what the user did
@@ -125,6 +139,20 @@ impl PluginWindows {
 }
 
 impl Window {
+    fn set_owner(&self, owner: isize) {
+        match self {
+            #[cfg(windows)]
+            Window::Embedded(frame) => {
+                if frame.owner() != Some(owner) {
+                    frame.set_owner(owner);
+                }
+            }
+            Window::Floating => {
+                let _ = owner;
+            }
+        }
+    }
+
     fn raise(&self) {
         match self {
             #[cfg(windows)]
@@ -184,6 +212,7 @@ fn open(
     match instance.open_window(ParentWindow::Win32(frame.hwnd()), scale) {
         Ok((width, height)) => {
             frame.set_client_size(width, height);
+            frame.center_on_owner();
             frame.show();
             Ok(Window::Embedded(frame))
         }
@@ -222,6 +251,15 @@ fn open(
     Ok(Window::Floating)
 }
 
+/// The window of Musicable's whose frame is at `rect` on the desktop, its
+/// left, top, right and bottom edges in pixels, as Win32's `HWND`: a window
+/// of its own the user moved panels to, which egui knows only by where it
+/// is.
+#[cfg(windows)]
+pub(crate) fn window_at(rect: [i32; 4]) -> Option<isize> {
+    native::window_at(rect)
+}
+
 /// Musicable's window for a plugin's window to go inside, in Win32.
 #[cfg(windows)]
 mod native {
@@ -231,15 +269,20 @@ mod native {
 
     use musicable_plugins::Waker;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-        GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, LoadCursorW,
-        RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-        WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+        EnumWindows, GW_OWNER, GWLP_HWNDPARENT, GWLP_USERDATA, GetClientRect, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, IsWindowVisible,
+        LoadCursorW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_CLOSE, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX,
+        WS_OVERLAPPED, WS_SYSMENU,
     };
-    use windows::core::{HSTRING, PCWSTR, w};
+    use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
     const CLASS: PCWSTR = w!("MusicablePluginWindow");
     /// A title bar with a close and a minimize button, and a border that
@@ -282,13 +325,20 @@ mod native {
                     RegisterClassW(&class);
                 });
                 let owner = owner.map(|hwnd| HWND(hwnd as *mut c_void));
+                // On the owner's monitor, so the plugin's window is made
+                // for that monitor's scaling.
+                let mut over = RECT::default();
+                let (x, y) = match owner {
+                    Some(owner) if GetWindowRect(owner, &mut over).is_ok() => (over.left, over.top),
+                    _ => (CW_USEDEFAULT, CW_USEDEFAULT),
+                };
                 let hwnd = CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     CLASS,
                     &HSTRING::from(title),
                     STYLE,
-                    CW_USEDEFAULT,
-                    CW_USEDEFAULT,
+                    x,
+                    y,
                     400,
                     300,
                     owner,
@@ -337,6 +387,64 @@ mod native {
             }
         }
 
+        /// Puts the window in the middle of the window that owns it, and
+        /// all of it on that window's monitor where it fits.
+        pub fn center_on_owner(&self) {
+            // SAFETY: a window this owns, the window that owns it, and
+            // structs that live for the calls.
+            unsafe {
+                let Ok(owner) = GetWindow(self.hwnd, GW_OWNER) else {
+                    return;
+                };
+                let (mut over, mut frame) = (RECT::default(), RECT::default());
+                if GetWindowRect(owner, &mut over).is_err()
+                    || GetWindowRect(self.hwnd, &mut frame).is_err()
+                {
+                    return;
+                }
+                let (width, height) = (frame.right - frame.left, frame.bottom - frame.top);
+                let mut x = over.left + (over.right - over.left - width) / 2;
+                let mut y = over.top + (over.bottom - over.top - height) / 2;
+                let mut monitor = MONITORINFO {
+                    cbSize: size_of::<MONITORINFO>() as u32,
+                    ..MONITORINFO::default()
+                };
+                let on = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+                if GetMonitorInfoW(on, &mut monitor).as_bool() {
+                    let work = monitor.rcWork;
+                    x = x.min(work.right - width).max(work.left);
+                    y = y.min(work.bottom - height).max(work.top);
+                }
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    None,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+
+        /// The window that owns this one, which it stays in front of.
+        pub fn owner(&self) -> Option<isize> {
+            // SAFETY: a window this owns.
+            let owner = unsafe { GetWindow(self.hwnd, GW_OWNER) };
+            owner.ok().map(|owner| owner.0 as isize)
+        }
+
+        /// Has the window `owner` own this one from now on. Windows destroys
+        /// a window with the window that owns it, and the plugin's with it,
+        /// unawares.
+        pub fn set_owner(&self, owner: isize) {
+            // SAFETY: a window this owns. Win32 changes the owner of a
+            // top-level window through its GWLP_HWNDPARENT.
+            unsafe {
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner);
+            }
+        }
+
         pub fn show(&self) {
             // SAFETY: a window this owns.
             unsafe {
@@ -367,6 +475,53 @@ mod native {
                 drop(Box::from_raw(self.shared));
             }
         }
+    }
+
+    /// What [`window_at`] looks for, and what it found.
+    struct Search {
+        rect: [i32; 4],
+        process: u32,
+        found: Option<isize>,
+    }
+
+    pub fn window_at(rect: [i32; 4]) -> Option<isize> {
+        let mut search = Search {
+            rect,
+            process: std::process::id(),
+            found: None,
+        };
+        // SAFETY: the callback reads the search only while EnumWindows runs,
+        // and stops it once it finds the window, which EnumWindows reports
+        // as an error.
+        unsafe {
+            let _ = EnumWindows(Some(visit), LPARAM(&raw mut search as isize));
+        }
+        search.found
+    }
+
+    /// Whether `hwnd`, which the system lists, is the window the search
+    /// `lparam` looks for: one of this process's, shown, at the rect, to
+    /// within a pixel of rounding.
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: the search window_at made, for as long as EnumWindows runs.
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        let mut process = 0;
+        let mut at = RECT::default();
+        // SAFETY: plain Win32 calls on a window the system listed.
+        let ours = unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut process)) != 0
+                && process == search.process
+                && IsWindowVisible(hwnd).as_bool()
+                && GetWindowRect(hwnd, &mut at).is_ok()
+        };
+        let edges = [at.left, at.top, at.right, at.bottom];
+        let there =
+            (edges.iter().zip(search.rect)).all(|(&edge, wanted)| (edge - wanted).abs() <= 1);
+        if ours && there {
+            search.found = Some(hwnd.0 as isize);
+            return BOOL(0);
+        }
+        BOOL(1)
     }
 
     unsafe extern "system" fn procedure(

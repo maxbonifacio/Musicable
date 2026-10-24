@@ -16,23 +16,25 @@ use musicable_commands::{
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Project, TrackId};
+use musicable_model::{Chain, Project, TrackId};
 
 use crate::browser::{self, Library};
+use crate::carry::Carry;
 use crate::devices::Plugins;
-use crate::dock::{Dock, Draw};
+use crate::dock::{Dock, Draw, Move};
 use crate::menus::menus;
 use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
-use crate::panels::{self, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
+use crate::panels::{self, ARRANGEMENT, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
 use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::transport_bar;
 use crate::waveform::Waveforms;
 use crate::widgets::{checked_name_box, name_box};
-use crate::workspace::{WindowLayout, Workspace, check_name};
+use crate::windows::{Monitor, Place, Placement, Window, on_desktop, unscaled};
+use crate::workspace::{Workspace, check_name};
 
 /// What the shell shows. The app fills one in for each frame.
 pub struct View<'a> {
@@ -81,6 +83,9 @@ pub struct View<'a> {
     pub library: Library<'a>,
     /// The user's workspaces, for the Workspaces menu.
     pub workspaces: Workspaces<'a>,
+    /// The monitors, where windows of their own go: a window whose monitor
+    /// is gone opens on the main one. None where the app can't tell.
+    pub monitors: &'a [Monitor],
 }
 
 /// The transport, as the engine last reported it.
@@ -254,16 +259,20 @@ pub struct Shell {
     rename: Option<Rename>,
     /// What the box asking about a workspace asks, while it's open.
     asking_workspace: Option<WorkspaceBox>,
-    /// Where the main window is, as last seen, for the workspace.
-    place: Place,
-    /// When the main window got there, in egui's time.
-    placed_at: f64,
-    /// Where the main window was when the workspace was last handed out to
-    /// be saved: `None` until the window has been seen since it was laid
-    /// out.
-    saved_place: Option<Place>,
-    /// The time of the frame drawn last, in egui's time.
-    now: f64,
+    /// Where the main window is, for the workspace.
+    main: Placement,
+    /// The panel with the focus while the user is in the main window.
+    main_focus: &'static str,
+    /// Whether the main window had the system's focus, as last seen.
+    main_focused: bool,
+    /// The windows of their own that the user moved panels out to.
+    windows: Vec<Window>,
+    /// How many windows of their own have opened, so each new one is a new
+    /// viewport.
+    opened: u64,
+    /// The panels commands asked to move to another window since the last
+    /// frame.
+    asked: Vec<Move>,
 }
 
 impl Default for Shell {
@@ -281,10 +290,12 @@ impl Default for Shell {
             followed: None,
             rename: None,
             asking_workspace: None,
-            place: Place::default(),
-            placed_at: 0.0,
-            saved_place: None,
-            now: 0.0,
+            main: Placement::default(),
+            main_focus: ARRANGEMENT,
+            main_focused: false,
+            windows: Vec::new(),
+            opened: 0,
+            asked: Vec::new(),
         }
     }
 }
@@ -299,80 +310,6 @@ enum WorkspaceBox {
     Rename(Option<String>),
     /// Whether to delete the workspace in use.
     Delete,
-}
-
-/// How long a window that the user moves or resizes stays put before its
-/// place is saved, in seconds, so it isn't saved at every step.
-const SETTLE: f64 = 1.0;
-
-/// Where a window is, and how big: its place in its [`WindowLayout`].
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Place {
-    /// Where its top left corner is on the desktop, in pixels.
-    at: Option<[i32; 2]>,
-    /// How big its inside is, in pixels at 100% scaling: its monitor's
-    /// scaling makes it bigger.
-    size: Option<[u32; 2]>,
-    maximized: bool,
-}
-
-impl Place {
-    /// Where the window egui describes as `viewport` is, now that egui
-    /// zooms by `zoom`, when it was at `self` before. A minimized window
-    /// stays where it was, and a maximized one keeps the place it goes back
-    /// to, but for the monitor: one moved to another monitor while it was
-    /// maximized goes back there.
-    fn seen(self, viewport: &egui::ViewportInfo, zoom: f32) -> Self {
-        if viewport.minimized == Some(true) {
-            return self;
-        }
-        // Pixels to an egui point, on the window's monitor.
-        let scale = viewport.native_pixels_per_point.unwrap_or(1.0);
-        let pixels = scale * zoom;
-        let outer = viewport.outer_rect.map(|rect| rect * pixels);
-        let at = outer.map(|rect| [rect.min.x.round() as i32, rect.min.y.round() as i32]);
-        let size = (viewport.inner_rect).map(|rect| {
-            let size = (rect.size() * zoom).round();
-            [size.x.max(1.0) as u32, size.y.max(1.0) as u32]
-        });
-        if viewport.maximized != Some(true) {
-            return Self {
-                at: at.or(self.at),
-                size: size.or(self.size),
-                maximized: false,
-            };
-        }
-        let mut back = Self {
-            at: self.at.or(at),
-            size: self.size.or(size),
-            maximized: true,
-        };
-        if let (Some(outer), Some([x, y]), Some([width, height])) = (outer, back.at, back.size) {
-            let middle = egui::pos2(
-                x as f32 + width as f32 * scale / 2.0,
-                y as f32 + height as f32 * scale / 2.0,
-            );
-            if !outer.contains(middle) {
-                let corner = (outer.min + egui::vec2(40.0, 40.0) * scale).round();
-                back.at = Some([corner.x as i32, corner.y as i32]);
-            }
-        }
-        back
-    }
-
-    fn of(window: &WindowLayout) -> Self {
-        Self {
-            at: window.at,
-            size: window.size,
-            maximized: window.maximized,
-        }
-    }
-
-    fn put_in(self, window: &mut WindowLayout) {
-        window.at = self.at;
-        window.size = self.size;
-        window.maximized = self.maximized;
-    }
 }
 
 /// What the tabs of the devices and the piano roll follow: selecting the
@@ -395,26 +332,57 @@ struct Rename {
     text: Option<String>,
 }
 
+/// A panel the user moved to another window, and where it goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Moving {
+    /// To a new window of its own, there.
+    Out(&'static str, Place),
+    /// Back to where it was in the main window.
+    Back(&'static str),
+}
+
 impl Shell {
     /// The shell in the dark theme, with Live's mouse.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Shows the shell in the window's root `ui`, and returns what the user
-    /// asked for.
+    /// Shows the shell in the window's root `ui`, and the windows of their
+    /// own the user moved panels out to, and returns what the user asked
+    /// for.
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
+        let ctx = ui.ctx().clone();
+        // Drags from the browser go from window to window.
+        ctx.plugin_or_default::<Carry>();
+        let zoom = ctx.zoom_factor();
+        let main = ctx.input(|i| i.viewport().clone());
         self.follow(view.editor);
-        self.follow_place(ui.ctx());
+        self.main.follow(&main, zoom, ctx.input(|i| i.time));
+        self.remember_focus(view.editor);
+        // The user came back to the main window.
+        let focused = main.focused == Some(true);
+        if focused && !self.main_focused {
+            self.focus_main(view.editor, &mut actions);
+        }
+        self.main_focused = focused;
+        for moving in self.asked_moves(&ctx, &main, zoom) {
+            self.carry(moving);
+        }
         let shown: BTreeSet<_> = (self.registry.iter())
             .map(|panel| panel.id)
-            .filter(|id| self.dock.shown(id))
+            .filter(|id| self.panel_shown(id))
             .collect();
+        let focus = view.editor.focus.panel();
+        let state = MenuState {
+            shown: &shown,
+            to_new_window: self.can_move_to_new_window(focus),
+            to_main_window: self.window_of(focus).is_some(),
+        };
         let theme = &self.theme;
         let parts = &self.parts;
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            menu_bar(ui, view, &shown, &mut actions);
+            menu_bar(ui, view, &state, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
             transport_bar::show(ui, view, theme, parts, &mut actions);
@@ -439,18 +407,29 @@ impl Shell {
             edited: false,
             closed: Vec::new(),
             focused: None,
+            moves: Vec::new(),
+            detached: false,
+            shown: self.dock.count_shown(),
+            bounds: ctx.content_rect(),
+            outside: false,
         };
         let dock = &mut self.dock;
         egui::CentralPanel::no_frame().show(ui, |ui| dock.show(ui, &mut draw));
         if let Some(panel) = draw.focused {
             focus_on(panel, view.editor, drawn, draw.cx.actions);
         }
+        let mut browse = draw.cx.browse;
+        let mut moves = moving(draw.moves, &main, self.main.place, zoom);
+        self.show_windows(&ctx, view, chain, &mut actions, &mut browse, &mut moves);
+        for moving in moves {
+            self.carry(moving);
+        }
         // Add Device shows the browser's devices.
-        if draw.cx.browse {
+        if browse {
             self.panels.browser.show_devices();
-            if !self.dock.shown(BROWSER) {
-                self.dock.show_panel(BROWSER);
-                ui.ctx().request_repaint();
+            if !self.panel_shown(BROWSER) {
+                self.show_panel(BROWSER);
+                ctx.request_repaint();
             }
         }
         // A device added from the browser brings the devices forward.
@@ -460,17 +439,126 @@ impl Shell {
             _ => false,
         });
         if added {
-            self.dock.bring_forward(DEVICES);
+            self.bring_forward(DEVICES);
         }
         self.parts.carry_out();
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
-        self.show_rename(ui.ctx(), view, &mut actions);
-        self.show_workspace_box(ui.ctx(), view, &mut actions);
-        self.palette.show(ui.ctx(), view, &mut actions);
-        self.parts.show_customise(ui.ctx(), &self.theme);
-        browser::show_dragged(ui.ctx());
+        self.show_rename(&ctx, view, &mut actions);
+        self.show_workspace_box(&ctx, view, &mut actions);
+        self.palette.show(&ctx, view, &mut actions);
+        self.parts.show_customise(&ctx, &self.theme);
+        browser::show_dragged(&ctx);
         actions
+    }
+
+    /// Shows each window of its own, with its panels, and takes the keys
+    /// pressed in it, as the app takes the main window's. Panels moved out
+    /// of them go in `moves`, and Add Device clicked in one sets `browse`.
+    /// A window the user closed, or that's left with nothing to show,
+    /// closes, and its panels go back to the main window.
+    fn show_windows(
+        &mut self,
+        ctx: &egui::Context,
+        view: &View<'_>,
+        chain: Option<Chain>,
+        actions: &mut Vec<Action>,
+        browse: &mut bool,
+        moves: &mut Vec<Moving>,
+    ) {
+        let zoom = ctx.zoom_factor();
+        // The main window's scaling, a guess at that of the monitor a new
+        // window is made on, before it moves where it goes.
+        let scale = ctx.input(|i| i.viewport().native_pixels_per_point);
+        let scale = scale.unwrap_or(1.0);
+        let asking = self.asking();
+        let editor = view.editor;
+        let Self {
+            windows,
+            registry,
+            panels,
+            theme,
+            mouse,
+            parts,
+            shortcuts,
+            ..
+        } = self;
+        let (registry, theme, mouse, parts) = (&*registry, &*theme, &*mouse, &*parts);
+        let mut closed = Vec::new();
+        for (index, window) in windows.iter_mut().enumerate() {
+            let title = title(&window.dock, registry, view.name);
+            let builder = window.builder(&title, view.monitors, scale, zoom);
+            if std::mem::take(&mut window.raise) {
+                ctx.send_viewport_cmd_to(window.id, egui::ViewportCommand::Focus);
+            }
+            let shown = window.shown();
+            let close = ctx.show_viewport_immediate(window.id, builder, |ui, class| {
+                let ctx = ui.ctx().clone();
+                // An OS window of its own: tests embed it in the main one.
+                let own = class == egui::ViewportClass::Immediate;
+                let viewport = ctx.input(|i| i.viewport().clone());
+                if own {
+                    match window.follow_goal(&viewport, zoom) {
+                        Some(command) => ctx.send_viewport_cmd(command),
+                        None if !window.placing() => {
+                            let now = ctx.input(|i| i.time);
+                            window.placement.follow(&viewport, zoom, now);
+                        }
+                        None => {}
+                    }
+                    // The user came to this window.
+                    let focused = viewport.focused == Some(true);
+                    if focused && !window.focused {
+                        focus_window(window, editor, actions);
+                    }
+                    window.focused = focused;
+                    take_keys(&ctx, window, view, asking, shortcuts, actions);
+                }
+                let drawn = actions.len();
+                let mut draw = Draw {
+                    registry,
+                    panels: &mut *panels,
+                    cx: Cx {
+                        view,
+                        theme,
+                        mouse,
+                        parts,
+                        chain,
+                        actions: &mut *actions,
+                        browse: false,
+                    },
+                    edited: false,
+                    closed: Vec::new(),
+                    focused: None,
+                    moves: Vec::new(),
+                    detached: true,
+                    shown,
+                    bounds: if own {
+                        ctx.content_rect()
+                    } else {
+                        ui.max_rect()
+                    },
+                    outside: false,
+                };
+                window.dock.show(ui, &mut draw);
+                if let Some(panel) = draw.focused {
+                    focus_on(panel, editor, drawn, draw.cx.actions);
+                }
+                *browse |= draw.cx.browse;
+                let from = window.placement.place;
+                moves.extend(moving(draw.moves, &viewport, from, zoom));
+                if own {
+                    browser::show_dragged(&ctx);
+                }
+                own && viewport.close_requested()
+            });
+            if close || window.shown() == 0 {
+                closed.push(index);
+            }
+        }
+        for index in closed.into_iter().rev() {
+            self.close_window(index);
+        }
     }
 
     /// Brings the piano roll forward when the clip it shows is selected,
@@ -486,10 +574,32 @@ impl Shell {
             return;
         };
         if now.selected && (!last.selected || now.clip != last.clip) {
-            self.dock.bring_forward(PIANO_ROLL);
+            self.bring_forward(PIANO_ROLL);
         } else if now.track != last.track {
-            self.dock.bring_forward(DEVICES);
+            self.bring_forward(DEVICES);
         }
+    }
+
+    /// Notes which window the panel with the focus is in, so that window
+    /// gives it the focus again when the user comes back to it.
+    fn remember_focus(&mut self, editor: &Editor) {
+        let panel = editor.focus.panel();
+        match self.window_of(panel) {
+            Some(index) => self.windows[index].focus = panel,
+            None => self.main_focus = panel,
+        }
+    }
+
+    /// The user came back to the main window: the panel that had the focus
+    /// there last has it again, if the focus is in another window.
+    fn focus_main(&self, editor: &Editor, actions: &mut Vec<Action>) {
+        if self.window_of(editor.focus.panel()).is_none() {
+            return;
+        }
+        let panel = Some(self.main_focus)
+            .filter(|&panel| self.window_of(panel).is_none() && self.dock.shown(panel))
+            .unwrap_or(ARRANGEMENT);
+        focus_on(panel, editor, actions.len(), actions);
     }
 
     /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden or
@@ -503,16 +613,43 @@ impl Shell {
         }
     }
 
-    /// Shows the panel with id `id`, in front of the tabs beside it.
+    /// Shows the panel with id `id`, in front of the tabs beside it, in the
+    /// window it's in, which comes to the front.
     pub fn show_panel(&mut self, id: &str) {
-        self.dock.show_panel(id);
+        match self.window_of(id) {
+            Some(index) => {
+                let window = &mut self.windows[index];
+                window.dock.show_panel(id);
+                window.raise = true;
+            }
+            None => self.dock.show_panel(id),
+        }
     }
 
     /// Hides the panel with id `id`, unless it's one that stays, such as
-    /// the arrangement.
+    /// the arrangement. A window of its own left with nothing to show
+    /// closes.
     pub fn hide_panel(&mut self, id: &str) {
-        if self.registry.get(id).is_some_and(|panel| panel.hides) {
-            self.dock.hide_panel(id);
+        if !self.registry.get(id).is_some_and(|panel| panel.hides) {
+            return;
+        }
+        match self.window_of(id) {
+            Some(index) => {
+                self.windows[index].dock.hide_panel(id);
+                if self.windows[index].shown() == 0 {
+                    self.close_window(index);
+                }
+            }
+            None => self.dock.hide_panel(id),
+        }
+    }
+
+    /// Puts the panel with id `id` in front of the tabs beside it, if it
+    /// isn't hidden.
+    fn bring_forward(&mut self, id: &str) {
+        match self.window_of(id) {
+            Some(index) => self.windows[index].dock.bring_forward(id),
+            None => self.dock.bring_forward(id),
         }
     }
 
@@ -527,73 +664,239 @@ impl Shell {
         }
     }
 
-    /// Whether the panel with id `id` is in sight: not hidden, nor behind
-    /// another tab.
+    /// Whether the panel with id `id` is in sight, in whichever window it's
+    /// in: not hidden, nor behind another tab.
     pub fn panel_shown(&self, id: &str) -> bool {
-        self.dock.shown(id)
+        match self.window_of(id) {
+            Some(index) => self.windows[index].dock.shown(id),
+            None => self.dock.shown(id),
+        }
     }
 
     /// Shows the browser, and puts the keys in the search field of the list
     /// it shows.
     pub fn focus_browser_search(&mut self) {
-        self.dock.show_panel(BROWSER);
+        self.show_panel(BROWSER);
         self.panels.browser.focus_search();
     }
 
-    /// Follows where the main window is, as egui says in `ctx`.
-    fn follow_place(&mut self, ctx: &egui::Context) {
-        let zoom = ctx.zoom_factor();
-        let (place, now) = ctx.input(|input| (self.place.seen(input.viewport(), zoom), input.time));
-        self.now = now;
-        if place != self.place {
-            self.place = place;
-            self.placed_at = now;
-        }
-        // Where the window is once it's laid out is where it was saved.
-        self.saved_place.get_or_insert(place);
+    /// The window of its own the panel with id `id` is in, if it's not in
+    /// the main window.
+    fn window_of(&self, id: &str) -> Option<usize> {
+        (self.windows.iter()).position(|window| window.dock.has(id))
     }
 
-    /// How the panels are laid out, where the window is, and the parts of
-    /// the transport bar, the track headers and the mixer strips, for the
-    /// app to save. The app gives it its slot.
+    /// The viewport of the window the panel with id `id` is in: the main
+    /// window's, [`egui::ViewportId::ROOT`], unless the user moved it to a
+    /// window of its own. Plugin windows open from the devices there.
+    pub fn viewport_of(&self, id: &str) -> egui::ViewportId {
+        let window = self.window_of(id);
+        window.map_or(egui::ViewportId::ROOT, |index| self.windows[index].id)
+    }
+
+    /// How many windows of their own are open.
+    pub fn windows(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Moves the panel with id `id` to a new window of its own, a little
+    /// down and right of the window it's in, as big as it is there, from
+    /// the next frame on. Returns why it can't, if it can't: the arrangement
+    /// stays in the main window, and the last panel in a window of its own
+    /// has it to itself already.
+    pub fn move_to_new_window(&mut self, id: &str) -> Result<(), String> {
+        let panel = self
+            .registry
+            .get(id)
+            .ok_or_else(|| format!("There's no panel {id}."))?;
+        let title = panel.title;
+        if !panel.hides {
+            return Err(format!("{title} stays in the main window."));
+        }
+        if !self.can_move_to_new_window(id) {
+            return Err(format!("{title} has its window to itself already."));
+        }
+        let asked = Move::ToNewWindow {
+            panel: panel.id,
+            at: None,
+            size: None,
+        };
+        self.asked.push(asked);
+        Ok(())
+    }
+
+    /// Sends the panel with id `id` back to where it was in the main
+    /// window, from the next frame on. Returns why it can't, if it's in the
+    /// main window already.
+    pub fn move_to_main_window(&mut self, id: &str) -> Result<(), String> {
+        let panel = self
+            .registry
+            .get(id)
+            .ok_or_else(|| format!("There's no panel {id}."))?;
+        if self.window_of(id).is_none() {
+            return Err(format!("{} is in the main window already.", panel.title));
+        }
+        self.asked.push(Move::ToMainWindow(panel.id));
+        Ok(())
+    }
+
+    /// Whether the panel with id `id` can move to a new window: not the
+    /// arrangement, which stays in the main window, nor the last panel of
+    /// a window of its own.
+    pub fn can_move_to_new_window(&self, id: &str) -> bool {
+        let hides = self.registry.get(id).is_some_and(|panel| panel.hides);
+        let last = (self.window_of(id)).is_some_and(|index| self.windows[index].shown() <= 1);
+        hides && !last
+    }
+
+    /// The moves commands asked for since the last frame, and where the
+    /// panels go.
+    fn asked_moves(
+        &mut self,
+        ctx: &egui::Context,
+        main: &egui::ViewportInfo,
+        zoom: f32,
+    ) -> Vec<Moving> {
+        let mut moves = Vec::new();
+        for asked in std::mem::take(&mut self.asked) {
+            let panel = match asked {
+                Move::ToNewWindow { panel, .. } | Move::ToMainWindow(panel) => panel,
+            };
+            let (viewport, from, dock) = match self.window_of(panel) {
+                Some(index) => {
+                    let window = &self.windows[index];
+                    let viewport = ctx.input_for(window.id, |i| i.viewport().clone());
+                    (viewport, window.place(), &window.dock)
+                }
+                None => (main.clone(), self.main.place, &self.dock),
+            };
+            let asked = match asked {
+                Move::ToNewWindow { panel, at, .. } => Move::ToNewWindow {
+                    panel,
+                    at,
+                    size: dock.panel_size(panel, &self.theme),
+                },
+                back => back,
+            };
+            moves.extend(moving(vec![asked], &viewport, from, zoom));
+        }
+        moves
+    }
+
+    /// Carries out a move of a panel to another window.
+    fn carry(&mut self, moving: Moving) {
+        match moving {
+            Moving::Out(panel, place) => self.open_window(panel, place),
+            Moving::Back(panel) => self.send_back(panel),
+        }
+    }
+
+    /// Moves the panel `panel` out of the window it's in to a new window of
+    /// its own at `place`. Out of the main window, it keeps its place there,
+    /// hidden, to go back to.
+    fn open_window(&mut self, panel: &'static str, place: Place) {
+        if !self.can_move_to_new_window(panel) {
+            return;
+        }
+        match self.window_of(panel) {
+            Some(index) => self.windows[index].dock.remove_panel(panel),
+            None => self.dock.hide_panel(panel),
+        }
+        self.opened += 1;
+        let id = egui::ViewportId::from_hash_of(("panels", self.opened));
+        let window = Window::new(id, Dock::of_panel(panel), place, panel);
+        self.windows.push(window);
+        self.dock.mark_changed();
+    }
+
+    /// Sends the panel `panel` back to where it was in the main window, out
+    /// of the window of its own it's in, shown if it was shown there.
+    fn send_back(&mut self, panel: &'static str) {
+        let Some(index) = self.window_of(panel) else {
+            return;
+        };
+        let dock = &mut self.windows[index].dock;
+        let shown = (dock.panels().iter()).any(|&(other, shown)| other == panel && shown);
+        dock.remove_panel(panel);
+        if shown {
+            self.dock.show_panel(panel);
+        }
+        if self.windows[index].shown() == 0 {
+            self.close_window(index);
+        }
+        self.dock.mark_changed();
+    }
+
+    /// Closes the window of its own `index`, and sends its panels back to
+    /// where they were in the main window: those it showed are shown there,
+    /// and those it hid stay hidden.
+    fn close_window(&mut self, index: usize) {
+        let window = self.windows.remove(index);
+        for (panel, shown) in window.dock.panels() {
+            if shown {
+                self.dock.show_panel(panel);
+            }
+        }
+        self.dock.mark_changed();
+    }
+
+    /// How the panels are laid out, where the windows are, the main one
+    /// first, and the parts of the transport bar, the track headers and the
+    /// mixer strips, for the app to save. The app gives it its slot.
     pub fn workspace(&self) -> Workspace {
         let mut main = self.dock.layout(&self.registry, &self.theme);
-        self.place.put_in(&mut main);
+        self.main.place.put_in(&mut main);
+        let mut windows = vec![main];
+        for window in &self.windows {
+            let mut layout = window.dock.layout(&self.registry, &self.theme);
+            window.place().put_in(&mut layout);
+            windows.push(layout);
+        }
         Workspace {
             slot: None,
             views: self.parts.views(),
-            windows: vec![main],
+            windows,
         }
     }
 
     /// The workspace, if the user changed the layout or the views' parts,
-    /// or moved the window, since it was last handed out, for the app to
+    /// or moved a window, since it was last handed out, for the app to
     /// save. A window being moved or resized is saved once it has stayed
     /// put for a second.
     pub fn changed_workspace(&mut self) -> Option<Workspace> {
-        let moved = self.saved_place.is_some_and(|saved| saved != self.place)
-            && self.now - self.placed_at >= SETTLE;
-        // Both are asked, so neither tells of the same change again.
-        let changed = self.dock.take_changed() | self.parts.take_changed();
-        (changed | moved).then(|| self.take_workspace())
+        self.hand_out(false)
     }
 
-    /// The same, without waiting for the window to stay put: before the
+    /// The same, without waiting for the windows to stay put: before the
     /// app switches to another workspace, or closes.
     pub fn unsaved_workspace(&mut self) -> Option<Workspace> {
-        let moved = self.saved_place.is_some_and(|saved| saved != self.place);
-        let changed = self.dock.take_changed() | self.parts.take_changed();
-        (changed | moved).then(|| self.take_workspace())
+        self.hand_out(true)
     }
 
-    fn take_workspace(&mut self) -> Workspace {
-        self.saved_place = Some(self.place);
-        self.workspace()
+    /// The workspace, if it changed, waiting for windows the user moves to
+    /// stay put unless `now`.
+    fn hand_out(&mut self, now: bool) -> Option<Workspace> {
+        // Each is asked, so none tells of the same change again.
+        let mut changed = self.dock.take_changed() | self.parts.take_changed();
+        for window in &mut self.windows {
+            changed |= window.dock.take_changed();
+        }
+        let moved =
+            self.main.moved(now) || (self.windows.iter()).any(|window| window.placement.moved(now));
+        if !changed && !moved {
+            return None;
+        }
+        self.main.saved();
+        for window in &mut self.windows {
+            window.placement.saved();
+        }
+        Some(self.workspace())
     }
 
     /// Lays the panels out and shows the views' parts as `workspace` says,
-    /// and takes the main window's place from it, which the app moves the
-    /// window to.
+    /// in the windows it has, and takes the main window's place from it,
+    /// which the app moves the window to. The panels in windows of their
+    /// own keep their places in the main window, hidden, to go back to.
     pub fn set_workspace(&mut self, workspace: &Workspace) {
         let main = workspace.windows.first();
         self.dock = match main {
@@ -601,10 +904,30 @@ impl Shell {
             None => Dock::new(&self.registry),
         };
         self.parts.set_views(&workspace.views);
-        if let Some(window) = main.filter(|window| window.at.is_some() || window.size.is_some()) {
-            self.place = Place::of(window);
+        match main.filter(|window| window.at.is_some() || window.size.is_some()) {
+            Some(window) => self.main.set(Place::of(window)),
+            None => self.main.forget(),
         }
-        self.saved_place = None;
+        self.windows.clear();
+        let mut placed = Vec::new();
+        for layout in workspace.windows.iter().skip(1) {
+            let registry = &self.registry;
+            let Some(dock) = Dock::of_window(layout, registry, &self.theme, &mut placed) else {
+                continue;
+            };
+            let panels = dock.panels();
+            for &(panel, _) in &panels {
+                self.dock.hide_panel(panel);
+            }
+            let shown = panels.iter().find(|(_, shown)| *shown);
+            let focus = shown.or(panels.first()).map_or(MIXER, |&(panel, _)| panel);
+            self.opened += 1;
+            let id = egui::ViewportId::from_hash_of(("panels", self.opened));
+            self.windows
+                .push(Window::new(id, dock, Place::of(layout), focus));
+        }
+        // Laid out as it was saved, there's nothing to save.
+        self.dock.take_changed();
     }
 
     /// Lays the panels out as at first, with all of them in the main window,
@@ -612,6 +935,7 @@ impl Shell {
     /// saves that as the workspace in use.
     pub fn reset_workspace(&mut self) {
         self.dock = Dock::new(&self.registry);
+        self.windows.clear();
         self.dock.mark_changed();
         self.parts.set_views(&Views::default());
     }
@@ -838,15 +1162,24 @@ impl Shell {
     }
 }
 
-/// The menus, with every command and its keys. `shown` has the ids of the
-/// panels in sight.
-fn menu_bar(ui: &mut Ui, view: &View<'_>, shown: &BTreeSet<&str>, actions: &mut Vec<Action>) {
+/// What the menus tick and grey out that the shell knows.
+struct MenuState<'a> {
+    /// The ids of the panels in sight.
+    shown: &'a BTreeSet<&'static str>,
+    /// Whether the panel with the focus can move to a new window.
+    to_new_window: bool,
+    /// Whether it's in a window of its own, to send back to the main one.
+    to_main_window: bool,
+}
+
+/// The menus, with every command and its keys.
+fn menu_bar(ui: &mut Ui, view: &View<'_>, state: &MenuState<'_>, actions: &mut Vec<Action>) {
     egui::MenuBar::new().ui(ui, |ui| {
         for menu in menus(view.commands) {
             ui.menu_button(menu.title.as_str(), |ui| {
                 for item in &menu.items {
                     match item {
-                        Some(command) => command_button(ui, view, shown, command, actions),
+                        Some(command) => command_button(ui, view, state, command, actions),
                         None => {
                             ui.separator();
                         }
@@ -863,7 +1196,7 @@ fn menu_bar(ui: &mut Ui, view: &View<'_>, shown: &BTreeSet<&str>, actions: &mut 
 fn command_button(
     ui: &mut Ui,
     view: &View<'_>,
-    shown: &BTreeSet<&str>,
+    state: &MenuState<'_>,
     command: &Command,
     actions: &mut Vec<Action>,
 ) {
@@ -887,12 +1220,19 @@ fn command_button(
         (None, None) if *id == workspace::RENAME || *id == workspace::DELETE => {
             (command.title.clone(), workspaces.current != 0)
         }
+        (None, None) if *id == view::MOVE_TO_NEW_WINDOW => {
+            (command.title.clone(), state.to_new_window)
+        }
+        (None, None) if *id == view::MOVE_TO_MAIN_WINDOW => {
+            (command.title.clone(), state.to_main_window)
+        }
         (None, None) => (
             command.title.clone(),
             command.when.applies(view.project, view.editor),
         ),
     };
     let mut button = with_keys(Button::new(title), view, id);
+    let shown = state.shown;
     let on = match id {
         id if *id == view::TOGGLE_MIXER => Some(shown.contains(MIXER)),
         id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
@@ -926,6 +1266,125 @@ fn focus_on(id: &'static str, editor: &Editor, drawn: usize, actions: &mut Vec<A
         let args = Args::new().with("panel", id);
         actions.insert(drawn, Action::RunWith(view::SET_FOCUS, args));
     }
+}
+
+/// Where the panels `moves` moved out of the window egui describes as
+/// `viewport` go, the window being at `from` and egui zooming by `zoom`. A
+/// tab dragged out goes where it was let go of, with the new window's title
+/// bar under the pointer, and a panel moved from its tab's menu goes a
+/// little down and right of the window. Either is as big as it was.
+fn moving(moves: Vec<Move>, viewport: &egui::ViewportInfo, from: Place, zoom: f32) -> Vec<Moving> {
+    // Title bars and the like are in pixels the monitor scales.
+    let scale = viewport.native_pixels_per_point.unwrap_or(1.0);
+    let pixels = |points: f32| (points * scale).round() as i32;
+    (moves.into_iter())
+        .map(|asked| match asked {
+            Move::ToNewWindow { panel, at, size } => {
+                let dropped = (at.and_then(|at| on_desktop(at, viewport, zoom)))
+                    .map(|[x, y]| [x - pixels(60.0), y - pixels(12.0)]);
+                let beside = (from.at).map(|[x, y]| [x + pixels(40.0), y + pixels(40.0)]);
+                let size = size.map(|size| unscaled(size.max(egui::vec2(320.0, 200.0)), zoom));
+                let place = Place {
+                    at: dropped.or(beside),
+                    size,
+                    maximized: false,
+                };
+                Moving::Out(panel, place)
+            }
+            Move::ToMainWindow(panel) => Moving::Back(panel),
+        })
+        .collect()
+}
+
+/// The title of a window of its own: the panels it shows, then the
+/// project's name `name`.
+fn title(dock: &Dock, registry: &panels::Registry, name: &str) -> String {
+    let panels: Vec<_> = (dock.panels().into_iter())
+        .filter(|&(_, shown)| shown)
+        .filter_map(|(id, _)| registry.get(id).map(|panel| panel.title))
+        .collect();
+    format!("{} - {name} - Musicable", panels.join(", "))
+}
+
+/// Where keys pressed in `window` go: to the panel with the focus if it's
+/// there, or else to the one that gets it as the user comes to the window,
+/// the one that had it last if it's in sight, or the first in sight. `None`
+/// when none can take it, as the piano roll can't with no clip, so only
+/// keys that work everywhere work.
+fn window_focus(window: &Window, editor: &Editor) -> Option<Focus> {
+    if window.dock.has(editor.focus.panel()) {
+        return Some(editor.focus);
+    }
+    let in_sight = |panel: &&'static str| window.dock.shown(panel);
+    let mut panels = (window.dock.panels().into_iter()).map(|(panel, _)| panel);
+    let panel = (Some(window.focus).filter(in_sight)).or_else(|| panels.find(in_sight))?;
+    Focus::on(panel).filter(|&focus| focus != Focus::PIANO_ROLL || editor.piano_roll.clip.is_some())
+}
+
+/// The user came to `window`: the panel that had the focus there last has
+/// it again, unless the focus is there already.
+fn focus_window(window: &Window, editor: &Editor, actions: &mut Vec<Action>) {
+    if let Some(focus) = window_focus(window, editor) {
+        focus_on(focus.panel(), editor, actions.len(), actions);
+    }
+}
+
+/// Hands the keys pressed in `window` to the keymap before its panels see
+/// them, as the app hands it the main window's: a chord bound in the panel
+/// the keys go to, or everywhere, runs its command, unless a text field
+/// has the focus or the shell is `asking` something. While the Settings
+/// window's Keys page waits for keys, they go to it instead.
+fn take_keys(
+    ctx: &egui::Context,
+    window: &mut Window,
+    view: &View<'_>,
+    asking: bool,
+    shortcuts: &mut Shortcuts,
+    actions: &mut Vec<Action>,
+) {
+    let mut events = ctx.input_mut(|i| std::mem::take(&mut i.events));
+    if shortcuts.capturing() {
+        if let Some(chord) = window.keys.capture_events(&mut events) {
+            shortcuts.captured(chord);
+        }
+    } else if !asking {
+        let editor = view.editor;
+        let focus = window_focus(window, editor);
+        // The command runs once the focus is there.
+        let moved = focus
+            .filter(|&focus| focus != editor.focus)
+            .map(|focus| Editor {
+                focus,
+                ..editor.clone()
+            });
+        let there = moved.as_ref().unwrap_or(editor);
+        let text_field = ctx.text_edit_focused();
+        let took = window
+            .keys
+            .take_events(ctx, &mut events, text_field, |chord, repeat| {
+                let found = match focus {
+                    Some(focus) => view.keymap.lookup_focused(chord, focus),
+                    None => view.keymap.lookup(chord),
+                };
+                let applies = |id: &CommandId| {
+                    (view.commands.get(id))
+                        .is_some_and(|command| command.when.applies(view.project, there))
+                };
+                let Some(id) = found.filter(|id| applies(id)) else {
+                    return false;
+                };
+                if !repeat {
+                    actions.push(Action::Run(id.clone()));
+                }
+                true
+            });
+        // A key taken doesn't move the keyboard focus, as egui would have
+        // once the pass began.
+        if took {
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
+    }
+    ctx.input_mut(|i| i.events = events);
 }
 
 /// Whether the command `id` is a toggle that's on, such as Loop or Snap to
@@ -1078,8 +1537,10 @@ mod tests {
     use musicable_model::{TrackId, TrackKind};
 
     use super::*;
+    use crate::browser::Dragged;
     use crate::panels::ARRANGEMENT;
-    use crate::testing::{State, harness};
+    use crate::testing::{State, focus_main, harness, own_windows, own_windows_harness, with_own};
+    use crate::windows::SETTLE;
     use crate::workspace::{Layout, Split, WindowLayout};
 
     type Harness = egui_kittest::Harness<'static, State>;
@@ -1705,49 +2166,313 @@ mod tests {
         assert_eq!(harness.state().actions, [Action::DeleteWorkspace]);
     }
 
+    /// Opens the menu of the tab `tab`, and clicks `item` in it.
+    fn tab_menu(harness: &mut Harness, tab: &str, item: &str) {
+        harness.get_by_label(tab).click_secondary();
+        harness.run();
+        harness.get_by_label(item).click();
+        harness.run();
+    }
+
     #[test]
-    fn a_window_keeps_the_place_it_goes_back_to() {
-        let viewport = |min: [f32; 2], size: [f32; 2], maximized| egui::ViewportInfo {
-            native_pixels_per_point: Some(1.5),
-            outer_rect: Some(egui::Rect::from_min_size(min.into(), size.into())),
-            inner_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(min[0] + 5.0, min[1] + 20.0),
-                egui::vec2(size[0] - 10.0, size[1] - 25.0),
-            )),
-            maximized: Some(maximized),
-            ..egui::ViewportInfo::default()
+    fn a_tabs_menu_moves_its_panel_to_a_window_of_its_own_and_back() {
+        let mut project = Project::new();
+        project.add_track("Drums", TrackKind::Audio);
+        let mut harness = harness(project);
+        let before = layout(&harness);
+        tab_menu(&mut harness, "Mixer panel", "Move to New Window");
+        let shell = &harness.state().shell;
+        assert_eq!(shell.windows(), 1);
+        assert!(shell.panel_shown(MIXER));
+        // A window named after it, which the tests show in the main one.
+        // A press in its panel, at its foot, gives the panel the focus.
+        let window = harness.get_by_label("Mixer - Untitled - Musicable").rect();
+        let inside = egui::pos2(window.center().x, window.bottom() - 20.0);
+        harness.drag_at(inside);
+        harness.drop_at(inside);
+        harness.run();
+        assert_eq!(harness.state().editor.focus, Focus::MIXER);
+        // The main window keeps its place, hidden, and the workspace has
+        // the window, as big as the mixer was with its tab bar: 1084 by 289
+        // points, and 22.
+        let workspace = harness.state().shell.workspace();
+        let [main, window] = &workspace.windows[..] else {
+            panic!("{workspace:?}");
         };
-        // Its corner in pixels, and its inside's size at 100% scaling.
-        let place = Place::default().seen(&viewport([100.0, 50.0], [810.0, 625.0], false), 1.0);
-        let normal = Place {
-            at: Some([150, 75]),
-            size: Some([800, 600]),
-            maximized: false,
-        };
-        assert_eq!(place, normal);
-        // Maximized on the same monitor, it goes back to where it was.
-        let maximized = place.seen(&viewport([-5.0, -5.0], [1290.0, 700.0], true), 1.0);
+        assert!(main.hidden.iter().any(|id| id == MIXER));
+        assert_eq!(window.layout, Layout::panel(MIXER));
+        assert_eq!(window.size, Some([1084, 311]));
+        assert!(harness.state_mut().shell.changed_workspace().is_some());
+        // The last panel in a window stays there.
+        harness.get_by_label("Mixer panel").click_secondary();
+        harness.run();
+        let item = harness.get_by_label("Move to New Window");
+        assert!(item.accesskit_node().is_disabled());
+        harness.get_by_label("Move to Main Window").click();
+        harness.run();
+        assert_eq!(harness.state().shell.windows(), 0);
+        assert_eq!(layout(&harness), before);
+    }
+
+    #[test]
+    fn the_arrangement_stays_in_the_main_window() {
+        let mut harness = harness(Project::new());
+        harness.get_by_label("Arrangement panel").click_secondary();
+        harness.run();
+        let item = harness.get_by_label("Move to New Window");
+        assert!(item.accesskit_node().is_disabled());
+        assert!(harness.query_by_label("Move to Main Window").is_none());
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        // Nor do the commands move it, and they say why.
+        let shell = &mut harness.state_mut().shell;
         assert_eq!(
-            maximized,
-            Place {
-                maximized: true,
-                ..normal
+            shell.move_to_new_window(ARRANGEMENT),
+            Err("Arrangement stays in the main window.".to_owned())
+        );
+        assert_eq!(
+            shell.move_to_main_window(MIXER),
+            Err("Mixer is in the main window already.".to_owned())
+        );
+        // The View menu greys out what doesn't apply to the panel with the
+        // focus.
+        let disabled = |harness: &mut Harness, label| {
+            harness.get_by_label("View").click();
+            harness.run();
+            let disabled = harness.get_by_label(label).accesskit_node().is_disabled();
+            harness.key_press(egui::Key::Escape);
+            harness.run();
+            disabled
+        };
+        assert!(disabled(&mut harness, "Move Panel to New Window"));
+        harness.state_mut().editor.focus = Focus::MIXER;
+        assert!(!disabled(&mut harness, "Move Panel to New Window"));
+        assert!(disabled(&mut harness, "Move Panel to Main Window"));
+    }
+
+    #[test]
+    fn a_tab_dragged_out_of_the_window_gets_a_window_of_its_own() {
+        let mut harness = harness(Project::new());
+        let tab = harness.get_by_label("Mixer panel").rect().center();
+        let below = egui::pos2(tab.x, harness.ctx.content_rect().bottom() + 40.0);
+        drag(&mut harness, tab, below);
+        let shell = &harness.state().shell;
+        assert_eq!(shell.windows(), 1);
+        assert!(shell.panel_shown(MIXER));
+        assert!(layout(&harness).hidden.iter().any(|id| id == MIXER));
+        // Dragged about inside, a tab docks as ever.
+        let tab = harness.get_by_label("Devices panel").rect().center();
+        let lanes = harness.get_by_label("Arrangement").rect();
+        drag(
+            &mut harness,
+            tab,
+            egui::pos2(lanes.right() - 10.0, lanes.center().y),
+        );
+        assert_eq!(harness.state().shell.windows(), 1);
+    }
+
+    #[test]
+    fn workspaces_keep_the_windows_of_their_own() {
+        let mut harness = harness(Project::new());
+        let window = WindowLayout {
+            at: Some([3900, 100]),
+            size: Some([800, 500]),
+            hidden: vec![BROWSER.into()],
+            layout: tabs(&[MIXER, BROWSER], MIXER),
+            ..WindowLayout::default()
+        };
+        let mut workspace = Shell::new().workspace();
+        workspace.windows.push(window.clone());
+        harness.state_mut().shell.set_workspace(&workspace);
+        harness.run();
+        let shell = &harness.state().shell;
+        assert_eq!(shell.windows(), 1);
+        assert!(shell.panel_shown(MIXER));
+        assert!(!shell.panel_shown(BROWSER));
+        assert_eq!(shell.workspace().windows[1], window);
+        assert!(harness.state_mut().shell.changed_workspace().is_none());
+        // The browser comes back in that window, and goes again, and the
+        // window closes once it has nothing to show.
+        let shell = &mut harness.state_mut().shell;
+        shell.toggle_panel(BROWSER);
+        assert!(shell.panel_shown(BROWSER));
+        assert_eq!(shell.viewport_of(BROWSER), shell.viewport_of(MIXER));
+        shell.toggle_panel(BROWSER);
+        shell.toggle_panel(MIXER);
+        assert_eq!(shell.windows(), 0);
+        assert!(!shell.panel_shown(MIXER));
+        assert_eq!(shell.viewport_of(MIXER), egui::ViewportId::ROOT);
+        // A panel in two windows of a workspace goes in the first, and the
+        // arrangement in none.
+        let mut workspace = Shell::new().workspace();
+        let only = |id: &str| WindowLayout {
+            layout: Layout::panel(id),
+            ..WindowLayout::default()
+        };
+        workspace
+            .windows
+            .extend([only(MIXER), only(MIXER), only(ARRANGEMENT)]);
+        shell.set_workspace(&workspace);
+        assert_eq!(shell.windows(), 1);
+        assert!(shell.panel_shown(ARRANGEMENT));
+    }
+
+    /// A key pressed and let go of.
+    fn key(key: egui::Key) -> [egui::Event; 2] {
+        [true, false].map(|pressed| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn a_window_of_its_own_has_a_focus_and_keys_of_its_own() {
+        let mut project = Project::new();
+        project.add_track("Drums", TrackKind::Audio);
+        let mut harness = own_windows_harness(project);
+        harness.state_mut().shell.move_to_new_window(MIXER).unwrap();
+        harness.run();
+        let [window] = &own_windows()[..] else {
+            panic!("one window of its own");
+        };
+        let window = window.id;
+        assert_eq!(harness.state().shell.viewport_of(MIXER), window);
+        // The user goes to it, and its panel has the focus.
+        focus_main(&mut harness, false);
+        with_own(&mut harness, window, |own| own.info.focused = Some(true));
+        harness.run();
+        assert_eq!(harness.state().editor.focus, Focus::MIXER);
+        // Keys there run commands, and the keys that work everywhere work
+        // there.
+        with_own(&mut harness, window, |own| {
+            own.events.extend(key(egui::Key::Space))
+        });
+        harness.run();
+        assert_eq!(harness.state().actions, [Action::Run(transport::PLAY_STOP)]);
+        // Back in the main window, the arrangement has the focus again.
+        with_own(&mut harness, window, |own| own.info.focused = Some(false));
+        focus_main(&mut harness, true);
+        harness.run();
+        assert_eq!(harness.state().editor.focus, Focus::ARRANGEMENT);
+        // And in the window again, the mixer.
+        focus_main(&mut harness, false);
+        with_own(&mut harness, window, |own| own.info.focused = Some(true));
+        harness.run();
+        assert_eq!(harness.state().editor.focus, Focus::MIXER);
+    }
+
+    #[test]
+    fn a_text_field_in_a_window_of_its_own_takes_every_key() {
+        let mut harness = own_windows_harness(Project::new());
+        let shell = &mut harness.state_mut().shell;
+        shell.move_to_new_window(BROWSER).unwrap();
+        shell.focus_browser_search();
+        harness.run();
+        let window = own_windows()[0].id;
+        focus_main(&mut harness, false);
+        with_own(&mut harness, window, |own| own.info.focused = Some(true));
+        harness.run();
+        with_own(&mut harness, window, |own| {
+            own.events.extend(key(egui::Key::Space))
+        });
+        harness.run();
+        let actions = &harness.state().actions;
+        assert!(
+            !actions.contains(&Action::Run(transport::PLAY_STOP)),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn closing_a_window_of_its_own_sends_its_panels_back() {
+        let mut harness = own_windows_harness(Project::new());
+        let before = layout(&harness);
+        let mut workspace = Shell::new().workspace();
+        workspace.windows.push(WindowLayout {
+            at: Some([1200, 0]),
+            size: Some([800, 500]),
+            layout: tabs(&[MIXER, BROWSER], BROWSER),
+            ..WindowLayout::default()
+        });
+        harness.state_mut().shell.set_workspace(&workspace);
+        harness.run();
+        let window = own_windows()[0].clone();
+        // It went where the workspace has it, as big.
+        let inner = window.info.inner_rect.unwrap();
+        assert_eq!(
+            (inner.min, inner.size()),
+            (egui::pos2(1200.0, 0.0), vec2(800.0, 500.0))
+        );
+        assert_eq!(
+            window.builder.title.as_deref(),
+            Some("Mixer, Browser - Untitled - Musicable")
+        );
+        with_own(&mut harness, window.id, |own| {
+            own.info.events.push(egui::ViewportEvent::Close);
+        });
+        harness.run();
+        let shell = &harness.state().shell;
+        assert_eq!(shell.windows(), 0);
+        // Both are shown where they were in the main window.
+        assert!(shell.panel_shown(MIXER) && shell.panel_shown(BROWSER));
+        let mut after = layout(&harness);
+        after.hidden = before.hidden.clone();
+        assert_eq!(
+            after,
+            WindowLayout {
+                hidden: before.hidden.clone(),
+                ..before
             }
         );
-        // Minimized, it's where it was.
-        let minimized = egui::ViewportInfo {
-            minimized: Some(true),
-            ..viewport([-32000.0, -32000.0], [160.0, 28.0], false)
+    }
+
+    #[test]
+    fn a_sample_dragged_from_a_browser_of_its_own_goes_on_a_track() {
+        let mut project = Project::new();
+        let drums = project.add_track("Drums", TrackKind::Audio);
+        let mut harness = own_windows_harness(project);
+        harness
+            .state_mut()
+            .shell
+            .move_to_new_window(BROWSER)
+            .unwrap();
+        harness.run();
+        // The browser's window is right of the main window, which is 1100
+        // points wide.
+        let window = own_windows()[0].id;
+        with_own(&mut harness, window, |own| {
+            let rect = egui::Rect::from_min_size(egui::pos2(1200.0, 0.0), vec2(400.0, 600.0));
+            own.info.inner_rect = Some(rect);
+            own.info.outer_rect = Some(rect);
+        });
+        harness.run();
+        // Over the drums' lane in the main window, in the browser's
+        // window's points, as the system has the drag there.
+        let lanes = harness.get_by_label("Arrangement").rect();
+        let row = harness.get_by_label("Track Drums").rect();
+        let over = egui::pos2(lanes.center().x, row.center().y) - vec2(1200.0, 0.0);
+        let sample = PathBuf::from("/samples/kick.wav");
+        egui::DragAndDrop::set_payload(&harness.ctx, Dragged::Sample(sample.clone()));
+        with_own(&mut harness, window, |own| {
+            own.events.push(egui::Event::PointerMoved(over))
+        });
+        harness.run();
+        let release = egui::Event::PointerButton {
+            pos: over,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
         };
-        assert_eq!(maximized.seen(&minimized, 1.0), maximized);
-        // Maximized on another monitor, it goes back to that one.
-        let moved = maximized.seen(&viewport([1275.0, -5.0], [1290.0, 700.0], true), 1.0);
-        assert_eq!(moved.at, Some([1973, 53]), "40 points in from its corner");
-        assert_eq!(moved.size, normal.size);
-        // egui's zoom makes points bigger, but not pixels.
-        let zoomed = Place::default().seen(&viewport([100.0, 50.0], [810.0, 625.0], false), 2.0);
-        assert_eq!(zoomed.at, Some([300, 150]));
-        assert_eq!(zoomed.size, Some([1600, 1200]));
+        with_own(&mut harness, window, |own| own.events.push(release));
+        harness.run();
+        let dropped = (harness.state().actions.iter()).find_map(|action| match action {
+            Action::DropFiles { files, track, .. } => Some((files.clone(), *track)),
+            _ => None,
+        });
+        assert_eq!(dropped, Some((vec![sample], Some(drums))));
     }
 
     #[test]
@@ -1756,22 +2481,26 @@ mod tests {
         harness.run();
         let shell = &mut harness.state_mut().shell;
         assert!(shell.changed_workspace().is_none(), "nothing's changed");
-        let place = Place {
-            at: Some([200, 100]),
-            size: Some([1000, 700]),
-            maximized: false,
+        // The window as egui describes it, at 100%, at the time `now`.
+        let seen = |shell: &mut Shell, x: f32, now: f64| {
+            let rect = egui::Rect::from_min_size(egui::pos2(x, 100.0), egui::vec2(1000.0, 700.0));
+            let viewport = egui::ViewportInfo {
+                native_pixels_per_point: Some(1.0),
+                outer_rect: Some(rect),
+                inner_rect: Some(rect),
+                ..egui::ViewportInfo::default()
+            };
+            shell.main.follow(&viewport, 1.0, now);
         };
-        shell.place = place;
-        shell.placed_at = shell.now;
+        seen(shell, 200.0, 10.0);
         assert!(shell.changed_workspace().is_none(), "it's still moving");
-        shell.now += SETTLE;
+        seen(shell, 200.0, 10.0 + SETTLE);
         let saved = shell.changed_workspace().expect("it stayed put");
         assert_eq!(saved.windows[0].at, Some([200, 100]));
         assert_eq!(saved.windows[0].size, Some([1000, 700]));
         assert!(shell.changed_workspace().is_none(), "it's saved");
         // Before switching, it's saved at once.
-        shell.place.at = Some([300, 100]);
-        shell.placed_at = shell.now;
+        seen(shell, 300.0, 20.0);
         assert!(shell.changed_workspace().is_none());
         assert!(shell.unsaved_workspace().is_some());
         assert!(shell.unsaved_workspace().is_none());
