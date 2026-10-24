@@ -518,6 +518,7 @@ fn examples() -> Vec<Example> {
             let track = find_track(s, |_| true)?.id;
             Some(Args::new().with("tracks", vec![track]))
         }),
+        leaves(edit::SELECT_MASTER, bare),
         edits(edit::SPLIT, |s| {
             let clip = find_clip(s, |c| c.length.ticks() >= 2)?;
             let (id, at) = (clip.id, middle(clip));

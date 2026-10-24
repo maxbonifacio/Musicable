@@ -348,14 +348,14 @@ fn add(
         (id, new)
     });
     if new.is_some() {
-        ctx.document.editor_mut().selected_track = new;
+        ctx.document.editor_mut().selected_track = new.map(Chain::Track);
     }
     Ok(device.into())
 }
 
 /// The chain a new device goes in: the master's with `master`, else
-/// `track`'s, else the selected track's. `what` names the device in the
-/// error without a track.
+/// `track`'s, else the selected track's, which can be the master's. `what`
+/// names the device in the error without a track.
 fn chain(
     ctx: &Context<'_>,
     track: Option<TrackId>,
@@ -365,10 +365,17 @@ fn chain(
     if master {
         return Ok(Chain::Master);
     }
-    let Some(track) = track.or(ctx.document.editor().selected_track) else {
-        return Err(CommandError::invalid(format!(
-            "select a track for the {what} to go on"
-        )));
+    let track = match track
+        .map(Chain::Track)
+        .or(ctx.document.editor().selected_track)
+    {
+        Some(Chain::Track(track)) => track,
+        Some(Chain::Master) => return Ok(Chain::Master),
+        None => {
+            return Err(CommandError::invalid(format!(
+                "select a track for the {what} to go on"
+            )));
+        }
     };
     match ctx.document.project().track(track) {
         Some(_) => Ok(Chain::Track(track)),
@@ -877,7 +884,8 @@ mod tests {
         // The new track is selected, and it came with its device, as one
         // change.
         let eq_track = project.tracks[1].id;
-        assert_eq!(setup.document.editor().selected_track, Some(eq_track));
+        let selected = setup.document.editor().selected_track;
+        assert_eq!(selected, Some(Chain::Track(eq_track)));
         assert_eq!(setup.committed_names(), ["Add Synth", "Add EQ"]);
         assert!(setup.document.undo());
         assert_eq!(setup.document.project().tracks.len(), 2);

@@ -1,7 +1,8 @@
 //! The devices panel, under the arrangement: the devices of the selected
-//! track, or the master's, in the order they play, with the controls of
-//! Musicable's own. And the browser's list of Musicable's own devices and
-//! the plugins installed, which adds them to the devices the panel shows.
+//! track, which can be the master track, in the order they play, with the
+//! controls of Musicable's own. And the browser's list of Musicable's own
+//! devices and the plugins installed, which adds them to the devices the
+//! panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use egui::{
 use musicable_commands::{Args, device};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
-use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId};
+use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::Dragged;
 use crate::mouse::MouseMap;
@@ -87,7 +88,7 @@ impl Default for Plugins<'_> {
 }
 
 /// What the devices panel shows without a chain to show.
-const NO_TRACK: &str = "Select a track to see its devices, or pick Master.";
+const NO_TRACK: &str = "Select a track, or the master track, to see its devices.";
 /// What it shows for a chain without devices.
 const NO_DEVICES: &str =
     "No devices. Double-click a device or a preset in the browser, or drag one here, to add it.";
@@ -95,11 +96,6 @@ const NO_DEVICES: &str =
 /// The devices panel's own state.
 #[derive(Debug, Default)]
 pub(crate) struct DevicesPanel {
-    /// It shows the master's devices, not the selected track's.
-    master: bool,
-    /// The selected track as the panel last saw it, so selecting another
-    /// track shows that track's devices.
-    track: Option<TrackId>,
     /// The device being saved as a preset, while the box asks for the
     /// preset's name.
     saving: Option<Saving>,
@@ -115,22 +111,9 @@ struct Saving {
 }
 
 impl DevicesPanel {
-    /// The chain the panel shows: the master's if the user picked it, else
-    /// the selected track's.
-    pub fn chain(&mut self, project: &Project, selected: Option<TrackId>) -> Option<Chain> {
-        let selected = selected.filter(|&id| project.track(id).is_some());
-        if selected != self.track {
-            self.track = selected;
-            self.master = false;
-        }
-        match self.master {
-            true => Some(Chain::Master),
-            false => selected.map(Chain::Track),
-        }
-    }
-
-    /// Shows the devices of `chain`, and adds what the user asked for to
-    /// `actions`. Returns whether the user asked for the plugin browser.
+    /// Shows the devices of `chain`, the selected track's, and adds what
+    /// the user asked for to `actions`. Returns whether the user asked for
+    /// the plugin browser.
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -145,14 +128,15 @@ impl DevicesPanel {
         self.ask_preset_name(ui.ctx(), actions);
         ui.add_space(theme.devices.margin);
         ui.horizontal(|ui| {
-            let track = self.track.and_then(|id| project.track(id));
-            if let Some(track) = track
-                && chain_button(ui, !self.master, &track.name)
-            {
-                self.master = false;
-            }
-            if chain_button(ui, self.master, "Master") {
-                self.master = true;
+            let name = match chain {
+                Some(Chain::Master) => Some("Master"),
+                Some(Chain::Track(id)) => project.track(id).map(|track| track.name.as_str()),
+                None => None,
+            };
+            if let Some(name) = name {
+                let label = ui.add(Label::new(RichText::new(name).strong()).truncate());
+                let label_text = format!("Devices of {name}");
+                label.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label_text));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 browse = ui
@@ -215,15 +199,6 @@ impl DevicesPanel {
         }
         self.saving = None;
     }
-}
-
-/// The button that shows the devices of the track called `name`, or the
-/// master's. Says whether it was clicked.
-fn chain_button(ui: &mut Ui, on: bool, name: &str) -> bool {
-    let response = ui.selectable_label(on, name);
-    let label = format!("Devices of {name}");
-    response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, &label));
-    response.clicked()
 }
 
 /// A device: its name, and a built-in device's controls, or a plugin's
@@ -716,6 +691,13 @@ mod tests {
         harness.run();
     }
 
+    /// Makes `chain`'s track the selected track, as clicking its header
+    /// does.
+    fn select(harness: &mut Harness<'static, State>, chain: Chain) {
+        harness.state_mut().editor.selected_track = Some(chain);
+        harness.run();
+    }
+
     /// Double-clicks at `at`, in a window from [`quick_harness`].
     fn double_click(harness: &mut Harness<'static, State>, at: Pos2) {
         harness.hover_at(at);
@@ -755,13 +737,13 @@ mod tests {
         let track = project.add_track("Keys", TrackKind::Midi);
         project.track_mut(track).unwrap().devices = devices;
         let mut harness = harness(project);
-        harness.state_mut().editor.selected_track = Some(track);
+        harness.state_mut().editor.selected_track = Some(Chain::Track(track));
         harness.run();
         harness
     }
 
     #[test]
-    fn the_panel_shows_the_selected_tracks_devices_or_the_masters() {
+    fn the_panel_shows_the_selected_tracks_devices() {
         let mut project = Project::new();
         let keys = project.add_track("Keys", TrackKind::Midi);
         let bass = project.add_track("Bass", TrackKind::Audio);
@@ -778,7 +760,7 @@ mod tests {
         // how their plugins are doing.
         let missing = "Old Reverb isn't installed, or Musicable hasn't found it: it plays nothing";
         let state = harness.state_mut();
-        state.editor.selected_track = Some(keys);
+        state.editor.selected_track = Some(Chain::Track(keys));
         let loaded = PluginStatus {
             loaded: true,
             has_window: true,
@@ -818,19 +800,22 @@ mod tests {
             ]
         );
 
-        // The master's, until another track is selected.
-        click(&mut harness, "Devices of Master");
+        // The master's, while the master track is selected: the panel says
+        // whose devices they are, and has no buttons to pick another's.
+        harness.get_by_role_and_label(Role::Label, "Devices of Keys");
+        select(&mut harness, Chain::Master);
+        harness.get_by_role_and_label(Role::Label, "Devices of Master");
+        assert!(harness.query_by_label("Devices of Keys").is_none());
         assert!(harness.query_by_label("Device Surge XT").is_none());
         harness.get_by_label("Device Test Gain");
         harness.get_by_label("Not loaded");
         harness.state_mut().scanning = true;
         harness.run();
         harness.get_by_label("Waiting for the plugin scan");
-        click(&mut harness, "Devices of Keys");
+        select(&mut harness, Chain::Track(keys));
         harness.get_by_label("Device Surge XT");
-        click(&mut harness, "Devices of Master");
-        harness.state_mut().editor.selected_track = Some(bass);
-        harness.run();
+        select(&mut harness, Chain::Track(bass));
+        harness.get_by_label("Devices of Bass");
         harness.get_by_label(NO_DEVICES);
 
         // Add Device shows the browser.
@@ -888,14 +873,14 @@ mod tests {
         let state = harness.state_mut();
         state.project.add_track("Keys", TrackKind::Midi);
         state.plugins = vec![entry("Vital", "Vital Audio", true)];
-        state.editor.selected_track = Some(keys);
+        state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
         harness.run();
         click(&mut harness, "Devices");
         let at = harness.get_by_label("Vital").rect().center();
         double_click(&mut harness, at);
-        // Or to the master, when the devices panel shows the master's.
-        click(&mut harness, "Devices of Master");
+        // Or to the master, while the master track is selected.
+        select(&mut harness, Chain::Master);
         double_click(&mut harness, at);
         click(&mut harness, "Rescan");
         let add = Args::new()
@@ -942,7 +927,7 @@ mod tests {
             },
             entry("Vital", "Vital Audio", true),
         ];
-        state.editor.selected_track = Some(keys);
+        state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
         harness.run();
         click(&mut harness, "Devices");
@@ -1192,7 +1177,7 @@ mod tests {
         let state = harness.state_mut();
         state.native = vec![NativeKind::Eq, NativeKind::Utility, NativeKind::Synth];
         state.plugins = vec![entry("Vital", "Vital Audio", true)];
-        state.editor.selected_track = Some(keys);
+        state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
         harness.run();
         click(&mut harness, "Devices");
@@ -1230,7 +1215,7 @@ mod tests {
         // A double-click adds it to the selected track, or to the master.
         let at = harness.get_by_label("Utility").rect().center();
         double_click(&mut harness, at);
-        click(&mut harness, "Devices of Master");
+        select(&mut harness, Chain::Master);
         double_click(&mut harness, at);
         let add = Args::new().with("kind", "utility");
         assert_eq!(

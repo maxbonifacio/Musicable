@@ -52,7 +52,7 @@ pub fn register(registry: &mut Registry) {
                 (_, Some(true)) => Chain::Master,
                 (Some(track), _) => Chain::Track(track),
                 (None, _) => match ctx.document.editor().selected_track {
-                    Some(track) => Chain::Track(track),
+                    Some(chain) => chain,
                     None => return Err(CommandError::invalid("no track is selected")),
                 },
             };

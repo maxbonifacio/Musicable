@@ -16,7 +16,7 @@ use std::path::Path;
 
 use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Fades, MidiClip, Timing};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{Project, TrackId, TrackKind};
+use musicable_model::{Chain, Project, TrackId, TrackKind};
 
 use crate::editor::{Editor, Selection};
 use crate::{
@@ -207,7 +207,7 @@ pub fn register(registry: &mut Registry) {
             let (track, clips) = insert_audio(ctx, &files, args.opt("track")?, args.opt("at")?)?;
             let editor = ctx.document.editor_mut();
             editor.selection = Selection::clips(clips.clone());
-            editor.selected_track = Some(track);
+            editor.selected_track = Some(Chain::Track(track));
             Ok(clips.into())
         },
     );
@@ -518,7 +518,9 @@ fn insert_audio(
             return Err(CommandError::invalid("audio clips go on audio tracks"));
         }
         Some(id) => Some(id),
-        None => editor.selected_track.filter(|&id| audio(id)),
+        None => (editor.selected_track)
+            .and_then(Chain::track)
+            .filter(|&id| audio(id)),
     };
     let time = editor.selection.time.as_ref();
     let at = at.unwrap_or_else(|| time.map_or(editor.start_marker, |time| time.range.start));
@@ -562,7 +564,11 @@ fn insert_midi_clips(ctx: &mut Context<'_>, args: &Args) -> Result<Vec<ClipId>, 
                 .filter(|t| time.tracks.contains(&t.id))
                 .map(|t| t.id)
                 .collect(),
-            None => editor.selected_track.into_iter().collect(),
+            None => editor
+                .selected_track
+                .and_then(Chain::track)
+                .into_iter()
+                .collect(),
         },
     };
     let tracks: Vec<TrackId> = tracks
@@ -1013,7 +1019,7 @@ mod tests {
             [row("loop", 2.0, 14.0), row("loop", 14.0, 26.0)]
         );
         let editor = setup.document.editor();
-        assert_eq!(editor.selected_track, Some(track.id));
+        assert_eq!(editor.selected_track, Some(Chain::Track(track.id)));
         let Value::List(inserted) = inserted else {
             panic!("{inserted:?}")
         };

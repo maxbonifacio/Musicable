@@ -22,8 +22,9 @@ pub struct Editor {
     pub selection: Selection,
     /// The track the detail panels show, such as its devices: the one whose
     /// header, clip or mixer strip was clicked last, as Live's selected
-    /// track is. Always one of the project's tracks.
-    pub selected_track: Option<TrackId>,
+    /// track is, or the master track. Always one of the project's tracks,
+    /// or the master.
+    pub selected_track: Option<Chain>,
     /// Where Play/Stop starts playing from, unless the behaviour says
     /// otherwise: Live's start marker. Clicking in the arrangement moves it.
     pub start_marker: Beats,
@@ -165,7 +166,9 @@ impl Editor {
                 selection.time = None;
             }
         }
-        if self.selected_track.is_some_and(|id| !tracks.contains(&id)) {
+        if let Some(Chain::Track(id)) = self.selected_track
+            && !tracks.contains(&id)
+        {
             self.selected_track = None;
         }
         self.track_heights.retain(|id, _| tracks.contains(id));
@@ -894,7 +897,7 @@ mod tests {
                     tracks: [gone].into(),
                 }),
             },
-            selected_track: Some(gone),
+            selected_track: Some(Chain::Track(gone)),
             ..Editor::default()
         };
         editor.track_heights.insert(gone, 80.0);

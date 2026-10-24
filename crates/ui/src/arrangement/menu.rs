@@ -12,8 +12,8 @@ use musicable_commands::{
     Args, Command, CommandId, Type, Value, arrange, automation, edit, file, locator, take, track,
     transport, view,
 };
+use musicable_model::TrackKind;
 use musicable_model::time::Beats;
-use musicable_model::{Chain, TrackKind};
 
 use super::{Hit, Scene, Spot};
 use crate::menus::context_menu;
@@ -105,6 +105,12 @@ const TAKE: Items = &[
     Some(view::TOGGLE_TAKE_LANES),
 ];
 
+/// On the master track's lane.
+const MASTER_LANE: Items = &[Some(locator::ADD), None, Some(automation::SHOW)];
+
+/// On the master track's header.
+const MASTER_HEADER: Items = &[Some(automation::SHOW)];
+
 /// On an automation lane or its header, for its parameter.
 const AUTOMATION: Items = &[
     Some(automation::RE_ENABLE),
@@ -121,6 +127,8 @@ fn items(hit: Hit) -> Vec<Option<CommandId>> {
         Hit::Lane(_) => &[LANE, GRID],
         Hit::Empty => &[EMPTY],
         Hit::Header(_) | Hit::TrackEdge(_) => &[HEADER],
+        Hit::Master => &[MASTER_LANE, GRID],
+        Hit::MasterHeader => &[MASTER_HEADER],
         Hit::Ruler | Hit::Strip | Hit::LoopBrace | Hit::LoopEdge(_) => &[RULER],
         Hit::Locator(_) => &[LOCATOR],
         Hit::Take { .. } | Hit::TakeHeader { .. } => &[TAKE],
@@ -151,7 +159,7 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
     }
     context_menu(ui, view, &entries, actions);
     // A track's header is made of parts, which the user can hide.
-    if let Hit::Header(_) | Hit::TrackEdge(_) = spot.hit {
+    if let Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader = spot.hit {
         ui.separator();
         scene.parts.menu_items(ui, TRACK_HEADER, spot.part);
     }
@@ -195,18 +203,8 @@ fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
             }),
             (Type::Locator, Hit::Locator(id)) => Some(id.into()),
             (Type::Param, hit) if param.name == "param" => hit.lane().map(Value::from),
-            // The master's lanes are its, not the selected track's.
-            (
-                Type::Bool,
-                Hit::Automation {
-                    chain: Chain::Master,
-                    ..
-                }
-                | Hit::AutomationHeader {
-                    chain: Chain::Master,
-                    ..
-                },
-            ) if param.name == "master" => Some(true.into()),
+            // The master's row and lanes are its, not the selected track's.
+            (Type::Bool, hit) if param.name == "master" && hit.on_master() => Some(true.into()),
             (Type::Beats, _) if matches!(param.name.as_ref(), "at" | "start") => {
                 Some(spot.at.into())
             }

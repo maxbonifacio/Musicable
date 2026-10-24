@@ -160,6 +160,10 @@ fn the_demos_arranging_steps_work_with_the_mouse_and_the_keys() {
     let config = TempDir::new("arranging-config");
     let (_folder, path, take) = song_folder();
     let mut harness = window(&config.0, Some(path.clone()));
+    // Tall enough for both tracks over the master track, under the
+    // ruler, with the mixer and the devices under the arrangement.
+    harness.set_size(vec2(1280.0, 960.0));
+    harness.run();
     let opened = song(&harness).clone();
 
     // The take, dropped at the start of the audio track's lane, lasts as

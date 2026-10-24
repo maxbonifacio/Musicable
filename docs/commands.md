@@ -145,6 +145,7 @@ so there they don't apply.
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
 | `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip | Ctrl+A | Ctrl+A |
+| `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header does | none | Clicking the Main track |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 
 And for the arrangement's clicks, scripts and agents:
@@ -560,7 +561,11 @@ for the behaviour settings.
 
 - **The selection** (`Selection`): clips, a time selection (a stretch of
   beats on some tracks), or tracks, and the selected track, which new clips
-  and pasting start from.
+  and pasting start from, and whose devices the devices panel shows. The
+  selected track (`selected_track`, a `Chain`) can be the master track,
+  which is selected alone: new devices and Show/Hide Automation go to the
+  master then, and the commands that need a track, such as Paste, act as
+  if none were selected.
 - **The start marker**: where Play/Stop plays from, Paste pastes to and
   Split splits the selected clips. Clicking in the arrangement puts it
   there.

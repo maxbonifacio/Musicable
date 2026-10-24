@@ -16,7 +16,7 @@ use std::fmt;
 
 use musicable_model::clip::{ClipContent, ClipId};
 use musicable_model::time::Beats;
-use musicable_model::{DeviceId, LocatorId, Project, TakeId, TrackId};
+use musicable_model::{Chain, DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
@@ -195,7 +195,9 @@ impl When {
             When::TracksSelected => !selection.tracks.is_empty(),
             When::CanPaste if notes => roll.clip.is_some() && roll.clipboard.is_some(),
             When::CanPaste => arranging && editor.clipboard.is_some(),
-            When::CanRename => selection.clips.len() == 1 || editor.selected_track.is_some(),
+            When::CanRename => {
+                selection.clips.len() == 1 || matches!(editor.selected_track, Some(Chain::Track(_)))
+            }
             When::HasLocators => !project.locators.is_empty(),
             When::CanQuantize if notes => roll.clip.is_some(),
             When::CanQuantize => selection.clips.iter().any(|&id| {

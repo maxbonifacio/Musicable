@@ -108,6 +108,10 @@ pub struct Theme {
     /// Clips take a colour from these, by their track's place.
     #[serde(with = "values::colours")]
     pub clips: [Color32; 8],
+    /// The master track's colour, down the left of its header and of its
+    /// automation lanes' headers.
+    #[serde(with = "values::colour")]
+    pub master: Color32,
     /// Laid over a clip's colour under its title bar, where its waveform or
     /// its notes are.
     #[serde(with = "values::colour")]
@@ -573,6 +577,7 @@ impl Theme {
                 Color32::from_rgb(196, 98, 168),
                 Color32::from_rgb(160, 160, 160),
             ],
+            master: Color32::from_gray(205),
             clip_body: Color32::from_rgba_unmultiplied(255, 255, 255, 70),
             clip_text: Color32::from_gray(20),
             clip_selected: Color32::from_rgb(250, 250, 250),

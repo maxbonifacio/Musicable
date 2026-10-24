@@ -7,8 +7,8 @@
 //! in the [`Editor`](crate::Editor). Zooming acts on the view with the focus:
 //! the arrangement, or the piano roll.
 
-use musicable_model::TrackId;
 use musicable_model::time::Beats;
+use musicable_model::{Chain, TrackId};
 
 use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
 use crate::{
@@ -197,7 +197,11 @@ pub fn register(registry: &mut Registry) {
                 None if !editor.selection.tracks.is_empty() => {
                     editor.selection.tracks.iter().copied().collect()
                 }
-                None => editor.selected_track.into_iter().collect(),
+                None => editor
+                    .selected_track
+                    .and_then(Chain::track)
+                    .into_iter()
+                    .collect(),
             };
             let project = ctx.document.project();
             let tracks: Vec<TrackId> = tracks
@@ -390,7 +394,7 @@ mod tests {
         let lanes = |setup: &Setup| setup.document.editor().take_lanes.clone();
         assert_eq!(lanes(&setup), BTreeSet::from([vocal, keys]));
         setup.select_tracks(&[]);
-        setup.document.editor_mut().selected_track = Some(keys);
+        setup.document.editor_mut().selected_track = Some(Chain::Track(keys));
         setup.run(&TOGGLE_TAKE_LANES);
         assert_eq!(lanes(&setup), BTreeSet::from([vocal]));
         // Showing them isn't a change to the project.

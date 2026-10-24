@@ -2,13 +2,15 @@
 //! button that shows its automation, mute, solo and arm, and its meter.
 //! Headers are painted, so a hundred tracks stay quick: each part paints
 //! into its column of a header, and the columns are the same in every
-//! header, so the buttons line up.
+//! header, so the buttons line up. The master track's header has the same
+//! parts, but for mute, solo and arm.
 
 use egui::{Align2, FontId, Id, Painter, Rangef, Rect, Role, Sense, Ui, WidgetInfo, pos2};
 use musicable_commands::mixer::Change;
 use musicable_commands::{Args, automation};
 use musicable_model::{Chain, Track, TrackKind};
 
+use super::paint::{master_painter, tracks_painter};
 use super::{Row, Scene, run};
 use crate::mixer::{meter_colour, meter_height};
 use crate::mouse::{Gesture, MouseAction, Target, modifiers};
@@ -16,15 +18,24 @@ use crate::parts::{self, Draw, Registry, Shown, Size, TRACK_HEADER};
 use crate::shell::Action;
 use crate::widgets::{Face, paint_toggle};
 
-/// What a track header's part paints: where it goes in the header of
-/// `row`'s track, and with what.
+/// What a track header's part paints: where it goes in the header of a
+/// track, or of the master, and with what.
 pub(crate) struct HeaderPart<'a> {
     scene: &'a Scene<'a>,
+    /// Paints only in the part of the headers the header is in: the
+    /// tracks' or the master's.
     painter: &'a Painter,
-    row: &'a Row,
-    track: &'a Track,
-    /// The part's column of the header.
+    owner: Owner<'a>,
+    /// The part's column of the header, from its top to its bottom.
     rect: Rect,
+}
+
+/// Whose header it is.
+#[derive(Clone, Copy)]
+enum Owner<'a> {
+    /// The track in the row.
+    Track(&'a Row, &'a Track),
+    Master,
 }
 
 /// Registers the parts of the tracks' headers, in the order headers show
@@ -35,7 +46,11 @@ pub(crate) fn register(registry: &mut Registry) {
         "Colour",
         Size::Resizable(|theme| theme.colour_strip),
         |_, part, _| {
-            let colour = part.scene.theme.clip(part.row.index);
+            let theme = part.scene.theme;
+            let colour = match part.owner {
+                Owner::Track(row, _) => theme.clip(row.index),
+                Owner::Master => theme.master,
+            };
             part.painter.rect_filled(part.rect, 0.0, colour);
         },
     ));
@@ -46,13 +61,17 @@ pub(crate) fn register(registry: &mut Registry) {
             part.rect.left() + inset..=part.rect.right() - inset,
             part.rect.top() + theme.padding..=part.rect.bottom(),
         );
+        let name = match part.owner {
+            Owner::Track(_, track) => track.name.as_str(),
+            Owner::Master => "Master",
+        };
         let painter = part.painter;
         painter
             .with_clip_rect(room.intersect(painter.clip_rect()))
             .text(
                 room.left_top(),
                 Align2::LEFT_TOP,
-                &part.track.name,
+                name,
                 FontId::proportional(theme.text),
                 theme.header_text,
             );
@@ -77,16 +96,19 @@ pub(crate) fn register(registry: &mut Registry) {
         "Meter",
         Size::Resizable(|theme| theme.header_meter + theme.padding / 2.0),
         |_, part, _| {
-            let (scene, row) = (part.scene, part.row);
+            let scene = part.scene;
             let theme = scene.theme;
             // Down the column's right, set in from the parts on its left.
             let width = (part.rect.width() - theme.padding / 2.0).max(1.0);
-            let top = row.top + theme.padding;
+            let top = part.rect.top() + theme.padding;
             let meter = Rect::from_x_y_ranges(
                 part.rect.right() - width..=part.rect.right(),
-                top..=(row.bottom() - theme.padding).max(top),
+                top..=(part.rect.bottom() - theme.padding).max(top),
             );
-            let level = scene.view.levels.track(part.track.id);
+            let level = match part.owner {
+                Owner::Track(_, track) => scene.view.levels.track(track.id),
+                Owner::Master => scene.view.levels.master,
+            };
             let height = meter_height(level.peak[0].max(level.peak[1]));
             part.painter.rect_filled(meter, 0.0, theme.divider);
             if height > 0.0 {
@@ -141,7 +163,8 @@ pub(super) fn columns<'p>(
     columns.collect()
 }
 
-/// Paints the parts of the header of each track in sight, in `columns`.
+/// Paints the parts of the header of each track in sight, and of the
+/// master's, in `columns`.
 pub(super) fn paint(
     ui: &mut Ui,
     painter: &Painter,
@@ -149,23 +172,30 @@ pub(super) fn paint(
     columns: &[(&parts::Part, Rangef)],
     actions: &mut Vec<Action>,
 ) {
-    for row in scene.layout.visible_rows() {
-        let track = &scene.project().tracks[row.index];
+    let mut header = |ui: &mut Ui, painter: &Painter, owner: Owner<'_>, rows: Rangef| {
         for &(part, column) in columns {
             let Draw::Header(draw) = part.draw else {
                 continue;
             };
-            let rect = Rect::from_x_y_ranges(column, row.top..=row.bottom());
+            let rect = Rect::from_x_y_ranges(column, rows);
             let header = HeaderPart {
                 scene,
                 painter,
-                row,
-                track,
+                owner,
                 rect,
             };
             draw(ui, &header, actions);
         }
+    };
+    let tracks = tracks_painter(painter, scene);
+    for row in scene.layout.visible_rows() {
+        let track = &scene.project().tracks[row.index];
+        let rows = Rangef::new(row.top, row.bottom());
+        header(ui, &tracks, Owner::Track(row, track), rows);
     }
+    let master = scene.layout.master;
+    let rows = Rangef::new(master.top, master.bottom());
+    header(ui, &master_painter(painter, scene), Owner::Master, rows);
 }
 
 /// The header's buttons.
@@ -180,24 +210,31 @@ enum Button {
 
 /// `buttons` along the top of the part's column, half a padding apart,
 /// each in its place even when the track doesn't have it: return and
-/// group tracks have no arm. A row partly scrolled away has none.
+/// group tracks have no arm, and the master has only its automation's.
+/// A row partly scrolled away has none.
 fn paint_buttons(
     ui: &mut Ui,
     part: &HeaderPart<'_>,
     buttons: &[Button],
     actions: &mut Vec<Action>,
 ) {
-    let (scene, track) = (part.scene, part.track);
+    let scene = part.scene;
+    let track = match part.owner {
+        Owner::Track(_, track) => track,
+        Owner::Master => {
+            if buttons.contains(&Button::Automation) {
+                master_automation_button(ui, part, actions);
+            }
+            return;
+        }
+    };
     let theme = scene.theme;
-    let headers = scene.layout.headers;
     let size = theme.button;
     let mods = modifiers(ui.input(|i| i.modifiers));
     for (i, &button) in buttons.iter().enumerate() {
         let x = part.rect.left() + i as f32 * (size.x + theme.padding / 2.0);
-        let rect = Rect::from_min_size(pos2(x, part.row.top + theme.padding), size);
-        let fits = headers.contains_rect(rect)
-            && rect.bottom() <= part.row.bottom()
-            && rect.left() > headers.left();
+        let rect = Rect::from_min_size(pos2(x, part.rect.top() + theme.padding), size);
+        let fits = fits(part, rect);
         let records = matches!(track.kind, TrackKind::Audio | TrackKind::Midi);
         if !fits || (button == Button::Arm && !records) {
             continue;
@@ -255,6 +292,42 @@ fn paint_buttons(
         };
         actions.push(Action::Mixer(change));
     }
+}
+
+/// The master's A button, which shows its automation lanes or hides them.
+fn master_automation_button(ui: &mut Ui, part: &HeaderPart<'_>, actions: &mut Vec<Action>) {
+    let theme = part.scene.theme;
+    let rect = Rect::from_min_size(
+        pos2(part.rect.left(), part.rect.top() + theme.padding),
+        theme.button,
+    );
+    if !fits(part, rect) {
+        return;
+    }
+    let on = (part.scene.editor().automation).contains_key(&Chain::Master);
+    let response = ui.interact(rect, Id::unique("master automation button"), Sense::click());
+    let label = "Show automation of the master track";
+    response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, label));
+    paint_toggle(
+        ui,
+        rect,
+        &response,
+        Face::Text("A"),
+        on,
+        theme.automation,
+        theme,
+    );
+    if response.clicked() {
+        run(actions, automation::SHOW, Args::new().with("master", true));
+    }
+}
+
+/// Whether a button at `rect` fits in the header `part` is in, in sight.
+fn fits(part: &HeaderPart<'_>, rect: Rect) -> bool {
+    let headers = part.scene.layout.headers;
+    part.painter.clip_rect().contains_rect(rect)
+        && rect.bottom() <= part.rect.bottom()
+        && rect.left() > headers.left()
 }
 
 /// The header part in `columns` at `x`, if one is there.

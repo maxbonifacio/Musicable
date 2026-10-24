@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 
 use musicable_model::clip::{Clip, ClipId};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Project, TrackId};
+use musicable_model::{Chain, Project, TrackId};
 
 use crate::editor::{Clipboard, Editor, Edits, Selection, TimeSelection};
 use crate::{
@@ -59,12 +59,15 @@ pub const SELECT_CLIPS: CommandId = CommandId::new("edit.select_clips");
 pub const SELECT_TIME: CommandId = CommandId::new("edit.select_time");
 /// Selects tracks.
 pub const SELECT_TRACKS: CommandId = CommandId::new("edit.select_tracks");
+/// Makes the master the selected track, for the devices panel to show its
+/// devices, as clicking its header does.
+pub const SELECT_MASTER: CommandId = CommandId::new("edit.select_master");
 
 type Handler = fn(&mut Context<'_>);
 
 /// The edit commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 10] = [
     (UNDO, "Undo", When::Always, |ctx| {
         ctx.document.undo();
     }),
@@ -90,6 +93,12 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
     (SELECT_ALL, "Select All", When::CanSelectAll, |ctx| {
         by_focus(ctx, notes::select_all, select_all);
     }),
+    (
+        SELECT_MASTER,
+        "Select Master Track",
+        When::Always,
+        select_master,
+    ),
 ];
 
 /// Runs `notes` while the piano roll has the focus, or `arrangement` while
@@ -135,7 +144,8 @@ pub fn register(registry: &mut Registry) {
                 // track.
                 _ => {
                     let editor = ctx.document.editor();
-                    match (editor.selection.clips.first(), editor.selected_track) {
+                    let track = editor.selected_track.and_then(Chain::track);
+                    match (editor.selection.clips.first(), track) {
                         (Some(&clip), _) if editor.selection.clips.len() == 1 => Named::Clip(clip),
                         (_, Some(track)) => Named::Track(track),
                         _ => return Err(CommandError::NotNow(RENAME)),
@@ -226,7 +236,7 @@ fn select_clips(
         }
     }
     if let Some(&track) = tracks.last() {
-        editor.selected_track = Some(track);
+        editor.selected_track = Some(Chain::Track(track));
     }
     editor.focus_arrangement();
     let selected: Vec<ClipId> = clips
@@ -251,13 +261,11 @@ fn select_time(
     tracks: &[TrackId],
 ) -> Result<(), CommandError> {
     let tracks = existing(project, tracks)?;
-    if !tracks.contains(&editor.selected_track.unwrap_or(TrackId(u32::MAX))) {
-        editor.selected_track = project
-            .tracks
-            .iter()
-            .find(|t| tracks.contains(&t.id))
-            .map(|t| t.id)
-            .or(editor.selected_track);
+    let selected = editor.selected_track.and_then(Chain::track);
+    if !selected.is_some_and(|id| tracks.contains(&id))
+        && let Some(first) = project.tracks.iter().find(|t| tracks.contains(&t.id))
+    {
+        editor.selected_track = Some(Chain::Track(first.id));
     }
     let time = (!range.is_empty() && !tracks.is_empty()).then_some(TimeSelection { range, tracks });
     editor.selection = Selection {
@@ -286,10 +294,18 @@ fn select_tracks(
         }
     }
     if let Some(&track) = tracks.iter().rev().find(|t| selection.tracks.contains(t)) {
-        editor.selected_track = Some(track);
+        editor.selected_track = Some(Chain::Track(track));
     }
     editor.focus_arrangement();
     Ok(())
+}
+
+/// Makes the master the selected track, with nothing else selected.
+fn select_master(ctx: &mut Context<'_>) {
+    let editor = ctx.document.editor_mut();
+    editor.selection = Selection::default();
+    editor.selected_track = Some(Chain::Master);
+    editor.focus_arrangement();
 }
 
 /// `tracks` as a set, if the project has each of them.
@@ -418,6 +434,7 @@ fn paste(ctx: &mut Context<'_>) {
     // hold the first clip.
     let first = editor
         .selected_track
+        .and_then(Chain::track)
         .and_then(|id| project.track_index(id))
         .or_else(|| {
             let (_, clip) = clipboard.clips.first()?;
@@ -884,7 +901,7 @@ mod tests {
         let editor = setup.document.editor();
         assert_eq!(editor.selection.clips, [b, k, v].into());
         // The track of the last clip clicked.
-        assert_eq!(editor.selected_track, Some(keys));
+        assert_eq!(editor.selected_track, Some(Chain::Track(keys)));
         select(&mut setup, &[k], true);
         assert_eq!(setup.document.editor().selection.clips, [b, v].into());
         assert_eq!(
@@ -899,19 +916,31 @@ mod tests {
         assert_eq!(time.range, BeatRange::new(Beats::new(2), Beats::new(8)));
         assert!(editor.selection.clips.is_empty());
         // Keys isn't one of them: the topmost one is selected now.
-        assert_eq!(editor.selected_track, Some(bass));
+        assert_eq!(editor.selected_track, Some(Chain::Track(bass)));
         // A click without a stretch selects the track, and no time.
         setup.select_time(5, 5, &[vox]);
         let editor = setup.document.editor();
         assert_eq!(editor.selection, Selection::default());
-        assert_eq!(editor.selected_track, Some(vox));
+        assert_eq!(editor.selected_track, Some(Chain::Track(vox)));
 
         setup.select_tracks(&[keys]);
         let args = Args::new().with("tracks", vec![bass]).with("toggle", true);
         setup.run_with(&SELECT_TRACKS, args).unwrap();
         let editor = setup.document.editor();
         assert_eq!(editor.selection.tracks, [bass, keys].into());
-        assert_eq!(editor.selected_track, Some(bass));
+        assert_eq!(editor.selected_track, Some(Chain::Track(bass)));
+
+        // Selecting the master track selects nothing else, and a time
+        // selection without tracks keeps it.
+        setup.run(&SELECT_MASTER);
+        let editor = setup.document.editor();
+        assert_eq!(editor.selection, Selection::default());
+        assert_eq!(editor.selected_track, Some(Chain::Master));
+        setup.select_time(5, 5, &[]);
+        assert_eq!(setup.document.editor().selected_track, Some(Chain::Master));
+        setup.select_time(2, 4, &[keys]);
+        let editor = setup.document.editor();
+        assert_eq!(editor.selected_track, Some(Chain::Track(keys)));
 
         setup.run(&SELECT_ALL);
         assert_eq!(setup.document.editor().selection.clips, [b, k, v].into());

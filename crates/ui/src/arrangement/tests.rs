@@ -8,7 +8,7 @@ use egui::accesskit::Toggled;
 use egui::{DroppedFile, Event, Modifiers, PointerButton, Pos2, Shape, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use musicable_commands::editor::AudioFile;
+use musicable_commands::editor::{AudioFile, Selection};
 use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
 use musicable_model::automation::Lane;
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing};
@@ -406,7 +406,7 @@ fn clicks_select_clips_and_place_the_start_marker() {
     click(&mut harness, at, Modifiers::NONE);
     let editor = harness.state().editor();
     assert!(editor.selection.clips.is_empty());
-    assert_eq!(editor.selected_track, Some(ids.bass));
+    assert_eq!(editor.selected_track, Some(Chain::Track(ids.bass)));
     assert_eq!(editor.start_marker, Beats::new(30));
     assert!(harness.state().errors.is_empty());
 }
@@ -1424,27 +1424,150 @@ fn automation_menus_clear_and_re_enable_a_lane() {
 }
 
 #[test]
-fn the_masters_lanes_go_under_the_tracks() {
+fn the_master_track_is_pinned_under_the_tracks() {
     let (project, ids) = project();
     let mut harness = harness(project);
-    let state = harness.state_mut();
-    let lanes = &mut state.document.editor_mut().automation;
-    lanes.insert(Chain::Master, vec![ParamAddress::Pan(Chain::Master)]);
-    lanes.insert(
-        Chain::Track(ids.drums),
-        vec![ParamAddress::Volume(Chain::Track(ids.drums))],
-    );
-    harness.run();
+    let theme = Theme::default();
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let master = harness.get_by_label("Master track").rect();
     let reverb = harness.get_by_label("Track Reverb").rect();
-    let pan = harness.get_by_label("Pan of Master");
-    assert_eq!(pan.rect().top(), reverb.bottom());
-    assert_eq!(pan.value().as_deref(), Some("C"));
-    // Its menu acts on the master's.
-    pan.click_secondary();
+    // Along the bottom, with room for a new track over it.
+    assert_eq!(master.bottom(), lanes.bottom());
+    assert_eq!(master.height(), theme.track_height);
+    assert!(master.top() > reverb.bottom());
+
+    // Clicking its header selects it, alone, as the track the devices
+    // panel shows.
+    let kick = title(&harness, "Kick", 10.0);
+    click(&mut harness, kick, Modifiers::NONE);
+    click(&mut harness, master.center(), Modifiers::NONE);
+    let editor = harness.state().editor();
+    assert_eq!(editor.selected_track, Some(Chain::Master));
+    assert_eq!(editor.selection, Selection::default());
+    let row = harness.get_by_label("Master track");
+    assert_eq!(row.accesskit_node().toggled(), Some(Toggled::True));
+    // Clicking a track's header selects that track instead, and clicking
+    // the master's lane selects the master again, and puts the start
+    // marker there.
+    let drums = harness.get_by_label("Track Drums").rect().center();
+    click(&mut harness, drums, Modifiers::NONE);
+    let selected = harness.state().editor().selected_track;
+    assert_eq!(selected, Some(Chain::Track(ids.drums)));
+    let row = harness.get_by_label("Master track");
+    assert_eq!(row.accesskit_node().toggled(), Some(Toggled::False));
+    let lane = pos2(x_of(&harness, 4.0), master.center().y);
+    click(&mut harness, lane, Modifiers::NONE);
+    let editor = harness.state().editor();
+    assert_eq!(editor.selected_track, Some(Chain::Master));
+    assert_eq!(editor.start_marker, Beats::new(4));
+    // A drag there selects no time.
+    drag(&mut harness, lane, lane + vec2(80.0, 0.0), Modifiers::NONE);
+    assert_eq!(harness.state().editor().selection.time, None);
+
+    // Its A button shows its automation lanes, under its row, and the row
+    // goes up to make room.
+    let button = harness.get_by_label("Show automation of the master track");
+    assert_eq!(button.accesskit_node().toggled(), Some(Toggled::False));
+    button.click();
+    harness.run();
+    let lanes_shown = &harness.state().editor().automation;
+    let volume = ParamAddress::Volume(Chain::Master);
+    assert_eq!(lanes_shown.get(&Chain::Master), Some(&vec![volume]));
+    let master = harness.get_by_label("Master track").rect();
+    let lane = harness.get_by_label("Volume of Master").rect();
+    assert_eq!(master.bottom(), lane.top());
+    assert_eq!(lane.bottom(), lanes.bottom());
+    let button = harness.get_by_label("Show automation of the master track");
+    assert_eq!(button.accesskit_node().toggled(), Some(Toggled::True));
+
+    // The tracks scroll over it, and it stays where it is.
+    for track in [ids.drums, ids.keys, ids.bass] {
+        let heights = &mut harness.state_mut().document.editor_mut().track_heights;
+        heights.insert(track, 150.0);
+    }
+    harness.run();
+    // Out of sight, under the master.
+    assert!(harness.query_by_label("Track Reverb").is_none());
+    harness.hover_at(in_lane(&harness, "Drums", 4.0));
+    harness.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -10_000.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run();
+    assert!(harness.state().editor().viewport.top > 0.0);
+    let reverb = harness.get_by_label("Track Reverb").rect();
+    assert!(
+        reverb.bottom() <= master.top(),
+        "{reverb:?} over {master:?}"
+    );
+    assert_eq!(harness.get_by_label("Master track").rect(), master);
+
+    // Its lane's menu acts on the master's.
+    harness.get_by_label("Volume of Master").click_secondary();
     harness.run();
     harness.get_by_label("Hide Automation Lane").click();
     harness.run();
+    assert!(harness.query_by_label("Volume of Master").is_none());
+    assert!(
+        !harness
+            .state()
+            .editor()
+            .automation
+            .contains_key(&Chain::Master)
+    );
+    // And its header's shows and hides its lanes.
+    harness.get_by_label("Master track").click_secondary();
+    harness.run();
+    harness.get_by_label("Show/Hide Automation A").click();
+    harness.run();
+    harness.get_by_label("Volume of Master");
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_masters_lanes_scroll_on_their_own_when_they_dont_fit() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let params = [
+        ParamAddress::Volume(Chain::Master),
+        ParamAddress::Pan(Chain::Master),
+    ];
+    let state = harness.state_mut();
+    let shown = &mut state.document.editor_mut().automation;
+    shown.insert(Chain::Master, params.to_vec());
+    shown.insert(
+        Chain::Track(ids.drums),
+        vec![ParamAddress::Volume(Chain::Track(ids.drums))],
+    );
+    // Taller lanes than half the arrangement has room for.
+    state.theme.automation_height = lanes.height() / 2.0;
+    harness.run();
+    let master = harness.get_by_label("Master track").rect();
+    // Half the lanes, with the master's row at the top, and its second
+    // lane out of sight.
+    let top = lanes.bottom() - lanes.height() / 2.0;
+    assert_eq!(master.top(), top);
+    harness.get_by_label("Volume of Master");
     assert!(harness.query_by_label("Pan of Master").is_none());
-    harness.get_by_label("Volume of Drums");
+    // The wheel over them scrolls them, not the tracks.
+    harness.hover_at(pos2(x_of(&harness, 4.0), master.center().y));
+    harness.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -10_000.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run();
+    assert_eq!(harness.state().editor().viewport.top, 0.0);
+    let pan = harness.get_by_label("Pan of Master").rect();
+    assert_eq!(pan.bottom(), lanes.bottom());
+    // The tracks' lanes stay over the master's part.
+    let drums = harness.get_by_label("Volume of Drums").rect();
+    assert!(drums.bottom() <= top, "{drums:?}");
     assert!(harness.state().errors.is_empty());
 }

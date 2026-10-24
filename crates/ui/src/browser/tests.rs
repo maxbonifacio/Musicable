@@ -430,7 +430,7 @@ fn presets_are_listed_by_device_and_added_to_the_devices_chain() {
         ),
     ];
     state.library.presets = presets();
-    state.editor.selected_track = Some(keys);
+    state.editor.selected_track = Some(Chain::Track(keys));
     harness.run();
     click(&mut harness, "Presets");
     // By device, in order of name, without the presets of plugins that
@@ -483,7 +483,7 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
     )];
     state.library.presets = presets();
     state.library.search("kick");
-    state.editor.selected_track = Some(keys);
+    state.editor.selected_track = Some(Chain::Track(keys));
     // Room under the tracks.
     state.shell.toggle_panel(crate::MIXER);
     harness.run();
@@ -505,9 +505,11 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
     };
     assert_eq!(actions(&mut harness), [dropped]);
 
-    // A plugin under the tracks goes on a new track.
+    // A plugin under the tracks, over the master track, goes on a new
+    // track.
     click(&mut harness, "Devices");
-    let below = (harness.get_by_label("Track Keys").rect().bottom() + lanes.bottom()) / 2.0;
+    let master = harness.get_by_label("Master track").rect();
+    let below = (harness.get_by_label("Track Keys").rect().bottom() + master.top()) / 2.0;
     let from = harness.get_by_label("Vital").rect().center();
     drag(&mut harness, from, pos2(lanes.center().x, below));
     let vital = devices::add(&harness.state().plugins[0], None);
@@ -523,6 +525,13 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
     drag(&mut harness, from, pos2(x + 2.0, drums_row.center().y));
     let eq = Args::new().with("kind", "eq").with("track", drums);
     assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, eq)]);
+    // On the master track, it goes on the master's, over its lane or its
+    // header. A sample doesn't go there.
+    for at in [pos2(x + 2.0, master.center().y), master.center()] {
+        drag(&mut harness, from, at);
+        let eq = Args::new().with("kind", "eq").with("master", true);
+        assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, eq)]);
+    }
 
     // A preset in the devices panel goes in the chain it shows: the
     // selected track's.
@@ -538,10 +547,12 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
         [Action::RunWith(device::ADD_PRESET, add)]
     );
 
-    // Nothing comes of a sample let go in the devices panel.
+    // Nothing comes of a sample let go in the devices panel, or on the
+    // master track.
     click(&mut harness, "Samples");
     let from = harness.get_by_label("Kick 02").rect().center();
     drag(&mut harness, from, panel.center());
+    drag(&mut harness, from, pos2(x + 2.0, master.center().y));
     assert!(actions(&mut harness).is_empty());
 }
 
@@ -573,7 +584,7 @@ fn devices_dropped_in_the_devices_panel_go_in_its_chain_wherever_it_is() {
     };
     let state = harness.state_mut();
     state.shell.set_workspace(&workspace);
-    state.editor.selected_track = Some(keys);
+    state.editor.selected_track = Some(Chain::Track(keys));
     harness.run();
     click(&mut harness, "Devices");
     actions(&mut harness);
@@ -600,7 +611,7 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
     }));
     project.track_mut(keys).unwrap().devices.push(synth.clone());
     let mut harness = harness(project, Index::new());
-    harness.state_mut().editor.selected_track = Some(keys);
+    harness.state_mut().editor.selected_track = Some(Chain::Track(keys));
     harness.run();
     harness.get_by_label("Device Vital").click_secondary();
     harness.run();
