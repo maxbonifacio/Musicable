@@ -2,6 +2,7 @@
 //! and the project's file.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use musicable_ui::{
     Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
+use crate::appearance_window::{AppearanceWindow, Asked as AppearanceAsked};
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::audio_window::{AudioWindow, Change};
 use crate::export::{self, Export, ExportSettings, Job, Report};
@@ -29,7 +31,8 @@ use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
-use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings};
+use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER};
+use crate::theme_file::{Choice, UserTheme};
 use crate::{Output, Session, capital};
 
 /// How often the window redraws while the transport plays or the mixer's
@@ -70,6 +73,7 @@ pub struct App {
     files_found: Option<u64>,
     keys: KeyPresses,
     audio_window: AudioWindow,
+    appearance_window: AppearanceWindow,
     export_window: ExportWindow,
     /// The export under way, if one is.
     export: Option<Export>,
@@ -89,6 +93,11 @@ pub struct App {
     settings: Settings,
     /// The user's keymap file, which every change of keys is saved to.
     keymap_file: UserKeymap,
+    /// The theme Musicable draws with, and the file it's from, which is
+    /// followed as it changes.
+    theme_file: UserTheme,
+    /// What the status bar says about the theme's file, as last said.
+    theme_message: Option<String>,
     /// What waits for the user to say whether to save their changes first.
     pending: Option<Request>,
     /// Set once the user has said what to do with their changes, so the
@@ -167,6 +176,10 @@ impl App {
         ));
         session.set_preview_gain(settings.browser.preview_gain());
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
+        let theme_file = UserTheme::new(
+            config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
+            Choice::from_name(&settings.appearance.theme),
+        );
         // What the last scan found, while the next one runs. Before the
         // first, plugin devices wait for it.
         let known = plugin_scan.known();
@@ -186,6 +199,7 @@ impl App {
             files_found: None,
             keys: KeyPresses::new(),
             audio_window: AudioWindow::new(),
+            appearance_window: AppearanceWindow::new(),
             export_window: ExportWindow::new(),
             export: None,
             export_folder: None,
@@ -196,10 +210,13 @@ impl App {
             config_dir,
             settings,
             keymap_file,
+            theme_file,
+            theme_message: None,
             pending: None,
             closing: false,
             title: String::new(),
         };
+        app.use_theme(ctx);
         if let Some(known) = known {
             app.set_installed_plugins(known);
         }
@@ -383,6 +400,7 @@ impl App {
             Request::CommandPalette => self.shell.open_palette(),
             Request::AudioSettings => self.audio_window.open(&self.output),
             Request::KeyboardShortcuts => self.shell.open_shortcuts(),
+            Request::Appearance => self.appearance_window.open(),
             Request::ImportAudio => {
                 if let Some(files) = self.audio_dialog(frame).pick_files() {
                     self.insert_audio(files, None, None);
@@ -792,6 +810,63 @@ impl App {
             .collect();
     }
 
+    /// Draws with the theme in use from the next frame on, and says in the
+    /// status bar when its file couldn't be used as it is.
+    fn use_theme(&mut self, ctx: &egui::Context) {
+        if let Some(fonts) = self.theme_file.take_fonts() {
+            ctx.set_fonts(fonts);
+        }
+        let theme = self.theme_file.theme();
+        musicable_ui::apply_theme(ctx, theme);
+        self.shell.set_theme(theme.clone());
+        let message = self.theme_file.message();
+        if message != self.theme_message {
+            if let Some(said) = self.theme_message.take() {
+                self.messages.retain(|message| *message != said);
+            }
+            self.messages.extend(message.clone());
+            self.theme_message = message;
+        }
+        ctx.request_repaint();
+    }
+
+    /// Does what the user asked for in the appearance window, and keeps the
+    /// theme picked in the settings.
+    fn appearance(&mut self, asked: AppearanceAsked, ctx: &egui::Context, frame: &eframe::Frame) {
+        match asked {
+            AppearanceAsked::Choose(choice) => self.theme_file.choose(choice),
+            AppearanceAsked::Export => {
+                if let Some(path) = self.theme_dialog(frame).save_file() {
+                    let path = match path.extension() {
+                        Some(_) => path,
+                        None => path.with_extension("toml"),
+                    };
+                    self.theme_file.export(&path);
+                }
+            }
+            AppearanceAsked::OpenFolder => self.theme_file.open_folder(),
+            AppearanceAsked::Reload => self.theme_file.reload(),
+        }
+        let chosen = self.theme_file.choice().name();
+        if chosen != self.settings.appearance.theme {
+            self.settings.appearance.theme = chosen.to_owned();
+            self.save_settings();
+        }
+        self.use_theme(ctx);
+    }
+
+    /// A dialog for saving a theme file, in the themes folder.
+    fn theme_dialog(&self, frame: &eframe::Frame) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .add_filter("Musicable theme", &["toml"])
+            .set_file_name("My Theme.toml");
+        match self.theme_file.folder() {
+            Some(folder) if fs::create_dir_all(folder).is_ok() => dialog.set_directory(folder),
+            _ => dialog,
+        }
+    }
+
     fn save_settings(&mut self) {
         let Some(path) = self.config_dir.as_ref().map(|dir| dir.join(SETTINGS_FILE)) else {
             return;
@@ -864,6 +939,9 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.theme_file.poll() {
+            self.use_theme(ctx);
+        }
         if let Some(scanned) = self.plugin_scan.receive() {
             self.messages.extend(scanned.problems);
             self.set_installed_plugins(scanned.plugins);
@@ -1011,6 +1089,9 @@ impl eframe::App for App {
             Some(Change::Stream(request)) => self.apply_audio(request),
             Some(Change::RecordingOffset(frames)) => self.set_recording_offset(frames),
             None => {}
+        }
+        if let Some(asked) = self.appearance_window.show(&ctx, &self.theme_file) {
+            self.appearance(asked, &ctx, frame);
         }
         let project = self.session.project();
         let editor = self.session.editor();
@@ -1170,6 +1251,8 @@ mod plugins_on_tracks;
 mod remapping;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+mod theming;
 
 #[cfg(test)]
 mod tests {

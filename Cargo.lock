@@ -1908,6 +1908,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde",
+ "skrifa",
  "toml",
  "windows",
 ]
@@ -2005,6 +2006,8 @@ dependencies = [
  "musicable-commands",
  "musicable-library",
  "musicable-model",
+ "serde",
+ "toml",
 ]
 
 [[package]]

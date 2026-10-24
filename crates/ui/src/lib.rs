@@ -40,6 +40,9 @@ pub use piano_roll::PIANO_ROLL;
 pub use shell::{
     Action, Audio, KeymapStatus, MIXER, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
 };
-pub use theme::{BrowserSizes, DeviceSizes, MixerSizes, PianoRollSizes, Theme};
+pub use theme::{
+    Base, BrowserSizes, DeviceSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes, Theme,
+    ThemeFile, ThemeFileError, ThemeProblem, WidgetState, Widgets, apply as apply_theme,
+};
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};
