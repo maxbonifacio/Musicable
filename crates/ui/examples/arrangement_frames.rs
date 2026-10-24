@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Pos2, RawInput, Rect, vec2};
 use musicable_commands::editor::AudioFile;
-use musicable_commands::{Editor, Keymap, Registry, view};
+use musicable_commands::{Editor, Keymap, Registry, Steps, view};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackKind};
@@ -218,8 +218,7 @@ impl Bench {
                 commands: &self.commands,
                 keymap: &self.keymap,
                 default_keymap: &self.keymap,
-                undo: None,
-                redo: None,
+                history: Steps::default(),
                 playback: Playback {
                     playing: self.playing,
                     record: false,

@@ -11,7 +11,9 @@ use egui::{
     ViewportInfo, pos2, vec2,
 };
 use egui_kittest::{Harness, HarnessBuilder};
-use musicable_commands::{Editor, Focus, Keymap, Problem, Registry, Transport, browser, view};
+use musicable_commands::{
+    Document, Editor, Focus, Keymap, Problem, Registry, Transport, browser, history, view,
+};
 use musicable_library::{FileId, Index, Preset};
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
@@ -35,9 +37,10 @@ pub(crate) struct State {
     pub default_keymap: Keymap,
     pub keymap_path: Option<PathBuf>,
     pub keymap_problems: Vec<Problem>,
-    /// What the Edit menu's Undo and Redo would change.
-    pub undo: Option<&'static str>,
-    pub redo: Option<&'static str>,
+    /// The undo history the Edit menu and the History panel show, in a
+    /// document of its own: the tests make its steps with [`step`](Self::step),
+    /// and it goes to the step the History panel asks for.
+    pub history: Document,
     /// What the meters read.
     pub levels: Levels,
     /// The plugins installed, whether a scan is running, and how each
@@ -55,6 +58,15 @@ pub(crate) struct State {
     /// Settings window would show it.
     pub keys_page: bool,
     pub actions: Vec<Action>,
+}
+
+impl State {
+    /// Makes a step called `name` in the undo history: one that turns the
+    /// metronome on or off.
+    pub fn step(&mut self, name: &str) {
+        let on = !self.history.project().metronome;
+        self.history.transact(name, |tx| tx.set_metronome(on));
+    }
 }
 
 /// A transport that plays along: locating moves its playhead.
@@ -236,8 +248,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         default_keymap: Keymap::default_keymap(),
         keymap_path: None,
         keymap_problems: Vec::new(),
-        undo: None,
-        redo: None,
+        history: Document::default(),
         levels: Levels::default(),
         plugins: Vec::new(),
         scanning: false,
@@ -260,8 +271,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 commands: &state.commands,
                 keymap: &state.keymap,
                 default_keymap: &state.default_keymap,
-                undo: state.undo,
-                redo: state.redo,
+                history: state.history.steps(),
                 playback: Playback {
                     playing: false,
                     record: false,
@@ -325,6 +335,10 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                     Action::RunWith(id, args) if *id == browser::FIND_SIMILAR => {
                         let file: String = args.get("file").unwrap();
                         state.library.find_similar(Path::new(&file));
+                    }
+                    Action::RunWith(id, args) if *id == history::GO_TO => {
+                        let step = args.get::<i64>("step").unwrap();
+                        assert!(state.history.go_to(step as usize), "{step}");
                     }
                     _ => {}
                 }
@@ -426,6 +440,27 @@ pub(crate) fn with_own(
     });
     let info = info.expect("a window of its own");
     harness.input_mut().viewports.insert(id, info);
+}
+
+/// Clicks with the mouse at `at`.
+pub(crate) fn click_at(harness: &mut Harness<'_, State>, at: Pos2) {
+    harness.hover_at(at);
+    harness.run();
+    harness.drag_at(at);
+    harness.run();
+    harness.drop_at(at);
+    harness.run();
+}
+
+/// A key pressed and let go of, as a window of its own gets it.
+pub(crate) fn key(key: egui::Key) -> [Event; 2] {
+    [true, false].map(|pressed| Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    })
 }
 
 /// Gives the main window the system's focus, or takes it away.

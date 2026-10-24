@@ -1004,11 +1004,14 @@ mod tests {
         );
         harness.get_by_label("over Toggle Metronome");
 
-        // Keys the piano roll gives another command can still work
-        // everywhere else.
+        // Keys the panels give other commands can still work everywhere
+        // else.
         click(&mut harness, "Add keys to Toggle Loop");
         press(&mut harness, "Up");
-        harness.get_by_label("isn't used yet, but the Piano Roll panel keeps it for Transpose Up.");
+        harness.get_by_label(
+            "isn't used yet, but the History panel keeps it for Undo and the Piano Roll panel \
+             keeps it for Transpose Up.",
+        );
         click(&mut harness, "Assign");
         let keymap = &harness.state().keymap;
         assert_eq!(keymap.lookup(chord("Up")), Some(&transport::TOGGLE_LOOP));
@@ -1030,7 +1033,7 @@ mod tests {
         assert_eq!(roll.accesskit_node().toggled(), Some(Toggled::True));
         click(&mut harness, "Where: Everywhere");
         press(&mut harness, "Up");
-        harness.get_by_label("isn't used yet.");
+        harness.get_by_label("isn't used yet, but the History panel keeps it for Undo.");
         click(&mut harness, "Assign");
         let keymap = &harness.state().keymap;
         assert_eq!(keymap.lookup(chord("Up")), Some(&transpose));

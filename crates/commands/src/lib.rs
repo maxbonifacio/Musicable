@@ -30,7 +30,7 @@ pub mod editor;
 #[cfg(test)]
 mod every_command;
 pub mod file;
-mod history;
+pub mod history;
 mod key;
 mod keymap;
 pub mod locator;
@@ -50,6 +50,7 @@ pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use browser::{Library, NoLibrary};
 pub use document::{Committed, Document, Edit, Transaction};
 pub use editor::{Editor, Edits, Focus};
+pub use history::Steps;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
 pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem, Scope};
 
@@ -425,6 +426,7 @@ impl fmt::Debug for Registry {
 pub fn register_all(registry: &mut Registry) {
     file::register(registry);
     edit::register(registry);
+    history::register(registry);
     transport::register(registry);
     track::register(registry);
     arrange::register(registry);

@@ -207,6 +207,10 @@ That's what `ParallelOptions::inline_below` is for
   the presets ([The browser](#the-browser)), hidden until Add Device,
   **Browser > Search in Browser** (Ctrl+F) or **View > Browser**
   (Ctrl+Alt+B) shows it.
+- **The History panel** is in a tab beside the browser, hidden until
+  **View > History** (Ctrl+Alt+H) shows it: every step of the undo history
+  by name, and clicking one takes the project back or forward to it
+  ([below](#the-history-panel)).
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
   measures it (click it for the audio settings), and the project's name,
@@ -230,9 +234,9 @@ egui's 0.3 seconds.
 
 ### The panels
 
-The arrangement, the mixer, the devices panel, the piano roll and the
-browser are docked panels, laid out in splits and tabs
-([egui_tiles](https://docs.rs/egui_tiles)):
+The arrangement, the mixer, the devices panel, the piano roll, the
+browser and the History panel are docked panels, laid out in splits and
+tabs ([egui_tiles](https://docs.rs/egui_tiles)):
 
 - **Drag a tab** onto another panel to split it, beside, over or under,
   where the blue preview shows, or onto a tab bar to join its tabs. A
@@ -255,12 +259,12 @@ browser are docked panels, laid out in splits and tabs
   is ([commands.md](commands.md#the-editors-state)): Copy and Delete take
   the notes selected in the piano roll while it has the focus, the clips,
   time or tracks selected in the arrangement while the arrangement or the
-  mixer has it, and nothing in the devices panel and the browser. The
-  piano roll takes the focus once it shows a clip. A panel's own keys, such
-  as the piano roll's arrow keys, work while it has the focus, and the
-  menus and the palette show the keys that work there. When the panel
-  with the focus is hidden or goes behind another tab, the arrangement
-  takes it.
+  mixer has it, and nothing in the devices panel, the browser and the
+  History panel. The piano roll takes the focus once it shows a clip. A
+  panel's own keys, such as the piano roll's arrow keys, work while it has
+  the focus, and the menus and the palette show the keys that work there.
+  When the panel with the focus is hidden or goes behind another tab, the
+  arrangement takes it.
 
 Devices and presets dragged from the browser go in the devices panel's
 chain wherever the panel is.
@@ -629,6 +633,30 @@ the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
 shows is the editor's too (`PianoRoll::lane`); its panel's id is
 `musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
 setting.
+
+## The History panel
+
+The History panel lists every step of the undo history by name, the
+oldest at the top. Live has no such list. **View > History** (Ctrl+Alt+H)
+shows it, in a tab beside the browser at first.
+
+- **The top row** is the project before any of the steps, named after it,
+  and a row follows for each step, up to the 1000 the history keeps. The
+  row the project is at is highlighted, and the steps after it, which redo
+  makes again, are greyed out under it.
+- **Clicking a row** takes the project back or forward to it, undoing or
+  redoing the steps in between (`history.go_to`). Clicking the top row
+  undoes them all, and the project has no changes to save if it had none
+  when it opened. The list scrolls to keep the row the project is at in
+  sight.
+- **A new change** after going back drops the greyed steps, as undo does.
+- **Up and Down** step back and forward through the list while the panel
+  has the focus, as Undo and Redo do. They're the panel's own keys
+  ([Changing keys](#changing-keys)), so the arrow keys still move the
+  notes in the piano roll.
+
+Its panel's id is `musicable_ui::HISTORY`, and it docks, moves to a window
+of its own and goes in workspaces as the other panels do.
 
 ## The command palette
 
@@ -1831,6 +1859,10 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   previews a sample through the engine at the settings' volume, puts it on
   a new track with a double-click, tags it, and starts the app again to
   find the tag and the settings kept.
+  [`crates/app/src/app/undoing.rs`](../crates/app/src/app/undoing.rs)
+  makes changes, goes back to the first by clicking it in the History
+  panel, steps through the rest with the panel's arrow keys, and moves the
+  panel to a window of its own, which comes back with the app.
   `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that

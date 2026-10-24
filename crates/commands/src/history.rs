@@ -1,17 +1,50 @@
 //! The undo history that [`Document::undo`](crate::Document::undo) and
-//! [`Document::redo`](crate::Document::redo) step through.
+//! [`Document::redo`](crate::Document::redo) step through, and the command
+//! that jumps through it, for the History panel.
 //!
 //! Each committed transaction is a step, with its edits. Undo applies a
 //! step's edits backwards, each one's [`inverse`](Edit::inverse), and redo
 //! applies them again, both as transactions of their own. A gesture, such as
 //! dragging a fader, folds its transactions into one step.
+//!
+//! [`Steps`] lists the steps by name, and [`GO_TO`] takes the project back
+//! or forward to one, undoing or redoing those in between one at a time
+//! ([`Document::go_to`](crate::Document::go_to)).
 
 use std::collections::VecDeque;
 
-use crate::Edit;
+use crate::{Command, CommandError, CommandId, Edit, Param, Registry, Type, Value};
+
+/// Takes the project back or forward to a step in the undo history, as
+/// clicking it in the History panel does.
+pub const GO_TO: CommandId = CommandId::new("history.go_to");
 
 /// How many steps undo can go back. Beyond that, the oldest go.
 pub(crate) const LIMIT: usize = 1000;
+
+/// Registers the history's command.
+pub fn register(registry: &mut Registry) {
+    registry.add(
+        Command::new(GO_TO, "Go to Step").with_params(&[Param::required(
+            "step",
+            Type::Int,
+            "The step, numbered from 1 for the oldest the history keeps: it and those \
+             before it are done, and those after it undone. 0 undoes every step.",
+        )]),
+        |ctx, args| {
+            let step: i64 = args.get("step")?;
+            let steps = ctx.document.steps().len();
+            let done = usize::try_from(step)
+                .ok()
+                .filter(|&done| done <= steps)
+                .ok_or_else(|| {
+                    CommandError::invalid(format!("the history has no step {step}: it has {steps}"))
+                })?;
+            ctx.document.go_to(done);
+            Ok(Value::None)
+        },
+    );
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct History {
@@ -98,12 +131,11 @@ impl History {
         self.undo.back()
     }
 
-    pub(crate) fn undo_name(&self) -> Option<&str> {
-        self.undo.back().map(|step| step.name.as_str())
-    }
-
-    pub(crate) fn redo_name(&self) -> Option<&str> {
-        self.redo.last().map(|step| step.name.as_str())
+    pub(crate) fn steps(&self) -> Steps<'_> {
+        Steps {
+            undo: &self.undo,
+            redo: &self.redo,
+        }
     }
 
     pub(crate) fn begin_gesture(&mut self) {
@@ -131,6 +163,63 @@ impl History {
     fn next_id(&mut self) -> u64 {
         self.last_id += 1;
         self.last_id
+    }
+}
+
+/// The steps in the undo history, by name, for a list of them such as the
+/// History panel's: from the oldest, those undo can take back, then those
+/// redo can make again, the next one first.
+#[derive(Debug, Clone, Copy)]
+pub struct Steps<'a> {
+    undo: &'a VecDeque<Step>,
+    redo: &'a [Step],
+}
+
+impl<'a> Steps<'a> {
+    /// How many steps there are, undone ones too.
+    pub fn len(self) -> usize {
+        self.undo.len() + self.redo.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many are done: the first this many, from the oldest. Those after
+    /// them were undone, and redo can make them again.
+    pub fn done(self) -> usize {
+        self.undo.len()
+    }
+
+    /// The name of the step at `index`, from 0 for the oldest, or `None`
+    /// past the newest.
+    pub fn name(self, index: usize) -> Option<&'a str> {
+        let step = match index.checked_sub(self.undo.len()) {
+            None => &self.undo[index],
+            Some(undone) => self.redo.iter().rev().nth(undone)?,
+        };
+        Some(&step.name)
+    }
+
+    /// The name of the step undo would take back.
+    pub fn undo_name(self) -> Option<&'a str> {
+        self.undo.back().map(|step| step.name.as_str())
+    }
+
+    /// The name of the step redo would make again.
+    pub fn redo_name(self) -> Option<&'a str> {
+        self.redo.last().map(|step| step.name.as_str())
+    }
+}
+
+impl Default for Steps<'_> {
+    /// No steps.
+    fn default() -> Self {
+        static NONE: VecDeque<Step> = VecDeque::new();
+        Self {
+            undo: &NONE,
+            redo: &[],
+        }
     }
 }
 
@@ -765,6 +854,50 @@ mod tests {
     }
 
     #[test]
+    fn the_steps_are_listed_by_name_and_go_to_jumps_to_one() {
+        let mut doc = Document::new(Project::new());
+        doc.transact("Toggle Metronome", |tx| tx.set_metronome(true));
+        doc.transact("Toggle Loop", |tx| tx.set_looping(true));
+        doc.transact("Toggle Punch In", |tx| tx.set_punch_in(true));
+        doc.take_committed();
+        let listed = |doc: &Document| -> (Vec<String>, usize) {
+            let steps = doc.steps();
+            let names = (0..steps.len()).map(|i| steps.name(i).unwrap().to_owned());
+            (names.collect(), steps.done())
+        };
+        let names = ["Toggle Metronome", "Toggle Loop", "Toggle Punch In"].map(String::from);
+        assert_eq!(listed(&doc), (names.to_vec(), 3));
+        assert_eq!(doc.steps().name(3), None);
+
+        // Back to the first step, undoing the two after it in turn, which
+        // stay listed.
+        assert!(doc.go_to(1));
+        assert!(doc.project().metronome && !doc.project().looping);
+        let committed: Vec<_> = doc.take_committed().into_iter().map(|c| c.name).collect();
+        assert_eq!(committed, ["Undo Toggle Punch In", "Undo Toggle Loop"]);
+        assert_eq!(listed(&doc), (names.to_vec(), 1));
+        assert_eq!(doc.redo_name(), Some("Toggle Loop"));
+        // Forward to the last, and back to before them all.
+        assert!(doc.go_to(3));
+        assert!(doc.project().punch_in);
+        assert_eq!(doc.take_committed().len(), 2);
+        assert!(doc.go_to(0));
+        assert_eq!(doc.project(), &Project::new());
+        assert!(!doc.is_modified());
+        assert_eq!(listed(&doc), (names.to_vec(), 0));
+        // Where it is already, nothing happens; past the last, nothing can.
+        doc.take_committed();
+        assert!(doc.go_to(0));
+        assert!(!doc.go_to(4));
+        assert!(doc.take_committed().is_empty());
+        // A new step after going back forgets the steps undone.
+        assert!(doc.go_to(1));
+        doc.transact("Toggle Punch Out", |tx| tx.set_punch_out(true));
+        let names = ["Toggle Metronome", "Toggle Punch Out"].map(String::from);
+        assert_eq!(listed(&doc), (names.to_vec(), 2));
+    }
+
+    #[test]
     fn a_gesture_is_one_step() {
         let mut doc = Document::new(Project::new());
         let tempo = |bpm| {
@@ -921,6 +1054,8 @@ mod tests {
         // project started.
         assert!(doc.project().metronome);
         assert!(doc.is_modified());
+        let steps = doc.steps();
+        assert_eq!((steps.len(), steps.done()), (LIMIT, 0));
     }
 
     /// What a test does to a document.
@@ -933,6 +1068,8 @@ mod tests {
         },
         Undo,
         Redo,
+        /// Goes to a step, picked by the number.
+        GoTo(usize),
         BeginGesture,
         EndGesture,
         Save,
@@ -943,6 +1080,7 @@ mod tests {
             4 => (0..KINDS, any::<bool>()).prop_map(|(kind, inverse)| Op::Edit { kind, inverse }),
             2 => Just(Op::Undo),
             1 => Just(Op::Redo),
+            1 => (0..64_usize).prop_map(Op::GoTo),
             1 => Just(Op::BeginGesture),
             1 => Just(Op::EndGesture),
             1 => Just(Op::Save),
@@ -1052,6 +1190,15 @@ mod tests {
                         }
                         model.gesture = None;
                     }
+                    Op::GoTo(step) => {
+                        let step = step % model.projects.len();
+                        prop_assert!(doc.go_to(step));
+                        // Undoing or redoing ends the gesture.
+                        if step != model.done {
+                            model.gesture = None;
+                        }
+                        model.done = step;
+                    }
                     Op::BeginGesture => {
                         doc.begin_gesture();
                         model.gesture = Some(model.next_id());
@@ -1076,6 +1223,11 @@ mod tests {
                 prop_assert_eq!(doc.undo_name(), undo_name);
                 let redo_name = model.projects.get(model.done + 1).map(|p| p.1.as_str());
                 prop_assert_eq!(doc.redo_name(), redo_name);
+                let steps = doc.steps();
+                let listed: Vec<_> = (0..steps.len()).filter_map(|i| steps.name(i)).collect();
+                let made: Vec<_> = model.projects[1..].iter().map(|p| p.1.as_str()).collect();
+                prop_assert_eq!(listed, made);
+                prop_assert_eq!(steps.done(), model.done);
 
                 // Each committed edit starts from the value the one before
                 // it left, so whatever follows them stays in step.

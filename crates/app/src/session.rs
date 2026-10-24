@@ -8,7 +8,7 @@ use std::time::Instant;
 use musicable_audio::{InputBuffer, MidiBuffer};
 use musicable_commands::{
     Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
-    Request, Transport, UnknownCommand, Value, mixer, take, transport,
+    Request, Steps, Transport, UnknownCommand, Value, mixer, take, transport,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
@@ -511,7 +511,13 @@ impl Session {
         self.document.mark_saved();
     }
 
-    /// The name of the change Undo would take back, for the Edit menu.
+    /// The steps of the undo history, by name, for the History panel and
+    /// the Edit menu.
+    pub fn history(&self) -> Steps<'_> {
+        self.document.steps()
+    }
+
+    /// The name of the change Undo would take back.
     pub fn undo_name(&self) -> Option<&str> {
         self.document.undo_name()
     }
