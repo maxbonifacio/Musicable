@@ -183,7 +183,8 @@ lives. What each still lacks is in its doc's "Not done yet".
   settings) is the `Editor`, kept with the `Document` outside the widgets,
   where the piano roll, extensions and agents find it too
   ([commands.md](commands.md#the-editors-state)). Colours and sizes come
-  from a `Theme`, and gestures from a `MouseMap`, for Tier 2's profiles.
+  from a `Theme`, and gestures from a `MouseMap`, which the user's theme
+  and mouse map files change.
 - **The piano roll.** A MIDI clip's notes on rows of keys beside a
   keyboard, over a lane of their velocities or a controller's curve, in a
   tab beside the devices panel, drawn and tested as the arrangement is. Its
@@ -396,8 +397,9 @@ says what's there.
   ([app.md](app.md#workspaces)). Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
-  so a theme file fills a `Theme` ([app.md](app.md#themes)), and a
-  profile is a keymap file, a mouse map, a theme, workspaces and the
+  so a theme file fills a `Theme` ([app.md](app.md#themes)), a mouse map
+  file changes Live's `MouseMap` ([app.md](app.md#settings-and-your-keymap)),
+  and a profile is a keymap file, a mouse map, a theme, workspaces and the
   behaviour settings (`Editor::behaviour`) together, each saved as what
   differs from its base. The transport bar, the track headers and the
   mixer strips are lists of parts, which the user hides, moves and resizes

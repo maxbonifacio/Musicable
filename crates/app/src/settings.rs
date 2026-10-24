@@ -65,10 +65,12 @@ const VERSION: u32 = 1;
 pub const SETTINGS_FILE: &str = "settings.toml";
 /// The user's keymap file's name in the config folder.
 pub const KEYMAP_FILE: &str = "keymap.toml";
+/// The user's mouse map file's name in the config folder.
+pub const MOUSE_FILE: &str = "mouse.toml";
 /// The folder of the user's theme files, in the config folder.
 pub const THEMES_FOLDER: &str = "themes";
 
-/// The folder for the settings, the user's keymap and their themes:
+/// The folder for the settings, the user's keymap, mouse map and themes:
 /// `%APPDATA%\Musicable` on Windows, `~/Library/Application
 /// Support/Musicable` on macOS, and `$XDG_CONFIG_HOME/musicable` or
 /// `~/.config/musicable` elsewhere. The `MUSICABLE_CONFIG_DIR` environment

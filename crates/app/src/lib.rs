@@ -12,6 +12,8 @@ mod frame_times;
 mod keymap_file;
 pub mod library;
 mod media;
+mod mouse_file;
+mod mouse_page;
 pub mod null_test;
 mod output;
 mod plugin_scan;

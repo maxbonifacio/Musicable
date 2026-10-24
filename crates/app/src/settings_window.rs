@@ -1,8 +1,10 @@
 //! The Settings window: a page for each area of Musicable's settings,
 //! listed down its left side, as Live's Preferences has a tab for each.
 //! Changes apply at once, and the app keeps them, in the settings file or
-//! in the keymap's, the theme's or the workspaces' files. The window isn't
-//! a panel, so no workspace has it.
+//! in the keymap's, the mouse map's, the theme's or the workspaces' files.
+//! The window isn't a panel, so no workspace has it. Each page is
+//! registered with its id, its title and what draws it, so a new page goes
+//! in one place.
 
 use std::path::Path;
 
@@ -18,6 +20,8 @@ use musicable_ui::{Action, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Shell, View, 
 use crate::Output;
 use crate::appearance_page::{self, AppearancePage};
 use crate::audio_page::AudioPage;
+use crate::mouse_file::UserMouse;
+use crate::mouse_page;
 use crate::settings::Settings;
 use crate::theme_file::UserTheme;
 
@@ -27,6 +31,8 @@ pub const AUDIO: &str = "audio";
 pub const RECORDING: &str = "recording";
 /// Every command's keys.
 pub const KEYS: &str = "keys";
+/// What the mouse does where.
+pub const MOUSE: &str = "mouse";
 /// How editing behaves where people's habits differ.
 pub const BEHAVIOUR: &str = "behaviour";
 /// The theme.
@@ -36,17 +42,85 @@ pub const WORKSPACES: &str = "workspaces";
 /// How the browser previews samples, and where presets go.
 pub const BROWSER: &str = "browser";
 
-/// The pages by id, with their titles, in the order the window lists them.
-/// Commands name a page by its id. A new page goes here, and in
-/// [`SettingsWindow::page`].
-const PAGES: [(&str, &str); 7] = [
-    (AUDIO, "Audio"),
-    (RECORDING, "Recording"),
-    (KEYS, "Keys"),
-    (BEHAVIOUR, "Behaviour"),
-    (APPEARANCE, "Appearance"),
-    (WORKSPACES, "Workspaces"),
-    (BROWSER, "Browser"),
+/// A page of the window.
+struct Page {
+    /// What commands name it by.
+    id: &'static str,
+    /// What the list down the window's side calls it.
+    title: &'static str,
+    /// Whether it scrolls its own contents, as the keys' long list does.
+    /// The others scroll in the window.
+    scrolls: bool,
+    /// Draws it, with what the pages keep. The flag says it came into
+    /// sight in this frame, so what it keeps starts afresh. Returns what
+    /// the user changed or asked for, for the app to carry out.
+    show: fn(&mut Pages, &mut Ui, &mut Cx<'_>, bool) -> Option<Asked>,
+}
+
+/// The pages, in the order the window lists them. A new page goes here.
+const PAGES: [Page; 8] = [
+    Page {
+        id: AUDIO,
+        title: "Audio",
+        scrolls: false,
+        show: |pages, ui, cx, new| {
+            if new {
+                pages.audio.reset(cx.output);
+            }
+            pages.audio.show(ui, cx.output).map(Asked::Stream)
+        },
+    },
+    Page {
+        id: RECORDING,
+        title: "Recording",
+        scrolls: false,
+        show: |pages, ui, cx, _| pages.recording.show(ui, cx),
+    },
+    Page {
+        id: KEYS,
+        title: "Keys",
+        scrolls: true,
+        show: |_, ui, cx, _| {
+            let actions = cx.shell.show_keys(ui, cx.view);
+            cx.actions.extend(actions);
+            None
+        },
+    },
+    Page {
+        id: MOUSE,
+        title: "Mouse",
+        scrolls: true,
+        show: |_, ui, cx, _| mouse_page::show(ui, cx.shell.mouse_map(), cx.mouse).map(Asked::Mouse),
+    },
+    Page {
+        id: BEHAVIOUR,
+        title: "Behaviour",
+        scrolls: false,
+        show: |_, ui, cx, _| behaviour(ui, cx.settings.behaviour).map(Asked::Behaviour),
+    },
+    Page {
+        id: APPEARANCE,
+        title: "Appearance",
+        scrolls: false,
+        show: |pages, ui, cx, new| {
+            if new {
+                pages.appearance.reset();
+            }
+            pages.appearance.show(ui, cx.theme).map(Asked::Appearance)
+        },
+    },
+    Page {
+        id: WORKSPACES,
+        title: "Workspaces",
+        scrolls: false,
+        show: |_, ui, cx, _| workspaces(ui, cx),
+    },
+    Page {
+        id: BROWSER,
+        title: "Browser",
+        scrolls: false,
+        show: |_, ui, cx, _| browser(ui, cx),
+    },
 ];
 
 /// How big the window is at first, in points.
@@ -69,6 +143,8 @@ pub enum Asked {
     CaptureMinutes(u32),
     /// Editing behaves so from now on.
     Behaviour(Behaviour),
+    /// What the Mouse page asked for.
+    Mouse(mouse_page::Asked),
     /// What the Appearance page asked for.
     Appearance(appearance_page::Asked),
     /// Ask for a folder to save presets in.
@@ -83,17 +159,30 @@ pub enum Asked {
 pub struct Cx<'a> {
     /// What the shell shows in this frame, which the Keys page shows too.
     pub view: &'a View<'a>,
-    /// The shell, which draws the Keys page.
+    /// The shell, which draws the Keys page and has the mouse map.
     pub shell: &'a mut Shell,
+    /// Where the pages put what they ask the shell's way, as the Keys page
+    /// and the workspace buttons do, with the rest of the shell's actions.
+    pub actions: &'a mut Vec<Action>,
     pub output: &'a Output,
     /// The device playing's recording offset, in frames.
     pub offset: i64,
+    /// The user's mouse map file.
+    pub mouse: &'a UserMouse,
     pub theme: &'a UserTheme,
     pub settings: &'a Settings,
     /// Where presets go, if Musicable has a folder for them.
     pub presets_folder: Option<&'a Path>,
     /// Where the workspaces' files go, if there's a config folder.
     pub workspaces_folder: Option<&'a Path>,
+}
+
+/// What the pages keep from frame to frame.
+#[derive(Default)]
+struct Pages {
+    audio: AudioPage,
+    recording: RecordingPage,
+    appearance: AppearancePage,
 }
 
 /// The Settings window.
@@ -103,12 +192,7 @@ pub struct SettingsWindow {
     page: &'static str,
     /// The page drawn in the last frame, to tell when one comes into sight.
     drawn: Option<&'static str>,
-    audio: AudioPage,
-    appearance: AppearancePage,
-    /// The recording offset as the user drags it, until they let go.
-    offset_drag: Option<i64>,
-    /// Capture's length as the user drags it, until they let go.
-    capture_drag: Option<u32>,
+    pages: Pages,
 }
 
 impl Default for SettingsWindow {
@@ -117,10 +201,7 @@ impl Default for SettingsWindow {
             open: false,
             page: AUDIO,
             drawn: None,
-            audio: AudioPage::default(),
-            appearance: AppearancePage::default(),
-            offset_drag: None,
-            capture_drag: None,
+            pages: Pages::default(),
         }
     }
 }
@@ -130,7 +211,8 @@ impl SettingsWindow {
         Self::default()
     }
 
-    /// Shows the window at `page`, or at the page it showed last.
+    /// Shows the window at the page with id `page`, or at the page it
+    /// showed last.
     pub fn open(&mut self, page: Option<&'static str>) {
         self.open = true;
         if let Some(page) = page {
@@ -151,18 +233,12 @@ impl SettingsWindow {
 
     /// Says how applying the Audio page's settings went.
     pub fn applied(&mut self, outcome: Result<String, String>) {
-        self.audio.applied(outcome);
+        self.pages.audio.applied(outcome);
     }
 
-    /// Shows the window, if it's open. What the Keys page asks for goes in
-    /// `actions`, with the rest of the shell's. Returns what the user
-    /// changed or asked for on the other pages.
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        mut cx: Cx<'_>,
-        actions: &mut Vec<Action>,
-    ) -> Option<Asked> {
+    /// Shows the window, if it's open. Returns what the user changed or
+    /// asked for that the app carries out.
+    pub fn show(&mut self, ctx: &egui::Context, mut cx: Cx<'_>) -> Option<Asked> {
         // Escape closes the window, unless the Keys page is giving a command
         // keys, or a menu is open: then it stops that.
         if self.open && !cx.shell.giving_keys() && !egui::Popup::is_any_open(ctx) {
@@ -181,10 +257,7 @@ impl SettingsWindow {
                 .pivot(Align2::CENTER_TOP)
                 .default_pos(top)
                 .default_size(SIZE)
-                .show(ctx, |ui| {
-                    drawn = Some(self.page);
-                    asked = self.contents(ui, &mut cx, actions);
-                });
+                .show(ctx, |ui| asked = self.contents(ui, &mut cx, &mut drawn));
             // Clicking anywhere else stops giving a command keys.
             if window.is_some_and(|w| w.response.clicked_elsewhere()) {
                 cx.shell.stop_giving_keys();
@@ -198,12 +271,12 @@ impl SettingsWindow {
         asked
     }
 
-    /// The list of pages, and the page in sight.
+    /// The list of pages, and the page in sight, whose id goes in `drawn`.
     fn contents(
         &mut self,
         ui: &mut Ui,
         cx: &mut Cx<'_>,
-        actions: &mut Vec<Action>,
+        drawn: &mut Option<&'static str>,
     ) -> Option<Asked> {
         let mut asked = None;
         ui.horizontal_top(|ui| {
@@ -211,70 +284,51 @@ impl SettingsWindow {
             let list = Layout::top_down_justified(Align::LEFT);
             ui.allocate_ui_with_layout(vec2(LIST_WIDTH, 0.0), list, |ui| {
                 ui.set_width(LIST_WIDTH);
-                for (id, title) in PAGES {
-                    let on = self.page == id;
-                    let tab = ui.selectable_label(on, title);
+                for page in &PAGES {
+                    let on = self.page == page.id;
+                    let tab = ui.selectable_label(on, page.title);
                     // Named as the panels' tabs are.
-                    let name = format!("{title} page");
+                    let name = format!("{} page", page.title);
                     tab.widget_info(|| WidgetInfo::selected(Role::Tab, true, on, &name));
                     if tab.clicked() {
-                        self.page = id;
+                        self.page = page.id;
                     }
                 }
             });
             ui.separator();
             ui.vertical(|ui| {
-                let page = self.page;
-                // The page's own state starts afresh as it comes into sight.
-                let new = self.drawn != Some(page);
-                if page == KEYS {
-                    // The keys scroll in a list of their own.
-                    actions.extend(cx.shell.show_keys(ui, cx.view));
+                let Some(page) = PAGES.iter().find(|page| page.id == self.page) else {
                     return;
+                };
+                let new = self.drawn != Some(page.id);
+                *drawn = Some(page.id);
+                let pages = &mut self.pages;
+                if page.scrolls {
+                    asked = (page.show)(pages, ui, cx, new);
+                } else {
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| asked = (page.show)(pages, ui, cx, new));
                 }
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        asked = self.page_contents(ui, page, new, cx, actions)
-                    });
             });
         });
         asked
     }
+}
 
-    /// The page `page`, which comes into sight in this frame if `new`.
-    fn page_contents(
-        &mut self,
-        ui: &mut Ui,
-        page: &str,
-        new: bool,
-        cx: &mut Cx<'_>,
-        actions: &mut Vec<Action>,
-    ) -> Option<Asked> {
-        match page {
-            AUDIO => {
-                if new {
-                    self.audio.reset(cx.output);
-                }
-                self.audio.show(ui, cx.output).map(Asked::Stream)
-            }
-            RECORDING => self.recording(ui, cx),
-            BEHAVIOUR => behaviour(ui, cx.settings.behaviour).map(Asked::Behaviour),
-            APPEARANCE => {
-                if new {
-                    self.appearance.reset();
-                }
-                (self.appearance.show(ui, cx.theme)).map(Asked::Appearance)
-            }
-            WORKSPACES => workspaces(ui, cx, actions),
-            BROWSER => browser(ui, cx, actions),
-            _ => None,
-        }
-    }
+/// What the Recording page keeps.
+#[derive(Default)]
+struct RecordingPage {
+    /// Capture's length as the user drags it, until they let go.
+    capture_drag: Option<u32>,
+    /// The recording offset as the user drags it, until they let go.
+    offset_drag: Option<i64>,
+}
 
+impl RecordingPage {
     /// How long Capture holds the inputs, and how late recordings through
     /// the device playing land.
-    fn recording(&mut self, ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
+    fn show(&mut self, ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
         let mut asked = None;
         ui.label(RichText::new("Capture").strong());
         ui.horizontal(|ui| {
@@ -397,8 +451,9 @@ fn behaviour(ui: &mut Ui, behaviour: Behaviour) -> Option<Behaviour> {
 
 /// The user's workspaces, by slot, with the one in use picked, and what
 /// can be done with them, which runs the workspace commands.
-fn workspaces(ui: &mut Ui, cx: &Cx<'_>, actions: &mut Vec<Action>) -> Option<Asked> {
+fn workspaces(ui: &mut Ui, cx: &mut Cx<'_>) -> Option<Asked> {
     let view = cx.view;
+    let actions = &mut *cx.actions;
     let listed = view.workspaces;
     for ((slot, name), switch) in listed.slots.iter().enumerate().zip(workspace::SWITCH) {
         let Some(name) = name else {
@@ -465,8 +520,9 @@ fn workspaces(ui: &mut Ui, cx: &Cx<'_>, actions: &mut Vec<Action>) -> Option<Ask
 }
 
 /// How the browser previews samples, and where Musicable's presets go.
-fn browser(ui: &mut Ui, cx: &Cx<'_>, actions: &mut Vec<Action>) -> Option<Asked> {
+fn browser(ui: &mut Ui, cx: &mut Cx<'_>) -> Option<Asked> {
     let settings = &cx.settings.browser;
+    let actions = &mut *cx.actions;
     ui.label(RichText::new("Previews").strong());
     let mut on = settings.auto_preview;
     if ui
@@ -538,7 +594,7 @@ mod tests {
     /// A device's recording offset, as the Recording page shows it, with
     /// the offsets it asked for.
     struct Offset {
-        window: SettingsWindow,
+        page: RecordingPage,
         frames: i64,
         asked: Vec<i64>,
     }
@@ -546,13 +602,13 @@ mod tests {
     #[test]
     fn a_recording_offset_applies_once_typed_or_let_go_of() {
         let offset = Offset {
-            window: SettingsWindow::new(),
+            page: RecordingPage::default(),
             frames: 0,
             asked: Vec::new(),
         };
         let mut harness = Harness::new_ui_state(
             |ui, offset: &mut Offset| {
-                if let Some(frames) = offset.window.offset_row(ui, offset.frames, 48_000) {
+                if let Some(frames) = offset.page.offset_row(ui, offset.frames, 48_000) {
                     offset.asked.push(frames);
                     offset.frames = frames;
                 }
@@ -579,17 +635,12 @@ mod tests {
             harness.run();
         }
         assert_eq!(harness.state().asked, [480]);
-        assert!(
-            harness
-                .state()
-                .window
-                .offset_drag
-                .is_some_and(|frames| frames > 480)
-        );
+        let dragged = harness.state().page.offset_drag;
+        assert!(dragged.is_some_and(|frames| frames > 480), "{dragged:?}");
         harness.drop_at(at + vec2(40.0, 0.0));
         harness.run();
         let asked = &harness.state().asked;
         assert!(asked.len() == 2 && asked[1] > 480, "{asked:?}");
-        assert_eq!(harness.state().window.offset_drag, None);
+        assert_eq!(harness.state().page.offset_drag, None);
     }
 }

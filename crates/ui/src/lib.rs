@@ -49,7 +49,10 @@ pub use browser::{Library, Listing, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Prev
 pub use devices::{PluginEntry, PluginParam, PluginStatus, Plugins};
 pub use keys::{KeyPresses, chord, first_press};
 pub use mixer::{InputChoice, Level, Levels, MidiChoice};
-pub use mouse::{Gesture, MouseAction, MouseMap, Target};
+pub use mouse::{
+    Gesture, MouseAction, MouseFileError, MouseMap, MouseMapFile, MouseProblem, Target,
+    modifier_sets,
+};
 pub use panels::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL};
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use shell::{

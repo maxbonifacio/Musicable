@@ -160,6 +160,28 @@ impl Modifiers {
             .map(|&(mods, _)| mods)
     }
 
+    /// Reads the modifiers in front of the last part of `text`, such as the
+    /// Ctrl and Shift of `Ctrl+Shift+M`, and returns them with that part,
+    /// trimmed. Mouse maps write gestures this way too: `Alt+Drag`.
+    pub fn split_off(text: &str) -> Result<(Modifiers, &str), ChordError> {
+        let Some((names, last)) = text.rsplit_once('+') else {
+            return Ok((Self::NONE, text.trim()));
+        };
+        let mut mods = Self::NONE;
+        for name in names.split('+').map(str::trim) {
+            if name.is_empty() {
+                return Err(ChordError::EmptyName);
+            }
+            let modifier = Self::from_name(name)
+                .ok_or_else(|| ChordError::UnknownModifier(name.to_owned()))?;
+            if mods.overlaps(modifier) {
+                return Err(ChordError::RepeatedModifier(name.to_owned()));
+            }
+            mods = mods | modifier;
+        }
+        Ok((mods, last.trim()))
+    }
+
     fn overlaps(self, other: Modifiers) -> bool {
         (self.ctrl && other.ctrl)
             || (self.alt && other.alt)
@@ -206,14 +228,24 @@ impl From<Key> for KeyChord {
     }
 }
 
+impl fmt::Display for Modifiers {
+    /// The modifiers as key chords write them, joined by `+` in the order
+    /// chords write them: `Ctrl+Shift`. No modifiers write nothing.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = Self::NAMES
+            .iter()
+            .filter(|&&(mods, _)| self.overlaps(mods))
+            .map(|&(_, name)| name)
+            .collect();
+        f.pad(&names.join("+"))
+    }
+}
+
 impl fmt::Display for KeyChord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut chord = String::new();
-        for (mods, name) in Modifiers::NAMES {
-            if self.mods.overlaps(mods) {
-                chord.push_str(name);
-                chord.push('+');
-            }
+        let mut chord = self.mods.to_string();
+        if !chord.is_empty() {
+            chord.push('+');
         }
         chord.push_str(self.key.name());
         f.pad(&chord)
@@ -227,20 +259,7 @@ impl FromStr for KeyChord {
         if text.trim().is_empty() {
             return Err(ChordError::Empty);
         }
-        let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
-        let key = parts.pop().unwrap_or_default();
-        let mut mods = Modifiers::NONE;
-        for part in parts {
-            if part.is_empty() {
-                return Err(ChordError::EmptyName);
-            }
-            let modifier = Modifiers::from_name(part)
-                .ok_or_else(|| ChordError::UnknownModifier(part.to_owned()))?;
-            if mods.overlaps(modifier) {
-                return Err(ChordError::RepeatedModifier(part.to_owned()));
-            }
-            mods = mods | modifier;
-        }
+        let (mods, key) = Modifiers::split_off(text)?;
         if key.is_empty() || Modifiers::from_name(key).is_some() {
             return Err(ChordError::MissingKey);
         }
@@ -334,6 +353,25 @@ mod tests {
             "Ctrl+Alt+Shift+Cmd+F5"
         );
         assert_eq!(chord("ctrl+=").to_string(), "Ctrl+Equals");
+    }
+
+    #[test]
+    fn modifiers_read_and_write_as_chords_do() {
+        assert_eq!(Modifiers::NONE.to_string(), "");
+        let mods = Modifiers::SHIFT | Modifiers::CTRL;
+        assert_eq!(mods.to_string(), "Ctrl+Shift");
+        assert_eq!(
+            Modifiers::split_off(" Drag "),
+            Ok((Modifiers::NONE, "Drag"))
+        );
+        assert_eq!(
+            Modifiers::split_off("shift + ctrl+Drag"),
+            Ok((mods, "Drag"))
+        );
+        assert_eq!(
+            Modifiers::split_off("Hyper+Drag"),
+            Err(ChordError::UnknownModifier("Hyper".into()))
+        );
     }
 
     #[test]
