@@ -65,6 +65,7 @@ impl Theme {
             header_selected: rgb(210, 220, 234),
             header_text: gray(25),
             divider: gray(186),
+            focus: rgb(40, 110, 210),
             device: gray(248),
             preview_wave: rgb(40, 110, 210),
 

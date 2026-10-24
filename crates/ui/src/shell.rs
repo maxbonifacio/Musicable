@@ -9,8 +9,8 @@ use egui::{Align, Button, DragValue, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, Command, CommandId, Editor, KeyChord, Keymap, Named, Problem, Registry, Value, arrange,
-    controllers, device, edit, locator, notes, options, take, track, transport, view,
+    Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Value,
+    arrange, controllers, device, edit, locator, notes, options, take, track, transport, view,
 };
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
@@ -275,6 +275,7 @@ impl Shell {
             status_bar(ui, view, &mut actions);
         });
         let chain = (self.panels.devices).chain(view.project, view.editor.selected_track);
+        let drawn = actions.len();
         let mut draw = Draw {
             registry: &self.registry,
             panels: &mut self.panels,
@@ -288,9 +289,13 @@ impl Shell {
             },
             edited: false,
             closed: Vec::new(),
+            focused: None,
         };
         let dock = &mut self.dock;
         egui::CentralPanel::no_frame().show(ui, |ui| dock.show(ui, &mut draw));
+        if let Some(panel) = draw.focused {
+            focus_on(panel, view.editor, drawn, draw.cx.actions);
+        }
         // Add Device shows the browser's devices.
         if draw.cx.browse {
             self.panels.browser.show_devices();
@@ -312,7 +317,8 @@ impl Shell {
         // they're open, such as Escape, don't reach the windows under them.
         self.show_rename(ui.ctx(), view, &mut actions);
         self.palette.show(ui.ctx(), view, &mut actions);
-        self.shortcuts.show(ui.ctx(), view, &mut actions);
+        self.shortcuts
+            .show(ui.ctx(), view, &self.registry, &mut actions);
         browser::show_dragged(ui.ctx());
         actions
     }
@@ -569,7 +575,7 @@ fn command_button(
             command.when.applies(view.project, view.editor),
         ),
     };
-    let mut button = with_keys(Button::new(title), view.keymap, id);
+    let mut button = with_keys(Button::new(title), view, id);
     let on = match id {
         id if *id == view::TOGGLE_MIXER => Some(shown.contains(MIXER)),
         id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
@@ -582,6 +588,25 @@ fn command_button(
     }
     if ui.add_enabled(enabled, button).clicked() {
         actions.push(Action::Run(id.clone()));
+    }
+}
+
+/// Gives the panel `id` the focus, before what the panels asked for from
+/// `drawn` on, unless it has the focus, or asked for it, or is the piano
+/// roll with no clip to show. What a click does in a panel can move the
+/// focus on, as opening a clip in the piano roll does.
+fn focus_on(id: &'static str, editor: &Editor, drawn: usize, actions: &mut Vec<Action>) {
+    let Some(focus) = Focus::on(id).filter(|&focus| focus != editor.focus) else {
+        return;
+    };
+    if focus == Focus::PIANO_ROLL && editor.piano_roll.clip.is_none() {
+        return;
+    }
+    let asked = (actions[drawn..].iter())
+        .any(|action| matches!(action, Action::RunWith(id, _) if *id == view::SET_FOCUS));
+    if !asked {
+        let args = Args::new().with("panel", id);
+        actions.insert(drawn, Action::RunWith(view::SET_FOCUS, args));
     }
 }
 
@@ -826,21 +851,25 @@ fn hint(view: &View<'_>, id: &CommandId) -> String {
         .commands
         .get(id)
         .map_or(id.as_str(), |c| c.title.as_str());
-    match chords(view.keymap, id).as_str() {
+    match chords(view, id).as_str() {
         "" => title.to_owned(),
         chords => format!("{title} ({chords})"),
     }
 }
 
-/// The chords that run `id`, as keymap files write them.
-pub(crate) fn chords(keymap: &Keymap, id: &CommandId) -> String {
-    let chords: Vec<_> = keymap.chords_for(id).map(|c| c.to_string()).collect();
+/// The chords that run `id` in the panel with the focus, as keymap files
+/// write them: the panel's own, and those that work everywhere that the
+/// panel doesn't take for another command.
+pub(crate) fn chords(view: &View<'_>, id: &CommandId) -> String {
+    let chords = view.keymap.chords_focused(id, view.editor.focus);
+    let chords: Vec<_> = chords.iter().map(KeyChord::to_string).collect();
     chords.join(", ")
 }
 
-/// `button` with the chords that run `id` at its right, if any do.
-pub(crate) fn with_keys<'a>(button: Button<'a>, keymap: &Keymap, id: &CommandId) -> Button<'a> {
-    match chords(keymap, id) {
+/// `button` with the chords that run `id` in the panel with the focus at
+/// its right, if any do.
+pub(crate) fn with_keys<'a>(button: Button<'a>, view: &View<'_>, id: &CommandId) -> Button<'a> {
+    match chords(view, id) {
         keys if keys.is_empty() => button,
         keys => button.shortcut_text(keys),
     }
@@ -849,8 +878,9 @@ pub(crate) fn with_keys<'a>(button: Button<'a>, keymap: &Keymap, id: &CommandId)
 #[cfg(test)]
 mod tests {
     use egui::accesskit::{Role, Toggled};
+    use egui::vec2;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::{file, track, view};
+    use musicable_commands::{Scope, file, track, view};
     use musicable_model::{TrackId, TrackKind};
 
     use super::*;
@@ -871,6 +901,16 @@ mod tests {
             harness.run();
         }
         harness.drop_at(to);
+        harness.run();
+    }
+
+    /// Clicks with the mouse at `at`.
+    fn click_at(harness: &mut Harness, at: egui::Pos2) {
+        harness.hover_at(at);
+        harness.run();
+        harness.drag_at(at);
+        harness.run();
+        harness.drop_at(at);
         harness.run();
     }
 
@@ -947,6 +987,68 @@ mod tests {
         harness.get_by_label("Save Project Ctrl+S").click();
         harness.run();
         assert_eq!(harness.state().actions, [Action::Run(file::SAVE)]);
+    }
+
+    #[test]
+    fn menus_show_the_keys_that_work_where_the_focus_is() {
+        let mut harness = harness(Project::new());
+        // In the mixer, Ctrl+S plays instead of saving, and F5 saves.
+        let keymap = &mut harness.state_mut().keymap;
+        let mixer = Scope::Panel(MIXER);
+        keymap.bind_in(mixer, "Ctrl+S".parse().unwrap(), transport::PLAY);
+        keymap.bind_in(mixer, "F5".parse().unwrap(), file::SAVE);
+        harness.get_by_label("File").click();
+        harness.run();
+        harness.get_by_label("Save Project Ctrl+S");
+        harness.state_mut().editor.focus = Focus::MIXER;
+        harness.run();
+        harness.get_by_label("Save Project F5");
+    }
+
+    #[test]
+    fn clicking_in_a_panel_gives_it_the_focus() {
+        let mut project = Project::new();
+        project.add_track("Drums", TrackKind::Audio);
+        let mut harness = harness(project);
+        let focus = |harness: &Harness| harness.state().editor.focus;
+        // Under the mixer's tab, in the mixer.
+        let tab = harness.get_by_label("Mixer panel").rect();
+        click_at(&mut harness, tab.left_bottom() + vec2(60.0, 80.0));
+        assert_eq!(focus(&harness), Focus::MIXER);
+        assert_eq!(harness.state().actions, []);
+
+        // Not through a window over the panels, though.
+        harness.state_mut().shell.open_shortcuts();
+        harness.run();
+        let window = harness.get_by_label("Keyboard Shortcuts").rect();
+        let at = window.center_top() + vec2(0.0, 40.0);
+        click_at(&mut harness, at);
+        assert_eq!(focus(&harness), Focus::MIXER);
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        // Without it, that's the arrangement.
+        click_at(&mut harness, at);
+        assert_eq!(focus(&harness), Focus::ARRANGEMENT);
+
+        // Clicking a tab gives its panel the focus, and so does moving the
+        // keyboard focus into a panel, as Tab does.
+        harness.get_by_label("Devices panel").click();
+        harness.run();
+        assert_eq!(focus(&harness), Focus::DEVICES);
+        harness.get_by_label("Mute Drums").focus();
+        harness.run();
+        assert_eq!(focus(&harness), Focus::MIXER);
+    }
+
+    #[test]
+    fn the_piano_roll_takes_the_focus_once_it_shows_a_clip() {
+        let mut harness = harness(Project::new());
+        harness.state_mut().shell.show_panel(PIANO_ROLL);
+        harness.run();
+        let tab = harness.get_by_label("Piano Roll panel").rect();
+        click_at(&mut harness, tab.left_bottom() + vec2(60.0, 60.0));
+        // With no clip, it has nothing for the keys to act on.
+        assert_eq!(harness.state().editor.focus, Focus::ARRANGEMENT);
     }
 
     #[test]
@@ -1037,11 +1139,12 @@ mod tests {
         harness.get_by_label("A4");
         harness.get_by_role_and_label(Role::Slider, "A4 Volume");
         harness.get_by_role_and_label(Role::Slider, "Master Volume");
-        // Its changes come back as actions.
+        // Its changes come back as actions, and it takes the focus.
         harness.get_by_label("Mute A4").click();
         harness.run();
         let mute = Change::Muted(TrackId(0), true);
         assert_eq!(harness.state().actions, [Action::Mixer(mute)]);
+        assert_eq!(harness.state().editor.focus, Focus::MIXER);
     }
 
     #[test]

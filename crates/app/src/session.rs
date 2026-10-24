@@ -586,14 +586,16 @@ impl Session {
     /// press of it runs one. Other keys can go elsewhere.
     pub fn takes_key(&self, chord: KeyChord) -> bool {
         self.keymap
-            .lookup(chord)
+            .lookup_focused(chord, self.document.editor().focus)
             .is_some_and(|id| self.commands.applies(id, &self.document))
     }
 
-    /// Runs the command the keymap binds to `chord`. Returns `false` if there
-    /// is none, so the key can go elsewhere.
+    /// Runs the command the keymap binds to `chord` where the focus is: the
+    /// focused panel's own, or else the one everywhere. Returns `false` if
+    /// there is none, so the key can go elsewhere.
     pub fn key_pressed(&mut self, chord: KeyChord) -> bool {
-        let Some(id) = self.keymap.lookup(chord).cloned() else {
+        let focus = self.document.editor().focus;
+        let Some(id) = self.keymap.lookup_focused(chord, focus).cloned() else {
             return false;
         };
         // A keymap can bind a command this version doesn't have.

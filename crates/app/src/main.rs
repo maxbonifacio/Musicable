@@ -12,7 +12,7 @@ use eframe::egui;
 use musicable_app::export::{Bits, Export, ExportSettings, FileFormat, Job, Span};
 use musicable_app::null_test::{self, Player, Render};
 use musicable_app::{App, PLUGINS_FILE};
-use musicable_commands::{Editor, Keymap, KeymapFile, Registry};
+use musicable_commands::{Editor, Keymap, KeymapFile, Registry, Scope};
 use musicable_engine::{EngineConfig, ParallelOptions};
 use musicable_model::{Project, TrackId};
 use musicable_plugins::scan::ScanCache;
@@ -135,10 +135,14 @@ fn print_keymap(commands: &Registry, file: Option<OsString>) -> ExitCode {
             }
         }
     }
+    // Keys that work in one panel only say which.
+    let place = |scope| match scope {
+        Scope::Everywhere => String::new(),
+        Scope::Panel(panel) => format!(" in {panel}"),
+    };
     for command in commands.iter() {
-        let chords: Vec<_> = keymap
-            .chords_for(&command.id)
-            .map(|c| c.to_string())
+        let chords: Vec<_> = (keymap.bindings_for(&command.id))
+            .map(|(scope, chord)| format!("{chord}{}", place(scope)))
             .collect();
         let chords = if chords.is_empty() {
             "(none)".to_owned()
@@ -147,8 +151,8 @@ fn print_keymap(commands: &Registry, file: Option<OsString>) -> ExitCode {
         };
         println!("{:<28} {:<18} {chords}", command.id, command.title);
     }
-    for (chord, id) in keymap.dangling(commands) {
-        eprintln!("{chord} runs {id}, which isn't a command");
+    for (scope, chord, id) in keymap.dangling(commands) {
+        eprintln!("{chord}{} runs {id}, which isn't a command", place(scope));
     }
     ExitCode::SUCCESS
 }

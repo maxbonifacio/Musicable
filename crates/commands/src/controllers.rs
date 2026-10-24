@@ -269,7 +269,7 @@ mod tests {
         let editor = setup.document.editor();
         assert_eq!(editor.piano_roll.clip, Some(k));
         assert_eq!(editor.piano_roll.lane, Lane::Controller(wheel));
-        assert_eq!(editor.focus, Focus::PianoRoll);
+        assert_eq!(editor.focus, Focus::PIANO_ROLL);
         // Before, the clip left the wheel alone: nothing to pick up after.
         assert_eq!(curve(&setup, k, wheel), [(0.0, 0.25), (1.0, 0.5)]);
         // Over the end, given out of order: the wheel comes back to 0.5 at

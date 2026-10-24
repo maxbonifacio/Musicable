@@ -10,9 +10,11 @@
 //! selected, for the arrangement's mouse gestures, scripts and agents, and
 //! give the arrangement the focus.
 //!
-//! While the piano roll has the [focus](crate::Focus), Cut, Copy, Paste,
-//! Duplicate, Delete and Select All act on its notes instead (see
-//! [`notes`]). Split acts on clips only.
+//! They act where the [focus](crate::Focus) is: on the arrangement's
+//! selection while the arrangement or the mixer has it, and while the
+//! piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select All
+//! act on its notes instead (see [`notes`]). In the other panels they don't
+//! apply. Split acts on clips only.
 
 use std::collections::BTreeSet;
 
@@ -20,7 +22,7 @@ use musicable_model::clip::{Clip, ClipId};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackId};
 
-use crate::editor::{Clipboard, Editor, Focus, Selection, TimeSelection};
+use crate::editor::{Clipboard, Editor, Edits, Selection, TimeSelection};
 use crate::{
     Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction, Type,
     Value, When,
@@ -85,16 +87,18 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
         by_focus(ctx, notes::delete, delete);
     }),
     (SPLIT, "Split", When::ClipsOrTimeSelected, split),
-    (SELECT_ALL, "Select All", When::Always, |ctx| {
+    (SELECT_ALL, "Select All", When::CanSelectAll, |ctx| {
         by_focus(ctx, notes::select_all, select_all);
     }),
 ];
 
-/// Runs `notes` while the piano roll has the focus, or else `arrangement`.
+/// Runs `notes` while the piano roll has the focus, or `arrangement` while
+/// the arrangement or the mixer has it.
 fn by_focus(ctx: &mut Context<'_>, notes: Handler, arrangement: Handler) {
-    match ctx.document.editor().focus {
-        Focus::PianoRoll => notes(ctx),
-        Focus::Arrangement => arrangement(ctx),
+    match ctx.document.editor().focus.edits() {
+        Edits::Notes => notes(ctx),
+        Edits::Arrangement => arrangement(ctx),
+        Edits::Nothing => {}
     }
 }
 
@@ -224,7 +228,7 @@ fn select_clips(
     if let Some(&track) = tracks.last() {
         editor.selected_track = Some(track);
     }
-    editor.focus = Focus::Arrangement;
+    editor.focus_arrangement();
     let selected: Vec<ClipId> = clips
         .iter()
         .rev()
@@ -260,7 +264,7 @@ fn select_time(
         time,
         ..Selection::default()
     };
-    editor.focus = Focus::Arrangement;
+    editor.focus_arrangement();
     Ok(())
 }
 
@@ -284,7 +288,7 @@ fn select_tracks(
     if let Some(&track) = tracks.iter().rev().find(|t| selection.tracks.contains(t)) {
         editor.selected_track = Some(track);
     }
-    editor.focus = Focus::Arrangement;
+    editor.focus_arrangement();
     Ok(())
 }
 
@@ -518,6 +522,7 @@ mod tests {
     use musicable_model::{LocatorId, TakeId, TrackKind};
 
     use super::*;
+    use crate::Focus;
     use crate::testing::Setup;
     use crate::{Args, Document, Keymap};
 
@@ -810,6 +815,35 @@ mod tests {
         );
         // The selection forgot what went.
         assert!(setup.document.editor().selection.is_empty());
+    }
+
+    #[test]
+    fn the_edit_commands_act_where_the_focus_is() {
+        let (mut setup, [_, keys, _], [_, k, _]) = arrangement();
+        setup.select_clips(&[k]);
+        // The mixer shows the arrangement's tracks, so it edits what the
+        // arrangement has selected.
+        setup.document.editor_mut().focus = Focus::MIXER;
+        assert!(setup.applies(&COPY) && setup.applies(&SELECT_ALL));
+        // The devices and the browser have nothing the edit commands take.
+        for focus in [Focus::DEVICES, Focus::BROWSER] {
+            setup.document.editor_mut().focus = focus;
+            for id in [&CUT, &COPY, &DUPLICATE, &DELETE, &SPLIT, &SELECT_ALL] {
+                assert!(!setup.applies(id), "{id:?} in {focus:?}");
+            }
+            setup.run(&DELETE);
+            assert_eq!(clips(&setup, keys), [row("K", 4.0, 12.0)]);
+        }
+        setup.document.editor_mut().focus = Focus::MIXER;
+        setup.run(&DELETE);
+        assert_eq!(clips(&setup, keys), []);
+        // Selecting in the arrangement leaves the mixer the focus, and gives
+        // it the arrangement back from the others.
+        setup.select_tracks(&[keys]);
+        assert_eq!(setup.document.editor().focus, Focus::MIXER);
+        setup.document.editor_mut().focus = Focus::DEVICES;
+        setup.select_tracks(&[keys]);
+        assert_eq!(setup.document.editor().focus, Focus::ARRANGEMENT);
     }
 
     #[test]

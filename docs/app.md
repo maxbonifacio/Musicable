@@ -243,6 +243,19 @@ browser are docked panels, laid out in splits and tabs
   clip the piano roll shows brings it forward, selecting another track
   brings the devices forward, and so does adding a device. Neither comes
   back from hidden by itself.
+- **The focus** is on one panel, outlined in the theme's `focus` colour.
+  Clicking in a panel or on its tab gives it the focus, and so does moving
+  the keyboard focus into it with Tab; a click in a menu or a window over
+  the panels doesn't. The keys and the edit commands act where the focus
+  is ([commands.md](commands.md#the-editors-state)): Copy and Delete take
+  the notes selected in the piano roll while it has the focus, the clips,
+  time or tracks selected in the arrangement while the arrangement or the
+  mixer has it, and nothing in the devices panel and the browser. The
+  piano roll takes the focus once it shows a clip. A panel's own keys, such
+  as the piano roll's arrow keys, work while it has the focus, and the
+  menus and the palette show the keys that work there. When the panel
+  with the focus is hidden or goes behind another tab, the arrangement
+  takes it.
 
 Devices and presets dragged from the browser go in the devices panel's
 chain wherever the panel is. The window opens laid out as it was left:
@@ -484,8 +497,8 @@ setting.
 
 ## The command palette
 
-The command palette lists every command as "Area: Title", with its keys.
-Typing narrows the list:
+The command palette lists every command as "Area: Title", with the keys
+that run it in the panel with the focus. Typing narrows the list:
 
 - Every word typed has to match. A word matches best at the start of a word
   of the name ("tog", "loop"), then inside one, or as the initials of its
@@ -501,33 +514,44 @@ into it and run no commands.
 
 ## Changing keys
 
-Options > Keyboard Shortcuts lists the commands by menu, each with its keys.
-The search field at the top finds commands the way the command palette
-does, by name or by keys.
+Options > Keyboard Shortcuts lists the commands by menu, each with its keys,
+and says where they work: each command has a row for its keys that work
+everywhere, and one for each panel it has keys of its own in, such as the
+piano roll's arrow keys. A panel's keys win while the panel has the focus
+([The panels](#the-panels)). One that runs another command everywhere else
+says so beside it, as "over Toggle Metronome". The search field at the top
+finds commands the way the command palette does, by name or by keys,
+wherever they work.
 
 - **Click a key** to change it, or **+** to add one. The window waits for
   the keys, and any keys can be pressed, Escape, Enter and Tab included;
-  they run nothing while it waits. Then it says what the keys do now:
-  - "isn't used yet": **Assign** (or Enter) gives them to the command.
+  they run nothing while it waits. **Where** picks the place the new keys
+  work: everywhere, or one panel. It starts at the row's. Then it says what
+  the keys do there now:
+  - "isn't used yet": **Assign** (or Enter) gives them to the command. If
+    a panel gives them to another command, it says so: the panel keeps
+    them.
   - "runs *another command* now": **Reassign** (or Enter) takes them from
-    that command.
+    that command there.
+  - "runs *another command* everywhere": in a panel, **Assign** gives them
+    to this command there, over the other.
   - "runs *this command* already": there's nothing to do.
 
   **Try Other Keys** waits for keys again. **Cancel**, Escape, or a click
   anywhere else stops without changing anything.
 - **×** next to a key removes it.
-- **Reset** shows on a command whose keys aren't the default ones, and gives
-  it its default keys back. If another command has one of them now, the
-  tooltip says so, and Reset takes it.
+- **Reset** shows on a command whose keys aren't the default ones,
+  everywhere or in a panel, and gives it its default keys back. If another
+  command has one of them now, the tooltip says so, and Reset takes it.
 
 Every change is saved to your keymap file at once
 ([below](#settings-and-your-keymap)), as the changes to the default keymap.
 Under the list:
 
 - **Mistakes in your keymap file**, as [commands.md](commands.md#mistakes)
-  describes. A chord that two lines claim runs none of their commands, and
-  gets a button for each to give it to. Keys for commands this version
-  doesn't have can be removed.
+  describes. A chord that two lines of one table claim runs none of their
+  commands there, and gets a button for each to give it to. Keys for
+  commands this version doesn't have can be removed.
 - **Import...** uses the keys in another keymap file in place of yours. What
   it gets wrong is left out, and listed.
 - **Export...** saves your keys to a keymap file, to share or keep.
@@ -1056,10 +1080,13 @@ words to keep up to date.
 Every key press goes to the keymap before egui sees it, through
 `musicable_ui::KeyPresses`. A bound chord runs its command through
 `Session::key_pressed` and goes no further, so Space plays even when a button
-has keyboard focus. Unbound keys go on to egui, and so do keys whose command
-doesn't apply now (`Session::takes_key`): with no notes selected in the
-piano roll, the arrow keys move the keyboard focus between controls, as
-egui does with them. Key presses never reach the engine any other way.
+has keyboard focus. The panel with the focus has its own keys first, then
+the ones that work everywhere ([The panels](#the-panels)), so the transport's
+keys work in every panel. Unbound keys go on to egui, and so do keys whose
+command doesn't apply now (`Session::takes_key`): with no notes selected in
+the piano roll, or in the other panels, the arrow keys move the keyboard
+focus between controls, as egui does with them. Key presses never reach the
+engine any other way.
 
 - While a text field has focus, such as the tempo field being typed into,
   every key goes to it instead. Ctrl+C, Ctrl+X and Ctrl+V reach the keymap
@@ -1427,8 +1454,9 @@ save it. Reload reads it again, and its fonts.
 Most entries colour or size Musicable's views: the arrangement's, the
 transport bar's, and those under `[mixer]`, `[devices]`, `[piano_roll]` and
 `[browser]`. `[dock]` sizes the panels' tab bars (`tab_bar`), the gaps
-between panels (`gap`) and the least a panel's edge can be dragged to
-(`min_panel`). `[widgets]` is egui's: the fill of panels and of windows and
+between panels (`gap`), the outline around the panel with the focus
+(`outline`, in the `focus` colour) and the least a panel's edge can be
+dragged to (`min_panel`). `[widgets]` is egui's: the fill of panels and of windows and
 menus, their outline and shadow, text fields (`field`), the selection,
 links, warnings, corners and spacing. Under it, `[widgets.passive]` is what
 can't be clicked, such as labels and separators, and `resting`, `hovered`,

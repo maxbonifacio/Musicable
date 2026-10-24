@@ -17,16 +17,9 @@ use crate::piano_roll::PianoRoll;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 
-/// The arrangement's panel, in the middle of the window.
-pub const ARRANGEMENT: &str = "arrangement";
-/// The mixer's panel, under the arrangement.
-pub const MIXER: &str = "mixer";
-/// The devices panel, under the mixer.
-pub const DEVICES: &str = "devices";
-/// The piano roll's panel, in a tab beside the devices.
-pub const PIANO_ROLL: &str = "piano_roll";
-/// The browser's panel, on the left.
-pub const BROWSER: &str = "browser";
+// The panels' ids, which the focus and the keymaps' panel tables know them
+// by too.
+pub use musicable_commands::panel::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
 
 /// Where a panel goes in the default layout, and in a layout that doesn't
 /// have it yet, such as one saved before it existed.
@@ -232,4 +225,19 @@ fn framed<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     );
     ui.scope_builder(UiBuilder::new().max_rect(inner), add_contents)
         .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use musicable_commands::panel;
+
+    use super::*;
+
+    #[test]
+    fn the_registry_has_the_panels_the_commands_know() {
+        let ids: BTreeSet<_> = Registry::new().iter().map(|panel| panel.id).collect();
+        assert_eq!(ids, BTreeSet::from(panel::ALL));
+    }
 }

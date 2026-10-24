@@ -10,13 +10,36 @@ use std::{fmt, fs, io, process};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ChordError, CommandId, KeyChord, Registry};
+use crate::{ChordError, CommandId, Focus, KeyChord, Registry, panel};
 
 /// The default keymap's file. It follows Ableton Live's shortcuts where Live
 /// has one.
 const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.toml");
 
-/// Maps key chords to commands. A chord runs one command, and a command can
+/// Where a key binding works: everywhere, or in one panel, while it has the
+/// focus, in place of what the chord runs everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Scope {
+    Everywhere,
+    /// The panel with this id, one of [`panel::ALL`].
+    Panel(&'static str),
+}
+
+impl Scope {
+    /// The scope of the panel with id `id`, if there's one.
+    pub fn panel(id: &str) -> Option<Self> {
+        panel::find(id).map(Self::Panel)
+    }
+
+    /// Where `focus` is.
+    pub fn of(focus: Focus) -> Self {
+        Self::Panel(focus.panel())
+    }
+}
+
+/// Maps key chords to commands, everywhere and in single panels. A chord
+/// runs one command in each place: in the panel with the focus, the
+/// panel's own if it has one, or else the one everywhere. A command can
 /// have any number of chords.
 ///
 /// Keymaps are plain data. Musicable starts from the
@@ -24,7 +47,7 @@ const DEFAULT_KEYMAP: &str = include_str!("../keymaps/default.toml");
 /// [keymap file](KeymapFile) changes it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Keymap {
-    bindings: BTreeMap<KeyChord, CommandId>,
+    bindings: BTreeMap<(Scope, KeyChord), CommandId>,
 }
 
 impl Keymap {
@@ -43,64 +66,137 @@ impl Keymap {
         keymap
     }
 
-    /// Binds `chord` to `command`, returning the command it replaced, if any,
-    /// so the UI can warn about conflicts.
+    /// Binds `chord` to `command` everywhere, returning the command it
+    /// replaced, if any, so the UI can warn about conflicts.
     pub fn bind(&mut self, chord: KeyChord, command: impl Into<CommandId>) -> Option<CommandId> {
-        self.bindings.insert(chord, command.into())
+        self.bind_in(Scope::Everywhere, chord, command)
     }
 
+    /// Binds `chord` to `command` in `scope`, returning the command it
+    /// replaced there, if any.
+    pub fn bind_in(
+        &mut self,
+        scope: Scope,
+        chord: KeyChord,
+        command: impl Into<CommandId>,
+    ) -> Option<CommandId> {
+        self.bindings.insert((scope, chord), command.into())
+    }
+
+    /// Unbinds `chord` everywhere, but not in the panels that bind it.
     pub fn unbind(&mut self, chord: KeyChord) -> Option<CommandId> {
-        self.bindings.remove(&chord)
+        self.unbind_in(Scope::Everywhere, chord)
     }
 
-    /// Removes all of `command`'s chords.
+    pub fn unbind_in(&mut self, scope: Scope, chord: KeyChord) -> Option<CommandId> {
+        self.bindings.remove(&(scope, chord))
+    }
+
+    /// Removes all of `command`'s chords, everywhere and in every panel.
     pub fn unbind_command(&mut self, command: &CommandId) {
         self.bindings.retain(|_, c| c != command);
     }
 
-    /// Gives `command` the chords it has in `defaults`, in place of the ones
-    /// it has now. A chord that another command has now is taken from it.
-    /// Returns the chords taken, with the commands that had them.
+    /// Removes `command`'s chords in `scope`.
+    fn unbind_command_in(&mut self, command: &CommandId, scope: Scope) {
+        self.bindings
+            .retain(|&(place, _), c| place != scope || c != command);
+    }
+
+    /// Gives `command` the chords it has in `defaults`, everywhere and in
+    /// each panel, in place of the ones it has now. A chord that another
+    /// command has in the same place now is taken from it. Returns the
+    /// chords taken, with where and the commands that had them.
     pub fn reset_command(
         &mut self,
         command: &CommandId,
         defaults: &Keymap,
-    ) -> Vec<(KeyChord, CommandId)> {
+    ) -> Vec<(Scope, KeyChord, CommandId)> {
         self.unbind_command(command);
         defaults
-            .chords_for(command)
-            .filter_map(|chord| Some((chord, self.bind(chord, command.clone())?)))
+            .bindings_for(command)
+            .filter_map(|(scope, chord)| {
+                Some((scope, chord, self.bind_in(scope, chord, command.clone())?))
+            })
             .collect()
     }
 
+    /// The command `chord` runs everywhere.
     pub fn lookup(&self, chord: KeyChord) -> Option<&CommandId> {
-        self.bindings.get(&chord)
+        self.lookup_in(Scope::Everywhere, chord)
     }
 
+    /// The command `chord` runs in `scope` itself.
+    pub fn lookup_in(&self, scope: Scope, chord: KeyChord) -> Option<&CommandId> {
+        self.bindings.get(&(scope, chord))
+    }
+
+    /// The command `chord` runs while `focus` is where it is: the panel's
+    /// own, or else the one everywhere.
+    pub fn lookup_focused(&self, chord: KeyChord, focus: Focus) -> Option<&CommandId> {
+        (self.lookup_in(Scope::of(focus), chord)).or_else(|| self.lookup(chord))
+    }
+
+    /// `command`'s chords everywhere.
     pub fn chords_for<'a>(&'a self, command: &'a CommandId) -> impl Iterator<Item = KeyChord> + 'a {
-        self.bindings
-            .iter()
-            .filter(move |(_, c)| *c == command)
-            .map(|(&chord, _)| chord)
+        self.chords_in(command, Scope::Everywhere)
     }
 
-    /// Every binding, in chord order.
-    pub fn iter(&self) -> impl Iterator<Item = (KeyChord, &CommandId)> {
+    /// `command`'s chords in `scope` itself.
+    pub fn chords_in<'a>(
+        &'a self,
+        command: &'a CommandId,
+        scope: Scope,
+    ) -> impl Iterator<Item = KeyChord> + 'a {
+        self.bindings_for(command)
+            .filter(move |&(place, _)| place == scope)
+            .map(|(_, chord)| chord)
+    }
+
+    /// The chords that run `command` while `focus` is where it is: its own
+    /// in the panel, and those everywhere that the panel doesn't give
+    /// another command, in chord order.
+    pub fn chords_focused(&self, command: &CommandId, focus: Focus) -> Vec<KeyChord> {
+        let scope = Scope::of(focus);
+        let everywhere = (self.chords_for(command))
+            .filter(|&chord| self.lookup_in(scope, chord).is_none_or(|c| c == command));
+        let mut chords: Vec<_> = self.chords_in(command, scope).chain(everywhere).collect();
+        chords.sort();
+        chords.dedup();
+        chords
+    }
+
+    /// Where `command` has chords, and the chords: everywhere first, then
+    /// panel by panel, in chord order.
+    pub fn bindings_for<'a>(
+        &'a self,
+        command: &'a CommandId,
+    ) -> impl Iterator<Item = (Scope, KeyChord)> + 'a {
+        self.iter()
+            .filter(move |(_, _, c)| *c == command)
+            .map(|(scope, chord, _)| (scope, chord))
+    }
+
+    /// Every binding: everywhere first, then panel by panel, in chord order.
+    pub fn iter(&self) -> impl Iterator<Item = (Scope, KeyChord, &CommandId)> {
         self.bindings
             .iter()
-            .map(|(&chord, command)| (chord, command))
+            .map(|(&(scope, chord), command)| (scope, chord, command))
     }
 
     /// Bindings that point at commands missing from `registry`.
     pub fn dangling<'a>(
         &'a self,
         registry: &'a Registry,
-    ) -> impl Iterator<Item = (KeyChord, &'a CommandId)> {
-        self.iter().filter(|(_, c)| registry.get(c).is_none())
+    ) -> impl Iterator<Item = (Scope, KeyChord, &'a CommandId)> {
+        self.iter().filter(|(_, _, c)| registry.get(c).is_none())
     }
 
-    fn commands(&self) -> BTreeSet<&CommandId> {
-        self.bindings.values().collect()
+    /// Each command with chords, with where it has them.
+    fn commands(&self) -> BTreeSet<(Scope, &CommandId)> {
+        self.iter()
+            .map(|(scope, _, command)| (scope, command))
+            .collect()
     }
 }
 
@@ -117,6 +213,10 @@ const HEADER: &str = "\
 # Each line under [bindings] gives a command the key chords that run it, in
 # place of its default ones. An empty list, [], unbinds the command. A chord
 # runs one command, so giving a chord to one command takes it from another.
+#
+# Lines under [panels.piano_roll], and the other panels' tables, do the same
+# for the keys that work in that panel only, while it has the focus. There
+# they win over the keys under [bindings].
 ";
 
 /// A keymap file: changes to a base keymap, usually the default keymap.
@@ -128,20 +228,27 @@ const HEADER: &str = "\
 /// [bindings]
 /// "transport.toggle_metronome" = ["M", "Ctrl+M"]
 /// "transport.toggle_loop" = []
+///
+/// [panels.piano_roll]
+/// "notes.toggle_draw" = ["D"]
 /// ```
 ///
 /// Each entry gives a command the chords that run it, replacing the chords it
 /// has in the base. An entry with no chords unbinds the command, and commands
 /// without an entry keep their chords. A chord runs one command, so an entry
 /// that gives a chord to one command takes it from the command that had it.
+/// Entries under `[bindings]` work everywhere, and those under a panel's
+/// table in `[panels]` work in that panel only, while it has the focus,
+/// where they win over the ones everywhere.
 ///
 /// A bad entry doesn't stop the rest of the file from loading:
 /// [`parse`](Self::parse) skips it and reports a [`Problem`]. So does a chord
-/// that two entries claim, which then runs neither command. `format` and
-/// `version` are optional, so a hand-written file can start at `[bindings]`.
+/// that two entries claim in one place, which then runs neither command
+/// there, and a panel this version doesn't have. `format` and `version` are
+/// optional, so a hand-written file can start at `[bindings]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeymapFile {
-    bindings: BTreeMap<CommandId, BTreeSet<KeyChord>>,
+    bindings: BTreeMap<(Scope, CommandId), BTreeSet<KeyChord>>,
 }
 
 impl KeymapFile {
@@ -156,6 +263,8 @@ impl KeymapFile {
             version: Option<u32>,
             #[serde(default)]
             bindings: toml::Table,
+            #[serde(default)]
+            panels: toml::Table,
         }
 
         let raw: Raw = toml::from_str(text).map_err(KeymapFileError::Toml)?;
@@ -167,20 +276,42 @@ impl KeymapFile {
             return Err(KeymapFileError::UnsupportedVersion(version));
         }
 
-        let mut entries = Vec::new();
-        flatten(&raw.bindings, "", &mut entries);
-        let mut file = Self::default();
         let mut problems = Vec::new();
-        for (command, value) in entries {
-            match parse_chords(&command, value) {
-                Ok(chords) => file.bindings.entry(command).or_default().extend(chords),
-                Err(problem) => problems.push(problem),
+        let mut tables = vec![(Scope::Everywhere, &raw.bindings)];
+        for (name, value) in &raw.panels {
+            match (Scope::panel(name), value) {
+                (Some(scope), toml::Value::Table(table)) => tables.push((scope, table)),
+                (Some(_), _) => problems.push(Problem::NotBindings {
+                    panel: name.clone(),
+                }),
+                (None, _) => problems.push(Problem::UnknownPanel {
+                    panel: name.clone(),
+                }),
+            }
+        }
+        let mut file = Self::default();
+        for (scope, table) in tables {
+            let mut entries = Vec::new();
+            flatten(table, "", &mut entries);
+            for (command, value) in entries {
+                match parse_chords(&command, value) {
+                    Ok(chords) => file
+                        .bindings
+                        .entry((scope, command))
+                        .or_default()
+                        .extend(chords),
+                    Err(problem) => problems.push(problem),
+                }
             }
         }
         problems.extend(
             file.conflicts()
                 .into_iter()
-                .map(|(chord, commands)| Problem::Conflict { chord, commands }),
+                .map(|((scope, chord), commands)| Problem::Conflict {
+                    scope,
+                    chord,
+                    commands,
+                }),
         );
         Ok((file, problems))
     }
@@ -191,14 +322,14 @@ impl KeymapFile {
     }
 
     /// The changes that turn `base` into `keymap`: an entry for each command
-    /// whose chords differ.
+    /// whose chords differ, everywhere or in a panel.
     pub fn diff(base: &Keymap, keymap: &Keymap) -> Self {
         let mut bindings = BTreeMap::new();
-        for command in base.commands().union(&keymap.commands()) {
-            let before: BTreeSet<_> = base.chords_for(command).collect();
-            let after: BTreeSet<_> = keymap.chords_for(command).collect();
+        for &(scope, command) in base.commands().union(&keymap.commands()) {
+            let before: BTreeSet<_> = base.chords_in(command, scope).collect();
+            let after: BTreeSet<_> = keymap.chords_in(command, scope).collect();
             if before != after {
-                bindings.insert((*command).clone(), after);
+                bindings.insert((scope, command.clone()), after);
             }
         }
         Self { bindings }
@@ -206,41 +337,49 @@ impl KeymapFile {
 
     /// Makes the file's changes to `keymap`.
     pub fn apply_to(&self, keymap: &mut Keymap) {
-        let conflicts: BTreeSet<KeyChord> = self.conflicts().into_keys().collect();
-        for command in self.bindings.keys() {
-            keymap.unbind_command(command);
+        let conflicts: BTreeSet<(Scope, KeyChord)> = self.conflicts().into_keys().collect();
+        for (scope, command) in self.bindings.keys() {
+            keymap.unbind_command_in(command, *scope);
         }
-        for &chord in &conflicts {
-            keymap.unbind(chord);
+        for &(scope, chord) in &conflicts {
+            keymap.unbind_in(scope, chord);
         }
-        for (command, chords) in &self.bindings {
-            for &chord in chords.difference(&conflicts) {
-                keymap.bind(chord, command.clone());
+        for ((scope, command), chords) in &self.bindings {
+            for &chord in chords {
+                if !conflicts.contains(&(*scope, chord)) {
+                    keymap.bind_in(*scope, chord, command.clone());
+                }
             }
         }
     }
 
     /// The file as TOML, starting with a comment that explains it.
     pub fn to_toml(&self) -> String {
+        type Entries<'a> = BTreeMap<&'a str, Vec<String>>;
+
         #[derive(Serialize)]
         struct Raw<'a> {
             format: &'a str,
             version: u32,
-            bindings: BTreeMap<&'a str, Vec<String>>,
+            bindings: Entries<'a>,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            panels: BTreeMap<&'a str, Entries<'a>>,
         }
 
-        let raw = Raw {
+        let mut raw = Raw {
             format: KEYMAP_FORMAT,
             version: KEYMAP_VERSION,
-            bindings: self
-                .bindings
-                .iter()
-                .map(|(command, chords)| {
-                    let chords = chords.iter().map(KeyChord::to_string).collect();
-                    (command.as_str(), chords)
-                })
-                .collect(),
+            bindings: BTreeMap::new(),
+            panels: BTreeMap::new(),
         };
+        for ((scope, command), chords) in &self.bindings {
+            let entries = match scope {
+                Scope::Everywhere => &mut raw.bindings,
+                Scope::Panel(panel) => raw.panels.entry(panel).or_default(),
+            };
+            let chords = chords.iter().map(KeyChord::to_string).collect();
+            entries.insert(command.as_str(), chords);
+        }
         let body = toml::to_string(&raw).expect("keymaps always serialize");
         format!("{HEADER}\n{body}")
     }
@@ -253,7 +392,7 @@ impl KeymapFile {
         write_replacing(path, self.to_toml().as_bytes())
     }
 
-    /// How many commands the file changes.
+    /// How many commands the file changes, counting each place once.
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
@@ -262,13 +401,16 @@ impl KeymapFile {
         self.bindings.is_empty()
     }
 
-    /// Chords that more than one entry claims, with the commands claiming
-    /// them.
-    fn conflicts(&self) -> BTreeMap<KeyChord, Vec<CommandId>> {
-        let mut claims: BTreeMap<KeyChord, Vec<CommandId>> = BTreeMap::new();
-        for (command, chords) in &self.bindings {
+    /// Chords that more than one entry claims in one place, with the
+    /// commands claiming them.
+    fn conflicts(&self) -> BTreeMap<(Scope, KeyChord), Vec<CommandId>> {
+        let mut claims: BTreeMap<(Scope, KeyChord), Vec<CommandId>> = BTreeMap::new();
+        for ((scope, command), chords) in &self.bindings {
             for &chord in chords {
-                claims.entry(chord).or_default().push(command.clone());
+                claims
+                    .entry((*scope, chord))
+                    .or_default()
+                    .push(command.clone());
             }
         }
         claims.retain(|_, commands| commands.len() > 1);
@@ -360,11 +502,19 @@ pub enum Problem {
         chord: String,
         error: ChordError,
     },
-    /// Several entries claim the chord, so it runs none of their commands.
+    /// Several entries claim the chord in one place, so it runs none of
+    /// their commands there.
     Conflict {
+        scope: Scope,
         chord: KeyChord,
         commands: Vec<CommandId>,
     },
+    /// `[panels]` names a panel this version doesn't have, so its entries
+    /// are skipped.
+    UnknownPanel { panel: String },
+    /// A panel's entry in `[panels]` isn't a table of commands, so it's
+    /// skipped.
+    NotBindings { panel: String },
 }
 
 impl fmt::Display for Problem {
@@ -383,7 +533,11 @@ impl fmt::Display for Problem {
                 f,
                 "{command} keeps its default chords: \"{chord}\" isn't a key chord ({error})"
             ),
-            Self::Conflict { chord, commands } => {
+            Self::Conflict {
+                scope,
+                chord,
+                commands,
+            } => {
                 write!(f, "{chord} is given to ")?;
                 for (i, command) in commands.iter().enumerate() {
                     match i {
@@ -393,8 +547,21 @@ impl fmt::Display for Problem {
                     }
                     write!(f, "{command}")?;
                 }
+                if let Scope::Panel(panel) = scope {
+                    write!(f, " in panels.{panel}")?;
+                }
                 f.write_str(", so it runs none of them")
             }
+            Self::UnknownPanel { panel } => write!(
+                f,
+                "there's no panel called \"{panel}\", so the keys under panels.{panel} are \
+                 left out"
+            ),
+            Self::NotBindings { panel } => write!(
+                f,
+                "panels.{panel} should give commands key chords, as [bindings] does, so it's \
+                 left out"
+            ),
         }
     }
 }
@@ -495,7 +662,10 @@ mod tests {
 
         // The loop gets Ctrl+L back from the metronome, and loses L.
         let taken = map.reset_command(&loop_, &base());
-        assert_eq!(taken, [(chord("Ctrl+L"), metronome.clone())]);
+        assert_eq!(
+            taken,
+            [(Scope::Everywhere, chord("Ctrl+L"), metronome.clone())]
+        );
         assert_eq!(
             map.chords_for(&loop_).collect::<Vec<_>>(),
             [chord("Ctrl+L")]
@@ -522,7 +692,7 @@ mod tests {
         let mut map = Keymap::new();
         map.bind(Key::Space.into(), "transport.play");
         map.bind(Key::X.into(), "does.not.exist");
-        let dangling: Vec<_> = map.dangling(&reg).map(|(_, c)| c.as_str()).collect();
+        let dangling: Vec<_> = map.dangling(&reg).map(|(.., c)| c.as_str()).collect();
         assert_eq!(dangling, ["does.not.exist"]);
     }
 
@@ -631,6 +801,7 @@ mod tests {
         assert_eq!(
             problems,
             [Problem::Conflict {
+                scope: Scope::Everywhere,
                 chord: chord("L"),
                 commands: vec![
                     command("transport.toggle_loop"),
@@ -653,6 +824,130 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn a_panel_s_keys_win_while_it_has_the_focus() {
+        let (everywhere, own) = (command("a.everywhere"), command("b.own"));
+        let roll = Scope::Panel(panel::PIANO_ROLL);
+        let mut map = Keymap::new();
+        map.bind(chord("Up"), everywhere.clone());
+        map.bind(chord("Down"), everywhere.clone());
+        map.bind_in(roll, chord("Up"), own.clone());
+        assert_eq!(
+            map.lookup_focused(chord("Up"), Focus::PIANO_ROLL),
+            Some(&own)
+        );
+        assert_eq!(
+            map.lookup_focused(chord("Up"), Focus::ARRANGEMENT),
+            Some(&everywhere)
+        );
+        // The piano roll keeps Down for the command everywhere.
+        assert_eq!(
+            map.lookup_focused(chord("Down"), Focus::PIANO_ROLL),
+            Some(&everywhere)
+        );
+        assert_eq!(
+            map.chords_focused(&everywhere, Focus::PIANO_ROLL),
+            [chord("Down")]
+        );
+        assert_eq!(
+            map.chords_focused(&everywhere, Focus::MIXER),
+            [chord("Up"), chord("Down")]
+        );
+        assert_eq!(map.chords_focused(&own, Focus::PIANO_ROLL), [chord("Up")]);
+        assert_eq!(map.chords_focused(&own, Focus::MIXER), []);
+        let bindings: Vec<_> = map.bindings_for(&everywhere).collect();
+        assert_eq!(
+            bindings,
+            [
+                (Scope::Everywhere, chord("Up")),
+                (Scope::Everywhere, chord("Down"))
+            ]
+        );
+        // Unbinding everywhere leaves the panel's own.
+        map.unbind(chord("Up"));
+        assert_eq!(map.lookup_in(roll, chord("Up")), Some(&own));
+    }
+
+    #[test]
+    fn panels_have_tables_of_their_own_in_files() {
+        let (map, problems) = load(
+            r#"
+            [bindings]
+            "transport.play" = ["P"]
+
+            [panels.piano_roll]
+            "notes.transpose_up" = ["Up"]
+            "notes.transpose_down" = ["P", "Down"]
+            "notes.nudge_left" = ["Down"]
+
+            [panels.later]
+            "transport.stop" = ["S"]
+
+            [panels]
+            mixer = 4
+            "#,
+        );
+        let roll = Scope::Panel(panel::PIANO_ROLL);
+        assert_eq!(
+            problems,
+            [
+                Problem::UnknownPanel {
+                    panel: "later".into()
+                },
+                Problem::NotBindings {
+                    panel: "mixer".into()
+                },
+                Problem::Conflict {
+                    scope: roll,
+                    chord: chord("Down"),
+                    commands: vec![command("notes.nudge_left"), command("notes.transpose_down")],
+                },
+            ]
+        );
+        assert_eq!(
+            problems[0].to_string(),
+            "there's no panel called \"later\", so the keys under panels.later are left out"
+        );
+        assert_eq!(
+            problems[2].to_string(),
+            "Down is given to notes.nudge_left and notes.transpose_down in panels.piano_roll, so \
+             it runs none of them"
+        );
+        let up = chord("Up");
+        assert_eq!(
+            map.lookup_focused(up, Focus::PIANO_ROLL),
+            Some(&command("notes.transpose_up"))
+        );
+        assert_eq!(map.lookup_focused(up, Focus::ARRANGEMENT), None);
+        // P runs Transpose Down in the piano roll, and Play elsewhere.
+        assert_eq!(
+            map.lookup_focused(chord("P"), Focus::PIANO_ROLL),
+            Some(&command("notes.transpose_down"))
+        );
+        assert_eq!(map.lookup(chord("P")), Some(&command("transport.play")));
+        assert_eq!(map.lookup_in(roll, chord("Down")), None);
+    }
+
+    #[test]
+    fn a_panel_s_changes_are_saved_under_its_table() {
+        let mut map = base();
+        let roll = Scope::Panel(panel::PIANO_ROLL);
+        map.bind_in(roll, chord("Up"), "notes.transpose_up");
+        map.bind(chord("M"), "transport.toggle_metronome");
+        let file = KeymapFile::diff(&base(), &map);
+        assert_eq!(file.len(), 2);
+        assert_eq!(
+            file.to_toml(),
+            format!(
+                "{HEADER}\nformat = \"musicable-keymap\"\nversion = 1\n\n[bindings]\n\
+                 \"transport.toggle_metronome\" = [\"M\", \"O\"]\n\n\
+                 [panels.piano_roll]\n\"notes.transpose_up\" = [\"Up\"]\n"
+            )
+        );
+        let (read, problems) = KeymapFile::parse(&file.to_toml()).unwrap();
+        assert_eq!((read, problems), (file, Vec::new()));
     }
 
     #[test]
@@ -722,12 +1017,18 @@ mod tests {
                     Modifiers::SHIFT | Modifiers::ALT,
                 ];
                 let chord = KeyChord::new(key, mods[next(mods.len())]);
+                let scopes = [
+                    Scope::Everywhere,
+                    Scope::Panel(panel::PIANO_ROLL),
+                    Scope::Panel(panel::MIXER),
+                ];
+                let scope = scopes[next(scopes.len())];
                 match next(3) {
                     0 => {
-                        map.unbind(chord);
+                        map.unbind_in(scope, chord);
                     }
                     _ => {
-                        map.bind(chord, commands[next(commands.len())]);
+                        map.bind_in(scope, chord, commands[next(commands.len())]);
                     }
                 }
             }

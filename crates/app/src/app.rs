@@ -18,8 +18,8 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, PIANO_ROLL,
-    Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
+    PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::appearance_window::{AppearanceWindow, Asked as AppearanceAsked};
@@ -504,12 +504,12 @@ impl App {
         }
     }
 
-    /// Gives the arrangement the focus when the piano roll has it but is
-    /// hidden, so the keys act on what's in sight.
+    /// Gives the arrangement the focus when the panel with it is hidden or
+    /// behind another tab, so the keys act on what's in sight.
     fn focus_in_sight(&mut self) {
         let editor = self.session.editor_mut();
-        if editor.focus == Focus::PianoRoll && !self.shell.panel_shown(PIANO_ROLL) {
-            editor.focus = Focus::Arrangement;
+        if !self.shell.panel_shown(editor.focus.panel()) {
+            editor.focus = Focus::ARRANGEMENT;
         }
     }
 
@@ -1119,6 +1119,9 @@ impl eframe::App for App {
         for action in actions {
             self.act(action, &ctx, frame);
         }
+        // A tab's close button hides its panel, and a tab clicked puts
+        // another in front of it, without a command.
+        self.focus_in_sight();
         // The layout, once the user lets go of the tab or the edge they're
         // dragging.
         if !ctx.input(|i| i.pointer.any_down()) {
@@ -1285,6 +1288,8 @@ mod browsing;
 mod built_in_devices;
 #[cfg(test)]
 mod exporting;
+#[cfg(test)]
+mod focusing;
 #[cfg(test)]
 mod laying_out;
 #[cfg(test)]
