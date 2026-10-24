@@ -1548,6 +1548,7 @@ impl eframe::App for App {
         let recordings = recordings(&self.session);
         let library = self.session.library();
         let scanning = library.scanning();
+        let reading = library.reading();
         let (found, total) = library.found();
         let view = View {
             project: self.session.project(),
@@ -1593,6 +1594,7 @@ impl eframe::App for App {
                 index: library.index(),
                 loaded: library.is_loaded(),
                 scanning: &scanning,
+                reading: &reading,
                 listing: match library.listing() {
                     Listing::Search(text) => musicable_ui::Listing::Search(text),
                     Listing::Similar(file) => musicable_ui::Listing::Similar(file),

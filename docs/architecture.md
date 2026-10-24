@@ -38,7 +38,7 @@ compiler, a node and the UI, in that order.
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them. A second one streams long previews | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
-| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
+| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders and reading the headers of the files found, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
 | Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
 | Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
 

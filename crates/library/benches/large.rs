@@ -1,7 +1,8 @@
 //! The library at the size of a large sample collection, printed as a
 //! Markdown table: reading and writing the index file, preparing it for
 //! search, searches of one and more words, finding similar files, and
-//! scanning a folder of real files, the first time and again.
+//! scanning a folder of real files, the first time and again, and reading
+//! their headers.
 //!
 //! ```sh
 //! cargo bench -p musicable-library --bench large
@@ -22,6 +23,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use musicable_io::audio::{SampleFormat, save_wav};
+use musicable_library::scan::header;
 use musicable_library::{AudioFacts, FileId, Format, Index, Query, Record, Searcher, scan};
 
 /// Files in the made-up index, unless the command line says.
@@ -203,6 +205,13 @@ fn main() {
         "| Scanning {SCANNED} files the first time | {} |",
         ms(first)
     );
+    let read = time(1, || {
+        let headers = records
+            .iter()
+            .map(|record| header(&place.join(&record.path)));
+        headers.collect::<Vec<_>>()
+    });
+    println!("| Reading their headers, on one thread | {} |", ms(read));
     println!(
         "| Scanning them again, unchanged | {} |",
         ms(time(3, || scan(&place, &records, &|| true, &mut |_| {})))

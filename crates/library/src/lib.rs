@@ -18,6 +18,6 @@ pub use index::{
     TagSource, is_audio_file,
 };
 pub use presets::{Loaded, Preset, PresetError, PresetKind};
-pub use queue::{Busy, Pace, Priority, Queue};
+pub use queue::{Adder, Busy, Pace, Priority, Queue};
 pub use scan::scan;
 pub use search::{Found, Hit, Prepared, Query, Searcher};

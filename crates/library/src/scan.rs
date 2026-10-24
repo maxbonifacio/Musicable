@@ -1,5 +1,6 @@
 //! Scanning a place: finding the audio files in a folder and the folders
-//! under it, and reading what their headers say.
+//! under it, and reading what their headers say, which comes after, as
+//! opening each file takes far longer than finding it.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
@@ -16,13 +17,15 @@ const REPORT_EVERY: usize = 256;
 
 /// Scans `folder`, and the folders under it, for the files the library
 /// indexes, and returns their records, in order of path. It goes through
-/// the folders as [`walk`] does.
+/// the folders as [`walk`] does, and opens no file.
 ///
 /// A file whose size and time of change are those its record in `old` has
-/// keeps that record, tags, analysis and all, and isn't opened. Others have
-/// their headers read. A file that moved keeps its tags: a file gone from
-/// where `old` had it and one new to the scan with the same name and size
-/// are taken for the same file.
+/// keeps that record, tags, analysis and all. Others are left
+/// [`unread`](Record::unread), for their headers to be read after, as with
+/// [`header`]. A file that moved keeps its tags: a file gone from where
+/// `old` had it and one new to the scan with the same name and size are
+/// taken for the same file, and if its time of change is the same too, it
+/// keeps what its header said and what analysis found.
 ///
 /// The scan stops when `wanted` says no, returning `None`. It tells `found`
 /// how many files it has found every so often.
@@ -34,7 +37,7 @@ pub fn scan(
 ) -> io::Result<Option<Vec<Record>>> {
     let mut records = Vec::new();
     let mut fresh = Vec::new();
-    let finished = walk(folder, wanted, &mut |relative, path, metadata| {
+    let finished = walk(folder, wanted, &mut |relative, _, metadata| {
         if !is_audio_file(relative.rsplit('/').next().unwrap_or_default()) {
             return;
         }
@@ -48,13 +51,13 @@ pub fn scan(
             Some(record) => {
                 // Changed: what's in it is read again, and the user's tags
                 // stay.
-                let mut changed = Record::new(relative, size, modified, header(&path));
+                let mut changed = Record::found(relative, size, modified);
                 changed.tags = record.tags.clone();
                 changed
             }
             None => {
                 fresh.push(records.len());
-                Record::new(relative, size, modified, header(&path))
+                Record::found(relative, size, modified)
             }
         };
         records.push(record);
@@ -78,6 +81,13 @@ pub fn scan(
 /// `__MACOSX` folders and names that aren't Unicode. Folders that link back
 /// to one the walk has been in are only gone through once.
 ///
+/// What the system says of a file, such as its size and time of change,
+/// comes from the listing of its folder: asking each file opens it on
+/// Windows, which takes over ten times as long as listing a large library.
+/// Only links are asked, for what they link to. A file still being written
+/// may be listed with its size and time from before, which the next scan
+/// sees changed.
+///
 /// The walk asks `wanted` between files, and stops when it says no,
 /// returning `false`. Folders under `folder` that can't be read are
 /// skipped; only `folder` itself not being readable is an error.
@@ -86,13 +96,16 @@ pub(crate) fn walk(
     wanted: &dyn Fn() -> bool,
     file: &mut dyn FnMut(String, PathBuf, &Metadata),
 ) -> io::Result<bool> {
+    // The folders gone through, by where they really are, links followed.
+    // The system is asked only of `folder` and links: a folder that isn't a
+    // link is where the folder it's in really is, with its name added.
     let mut visited = HashSet::new();
-    let mut folders: Vec<(String, PathBuf)> = vec![(String::new(), folder.to_owned())];
+    let real = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_owned());
+    let mut folders: Vec<(String, PathBuf, PathBuf)> =
+        vec![(String::new(), folder.to_owned(), real)];
     let mut first = true;
-    while let Some((prefix, dir)) = folders.pop() {
-        if let Ok(real) = fs::canonicalize(&dir)
-            && !visited.insert(real)
-        {
+    while let Some((prefix, dir, real)) = folders.pop() {
+        if !visited.insert(real.clone()) {
             continue;
         }
         let entries = match fs::read_dir(&dir) {
@@ -112,27 +125,41 @@ pub(crate) fn walk(
                 continue;
             }
             let path = entry.path();
-            // Follows links, to what they link to.
-            let Ok(metadata) = fs::metadata(&path) else {
+            // The listing says what a link is, not what it links to.
+            let link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+            let metadata = match link {
+                true => fs::metadata(&path),
+                false => entry.metadata(),
+            };
+            let Ok(metadata) = metadata else {
                 continue;
             };
-            let relative = match prefix.as_str() {
-                "" => name,
-                prefix => format!("{prefix}/{name}"),
-            };
             if metadata.is_dir() {
-                folders.push((relative, path));
+                let real = match link {
+                    true => fs::canonicalize(&path).unwrap_or_else(|_| path.clone()),
+                    false => real.join(&name),
+                };
+                folders.push((relative(&prefix, name), path, real));
             } else if metadata.is_file() {
-                file(relative, path, &metadata);
+                file(relative(&prefix, name), path, &metadata);
             }
         }
     }
     Ok(true)
 }
 
+/// The path of `name` in the folder at `prefix`, from the place's folder.
+fn relative(prefix: &str, name: String) -> String {
+    match prefix {
+        "" => name,
+        prefix => format!("{prefix}/{name}"),
+    }
+}
+
 /// Gives the files at `fresh` in `records`, which `old` didn't have, the
 /// tags of the files `old` had that are gone, where their names and sizes
-/// match. Those with the same time of change keep what analysis found too.
+/// match. Those with the same time of change keep what their headers said
+/// and what analysis found too.
 fn follow_moves(old: &[Record], records: &mut [Record], fresh: &[usize]) {
     if fresh.is_empty() {
         return;
@@ -159,9 +186,27 @@ fn follow_moves(old: &[Record], records: &mut [Record], fresh: &[usize]) {
         let record = &mut records[i];
         record.tags = was.tags;
         if was.modified == record.modified {
+            record.audio = was.audio;
+            record.unread = was.unread;
             record.measured = was.measured;
             record.embedding = was.embedding;
             record.analyser = was.analyser;
+        }
+    }
+}
+
+/// Gives each file of `records`, which a scan found, the tags the file at
+/// its path has in `now`, the place's files as they are when the scan
+/// ends: the scan went by them as they were when it started, so tags given
+/// or taken away meanwhile stay so. Both are in order of path.
+pub fn keep_tags(records: &mut [Record], now: &[Record]) {
+    let mut now = now.iter().peekable();
+    for record in records {
+        while now.next_if(|was| was.path < record.path).is_some() {}
+        if let Some(was) = now.next_if(|was| was.path == record.path)
+            && was.tags != record.tags
+        {
+            record.tags = was.tags.clone();
         }
     }
 }
@@ -238,16 +283,19 @@ mod tests {
                 "Kick.wav"
             ]
         );
-        let kick = records[3].audio.unwrap();
+        // Their headers are read after.
+        assert!(records.iter().all(|r| r.unread && r.audio.is_none()));
+        assert!(records.iter().all(|r| r.size > 0 && r.modified > 0));
+        let kick = header(&place.join("Kick.wav")).unwrap();
         assert_eq!(
             (kick.format, kick.sample_rate, kick.channels, kick.frames),
             (Format::Wav, 44_100, 1, 441)
         );
         // Named like audio, but not audio Musicable reads.
-        assert_eq!(records[2].audio, None);
+        assert_eq!(header(&place.join("Drums/fake.flac")), None);
         // A file that's really a WAV, whatever its extension says.
-        assert_eq!(records[0].audio.unwrap().format, Format::Wav);
-        assert!(records.iter().all(|r| r.size > 0 && r.modified > 0));
+        let hat = header(&place.join("Drums/Hats/Hat.aif"));
+        assert_eq!(hat.unwrap().format, Format::Wav);
         assert!(scan(&place.join("Missing"), &[], &|| true, &mut |_| {}).is_err());
     }
 
@@ -259,11 +307,12 @@ mod tests {
         wav(&place.join("Old/Hat.wav"), 300);
         let mut old = all(&place, &[]);
         for record in &mut old {
+            // As reading their headers leaves them.
+            record.audio = header(&place.join(&record.path));
+            record.unread = false;
             record.tags.push(Tag::yours("mine"));
             record.analyser = Some("test".to_owned());
         }
-        // A record the scan keeps as it is, without opening the file.
-        old[0].audio = None;
         // The snare changed, and the hat moved.
         wav(&place.join("Snare.wav"), 250);
         fs::create_dir(place.join("New")).unwrap();
@@ -274,10 +323,43 @@ mod tests {
         let hat = &records[1];
         assert_eq!(hat.tags, [Tag::yours("mine")]);
         assert_eq!(hat.analyser.as_deref(), Some("test"));
+        assert_eq!((hat.audio, hat.unread), (old[1].audio, false));
+        // Changed, its header is to be read again.
         let snare = &records[2];
-        assert_eq!(snare.audio.unwrap().frames, 250);
+        assert_eq!((snare.audio, snare.unread), (None, true));
         assert_eq!(snare.tags, [Tag::yours("mine")]);
         assert_eq!(snare.analyser, None);
+    }
+
+    #[test]
+    fn tags_given_or_taken_away_while_a_scan_ran_stay_so() {
+        let mut records = vec![
+            Record::new("Clap.wav", 1, 1, None),
+            Record::new("Kick.wav", 1, 1, None),
+            Record::found("New.wav", 1, 1),
+            Record::new("Snare.wav", 1, 1, None),
+        ];
+        records[1].tags.push(Tag::yours("old"));
+        records[3].tags.push(Tag::yours("old"));
+        let mut now = vec![
+            Record::new("Clap.wav", 1, 1, None),
+            Record::new("Gone.wav", 1, 1, None),
+            Record::new("Kick.wav", 1, 1, None),
+            Record::new("Snare.wav", 1, 1, None),
+        ];
+        now[0].tags.push(Tag::yours("given"));
+        now[1].tags.push(Tag::yours("given"));
+        now[3].tags = vec![Tag::yours("old"), Tag::yours("given")];
+        keep_tags(&mut records, &now);
+        let tags: Vec<Vec<&str>> = records
+            .iter()
+            .map(|r| r.tags.iter().map(|tag| tag.id.as_str()).collect())
+            .collect();
+        let none: Vec<&str> = Vec::new();
+        assert_eq!(
+            tags,
+            [vec!["given"], none.clone(), none, vec!["old", "given"]]
+        );
     }
 
     #[test]

@@ -233,6 +233,13 @@ fn a_place_rescans_or_leaves_the_library_from_its_menu() {
     harness.run_steps(2);
     harness.get_by_label("Looking through: 1,234 files");
     harness.get_by_label("Drums");
+
+    // Then, while it reads their headers, how many are left.
+    let state = harness.state_mut();
+    state.library.scanning.clear();
+    state.library.reading = vec![(PathBuf::from("/samples/Drums"), 1200)];
+    harness.run_steps(2);
+    harness.get_by_label("Reading: 1,200 files left");
 }
 
 #[test]
