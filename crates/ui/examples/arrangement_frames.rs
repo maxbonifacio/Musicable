@@ -18,7 +18,7 @@ use musicable_commands::editor::AudioFile;
 use musicable_commands::{Editor, Keymap, Registry, Steps, view};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Project, TrackKind};
+use musicable_model::{Chain, Project, TrackKind};
 use musicable_ui::{
     Action, Audio, KeymapStatus, Level, Levels, Library, MIXER, PeaksBuilder, Playback, Plugins,
     Shell, View, Waveforms, Workspaces,
@@ -58,7 +58,10 @@ fn main() {
     // The whole song in sight, with the tracks at their smallest.
     bench.editor.viewport.zoom = f64::from(width) / (CLIPS as f64 * 16.0);
     for track in &bench.project.tracks {
-        bench.editor.track_heights.insert(track.id, 24.0);
+        bench
+            .editor
+            .track_heights
+            .insert(Chain::Track(track.id), 24.0);
     }
     bench.measure("Zoomed out to the whole song, tracks small", |_| {});
     bench.measure("The same, scrolling down every frame", |bench| {

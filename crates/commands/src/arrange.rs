@@ -951,6 +951,7 @@ mod tests {
         setup.document.editor_mut().selection.time = Some(TimeSelection {
             range: BeatRange::new(Beats::new(2), Beats::new(6)),
             tracks: [drums, bass].into(),
+            master: false,
         });
         setup.run(&INSERT_MIDI_CLIP);
         assert_eq!(

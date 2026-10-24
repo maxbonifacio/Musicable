@@ -55,7 +55,7 @@ pub const SELECT_ALL: CommandId = CommandId::new("edit.select_all");
 pub const RENAME: CommandId = CommandId::new("edit.rename");
 /// Selects clips.
 pub const SELECT_CLIPS: CommandId = CommandId::new("edit.select_clips");
-/// Selects a stretch of time on some tracks.
+/// Selects a stretch of time on some tracks, or on the master.
 pub const SELECT_TIME: CommandId = CommandId::new("edit.select_time");
 /// Selects tracks.
 pub const SELECT_TRACKS: CommandId = CommandId::new("edit.select_tracks");
@@ -183,12 +183,18 @@ pub fn register(registry: &mut Registry) {
                  becomes the selected track.",
             ),
             Param::required("tracks", Type::TRACKS, "The tracks it covers."),
+            Param::optional(
+                "master",
+                Type::Bool,
+                "Whether it covers the master too, after the tracks.",
+            ),
         ]),
         |ctx, args| {
             let (start, end): (Beats, Beats) = (args.get("start")?, args.get("end")?);
             let tracks: Vec<TrackId> = args.get("tracks")?;
+            let master = args.opt("master")?.unwrap_or(false);
             let range = BeatRange::new(start.min(end).max(Beats::ZERO), start.max(end));
-            select_time(ctx.document.parts(), range, &tracks)?;
+            select_time(ctx.document.parts(), range, &tracks, master)?;
             Ok(Value::None)
         },
     );
@@ -253,21 +259,35 @@ fn select_clips(
     Ok(())
 }
 
-/// Selects `range` on `tracks`. An empty range selects no time, but still
-/// makes one of the tracks the selected track.
+/// Selects `range` on `tracks`, and on the master with `master`. An empty
+/// range selects no time, but still makes one of them the selected track:
+/// the topmost, the master being under the tracks, unless the selected
+/// track is one of them.
 fn select_time(
     (project, editor): (&Project, &mut Editor),
     range: BeatRange,
     tracks: &[TrackId],
+    master: bool,
 ) -> Result<(), CommandError> {
     let tracks = existing(project, tracks)?;
-    let selected = editor.selected_track.and_then(Chain::track);
-    if !selected.is_some_and(|id| tracks.contains(&id))
-        && let Some(first) = project.tracks.iter().find(|t| tracks.contains(&t.id))
+    let covered = |chain: Chain| match chain {
+        Chain::Track(id) => tracks.contains(&id),
+        Chain::Master => master,
+    };
+    let topmost = (project.tracks.iter())
+        .find(|t| tracks.contains(&t.id))
+        .map(|t| Chain::Track(t.id))
+        .or(master.then_some(Chain::Master));
+    if !editor.selected_track.is_some_and(covered)
+        && let Some(topmost) = topmost
     {
-        editor.selected_track = Some(Chain::Track(first.id));
+        editor.selected_track = Some(topmost);
     }
-    let time = (!range.is_empty() && !tracks.is_empty()).then_some(TimeSelection { range, tracks });
+    let time = (!range.is_empty() && topmost.is_some()).then_some(TimeSelection {
+        range,
+        tracks,
+        master,
+    });
     editor.selection = Selection {
         time,
         ..Selection::default()
@@ -942,10 +962,71 @@ mod tests {
         let editor = setup.document.editor();
         assert_eq!(editor.selected_track, Some(Chain::Track(keys)));
 
+        // Time on the master makes it the selected track, unless the
+        // selected track is one the time is on too.
+        let on_master = |start, end, tracks: &[TrackId]| {
+            Args::new()
+                .with("start", Beats::new(start))
+                .with("end", Beats::new(end))
+                .with("tracks", tracks.to_vec())
+                .with("master", true)
+        };
+        setup.run_with(&SELECT_TIME, on_master(4, 8, &[])).unwrap();
+        let editor = setup.document.editor();
+        let time = editor.selection.time.clone().unwrap();
+        assert_eq!(time.range, BeatRange::new(Beats::new(4), Beats::new(8)));
+        assert!(time.tracks.is_empty() && time.master);
+        assert_eq!(editor.selected_track, Some(Chain::Master));
+        setup
+            .run_with(&SELECT_TIME, on_master(4, 8, &[vox]))
+            .unwrap();
+        let editor = setup.document.editor();
+        assert_eq!(editor.selection.time.as_ref().unwrap().tracks, [vox].into());
+        assert_eq!(editor.selected_track, Some(Chain::Master));
+        setup.select_tracks(&[bass]);
+        setup
+            .run_with(&SELECT_TIME, on_master(4, 8, &[vox]))
+            .unwrap();
+        let selected = setup.document.editor().selected_track;
+        assert_eq!(selected, Some(Chain::Track(vox)));
+        // Without a stretch, it selects the master and no time.
+        setup.run_with(&SELECT_TIME, on_master(6, 6, &[])).unwrap();
+        let editor = setup.document.editor();
+        assert_eq!(editor.selection, Selection::default());
+        assert_eq!(editor.selected_track, Some(Chain::Master));
+
         setup.run(&SELECT_ALL);
         assert_eq!(setup.document.editor().selection.clips, [b, k, v].into());
         // None of it is a change to the project.
         assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn time_on_the_master_has_no_clips_to_edit_but_loops() {
+        let (mut setup, [bass, ..], [b, ..]) = arrangement();
+        setup.select_clips(&[b]);
+        setup.run(&COPY);
+        let clipboard = setup.document.editor().clipboard.clone();
+        let args = Args::new()
+            .with("start", Beats::new(2))
+            .with("end", Beats::new(6))
+            .with("tracks", Vec::<TrackId>::new())
+            .with("master", true);
+        setup.run_with(&SELECT_TIME, args).unwrap();
+        // Copy takes nothing from it, and Cut, Delete, Duplicate and Split
+        // change nothing.
+        setup.run(&COPY);
+        assert_eq!(setup.document.editor().clipboard, clipboard);
+        for id in [CUT, DELETE, DUPLICATE, SPLIT] {
+            setup.run(&id);
+        }
+        assert_eq!(setup.committed_names(), Vec::<String>::new());
+        assert_eq!(clips(&setup, bass), [row("B", 0.0, 8.0)]);
+        // Toggle Loop loops its stretch.
+        setup.run(&crate::transport::TOGGLE_LOOP);
+        let project = setup.document.project();
+        let range = BeatRange::new(Beats::new(2), Beats::new(6));
+        assert_eq!((project.loop_region, project.looping), (range, true));
     }
 
     #[test]

@@ -42,8 +42,11 @@ pub enum Target {
     /// Near the loop brace's start or end.
     LoopEdge,
     Locator,
+    /// A track's header, or its strip in the mixer, where the strip has no
+    /// control.
     TrackHeader,
-    /// A track's bottom edge, in its header.
+    /// A track's bottom edge, in its header, or the master track's top
+    /// edge: it's pinned along the bottom.
     TrackEdge,
     /// A take's lane, under its track's while the track shows its takes.
     TakeLane,
@@ -289,8 +292,8 @@ impl Target {
             Target::LoopBrace => "The loop brace",
             Target::LoopEdge => "The loop brace's start or end",
             Target::Locator => "A locator",
-            Target::TrackHeader => "A track's header",
-            Target::TrackEdge => "A track's bottom edge",
+            Target::TrackHeader => "A track's header or strip",
+            Target::TrackEdge => "A track's edge",
             Target::TakeLane => "A take's lane",
             Target::TakeHeader => "A take's header",
             Target::AutomationPoint => "An automation point",

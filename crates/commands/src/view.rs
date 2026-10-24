@@ -63,7 +63,7 @@ pub const TOGGLE_SNAP: CommandId = CommandId::new("view.toggle_snap");
 pub const FIXED_GRID: CommandId = CommandId::new("view.fixed_grid");
 /// Sets the arrangement's zoom and scrolling.
 pub const SET_VIEWPORT: CommandId = CommandId::new("view.set_viewport");
-/// Sets the height of a track in the arrangement.
+/// Sets the height of a track in the arrangement, or of the master's row.
 pub const SET_TRACK_HEIGHT: CommandId = CommandId::new("view.set_track_height");
 /// Sets the piano roll's zoom, scrolling and key height.
 pub const SET_PIANO_ROLL_VIEWPORT: CommandId = CommandId::new("view.set_piano_roll_viewport");
@@ -290,21 +290,33 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         Command::new(SET_TRACK_HEIGHT, "Set Track Height").with_params(&[
-            Param::required("track", Type::Track, "The track."),
+            Param::optional(
+                "track",
+                Type::Track,
+                "The track: the one the panels show without it.",
+            ),
+            Param::optional("master", Type::Bool, "The master's row instead."),
             Param::required("height", Type::Number, "Its height, in points."),
         ]),
         |ctx, args| {
-            let track: TrackId = args.get("track")?;
             let height: f64 = args.get("height")?;
             let (project, editor) = ctx.document.parts();
-            if project.track(track).is_none() {
+            let chain = match (args.opt::<TrackId>("track")?, args.opt("master")?) {
+                (_, Some(true)) => Chain::Master,
+                (Some(track), _) => Chain::Track(track),
+                (None, _) => (editor.selected_track)
+                    .ok_or_else(|| CommandError::invalid("no track is selected"))?,
+            };
+            if let Chain::Track(track) = chain
+                && project.track(track).is_none()
+            {
                 return Err(CommandError::invalid(format!(
                     "there's no track {}",
                     track.0
                 )));
             }
             let height = (height as f32).clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
-            editor.track_heights.insert(track, height);
+            editor.track_heights.insert(chain, height);
             Ok(Value::None)
         },
     );
@@ -494,13 +506,27 @@ mod tests {
         assert_eq!((viewport.top, viewport.width), (0.0, 640.0));
 
         let height = |h: f64| Args::new().with("track", keys).with("height", h);
+        let track = Chain::Track(keys);
         setup.run_with(&SET_TRACK_HEIGHT, height(1.0)).unwrap();
         assert_eq!(
-            setup.document.editor().track_heights[&keys],
+            setup.document.editor().track_heights[&track],
             MIN_TRACK_HEIGHT
         );
         setup.run_with(&SET_TRACK_HEIGHT, height(90.0)).unwrap();
-        assert_eq!(setup.document.editor().track_heights[&keys], 90.0);
+        assert_eq!(setup.document.editor().track_heights[&track], 90.0);
+        // The master's row, and without either, the selected track's.
+        let master = Args::new().with("master", true).with("height", 1e4);
+        setup.run_with(&SET_TRACK_HEIGHT, master).unwrap();
+        let heights = &setup.document.editor().track_heights;
+        assert_eq!(heights[&Chain::Master], MAX_TRACK_HEIGHT);
+        let selected = Args::new().with("height", 70.0);
+        assert_eq!(
+            setup.run_with(&SET_TRACK_HEIGHT, selected.clone()),
+            Err(CommandError::invalid("no track is selected"))
+        );
+        setup.document.editor_mut().selected_track = Some(track);
+        setup.run_with(&SET_TRACK_HEIGHT, selected).unwrap();
+        assert_eq!(setup.document.editor().track_heights[&track], 70.0);
         setup.run(&TOGGLE_FOLLOW);
         assert!(!setup.document.editor().follow);
         setup.run(&TOGGLE_MIXER);

@@ -11,7 +11,9 @@
 //! registry, with their arguments taken from what was clicked.
 //!
 //! The master track's row is pinned along the bottom, under the tracks,
-//! and is selected as they are, for the devices panel to show its devices.
+//! and is selected, resized and has time selected on it as they do, for
+//! the devices panel to show its devices. As it's pinned, its top edge is
+//! the one a drag moves.
 //!
 //! A track can show automation lanes under its lanes, and the master's go
 //! under its row. Their points are added, moved and deleted as Live's
@@ -107,6 +109,9 @@ enum Hit {
     Master,
     /// The master track's header.
     MasterHeader,
+    /// The master track's top edge, in its header: it's pinned along the
+    /// bottom, so the edge over it is the one that moves.
+    MasterEdge,
     Ruler,
     Strip,
     LoopBrace,
@@ -157,7 +162,7 @@ impl Hit {
             Hit::LoopEdge(_) => Target::LoopEdge,
             Hit::Locator(_) => Target::Locator,
             Hit::Header(_) => Target::TrackHeader,
-            Hit::TrackEdge(_) => Target::TrackEdge,
+            Hit::TrackEdge(_) | Hit::MasterEdge => Target::TrackEdge,
             Hit::Take { .. } => Target::TakeLane,
             Hit::TakeHeader { .. } => Target::TakeHeader,
             Hit::Automation { part, .. } => match part {
@@ -196,6 +201,7 @@ impl Hit {
             self,
             Hit::Master
                 | Hit::MasterHeader
+                | Hit::MasterEdge
                 | Hit::Automation {
                     chain: Chain::Master,
                     ..
@@ -259,7 +265,8 @@ struct Drag {
     clips: Vec<ClipId>,
     /// The viewport as the drag started.
     viewport: Viewport,
-    /// The height of the track whose edge is dragged, as the drag started.
+    /// The height of the track, or of the master's row, whose edge is
+    /// dragged, as the drag started.
     height: f32,
     /// What the drag last asked for, for those that ask while they last.
     sent: Option<Plan>,
@@ -306,17 +313,20 @@ enum Plan {
         locator: LocatorId,
         at: Beats,
     },
-    /// A time selection. Drags ask for it as they go.
+    /// A time selection, on the tracks and maybe the master. Drags ask for
+    /// it as they go.
     Time {
         start: Beats,
         end: Beats,
         tracks: Vec<TrackId>,
+        master: bool,
     },
     /// Scrolls and zooms. Drags ask for it as they go.
     Viewport(Viewport),
-    /// A track's height. Drags ask for it as they go.
+    /// A track's height, or the master's row's. Drags ask for it as they
+    /// go.
     Height {
-        track: TrackId,
+        chain: Chain,
         height: f32,
     },
     /// Copies a stretch of a take to its track.
@@ -503,12 +513,12 @@ impl Layout {
                     *y += theme.automation_height;
                 }
             };
+        let height_of = |chain: Chain| {
+            let height = editor.track_heights.get(&chain).copied();
+            height.unwrap_or(theme.track_height)
+        };
         for (index, track) in project.tracks.iter().enumerate() {
-            let height = editor
-                .track_heights
-                .get(&track.id)
-                .copied()
-                .unwrap_or(theme.track_height);
+            let height = height_of(Chain::Track(track.id));
             rows.push(Row {
                 index,
                 id: track.id,
@@ -534,22 +544,21 @@ impl Layout {
         // The master's row and lanes, along the bottom, as much of them as
         // fits in their share. In a short arrangement the tracks come first.
         let mut master_automation = Vec::new();
-        let mut master_content = theme.track_height;
+        let row_height = height_of(Chain::Master);
+        let mut master_content = row_height;
         lanes_of(
             Chain::Master,
             None,
             &mut master_content,
             &mut master_automation,
         );
-        let master_height = master_content
-            .min(lanes.height() * MASTER_SHARE)
-            .min((lanes.height() - theme.track_height).max(0.0));
+        let master_height = master_content.min(master_room(lanes, theme));
         let master_top = lanes.bottom() - master_height;
         let master_overflow = master_content - master_height;
         let master_scroll = master_scroll.clamp(0.0, master_overflow);
         let master = MasterRow {
             top: master_top - master_scroll,
-            height: theme.track_height,
+            height: row_height,
         };
         for lane in &mut master_automation {
             lane.top += master.top;
@@ -616,6 +625,12 @@ impl Layout {
     /// Whether `y` is in the master's part.
     fn in_master(&self, y: f32) -> bool {
         y >= self.master_top
+    }
+
+    /// Whether the master's part is in sight: in a short arrangement, the
+    /// tracks take all of it.
+    fn master_shown(&self) -> bool {
+        self.master_top < self.lanes.bottom()
     }
 
     fn x_of(&self, at: Beats) -> f32 {
@@ -844,6 +859,11 @@ impl Scene<'_> {
                     Hit::TrackEdge(row.id)
                 }
                 Some(row) => Hit::Header(row.id),
+                None if self.layout.in_master(pos.y)
+                    && pos.y < self.layout.master.top + self.theme.height_grab =>
+                {
+                    Hit::MasterEdge
+                }
                 None => match self.layout.take_at(pos.y) {
                     Some(lane) => Hit::TakeHeader {
                         track: lane.track,
@@ -1357,23 +1377,30 @@ impl Scene<'_> {
                     length: length.clamp(Beats::ZERO, room.max(Beats::ZERO)),
                 })
             }
-            // There's no time to select on the master.
-            (MouseAction::SelectTime, hit) if hit.on_master() => None,
             (MouseAction::SelectTime, hit) => {
                 let tracks = &project.tracks;
+                // The rows dragged over, by their places: the tracks', then
+                // the master's, under them.
+                let master = tracks.len();
                 let from = match hit.track() {
                     Some(track) => project.track_index(track)?,
+                    None if hit.on_master() => master,
                     None => layout.nearest_index(drag.from.y)?,
                 };
-                let to = layout.nearest_index(drag.to.y)?;
+                let to = match layout.in_master(drag.to.y) && layout.master_shown() {
+                    true => master,
+                    false => layout.nearest_index(drag.to.y).unwrap_or(master),
+                };
+                let (top, bottom) = (from.min(to), from.max(to));
                 let (start, end) = (self.snapped(drag.from.x), self.snapped(drag.to.x));
                 Some(Plan::Time {
                     start: start.min(end),
                     end: start.max(end),
-                    tracks: tracks[from.min(to)..=from.max(to)]
+                    tracks: tracks[top..(bottom + 1).min(master)]
                         .iter()
                         .map(|t| t.id)
                         .collect(),
+                    master: bottom == master,
                 })
             }
             (MouseAction::ScrubZoom, _) => {
@@ -1426,10 +1453,20 @@ impl Scene<'_> {
                 (at != locator.at).then_some(Plan::Locator { locator: id, at })
             }
             (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => Some(Plan::Height {
-                track,
+                chain: Chain::Track(track),
                 height: (drag.height + drag.to.y - drag.from.y)
                     .clamp(views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT),
             }),
+            // The master's top edge: up makes it taller, as far as the
+            // master's part of the lanes goes.
+            (MouseAction::ResizeTrack, Hit::MasterEdge) => {
+                let (least, most) = (views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT);
+                let room = master_room(layout.lanes, self.theme).clamp(least, most);
+                Some(Plan::Height {
+                    chain: Chain::Master,
+                    height: (drag.height + drag.from.y - drag.to.y).clamp(least, room),
+                })
+            }
             (MouseAction::Comp | MouseAction::CompFree, Hit::Take { track, take, .. }) => {
                 let free = drag.action == MouseAction::CompFree;
                 let at = |x| self.snap(layout.beats_at(x), free).max(Beats::ZERO);
@@ -1600,17 +1637,32 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
             let args = Args::new().with("locator", *locator).with("at", *at);
             run(actions, locator::MOVE, args);
         }
-        Plan::Time { start, end, tracks } => {
-            let args = Args::new()
+        Plan::Time {
+            start,
+            end,
+            tracks,
+            master,
+        } => {
+            let mut args = Args::new()
                 .with("start", *start)
                 .with("end", *end)
                 .with("tracks", tracks.clone());
+            if *master {
+                args.set("master", true);
+            }
             run(actions, edit::SELECT_TIME, args);
         }
         Plan::Viewport(viewport) => set_viewport(actions, viewport),
-        Plan::Height { track, height } => {
-            let args = Args::new().with("track", *track).with("height", *height);
-            run(actions, views::SET_TRACK_HEIGHT, args);
+        Plan::Height { chain, height } => {
+            let args = match chain {
+                Chain::Track(track) => Args::new().with("track", *track),
+                Chain::Master => Args::new().with("master", true),
+            };
+            run(
+                actions,
+                views::SET_TRACK_HEIGHT,
+                args.with("height", *height),
+            );
         }
         Plan::Comp {
             take, start, end, ..
@@ -1785,7 +1837,7 @@ impl Arrangement {
                     _ => None,
                 };
                 let part = match hit {
-                    Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader => {
+                    Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader | Hit::MasterEdge => {
                         header::part_at(&columns, pos.x)
                     }
                     _ => None,
@@ -2128,6 +2180,9 @@ impl Arrangement {
             (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => {
                 drag.height = scene.layout.row(track).map_or(0.0, |row| row.height);
             }
+            (MouseAction::ResizeTrack, Hit::MasterEdge) => {
+                drag.height = scene.layout.master.height;
+            }
             (MouseAction::Draw | MouseAction::DrawFree, _) => scene.draw(&mut drag),
             _ => {}
         }
@@ -2448,6 +2503,12 @@ fn lowest_top(content: f32, theme: &Theme, tracks: Rect) -> f32 {
     (content + theme.track_height - tracks.height()).max(0.0)
 }
 
+/// The most of `lanes` the master's row and its automation lanes take:
+/// their share, as long as that leaves the tracks a track's height.
+fn master_room(lanes: Rect, theme: &Theme) -> f32 {
+    (lanes.height() * MASTER_SHARE).min((lanes.height() - theme.track_height).max(0.0))
+}
+
 /// The ruler, the lanes and the headers together.
 fn rect_union(layout: &Layout) -> Rect {
     layout.ruler.union(layout.lanes).union(layout.headers)
@@ -2472,7 +2533,11 @@ fn select_for_menu(scene: &Scene<'_>, spot: Spot, actions: &mut Vec<Action>) {
                 Args::new().with("tracks", vec![track]),
             );
         }
-        Hit::Master | Hit::MasterHeader if scene.editor().selected_track != Some(Chain::Master) => {
+        // As on a track's lane, a time selection stays.
+        Hit::Master if selection.time.is_some() => {}
+        Hit::Master | Hit::MasterHeader | Hit::MasterEdge
+            if scene.editor().selected_track != Some(Chain::Master) =>
+        {
             run(actions, edit::SELECT_MASTER, Args::new());
         }
         Hit::Lane(track) if selection.time.is_none() => {

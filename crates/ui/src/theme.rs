@@ -213,7 +213,8 @@ pub struct Theme {
     pub edge_grab: f32,
     /// The square handles that drag fades.
     pub fade_handle: f32,
-    /// How near a track's bottom edge a drag changes its height.
+    /// How near a track's bottom edge, or the master's top edge, a drag
+    /// changes its height.
     pub height_grab: f32,
     /// The least room between the ruler's bar numbers.
     pub label_spacing: f32,

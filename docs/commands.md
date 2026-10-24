@@ -145,7 +145,7 @@ so there they don't apply.
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
 | `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip | Ctrl+A | Ctrl+A |
-| `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header does | none | Clicking the Main track |
+| `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header or its mixer strip does | none | Clicking the Main track |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 
 And for the arrangement's clicks, scripts and agents:
@@ -153,7 +153,7 @@ And for the arrangement's clicks, scripts and agents:
 | Command | Title | Arguments | What it does |
 |---|---|---|---|
 | `edit.select_clips` | Select Clips | `clips`, `toggle`? | Selects the clips, or adds them to the selection or takes them away |
-| `edit.select_time` | Select Time | `start`, `end`, `tracks` | Selects a stretch of time on some tracks |
+| `edit.select_time` | Select Time | `start`, `end`, `tracks`, `master`? | Selects a stretch of time on some tracks, and on the master too with `master`; `tracks` can then be empty |
 | `edit.select_tracks` | Select Tracks | `tracks`, `toggle`? | Selects tracks |
 
 These give the arrangement the focus, unless the mixer has it, which edits
@@ -516,8 +516,9 @@ other. They push a `Request`, as the file commands do.
 | `view.fixed_grid` | Fixed Grid | Keeps the grid's step whatever the zoom, or lets it follow the zoom | Ctrl+5 | Ctrl+5 |
 
 `view.set_viewport` (`start`, `zoom`, `top`, `width`) and
-`view.set_track_height` (`track`, `height`) carry the arrangement's
-scrolling, zooming and track heights, and `view.set_piano_roll_viewport`
+`view.set_track_height` (`track`? or `master`?, `height`) carry the
+arrangement's scrolling, zooming and the heights of its tracks and of the
+master's row, and `view.set_piano_roll_viewport`
 (`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
 roll's, with how tall its rows of keys are. `view.set_focus` gives a panel
 the focus (`panel`: `arrangement`, `mixer`, `devices`, `piano_roll`,
@@ -560,7 +561,9 @@ project, undo leaves it alone, and opening a project starts a new one, but
 for the behaviour settings.
 
 - **The selection** (`Selection`): clips, a time selection (a stretch of
-  beats on some tracks), or tracks, and the selected track, which new clips
+  beats on some tracks, and maybe on the master, which has no clips for
+  the edit commands but loops, zooms and exports as they do), or tracks,
+  and the selected track, which new clips
   and pasting start from, and whose devices the devices panel shows. The
   selected track (`selected_track`, a `Chain`) can be the master track,
   which is selected alone: new devices and Show/Hide Automation go to the
@@ -577,7 +580,8 @@ for the behaviour settings.
   width, which the arrangement reports so zooming to fit works. Follow
   turns its pages while the playhead plays out of sight.
 - **Track heights** in points, between `view::MIN_TRACK_HEIGHT` and
-  `MAX_TRACK_HEIGHT`, for the tracks whose height was changed.
+  `MAX_TRACK_HEIGHT`, for the tracks whose height was changed, and the
+  master's row, by their `Chain`.
 - **The focus** (`Focus`): the panel the keys and the edit commands act
   in, by its id (`crates/commands/src/panel.rs`): the arrangement, the
   mixer, the devices, the piano roll, the browser or the history.

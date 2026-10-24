@@ -514,6 +514,16 @@ fn examples() -> Vec<Example> {
                     .with("tracks", vec![track]),
             )
         }),
+        // On the master alone.
+        leaves(edit::SELECT_TIME, |_| {
+            Some(
+                Args::new()
+                    .with("start", Beats::new(2))
+                    .with("end", Beats::new(6))
+                    .with("tracks", Vec::<TrackId>::new())
+                    .with("master", true),
+            )
+        }),
         leaves(edit::SELECT_TRACKS, |s| {
             let track = find_track(s, |_| true)?.id;
             Some(Args::new().with("tracks", vec![track]))
@@ -991,6 +1001,10 @@ fn examples() -> Vec<Example> {
         leaves(view::SET_TRACK_HEIGHT, |s| {
             let track = find_track(s, |_| true)?.id;
             Some(Args::new().with("track", track).with("height", 80.0))
+        }),
+        // The master's row.
+        leaves(view::SET_TRACK_HEIGHT, |_| {
+            Some(Args::new().with("master", true).with("height", 120.0))
         }),
         leaves(view::SET_VIEWPORT, |_| {
             Some(
