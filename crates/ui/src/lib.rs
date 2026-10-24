@@ -45,7 +45,10 @@ pub use panels::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
 pub use shell::{
     Action, Audio, KeymapStatus, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
 };
-pub use theme::{BrowserSizes, DeviceSizes, DockSizes, MixerSizes, PianoRollSizes, Theme};
+pub use theme::{
+    Base, BrowserSizes, DeviceSizes, DockSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes,
+    Theme, ThemeFile, ThemeFileError, ThemeProblem, WidgetState, Widgets, apply as apply_theme,
+};
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};
 pub use workspace::{Layout, Split, WindowLayout, Workspace, WorkspaceError};

@@ -215,6 +215,8 @@ That's what `ParallelOptions::inline_below` is for
   keys and runs it ([below](#the-command-palette)).
 - **Options > Keyboard Shortcuts** (Ctrl+K) lists every command with its
   keys, and changes them ([below](#changing-keys)).
+- **Options > Appearance** picks the theme Musicable draws with
+  ([Themes](#themes)).
 
 **Double-clicks** count when the second click comes soon enough after the
 first: on Windows, within the double-click time in its mouse settings, as
@@ -349,12 +351,13 @@ again.
 draw every colour and size from a `musicable_ui::Theme`, and look up what
 each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
-`Shell::set_theme` and `set_mouse_map` change them, for the profiles of
-Tier 2. Each view is a panel with its own id, such as
-`musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel registry
-(`crates/ui/src/panels.rs`) holds with its title, its place and size in
-the default layout, and how it's drawn: the dock lays the panels out by
-id, and the workspace file names them by it.
+`Shell::set_theme` and `set_mouse_map` change them: the app sets the theme
+from Options > Appearance and theme files ([Themes](#themes)), and the
+mouse map is for the profiles of Tier 2. Each view is a panel with its own
+id, such as `musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel
+registry (`crates/ui/src/panels.rs`) holds with its title, its place and
+size in the default layout, and how it's drawn: the dock lays the panels
+out by id, and the workspace file names them by it.
 
 ### How fast it draws
 
@@ -1244,8 +1247,8 @@ scaled or rounded. A cancelled or failed export leaves no files behind.
 
 ## Settings and your keymap
 
-The app keeps its settings, your keymap and the panels' layout in its
-config folder:
+The app keeps its settings, your keymap, your themes and the panels'
+layout in its config folder:
 
 | System | Folder |
 |---|---|
@@ -1315,9 +1318,9 @@ first layout, and says why. Deleting the file brings back the first
 layout.
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, how editing behaves, the export window's and the browser's settings
-as they were last used, how long Capture holds the inputs, and the
-devices' recording offsets:
+ones, how editing behaves, the theme, the export window's and the
+browser's settings as they were last used, how long Capture holds the
+inputs, and the devices' recording offsets:
 
 ```toml
 format = "musicable-settings"
@@ -1331,6 +1334,9 @@ buffer_size = 128
 [behaviour]
 play_from = "start_marker"
 middle_c = "c3"
+
+[appearance]
+theme = "Studio.toml"
 
 [export]
 format = "wav"
@@ -1364,7 +1370,10 @@ roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
 as in scientific pitch notation and Reaper, or `c5`, as in FL Studio.
 `capture_minutes`, under `[recording]`, is how long [Capture](#capture)
 holds the inputs, 5 minutes if it's left out; 0 turns Capture off. The app
-reads them at startup; there's no window for them yet. Each of
+reads them at startup; there's no window for them yet. `theme`, under
+`[appearance]`, is the theme Musicable draws with: `dark`, `light`, or the
+name of a file in the `themes` folder ([Themes](#themes)), which Options >
+Appearance writes. Each of
 `recording.offsets` is the [recording offset](#recording), in `frames`, of
 a `device`, by its id, in exclusive mode or not (`exclusive`, false if it's
 left out), at a `sample_rate`. Audio Settings writes them; an offset of 0
@@ -1377,6 +1386,68 @@ presets somewhere other than `Music/Musicable/Presets` in your home folder.
 Fields this version doesn't know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
+
+## Themes
+
+Musicable draws with a theme: the dark one, a light one, or a theme file of
+your own. **Options > Appearance** picks one, and the window changes at
+once. A theme colours Musicable's views and egui's own widgets too, the
+menus, buttons, fields and windows, and the window's title bar is dark or
+light as the theme is, whichever the system is in.
+
+Theme files live in the `themes` folder in the [config
+folder](#settings-and-your-keymap), and hold only what they change in a
+built-in theme, the one their `base` names:
+
+```toml
+base = "light"
+playhead = "#ff8800"
+
+[mixer]
+strip = 96
+
+[widgets.resting]
+background = "#d0d4e0"
+
+[fonts]
+text = "Inter.ttf"
+```
+
+Each entry has the name of one of the theme's colours or sizes, in the
+section that holds it. Colours are `"#rrggbb"`, or `"#rrggbbaa"` with an
+opacity, sizes are in points, and pairs of sizes, across and down, are
+`[8, 3]`. A file without a `base` changes the dark theme. **Export Theme...**
+in the Appearance window writes the theme in use as a file with every entry
+in it, with those that keep the base's value commented out and each group
+explained, to start a theme of your own from; written into the themes
+folder, it becomes the theme in use. Musicable looks at the theme file in
+use twice a second, and draws with what you change in it as soon as you
+save it. Reload reads it again, and its fonts.
+
+Most entries colour or size Musicable's views: the arrangement's, the
+transport bar's, and those under `[mixer]`, `[devices]`, `[piano_roll]` and
+`[browser]`. `[dock]` sizes the panels' tab bars (`tab_bar`), the gaps
+between panels (`gap`) and the least a panel's edge can be dragged to
+(`min_panel`). `[widgets]` is egui's: the fill of panels and of windows and
+menus, their outline and shadow, text fields (`field`), the selection,
+links, warnings, corners and spacing. Under it, `[widgets.passive]` is what
+can't be clicked, such as labels and separators, and `resting`, `hovered`,
+`pressed` and `open` are buttons, checkboxes and sliders at rest, with the
+mouse over them, while they're pressed, and with their menu open, each with
+a `background`, a `fill` for checkboxes and the like, an `outline`, `text`
+and a `corner`. `[fonts]` names the font of text and of monospaced text: a
+font file in the themes folder, or one of egui's, `Ubuntu-Light` (egui's
+text) and `Hack` (egui's monospace); text a font can't write falls back to
+egui's fonts. `[fonts.sizes]` holds egui's text sizes; Musicable's views
+have sizes of their own, such as `text`.
+
+A mistake doesn't stop the rest of the file from applying: an entry no
+theme has, or one whose value isn't what it should be, keeps the base's
+value, and a font file that can't be read keeps egui's font. A file that
+can't be used at all, such as one that isn't valid TOML, leaves its base in
+its place, or the dark theme when even that can't be told, and so does a
+file that's gone. The status bar says so until the file is mended, and the
+Appearance window says what was wrong.
 
 ## Audio
 
@@ -1538,6 +1609,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
+- Editing a theme in the Appearance window, with colour pickers: theme
+  files are edited in a text editor for now. Plugins' own windows keep
+  their own look.
 - In the piano roll: the notes' MPE expression, shown and edited (Tier 2),
   drawing velocities across the lane, folding to the keys in use, scales,
   and repeating the arrow keys while they're held.

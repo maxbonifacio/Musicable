@@ -834,6 +834,7 @@ fn examples() -> Vec<Example> {
         }),
         edits(notes::VELOCITY_DOWN, note_selected),
         edits(notes::VELOCITY_UP, note_selected),
+        leaves(options::APPEARANCE, bare),
         leaves(options::AUDIO_SETTINGS, bare),
         leaves(options::KEYBOARD_SHORTCUTS, bare),
         leaves(options::RESCAN_PLUGINS, bare),

@@ -1,29 +1,54 @@
-//! The colours and sizes the views draw with.
+//! The colours, sizes and fonts the views draw with.
 //!
 //! Views draw from a [`Theme`], never from colours or sizes of their own, so
-//! a theme can change how all of Musicable looks. egui's own widgets, such
-//! as buttons and menus, follow egui's visuals instead.
+//! a theme can change how all of Musicable looks. Its [`widgets`] section
+//! does the same for egui's own widgets, such as buttons, menus and text
+//! fields, through egui's style ([`apply`]), and its [`fonts`] section names
+//! the fonts. Musicable has a dark theme and a light one built in
+//! ([`Base`]), and theme files change one of them ([`ThemeFile`]).
+//!
+//! [`widgets`]: Theme::widgets
+//! [`fonts`]: Theme::fonts
 
-use egui::{Color32, Vec2, vec2};
+mod file;
+mod light;
+mod style;
+mod values;
+
+use egui::{Color32, Stroke, Vec2, vec2};
+use serde::{Deserialize, Serialize};
+
+pub use file::{ThemeFile, ThemeFileError, ThemeProblem};
+pub use style::apply;
 
 /// How Musicable looks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
     // The colours of mute, solo and arm when they're on, wherever they are,
     // and of the text on them.
+    #[serde(with = "values::colour")]
     pub mute: Color32,
+    #[serde(with = "values::colour")]
     pub solo: Color32,
+    #[serde(with = "values::colour")]
     pub arm: Color32,
     /// Input monitoring's buttons, when they're on.
+    #[serde(with = "values::colour")]
     pub monitor: Color32,
     /// Built-in devices' switches, when they're on.
+    #[serde(with = "values::colour")]
     pub switch: Color32,
+    #[serde(with = "values::colour")]
     pub ink: Color32,
     /// The meters' colours, from quiet to loud to over full scale.
+    #[serde(with = "values::colour")]
     pub meter_quiet: Color32,
+    #[serde(with = "values::colour")]
     pub meter_loud: Color32,
+    #[serde(with = "values::colour")]
     pub meter_over: Color32,
     /// Errors and warnings, such as dropouts.
+    #[serde(with = "values::colour")]
     pub warning: Color32,
     /// How round clips', buttons' and strips' corners are.
     pub corner: f32,
@@ -38,80 +63,124 @@ pub struct Theme {
     /// The size of the playhead's position.
     pub position_text: f32,
     /// The CPU meter.
+    #[serde(with = "values::pair")]
     pub cpu_meter: Vec2,
 
     // The arrangement's colours.
     /// The tracks' lanes, every other one a little lighter.
+    #[serde(with = "values::colour")]
     pub lane: Color32,
+    #[serde(with = "values::colour")]
     pub lane_alternate: Color32,
     /// The lane of the selected track.
+    #[serde(with = "values::colour")]
     pub lane_selected: Color32,
     /// Below the last track.
+    #[serde(with = "values::colour")]
     pub empty: Color32,
     /// The grid's lines: at bars, at beats and between.
+    #[serde(with = "values::colour")]
     pub grid_bar: Color32,
+    #[serde(with = "values::colour")]
     pub grid_beat: Color32,
+    #[serde(with = "values::colour")]
     pub grid_step: Color32,
+    #[serde(with = "values::colour")]
     pub ruler: Color32,
+    #[serde(with = "values::colour")]
     pub ruler_text: Color32,
     /// The loop brace while looping, and while not.
+    #[serde(with = "values::colour")]
     pub loop_on: Color32,
+    #[serde(with = "values::colour")]
     pub loop_off: Color32,
     /// The loop region's shade over the lanes while looping.
+    #[serde(with = "values::colour")]
     pub loop_shade: Color32,
+    #[serde(with = "values::colour")]
     pub locator: Color32,
+    #[serde(with = "values::colour")]
     pub playhead: Color32,
+    #[serde(with = "values::colour")]
     pub start_marker: Color32,
+    #[serde(with = "values::colour")]
     pub time_selection: Color32,
     /// Clips take a colour from these, by their track's place.
+    #[serde(with = "values::colours")]
     pub clips: [Color32; 8],
     /// Laid over a clip's colour under its title bar, where its waveform or
     /// its notes are.
+    #[serde(with = "values::colour")]
     pub clip_body: Color32,
+    #[serde(with = "values::colour")]
     pub clip_text: Color32,
     /// The outline of selected clips.
+    #[serde(with = "values::colour")]
     pub clip_selected: Color32,
+    #[serde(with = "values::colour")]
     pub waveform: Color32,
+    #[serde(with = "values::colour")]
     pub notes: Color32,
+    #[serde(with = "values::colour")]
     pub fade: Color32,
     /// Where clips land while they're dragged.
+    #[serde(with = "values::colour")]
     pub ghost: Color32,
     /// The lanes of tracks' takes, under the tracks.
+    #[serde(with = "values::colour")]
     pub take_lane: Color32,
     /// A take's clips where the track doesn't play them. Where it does,
     /// they take the track's colour.
+    #[serde(with = "values::colour")]
     pub take_clip: Color32,
     /// What the armed tracks have recorded so far, while they record.
+    #[serde(with = "values::colour")]
     pub recording: Color32,
     /// Automation lanes, under the tracks, and the lines and points on
     /// them: grey where someone overrode the automation by hand, and for a
     /// parameter's own value where it has none.
+    #[serde(with = "values::colour")]
     pub automation_lane: Color32,
+    #[serde(with = "values::colour")]
     pub automation: Color32,
+    #[serde(with = "values::colour")]
     pub automation_off: Color32,
+    #[serde(with = "values::colour")]
     pub header: Color32,
+    #[serde(with = "values::colour")]
     pub header_selected: Color32,
+    #[serde(with = "values::colour")]
     pub header_text: Color32,
     /// Lines between tracks and around panels.
+    #[serde(with = "values::colour")]
     pub divider: Color32,
     /// The devices panel's boxes, one for each device.
+    #[serde(with = "values::colour")]
     pub device: Color32,
     /// The waveform of the sample previewing, in the browser.
+    #[serde(with = "values::colour")]
     pub preview_wave: Color32,
 
     // The piano roll's colours. Its notes take their track's colour, and
     // its grid lines, start marker and playhead are the arrangement's.
     /// The rows of the white keys and of the black keys, behind the notes.
+    #[serde(with = "values::colour")]
     pub white_row: Color32,
+    #[serde(with = "values::colour")]
     pub black_row: Color32,
     /// The keyboard beside them, and the names of its Cs.
+    #[serde(with = "values::colour")]
     pub white_key: Color32,
+    #[serde(with = "values::colour")]
     pub black_key: Color32,
+    #[serde(with = "values::colour")]
     pub key_text: Color32,
     /// Laid over the rows before the clip's start and after its end, where
     /// notes don't play.
+    #[serde(with = "values::colour")]
     pub outside_clip: Color32,
     /// The rectangle that selects the notes in it, while it's dragged.
+    #[serde(with = "values::colour")]
     pub area: Color32,
 
     // The arrangement's sizes, in points.
@@ -148,6 +217,7 @@ pub struct Theme {
     /// The colour strip down the left of a track's header.
     pub colour_strip: f32,
     /// Mute, solo and arm in a track's header, and its meter's width.
+    #[serde(with = "values::pair")]
     pub button: Vec2,
     pub header_meter: f32,
     /// The size of tracks' names and the ruler's numbers, and of clips'
@@ -160,10 +230,12 @@ pub struct Theme {
     pub piano_roll: PianoRollSizes,
     pub browser: BrowserSizes,
     pub dock: DockSizes,
+    pub widgets: Widgets,
+    pub fonts: Fonts,
 }
 
 /// The sizes of the dock the panels are in, in points.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DockSizes {
     /// The height of the bar of tabs over each group of panels.
     pub tab_bar: f32,
@@ -176,7 +248,7 @@ pub struct DockSizes {
 }
 
 /// The piano roll's sizes, in points.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PianoRollSizes {
     /// The piano roll panel's height until the user drags its edge.
     pub panel: f32,
@@ -194,7 +266,7 @@ pub struct PianoRollSizes {
 }
 
 /// The mixer's sizes, in points.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MixerSizes {
     /// The mixer panel's height until the user drags its edge.
     pub panel: f32,
@@ -210,6 +282,7 @@ pub struct MixerSizes {
     /// Room left under the strips for a scroll bar.
     pub scroll_bar: f32,
     /// A fader's cap, a meter's width and the width of the scale beside it.
+    #[serde(with = "values::pair")]
     pub cap: Vec2,
     pub meter: f32,
     pub scale: f32,
@@ -223,7 +296,7 @@ pub struct MixerSizes {
 }
 
 /// The devices panel's and the browser's sizes, in points.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSizes {
     /// The devices panel's height until the user drags its edge.
     pub panel: f32,
@@ -239,13 +312,198 @@ pub struct DeviceSizes {
 }
 
 /// The browser's sizes, in points. Its width is in [`DeviceSizes`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BrowserSizes {
     /// How far in a folder's rows are from its own, and the space for its
     /// arrow.
     pub indent: f32,
     /// The height of the waveform of the sample previewing.
     pub waveform: f32,
+}
+
+/// How egui's own widgets look: the menus, buttons, checkboxes, text fields
+/// and sliders, the windows and dialogs, and the panels the views sit in.
+/// [`apply`] hands them to egui as its style.
+///
+/// A theme is dark or light by its panels' colour, which decides the window's
+/// title bar and how egui draws text.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Widgets {
+    /// Behind panels, such as the menu bar and the transport bar.
+    #[serde(with = "values::colour")]
+    pub panel: Color32,
+    /// Behind windows, menus and tooltips, and around them.
+    #[serde(with = "values::colour")]
+    pub window: Color32,
+    #[serde(with = "values::colour")]
+    pub window_outline: Color32,
+    pub window_outline_width: f32,
+    /// The shadow under windows and menus.
+    #[serde(with = "values::colour")]
+    pub shadow: Color32,
+    /// Behind text fields, and the CPU meter.
+    #[serde(with = "values::colour")]
+    pub field: Color32,
+    /// Behind every other row of striped lists.
+    #[serde(with = "values::colour")]
+    pub stripe: Color32,
+    /// Behind code.
+    #[serde(with = "values::colour")]
+    pub code: Color32,
+    #[serde(with = "values::colour")]
+    pub link: Color32,
+    /// Warnings and errors in windows, such as a device that didn't open.
+    #[serde(with = "values::colour")]
+    pub warning: Color32,
+    #[serde(with = "values::colour")]
+    pub error: Color32,
+    /// Behind selected text and buttons that are on, such as Loop while it
+    /// loops, and the text on them.
+    #[serde(with = "values::colour")]
+    pub selection: Color32,
+    #[serde(with = "values::colour")]
+    pub selected_text: Color32,
+    /// The cursor in text fields.
+    #[serde(with = "values::colour")]
+    pub cursor: Color32,
+    /// How opaque faint text is, such as "Ready" in the status bar, from 0
+    /// to 1.
+    pub weak_text: f32,
+    /// How round windows' and menus' corners are.
+    pub window_corner: f32,
+    pub menu_corner: f32,
+
+    /// What can't be clicked: labels, separators and frames. Their text is
+    /// most of the text in windows and menus.
+    pub passive: WidgetState,
+    /// Buttons, checkboxes, sliders and the rest, at rest, hovered, pressed
+    /// or dragged, and with their menu open, as a combo box's is.
+    pub resting: WidgetState,
+    pub hovered: WidgetState,
+    pub pressed: WidgetState,
+    pub open: WidgetState,
+
+    // Their sizes, in points.
+    /// The room between widgets, across and down.
+    #[serde(with = "values::pair")]
+    pub item_spacing: Vec2,
+    /// The room around buttons' text.
+    #[serde(with = "values::pair")]
+    pub button_padding: Vec2,
+    /// The room inside windows and menus.
+    pub window_margin: f32,
+    pub menu_margin: f32,
+    /// How far in nested things are.
+    pub indent: f32,
+    /// The least width and height of what can be clicked, such as number
+    /// fields.
+    #[serde(with = "values::pair")]
+    pub interact_size: Vec2,
+    /// The widths of sliders, combo boxes and text fields, until a window
+    /// makes them wider.
+    pub slider_width: f32,
+    pub combo_width: f32,
+    pub text_edit_width: f32,
+    /// The boxes of checkboxes and radio buttons, and the room after them.
+    pub icon_width: f32,
+    pub icon_spacing: f32,
+    /// How wide scroll bars are while the mouse is over them.
+    pub scroll_bar: f32,
+}
+
+/// How egui's widgets look in one state, such as hovered.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WidgetState {
+    /// Behind buttons, which can go without, and behind checkboxes, radio
+    /// buttons and sliders, which can't.
+    #[serde(with = "values::colour")]
+    pub background: Color32,
+    #[serde(with = "values::colour")]
+    pub fill: Color32,
+    /// The line around them, and how wide it is.
+    #[serde(with = "values::colour")]
+    pub outline: Color32,
+    pub outline_width: f32,
+    /// Their text, and the lines of the marks drawn on them, such as ticks
+    /// and arrows, and how wide those lines are.
+    #[serde(with = "values::colour")]
+    pub text: Color32,
+    pub line_width: f32,
+    /// How round their corners are.
+    pub corner: f32,
+    /// How far they grow past their place.
+    pub expansion: f32,
+}
+
+/// The fonts egui's widgets and Musicable's views write with, and the sizes
+/// of egui's text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fonts {
+    /// The font of all text that isn't monospaced: a font file beside the
+    /// theme file, such as `"Inter.ttf"`, or one of egui's fonts,
+    /// `"Ubuntu-Light"` or `"Hack"`. Empty for egui's, Ubuntu Light. Text in
+    /// another script that it can't write falls back to egui's fonts.
+    pub text: String,
+    /// The font of monospaced text, such as the playhead's position. Empty
+    /// for egui's, Hack.
+    pub monospace: String,
+    pub sizes: FontSizes,
+}
+
+/// The sizes of egui's text, in points. Musicable's views have sizes of
+/// their own, such as [`Theme::text`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FontSizes {
+    /// Labels, menus and text fields.
+    pub body: f32,
+    pub button: f32,
+    pub small: f32,
+    /// Headings, such as dialogs' questions.
+    pub heading: f32,
+    pub monospace: f32,
+}
+
+/// A theme Musicable has built in, which theme files start from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Base {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Base {
+    pub const ALL: [Base; 2] = [Base::Dark, Base::Light];
+
+    /// The theme.
+    pub fn theme(self) -> Theme {
+        match self {
+            Self::Dark => Theme::dark(),
+            Self::Light => Theme::light(),
+        }
+    }
+
+    /// What theme files call it, as their `base`: `dark` or `light`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// The base whose [`name`](Self::name) is `name`, in any case.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|base| base.name().eq_ignore_ascii_case(name))
+    }
+
+    /// What windows call it: "Dark" or "Light".
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
 }
 
 impl MixerSizes {
@@ -256,8 +514,15 @@ impl MixerSizes {
 }
 
 impl Default for Theme {
-    /// The dark theme, which goes with egui's dark visuals.
+    /// The dark theme.
     fn default() -> Self {
+        Self::dark()
+    }
+}
+
+impl Theme {
+    /// The dark theme, whose widgets look as egui's dark ones do.
+    pub fn dark() -> Self {
         Self {
             mute: Color32::from_rgb(232, 165, 50),
             solo: Color32::from_rgb(80, 160, 235),
@@ -393,13 +658,94 @@ impl Default for Theme {
                 gap: 1.0,
                 min_panel: 96.0,
             },
+            widgets: Widgets::dark(),
+            fonts: Fonts::default(),
         }
     }
-}
 
-impl Theme {
     /// The colour of clips on the track at `index` in the track list.
     pub fn clip(&self, index: usize) -> Color32 {
         self.clips[index % self.clips.len()]
+    }
+}
+
+impl Widgets {
+    /// egui's dark widgets, as they look without a theme.
+    fn dark() -> Self {
+        let state = |background, fill, outline: Stroke, text: Stroke, corner| WidgetState {
+            background: Color32::from_gray(background),
+            fill: Color32::from_gray(fill),
+            outline: outline.color,
+            outline_width: outline.width,
+            text: text.color,
+            line_width: text.width,
+            corner,
+            expansion: 0.0,
+        };
+        let line = |width, gray| Stroke::new(width, Color32::from_gray(gray));
+        Self {
+            panel: Color32::from_gray(27),
+            window: Color32::from_gray(27),
+            window_outline: Color32::from_gray(60),
+            window_outline_width: 1.0,
+            shadow: Color32::from_black_alpha(96),
+            field: Color32::from_gray(10),
+            // egui adds a little light here, which looks the same on the
+            // panels and windows.
+            stripe: Color32::from_gray(32),
+            code: Color32::from_gray(64),
+            link: Color32::from_rgb(90, 170, 255),
+            warning: Color32::from_rgb(255, 143, 0),
+            error: Color32::from_rgb(255, 0, 0),
+            selection: Color32::from_rgb(0, 92, 128),
+            selected_text: Color32::from_rgb(192, 222, 255),
+            cursor: Color32::from_rgb(192, 222, 255),
+            weak_text: 0.6,
+            window_corner: 6.0,
+            menu_corner: 6.0,
+            passive: state(27, 27, line(1.0, 60), line(1.0, 140), 4.0),
+            resting: state(50, 60, Stroke::NONE, line(1.0, 215), 6.0),
+            hovered: state(64, 70, line(1.0, 150), line(1.5, 245), 6.0),
+            pressed: state(40, 55, line(1.0, 255), line(2.0, 255), 6.0),
+            open: state(45, 27, line(1.0, 60), line(1.0, 210), 6.0),
+            item_spacing: vec2(8.0, 3.0),
+            button_padding: vec2(8.0, 2.0),
+            window_margin: 6.0,
+            menu_margin: 6.0,
+            indent: 18.0,
+            interact_size: vec2(40.0, 20.0),
+            slider_width: 100.0,
+            combo_width: 100.0,
+            text_edit_width: 280.0,
+            icon_width: 14.0,
+            icon_spacing: 4.0,
+            scroll_bar: 10.0,
+        }
+    }
+
+    /// Whether the theme is dark, by its panels' colour: egui draws text a
+    /// little bolder on dark backgrounds, and the window's title bar
+    /// follows.
+    pub fn is_dark(&self) -> bool {
+        let [r, g, b, _] = self.panel.to_srgba_unmultiplied();
+        // Rec. 601's weights, near enough to how light a colour looks.
+        299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b) < 128_000
+    }
+}
+
+impl Default for Fonts {
+    /// egui's fonts, at egui's sizes.
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            monospace: String::new(),
+            sizes: FontSizes {
+                body: 13.0,
+                button: 13.0,
+                small: 9.0,
+                heading: 18.0,
+                monospace: 13.0,
+            },
+        }
     }
 }

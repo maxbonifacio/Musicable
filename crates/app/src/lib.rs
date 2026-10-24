@@ -3,6 +3,7 @@
 //! `docs/app.md` describes it.
 
 mod app;
+mod appearance_window;
 mod audio_files;
 mod audio_window;
 pub mod export;
@@ -18,6 +19,7 @@ mod plugins;
 mod recorder;
 mod session;
 mod settings;
+mod theme_file;
 mod workspaces;
 
 pub use app::App;

@@ -222,6 +222,8 @@ pub enum Request {
     AudioSettings,
     /// Show the keyboard shortcuts, where keys are changed.
     KeyboardShortcuts,
+    /// Show the appearance window, where the theme is picked.
+    Appearance,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),
     /// Show the panel with this id, such as the piano roll, if it's hidden.

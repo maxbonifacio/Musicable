@@ -382,11 +382,12 @@ says what's there.
   windows of their own, come next. Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
-  so a theme file fills a `Theme`, and a profile is a keymap file, a mouse
-  map, a theme, workspaces and the behaviour settings (`Editor::behaviour`)
-  together, each saved as what differs from its base. Configurable views
-  need the transport bar, the toolbars, the track headers and the strips
-  built from lists of parts, which they aren't yet.
+  so a theme file fills a `Theme` ([app.md](app.md#themes)), and a
+  profile is a keymap file, a mouse map, a theme, workspaces and the
+  behaviour settings (`Editor::behaviour`) together, each saved as what
+  differs from its base. Configurable views need the transport bar, the
+  toolbars, the track headers and the strips built from lists of parts,
+  which they aren't yet.
 - **Visible undo history.** The history names each step, and undo and redo
   move through it a step at a time (`Document::undo_name` and `redo_name`;
   [commands.md](commands.md#undo-and-redo)). A panel of the steps needs

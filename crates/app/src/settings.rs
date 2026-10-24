@@ -14,6 +14,9 @@
 //! play_from = "start_marker"
 //! middle_c = "c3"
 //!
+//! [appearance]
+//! theme = "Studio.toml"
+//!
 //! [export]
 //! format = "wav"
 //! bits = 24
@@ -47,7 +50,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
-use musicable_ui::{MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
+use musicable_ui::{Base, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
@@ -59,12 +62,14 @@ const VERSION: u32 = 1;
 pub const SETTINGS_FILE: &str = "settings.toml";
 /// The user's keymap file's name in the config folder.
 pub const KEYMAP_FILE: &str = "keymap.toml";
+/// The folder of the user's theme files, in the config folder.
+pub const THEMES_FOLDER: &str = "themes";
 
-/// The folder for the settings and the user's keymap: `%APPDATA%\Musicable`
-/// on Windows, `~/Library/Application Support/Musicable` on macOS, and
-/// `$XDG_CONFIG_HOME/musicable` or `~/.config/musicable` elsewhere. The
-/// `MUSICABLE_CONFIG_DIR` environment variable picks another. `None` when
-/// the system doesn't say where.
+/// The folder for the settings, the user's keymap and their themes:
+/// `%APPDATA%\Musicable` on Windows, `~/Library/Application
+/// Support/Musicable` on macOS, and `$XDG_CONFIG_HOME/musicable` or
+/// `~/.config/musicable` elsewhere. The `MUSICABLE_CONFIG_DIR` environment
+/// variable picks another. `None` when the system doesn't say where.
 pub fn config_dir() -> Option<PathBuf> {
     let var = |name| std::env::var_os(name).filter(|value| !value.is_empty());
     if let Some(dir) = var("MUSICABLE_CONFIG_DIR") {
@@ -91,11 +96,30 @@ pub struct Settings {
     /// Play/Stop starts from: the start marker (`start_marker`), as in Live,
     /// or wherever the playhead stopped (`playhead`).
     pub behaviour: Behaviour,
+    pub appearance: AppearanceSettings,
     /// How the export window writes files, as it was last used: see
     /// [`ExportSettings`].
     pub export: ExportSettings,
     pub browser: BrowserSettings,
     pub recording: RecordingSettings,
+}
+
+/// How Musicable looks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// The theme Musicable draws with: `dark` or `light`, the built-in
+    /// ones, or the name of a file in the themes folder, such as
+    /// `Studio.toml`.
+    pub theme: String,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: Base::Dark.name().to_owned(),
+        }
+    }
 }
 
 /// How the browser previews samples, and where Musicable's own presets go.
@@ -360,6 +384,9 @@ mod tests {
                 play_from: PlayFrom::Playhead,
                 middle_c: MiddleC::C4,
             },
+            appearance: AppearanceSettings {
+                theme: "Studio.toml".into(),
+            },
             export: ExportSettings {
                 format: FileFormat::Aiff,
                 bits: Bits::Int16,
@@ -398,6 +425,7 @@ mod tests {
         assert_eq!(settings.audio.buffer_size, Some(256));
         assert_eq!(settings.behaviour, Behaviour::default());
         assert_eq!(settings.recording.capture_minutes, 5);
+        assert_eq!(settings.appearance.theme, "dark");
         assert_eq!(
             settings.audio.request(),
             StreamRequest {

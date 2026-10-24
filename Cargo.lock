@@ -1920,6 +1920,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde",
+ "skrifa",
  "toml",
  "windows",
 ]

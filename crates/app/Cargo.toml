@@ -23,6 +23,9 @@ eframe.workspace = true
 rfd.workspace = true
 serde.workspace = true
 toml.workspace = true
+# Reads a theme's font files as egui will, which can't take one it can't
+# read. The version egui's text uses.
+skrifa = "0.44"
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }

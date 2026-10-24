@@ -176,6 +176,7 @@ const LAST_MENUS: [MenuSpec; 3] = [
         &[
             Some(options::AUDIO_SETTINGS),
             Some(options::KEYBOARD_SHORTCUTS),
+            Some(options::APPEARANCE),
             None,
             Some(options::RESCAN_PLUGINS),
         ],
