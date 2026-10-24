@@ -1,7 +1,7 @@
-//! The audio settings window: which device to play through, and how, and
-//! how late recordings through it land.
+//! The Settings window's Audio page: which device to play through, and
+//! how.
 
-use eframe::egui::{self, Button, ComboBox, DragValue, Grid, RadioButton, RichText, Ui};
+use eframe::egui::{Button, ComboBox, Grid, Id, RadioButton, RichText, Ui};
 use musicable_audio::{
     self as audio, AsioCapabilities, Capabilities, Device, DriverType, Mode, StreamRequest,
 };
@@ -11,24 +11,12 @@ use crate::output::{kilohertz, millis};
 
 /// The buffer sizes on offer, where the device takes them.
 const BUFFER_SIZES: [u32; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
-/// The furthest a recording offset goes either way, in frames.
-const MAX_OFFSET: i64 = 100_000;
 
-/// What the user changed in the window.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Change {
-    /// The settings to apply, all at once, which reopens the device.
-    Stream(StreamRequest),
-    /// How many frames late recordings through the device playing land.
-    RecordingOffset(i64),
-}
-
-/// The audio settings window. The settings change when the user applies
-/// them, all at once, since each change reopens the device.
+/// The Audio page. The settings change when the user applies them, all at
+/// once, since each change reopens the device.
 #[derive(Default)]
-pub struct AudioWindow {
-    open: bool,
-    /// The output devices, when the window opened or was refreshed.
+pub struct AudioPage {
+    /// The output devices, when the page came into sight or was refreshed.
     devices: Vec<Device>,
     /// Why the devices couldn't be listed.
     devices_error: Option<String>,
@@ -44,18 +32,12 @@ pub struct AudioWindow {
     playing: Option<(String, u32, u32)>,
     /// How the last Apply went.
     outcome: Option<Result<String, String>>,
-    /// The recording offset as the user drags it, until they let go.
-    offset_drag: Option<i64>,
 }
 
-impl AudioWindow {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Opens the window on the settings in use, and lists the devices.
-    pub fn open(&mut self, output: &Output) {
-        self.open = true;
+impl AudioPage {
+    /// Starts from the settings in use, and lists the devices: the page
+    /// came into sight.
+    pub fn reset(&mut self, output: &Output) {
         self.draft = output.request().clone();
         self.driver_type = driver_type(&self.draft);
         self.outcome = None;
@@ -63,80 +45,63 @@ impl AudioWindow {
         self.refresh();
     }
 
-    /// Shows the window, if it's open, with the device playing's recording
-    /// `offset`. Returns what the user changed: the settings to apply, when
-    /// the user applies them, or a new recording offset, once they've let
-    /// go of it.
-    pub fn show(&mut self, ctx: &egui::Context, output: &Output, offset: i64) -> Option<Change> {
-        let mut open = self.open;
-        let mut change = None;
-        if self.open && playing(output) != self.playing {
+    /// Draws the page. Returns the settings to apply, when the user applies
+    /// them.
+    pub fn show(&mut self, ui: &mut Ui, output: &Output) -> Option<StreamRequest> {
+        let mut apply = None;
+        if playing(output) != self.playing {
             self.playing = playing(output);
             self.load_capabilities();
         }
-        egui::Window::new("Audio Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.0)
-            .show(ctx, |ui| {
-                Grid::new("audio_settings")
-                    .num_columns(2)
-                    .spacing([14.0, 8.0])
-                    .show(ui, |ui| {
-                        if audio::driver_types().len() > 1 {
-                            self.driver_type_row(ui);
-                        }
-                        self.device_row(ui);
-                        if self.driver_type == DriverType::System {
-                            self.mode_row(ui);
-                        }
-                        self.rate_row(ui);
-                        self.buffer_row(ui);
-                        if self.driver_type == DriverType::Asio {
-                            self.driver_settings_row(ui, output);
-                        }
-                    });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let changed = self.draft != *output.request();
-                    // With no ASIO driver picked, there's nothing to apply.
-                    let picked =
-                        self.driver_type == DriverType::System || self.draft.device.is_some();
-                    if ui
-                        .add_enabled(changed && picked, Button::new("Apply"))
-                        .clicked()
-                    {
-                        change = Some(Change::Stream(self.draft.clone()));
-                    }
-                    if ui.add_enabled(changed, Button::new("Revert")).clicked() {
-                        self.draft = output.request().clone();
-                        self.driver_type = driver_type(&self.draft);
-                        self.load_capabilities();
-                    }
-                });
-                match &self.outcome {
-                    Some(Ok(text)) => {
-                        ui.label(text);
-                    }
-                    Some(Err(text)) => {
-                        ui.label(RichText::new(text).color(ui.visuals().warn_fg_color));
-                    }
-                    None => {}
+        Grid::new("audio_settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                if audio::driver_types().len() > 1 {
+                    self.driver_type_row(ui);
                 }
-                ui.separator();
-                ui.label(RichText::new("Now playing").strong());
-                ui.label(output.details());
-                if let Some(info) = output.info()
-                    && let Some(frames) = self.offset_row(ui, offset, info.sample_rate)
-                {
-                    change = Some(Change::RecordingOffset(frames));
+                self.device_row(ui);
+                if self.driver_type == DriverType::System {
+                    self.mode_row(ui);
                 }
-                ui.separator();
-                gpl_notice(ui);
+                self.rate_row(ui);
+                self.buffer_row(ui);
+                if self.driver_type == DriverType::Asio {
+                    self.driver_settings_row(ui, output);
+                }
             });
-        self.open = open;
-        change
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let changed = self.draft != *output.request();
+            // With no ASIO driver picked, there's nothing to apply.
+            let picked = self.driver_type == DriverType::System || self.draft.device.is_some();
+            if ui
+                .add_enabled(changed && picked, Button::new("Apply"))
+                .clicked()
+            {
+                apply = Some(self.draft.clone());
+            }
+            if ui.add_enabled(changed, Button::new("Revert")).clicked() {
+                self.draft = output.request().clone();
+                self.driver_type = driver_type(&self.draft);
+                self.load_capabilities();
+            }
+        });
+        match &self.outcome {
+            Some(Ok(text)) => {
+                ui.label(text);
+            }
+            Some(Err(text)) => {
+                ui.label(RichText::new(text).color(ui.visuals().warn_fg_color));
+            }
+            None => {}
+        }
+        ui.separator();
+        ui.label(RichText::new("Now playing").strong());
+        ui.label(output.details());
+        ui.separator();
+        gpl_notice(ui);
+        apply
     }
 
     /// Says how applying the settings went.
@@ -144,42 +109,8 @@ impl AudioWindow {
         self.outcome = Some(outcome);
     }
 
-    /// The device playing's recording offset, `offset` frames at `rate`.
-    /// Returns a new one, once the user has typed it, or let go of it.
-    fn offset_row(&mut self, ui: &mut Ui, offset: i64, rate: u32) -> Option<i64> {
-        let mut frames = self.offset_drag.unwrap_or(offset);
-        let mut set = None;
-        ui.horizontal(|ui| {
-            ui.label("Recording offset");
-            let field = ui
-                .add(
-                    DragValue::new(&mut frames)
-                        .range(-MAX_OFFSET..=MAX_OFFSET)
-                        .suffix(" frames")
-                        // A typed offset applies on Enter, not at each digit.
-                        .update_while_editing(false),
-                )
-                .on_hover_text(
-                    "How late recordings through this device land, in this mode and at this \
-                     rate, beyond the latency its driver reports: what a cable from one of its \
-                     outputs to one of its inputs measures. Every audio take starts that much \
-                     later in what its input captured. The record round trip example measures \
-                     it.",
-                );
-            if field.dragged() {
-                self.offset_drag = Some(frames);
-            } else if field.changed() || field.drag_stopped() {
-                self.offset_drag = None;
-                set = (frames != offset).then_some(frames);
-            }
-            let ms = frames as f64 * 1000.0 / f64::from(rate);
-            ui.label(format!("{ms:.2} ms"));
-        });
-        set
-    }
-
     fn driver_type_row(&mut self, ui: &mut Ui) {
-        ui.label("Driver type");
+        let label = ui.label("Driver type");
         let mut chosen = self.driver_type;
         ComboBox::from_id_salt("driver_type")
             .selected_text(driver_type_name(chosen))
@@ -189,6 +120,7 @@ impl AudioWindow {
                 }
             })
             .response
+            .labelled_by(label.id)
             .on_hover_text(
                 "ASIO drivers talk to their hardware themselves, for the lowest latency. Other \
                  apps can't play through the device while Musicable has it.",
@@ -214,7 +146,7 @@ impl AudioWindow {
 
     fn device_row(&mut self, ui: &mut Ui) {
         let system = self.driver_type == DriverType::System;
-        ui.label(if system { "Device" } else { "Driver" });
+        let label = ui.label(if system { "Device" } else { "Driver" });
         ui.horizontal(|ui| {
             let mut device = self.draft.device.clone();
             let offered: Vec<&Device> = self
@@ -251,7 +183,9 @@ impl AudioWindow {
                     for d in offered {
                         ui.selectable_value(&mut device, Some(d.id.clone()), &d.name);
                     }
-                });
+                })
+                .response
+                .labelled_by(label.id);
             if device != self.draft.device {
                 self.draft.device = device;
                 // Each device has its own rates and sizes.
@@ -317,7 +251,7 @@ impl AudioWindow {
     }
 
     fn rate_row(&mut self, ui: &mut Ui) {
-        ui.label("Sample rate");
+        let row = ui.label("Sample rate");
         let device_rate = self.device_rate();
         let rates = match (self.asio(), self.draft.mode, self.exclusive()) {
             // Switching an ASIO driver's rate switches it for its hardware.
@@ -347,19 +281,21 @@ impl AudioWindow {
                     for r in rates {
                         ui.selectable_value(&mut rate, Some(r), kilohertz(r));
                     }
-                });
+                })
+                .response
+                .labelled_by(row.id);
             self.draft.sample_rate = rate;
         }
         ui.end_row();
     }
 
     fn buffer_row(&mut self, ui: &mut Ui) {
-        ui.label("Buffer size");
+        let row = ui.label("Buffer size");
         let rate = self.draft.sample_rate.or(self.device_rate());
         if let Some(asio) = self.asio() {
             let sizes = asio.buffer_sizes.clone();
             let preferred = self.capabilities().and_then(|caps| caps.default_period);
-            self.asio_buffer_row(ui, rate, &sizes, preferred);
+            self.asio_buffer_row(ui, row.id, rate, &sizes, preferred);
             return;
         }
         let (smallest, default) = match (self.draft.mode, self.capabilities()) {
@@ -398,6 +334,7 @@ impl AudioWindow {
                 }
             })
             .response
+            .labelled_by(row.id)
             .on_hover_text(
                 "Smaller buffers play sooner after a key press, and take more CPU. Drivers \
                  round the size to one they take: \"Now playing\" says what you got.",
@@ -408,10 +345,11 @@ impl AudioWindow {
 
     /// An ASIO driver's buffer sizes: those it lists, and by default the
     /// one it prefers, which is the one set in its own settings if it has
-    /// any.
+    /// any. The label with id `row` names them.
     fn asio_buffer_row(
         &mut self,
         ui: &mut Ui,
+        row: Id,
         rate: Option<u32>,
         sizes: &[u32],
         preferred: Option<u32>,
@@ -431,6 +369,7 @@ impl AudioWindow {
                 }
             })
             .response
+            .labelled_by(row)
             .on_hover_text(
                 "Smaller buffers play sooner after a key press, and take more CPU. Many ASIO \
                  drivers only take the size set in their own settings: Driver Settings opens \

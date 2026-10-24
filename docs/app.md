@@ -37,9 +37,10 @@ reference renderer (see [The null test](#the-null-test)), and
    stages, one of them muted, looping the first four bars at 124 BPM with the
    metronome on.
 2. Press Space. It plays, loops and clicks.
-3. **Options > Audio Settings** picks the device, shared or exclusive mode,
-   and the buffer size. The right end of the transport bar shows the CPU
-   load and counts dropouts.
+3. **Options > Audio Settings** opens the [Settings
+   window](#the-settings-window) at its Audio page, which picks the device,
+   shared or exclusive mode, and the buffer size. The right end of the
+   transport bar shows the CPU load and counts dropouts.
 4. **File > Save Project As**, then **File > Open Project**: the project comes
    back as it was. Saving the demo writes the same bytes as the fixture.
 5. `musicable null-test` checks what you can't hear: that the parallel
@@ -213,10 +214,12 @@ That's what `ParallelOptions::inline_below` is for
   with a `*`.
 - **View > Command Palette** (Ctrl+Shift+P) finds any command by name or
   keys and runs it ([below](#the-command-palette)).
-- **Options > Keyboard Shortcuts** (Ctrl+K) lists every command with its
-  keys, and changes them ([below](#changing-keys)).
-- **Options > Appearance** picks the theme Musicable draws with
-  ([Themes](#themes)).
+- **Options > Settings** (Ctrl+Comma) has a page for each area of the
+  settings: the audio device, recording, every command's keys, how editing
+  behaves, the theme, the workspaces and the browser's previews
+  ([below](#the-settings-window)). **Options > Keyboard Shortcuts** (Ctrl+K)
+  opens it at its Keys page ([below](#changing-keys)), and Audio Settings
+  and Appearance at theirs.
 - **The Workspaces menu** switches between layouts of the panels
   ([below](#workspaces)).
 
@@ -284,6 +287,9 @@ workspaces, up to nine, with a tick on the one in use:
   keeps its name and can't be deleted.
 - **Reset Workspace** lays the panels out and shows the views' parts as at
   first, and leaves the window where it is.
+
+The [Settings window](#the-settings-window)'s Workspaces page lists them
+too, with the same commands, and opens the folder of their files.
 
 The zoom and the scrolling are the project's: switching workspaces leaves
 them as they are. A project remembers the workspace it was saved with,
@@ -435,7 +441,8 @@ draw every colour and size from a `musicable_ui::Theme`, and look up what
 each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
 `Shell::set_theme` and `set_mouse_map` change them: the app sets the theme
-from Options > Appearance and theme files ([Themes](#themes)), and the
+from the Settings window's Appearance page and theme files
+([Themes](#themes)), and the
 mouse map is for the profiles of Tier 2. Each view is a panel with its own
 id, such as `musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel
 registry (`crates/ui/src/panels.rs`) holds with its title, its place and
@@ -582,9 +589,42 @@ Up and Down choose a command, and Enter or a click runs it and closes the
 palette. Escape or a click outside closes it. While it's open, keys type
 into it and run no commands.
 
+## The Settings window
+
+**Options > Settings** (Ctrl+Comma) opens the Settings window, with a page
+for each area of the settings listed down its left side, as Live's
+Preferences has a tab for each. It opens at the page it showed last, and
+**Options > Audio Settings**, **Keyboard Shortcuts** (Ctrl+K) and
+**Appearance** open it at theirs. Changes apply at once, and are kept: in
+[settings.toml](#settings-and-your-keymap), or in the keymap's, the theme's
+or the workspaces' own files. Every setting in settings.toml has a control
+here but the export window's, which that window keeps as it was last used.
+The window isn't a panel, so no workspace has it. Escape closes it, unless
+a menu or the command palette is open over it, or the Keys page is waiting
+for keys: then Escape closes that, or stops waiting, first.
+
+- **Audio**: the device to play through, its mode, rate and buffer size,
+  which **Apply** opens ([Audio](#audio)), and what's playing now.
+- **Recording**: how long [Capture](#capture) holds the inputs, 0 for off,
+  and the [recording offset](#recording) of the device playing, in its mode
+  and at its rate.
+- **Keys**: every command's keys ([below](#changing-keys)).
+- **Behaviour**: where Play/Stop plays from, the start marker, as in Live,
+  or wherever the playhead stopped, and what the piano roll calls middle C.
+- **Appearance**: the theme ([Themes](#themes)).
+- **Workspaces**: the workspaces, with the keys that switch to each, and
+  picking one switches to it. Save As, Rename, Delete and Reset do what the
+  Workspaces menu's do ([Workspaces](#workspaces)), and **Open Workspaces
+  Folder** shows their files.
+- **Browser**: whether picking a sample previews it, how loud previews
+  play, and the folder presets are saved in: **Choose Folder...** picks
+  another, and **Use the Default** goes back to `Music/Musicable/Presets` in
+  your home folder.
+
 ## Changing keys
 
-Options > Keyboard Shortcuts lists the commands by menu, each with its keys,
+The Settings window's **Keys** page (Options > Keyboard Shortcuts, Ctrl+K)
+lists the commands by menu, each with its keys,
 and says where they work: each command has a row for its keys that work
 everywhere, and one for each panel it has keys of its own in, such as the
 piano roll's arrow keys. A panel's keys win while the panel has the focus
@@ -593,7 +633,7 @@ says so beside it, as "over Toggle Metronome". The search field at the top
 finds commands the way the command palette does, by name or by keys,
 wherever they work.
 
-- **Click a key** to change it, or **+** to add one. The window waits for
+- **Click a key** to change it, or **+** to add one. The page waits for
   the keys, and any keys can be pressed, Escape, Enter and Tab included;
   they run nothing while it waits. **Where** picks the place the new keys
   work: everywhere, or one panel. It starts at the row's. Then it says what
@@ -607,8 +647,8 @@ wherever they work.
     to this command there, over the other.
   - "runs *this command* already": there's nothing to do.
 
-  **Try Other Keys** waits for keys again. **Cancel**, Escape, or a click
-  anywhere else stops without changing anything.
+  **Try Other Keys** waits for keys again. **Cancel**, Escape, a click
+  outside the window or another page stops without changing anything.
 - **×** next to a key removes it.
 - **Reset** shows on a command whose keys aren't the default ones,
   everywhere or in a panel, and gives it its default keys back. If another
@@ -628,7 +668,7 @@ Under the list:
 - **Reset All** gives every command its default keys again.
 - **Reload** reads your keymap file again after you edit it, and **Create
   It** creates it when there's none yet, to edit.
-- Escape closes the window, once it isn't waiting for keys.
+- Escape closes the window, once the page isn't waiting for keys.
 
 ## The mixer
 
@@ -747,8 +787,8 @@ engine's timeline says which song position each frame played, and how late
 the plugins' latency made it ([engine.md](engine.md#recording)). Latency
 the driver doesn't report, such as an interface's converters', is made up
 for by the device's **recording offset**: each audio take starts that many
-frames later in what its input captured. **Options > Audio Settings** sets
-it for the device playing, under Now playing, and the
+frames later in what its input captured. The Settings window's
+**Recording** page sets it for the device playing, and the
 [settings](#settings-and-your-keymap) keep one for each device, mode and
 sample rate. The record round trip example below measures it. A MIDI
 message lands the same way as audio, without the offset: the backend stamps
@@ -854,9 +894,10 @@ for while playing waits for the inputs to bring what was heard up to then,
 as a recording does, for two seconds at most. With nothing to capture, the
 status bar says why.
 
-**How long.** `capture_minutes` in the settings
-([settings.toml](#settings-and-your-keymap)) is how long each input is
-held, 5 minutes by default; 0 turns Capture off. An audio input is held as
+**How long.** The Settings window's Recording page sets how long each
+input is held (`capture_minutes` in
+[settings.toml](#settings-and-your-keymap)), 5 minutes by default; 0 turns
+Capture off. An audio input is held as
 32-bit floats at the engine's sample rate, rounded up to a power of two of
 frames: at 48 kHz, 5 minutes of a stereo input take 128 MiB. A MIDI input
 holds 2,000 messages for each second, 24 MiB for 5 minutes: one that sends
@@ -1166,9 +1207,9 @@ engine any other way.
   swallowed.
 - While the app asks whether to save changes, keys go to that question.
 - While the command palette is open, keys go to it, and run no commands.
-- While the keyboard shortcuts window waits for the keys to give a command,
-  every key press goes to it, Escape and Enter too, and nothing else sees
-  it. `KeyPresses::capture` takes it there instead of `KeyPresses::take`.
+- While the Settings window's Keys page waits for the keys to give a
+  command, every key press goes to it, Escape and Enter too, and nothing
+  else sees it. `KeyPresses::capture` takes it there instead of `KeyPresses::take`.
 
 ### Keyboard layouts
 
@@ -1366,25 +1407,25 @@ added, what's in them, and your tags ([The browser](#the-browser)).
 Deleting it empties the library, tags and all.
 
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
-describes. The app reads it at startup and when you click Reload in
-Options > Keyboard Shortcuts, which shows any mistakes in it. A file that
+describes. The app reads it at startup and when you click Reload on the
+Settings window's Keys page, which shows any mistakes in it. A file that
 can't be used leaves the default keymap, and says why. The app saves every
-change of keys made in the window to the file at once. Create It writes a
+change of keys made on the page to the file at once. Create It writes a
 file with no changes in it yet, just the comment that explains it.
 
 Before writing over your keymap file, the app copies it to
 `keymap.backup.toml` in the same folder when the write would lose something:
 
 - When the file has mistakes, or can't be read at all, the first change made
-  in the window writes a new file, and the old one becomes the backup. The
-  window says so.
+  on the page writes a new file, and the old one becomes the backup. The
+  page says so.
 - Reset All and Import replace all your changes at once, so the file with
   your keys from before becomes the backup. Importing the backup brings them
   back.
 
 Single changes to a file without mistakes make no backup: there's nothing to
 lose. Without a config folder, changes last until the app closes. If the
-backup or the file can't be written, the window says so, and the keys you
+backup or the file can't be written, the page says so, and the keys you
 set still work until the app closes.
 
 `workspaces` holds a file for each workspace ([Workspaces](#workspaces)),
@@ -1497,31 +1538,31 @@ wherever the playhead stopped (`playhead`). `middle_c` is what the piano
 roll calls MIDI note 60: `c3`, as in Live, Cubase, Logic and Bitwig, `c4`,
 as in scientific pitch notation and Reaper, or `c5`, as in FL Studio.
 `capture_minutes`, under `[recording]`, is how long [Capture](#capture)
-holds the inputs, 5 minutes if it's left out; 0 turns Capture off. The app
-reads them at startup; there's no window for them yet. `theme`, under
-`[appearance]`, is the theme Musicable draws with: `dark`, `light`, or the
-name of a file in the `themes` folder ([Themes](#themes)), which Options >
-Appearance writes. `current`, under `[workspaces]`, is the workspace in
+holds the inputs, 5 minutes if it's left out; 0 turns Capture off.
+`theme`, under `[appearance]`, is the theme Musicable draws with: `dark`,
+`light`, or the name of a file in the `themes` folder ([Themes](#themes)).
+`current`, under `[workspaces]`, is the workspace in
 use, by name, which the app opens with unless the project it opens was
 saved with another; Default if it's left out. Each of
 `recording.offsets` is the [recording offset](#recording), in `frames`, of
 a `device`, by its id, in exclusive mode or not (`exclusive`, false if it's
-left out), at a `sample_rate`. Audio Settings writes them; an offset of 0
-isn't kept. `[export]` is the export window's settings as it was last used:
+left out), at a `sample_rate`; an offset of 0 isn't kept. `[export]` is the export window's settings as it was last used:
 `format` is `wav`, `aiff` or `flac`, `bits` is 16, 24, or 32 for floats,
 and a `sample_rate` there renders at that rate instead of the engine's.
 `[browser]` has Auto, which plays a sample when it's picked, and the
 previews' volume in dB, from -60 to 6; a `presets_folder` there saves
 presets somewhere other than `Music/Musicable/Presets` in your home folder.
-Fields this version doesn't know are ignored.
+The [Settings window](#the-settings-window) has a control for every setting
+but those under `[export]`, and writes the file as soon as one changes; the
+app reads it at startup. Fields this version doesn't know are ignored.
 An ASIO driver's id starts with `asio:`; a build without ASIO plays through
 the default output instead, and says why.
 
 ## Themes
 
 Musicable draws with a theme: the dark one, a light one, or a theme file of
-your own. **Options > Appearance** picks one, and the window changes at
-once. A theme colours Musicable's views and egui's own widgets too, the
+your own. The Settings window's **Appearance** page (Options > Appearance)
+picks one, and the window changes at once. A theme colours Musicable's views and egui's own widgets too, the
 menus, buttons, fields and windows, and the window's title bar is dark or
 light as the theme is, whichever the system is in.
 
@@ -1547,7 +1588,7 @@ Each entry has the name of one of the theme's colours or sizes, in the
 section that holds it. Colours are `"#rrggbb"`, or `"#rrggbbaa"` with an
 opacity, sizes are in points, and pairs of sizes, across and down, are
 `[8, 3]`. A file without a `base` changes the dark theme. **Export Theme...**
-in the Appearance window writes the theme in use as a file with every entry
+on the Appearance page writes the theme in use as a file with every entry
 in it, with those that keep the base's value commented out and each group
 explained, to start a theme of your own from; written into the themes
 folder, it becomes the theme in use. Musicable looks at the theme file in
@@ -1578,7 +1619,7 @@ value, and a font file that can't be read keeps egui's font. A file that
 can't be used at all, such as one that isn't valid TOML, leaves its base in
 its place, or the dark theme when even that can't be told, and so does a
 file that's gone. The status bar says so until the file is mended, and the
-Appearance window says what was wrong.
+Appearance page says what was wrong.
 
 ## Audio
 
@@ -1596,24 +1637,24 @@ Appearance window says what was wrong.
   settings, opens again at once with them, and the app says what it plays
   with now. While nothing plays, the engine waits, and the commands sent to it
   wait in its queue and the session's.
-- **Apply** in the audio settings stops the stream and opens the new one. If
+- **Apply** on the Audio page stops the stream and opens the new one. If
   it needs another sample rate or block size, a new engine takes over:
   `Session::replace_engine` sets it up with the project's graph, tempo map
   and loop, at the same place in bars and beats, playing if the old one was.
   If the new stream doesn't open, the old one comes back, and the error shows
-  in the window.
+  on the page.
 
-The audio settings window lists the devices (Refresh lists them again after
-plugging one in), offers exclusive mode where the device does, the device's
-rates in exclusive mode, and buffer sizes from the smallest the device
-supports. Drivers round the buffer size, and some ignore it, so "Now playing"
-says what the stream got. Below that, **Recording offset** is the device's
-[recording offset](#recording) in its mode and at its rate, in frames and
-milliseconds: drag it, or type it and press Enter, and the next recording
-uses it, as does Capture. The foot of the window has the notice the GPL asks
-for.
+The [Settings window](#the-settings-window)'s Audio page lists the devices
+(Refresh lists them again after plugging one in), offers exclusive mode
+where the device does, the device's rates in exclusive mode, and buffer
+sizes from the smallest the device supports. Drivers round the buffer size,
+and some ignore it, so "Now playing" says what the stream got. The foot of
+the page has the notice the GPL asks for. On the Recording page, **Recording
+offset** is the playing device's [recording offset](#recording) in its mode
+and at its rate, in frames and milliseconds: drag it, or type it and press
+Enter, and the next recording uses it, as does Capture.
 
-On Windows, the window has a driver type above the device, WASAPI or ASIO
+On Windows, the page has a driver type above the device, WASAPI or ASIO
 ([audio.md](audio.md#asio)). For ASIO it lists the installed drivers, the
 rates each can switch to and the buffer sizes it takes, by default the one
 it prefers, and Driver Settings opens the playing driver's own settings.
@@ -1647,14 +1688,22 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   app: it runs the library's file work on the queue, hands the engine the
   previews, and reaches the commands through `LibraryLink`.
 - `crates/app` has the eframe app (`App`), which holds the `Session`, the
-  `Output`, the audio settings window and the user's keymap file
+  `Output`, the Settings window and the user's keymap file
   (`UserKeymap`), and the binary. Debug builds install the engine's
-  allocation checker, as the tests do.
+  allocation checker, as the tests do. The Settings window
+  (`settings_window.rs`) lists its pages, draws the small ones, and hands
+  what changed to the app to carry out and keep; the Audio and Appearance
+  pages have files of their own (`audio_page.rs`, `appearance_page.rs`),
+  and the shell draws the Keys page, as it holds the keymap's commands.
 - [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
   drives the whole window with `egui_kittest`, handing it key presses as
-  eframe does, without an audio device. It gives every command new keys in
-  the keyboard shortcuts window, finds every command in the command palette
-  with them, and starts the app again to check they were saved.
+  eframe does, without an audio device. It gives every command new keys on
+  the Settings window's Keys page, finds every command in the command
+  palette with them, and starts the app again to check they were saved.
+  [`crates/app/src/app/configuring.rs`](../crates/app/src/app/configuring.rs)
+  opens the Settings window at each page, turns from page to page, changes
+  every setting it has a control for and reads the settings file back, and
+  checks what Escape and clicks do while the Keys page waits for keys.
 - [`crates/app/src/app/arranging.rs`](../crates/app/src/app/arranging.rs)
   drives the window the same way through the Tier 1 demo's arranging
   steps, with the mouse and the keys: it drops an audio file on a track,
@@ -1744,8 +1793,11 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   library forgets its files' tags.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
-  drawn between clips; a window for the behaviour settings.
-- Editing a theme in the Appearance window, with colour pickers: theme
+  drawn between clips.
+- The Settings window's Mouse page, for what the mouse does where, and
+  profiles of keys, mouse, theme, workspaces and behaviour to switch
+  between, which come next in Tier 2's UI foundations.
+- Editing a theme on the Appearance page, with colour pickers: theme
   files are edited in a text editor for now. Plugins' own windows keep
   their own look.
 - In the piano roll: the notes' MPE expression, shown and edited (Tier 2),

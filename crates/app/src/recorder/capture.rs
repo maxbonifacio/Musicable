@@ -288,7 +288,7 @@ impl Tape {
     /// with what was heard then.
     pub(super) fn ask_capture(&mut self, at: u64) {
         let nothing = if self.held.seconds == 0 {
-            "Capture is off: its length, capture_minutes in the settings, is 0."
+            "Capture is off: its length, on the Recording page of Settings, is 0."
         } else if self.held.tracks.is_empty() {
             "Nothing to capture: no track is armed or monitoring In."
         } else {
@@ -463,7 +463,7 @@ fn refusal<'a>(tracks: impl Iterator<Item = &'a Armed>, kind: &str, limit: u64) 
     let names: Vec<&str> = tracks.map(|track| track.name.as_str()).collect();
     format!(
         "Capture doesn't hold {}'s {kind}: holding it would take Capture past {} of memory. A \
-         shorter capture_minutes in the settings holds more inputs.",
+         shorter length, on the Recording page of Settings, holds more inputs.",
         names.join(" and "),
         memory(limit)
     )

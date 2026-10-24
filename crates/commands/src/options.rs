@@ -1,22 +1,27 @@
-//! The options commands: the windows that change Musicable's settings, and
-//! scanning for plugins.
+//! The options commands: the Settings window, with commands for some of
+//! its pages, and scanning for plugins.
 //!
 //! Commands can't show a window, so these ask the app to, with a [`Request`].
 
 use crate::{CommandId, Registry, Request};
 
-/// Shows the audio settings: the device, its mode and the buffer size.
+/// Shows the Settings window, at the page it showed last.
+pub const SETTINGS: CommandId = CommandId::new("options.settings");
+/// Shows the Settings window's Audio page: the device, its mode and the
+/// buffer size.
 pub const AUDIO_SETTINGS: CommandId = CommandId::new("options.audio_settings");
-/// Shows the keyboard shortcuts, where every command's keys can be changed.
+/// Shows the Settings window's Keys page, where every command's keys can
+/// be changed.
 pub const KEYBOARD_SHORTCUTS: CommandId = CommandId::new("options.keyboard_shortcuts");
-/// Shows the appearance window, where the theme is picked.
+/// Shows the Settings window's Appearance page, where the theme is picked.
 pub const APPEARANCE: CommandId = CommandId::new("options.appearance");
 /// Scans for plugins again, loading the libraries that were left out as bad
 /// too.
 pub const RESCAN_PLUGINS: CommandId = CommandId::new("options.rescan_plugins");
 
 /// Every options command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 4] = [
+const COMMANDS: [(CommandId, &str, Request); 5] = [
+    (SETTINGS, "Settings...", Request::Settings),
     (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
     (
         KEYBOARD_SHORTCUTS,
@@ -48,6 +53,7 @@ mod tests {
         let mut document = Document::new(Project::new());
         let mut requests = Vec::new();
         let ids = [
+            SETTINGS,
             AUDIO_SETTINGS,
             KEYBOARD_SHORTCUTS,
             APPEARANCE,
@@ -66,6 +72,7 @@ mod tests {
         assert_eq!(
             requests,
             [
+                Request::Settings,
                 Request::AudioSettings,
                 Request::KeyboardShortcuts,
                 Request::Appearance,
@@ -80,7 +87,8 @@ mod tests {
         let keymap = Keymap::default_keymap();
         let chords =
             |id| -> Vec<String> { keymap.chords_for(&id).map(|c| c.to_string()).collect() };
-        assert_eq!(chords(AUDIO_SETTINGS), ["Ctrl+Comma"]);
+        assert_eq!(chords(SETTINGS), ["Ctrl+Comma"]);
+        assert!(chords(AUDIO_SETTINGS).is_empty());
         assert_eq!(chords(KEYBOARD_SHORTCUTS), ["Ctrl+K"]);
         assert_eq!(chords(view::COMMAND_PALETTE), ["Ctrl+Shift+P"]);
     }

@@ -50,7 +50,7 @@ impl Choice {
         }
     }
 
-    /// What the appearance window calls it: a file's name without its
+    /// What the Appearance page calls it: a file's name without its
     /// extension.
     pub fn title(&self) -> &str {
         match self {
@@ -159,8 +159,8 @@ impl UserTheme {
     }
 
     /// What was wrong with entries of the file and with its fonts, which
-    /// were left out, as the keyboard shortcuts window lists a keymap's. The
-    /// rest of the file applies.
+    /// were left out, as the Keys page lists a keymap's. The rest of the
+    /// file applies.
     pub fn problems(&self) -> &[String] {
         &self.problems
     }
@@ -429,7 +429,7 @@ fn read_font(folder: Option<&Path>, name: &str) -> Result<FontData, String> {
 }
 
 /// Opens `folder` in the system's file manager.
-fn show_folder(folder: &Path) -> io::Result<()> {
+pub(crate) fn show_folder(folder: &Path) -> io::Result<()> {
     let program = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {

@@ -712,6 +712,20 @@ impl Library {
         (&self.found, self.total)
     }
 
+    /// Where Musicable's own presets go, if it has a folder for them.
+    pub fn presets_folder(&self) -> Option<&Path> {
+        self.presets_folder.as_deref()
+    }
+
+    /// Saves presets in `folder` from now on, and finds the presets again,
+    /// with those in it.
+    pub fn set_presets_folder(&mut self, folder: Option<PathBuf>) {
+        if folder != self.presets_folder {
+            self.presets_folder = folder;
+            self.find_presets();
+        }
+    }
+
     pub fn presets(&self) -> &[Preset] {
         &self.presets
     }
