@@ -383,9 +383,10 @@ says what's there.
   outline shows: the edit commands act on its selection, and its own keys,
   from its table in the keymap, win over those that work everywhere
   ([commands.md](commands.md#the-editors-state)).
-  The layout is a `musicable_ui::Workspace`, kept in the config folder;
-  workspaces to switch between, and egui's viewports putting panels in
-  windows of their own, come next. Every view
+  The layout, with where the window is, is a `musicable_ui::Workspace`,
+  a file in the config folder for each of the user's workspaces, which the
+  app switches between ([app.md](app.md#workspaces)); egui's viewports
+  putting panels in windows of their own come next. Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
   so a theme file fills a `Theme` ([app.md](app.md#themes)), and a

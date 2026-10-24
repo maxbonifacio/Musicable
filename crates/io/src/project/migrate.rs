@@ -26,6 +26,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     controllers,
     native,
     automation,
+    workspace,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -178,6 +179,12 @@ fn native(_: &mut Map<String, Value>) -> Result<(), Invalid> {
 /// Version 9 added automation. Version 8 files have none.
 fn automation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     add(file, "", "automation", json!([]))
+}
+
+/// Version 10 added the workspace a project was saved with. Version 9 files
+/// name none.
+fn workspace(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "workspace", Value::Null)
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.
@@ -400,6 +407,22 @@ mod tests {
             run(&STEPS[..8], &mut file, 8).unwrap_err().path,
             "automation",
             "automation in a version 8 file"
+        );
+    }
+
+    #[test]
+    fn version_9_files_name_no_workspace() {
+        let mut file = json!({"version": 9, "tracks": []});
+        run(&STEPS[..9], &mut file, 9).unwrap();
+        assert_eq!(
+            file,
+            json!({"version": 10, "tracks": [], "workspace": null})
+        );
+        let mut file = json!({"version": 9, "workspace": "Mixing"});
+        assert_eq!(
+            run(&STEPS[..9], &mut file, 9).unwrap_err().path,
+            "workspace",
+            "a workspace in a version 9 file"
         );
     }
 

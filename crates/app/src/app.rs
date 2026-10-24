@@ -18,8 +18,8 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, InputChoice, KeyPresses, KeymapStatus, Level, Levels, MidiChoice, Playback,
-    PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, DEFAULT_WORKSPACE, InputChoice, KeyPresses, KeymapStatus, Level, Levels,
+    MidiChoice, Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
 };
 
 use crate::appearance_window::{AppearanceWindow, Asked as AppearanceAsked};
@@ -33,7 +33,8 @@ use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER};
 use crate::theme_file::{Choice, UserTheme};
-use crate::{Output, Session, capital, workspaces};
+use crate::workspaces::{Place, ReadError, Workspaces};
+use crate::{Output, Session, capital};
 
 /// How often the window redraws while the transport plays or the mixer's
 /// meters move, and while neither does, to update the CPU meter.
@@ -98,6 +99,11 @@ pub struct App {
     theme_file: UserTheme,
     /// What the status bar says about the theme's file, as last said.
     theme_message: Option<String>,
+    /// The user's workspaces, which lay the panels out.
+    workspaces: Workspaces,
+    /// Where the main window goes, once it can be moved there: the place
+    /// the workspace switched to has for it.
+    unplaced: Option<Place>,
     /// What waits for the user to say whether to save their changes first.
     pending: Option<Request>,
     /// Set once the user has said what to do with their changes, so the
@@ -109,8 +115,9 @@ pub struct App {
 
 impl App {
     /// Opens the audio device and the project at `path`, or a new project,
-    /// in the window whose egui context is `ctx`.
-    pub fn new(path: Option<PathBuf>, ctx: &egui::Context) -> Self {
+    /// in the window eframe is creating, as `cc` says.
+    pub fn new(path: Option<PathBuf>, cc: &eframe::CreationContext<'_>) -> Self {
+        let ctx = &cc.egui_ctx;
         follow_system_double_clicks(ctx);
         let mut messages = Vec::new();
         let config_dir = settings::config_dir();
@@ -127,6 +134,11 @@ impl App {
         let (output, handle) = Output::open(settings.audio.request(), &mut messages);
         let mut app = Self::with_output(path, config_dir, settings, output, handle, messages, ctx);
         app.scan_plugins(false, ctx);
+        // The window is still hidden, so it opens where the workspace has
+        // it.
+        if let (Some(place), Some(window)) = (app.unplaced.take(), cc.winit_window()) {
+            place.apply(window);
+        }
         app
     }
 
@@ -180,6 +192,7 @@ impl App {
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
             Choice::from_name(&settings.appearance.theme),
         );
+        let workspaces = Workspaces::list(config_dir.as_deref(), &mut messages);
         // What the last scan found, while the next one runs. Before the
         // first, plugin devices wait for it.
         let known = plugin_scan.known();
@@ -212,6 +225,8 @@ impl App {
             keymap_file,
             theme_file,
             theme_message: None,
+            workspaces,
+            unplaced: None,
             pending: None,
             closing: false,
             title: String::new(),
@@ -221,40 +236,148 @@ impl App {
             app.set_installed_plugins(known);
         }
         app.list_inputs();
-        app.read_workspace();
+        app.open_workspace();
         app
     }
 
-    /// Lays the panels out as the user left them, as the default
-    /// workspace's file has it.
-    fn read_workspace(&mut self) {
-        let Some(path) = self.config_dir.as_deref().map(workspaces::default_file) else {
+    /// Lays the panels out as the user left them: as the workspace the
+    /// project was saved with has them, if the user has it, or else the one
+    /// in use when the app last closed.
+    fn open_workspace(&mut self) {
+        let slot = {
+            let named = |name: &str| self.workspaces.slot_named(name);
+            let saved_with = self.session.project().workspace.as_deref().and_then(named);
+            saved_with.or_else(|| named(&self.settings.workspaces.current))
+        };
+        let slot = slot.unwrap_or(0);
+        let Err(error) = self.use_workspace(slot) else {
             return;
         };
-        match workspaces::read(&path) {
-            Ok(Some(workspace)) => self.shell.set_workspace(&workspace),
-            Ok(None) => {}
-            Err(error) => self.messages.push(format!(
+        let error = capital(error.to_string().trim_end());
+        if slot == 0 {
+            self.messages.push(format!(
+                "{error}; Musicable lays the panels out as it does at first."
+            ));
+            return;
+        }
+        let name = self.workspaces.name(slot).unwrap_or_default();
+        self.messages.push(format!(
+            "{error}; Musicable uses {DEFAULT_WORKSPACE} instead of the workspace {name}."
+        ));
+        self.open_default_workspace();
+    }
+
+    /// Lays the panels out as the Default workspace has them, which is in
+    /// use from now on.
+    fn open_default_workspace(&mut self) {
+        if let Err(error) = self.use_workspace(0) {
+            self.messages.push(format!(
                 "{}; Musicable lays the panels out as it does at first.",
                 capital(error.to_string().trim_end())
-            )),
+            ));
+            self.shell.set_workspace(&Default::default());
+            self.set_current_workspace(0);
         }
     }
 
-    /// Saves the panels' layout to the default workspace's file, if the user
-    /// changed it since it was last saved.
-    fn save_workspace(&mut self) {
-        let Some(workspace) = self.shell.changed_workspace() else {
+    /// Lays the panels out as the workspace in `slot` has them, and uses it
+    /// from now on. The main window goes where the workspace has it.
+    fn use_workspace(&mut self, slot: usize) -> Result<(), ReadError> {
+        let workspace = self.workspaces.read(slot)?.unwrap_or_default();
+        self.shell.set_workspace(&workspace);
+        self.unplaced = workspace.windows.first().and_then(Place::of);
+        self.set_current_workspace(slot);
+        self.focus_in_sight();
+        Ok(())
+    }
+
+    /// Uses the workspace in `slot` from now on, and keeps that in the
+    /// settings, so the app opens with it.
+    fn set_current_workspace(&mut self, slot: usize) {
+        self.workspaces.set_current(slot);
+        let name = self.workspaces.current_name();
+        if self.settings.workspaces.current != name {
+            self.settings.workspaces.current = name.to_owned();
+            self.save_settings();
+        }
+    }
+
+    /// Saves the panels' layout, and where the window is, to the file of the
+    /// workspace in use, if the user changed them since they were last
+    /// saved. A window being moved about is saved once it stays put, unless
+    /// `now`.
+    fn save_workspace(&mut self, now: bool) {
+        let changed = if now {
+            self.shell.unsaved_workspace()
+        } else {
+            self.shell.changed_workspace()
+        };
+        let Some(workspace) = changed else {
             return;
         };
-        let Some(path) = self.config_dir.as_deref().map(workspaces::default_file) else {
-            return;
-        };
-        if let Err(error) = workspaces::write(&path, &workspace) {
+        let slot = self.workspaces.current();
+        if let Err(error) = self.workspaces.write(slot, &workspace) {
+            let path = self.workspaces.file(slot).unwrap_or_default();
             self.messages.push(format!(
                 "Couldn't save the panels' layout to {}: {error}",
                 path.display()
             ));
+        }
+    }
+
+    /// Switches to the workspace in `slot`, from 0, once the one in use is
+    /// saved.
+    fn switch_workspace(&mut self, slot: usize) {
+        let Some(name) = self.workspaces.name(slot).map(str::to_owned) else {
+            return;
+        };
+        if slot == self.workspaces.current() {
+            return;
+        }
+        self.save_workspace(true);
+        if let Err(error) = self.use_workspace(slot) {
+            self.messages
+                .push(format!("Couldn't switch to the workspace {name}: {error}."));
+        }
+    }
+
+    /// Keeps the panels' layout as a new workspace called `name`, which is
+    /// in use from then on, and the one in use before keeps what it has.
+    fn save_workspace_as(&mut self, name: &str) {
+        self.save_workspace(true);
+        let workspace = self.shell.workspace();
+        match self.workspaces.add(name, &workspace) {
+            Ok(slot) => self.set_current_workspace(slot),
+            Err(error) => self
+                .messages
+                .push(format!("Couldn't save the workspace {name}: {error}.")),
+        }
+    }
+
+    /// Calls the workspace in use `name`.
+    fn rename_workspace(&mut self, name: &str) {
+        let slot = self.workspaces.current();
+        let old = self.workspaces.current_name().to_owned();
+        match self.workspaces.rename(slot, name) {
+            Ok(()) => self.set_current_workspace(slot),
+            Err(error) => self.messages.push(format!(
+                "Couldn't rename the workspace {old} to {name}: {error}."
+            )),
+        }
+    }
+
+    /// Deletes the workspace in use, and switches to Default.
+    fn delete_workspace(&mut self) {
+        let slot = self.workspaces.current();
+        let name = self.workspaces.current_name().to_owned();
+        if slot == 0 {
+            return;
+        }
+        match self.workspaces.delete(slot) {
+            Ok(()) => self.open_default_workspace(),
+            Err(error) => self
+                .messages
+                .push(format!("Couldn't delete the workspace {name}: {error}.")),
         }
     }
 
@@ -384,6 +507,9 @@ impl App {
                 self.save_settings();
             }
             Action::DismissMessages => self.messages.clear(),
+            Action::SaveWorkspaceAs(name) => self.save_workspace_as(&name),
+            Action::RenameWorkspace(name) => self.rename_workspace(&name),
+            Action::DeleteWorkspace => self.delete_workspace(),
         }
         self.handle_requests(ctx, frame);
     }
@@ -475,6 +601,28 @@ impl App {
             }
             Request::AddLibraryFolder => self.add_library_folder(frame),
             Request::FocusBrowserSearch => self.shell.focus_browser_search(),
+            Request::SwitchWorkspace(slot) => {
+                if let Some(slot) = usize::from(slot).checked_sub(1) {
+                    self.switch_workspace(slot);
+                }
+            }
+            Request::SaveWorkspaceAs => self.shell.save_workspace_as(),
+            Request::RenameWorkspace if self.workspaces.current() == 0 => {
+                self.messages.push(format!(
+                    "{DEFAULT_WORKSPACE} keeps its name: Save Workspace As makes a copy to name."
+                ))
+            }
+            Request::RenameWorkspace => self.shell.rename_workspace(),
+            Request::DeleteWorkspace if self.workspaces.current() == 0 => {
+                self.messages.push(format!(
+                    "{DEFAULT_WORKSPACE} can't be deleted: Reset Workspace lays it out as at first."
+                ))
+            }
+            Request::DeleteWorkspace => self.shell.delete_workspace(),
+            Request::ResetWorkspace => {
+                self.shell.reset_workspace();
+                self.focus_in_sight();
+            }
         }
     }
 
@@ -532,10 +680,16 @@ impl App {
     }
 
     fn open_project(&mut self, project: Project, path: Option<PathBuf>) {
+        let saved_with =
+            (project.workspace.as_deref()).and_then(|name| self.workspaces.slot_named(name));
         self.session
             .open(project, path.as_deref().and_then(Path::parent));
         self.audio_files.forget();
         self.set_path(path);
+        // The panels as they were when the project was saved.
+        if let Some(slot) = saved_with {
+            self.switch_workspace(slot);
+        }
     }
 
     /// The folder of the project's file, which audio clips' relative paths
@@ -617,7 +771,9 @@ impl App {
                 }
             }
         };
-        match project::save(&path, &self.session.saved_project()) {
+        let mut project = self.session.saved_project();
+        project.workspace = Some(self.workspaces.current_name().to_owned());
+        match project::save(&path, &project) {
             Ok(()) => {
                 self.session.mark_saved();
                 self.set_path(Some(path));
@@ -1029,7 +1185,7 @@ impl eframe::App for App {
     /// there.
     fn on_exit(&mut self) {
         self.plugin_windows.close_all(&mut self.session);
-        self.save_workspace();
+        self.save_workspace(true);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1114,6 +1270,10 @@ impl eframe::App for App {
                 auto_preview: self.settings.browser.auto_preview,
                 preview_volume: self.settings.browser.preview_volume,
             },
+            workspaces: musicable_ui::Workspaces {
+                slots: self.workspaces.slots(),
+                current: self.workspaces.current(),
+            },
         };
         let actions = self.shell.show(ui, &view);
         for action in actions {
@@ -1125,7 +1285,11 @@ impl eframe::App for App {
         // The layout, once the user lets go of the tab or the edge they're
         // dragging.
         if !ctx.input(|i| i.pointer.any_down()) {
-            self.save_workspace();
+            self.save_workspace(false);
+        }
+        // The window, where the workspace switched to has it.
+        if let (Some(place), Some(window)) = (self.unplaced.take(), frame.winit_window()) {
+            place.apply(window);
         }
         let offset = self.session.recording_offset();
         match self.audio_window.show(&ctx, &self.output, offset) {

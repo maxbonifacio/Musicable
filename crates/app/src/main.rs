@@ -85,7 +85,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
     let result = eframe::run_native(
         "Musicable",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(path, &cc.egui_ctx)))),
+        Box::new(|cc| Ok(Box::new(App::new(path, cc)))),
     );
     match result {
         Ok(()) => ExitCode::SUCCESS,

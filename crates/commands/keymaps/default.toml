@@ -87,6 +87,18 @@ version = 1
 "file.export_audio" = ["Ctrl+Shift+R"]
 "file.quit" = ["Ctrl+Q"]
 
+# Live has no workspaces. Alt and a slot's number switch to the workspace in
+# that slot, the first being Default.
+"workspace.switch_1" = ["Alt+1"]
+"workspace.switch_2" = ["Alt+2"]
+"workspace.switch_3" = ["Alt+3"]
+"workspace.switch_4" = ["Alt+4"]
+"workspace.switch_5" = ["Alt+5"]
+"workspace.switch_6" = ["Alt+6"]
+"workspace.switch_7" = ["Alt+7"]
+"workspace.switch_8" = ["Alt+8"]
+"workspace.switch_9" = ["Alt+9"]
+
 # The app's windows. Live opens its settings with Ctrl+Comma, and Ctrl+K is
 # its key map mode, the nearest it has to changing keys. Live has no command
 # palette, and Ctrl+Shift+P is the usual key for one elsewhere.

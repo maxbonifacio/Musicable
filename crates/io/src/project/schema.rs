@@ -48,6 +48,9 @@ pub(super) struct File {
     master: Master,
     locators: Vec<Locator>,
     automation: Vec<Lane>,
+    /// The workspace the project was saved with.
+    #[serde(deserialize_with = "Option::deserialize")]
+    workspace: Option<String>,
 }
 
 /// A named place in the song.
@@ -442,6 +445,7 @@ impl From<&model::Project> for File {
             next_clip_id,
             next_locator_id,
             next_take_id,
+            workspace,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -463,6 +467,7 @@ impl From<&model::Project> for File {
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
             automation: automation.iter().map(Lane::from).collect(),
+            workspace: workspace.clone(),
         }
     }
 }
@@ -491,6 +496,7 @@ impl File {
             master,
             locators,
             automation,
+            workspace,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
             let message = format!("must be {}", Beats::TICKS_PER_BEAT);
@@ -577,6 +583,7 @@ impl File {
             next_clip_id: *next_clip_id,
             next_locator_id: *next_locator_id,
             next_take_id: *next_take_id,
+            workspace: workspace.clone(),
         };
         check_loops(&project)?;
         // Which parameters a device has depends on its kind, and a built-in

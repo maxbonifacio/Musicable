@@ -42,6 +42,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("controllers", controllers()),
         ("built-in", built_in()),
         ("automation", automation()),
+        ("workspace", workspace()),
     ]
 }
 
@@ -634,6 +635,15 @@ fn built_in() -> Project {
     project.track_mut(lead).unwrap().devices = vec![synth, delay];
     project.track_mut(vocal).unwrap().devices = vec![tone, compressor, reverb];
     project.master.devices = vec![utility];
+    project
+}
+
+/// The workspace a project was saved with, from version 10: one whose name
+/// isn't plain ASCII.
+fn workspace() -> Project {
+    let mut project = Project::new();
+    project.add_track("Vocals", TrackKind::Audio);
+    project.workspace = Some("Mixage à deux".to_owned());
     project
 }
 

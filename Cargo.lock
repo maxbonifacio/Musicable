@@ -1907,6 +1907,7 @@ name = "musicable-app"
 version = "0.2.0"
 dependencies = [
  "eframe",
+ "egui-winit",
  "egui_kittest",
  "musicable-audio",
  "musicable-commands",
@@ -1923,6 +1924,7 @@ dependencies = [
  "skrifa",
  "toml",
  "windows",
+ "winit",
 ]
 
 [[package]]

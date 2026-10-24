@@ -38,6 +38,7 @@ use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
     controllers, device, edit, file, locator, mixer, notes, options, take, track, transport, view,
+    workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -129,7 +130,8 @@ fn bare(_: &mut Rig) -> Option<Args> {
 /// on what's there. Some have more than one example, for the ways they
 /// work: on clips or on notes, with arguments or without them.
 fn examples() -> Vec<Example> {
-    vec![
+    let switches = workspace::SWITCH.map(|id| leaves(id, bare));
+    let mut examples = vec![
         edits(automation::ADD_POINT, |s| {
             let track = find_track(s, |_| true)?.id;
             let param = ParamAddress::Volume(Chain::Track(track));
@@ -1006,7 +1008,13 @@ fn examples() -> Vec<Example> {
         leaves(view::ZOOM_IN, bare),
         leaves(view::ZOOM_OUT, bare),
         leaves(view::ZOOM_TO_SELECTION, clip_selected),
-    ]
+        leaves(workspace::DELETE, bare),
+        leaves(workspace::RENAME, bare),
+        leaves(workspace::RESET, bare),
+        leaves(workspace::SAVE_AS, bare),
+    ];
+    examples.extend(switches);
+    examples
 }
 
 fn project(s: &Rig) -> &Project {

@@ -11,12 +11,13 @@ A project with a bass track playing a recording and sending to a reverb on
 a return track, and a keys track playing a note through the test
 instrument, bending it up a tone. It loops the first four bars, with the
 master's soft clip stage on, a locator marks the chorus at bar 3, and the
-bass's send to the reverb swells up to it:
+bass's send to the reverb swells up to it. It was saved with the Mixing
+workspace:
 
 ```json
 {
   "format": "musicable-project",
-  "version": 9,
+  "version": 10,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -222,7 +223,8 @@ bass's send to the reverb swells up to it:
       ],
       "overridden": false
     }
-  ]
+  ],
+  "workspace": "Mixing"
 }
 ```
 
@@ -268,7 +270,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 9 for this page. |
+| `version` | whole number | The format version: 10 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -286,6 +288,7 @@ in version control shows only what really changed.
 | `master` | master | The master channel. |
 | `locators` | array of locators | Named places in the song, in any order. |
 | `automation` | array of lanes | The automated parameters, a lane for each, in any order. |
+| `workspace` | string or null | The name of the workspace the project was saved with, which lays Musicable's panels out. Musicable switches to it as it opens the project, if the user has a workspace by that name. |
 
 ### Tempo map
 
@@ -781,6 +784,7 @@ Signal flows from tracks to buses without loops:
 | 7 | 2026-10-22 | Controllers in MIDI clips, such as the mod wheel and the sustain pedal. Version 6 MIDI clips move none. |
 | 8 | 2026-10-22 | Musicable's own devices: an EQ, a compressor, a gate, a delay, a reverb, a utility, a sampler and a synth. Version 7 files have none. |
 | 9 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 8 files have none. |
+| 10 | 2026-10-24 | The workspace a project was saved with. Version 9 files name none. |
 
 ## Changing the format
 

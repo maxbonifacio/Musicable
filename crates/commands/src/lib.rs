@@ -44,6 +44,7 @@ mod testing;
 pub mod track;
 pub mod transport;
 pub mod view;
+pub mod workspace;
 
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use browser::{Library, NoLibrary};
@@ -259,6 +260,18 @@ pub enum Request {
     AddLibraryFolder,
     /// Show the browser, and put the cursor in its search field.
     FocusBrowserSearch,
+    /// Switch to the workspace in this slot, from 1, the first being
+    /// Default.
+    SwitchWorkspace(u8),
+    /// Ask for a name, and keep the panels' layout as a new workspace under
+    /// it.
+    SaveWorkspaceAs,
+    /// Ask for a new name for the workspace in use.
+    RenameWorkspace,
+    /// Delete the workspace in use, once the user says so.
+    DeleteWorkspace,
+    /// Lay the panels of the workspace in use out as at first.
+    ResetWorkspace,
 }
 
 /// Something in the project with a name the user can change.
@@ -417,6 +430,7 @@ pub fn register_all(registry: &mut Registry) {
     controllers::register(registry);
     automation::register(registry);
     view::register(registry);
+    workspace::register(registry);
     options::register(registry);
 }
 
