@@ -2,14 +2,20 @@
 //! modifiers held.
 //!
 //! The arrangement, the piano roll and the mixer look gestures up here
-//! instead of deciding for themselves, so a profile can make the mouse work
-//! as another DAW's does, as a keymap does for keys. [`MouseMap::live`], the map Musicable
-//! starts with, follows Ableton Live on Windows, with Cmd standing in for
-//! Ctrl on a Mac.
+//! instead of deciding for themselves, so the user can make the mouse work
+//! as another DAW's does, as a keymap does for keys. [`MouseMap::live`], the
+//! map Musicable starts with, follows Ableton Live on Windows, with Cmd
+//! standing in for Ctrl on a Mac. A [`MouseMapFile`] holds the user's
+//! changes to it, which the Settings window's Mouse page makes, from the
+//! actions each place can do ([`Target::actions`]).
+
+mod file;
 
 use std::collections::BTreeMap;
 
 use musicable_commands::Modifiers;
+
+pub use file::{MouseFileError, MouseMapFile, MouseProblem};
 
 /// Where a gesture starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,6 +201,451 @@ pub enum MouseAction {
     EraseController,
 }
 
+impl Target {
+    /// Every place a gesture starts, in the order the Mouse page and mouse
+    /// map files list them.
+    pub const ALL: [Target; 31] = [
+        Target::ClipTitle,
+        Target::ClipBody,
+        Target::ClipEdge,
+        Target::FadeHandle,
+        Target::Lane,
+        Target::Empty,
+        Target::TrackHeader,
+        Target::TrackEdge,
+        Target::Ruler,
+        Target::Strip,
+        Target::LoopBrace,
+        Target::LoopEdge,
+        Target::Locator,
+        Target::TakeLane,
+        Target::TakeHeader,
+        Target::AutomationLane,
+        Target::AutomationLine,
+        Target::AutomationPoint,
+        Target::AutomationHeader,
+        Target::Note,
+        Target::NoteEdge,
+        Target::NoteGrid,
+        Target::DrawNote,
+        Target::DrawGrid,
+        Target::PianoKey,
+        Target::VelocityLane,
+        Target::ControllerLane,
+        Target::SoloButton,
+        Target::MixerControl,
+        Target::DeviceControl,
+        Target::Timeline,
+    ];
+
+    /// Its name in mouse map files.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Target::ClipTitle => "clip_title",
+            Target::ClipBody => "clip_body",
+            Target::ClipEdge => "clip_edge",
+            Target::FadeHandle => "fade_handle",
+            Target::Lane => "lane",
+            Target::Empty => "empty",
+            Target::Ruler => "ruler",
+            Target::Strip => "strip",
+            Target::LoopBrace => "loop_brace",
+            Target::LoopEdge => "loop_edge",
+            Target::Locator => "locator",
+            Target::TrackHeader => "track_header",
+            Target::TrackEdge => "track_edge",
+            Target::TakeLane => "take_lane",
+            Target::TakeHeader => "take_header",
+            Target::AutomationPoint => "automation_point",
+            Target::AutomationLine => "automation_line",
+            Target::AutomationLane => "automation_lane",
+            Target::AutomationHeader => "automation_header",
+            Target::SoloButton => "solo_button",
+            Target::MixerControl => "mixer_control",
+            Target::DeviceControl => "device_control",
+            Target::Timeline => "timeline",
+            Target::Note => "note",
+            Target::NoteEdge => "note_edge",
+            Target::NoteGrid => "note_grid",
+            Target::DrawNote => "draw_note",
+            Target::DrawGrid => "draw_grid",
+            Target::PianoKey => "piano_key",
+            Target::VelocityLane => "velocity_lane",
+            Target::ControllerLane => "controller_lane",
+        }
+    }
+
+    /// What the Mouse page calls it.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Target::ClipTitle => "A clip's title bar",
+            Target::ClipBody => "A clip's body",
+            Target::ClipEdge => "A clip's start or end",
+            Target::FadeHandle => "A fade handle",
+            Target::Lane => "A track's lane",
+            Target::Empty => "Under the last track",
+            Target::Ruler => "The ruler",
+            Target::Strip => "The ruler's strip",
+            Target::LoopBrace => "The loop brace",
+            Target::LoopEdge => "The loop brace's start or end",
+            Target::Locator => "A locator",
+            Target::TrackHeader => "A track's header",
+            Target::TrackEdge => "A track's bottom edge",
+            Target::TakeLane => "A take's lane",
+            Target::TakeHeader => "A take's header",
+            Target::AutomationPoint => "An automation point",
+            Target::AutomationLine => "An automation lane's line",
+            Target::AutomationLane => "An automation lane",
+            Target::AutomationHeader => "An automation lane's header",
+            Target::SoloButton => "Solo, in a header or a strip",
+            Target::MixerControl => "A fader, pan or send",
+            Target::DeviceControl => "A built-in device's control",
+            Target::Timeline => "Over the tracks or the notes",
+            Target::Note => "A note",
+            Target::NoteEdge => "A note's start or end",
+            Target::NoteGrid => "The rows, where there's no note",
+            Target::DrawNote => "A note, in Draw Mode",
+            Target::DrawGrid => "The rows, in Draw Mode",
+            Target::PianoKey => "The piano roll's keys",
+            Target::VelocityLane => "The velocity lane",
+            Target::ControllerLane => "A controller's lane",
+        }
+    }
+
+    /// The place a mouse map file names, ignoring case.
+    pub fn from_name(name: &str) -> Option<Target> {
+        Self::ALL
+            .into_iter()
+            .find(|target| target.name().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// What `gesture` can do here: the actions the arrangement, the piano
+    /// roll, the mixer and the devices carry out for it, in the order the
+    /// Mouse page offers them. None for a gesture that does nothing here.
+    ///
+    /// A target the arrangement and the piano roll share, such as the
+    /// ruler, has the actions both carry out.
+    pub fn actions(self, gesture: Gesture) -> &'static [MouseAction] {
+        use Gesture::{Click, DoubleClick, Drag, Wheel};
+        use MouseAction as A;
+        use Target as T;
+        match (self, gesture) {
+            // The arrangement's, where a double click does what a click can.
+            (T::ClipTitle | T::ClipBody | T::ClipEdge | T::FadeHandle, Click | DoubleClick) => &[
+                A::Select,
+                A::ToggleSelect,
+                A::SelectAndMark,
+                A::Rename,
+                A::Open,
+            ],
+            (T::ClipTitle | T::ClipBody, Drag) => &[A::Move, A::Copy, A::MoveFree, A::SelectTime],
+            (T::ClipEdge, Drag) => &[A::Trim, A::TrimFree, A::Move, A::Copy, A::MoveFree],
+            (T::FadeHandle, Drag) => &[A::Fade, A::Move, A::Copy, A::MoveFree],
+            (T::Lane | T::Empty, Click | DoubleClick) => &[A::PlaceMarker, A::Locate],
+            (T::Lane | T::Empty, Drag) => &[A::SelectTime],
+            (T::TrackHeader, Click | DoubleClick) => &[A::Select, A::ToggleSelect, A::Rename],
+            (T::TrackEdge, Drag) => &[A::ResizeTrack],
+            (T::Ruler, Click | DoubleClick) => &[A::Locate],
+            (T::Ruler, Drag) => &[A::ScrubZoom],
+            (T::Strip, Click | DoubleClick) => &[A::Locate, A::ToggleLoop],
+            (T::Strip, Drag) => &[A::DrawLoop, A::ScrubZoom],
+            (T::LoopBrace | T::LoopEdge, Click | DoubleClick) => &[A::ToggleLoop, A::Locate],
+            (T::LoopBrace, Drag) => &[A::MoveLoop, A::DrawLoop],
+            (T::LoopEdge, Drag) => &[A::ResizeLoop, A::MoveLoop],
+            (T::Locator, Click | DoubleClick) => &[A::Locate, A::Rename],
+            (T::Locator, Drag) => &[A::MoveLocator],
+            (T::TakeLane, Click | DoubleClick) => &[A::Comp],
+            (T::TakeLane, Drag) => &[A::Comp, A::CompFree],
+            (T::TakeHeader, Click | DoubleClick) => &[A::Rename],
+            (T::AutomationLane, Click | DoubleClick) => &[A::PlaceMarker, A::AddPoint, A::Locate],
+            (T::AutomationLane, Drag) => &[A::Draw, A::DrawFree, A::SelectTime],
+            (T::AutomationLine, Click | DoubleClick) => &[A::AddPoint, A::PlaceMarker],
+            (T::AutomationLine, Drag) => &[A::MoveSegment, A::Draw, A::DrawFree],
+            (T::AutomationPoint, Click | DoubleClick) => &[A::DeletePoint, A::PlaceMarker],
+            (T::AutomationPoint, Drag) => &[A::MovePoint, A::MovePointFree, A::Draw, A::DrawFree],
+            (T::AutomationHeader, Click | DoubleClick) => &[A::Select],
+            // The piano roll's.
+            (T::Note | T::NoteEdge | T::DrawNote, Click | DoubleClick) => {
+                &[A::Select, A::ToggleSelect, A::DeleteNote]
+            }
+            (T::Note | T::DrawNote, Drag) => &[A::Move, A::Copy, A::Velocity],
+            (T::NoteEdge, Drag) => &[A::Trim, A::TrimFree, A::Move, A::Copy, A::Velocity],
+            (T::NoteGrid | T::DrawGrid, Click | DoubleClick) => &[A::PlaceMarker, A::AddNote],
+            (T::NoteGrid | T::DrawGrid, Drag) => &[A::SelectArea, A::DrawNotes],
+            (T::PianoKey, Click | DoubleClick) => &[A::SelectKey, A::AddKey],
+            (T::PianoKey, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::ZoomKeys],
+            (T::VelocityLane, Drag) => &[A::Velocity],
+            (T::ControllerLane, Click | Drag) => &[A::DrawController, A::EraseController],
+            // The mixer's and the devices'.
+            (T::SoloButton, Click) => &[A::ExclusiveSolo, A::AddSolo],
+            (T::MixerControl | T::DeviceControl, Drag) => &[A::Coarse, A::Fine],
+            (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom],
+            _ => &[],
+        }
+    }
+
+    /// The gestures that can do something here, in order.
+    pub fn gestures(self) -> impl Iterator<Item = Gesture> {
+        Gesture::ALL
+            .into_iter()
+            .filter(move |&gesture| !self.actions(gesture).is_empty())
+    }
+}
+
+impl Gesture {
+    /// Every gesture, in the order the Mouse page and mouse map files list
+    /// them.
+    pub const ALL: [Gesture; 4] = [
+        Gesture::Click,
+        Gesture::DoubleClick,
+        Gesture::Drag,
+        Gesture::Wheel,
+    ];
+
+    /// Its name in mouse map files and on the Mouse page.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Gesture::Click => "Click",
+            Gesture::DoubleClick => "Double-click",
+            Gesture::Drag => "Drag",
+            Gesture::Wheel => "Wheel",
+        }
+    }
+
+    /// The gesture a mouse map file names, ignoring case, spaces and
+    /// hyphens, so `DoubleClick` and `double click` are double clicks too.
+    pub fn from_name(name: &str) -> Option<Gesture> {
+        let plain = |text: &str| -> String {
+            (text.chars())
+                .filter(|c| !matches!(c, '-' | ' ' | '_'))
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        let name = plain(name);
+        Self::ALL
+            .into_iter()
+            .find(|gesture| plain(gesture.name()) == name)
+    }
+
+    /// The gesture with `mods` held, as mouse map files and the Mouse page
+    /// write it: their names and its, joined by `+` as in key chords, such
+    /// as `Ctrl+Drag`.
+    pub fn with(self, mods: Modifiers) -> String {
+        match mods {
+            Modifiers::NONE => self.name().to_owned(),
+            mods => format!("{mods}+{}", self.name()),
+        }
+    }
+
+    /// Reads a gesture with modifiers, written as [`with`](Self::with)
+    /// writes it. The error says what's wrong.
+    pub fn parse(text: &str) -> Result<(Gesture, Modifiers), String> {
+        let (mods, name) = Modifiers::split_off(text).map_err(|error| error.to_string())?;
+        let gesture = Self::from_name(name).ok_or_else(|| match name {
+            "" => "there's no gesture after the modifiers".to_owned(),
+            name => format!(
+                "there's no gesture called \"{name}\" (they are Click, Double-click, Drag and \
+                 Wheel)"
+            ),
+        })?;
+        Ok((gesture, mods))
+    }
+}
+
+impl MouseAction {
+    /// Every action, which mouse map files name.
+    pub const ALL: [MouseAction; 47] = [
+        MouseAction::Select,
+        MouseAction::ToggleSelect,
+        MouseAction::SelectAndMark,
+        MouseAction::Move,
+        MouseAction::Copy,
+        MouseAction::MoveFree,
+        MouseAction::Trim,
+        MouseAction::TrimFree,
+        MouseAction::Fade,
+        MouseAction::PlaceMarker,
+        MouseAction::SelectTime,
+        MouseAction::Locate,
+        MouseAction::ScrubZoom,
+        MouseAction::DrawLoop,
+        MouseAction::ToggleLoop,
+        MouseAction::MoveLoop,
+        MouseAction::ResizeLoop,
+        MouseAction::MoveLocator,
+        MouseAction::Rename,
+        MouseAction::ResizeTrack,
+        MouseAction::Comp,
+        MouseAction::CompFree,
+        MouseAction::AddPoint,
+        MouseAction::DeletePoint,
+        MouseAction::MovePoint,
+        MouseAction::MovePointFree,
+        MouseAction::MoveSegment,
+        MouseAction::Draw,
+        MouseAction::DrawFree,
+        MouseAction::ExclusiveSolo,
+        MouseAction::AddSolo,
+        MouseAction::Coarse,
+        MouseAction::Fine,
+        MouseAction::Scroll,
+        MouseAction::ScrollSideways,
+        MouseAction::Zoom,
+        MouseAction::AddNote,
+        MouseAction::DeleteNote,
+        MouseAction::DrawNotes,
+        MouseAction::SelectArea,
+        MouseAction::Velocity,
+        MouseAction::SelectKey,
+        MouseAction::AddKey,
+        MouseAction::ZoomKeys,
+        MouseAction::Open,
+        MouseAction::DrawController,
+        MouseAction::EraseController,
+    ];
+
+    /// Its name in mouse map files.
+    pub const fn name(self) -> &'static str {
+        match self {
+            MouseAction::Select => "select",
+            MouseAction::ToggleSelect => "toggle_select",
+            MouseAction::SelectAndMark => "select_and_mark",
+            MouseAction::Move => "move",
+            MouseAction::Copy => "copy",
+            MouseAction::MoveFree => "move_free",
+            MouseAction::Trim => "trim",
+            MouseAction::TrimFree => "trim_free",
+            MouseAction::Fade => "fade",
+            MouseAction::PlaceMarker => "place_marker",
+            MouseAction::SelectTime => "select_time",
+            MouseAction::Locate => "locate",
+            MouseAction::ScrubZoom => "scrub_zoom",
+            MouseAction::DrawLoop => "draw_loop",
+            MouseAction::ToggleLoop => "toggle_loop",
+            MouseAction::MoveLoop => "move_loop",
+            MouseAction::ResizeLoop => "resize_loop",
+            MouseAction::MoveLocator => "move_locator",
+            MouseAction::Rename => "rename",
+            MouseAction::ResizeTrack => "resize_track",
+            MouseAction::Comp => "comp",
+            MouseAction::CompFree => "comp_free",
+            MouseAction::AddPoint => "add_point",
+            MouseAction::DeletePoint => "delete_point",
+            MouseAction::MovePoint => "move_point",
+            MouseAction::MovePointFree => "move_point_free",
+            MouseAction::MoveSegment => "move_segment",
+            MouseAction::Draw => "draw",
+            MouseAction::DrawFree => "draw_free",
+            MouseAction::ExclusiveSolo => "exclusive_solo",
+            MouseAction::AddSolo => "add_solo",
+            MouseAction::Coarse => "coarse",
+            MouseAction::Fine => "fine",
+            MouseAction::Scroll => "scroll",
+            MouseAction::ScrollSideways => "scroll_sideways",
+            MouseAction::Zoom => "zoom",
+            MouseAction::AddNote => "add_note",
+            MouseAction::DeleteNote => "delete_note",
+            MouseAction::DrawNotes => "draw_notes",
+            MouseAction::SelectArea => "select_area",
+            MouseAction::Velocity => "velocity",
+            MouseAction::SelectKey => "select_key",
+            MouseAction::AddKey => "add_key",
+            MouseAction::ZoomKeys => "zoom_keys",
+            MouseAction::Open => "open",
+            MouseAction::DrawController => "draw_controller",
+            MouseAction::EraseController => "erase_controller",
+        }
+    }
+
+    /// What the Mouse page calls it.
+    pub const fn title(self) -> &'static str {
+        match self {
+            MouseAction::Select => "Select",
+            MouseAction::ToggleSelect => "Add to the selection or take out",
+            MouseAction::SelectAndMark => "Select, and set the start marker",
+            MouseAction::Move => "Move",
+            MouseAction::Copy => "Copy",
+            MouseAction::MoveFree => "Move off the grid",
+            MouseAction::Trim => "Trim",
+            MouseAction::TrimFree => "Trim off the grid",
+            MouseAction::Fade => "Lengthen or shorten the fade",
+            MouseAction::PlaceMarker => "Put the start marker there",
+            MouseAction::SelectTime => "Select time",
+            MouseAction::Locate => "Put the playhead there",
+            MouseAction::ScrubZoom => "Zoom and scroll",
+            MouseAction::DrawLoop => "Draw a new loop",
+            MouseAction::ToggleLoop => "Turn looping on or off",
+            MouseAction::MoveLoop => "Move the loop",
+            MouseAction::ResizeLoop => "Move the loop's start or end",
+            MouseAction::MoveLocator => "Move the locator",
+            MouseAction::Rename => "Rename",
+            MouseAction::ResizeTrack => "Make the track taller or shorter",
+            MouseAction::Comp => "Comp, on the grid",
+            MouseAction::CompFree => "Comp off the grid",
+            MouseAction::AddPoint => "Add a point",
+            MouseAction::DeletePoint => "Delete the point",
+            MouseAction::MovePoint => "Move the point",
+            MouseAction::MovePointFree => "Move the point off the grid",
+            MouseAction::MoveSegment => "Move the line up or down",
+            MouseAction::Draw => "Draw, on the grid",
+            MouseAction::DrawFree => "Draw off the grid",
+            MouseAction::ExclusiveSolo => "Solo the track alone",
+            MouseAction::AddSolo => "Solo the track with the others",
+            MouseAction::Coarse => "Move it as far as the mouse",
+            MouseAction::Fine => "Move it a tenth as far",
+            MouseAction::Scroll => "Scroll",
+            MouseAction::ScrollSideways => "Scroll sideways",
+            MouseAction::Zoom => "Zoom",
+            MouseAction::AddNote => "Add a note",
+            MouseAction::DeleteNote => "Delete the note",
+            MouseAction::DrawNotes => "Draw notes",
+            MouseAction::SelectArea => "Select the notes in a rectangle",
+            MouseAction::Velocity => "Change the velocity",
+            MouseAction::SelectKey => "Select the key's notes",
+            MouseAction::AddKey => "Add the key's notes to the selection",
+            MouseAction::ZoomKeys => "Make the keys taller or shorter",
+            MouseAction::Open => "Open in the piano roll",
+            MouseAction::DrawController => "Draw the controller",
+            MouseAction::EraseController => "Erase the controller",
+        }
+    }
+
+    /// The action a mouse map file names, ignoring case.
+    pub fn from_name(name: &str) -> Option<MouseAction> {
+        Self::ALL
+            .into_iter()
+            .find(|action| action.name().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
+/// Every set of modifiers, in the order the Mouse page and mouse map files
+/// list gestures with them: none, then fewer before more, and Ctrl, Alt,
+/// Shift and Cmd in that order, as key chords write them.
+pub fn modifier_sets() -> Vec<Modifiers> {
+    let one = [
+        Modifiers::CTRL,
+        Modifiers::ALT,
+        Modifiers::SHIFT,
+        Modifiers::CMD,
+    ];
+    let mut sets: Vec<Modifiers> = (0..16u8)
+        .map(|bits| {
+            (one.iter().enumerate())
+                .filter(|&(i, _)| bits & (1 << i) != 0)
+                .fold(Modifiers::NONE, |mods, (_, &one)| mods | one)
+        })
+        .collect();
+    sets.sort_by_key(|&mods| rank(mods));
+    sets
+}
+
+/// Where gestures with `mods` held go in [`modifier_sets`]' order.
+fn rank(mods: Modifiers) -> (usize, [bool; 4]) {
+    let held = [mods.ctrl, mods.alt, mods.shift, mods.cmd];
+    let count = held.iter().filter(|&&held| held).count();
+    (count, held.map(|held| !held))
+}
+
 /// Gestures and what they do. See the [module docs](self).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MouseMap {
@@ -238,10 +689,27 @@ impl MouseMap {
         action(mods).or_else(|| action(Modifiers::NONE))
     }
 
+    /// What's bound to `gesture` on `target` with exactly `mods` held,
+    /// without falling back to what's bound to none.
+    pub fn bound(&self, target: Target, gesture: Gesture, mods: Modifiers) -> Option<MouseAction> {
+        self.bindings.get(&(target, gesture, mods)).copied()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (Target, Gesture, Modifiers, MouseAction)> + '_ {
         self.bindings
             .iter()
             .map(|(&(target, gesture, mods), &action)| (target, gesture, mods, action))
+    }
+
+    /// The gestures bound on `target`, with their modifiers and actions, by
+    /// gesture and then in [`modifier_sets`]' order.
+    pub fn on(&self, target: Target) -> Vec<(Gesture, Modifiers, MouseAction)> {
+        let mut bound: Vec<_> = (self.iter())
+            .filter(|&(on, ..)| on == target)
+            .map(|(_, gesture, mods, action)| (gesture, mods, action))
+            .collect();
+        bound.sort_by_key(|&(gesture, mods, _)| (gesture, rank(mods)));
+        bound
     }
 
     /// Ableton Live's mouse.
@@ -361,6 +829,8 @@ pub(crate) fn modifiers(modifiers: egui::Modifiers) -> Modifiers {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -384,6 +854,93 @@ mod tests {
         assert_eq!(modifiers(egui::Modifiers::CTRL), Modifiers::CTRL);
         assert_eq!(modifiers(egui::Modifiers::MAC_CMD), Modifiers::CMD);
         assert_eq!(modifiers(egui::Modifiers::COMMAND), Modifiers::CTRL);
+    }
+
+    #[test]
+    fn names_read_back_as_they_are_written() {
+        for target in Target::ALL {
+            assert_eq!(Target::from_name(target.name()), Some(target));
+        }
+        let names: BTreeSet<_> = Target::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(names.len(), Target::ALL.len());
+        for action in MouseAction::ALL {
+            assert_eq!(MouseAction::from_name(action.name()), Some(action));
+        }
+        let names: BTreeSet<_> = MouseAction::ALL.iter().map(|a| a.name()).collect();
+        assert_eq!(names.len(), MouseAction::ALL.len());
+        for gesture in Gesture::ALL {
+            assert_eq!(Gesture::from_name(gesture.name()), Some(gesture));
+        }
+        assert_eq!(
+            Gesture::from_name("double click"),
+            Some(Gesture::DoubleClick)
+        );
+        assert_eq!(Target::from_name("Clip_Title"), Some(Target::ClipTitle));
+        let mods = Modifiers::CTRL | Modifiers::SHIFT;
+        assert_eq!(Gesture::DoubleClick.with(mods), "Ctrl+Shift+Double-click");
+        assert_eq!(
+            Gesture::parse("shift+ctrl+DoubleClick"),
+            Ok((Gesture::DoubleClick, mods))
+        );
+        assert_eq!(
+            Gesture::parse("Ctrl+"),
+            Err("there's no gesture after the modifiers".to_owned())
+        );
+    }
+
+    #[test]
+    fn each_place_offers_what_live_does_there() {
+        let live = MouseMap::live();
+        for (target, gesture, mods, action) in live.iter() {
+            assert!(Target::ALL.contains(&target), "{target:?}");
+            let can = target.actions(gesture);
+            assert!(
+                can.contains(&action),
+                "{target:?} {mods:?}+{gesture:?}: {action:?}"
+            );
+        }
+        // Every place can do something, and every action is listed.
+        for target in Target::ALL {
+            assert!(target.gestures().next().is_some(), "{target:?}");
+            for gesture in Gesture::ALL {
+                for action in target.actions(gesture) {
+                    assert!(MouseAction::ALL.contains(action), "{action:?}");
+                }
+            }
+        }
+        let rows: Vec<String> = (live.on(Target::ClipTitle).into_iter())
+            .map(|(gesture, mods, _)| gesture.with(mods))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "Click",
+                "Ctrl+Click",
+                "Shift+Click",
+                "Cmd+Click",
+                "Double-click",
+                "Drag",
+                "Ctrl+Drag",
+                "Alt+Drag",
+                "Shift+Drag",
+                "Cmd+Drag"
+            ]
+        );
+        let sets: Vec<String> = (modifier_sets().into_iter().take(6))
+            .map(|mods| Gesture::Drag.with(mods))
+            .collect();
+        assert_eq!(
+            sets,
+            [
+                "Drag",
+                "Ctrl+Drag",
+                "Alt+Drag",
+                "Shift+Drag",
+                "Cmd+Drag",
+                "Ctrl+Alt+Drag"
+            ]
+        );
+        assert_eq!(modifier_sets().len(), 16);
     }
 
     #[test]

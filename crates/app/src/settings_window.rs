@@ -1,9 +1,10 @@
 //! The Settings window: a page for each area of Musicable's settings,
 //! listed down its left side, as Live's Preferences has a tab for each.
 //! Changes apply at once, and the app keeps them, in the settings file or
-//! in the keymap's, the theme's or the workspaces' files. The window isn't
-//! a panel, so no workspace has it. Each page is registered with its id,
-//! its title and what draws it, so a new page goes in one place.
+//! in the keymap's, the mouse map's, the theme's or the workspaces' files.
+//! The window isn't a panel, so no workspace has it. Each page is
+//! registered with its id, its title and what draws it, so a new page goes
+//! in one place.
 
 use std::path::Path;
 
@@ -19,6 +20,8 @@ use musicable_ui::{Action, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Shell, View, 
 use crate::Output;
 use crate::appearance_page::{self, AppearancePage};
 use crate::audio_page::AudioPage;
+use crate::mouse_file::UserMouse;
+use crate::mouse_page;
 use crate::settings::Settings;
 use crate::theme_file::UserTheme;
 
@@ -28,6 +31,8 @@ pub const AUDIO: &str = "audio";
 pub const RECORDING: &str = "recording";
 /// Every command's keys.
 pub const KEYS: &str = "keys";
+/// What the mouse does where.
+pub const MOUSE: &str = "mouse";
 /// How editing behaves where people's habits differ.
 pub const BEHAVIOUR: &str = "behaviour";
 /// The theme.
@@ -53,7 +58,7 @@ struct Page {
 }
 
 /// The pages, in the order the window lists them. A new page goes here.
-const PAGES: [Page; 7] = [
+const PAGES: [Page; 8] = [
     Page {
         id: AUDIO,
         title: "Audio",
@@ -80,6 +85,12 @@ const PAGES: [Page; 7] = [
             cx.actions.extend(actions);
             None
         },
+    },
+    Page {
+        id: MOUSE,
+        title: "Mouse",
+        scrolls: true,
+        show: |_, ui, cx, _| mouse_page::show(ui, cx.shell.mouse_map(), cx.mouse).map(Asked::Mouse),
     },
     Page {
         id: BEHAVIOUR,
@@ -132,6 +143,8 @@ pub enum Asked {
     CaptureMinutes(u32),
     /// Editing behaves so from now on.
     Behaviour(Behaviour),
+    /// What the Mouse page asked for.
+    Mouse(mouse_page::Asked),
     /// What the Appearance page asked for.
     Appearance(appearance_page::Asked),
     /// Ask for a folder to save presets in.
@@ -146,7 +159,7 @@ pub enum Asked {
 pub struct Cx<'a> {
     /// What the shell shows in this frame, which the Keys page shows too.
     pub view: &'a View<'a>,
-    /// The shell, which draws the Keys page.
+    /// The shell, which draws the Keys page and has the mouse map.
     pub shell: &'a mut Shell,
     /// Where the pages put what they ask the shell's way, as the Keys page
     /// and the workspace buttons do, with the rest of the shell's actions.
@@ -154,6 +167,8 @@ pub struct Cx<'a> {
     pub output: &'a Output,
     /// The device playing's recording offset, in frames.
     pub offset: i64,
+    /// The user's mouse map file.
+    pub mouse: &'a UserMouse,
     pub theme: &'a UserTheme,
     pub settings: &'a Settings,
     /// Where presets go, if Musicable has a folder for them.

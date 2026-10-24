@@ -2,21 +2,29 @@
 //! foundations): the audio settings and the keys are pages of one window,
 //! the other settings have pages there too, and every option in the
 //! settings file but the export window's has a control. Changes apply at
-//! once, and go to the settings file.
+//! once, and go to the settings file, or to the mouse map's.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
+use std::fs;
+
 use eframe::egui::accesskit::Role;
+use eframe::egui::{self, Event, PointerButton, Pos2, pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::{Behaviour, MiddleC, PlayFrom};
-use musicable_commands::options;
+use musicable_commands::{Modifiers, options};
+use musicable_io::project;
+use musicable_model::time::Beats;
+use musicable_model::{Project, TrackKind};
+use musicable_ui::{Gesture, MouseAction, MouseMap, Target};
 
 use super::App;
 use super::testing::{TempDir, chord, press, window};
 use crate::library;
-use crate::settings::{SETTINGS_FILE, Settings};
-use crate::settings_window::{APPEARANCE, AUDIO, BROWSER, KEYS, RECORDING, WORKSPACES};
+use crate::mouse_file::BACKUP_FILE;
+use crate::settings::{MOUSE_FILE, SETTINGS_FILE, Settings};
+use crate::settings_window::{APPEARANCE, AUDIO, BROWSER, KEYS, MOUSE, RECORDING, WORKSPACES};
 
 /// The page the Settings window shows, if it's open.
 fn page(harness: &Harness<'static, App>) -> Option<&'static str> {
@@ -40,6 +48,75 @@ fn turn_to(harness: &mut Harness<'static, App>, title: &str) {
 /// The settings as the app last saved them.
 fn saved(config: &TempDir) -> Settings {
     Settings::read(&config.0.join(SETTINGS_FILE)).unwrap()
+}
+
+/// Picks `item` from the menu called `menu`.
+fn pick(harness: &mut Harness<'static, App>, menu: &str, item: &str) {
+    click(harness, menu);
+    harness.get_by_role_and_label(Role::Button, item).click();
+    harness.run();
+}
+
+/// What the menu called `menu` shows.
+fn shown(harness: &Harness<'static, App>, menu: &str) -> String {
+    let node = harness.get_by_role_and_label(Role::ComboBox, menu);
+    node.accesskit_node().value().unwrap_or_default().to_owned()
+}
+
+/// What the mouse map in use does with `gesture` on `target`, with `mods`.
+fn does(
+    harness: &Harness<'static, App>,
+    target: Target,
+    gesture: Gesture,
+    mods: Modifiers,
+) -> Option<MouseAction> {
+    harness
+        .state()
+        .shell
+        .mouse_map()
+        .action(target, gesture, mods)
+}
+
+/// The clips on the first track, by their starts and ends in beats.
+fn clips(harness: &Harness<'static, App>) -> Vec<(f64, f64)> {
+    let track = &harness.state().session.project().tracks[0];
+    (track.clips.iter())
+        .map(|clip| (clip.start.to_f64(), clip.end().to_f64()))
+        .collect()
+}
+
+/// In the first track's lane, at `at` beats: in a clip's body if there's
+/// one there.
+fn lane(harness: &Harness<'static, App>, at: f64) -> Pos2 {
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let row = harness.get_by_label("Track Keys").rect();
+    let viewport = harness.state().session.editor().viewport;
+    pos2(
+        lanes.left() + viewport.x_of(Beats::from_f64(at)),
+        row.bottom() - 6.0,
+    )
+}
+
+fn button(harness: &mut Harness<'static, App>, at: Pos2, pressed: bool) {
+    harness.event(Event::PointerButton {
+        pos: at,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run();
+}
+
+/// Drags from `from` to `to`, in a few moves, or clicks if they're the same.
+fn drag(harness: &mut Harness<'static, App>, from: Pos2, to: Pos2) {
+    harness.hover_at(from);
+    harness.run();
+    button(harness, from, true);
+    for step in 1..=4 {
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.run();
+    }
+    button(harness, to, false);
 }
 
 #[test]
@@ -248,4 +325,109 @@ fn the_workspaces_page_switches_and_keeps_workspaces() {
     assert_eq!(harness.state().workspaces.current(), 0);
     assert_eq!(saved(&config).workspaces.current, "Default");
     assert_eq!(page(&harness), Some(WORKSPACES));
+}
+
+#[test]
+fn the_mouse_page_changes_what_gestures_do() {
+    let config = TempDir::new("settings-mouse");
+    let folder = TempDir::new("settings-mouse-song");
+    let mut song = Project::new();
+    song.add_track("Keys", TrackKind::Midi);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path.clone()));
+    harness.run();
+    // A click in the lane puts the start marker there, and Ctrl+Shift+M a
+    // bar-long MIDI clip.
+    let at = lane(&harness, 0.2);
+    drag(&mut harness, at, at);
+    press(&mut harness, chord("Ctrl+Shift+M"));
+    assert_eq!(clips(&harness), [(0.0, 4.0)]);
+
+    // Dragging a clip's body selects time, as in Live. On the Mouse page,
+    // it moves the clip instead, at once, and the file keeps that.
+    press(&mut harness, chord("Ctrl+Comma"));
+    turn_to(&mut harness, "Mouse");
+    assert_eq!(page(&harness), Some(MOUSE));
+    harness.get_by_label("Create It");
+    let menu = "A clip's body: Drag";
+    assert_eq!(shown(&harness, menu), "Select time");
+    pick(&mut harness, menu, "Move");
+    assert_eq!(shown(&harness, menu), "Move");
+    let drag_body = (Target::ClipBody, Gesture::Drag, Modifiers::NONE);
+    let (target, gesture, none) = drag_body;
+    assert_eq!(
+        does(&harness, target, gesture, none),
+        Some(MouseAction::Move)
+    );
+    let file = config.0.join(MOUSE_FILE);
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("[clip_body]\n"), "{text}");
+    assert!(text.contains("\n\"Drag\" = \"move\"\n"), "{text}");
+    harness.get_by_label("Reload");
+    press(&mut harness, chord("Escape"));
+    let (from, to) = (lane(&harness, 1.0), lane(&harness, 5.0));
+    drag(&mut harness, from, to);
+    assert_eq!(clips(&harness), [(4.0, 8.0)]);
+
+    // A gesture gets an action with other modifiers held: it does what it
+    // did until another's picked, and Reset takes the action away again.
+    press(&mut harness, chord("Ctrl+Comma"));
+    let strip = (Target::Strip, Gesture::Click, Modifiers::SHIFT);
+    let (target, gesture, shift) = strip;
+    pick(
+        &mut harness,
+        "The ruler's strip: Add Modifiers",
+        "Shift+Click",
+    );
+    let menu = "The ruler's strip: Shift+Click";
+    assert_eq!(shown(&harness, menu), "Put the playhead there");
+    pick(&mut harness, menu, "Turn looping on or off");
+    assert_eq!(
+        does(&harness, target, gesture, shift),
+        Some(MouseAction::ToggleLoop)
+    );
+    click(&mut harness, &format!("Reset {menu}"));
+    assert!(harness.query_by_label(menu).is_none());
+    assert_eq!(
+        does(&harness, target, gesture, shift),
+        Some(MouseAction::Locate)
+    );
+
+    // Ctrl-dragging a clip's title copies it, as in Live. Without an action
+    // of its own, it moves the clip, as dragging does.
+    let menu = "A clip's title bar: Ctrl+Drag";
+    pick(&mut harness, menu, "Same as Drag");
+    assert_eq!(shown(&harness, menu), "Same as Drag");
+    let ctrl_drag = (Target::ClipTitle, Gesture::Drag, Modifiers::CTRL);
+    let (target, gesture, ctrl) = ctrl_drag;
+    assert_eq!(
+        does(&harness, target, gesture, ctrl),
+        Some(MouseAction::Move)
+    );
+
+    // The changes last, and Reset All keeps them in a copy of the file.
+    drop(harness);
+    let mut harness = window(&config.0, Some(path));
+    harness.run();
+    let (target, gesture, mods) = drag_body;
+    assert_eq!(
+        does(&harness, target, gesture, mods),
+        Some(MouseAction::Move)
+    );
+    let (target, gesture, mods) = ctrl_drag;
+    assert_eq!(
+        does(&harness, target, gesture, mods),
+        Some(MouseAction::Move)
+    );
+    harness.state_mut().settings_window.open(Some(MOUSE));
+    harness.run();
+    click(&mut harness, "Reset All");
+    assert_eq!(*harness.state().shell.mouse_map(), MouseMap::live());
+    let kept = fs::read_to_string(config.0.join(BACKUP_FILE)).unwrap();
+    assert!(kept.contains("\n\"Ctrl+Drag\" = \"none\"\n"), "{kept}");
+    harness.get_by_label(&format!(
+        "Every gesture does what it does at first again. Your changes from before are in \
+         {BACKUP_FILE}."
+    ));
 }

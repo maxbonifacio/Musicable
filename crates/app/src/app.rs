@@ -28,9 +28,13 @@ use crate::export::{self, Export, ExportSettings, Job, Report};
 use crate::export_window::{Asked, ExportWindow};
 use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
+use crate::mouse_file::UserMouse;
+use crate::mouse_page::Asked as MouseAsked;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
-use crate::settings::{self, AudioSettings, KEYMAP_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER};
+use crate::settings::{
+    self, AudioSettings, KEYMAP_FILE, MOUSE_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER,
+};
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
 use crate::workspaces::{Place, ReadError, Workspaces};
@@ -88,11 +92,15 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
-    /// Where the settings, the user's keymap, themes and workspaces live.
+    /// Where the settings, the user's keymap, mouse map, themes and
+    /// workspaces live.
     config_dir: Option<PathBuf>,
     settings: Settings,
     /// The user's keymap file, which every change of keys is saved to.
     keymap_file: UserKeymap,
+    /// The user's mouse map file, which every change on the Mouse page is
+    /// saved to.
+    mouse_file: UserMouse,
     /// The theme Musicable draws with, and the file it's from, which is
     /// followed as it changes.
     theme_file: UserTheme,
@@ -143,7 +151,7 @@ impl App {
 
     /// Opens the project at `path`, or a new project, playing through
     /// `output`, whose engine `handle` drives. The settings and the user's
-    /// keymap live in `config_dir`.
+    /// keymap and mouse map live in `config_dir`.
     fn with_output(
         path: Option<PathBuf>,
         config_dir: Option<PathBuf>,
@@ -158,6 +166,13 @@ impl App {
         if !keymap_file.problems().is_empty() || keymap_file.error().is_some() {
             messages.push(
                 "Your keymap file has problems: see Options > Keyboard Shortcuts.".to_owned(),
+            );
+        }
+        let (mouse_file, mouse) =
+            UserMouse::read(config_dir.as_ref().map(|dir| dir.join(MOUSE_FILE)));
+        if !mouse_file.problems().is_empty() || mouse_file.error().is_some() {
+            messages.push(
+                "Your mouse map file has problems: see the Mouse page of Settings.".to_owned(),
             );
         }
         let (project, path) = match path {
@@ -221,6 +236,7 @@ impl App {
             config_dir,
             settings,
             keymap_file,
+            mouse_file,
             theme_file,
             theme_message: None,
             workspaces,
@@ -230,6 +246,7 @@ impl App {
             title: String::new(),
         };
         app.use_theme(ctx);
+        app.shell.set_mouse_map(mouse);
         if let Some(known) = known {
             app.set_installed_plugins(known);
         }
@@ -942,6 +959,7 @@ impl App {
                 self.session.editor_mut().behaviour = behaviour;
                 self.save_settings();
             }
+            Asked::Mouse(asked) => self.mouse(asked),
             Asked::Appearance(asked) => self.appearance(asked, ctx, frame),
             Asked::ChoosePresetsFolder => {
                 let mut dialog = rfd::FileDialog::new()
@@ -964,6 +982,25 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Carries out what the Mouse page asked for: the mouse map changes at
+    /// once, and the user's file keeps it.
+    fn mouse(&mut self, asked: MouseAsked) {
+        let map = match asked {
+            MouseAsked::Map(map) => {
+                self.mouse_file.save(&map);
+                map
+            }
+            MouseAsked::Reset => self.mouse_file.reset(),
+            MouseAsked::Reload => self.mouse_file.reload(),
+            MouseAsked::Create => {
+                let map = self.shell.mouse_map().clone();
+                self.mouse_file.save(&map);
+                map
+            }
+        };
+        self.shell.set_mouse_map(map);
     }
 
     /// Saves presets in `folder` from now on, or in the one Musicable picks
@@ -1339,6 +1376,7 @@ impl eframe::App for App {
             actions: &mut actions,
             output: &self.output,
             offset: self.session.recording_offset(),
+            mouse: &self.mouse_file,
             theme: &self.theme_file,
             settings: &self.settings,
             presets_folder: library.presets_folder(),
