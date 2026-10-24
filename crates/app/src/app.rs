@@ -1332,8 +1332,7 @@ impl eframe::App for App {
             commands: self.session.commands(),
             keymap: self.session.keymap(),
             default_keymap: self.keymap_file.defaults(),
-            undo: self.session.undo_name(),
-            redo: self.session.redo_name(),
+            history: self.session.history(),
             editor: self.session.editor(),
             playback: Playback {
                 playing: stats.playing,
@@ -1624,6 +1623,8 @@ mod remapping;
 mod testing;
 #[cfg(test)]
 mod theming;
+#[cfg(test)]
+mod undoing;
 
 #[cfg(test)]
 mod tests {

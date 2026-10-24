@@ -406,10 +406,13 @@ says what's there.
   has a page for each area of the settings, applies each change at once
   and keeps it (`crates/app/src/settings_window.rs`;
   [app.md](app.md#the-settings-window)).
-- **Visible undo history.** The history names each step, and undo and redo
-  move through it a step at a time (`Document::undo_name` and `redo_name`;
-  [commands.md](commands.md#undo-and-redo)). A panel of the steps needs
-  every step's name, and jumps to one by undoing or redoing up to it.
+- **Visible undo history.** The History panel lists every step of the
+  undo history by name, and clicking one takes the project back or forward
+  to it (`crates/ui/src/history.rs`; [app.md](app.md#the-history-panel)).
+  `Document::steps` names the steps and says how many are done, and
+  `history.go_to` undoes or redoes up to the step clicked, a step at a
+  time, so the engine follows it as it follows undo
+  ([commands.md](commands.md#undo-and-redo)).
 - **MIDI learn.** MIDI inputs reach the engine stamped with their frames
   (`ProcessContext::midi`), and every parameter has one address
   (`ParamAddress`), which automation uses, and modulation and MIDI mapping

@@ -63,6 +63,9 @@ version = 1
 "view.toggle_piano_roll" = ["Ctrl+Alt+3"]
 "view.switch_devices_piano_roll" = ["F12"]
 
+# Live has no list of the undo history. Its key follows the other panels'.
+"view.toggle_history" = ["Ctrl+Alt+H"]
+
 # Live's keys for its MIDI note editor that work everywhere: Draw Mode, and
 # Quantize, which quantizes the selected MIDI clips outside the piano roll.
 # The arrow keys are the piano roll's own, under [panels.piano_roll] below.
@@ -123,3 +126,9 @@ version = 1
 "notes.lengthen" = ["Shift+Right"]
 "notes.velocity_up" = ["Ctrl+Up"]
 "notes.velocity_down" = ["Ctrl+Down"]
+
+# The arrow keys step through the History panel's list: Up takes a step back,
+# as undo does, and Down makes the next one again, as redo does.
+[panels.history]
+"edit.undo" = ["Up"]
+"edit.redo" = ["Down"]

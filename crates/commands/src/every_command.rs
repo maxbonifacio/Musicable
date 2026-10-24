@@ -37,8 +37,8 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, locator, mixer, notes, options, take, track, transport, view,
-    workspace,
+    controllers, device, edit, file, history, locator, mixer, notes, options, take, track,
+    transport, view, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -59,7 +59,7 @@ enum Does {
     /// editor shows or has selected, drives the transport, or asks the app
     /// or the library for something.
     Leaves,
-    /// It steps through the undo history: undo or redo.
+    /// It steps through the undo history: undo, redo, or going to a step.
     Steps,
 }
 
@@ -112,12 +112,13 @@ fn leaves(command: CommandId, prepare: fn(&mut Rig) -> Option<Args>) -> Example 
     }
 }
 
-/// Undo or redo, which the tests run between the other examples.
-fn steps(command: CommandId) -> Example {
+/// Undo, redo or going to a step, which the tests run between the other
+/// examples.
+fn steps(command: CommandId, prepare: fn(&mut Rig) -> Option<Args>) -> Example {
     Example {
         command,
         does: Does::Steps,
-        prepare: bare,
+        prepare,
     }
 }
 
@@ -490,7 +491,7 @@ fn examples() -> Vec<Example> {
             start_marker(s, at);
             Some(Args::new())
         }),
-        steps(edit::REDO),
+        steps(edit::REDO, bare),
         leaves(edit::RENAME, |s| {
             let clip = find_clip(s, |_| true)?.id;
             Some(Args::new().with("clip", clip))
@@ -525,7 +526,7 @@ fn examples() -> Vec<Example> {
             Some(Args::new())
         }),
         edits(edit::SPLIT, time_selected),
-        steps(edit::UNDO),
+        steps(edit::UNDO, bare),
         leaves(file::EXPORT_AUDIO, bare),
         leaves(file::IMPORT_AUDIO, bare),
         leaves(file::NEW, bare),
@@ -533,6 +534,8 @@ fn examples() -> Vec<Example> {
         leaves(file::OPEN, bare),
         leaves(file::QUIT, bare),
         leaves(file::SAVE, bare),
+        // Before every step, which the fixture's history hasn't.
+        steps(history::GO_TO, |_| Some(Args::new().with("step", 0_i64))),
         leaves(file::SAVE_AS, bare),
         edits(locator::ADD, |s| {
             let locators = &project(s).locators;
@@ -999,6 +1002,7 @@ fn examples() -> Vec<Example> {
         leaves(view::TOGGLE_BROWSER, bare),
         leaves(view::TOGGLE_DEVICES, bare),
         leaves(view::TOGGLE_FOLLOW, bare),
+        leaves(view::TOGGLE_HISTORY, bare),
         leaves(view::TOGGLE_MIXER, bare),
         leaves(view::TOGGLE_PIANO_ROLL, bare),
         leaves(view::TOGGLE_SNAP, bare),
@@ -1539,6 +1543,9 @@ enum Op {
     Run(usize, usize),
     Undo,
     Redo,
+    /// Goes to a step in the history, picked by the number, as clicking it
+    /// in the History panel does.
+    GoTo(usize),
 }
 
 /// The examples [`Op::Run`] picks from.
@@ -1553,6 +1560,7 @@ fn op() -> impl Strategy<Value = Op> {
         6 => (0..runnable().len(), 0..32_usize).prop_map(|(i, pick)| Op::Run(i, pick)),
         2 => Just(Op::Undo),
         1 => Just(Op::Redo),
+        1 => (0..32_usize).prop_map(Op::GoTo),
     ]
 }
 
@@ -1633,12 +1641,38 @@ proptest! {
                     }
                     committed
                 }
+                Op::GoTo(step) => {
+                    let step = step % states.len();
+                    ran.push(format!("go to {step}"));
+                    let args = Args::new().with("step", step as i64);
+                    s.run_with(&history::GO_TO, args).unwrap();
+                    let committed = s.document.take_committed();
+                    // Each step in between, undone or redone in turn.
+                    let between: Vec<String> = if step < done {
+                        let undone = (step + 1..=done).rev();
+                        undone.map(|i| format!("Undo {}", states[i].1)).collect()
+                    } else {
+                        let redone = done + 1..=step;
+                        redone.map(|i| format!("Redo {}", states[i].1)).collect()
+                    };
+                    prop_assert_eq!(names(&committed), between);
+                    done = step;
+                    let went = format!("going to {step} (after {ran:?})");
+                    prop_assert_eq!(masked(project(&s)), masked(&states[done].0), "{}", went);
+                    committed
+                }
             };
             let what = format!("{ran:?}");
             let undo_name = (done > 0).then(|| states[done].1.as_str());
             prop_assert_eq!(s.document.undo_name(), undo_name, "{}", what);
             let redo_name = states.get(done + 1).map(|(_, name)| name.as_str());
             prop_assert_eq!(s.document.redo_name(), redo_name, "{}", what);
+            // The History panel lists the steps, and where the history is.
+            let steps = s.document.steps();
+            let listed: Vec<_> = (0..steps.len()).filter_map(|i| steps.name(i)).collect();
+            let made: Vec<_> = states[1..].iter().map(|(_, name)| name.as_str()).collect();
+            prop_assert_eq!(listed, made, "{}", what);
+            prop_assert_eq!(steps.done(), done, "{}", what);
             prop_assert_eq!(s.document.is_modified(), done > 0, "{}", what);
             // Undo and redo lead back to the fixture or to a project a step
             // made, both of which saved, but for the counters: if those are

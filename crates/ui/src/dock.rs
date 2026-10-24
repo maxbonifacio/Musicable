@@ -1105,7 +1105,7 @@ impl Behavior<Pane> for Draw<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panels::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
+    use crate::panels::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL};
 
     fn layout(dock: &Dock) -> WindowLayout {
         dock.layout(&Registry::new(), &Theme::default())
@@ -1118,14 +1118,18 @@ mod tests {
         }
     }
 
-    /// Today's layout: the browser on the left, and the arrangement over
-    /// the mixer and the devices, with the piano roll in a tab beside them.
+    /// Today's layout: the browser on the left, with the history in a tab
+    /// beside it, and the arrangement over the mixer and the devices, with
+    /// the piano roll in a tab beside them.
     fn default_layout() -> WindowLayout {
         let tabs = Split::Tabs(vec![DEVICES.into(), PIANO_ROLL.into()]);
         WindowLayout {
-            hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
+            hidden: vec![BROWSER.into(), PIANO_ROLL.into(), HISTORY.into()],
             layout: Layout::new(Split::Across(vec![
-                Layout::panel(BROWSER),
+                Layout {
+                    front: Some(BROWSER.into()),
+                    ..Layout::new(Split::Tabs(vec![BROWSER.into(), HISTORY.into()]))
+                },
                 Layout::new(Split::Down(vec![
                     Layout::panel(ARRANGEMENT),
                     Layout::panel(MIXER),
@@ -1163,7 +1167,7 @@ mod tests {
         dock.show_panel(BROWSER);
         dock.hide_panel(MIXER);
         let mut expected = default_layout();
-        expected.hidden = vec![MIXER.into(), PIANO_ROLL.into()];
+        expected.hidden = vec![MIXER.into(), PIANO_ROLL.into(), HISTORY.into()];
         assert_eq!(layout(&dock), expected);
         assert!(dock.take_changed());
         assert!(!dock.take_changed());
@@ -1178,7 +1182,7 @@ mod tests {
         let registry = Registry::new();
         let theme = Theme::default();
         let window = WindowLayout {
-            hidden: vec![DEVICES.into()],
+            hidden: vec![DEVICES.into(), HISTORY.into()],
             layout: Layout::new(Split::Down(vec![
                 Layout::new(Split::Across(vec![
                     Layout::panel(ARRANGEMENT),
@@ -1192,6 +1196,7 @@ mod tests {
                             DEVICES.into(),
                             MIXER.into(),
                             PIANO_ROLL.into(),
+                            HISTORY.into(),
                         ]))
                     },
                 ),
@@ -1201,7 +1206,7 @@ mod tests {
         let dock = Dock::from_layout(&window, &registry, &theme);
         assert_eq!(dock.layout(&registry, &theme), window);
         assert!(dock.shown(MIXER) && dock.shown(BROWSER));
-        assert!(!dock.shown(DEVICES) && !dock.shown(PIANO_ROLL));
+        assert!(!dock.shown(DEVICES) && !dock.shown(PIANO_ROLL) && !dock.shown(HISTORY));
     }
 
     #[test]
@@ -1220,13 +1225,21 @@ mod tests {
             ..WindowLayout::default()
         };
         let dock = Dock::from_layout(&window, &registry, &theme);
-        // The browser goes on the left and the devices under the
-        // arrangement, hidden, and the piano roll beside them. The
-        // arrangement can't be hidden.
+        // The browser goes on the left, with the history beside it, and the
+        // devices under the arrangement, with the piano roll beside them,
+        // all hidden. The arrangement can't be hidden.
         let expected = WindowLayout {
-            hidden: vec![BROWSER.into(), DEVICES.into(), PIANO_ROLL.into()],
+            hidden: vec![
+                BROWSER.into(),
+                DEVICES.into(),
+                PIANO_ROLL.into(),
+                HISTORY.into(),
+            ],
             layout: Layout::new(Split::Across(vec![
-                Layout::panel(BROWSER),
+                Layout {
+                    front: Some(BROWSER.into()),
+                    ..Layout::new(Split::Tabs(vec![BROWSER.into(), HISTORY.into()]))
+                },
                 Layout::new(Split::Down(vec![
                     Layout::panel(ARRANGEMENT),
                     Layout {

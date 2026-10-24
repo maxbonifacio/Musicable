@@ -27,6 +27,9 @@ pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
 /// Shows or hides the piano roll, in a tab beside the devices: Live's clip
 /// view.
 pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll");
+/// Shows or hides the History panel, which lists the steps of the undo
+/// history, in a tab beside the browser.
+pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
 /// Brings the piano roll in front of the devices, or the devices in front of
 /// the piano roll: Live's Toggle Between Device/Clip View.
 pub const SWITCH_DEVICES_PIANO_ROLL: CommandId = CommandId::new("view.switch_devices_piano_roll");
@@ -111,7 +114,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 8] = [
+const REQUESTS: [(CommandId, &str, Request); 9] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -125,6 +128,7 @@ const REQUESTS: [(CommandId, &str, Request); 8] = [
         "Piano Roll",
         Request::TogglePanel("piano_roll"),
     ),
+    (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
     (
         SWITCH_DEVICES_PIANO_ROLL,
         "Switch Devices and Piano Roll",

@@ -210,6 +210,7 @@ impl Focus {
     pub const DEVICES: Self = Self(panel::DEVICES);
     pub const PIANO_ROLL: Self = Self(panel::PIANO_ROLL);
     pub const BROWSER: Self = Self(panel::BROWSER);
+    pub const HISTORY: Self = Self(panel::HISTORY);
 
     /// The focus on the panel with id `id`, if there's one.
     pub fn on(id: &str) -> Option<Self> {
