@@ -9,9 +9,9 @@ use egui::{Align, Button, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
-    Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Value,
-    arrange, controllers, device, edit, locator, notes, options, take, track, transport, view,
-    workspace,
+    Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Steps,
+    Value, arrange, controllers, device, edit, locator, notes, options, take, track, transport,
+    view, workspace,
 };
 use musicable_model::clip::ClipId;
 use musicable_model::native::NativeKind;
@@ -26,7 +26,7 @@ use crate::menus::menus;
 use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
-use crate::panels::{self, ARRANGEMENT, BROWSER, Cx, DEVICES, MIXER, PIANO_ROLL, Panels};
+use crate::panels::{self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels};
 use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
@@ -54,11 +54,10 @@ pub struct View<'a> {
     /// The keymap Musicable starts from, which the user's keymap file
     /// changes.
     pub default_keymap: &'a Keymap,
-    /// The name of the change Undo would take back, such as "Set Tempo", for
-    /// the Edit menu. `None` when there's nothing to undo.
-    pub undo: Option<&'a str>,
-    /// The name of the change Redo would make again.
-    pub redo: Option<&'a str>,
+    /// The steps of the undo history, by name, for the History panel and
+    /// the Edit menu, which says what Undo and Redo would change, such as
+    /// "Undo Set Tempo".
+    pub history: Steps<'a>,
     pub playback: Playback,
     /// What the armed tracks have recorded so far, while they record.
     pub recordings: &'a [Recording],
@@ -1202,8 +1201,8 @@ fn command_button(
 ) {
     let id = &command.id;
     let step = match id {
-        id if *id == edit::UNDO => Some(view.undo),
-        id if *id == edit::REDO => Some(view.redo),
+        id if *id == edit::UNDO => Some(view.history.undo_name()),
+        id if *id == edit::REDO => Some(view.history.redo_name()),
         _ => None,
     };
     let workspaces = view.workspaces;
@@ -1238,6 +1237,7 @@ fn command_button(
         id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
         id if *id == view::TOGGLE_PIANO_ROLL => Some(shown.contains(PIANO_ROLL)),
         id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
+        id if *id == view::TOGGLE_HISTORY => Some(shown.contains(HISTORY)),
         _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
         id => toggled(view, id),
     };
@@ -1513,7 +1513,9 @@ mod tests {
     use super::*;
     use crate::browser::Dragged;
     use crate::panels::ARRANGEMENT;
-    use crate::testing::{State, focus_main, harness, own_windows, own_windows_harness, with_own};
+    use crate::testing::{
+        State, click_at, focus_main, harness, key, own_windows, own_windows_harness, with_own,
+    };
     use crate::windows::SETTLE;
     use crate::workspace::{Layout, Split, WindowLayout};
 
@@ -1530,16 +1532,6 @@ mod tests {
             harness.run();
         }
         harness.drop_at(to);
-        harness.run();
-    }
-
-    /// Clicks with the mouse at `at`.
-    fn click_at(harness: &mut Harness, at: egui::Pos2) {
-        harness.hover_at(at);
-        harness.run();
-        harness.drag_at(at);
-        harness.run();
-        harness.drop_at(at);
         harness.run();
     }
 
@@ -1716,7 +1708,7 @@ mod tests {
     #[test]
     fn the_edit_menu_says_what_undo_and_redo_change() {
         let mut harness = harness(Project::new());
-        harness.state_mut().undo = Some("Set Tempo");
+        harness.state_mut().step("Set Tempo");
         harness.get_by_label("Edit").click();
         harness.run();
         harness.get_by_label("Undo Set Tempo Ctrl+Z").click();
@@ -1821,9 +1813,11 @@ mod tests {
         );
         let devices = tabs(&[DEVICES, PIANO_ROLL], DEVICES);
         let beside = across(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]);
+        let browser = tabs(&[BROWSER, HISTORY], BROWSER);
+        let hidden = vec![BROWSER.into(), PIANO_ROLL.into(), HISTORY.into()];
         let expected = WindowLayout {
-            hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
-            layout: across(vec![Layout::panel(BROWSER), down(vec![beside, devices])]),
+            hidden: hidden.clone(),
+            layout: across(vec![browser.clone(), down(vec![beside, devices])]),
             ..WindowLayout::default()
         };
         assert_eq!(layout(&harness), expected);
@@ -1834,9 +1828,9 @@ mod tests {
         let to = egui::pos2(devices.right() + 20.0, devices.center().y);
         drag(&mut harness, tab, to);
         let expected = WindowLayout {
-            hidden: vec![BROWSER.into(), PIANO_ROLL.into()],
+            hidden,
             layout: across(vec![
-                Layout::panel(BROWSER),
+                browser,
                 down(vec![
                     Layout::panel(ARRANGEMENT),
                     tabs(&[DEVICES, PIANO_ROLL, MIXER], MIXER),
@@ -1905,7 +1899,10 @@ mod tests {
         harness.run();
         assert!(!harness.state().shell.panel_shown(MIXER));
         assert!(harness.query_by_label("Mixer panel").is_none());
-        assert_eq!(layout(&harness).hidden, [BROWSER, MIXER, PIANO_ROLL]);
+        assert_eq!(
+            layout(&harness).hidden,
+            [BROWSER, MIXER, PIANO_ROLL, HISTORY]
+        );
         // The arrangement's tab has no close button.
         let tab = harness.get_by_label("Arrangement panel").rect();
         let closes = harness.get_all_by_label("Close");
@@ -1956,12 +1953,12 @@ mod tests {
     fn workspaces_lay_the_panels_out() {
         let mut harness = harness(Project::new());
         let window = WindowLayout {
-            hidden: vec![MIXER.into()],
+            hidden: vec![MIXER.into(), HISTORY.into()],
             layout: across(vec![
                 down(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]),
                 Layout {
                     size: Some(300),
-                    ..tabs(&[BROWSER, DEVICES, PIANO_ROLL], DEVICES)
+                    ..tabs(&[BROWSER, DEVICES, PIANO_ROLL, HISTORY], DEVICES)
                 },
             ]),
             ..WindowLayout::default()
@@ -2289,17 +2286,6 @@ mod tests {
         shell.set_workspace(&workspace);
         assert_eq!(shell.windows(), 1);
         assert!(shell.panel_shown(ARRANGEMENT));
-    }
-
-    /// A key pressed and let go of.
-    fn key(key: egui::Key) -> [egui::Event; 2] {
-        [true, false].map(|pressed| egui::Event::Key {
-            key,
-            physical_key: Some(key),
-            pressed,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        })
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The panels the window docks: the arrangement, the mixer, the devices,
-//! the piano roll and the browser. Each kind of panel registers its id, its
-//! title, where it goes in the default layout and how it's drawn, and the
-//! dock lays them out by id: the shell doesn't name them.
+//! the piano roll, the browser and the history. Each kind of panel
+//! registers its id, its title, where it goes in the default layout and how
+//! it's drawn, and the dock lays them out by id: the shell doesn't name
+//! them.
 
 use std::fmt;
 
@@ -11,6 +12,7 @@ use musicable_model::Chain;
 use crate::arrangement::Arrangement;
 use crate::browser::{self, BrowserPanel, Destination};
 use crate::devices::DevicesPanel;
+use crate::history::HistoryPanel;
 use crate::mixer::{self, Choices};
 use crate::mouse::MouseMap;
 use crate::parts::Parts;
@@ -20,7 +22,7 @@ use crate::theme::Theme;
 
 // The panels' ids, which the focus and the keymaps' panel tables know them
 // by too.
-pub use musicable_commands::panel::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
+pub use musicable_commands::panel::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL};
 
 /// Where a panel goes in the default layout, and in a layout that doesn't
 /// have it yet, such as one saved before it existed.
@@ -168,6 +170,21 @@ impl Registry {
                 });
             },
         });
+        registry.register(Panel {
+            id: HISTORY,
+            title: "History",
+            // A list, as the browser is.
+            place: Place::With(BROWSER),
+            // It waits to be asked for.
+            shown: false,
+            size: |theme| theme.devices.browser,
+            hides: true,
+            show: |panels, ui, cx| {
+                framed(ui, |ui| {
+                    (panels.history).show(ui, cx.view, cx.theme, cx.actions);
+                });
+            },
+        });
         registry
     }
 
@@ -201,6 +218,7 @@ pub(crate) struct Panels {
     pub devices: DevicesPanel,
     pub piano_roll: PianoRoll,
     pub browser: BrowserPanel,
+    pub history: HistoryPanel,
 }
 
 /// What the panels draw from, and what they hand back.

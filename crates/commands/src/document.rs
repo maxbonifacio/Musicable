@@ -20,7 +20,7 @@ use musicable_model::{
 };
 
 use crate::editor::Editor;
-use crate::history::History;
+use crate::history::{History, Steps};
 
 /// The open project. It hands out `&Project` only, so every change goes
 /// through a transaction, and it keeps the history that undo and redo step
@@ -132,15 +132,38 @@ impl Document {
         true
     }
 
+    /// Undoes or redoes steps, one at a time, until the first `done` steps
+    /// in the undo history are done and those after them undone, as
+    /// clicking a step in the History panel does: 0 undoes every step. Each
+    /// is committed as [`undo`](Self::undo) and [`redo`](Self::redo) commit
+    /// theirs. Returns `false` if the history has fewer steps.
+    pub fn go_to(&mut self, done: usize) -> bool {
+        if done > self.steps().len() {
+            return false;
+        }
+        while self.steps().done() > done {
+            self.undo();
+        }
+        while self.steps().done() < done {
+            self.redo();
+        }
+        true
+    }
+
+    /// The steps in the undo history, by name, for the History panel.
+    pub fn steps(&self) -> Steps<'_> {
+        self.history.steps()
+    }
+
     /// The name of the step [`undo`](Self::undo) would take back, for the
     /// Edit menu, or `None` if there's nothing to undo.
     pub fn undo_name(&self) -> Option<&str> {
-        self.history.undo_name()
+        self.steps().undo_name()
     }
 
     /// The name of the step [`redo`](Self::redo) would make again, or `None`.
     pub fn redo_name(&self) -> Option<&str> {
-        self.history.redo_name()
+        self.steps().redo_name()
     }
 
     /// Starts a gesture, such as dragging a fader or the tempo field: until

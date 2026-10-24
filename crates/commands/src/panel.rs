@@ -1,6 +1,7 @@
 //! The window's panels, by id: the arrangement, the mixer, the devices, the
-//! piano roll and the browser. The UI docks them by these ids, the focus is
-//! on one of them, and a keymap can bind keys in one of them only.
+//! piano roll, the browser and the history. The UI docks them by these ids,
+//! the focus is on one of them, and a keymap can bind keys in one of them
+//! only.
 
 /// The arrangement's panel, in the middle of the window.
 pub const ARRANGEMENT: &str = "arrangement";
@@ -12,9 +13,12 @@ pub const DEVICES: &str = "devices";
 pub const PIANO_ROLL: &str = "piano_roll";
 /// The browser's panel, on the left.
 pub const BROWSER: &str = "browser";
+/// The History panel, which lists the steps of the undo history, in a tab
+/// beside the browser.
+pub const HISTORY: &str = "history";
 
 /// Every panel's id.
-pub const ALL: [&str; 5] = [ARRANGEMENT, MIXER, DEVICES, PIANO_ROLL, BROWSER];
+pub const ALL: [&str; 6] = [ARRANGEMENT, MIXER, DEVICES, PIANO_ROLL, BROWSER, HISTORY];
 
 /// The id `id` as [`ALL`] has it, if it's a panel's.
 pub fn find(id: &str) -> Option<&'static str> {

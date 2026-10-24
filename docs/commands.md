@@ -131,8 +131,8 @@ Duplicate puts a copy just after the selected notes. Split always acts on
 clips, and doesn't apply while the piano roll has the focus. The mixer
 shows the arrangement's tracks, so while it has the focus they act on the
 arrangement's selection, as Live's mixer does in its Arrangement View. The
-devices panel and the browser have nothing they take, so there they don't
-apply.
+devices panel, the browser and the History panel have nothing they take,
+so there they don't apply.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -165,6 +165,19 @@ the other common key for redo. Clips that land where others are, by
 pasting, moving or duplicating, overwrite what's there, as in Live: it's
 trimmed back, split around them, or removed. Cut, Copy and Paste keep the
 clips in the editor's clipboard, not the system's.
+
+### History
+
+The History panel ([app.md](app.md#the-history-panel)) goes to the step
+clicked through this command, and scripts and agents can too:
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `history.go_to` | Go to Step | `step` | Undoes or redoes up to a step of the undo history: `step` counts from 1, the oldest step the history keeps, and it and those before it are left done and those after it undone; 0 undoes every step |
+
+Going to a step undoes or redoes the steps in between one at a time, as
+that many presses of Undo or Redo would, so the engine follows each. A
+step the history doesn't have is an error that changes nothing.
 
 ### Clip
 
@@ -486,6 +499,7 @@ other. They push a `Request`, as the file commands do.
 | `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in a tab beside the devices | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
 | `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Brings the piano roll in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
 | `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
+| `view.toggle_history` | History | Shows or hides the History panel, in a tab beside the browser | Ctrl+Alt+H | none |
 | `view.move_to_new_window` | Move Panel to New Window | Moves the panel with the focus to a new window of its own, as its tab's menu does; the arrangement and a window's last panel stay where they are | none | none |
 | `view.move_to_main_window` | Move Panel to Main Window | Sends the panel with the focus back to where it was in the main window | none | none |
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
@@ -505,8 +519,8 @@ other. They push a `Request`, as the file commands do.
 scrolling, zooming and track heights, and `view.set_piano_roll_viewport`
 (`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
 roll's, with how tall its rows of keys are. `view.set_focus` gives a panel
-the focus (`panel`: `arrangement`, `mixer`, `devices`, `piano_roll` or
-`browser`), the piano roll only while it shows a clip. They and the take
+the focus (`panel`: `arrangement`, `mixer`, `devices`, `piano_roll`,
+`browser` or `history`), the piano roll only while it shows a clip. They and the take
 lanes change the editor's state, not the project, so undo leaves them
 alone. Live has no command palette. Ctrl+Shift+P is the usual key for one
 in other apps. Live 12 also switches between its clip view and its device
@@ -561,14 +575,15 @@ for the behaviour settings.
   `MAX_TRACK_HEIGHT`, for the tracks whose height was changed.
 - **The focus** (`Focus`): the panel the keys and the edit commands act
   in, by its id (`crates/commands/src/panel.rs`): the arrangement, the
-  mixer, the devices, the piano roll or the browser. `Focus::edits` says
-  what the edit commands act on there (`Edits`): the arrangement's
-  selection in the arrangement and the mixer, the notes in the piano roll,
-  and nothing in the others. The zoom acts on the piano roll while it has
-  the focus, and on the arrangement otherwise. Clicking in a panel or on
-  its tab gives it the focus ([app.md](app.md#the-panels)), and so do the
-  arrangement's and the piano roll's selection commands. A panel's own keys
-  work while it has it ([below](#the-keymap-file)).
+  mixer, the devices, the piano roll, the browser or the history.
+  `Focus::edits` says what the edit commands act on there (`Edits`): the
+  arrangement's selection in the arrangement and the mixer, the notes in
+  the piano roll, and nothing in the others. The zoom acts on the piano
+  roll while it has the focus, and on the arrangement otherwise. Clicking
+  in a panel or on its tab gives it the focus
+  ([app.md](app.md#the-panels)), and so do the arrangement's and the piano
+  roll's selection commands. A panel's own keys work while it has it
+  ([below](#the-keymap-file)).
 - **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
   selected notes, its own viewport (song positions across, as the
   arrangement's, so the start marker, the playhead and the grid line up,
@@ -646,7 +661,9 @@ it's no step, so undo doesn't take it back, redo carries on, and the
 project isn't modified for it.
 
 - `Document::undo_name` and `redo_name` say what Undo and Redo would
-  change, for the Edit menu.
+  change, for the Edit menu. `Document::steps` lists every step by name,
+  the oldest first, with how many of them are done, for the History panel,
+  and `Document::go_to` undoes or redoes until that many are.
 - **Gestures.** Dragging the tempo field makes a transaction on every frame
   it moves. Between `Document::begin_gesture` and `end_gesture`,
   transactions with the same name join one step, so one undo takes the whole
@@ -741,7 +758,8 @@ stops the transport at the start of the song. Then:
   `Session::meters` has the meters the engine measures into, for the mixer
   to read.
 - `Session::begin_gesture` and `end_gesture` make a drag one step in the
-  undo history, and `undo_name` and `redo_name` are for the Edit menu.
+  undo history, and `Session::history` lists its steps, for the History
+  panel and the Edit menu.
 - `Session::revision` goes up with every change to the project, undone and
   redone ones too, and when another project opens, for what follows the
   project, such as the app's reading of its audio files.
@@ -860,12 +878,13 @@ version = 1
   `"transport.play" = ["P"]`.
 - `[bindings]` holds the keys that work everywhere. A panel's table,
   `[panels.piano_roll]` and the others (`arrangement`, `mixer`, `devices`,
-  `browser`), holds the keys that work in that panel only, while it has the
-  focus, where they win over the ones everywhere: in the piano roll, D runs
-  Draw Mode above whatever it runs everywhere else. Its lines give the
-  command its chords in that panel, in place of its default ones there. A
-  chord runs one command in each place. The default keymap's arrow keys for
-  notes are the piano roll's.
+  `browser`, `history`), holds the keys that work in that panel only, while
+  it has the focus, where they win over the ones everywhere: in the piano
+  roll, D runs Draw Mode above whatever it runs everywhere else. Its lines
+  give the command its chords in that panel, in place of its default ones
+  there. A chord runs one command in each place. The default keymap's
+  arrow keys for notes are the piano roll's, and Up and Down are Undo and
+  Redo in the History panel.
 - `format` and `version` are optional when you write the file by hand.
   Musicable writes both, like the header of a project file.
 

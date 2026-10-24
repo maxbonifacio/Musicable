@@ -154,6 +154,7 @@ const LAST_MENUS: [MenuSpec; 4] = [
             Some(view::TOGGLE_PIANO_ROLL),
             Some(view::SWITCH_DEVICES_PIANO_ROLL),
             Some(view::TOGGLE_BROWSER),
+            Some(view::TOGGLE_HISTORY),
             None,
             Some(view::MOVE_TO_NEW_WINDOW),
             Some(view::MOVE_TO_MAIN_WINDOW),

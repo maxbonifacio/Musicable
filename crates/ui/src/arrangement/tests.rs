@@ -171,8 +171,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         commands: &state.commands,
                         keymap: &state.keymap,
                         default_keymap: &state.keymap,
-                        undo: None,
-                        redo: None,
+                        history: state.document.steps(),
                         playback: Playback {
                             playing: state.player.playing,
                             record: state.player.recording,
