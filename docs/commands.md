@@ -478,6 +478,8 @@ other. They push a `Request`, as the file commands do.
 | `options.audio_settings` | Audio Settings... | Shows the Settings window's Audio page | none | none |
 | `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the Settings window's Keys page, where keys are changed | Ctrl+K | Ctrl+K (Key Map Mode) |
 | `options.appearance` | Appearance... | Shows the Settings window's Appearance page, where the theme is picked | none | none |
+| `options.profiles` | Profiles... | Shows the Settings window's Profiles page, where profiles are made and switched between | none | none |
+| `options.next_profile` | Switch to Next Profile | Switches to the next profile, in the Profiles page's order, and from the last back to Default, saving the workspace in use first | none | none |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |

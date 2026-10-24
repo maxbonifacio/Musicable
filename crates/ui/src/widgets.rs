@@ -1,4 +1,5 @@
-//! Small widgets for the shell, and how it writes positions and times.
+//! Small widgets for the shell and the app's windows, and how they write
+//! positions and times.
 
 use egui::{
     Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Rect, Response, Role, Sense, Shape,
@@ -236,7 +237,7 @@ pub(crate) fn name_box(
 
 /// [`name_box`], which says under the field what `problem` finds wrong
 /// with the name typed, and can't be confirmed while it finds something.
-pub(crate) fn checked_name_box(
+pub fn checked_name_box(
     ctx: &egui::Context,
     id: &str,
     title: &str,
@@ -293,6 +294,37 @@ pub(crate) fn checked_name_box(
         done = done.or(Some(false));
     }
     done
+}
+
+/// A box over the window that asks `question`, with `detail` under it,
+/// and buttons to `confirm` or cancel. Escape or a click outside cancels.
+/// Returns whether the user confirmed, once they have or have cancelled.
+pub fn confirm_box(
+    ctx: &egui::Context,
+    question: &str,
+    detail: &str,
+    confirm: &str,
+) -> Option<bool> {
+    let modal = Modal::new(Id::unique(question)).show(ctx, |ui| {
+        ui.set_width(340.0);
+        ui.heading(question);
+        ui.label(detail);
+        ui.add_space(10.0);
+        let mut choice = None;
+        ui.horizontal(|ui| {
+            if ui.button(confirm).clicked() {
+                choice = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(false);
+            }
+        });
+        choice
+    });
+    if modal.inner.is_none() && modal.should_close() {
+        return Some(false);
+    }
+    modal.inner
 }
 
 #[cfg(test)]

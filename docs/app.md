@@ -652,10 +652,11 @@ into it and run no commands.
 **Options > Settings** (Ctrl+Comma) opens the Settings window, with a page
 for each area of the settings listed down its left side, as Live's
 Preferences has a tab for each. It opens at the page it showed last, and
-**Options > Audio Settings**, **Keyboard Shortcuts** (Ctrl+K) and
-**Appearance** open it at theirs. Changes apply at once, and are kept: in
-[settings.toml](#settings-and-your-keymap), or in the keymap's, the mouse
-map's, the theme's or the workspaces' own files. Every setting in
+**Options > Audio Settings**, **Keyboard Shortcuts** (Ctrl+K),
+**Appearance** and **Profiles** open it at theirs. Changes apply at once,
+and are kept: in [settings.toml](#settings-and-your-keymap), in the
+profile in use's keymap, mouse map, workspaces and settings
+([Profiles](#profiles)), or in the theme's own file. Every setting in
 settings.toml has a control here but the export window's, which that
 window keeps as it was last used. The window isn't a panel, so no
 workspace has it. Escape closes it, unless a menu or the command palette
@@ -689,6 +690,54 @@ that, or stops waiting, first.
   play, and the folder presets are saved in: **Choose Folder...** picks
   another, and **Use the Default** goes back to `Music/Musicable/Presets` in
   your home folder.
+- **Profiles**: your profiles ([below](#profiles)), and picking one
+  switches to it. **New...** makes one with Musicable's own keys, mouse,
+  theme, layout and behaviour, and **Duplicate...** one with the profile
+  in use's; both switch to it. **Rename...** and **Delete...** rename or
+  delete the profile in use, and deleting asks first, then switches to
+  Default, which keeps its name and can't be deleted. **Open Profiles
+  Folder** shows their folders.
+
+### Profiles
+
+A profile keeps your keys, your mouse map, the theme, your workspaces and
+the Behaviour page's settings together, so switching to another, such as
+one with another DAW's habits, changes them all at once, with no restart.
+Pick one on the Settings window's Profiles page, or **Options > Switch to
+Next Profile** goes to the next, in the page's order, and from the last
+back to Default; the status bar says which. Changes go to the profile in
+use, and the app opens with the profile it closed with. What belongs to
+the computer stays whichever profile is in use: the audio and MIDI
+devices, the recording settings, the browser's library and settings, the
+plugins, the export window's settings, and the theme files in the
+`themes` folder, which a profile picks from.
+
+Default is the profile Musicable starts with, and its files are the config
+folder's own ([Settings](#settings-and-your-keymap)). Each of your other
+profiles is a folder in the config folder's `profiles` folder, named after
+it, such as `profiles\Bitwig habits\`, which holds the same files for
+it: `keymap.toml`, `mouse.toml`, the `workspaces` folder, and a
+`settings.toml` with `[behaviour]`, `[appearance]` and `[workspaces]`
+alone. Each holds only what differs from Musicable's own, so a later
+version's new defaults still arrive:
+
+```toml
+format = "musicable-settings"
+version = 1
+
+[behaviour]
+play_from = "playhead"
+
+[appearance]
+theme = "light"
+```
+
+A profile's folder can be copied to another computer's `profiles` folder
+as it is, and the Profiles page finds it the next time it shows; a theme
+file of your own goes in that computer's `themes` folder too. A profile's
+name can't be another's, in any letters, start with a dot, or have
+characters a folder's name can't. A file of a profile's that can't be
+used leaves what Musicable starts with, and says why, as Default's do.
 
 ## Changing keys
 
@@ -1456,8 +1505,8 @@ scaled or rounded. A cancelled or failed export leaves no files behind.
 
 ## Settings and your keymap
 
-The app keeps its settings, your keymap, your mouse map, your themes and
-the panels' layout in its config folder:
+The app keeps its settings, your keymap, your mouse map, your themes, the
+panels' layout and your profiles in its config folder:
 
 | System | Folder |
 |---|---|
@@ -1593,10 +1642,15 @@ sizes given in the Customise window, in points. Parts the file doesn't name
 go after the part before them in the first order, and parts Musicable
 doesn't have are left out.
 
+`profiles` holds a folder for each of your profiles but Default, with its
+keymap, mouse map, workspaces and settings ([Profiles](#profiles)). The
+keymap file, the mouse map file and the workspaces above are Default's.
+
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, how editing behaves, the theme, the workspace in use, the export
-window's and the browser's settings as they were last used, how long
-Capture holds the inputs, and the devices' recording offsets:
+ones, how editing behaves, the theme, the workspace in use, the profile in
+use, the export window's and the browser's settings as they were last
+used, how long Capture holds the inputs, and the devices' recording
+offsets:
 
 ```toml
 format = "musicable-settings"
@@ -1616,6 +1670,9 @@ theme = "Studio.toml"
 
 [workspaces]
 current = "Mixing"
+
+[profiles]
+current = "Bitwig habits"
 
 [export]
 format = "wav"
@@ -1653,7 +1710,11 @@ holds the inputs, 5 minutes if it's left out; 0 turns Capture off.
 `light`, or the name of a file in the `themes` folder ([Themes](#themes)).
 `current`, under `[workspaces]`, is the workspace in
 use, by name, which the app opens with unless the project it opens was
-saved with another; Default if it's left out. Each of
+saved with another; Default if it's left out. `[behaviour]`,
+`[appearance]` and `[workspaces]` are the profile Default's, and
+`current`, under `[profiles]`, is the profile in use, which the app opens
+with: Default if it's left out, or one in the `profiles` folder, whose own
+settings file has those three ([Profiles](#profiles)). Each of
 `recording.offsets` is the [recording offset](#recording), in `frames`, of
 a `device`, by its id, in exclusive mode or not (`exclusive`, false if it's
 left out), at a `sample_rate`; an offset of 0 isn't kept. `[export]` is the export window's settings as it was last used:
@@ -1802,9 +1863,12 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   (`UserKeymap`), and the binary. Debug builds install the engine's
   allocation checker, as the tests do. The Settings window
   (`settings_window.rs`) lists its pages, draws the small ones, and hands
-  what changed to the app to carry out and keep; the Audio and Appearance
-  pages have files of their own (`audio_page.rs`, `appearance_page.rs`),
-  and the shell draws the Keys page, as it holds the keymap's commands.
+  what changed to the app to carry out and keep; the Audio, Mouse,
+  Appearance and Profiles pages have files of their own (`audio_page.rs`,
+  `mouse_page.rs`, `appearance_page.rs`, `profiles_page.rs`), and the
+  shell draws the Keys page, as it holds the keymap's commands.
+  `profiles.rs` lists the user's profiles and keeps their folders, and the
+  app reads the profile in use's files at once when it switches.
 - [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
   drives the whole window with `egui_kittest`, handing it key presses as
   eframe does, without an audio device. It gives every command new keys on
@@ -1814,6 +1878,10 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   opens the Settings window at each page, turns from page to page, changes
   every setting it has a control for and reads the settings file back, and
   checks what Escape and clicks do while the Keys page waits for keys.
+  [`crates/app/src/app/switching_profiles.rs`](../crates/app/src/app/switching_profiles.rs)
+  switches to a profile with its own theme, keys, mouse, behaviour and
+  workspace, from the Profiles page and with Switch to Next Profile, and
+  makes, copies, renames and deletes profiles on the page.
 - [`crates/app/src/app/arranging.rs`](../crates/app/src/app/arranging.rs)
   drives the window the same way through the Tier 1 demo's arranging
   steps, with the mouse and the keys: it drops an audio file on a track,
@@ -1907,8 +1975,6 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   Window sends a panel back.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips.
-- Profiles of keys, mouse, theme, workspaces and behaviour to switch
-  between, which come next in Tier 2's UI foundations.
 - Editing a theme on the Appearance page, with colour pickers: theme
   files are edited in a text editor for now. Plugins' own windows keep
   their own look.

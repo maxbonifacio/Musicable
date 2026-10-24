@@ -32,7 +32,7 @@ use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::transport_bar;
 use crate::waveform::Waveforms;
-use crate::widgets::{checked_name_box, name_box};
+use crate::widgets::{checked_name_box, confirm_box, name_box};
 use crate::windows::{Monitor, Place, Placement, Window, on_desktop, unscaled};
 use crate::workspace::{Workspace, check_name};
 
@@ -1480,32 +1480,6 @@ pub fn ask_to_save(ctx: &egui::Context, name: &str) -> Option<SaveChoice> {
     });
     if modal.inner.is_none() && modal.should_close() {
         return Some(SaveChoice::Cancel);
-    }
-    modal.inner
-}
-
-/// A box over the window that asks `question`, with `detail` under it,
-/// and buttons to `confirm` or cancel. Escape or a click outside cancels.
-/// Returns whether the user confirmed, once they have or have cancelled.
-fn confirm_box(ctx: &egui::Context, question: &str, detail: &str, confirm: &str) -> Option<bool> {
-    let modal = egui::Modal::new(egui::Id::unique(question)).show(ctx, |ui| {
-        ui.set_width(340.0);
-        ui.heading(question);
-        ui.label(detail);
-        ui.add_space(10.0);
-        let mut choice = None;
-        ui.horizontal(|ui| {
-            if ui.button(confirm).clicked() {
-                choice = Some(true);
-            }
-            if ui.button("Cancel").clicked() {
-                choice = Some(false);
-            }
-        });
-        choice
-    });
-    if modal.inner.is_none() && modal.should_close() {
-        return Some(false);
     }
     modal.inner
 }

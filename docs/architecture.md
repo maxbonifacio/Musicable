@@ -399,9 +399,11 @@ says what's there.
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
   so a theme file fills a `Theme` ([app.md](app.md#themes)), a mouse map
   file changes Live's `MouseMap` ([app.md](app.md#settings-and-your-keymap)),
-  and a profile is a keymap file, a mouse map, a theme, workspaces and the
-  behaviour settings (`Editor::behaviour`) together, each saved as what
-  differs from its base. The transport bar, the track headers and the
+  and a profile is a folder of a keymap file, a mouse map file,
+  workspaces, and the settings for the theme and the behaviour
+  (`Editor::behaviour`), each saved as what differs from its base, which
+  the app switches between in one step (`crates/app/src/profiles.rs`;
+  [app.md](app.md#profiles)). The transport bar, the track headers and the
   mixer strips are lists of parts, which the user hides, moves and resizes
   (`parts.rs`; [app.md](app.md#configurable-views)), and each workspace
   keeps how they show them. The Settings window, outside the workspaces,
