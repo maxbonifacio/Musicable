@@ -238,15 +238,24 @@ fn write_layout(text: &mut String, layout: &Layout, depth: usize) {
     text.push_str(" }");
 }
 
-/// The longest a workspace's name can be, in characters.
+/// The longest a workspace's or a profile's name can be, in characters.
 pub const MAX_NAME: usize = 64;
 
 /// `name` trimmed, if it can name a workspace, the file it's kept in being
 /// named after it: or else why it can't. `taken` has the names of the
 /// workspaces there are, which it can't be, whatever their case, as
 /// Windows doesn't tell file names apart by case.
-pub fn check_name<'a>(
+pub fn check_name<'a>(name: &str, taken: impl Iterator<Item = &'a str>) -> Result<String, String> {
+    check_file_name(name, "workspace", taken)
+}
+
+/// `name` trimmed, if it can name a `kind` of thing, such as a profile,
+/// that's kept in a file or a folder named after it: or else why it can't.
+/// `taken` has the names of those there are, which it can't be, whatever
+/// their case, as Windows doesn't tell file names apart by case.
+pub fn check_file_name<'a>(
     name: &str,
+    kind: &str,
     mut taken: impl Iterator<Item = &'a str>,
 ) -> Result<String, String> {
     let name = name.trim();
@@ -278,7 +287,7 @@ pub fn check_name<'a>(
             "A name can't be longer than {MAX_NAME} characters."
         ))
     } else if taken.any(|other| other.to_lowercase() == name.to_lowercase()) {
-        Err(format!("There's a workspace called {name} already."))
+        Err(format!("There's a {kind} called {name} already."))
     } else {
         Ok(name.to_owned())
     }
@@ -463,6 +472,10 @@ layout = { panel = "arrangement" }
             assert_eq!(check(name), Err(problem.to_owned()), "{name:?}");
         }
         assert!(check("COM10").is_ok());
+        assert_eq!(
+            check_file_name("default", "profile", taken.into_iter()),
+            Err("There's a profile called default already.".to_owned())
+        );
         let long = "x".repeat(MAX_NAME + 1);
         assert_eq!(
             check(&long),

@@ -1,7 +1,8 @@
 //! The options commands: the Settings window, with commands for some of
-//! its pages, and scanning for plugins.
+//! its pages, switching profiles, and scanning for plugins.
 //!
-//! Commands can't show a window, so these ask the app to, with a [`Request`].
+//! Commands can't show a window, or reach the user's profiles, which are
+//! the app's, so these ask the app, with a [`Request`].
 
 use crate::{CommandId, Registry, Request};
 
@@ -15,12 +16,19 @@ pub const AUDIO_SETTINGS: CommandId = CommandId::new("options.audio_settings");
 pub const KEYBOARD_SHORTCUTS: CommandId = CommandId::new("options.keyboard_shortcuts");
 /// Shows the Settings window's Appearance page, where the theme is picked.
 pub const APPEARANCE: CommandId = CommandId::new("options.appearance");
+/// Shows the Settings window's Profiles page, where profiles are made and
+/// switched between.
+pub const PROFILES: CommandId = CommandId::new("options.profiles");
+/// Switches to the next of the user's profiles, in the order the Profiles
+/// page lists them, and from the last back to the first: its keys, mouse
+/// map, theme, workspaces and behaviour, all at once.
+pub const NEXT_PROFILE: CommandId = CommandId::new("options.next_profile");
 /// Scans for plugins again, loading the libraries that were left out as bad
 /// too.
 pub const RESCAN_PLUGINS: CommandId = CommandId::new("options.rescan_plugins");
 
 /// Every options command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 5] = [
+const COMMANDS: [(CommandId, &str, Request); 7] = [
     (SETTINGS, "Settings...", Request::Settings),
     (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
     (
@@ -29,6 +37,8 @@ const COMMANDS: [(CommandId, &str, Request); 5] = [
         Request::KeyboardShortcuts,
     ),
     (APPEARANCE, "Appearance...", Request::Appearance),
+    (PROFILES, "Profiles...", Request::Profiles),
+    (NEXT_PROFILE, "Switch to Next Profile", Request::NextProfile),
     (RESCAN_PLUGINS, "Rescan Plugins", Request::RescanPlugins),
 ];
 
@@ -57,6 +67,8 @@ mod tests {
             AUDIO_SETTINGS,
             KEYBOARD_SHORTCUTS,
             APPEARANCE,
+            PROFILES,
+            NEXT_PROFILE,
             RESCAN_PLUGINS,
             view::COMMAND_PALETTE,
         ];
@@ -76,6 +88,8 @@ mod tests {
                 Request::AudioSettings,
                 Request::KeyboardShortcuts,
                 Request::Appearance,
+                Request::Profiles,
+                Request::NextProfile,
                 Request::RescanPlugins,
                 Request::CommandPalette
             ]

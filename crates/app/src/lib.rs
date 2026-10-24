@@ -19,6 +19,8 @@ mod output;
 mod plugin_scan;
 mod plugin_windows;
 mod plugins;
+mod profiles;
+mod profiles_page;
 mod recorder;
 mod session;
 mod settings;

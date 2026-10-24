@@ -842,6 +842,8 @@ fn examples() -> Vec<Example> {
         leaves(options::APPEARANCE, bare),
         leaves(options::AUDIO_SETTINGS, bare),
         leaves(options::KEYBOARD_SHORTCUTS, bare),
+        leaves(options::NEXT_PROFILE, bare),
+        leaves(options::PROFILES, bare),
         leaves(options::RESCAN_PLUGINS, bare),
         leaves(options::SETTINGS, bare),
         edits(take::COMP, |s| {

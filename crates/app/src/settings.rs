@@ -20,6 +20,9 @@
 //! [workspaces]
 //! current = "Mixing"
 //!
+//! [profiles]
+//! current = "Bitwig habits"
+//!
 //! [export]
 //! format = "wav"
 //! bits = 24
@@ -45,6 +48,11 @@
 //!
 //! Every setting is optional, and fields this version doesn't know are
 //! ignored, so a file from a newer version still opens.
+//!
+//! `[behaviour]`, `[appearance]` and `[workspaces]` go with a profile
+//! ([`ProfileSettings`]): they're Default's here, and each of the user's
+//! other profiles has a settings file of its own, in its folder, that holds
+//! only them ([`crate::profiles`]). `[profiles]` says which is in use.
 
 use std::fmt;
 use std::fs;
@@ -57,6 +65,7 @@ use musicable_ui::{Base, DEFAULT_WORKSPACE, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLU
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
+use crate::profiles::DEFAULT_PROFILE;
 
 const FORMAT: &str = "musicable-settings";
 const VERSION: u32 = 1;
@@ -103,6 +112,7 @@ pub struct Settings {
     pub behaviour: Behaviour,
     pub appearance: AppearanceSettings,
     pub workspaces: WorkspaceSettings,
+    pub profiles: ProfilesSettings,
     /// How the export window writes files, as it was last used: see
     /// [`ExportSettings`].
     pub export: ExportSettings,
@@ -142,6 +152,83 @@ impl Default for WorkspaceSettings {
         Self {
             current: DEFAULT_WORKSPACE.to_owned(),
         }
+    }
+}
+
+/// Which of the user's profiles is in use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfilesSettings {
+    /// The profile in use, by name: Default, whose settings are in this
+    /// file, or one in the profiles folder.
+    pub current: String,
+}
+
+impl Default for ProfilesSettings {
+    fn default() -> Self {
+        Self {
+            current: DEFAULT_PROFILE.to_owned(),
+        }
+    }
+}
+
+/// The settings that go with a profile, as its keys and its workspaces do:
+/// how editing behaves, the theme, and the workspace in use. Default's are
+/// in the settings file, and the user's other profiles' in settings files
+/// of their own, which hold only these.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileSettings {
+    pub behaviour: Behaviour,
+    pub appearance: AppearanceSettings,
+    pub workspaces: WorkspaceSettings,
+}
+
+impl ProfileSettings {
+    /// Reads a profile's settings from the settings file at `path`, which
+    /// may hold others: the defaults, with no file there.
+    pub fn read(path: &Path) -> Result<Self, SettingsError> {
+        Settings::read(path).map(|settings| settings.profile())
+    }
+
+    /// A settings file of these alone, holding those that differ from the
+    /// defaults, as a keymap file holds the keys that differ from Live's,
+    /// so a later version's new defaults still arrive.
+    pub fn to_toml(&self) -> String {
+        #[derive(Serialize)]
+        struct Raw<'a> {
+            format: &'a str,
+            version: u32,
+            #[serde(flatten)]
+            changed: toml::Table,
+        }
+
+        let table =
+            |profile: &Self| toml::Table::try_from(profile).expect("settings always serialize");
+        let defaults = table(&Self::default());
+        let mut changed = table(self);
+        for (name, section) in changed.iter_mut() {
+            let first = defaults.get(name).and_then(toml::Value::as_table);
+            if let (Some(section), Some(first)) = (section.as_table_mut(), first) {
+                section.retain(|key, value| first.get(key) != Some(value));
+            }
+        }
+        changed.retain(|_, section| section.as_table().is_none_or(|section| !section.is_empty()));
+        let raw = Raw {
+            format: FORMAT,
+            version: VERSION,
+            changed,
+        };
+        toml::to_string(&raw).expect("settings always serialize")
+    }
+
+    /// Writes a settings file of these alone to `path`, creating its folder
+    /// if need be.
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(path, self.to_toml())
     }
 }
 
@@ -321,6 +408,23 @@ impl Settings {
         }
     }
 
+    /// The settings that go with Default, the profile whose settings are
+    /// these.
+    pub fn profile(&self) -> ProfileSettings {
+        ProfileSettings {
+            behaviour: self.behaviour,
+            appearance: self.appearance.clone(),
+            workspaces: self.workspaces.clone(),
+        }
+    }
+
+    /// Keeps `profile` as the settings that go with Default.
+    pub fn set_profile(&mut self, profile: ProfileSettings) {
+        self.behaviour = profile.behaviour;
+        self.appearance = profile.appearance;
+        self.workspaces = profile.workspaces;
+    }
+
     /// Reads the settings file at `path`. With no file there, the settings
     /// are the defaults.
     pub fn read(path: &Path) -> Result<Self, SettingsError> {
@@ -413,6 +517,9 @@ mod tests {
             workspaces: WorkspaceSettings {
                 current: "Mixing".into(),
             },
+            profiles: ProfilesSettings {
+                current: "Bitwig habits".into(),
+            },
             export: ExportSettings {
                 format: FileFormat::Aiff,
                 bits: Bits::Int16,
@@ -453,6 +560,7 @@ mod tests {
         assert_eq!(settings.recording.capture_minutes, 5);
         assert_eq!(settings.appearance.theme, "dark");
         assert_eq!(settings.workspaces.current, "Default");
+        assert_eq!(settings.profiles.current, "Default");
         assert_eq!(
             settings.audio.request(),
             StreamRequest {
@@ -555,6 +663,80 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(Settings::parse(&settings.to_toml()).unwrap(), settings);
+    }
+
+    #[test]
+    fn profiles_have_settings_files_of_their_own() {
+        let profile = ProfileSettings {
+            behaviour: Behaviour {
+                play_from: PlayFrom::Playhead,
+                middle_c: MiddleC::C4,
+            },
+            appearance: AppearanceSettings {
+                theme: "light".into(),
+            },
+            workspaces: WorkspaceSettings {
+                current: "Mixing".into(),
+            },
+        };
+        let text = profile.to_toml();
+        assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
+        for left_out in [
+            "[audio]",
+            "[export]",
+            "[browser]",
+            "[recording]",
+            "[profiles]",
+        ] {
+            assert!(!text.contains(left_out), "{text}");
+        }
+        let read = Settings::parse(&text).unwrap();
+        assert_eq!(read.profile(), profile);
+        assert_eq!(read.audio, AudioSettings::default());
+        // It holds what differs from the defaults.
+        let light = ProfileSettings {
+            appearance: profile.appearance.clone(),
+            ..ProfileSettings::default()
+        };
+        assert_eq!(
+            light.to_toml(),
+            "format = \"musicable-settings\"\nversion = 1\n\n[appearance]\ntheme = \"light\"\n"
+        );
+        let middle_c = ProfileSettings {
+            behaviour: Behaviour {
+                middle_c: MiddleC::C4,
+                ..Behaviour::default()
+            },
+            ..ProfileSettings::default()
+        };
+        assert_eq!(
+            Settings::parse(&middle_c.to_toml()).unwrap().profile(),
+            middle_c
+        );
+        assert!(!middle_c.to_toml().contains("play_from"));
+        assert_eq!(
+            ProfileSettings::default().to_toml(),
+            "format = \"musicable-settings\"\nversion = 1\n"
+        );
+        // Default's are the settings file's own.
+        let mut settings = Settings::default();
+        settings.set_profile(profile.clone());
+        assert_eq!(settings.profile(), profile);
+        assert_eq!(settings.behaviour.middle_c, MiddleC::C4);
+        // A profile's file with the computer's settings in it gives only the
+        // profile's.
+        let dir = std::env::temp_dir().join(format!("musicable-profile-{}", std::process::id()));
+        let path = dir.join("Bitwig habits").join(SETTINGS_FILE);
+        settings.audio.buffer_size = Some(64);
+        settings.write(&path).unwrap();
+        assert_eq!(ProfileSettings::read(&path).unwrap(), profile);
+        profile.write(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            ProfileSettings::read(&dir.join(SETTINGS_FILE)).unwrap(),
+            ProfileSettings::default()
+        );
     }
 
     #[test]

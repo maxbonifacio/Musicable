@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Focus, Request, arrange, browser, device};
+use musicable_commands::{Args, CommandError, Focus, Keymap, Request, arrange, browser, device};
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_library::Queue;
@@ -19,8 +19,8 @@ use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
     Action, Audio, DEFAULT_WORKSPACE, DEVICES, InputChoice, KeyPresses, KeymapStatus, Level,
-    Levels, MidiChoice, Monitor, Playback, PluginEntry, PluginParam, PluginStatus, Plugins,
-    SaveChoice, Shell, View,
+    Levels, MidiChoice, Monitor, MouseMap, Playback, PluginEntry, PluginParam, PluginStatus,
+    Plugins, SaveChoice, Shell, View,
 };
 
 use crate::appearance_page::Asked as AppearanceAsked;
@@ -34,8 +34,11 @@ use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
+use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
+use crate::profiles_page::Asked as ProfilesAsked;
 use crate::settings::{
-    self, AudioSettings, KEYMAP_FILE, MOUSE_FILE, SETTINGS_FILE, Settings, THEMES_FOLDER,
+    self, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, SETTINGS_FILE, Settings,
+    THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -96,10 +99,17 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
-    /// Where the settings, the user's keymap, mouse map, themes and
-    /// workspaces live.
+    /// Where the settings, the user's keymap, mouse map, themes, workspaces
+    /// and profiles live.
     config_dir: Option<PathBuf>,
+    /// The settings file's settings: the computer's, and Default's.
     settings: Settings,
+    /// The user's profiles, and the one in use, whose folder holds the
+    /// keymap file, the mouse map file, the workspaces and `profile`.
+    profiles: Profiles,
+    /// The settings of the profile in use, which are `settings`' own while
+    /// it's Default.
+    profile: ProfileSettings,
     /// The user's keymap file, which every change of keys is saved to.
     keymap_file: UserKeymap,
     /// The user's mouse map file, which every change on the Mouse page is
@@ -163,31 +173,34 @@ impl App {
     }
 
     /// Opens the project at `path`, or a new project, playing through
-    /// `output`, whose engine `handle` drives. The settings and the user's
-    /// keymap and mouse map live in `config_dir`.
+    /// `output`, whose engine `handle` drives. The settings, the user's
+    /// profiles and Default's files live in `config_dir`.
     fn with_output(
         path: Option<PathBuf>,
         config_dir: Option<PathBuf>,
-        settings: Settings,
+        mut settings: Settings,
         output: Output,
         handle: EngineHandle,
         mut messages: Vec<String>,
         ctx: &egui::Context,
     ) -> Self {
-        let (keymap_file, keymap) =
-            UserKeymap::read(config_dir.as_ref().map(|dir| dir.join(KEYMAP_FILE)));
-        if !keymap_file.problems().is_empty() || keymap_file.error().is_some() {
-            messages.push(
-                "Your keymap file has problems: see Options > Keyboard Shortcuts.".to_owned(),
-            );
+        let mut profiles = Profiles::list(config_dir.as_deref(), &mut messages);
+        match profiles.index_of(&settings.profiles.current) {
+            Some(index) => profiles.set_current(index),
+            None => messages.push(format!(
+                "There's no profile called {}, so Musicable uses {DEFAULT_PROFILE}.",
+                settings.profiles.current
+            )),
         }
-        let (mouse_file, mouse) =
-            UserMouse::read(config_dir.as_ref().map(|dir| dir.join(MOUSE_FILE)));
-        if !mouse_file.problems().is_empty() || mouse_file.error().is_some() {
-            messages.push(
-                "Your mouse map file has problems: see the Mouse page of Settings.".to_owned(),
-            );
-        }
+        settings.profiles.current = profiles.current_name().to_owned();
+        let ProfileFiles {
+            profile,
+            keymap_file,
+            keymap,
+            mouse_file,
+            mouse,
+            workspaces,
+        } = ProfileFiles::read(&profiles, &settings, &mut messages);
         let (project, path) = match path {
             Some(path) => match project::load(&path) {
                 Ok(project) => (project, Some(path)),
@@ -200,7 +213,7 @@ impl App {
         };
         let folder = path.as_deref().and_then(Path::parent).map(Path::to_owned);
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
-        session.editor_mut().behaviour = settings.behaviour;
+        session.editor_mut().behaviour = profile.behaviour;
         session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_waker(waker(ctx));
         // The browser's library, whose file work runs on a queue of its own.
@@ -217,9 +230,8 @@ impl App {
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         let theme_file = UserTheme::new(
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
-            Choice::from_name(&settings.appearance.theme),
+            Choice::from_name(&profile.appearance.theme),
         );
-        let workspaces = Workspaces::list(config_dir.as_deref(), &mut messages);
         // What the last scan found, while the next one runs. Before the
         // first, plugin devices wait for it.
         let known = plugin_scan.known();
@@ -248,6 +260,8 @@ impl App {
             levels: Levels::default(),
             config_dir,
             settings,
+            profiles,
+            profile,
             keymap_file,
             mouse_file,
             theme_file,
@@ -279,9 +293,14 @@ impl App {
         let slot = {
             let named = |name: &str| self.workspaces.slot_named(name);
             let saved_with = self.session.project().workspace.as_deref().and_then(named);
-            saved_with.or_else(|| named(&self.settings.workspaces.current))
+            saved_with.or_else(|| named(&self.profile.workspaces.current))
         };
-        let slot = slot.unwrap_or(0);
+        self.open_workspace_in(slot.unwrap_or(0));
+    }
+
+    /// Lays the panels out as the workspace in `slot` has them, which is in
+    /// use from then on, or as Default has them if its file can't be read.
+    fn open_workspace_in(&mut self, slot: usize) {
         let Err(error) = self.use_workspace(slot) else {
             return;
         };
@@ -329,9 +348,9 @@ impl App {
     fn set_current_workspace(&mut self, slot: usize) {
         self.workspaces.set_current(slot);
         let name = self.workspaces.current_name();
-        if self.settings.workspaces.current != name {
-            self.settings.workspaces.current = name.to_owned();
-            self.save_settings();
+        if self.profile.workspaces.current != name {
+            self.profile.workspaces.current = name.to_owned();
+            self.save_profile();
         }
     }
 
@@ -412,6 +431,147 @@ impl App {
             Err(error) => self
                 .messages
                 .push(format!("Couldn't delete the workspace {name}: {error}.")),
+        }
+    }
+
+    /// Uses the files of the profile in use from now on: its keys, mouse
+    /// map, behaviour, theme and workspaces, all at once, with the
+    /// workspace it was left with.
+    fn use_profile(&mut self, ctx: &egui::Context) {
+        let files = ProfileFiles::read(&self.profiles, &self.settings, &mut self.messages);
+        self.profile = files.profile;
+        self.keymap_file = files.keymap_file;
+        self.shell.stop_giving_keys();
+        self.session.set_keymap(files.keymap);
+        self.mouse_file = files.mouse_file;
+        self.shell.set_mouse_map(files.mouse);
+        self.session.editor_mut().behaviour = self.profile.behaviour;
+        (self.theme_file).choose(Choice::from_name(&self.profile.appearance.theme));
+        self.use_theme(ctx);
+        self.workspaces = files.workspaces;
+        let slot = self.workspaces.slot_named(&self.profile.workspaces.current);
+        self.open_workspace_in(slot.unwrap_or(0));
+    }
+
+    /// Switches to the profile called `name`, once the workspace in use is
+    /// saved, and keeps that in the settings, so the app opens with it.
+    fn switch_profile(&mut self, name: &str, ctx: &egui::Context) {
+        let Some(index) = self.profiles.index_of(name) else {
+            (self.messages).push(format!("There's no profile called {name}."));
+            return;
+        };
+        if index == self.profiles.current() {
+            return;
+        }
+        self.save_workspace(true);
+        self.profiles.set_current(index);
+        self.use_profile(ctx);
+        self.settings.profiles.current = self.profiles.current_name().to_owned();
+        self.save_settings();
+    }
+
+    /// Switches to the profile after the one in use, in the Profiles page's
+    /// order, or from the last back to Default.
+    fn next_profile(&mut self, ctx: &egui::Context) {
+        self.profiles.relist(&mut self.messages);
+        let names = self.profiles.names();
+        if names.len() < 2 {
+            self.messages.push(format!(
+                "There's only the profile {DEFAULT_PROFILE}: the Profiles page of Settings makes \
+                 others."
+            ));
+            return;
+        }
+        let next = names[(self.profiles.current() + 1) % names.len()].clone();
+        self.switch_profile(&next, ctx);
+        // Each switch says so in place of the one before.
+        let switched = "Switched to the profile ";
+        self.messages
+            .retain(|message| !message.starts_with(switched));
+        self.messages.push(format!("{switched}{next}."));
+    }
+
+    /// Makes a profile called `name`, and switches to it: one with
+    /// Musicable's own keys, mouse, theme, layout and behaviour, or, if
+    /// `copy`, with the files and the settings of the one in use.
+    fn add_profile(&mut self, name: &str, copy: bool, ctx: &egui::Context) {
+        // The copy has the layout as it is now.
+        self.save_workspace(true);
+        let from = self.profiles.dir(self.profiles.current());
+        let index = match self.profiles.add(name) {
+            Ok(index) => index,
+            Err(error) => {
+                (self.messages).push(format!("Couldn't make the profile {name}: {error}."));
+                return;
+            }
+        };
+        if copy && let (Some(from), Some(to)) = (from, self.profiles.dir(index)) {
+            let copied = profiles::copy_files(&from, &to)
+                .and_then(|()| self.profile.write(&to.join(SETTINGS_FILE)));
+            if let Err(error) = copied {
+                let current = self.profiles.current_name();
+                self.messages.push(format!(
+                    "Couldn't copy all of the profile {current} to {name}: {error}."
+                ));
+            }
+        }
+        self.switch_profile(name, ctx);
+    }
+
+    /// Calls the profile in use `name`, and its folder too. Default keeps
+    /// its name.
+    fn rename_profile(&mut self, name: &str, ctx: &egui::Context) {
+        let index = self.profiles.current();
+        let old = self.profiles.current_name().to_owned();
+        if index == 0 {
+            return;
+        }
+        self.save_workspace(true);
+        match self.profiles.rename(index, name) {
+            // Its files are as they were, in a folder of another name.
+            Ok(()) => {
+                self.use_profile(ctx);
+                self.settings.profiles.current = self.profiles.current_name().to_owned();
+                self.save_settings();
+            }
+            Err(error) => self.messages.push(format!(
+                "Couldn't rename the profile {old} to {name}: {error}."
+            )),
+        }
+    }
+
+    /// Deletes the profile in use, with its folder, and switches to
+    /// Default, which can't be deleted.
+    fn delete_profile(&mut self, ctx: &egui::Context) {
+        let index = self.profiles.current();
+        let name = self.profiles.current_name().to_owned();
+        if index == 0 {
+            return;
+        }
+        self.switch_profile(DEFAULT_PROFILE, ctx);
+        if let Err(error) = self.profiles.delete(index) {
+            (self.messages).push(format!("Couldn't delete the profile {name}: {error}."));
+        }
+    }
+
+    /// Carries out what the Profiles page asked for.
+    fn profiles_asked(&mut self, asked: ProfilesAsked, ctx: &egui::Context) {
+        match asked {
+            ProfilesAsked::Switch(name) => self.switch_profile(&name, ctx),
+            ProfilesAsked::New(name) => self.add_profile(&name, false, ctx),
+            ProfilesAsked::Duplicate(name) => self.add_profile(&name, true, ctx),
+            ProfilesAsked::Rename(name) => self.rename_profile(&name, ctx),
+            ProfilesAsked::Delete => self.delete_profile(ctx),
+            ProfilesAsked::List => self.profiles.relist(&mut self.messages),
+            ProfilesAsked::OpenFolder => {
+                let Some(folder) = self.profiles.folder() else {
+                    return;
+                };
+                if let Err(error) = fs::create_dir_all(&folder).and_then(|()| show_folder(&folder))
+                {
+                    (self.messages).push(format!("Couldn't open {}: {error}.", folder.display()));
+                }
+            }
         }
     }
 
@@ -596,6 +756,8 @@ impl App {
             Request::AudioSettings => self.settings_window.open(Some(settings_window::AUDIO)),
             Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),
             Request::Appearance => self.settings_window.open(Some(settings_window::APPEARANCE)),
+            Request::Profiles => self.settings_window.open(Some(settings_window::PROFILES)),
+            Request::NextProfile => self.next_profile(ctx),
             Request::ImportAudio => {
                 if let Some(files) = self.audio_dialog(frame).pick_files() {
                     self.insert_audio(files, None, None);
@@ -960,12 +1122,12 @@ impl App {
     }
 
     /// A dialog for picking a keymap file. It starts in the folder of the
-    /// user's keymap file, where its backup is.
+    /// user's keymap file, the profile in use's, where its backup is.
     fn keymap_dialog(&self, frame: &eframe::Frame) -> rfd::FileDialog {
         let dialog = rfd::FileDialog::new()
             .set_parent(frame)
             .add_filter("Musicable keymap", &["toml"]);
-        match &self.config_dir {
+        match self.profiles.dir(self.profiles.current()) {
             Some(dir) => dialog.set_directory(dir),
             None => dialog,
         }
@@ -1005,11 +1167,12 @@ impl App {
                 self.save_settings();
             }
             Asked::Behaviour(behaviour) => {
-                self.settings.behaviour = behaviour;
+                self.profile.behaviour = behaviour;
                 self.session.editor_mut().behaviour = behaviour;
-                self.save_settings();
+                self.save_profile();
             }
             Asked::Mouse(asked) => self.mouse(asked),
+            Asked::Profiles(asked) => self.profiles_asked(asked, ctx),
             Asked::Appearance(asked) => self.appearance(asked, ctx, frame),
             Asked::ChoosePresetsFolder => {
                 let mut dialog = rfd::FileDialog::new()
@@ -1181,9 +1344,9 @@ impl App {
             AppearanceAsked::Reload => self.theme_file.reload(),
         }
         let chosen = self.theme_file.choice().name();
-        if chosen != self.settings.appearance.theme {
-            self.settings.appearance.theme = chosen.to_owned();
-            self.save_settings();
+        if chosen != self.profile.appearance.theme {
+            self.profile.appearance.theme = chosen.to_owned();
+            self.save_profile();
         }
         self.use_theme(ctx);
     }
@@ -1200,6 +1363,7 @@ impl App {
         }
     }
 
+    /// Saves the settings file: the computer's settings, and Default's.
     fn save_settings(&mut self) {
         let Some(path) = self.config_dir.as_ref().map(|dir| dir.join(SETTINGS_FILE)) else {
             return;
@@ -1207,6 +1371,24 @@ impl App {
         if let Err(error) = self.settings.write(&path) {
             self.messages.push(format!(
                 "Couldn't save the settings to {}: {error}",
+                path.display()
+            ));
+        }
+    }
+
+    /// Saves the settings of the profile in use: Default's in the settings
+    /// file, and another's in its folder's.
+    fn save_profile(&mut self) {
+        let index = self.profiles.current();
+        let Some(path) = (self.profiles.dir(index)).filter(|_| index > 0) else {
+            self.settings.set_profile(self.profile.clone());
+            self.save_settings();
+            return;
+        };
+        let path = path.join(SETTINGS_FILE);
+        if let Err(error) = self.profile.write(&path) {
+            self.messages.push(format!(
+                "Couldn't save the profile's settings to {}: {error}",
                 path.display()
             ));
         }
@@ -1444,6 +1626,8 @@ impl eframe::App for App {
             mouse: &self.mouse_file,
             theme: &self.theme_file,
             settings: &self.settings,
+            profiles: &self.profiles,
+            profile: &self.profile,
             presets_folder: library.presets_folder(),
             workspaces_folder: self.workspaces.folder(),
         };
@@ -1495,6 +1679,58 @@ impl eframe::App for App {
         if let Some(times) = &mut self.frame_times {
             times.frame(frame.info().cpu_usage, self.shell.windows() + 1);
             ctx.request_repaint();
+        }
+    }
+}
+
+/// What the files of the profile in use give.
+struct ProfileFiles {
+    profile: ProfileSettings,
+    keymap_file: UserKeymap,
+    keymap: Keymap,
+    mouse_file: UserMouse,
+    mouse: MouseMap,
+    workspaces: Workspaces,
+}
+
+impl ProfileFiles {
+    /// Reads the files of the profile in use among `profiles`, Default's
+    /// settings being `settings`' own. What's wrong with them goes in
+    /// `messages`.
+    fn read(profiles: &Profiles, settings: &Settings, messages: &mut Vec<String>) -> Self {
+        let index = profiles.current();
+        let dir = profiles.dir(index);
+        let file = |name| dir.as_ref().map(|dir| dir.join(name));
+        let profile = match file(SETTINGS_FILE).filter(|_| index > 0) {
+            Some(path) => ProfileSettings::read(&path).unwrap_or_else(|error| {
+                messages.push(format!(
+                    "The profile {} uses the default settings: {error}.",
+                    profiles.current_name()
+                ));
+                ProfileSettings::default()
+            }),
+            None => settings.profile(),
+        };
+        let (keymap_file, keymap) = UserKeymap::read(file(KEYMAP_FILE));
+        if !keymap_file.problems().is_empty() || keymap_file.error().is_some() {
+            messages.push(
+                "Your keymap file has problems: see Options > Keyboard Shortcuts.".to_owned(),
+            );
+        }
+        let (mouse_file, mouse) = UserMouse::read(file(MOUSE_FILE));
+        if !mouse_file.problems().is_empty() || mouse_file.error().is_some() {
+            messages.push(
+                "Your mouse map file has problems: see the Mouse page of Settings.".to_owned(),
+            );
+        }
+        let workspaces = Workspaces::list(dir.as_deref(), messages);
+        Self {
+            profile,
+            keymap_file,
+            keymap,
+            mouse_file,
+            mouse,
+            workspaces,
         }
     }
 }
@@ -1658,6 +1894,8 @@ mod laying_out;
 mod plugins_on_tracks;
 #[cfg(test)]
 mod remapping;
+#[cfg(test)]
+mod switching_profiles;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]

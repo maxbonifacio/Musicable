@@ -64,6 +64,8 @@ pub use theme::{
     Theme, ThemeFile, ThemeFileError, ThemeProblem, WidgetState, Widgets, apply as apply_theme,
 };
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
-pub use widgets::{clock, position};
+pub use widgets::{checked_name_box, clock, confirm_box, position};
 pub use windows::{Monitor, on_a_monitor};
-pub use workspace::{Layout, MAX_NAME, Split, WindowLayout, Workspace, WorkspaceError, check_name};
+pub use workspace::{
+    Layout, MAX_NAME, Split, WindowLayout, Workspace, WorkspaceError, check_file_name, check_name,
+};

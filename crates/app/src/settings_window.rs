@@ -1,10 +1,10 @@
 //! The Settings window: a page for each area of Musicable's settings,
 //! listed down its left side, as Live's Preferences has a tab for each.
-//! Changes apply at once, and the app keeps them, in the settings file or
-//! in the keymap's, the mouse map's, the theme's or the workspaces' files.
-//! The window isn't a panel, so no workspace has it. Each page is
-//! registered with its id, its title and what draws it, so a new page goes
-//! in one place.
+//! Changes apply at once, and the app keeps them: in the settings file, in
+//! the profile in use's keymap, mouse map, workspaces and settings, or in
+//! the theme's file. The window isn't a panel, so no workspace has it. Each
+//! page is registered with its id, its title and what draws it, so a new
+//! page goes in one place.
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 use musicable_audio::StreamRequest;
 use musicable_commands::editor::{Behaviour, MiddleC, PlayFrom};
-use musicable_commands::workspace;
+use musicable_commands::{options, workspace};
 use musicable_ui::{Action, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Shell, View, first_press};
 
 use crate::Output;
@@ -22,7 +22,9 @@ use crate::appearance_page::{self, AppearancePage};
 use crate::audio_page::AudioPage;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page;
-use crate::settings::Settings;
+use crate::profiles::Profiles;
+use crate::profiles_page::{self, ProfilesPage};
+use crate::settings::{ProfileSettings, Settings};
 use crate::theme_file::UserTheme;
 
 /// The device to play through, and how.
@@ -41,6 +43,8 @@ pub const APPEARANCE: &str = "appearance";
 pub const WORKSPACES: &str = "workspaces";
 /// How the browser previews samples, and where presets go.
 pub const BROWSER: &str = "browser";
+/// The user's profiles.
+pub const PROFILES: &str = "profiles";
 
 /// A page of the window.
 struct Page {
@@ -58,7 +62,7 @@ struct Page {
 }
 
 /// The pages, in the order the window lists them. A new page goes here.
-const PAGES: [Page; 8] = [
+const PAGES: [Page; 9] = [
     Page {
         id: AUDIO,
         title: "Audio",
@@ -96,7 +100,7 @@ const PAGES: [Page; 8] = [
         id: BEHAVIOUR,
         title: "Behaviour",
         scrolls: false,
-        show: |_, ui, cx, _| behaviour(ui, cx.settings.behaviour).map(Asked::Behaviour),
+        show: |_, ui, cx, _| behaviour(ui, cx.profile.behaviour).map(Asked::Behaviour),
     },
     Page {
         id: APPEARANCE,
@@ -120,6 +124,19 @@ const PAGES: [Page; 8] = [
         title: "Browser",
         scrolls: false,
         show: |_, ui, cx, _| browser(ui, cx),
+    },
+    Page {
+        id: PROFILES,
+        title: "Profiles",
+        scrolls: false,
+        show: |pages, ui, cx, new| {
+            let keys: Vec<String> = (cx.view.keymap.chords_for(&options::NEXT_PROFILE))
+                .map(|chord| chord.to_string())
+                .collect();
+            let page = &mut pages.profiles;
+            page.show(ui, cx.profiles, &keys.join(", "), new)
+                .map(Asked::Profiles)
+        },
     },
 ];
 
@@ -145,6 +162,8 @@ pub enum Asked {
     Behaviour(Behaviour),
     /// What the Mouse page asked for.
     Mouse(mouse_page::Asked),
+    /// What the Profiles page asked for.
+    Profiles(profiles_page::Asked),
     /// What the Appearance page asked for.
     Appearance(appearance_page::Asked),
     /// Ask for a folder to save presets in.
@@ -170,7 +189,12 @@ pub struct Cx<'a> {
     /// The user's mouse map file.
     pub mouse: &'a UserMouse,
     pub theme: &'a UserTheme,
+    /// The settings file's settings: the computer's, and Default's.
     pub settings: &'a Settings,
+    /// The user's profiles, and the one in use.
+    pub profiles: &'a Profiles,
+    /// The settings of the profile in use.
+    pub profile: &'a ProfileSettings,
     /// Where presets go, if Musicable has a folder for them.
     pub presets_folder: Option<&'a Path>,
     /// Where the workspaces' files go, if there's a config folder.
@@ -183,6 +207,7 @@ struct Pages {
     audio: AudioPage,
     recording: RecordingPage,
     appearance: AppearancePage,
+    profiles: ProfilesPage,
 }
 
 /// The Settings window.
@@ -239,6 +264,15 @@ impl SettingsWindow {
     /// Shows the window, if it's open. Returns what the user changed or
     /// asked for that the app carries out.
     pub fn show(&mut self, ctx: &egui::Context, mut cx: Cx<'_>) -> Option<Asked> {
+        // The Profiles page's box over the window, which Enter and Escape
+        // go to first.
+        let boxed = match self.open {
+            true => (self.pages.profiles.show_box(ctx, cx.profiles)).map(Asked::Profiles),
+            false => {
+                self.pages.profiles.reset();
+                None
+            }
+        };
         // Escape closes the window, unless the Keys page is giving a command
         // keys, or a menu is open: then it stops that.
         if self.open && !cx.shell.giving_keys() && !egui::Popup::is_any_open(ctx) {
@@ -268,7 +302,7 @@ impl SettingsWindow {
             cx.shell.hide_keys();
         }
         self.drawn = drawn;
-        asked
+        boxed.or(asked)
     }
 
     /// The list of pages, and the page in sight, whose id goes in `drawn`.

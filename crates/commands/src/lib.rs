@@ -235,6 +235,11 @@ pub enum Request {
     /// Show the Settings window's Appearance page, where the theme is
     /// picked.
     Appearance,
+    /// Show the Settings window's Profiles page.
+    Profiles,
+    /// Switch to the next of the user's profiles, or from the last back to
+    /// the first.
+    NextProfile,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),
     /// Show the panel with this id, such as the piano roll, if it's hidden.
