@@ -1238,14 +1238,21 @@ agents reach it too, and a search an agent runs shows in the browser.
 **The library** is the folders of samples you add, with the + at the foot
 of the list, or **Browser > Add Folder to Library...**. The app looks
 through each folder and the folders in it for WAV, AIFF and FLAC files,
-reading each one's header, and keeps what it finds in `library.json` in
-the config folder ([Settings](#settings-and-your-keymap)), so the next
-start has the library at once. Each start looks through the folders again
-in the background, reading only the files whose size or time of change
-differ, and **Browser > Rescan Library** does it when asked; a file that
-moved within its folder keeps its tags. A folder's right-click menu has
-Rescan and Remove from Library, which leaves the files where they are. A
-folder can't be added twice, nor one inside a folder of the library.
+and lists them once it has found them all, which takes about two seconds
+for 350,000 files on an SSD. Then it reads each one's header in the
+background, for the format, sample rate, channels and length that the
+tooltips and Find Similar use, while the foot says how many are left
+("Reading: 1,200 files left"). It keeps what it finds in `library.json`
+in the config folder ([Settings](#settings-and-your-keymap)), so the next
+start has the library at once, and if the app closed before the headers
+were all read, it reads the rest. Each start looks through the folders
+again in the background, reading only the headers of files whose size or
+time of change differ, and **Browser > Rescan Library** does it when
+asked; a tagged file that moved within its folder keeps its tags, and
+with the same time of change, what its header said. Tags given while a
+folder is looked through stay. A folder's right-click menu has Rescan and Remove
+from Library, which leaves the files where they are. A folder can't be
+added twice, nor one inside a folder of the library.
 
 **Browsing and searching.** With the search field empty, the list is the
 folders of the library, which a click opens and closes: each folder's
@@ -1321,28 +1328,42 @@ has the sample, the sampler names it from there, as clips name their files.
 ### Behind the browser
 
 **One queue for file work.** Reading the library file, looking through
-folders, finding presets, opening the files to preview and drawing their
-waveforms all happen on one queue of the library's own
-(`musicable_library::Queue`), never on the window's thread or the
-engine's workers. It has a thread for every two cores, one to four of
-them, called `musicable-files-1` and up, which run below normal priority.
-A preview comes first, then a waveform, then scans. Scans run on every
-thread while the transport is stopped and on one while it plays, and
-while recording they rest as long as they work, so the disk and the cores
-are left to the recorder and the engine. On Windows and macOS they also
-run in the system's background mode, which puts their reads behind
-others. Analysis will run on it too.
+folders, reading the headers of the files found, finding presets, opening
+the files to preview and drawing their waveforms all happen on one queue
+of the library's own (`musicable_library::Queue`), never on the window's
+thread or the engine's workers. It has a thread for every two cores, one
+to four of them, called `musicable-files-1` and up, which run below normal
+priority. A preview comes first, then a waveform, then scans. Scans and
+headers run on every thread but one while the transport is stopped, so a
+preview never waits for a thread, and on one while it plays, and while
+recording they rest as long as they work, so the disk and the cores are
+left to the recorder and the engine. Headers are read 64 files to a job,
+each job adding the next as it ends, so the jobs added meanwhile go
+first. On Windows and macOS they also run in the system's background
+mode, which puts their reads behind others. Analysis will run on it too.
+
+**Why headers come after.** Opening a file takes far longer than finding
+it. On a Windows PC with Defender's real-time protection on, opening each
+file took about 7 ms, so a library of 355,764 files on a SATA SSD took 43
+minutes when the browser listed nothing until every header was read,
+while listing its folders, each file's size and time of change and all,
+took 1.7 s. Asking a file for its size and time opens it on Windows too,
+which took 24 s for that library, so they come from the folder listing,
+and only links are asked. Opening files on several threads at once went
+several times faster there, which is why headers are read on several.
 
 **The library file** has a record for each file, with room for what
 analysis will add: tags with where each came from (the name, a
 measurement, a model or you) and how sure it is, measured values, an
 embedding for finding similar sounds, and the version of the analyser that
 made them. The browser fills in only the names, the file's size and time
-of change, and its header: format, sample rate, channels and length. It's
-saved a couple of seconds after a change, so tagging a run of files saves
-it once, and when the app closes. A library file that can't be read is
-kept beside the new one as `library.json.broken`, and the status bar says
-so.
+of change, and its header: format, sample rate, channels and length. A
+file whose header is still to be read says `"unread": true`. It's saved a
+couple of seconds after a change, so tagging a run of files saves it
+once, and when the app closes. Headers read in the background save it
+only once a folder's are all read, as a large library's file is tens of
+megabytes. A library file that can't be read is kept beside the new one
+as `library.json.broken`, and the status bar says so.
 
 ### How fast it finds things
 
@@ -1363,14 +1384,16 @@ four-core cloud machine:
 | Searching for "ha" (64,375 found) | 4.2 ms |
 | Searching for "nothing like it" (none found) | 3.4 ms |
 | Finding files like one | 62 ms |
-| Scanning 20,000 files the first time | 133 ms |
-| Scanning them again, unchanged | 62 ms |
+| Scanning 20,000 files the first time | 61 ms |
+| Reading their headers, on one thread | 158 ms |
+| Scanning them again, unchanged | 72 ms |
 
 The scan is of 20,000 small WAV files the bench writes, which the system
-has cached, so it measures Musicable's work, not the disk's. A search goes
-through every file's name and folders, in lower case, one after the other
-in a single string for each folder of the library, so there's no index of
-words to keep up to date.
+has cached, so it measures Musicable's work, not the disk's or an
+antivirus's ([above](#behind-the-browser)). A search goes through every
+file's name and folders, in lower case, one after the other in a single
+string for each folder of the library, so there's no index of words to
+keep up to date.
 
 ## Keys
 

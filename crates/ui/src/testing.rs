@@ -114,6 +114,7 @@ pub(crate) struct LibraryState {
     pub index: Index,
     pub loaded: bool,
     pub scanning: Vec<(PathBuf, usize)>,
+    pub reading: Vec<(PathBuf, usize)>,
     /// The last search: searches the shell asks for are run on the index,
     /// as the app runs them.
     pub search: String,
@@ -142,6 +143,7 @@ impl Default for LibraryState {
             index: Index::new(),
             loaded: true,
             scanning: Vec::new(),
+            reading: Vec::new(),
             search: String::new(),
             similar: None,
             found: Vec::new(),
@@ -160,6 +162,7 @@ impl LibraryState {
             index: &self.index,
             loaded: self.loaded,
             scanning: &self.scanning,
+            reading: &self.reading,
             listing: match &self.similar {
                 Some(like) => Listing::Similar(like),
                 None => Listing::Search(&self.search),

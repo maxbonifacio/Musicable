@@ -51,6 +51,10 @@ pub struct Record {
     pub modified: u64,
     /// What its header says, or `None` if it couldn't be read as audio.
     pub audio: Option<AudioFacts>,
+    /// Whether its header is still to be read, so `audio` says nothing yet:
+    /// a scan lists the files it finds, and their headers are read after.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unread: bool,
     /// Its tags, the user's and, later, analysis's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
@@ -80,10 +84,19 @@ impl Record {
             size,
             modified,
             audio,
+            unread: false,
             tags: Vec::new(),
             measured: Measured::default(),
             embedding: None,
             analyser: None,
+        }
+    }
+
+    /// A record of a file a scan found, whose header is still to be read.
+    pub fn found(path: impl Into<String>, size: u64, modified: u64) -> Self {
+        Self {
+            unread: true,
+            ..Self::new(path, size, modified, None)
         }
     }
 
@@ -110,6 +123,10 @@ impl Record {
     pub fn has_tag(&self, id: &str) -> bool {
         self.tags.iter().any(|tag| tag.id == id)
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// What an audio file's header says.
@@ -469,6 +486,29 @@ impl Index {
         true
     }
 
+    /// Gives the files of the place for `folder` at the paths in `read`
+    /// what their headers say, read after a scan found them: `None` for one
+    /// that isn't audio Musicable reads. A file whose header isn't waiting
+    /// to be read any more is left as it is. The generations stay as they
+    /// are, as searches go by the files' paths and tags, not what their
+    /// headers say. Returns whether there's such a place.
+    pub fn set_audio(&mut self, folder: &Path, read: &[(String, Option<AudioFacts>)]) -> bool {
+        let Some(index) = self.place(folder) else {
+            return false;
+        };
+        // Copies the files only if a copy of the index still has them.
+        let files = Arc::make_mut(&mut self.places[index].files);
+        for (path, audio) in read {
+            if let Ok(i) = files.binary_search_by(|record| record.path.as_str().cmp(path))
+                && files[i].unread
+            {
+                files[i].audio = *audio;
+                files[i].unread = false;
+            }
+        }
+        true
+    }
+
     /// The file at `id`.
     pub fn get(&self, id: FileId) -> Option<&Record> {
         self.places.get(id.place)?.files.get(id.file)
@@ -649,6 +689,46 @@ mod tests {
         assert_eq!(Index::read(&path).unwrap().len(), 3);
         fs::write(&path, r#"{"format":"musicable-project","version":1}"#).unwrap();
         assert!(matches!(Index::read(&path), Err(IndexError::NotAnIndex)));
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn headers_read_after_a_scan_fill_in_its_records() {
+        let folder = std::env::temp_dir().join(format!("musicable-unread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        let path = folder.join("library.json");
+        let mut index = Index::new();
+        let drums = folder.join("Drums");
+        index.add_place(drums.clone());
+        let files = vec![
+            Record::found("Kick.wav", 1, 2),
+            Record::found("Notes.wav", 3, 4),
+            Record::new("Snare.wav", 5, 6, facts(100)),
+        ];
+        index.set_files(&drums, files);
+        let generations = |index: &Index| (index.generation(), index.places()[0].generation());
+        let before = generations(&index);
+        let read = [
+            ("Kick.wav".to_owned(), facts(48_000)),
+            ("Notes.wav".to_owned(), None),
+            // Read already, and gone.
+            ("Snare.wav".to_owned(), facts(1)),
+            ("Gone.wav".to_owned(), facts(1)),
+        ];
+        assert!(index.set_audio(&drums, &read[..1]));
+        assert_eq!(generations(&index), before);
+        // Waiting files are kept so in the index file, for the next start.
+        index.write(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches(r#""unread":true"#).count(), 1, "{text}");
+        let mut index = Index::read(&path).unwrap();
+        assert!(index.places()[0].files()[1].unread);
+        assert!(index.set_audio(&drums, &read[1..]));
+        assert!(!index.set_audio(&folder.join("Loops"), &read));
+        let files = index.places()[0].files();
+        assert_eq!((files[0].audio, files[0].unread), (facts(48_000), false));
+        assert_eq!((files[1].audio, files[1].unread), (None, false));
+        assert_eq!(files[2].audio, facts(100));
         fs::remove_dir_all(&folder).unwrap();
     }
 

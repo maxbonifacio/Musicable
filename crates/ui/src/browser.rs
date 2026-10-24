@@ -47,6 +47,9 @@ pub struct Library<'a> {
     /// The folders being looked through, and how many files each has found
     /// so far.
     pub scanning: &'a [(PathBuf, usize)],
+    /// The folders whose files' headers are being read, and how many are
+    /// left to read in each.
+    pub reading: &'a [(PathBuf, usize)],
     /// What the library lists.
     pub listing: Listing<'a>,
     /// The files listed, best first, and how many were found in all: the
@@ -72,6 +75,7 @@ impl Default for Library<'_> {
             index: &EMPTY,
             loaded: true,
             scanning: &[],
+            reading: &[],
             listing: Listing::Search(""),
             found: &[],
             total: 0,
@@ -590,8 +594,15 @@ impl Samples {
             Some((_, name)) => name.to_owned(),
             None => folder.trim_end_matches('/').to_owned(),
         };
-        let detail = match (folder.is_empty(), self.scanning(view, found.folder())) {
-            (true, Some(files)) => format!("{} files...", thousands(files)),
+        let mut readings = view.library.reading.iter();
+        let reading = readings.find(|(f, _)| f == found.folder());
+        let detail = match (
+            folder.is_empty(),
+            self.scanning(view, found.folder()),
+            reading,
+        ) {
+            (true, Some(files), _) => format!("{} files...", thousands(files)),
+            (true, None, Some(&(_, left))) => format!("{} to read...", thousands(left)),
             _ => String::new(),
         };
         let row = row(ui, theme, depth, Some(open), &name, &detail, false);
@@ -722,7 +733,8 @@ impl Samples {
     }
 
     /// The line under the list: how many samples there are or were found,
-    /// or how a scan is going, and the button that adds folders.
+    /// or how a scan or the reading of headers after it is going, and the
+    /// button that adds folders.
     fn status(&self, ui: &mut Ui, library: &Library<'_>, tree: bool, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -739,6 +751,10 @@ impl Samples {
                     } else if !library.scanning.is_empty() {
                         ui.spinner();
                         format!("Looking through: {} files", thousands(scanned))
+                    } else if !library.reading.is_empty() {
+                        ui.spinner();
+                        let left = library.reading.iter().map(|&(_, left)| left).sum();
+                        format!("Reading: {} left", count(left, "file"))
                     } else if tree {
                         let places = library.index.places().len();
                         format!(

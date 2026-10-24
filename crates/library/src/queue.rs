@@ -4,12 +4,13 @@
 //! It has threads of its own, `musicable-files-1` and up, never the
 //! engine's workers, and they run below normal priority. Jobs come in three
 //! [`Priority`]s, and the most urgent waiting goes first. Jobs that can wait
-//! for good, such as scans, run on every thread while the transport is
-//! stopped, on one while it plays, and on one with a rest after each while
-//! it records, so the disk and the cores are left to the recorder and the
-//! engine; a long one, such as a scan, rests as it goes with a [`Pace`]. On
-//! Windows they also run in background mode, which lowers how soon the
-//! system serves their reads.
+//! for good, such as scans, run on every thread but one while the transport
+//! is stopped, which is left for previews and waveforms, on one while it
+//! plays, and on one with a rest after each while it records, so the disk
+//! and the cores are left to the recorder and the engine; a long one, such
+//! as a scan, rests as it goes with a [`Pace`], or goes on in pieces, each a
+//! job its [`Adder`] adds. On Windows they also run in background mode,
+//! which lowers how soon the system serves their reads.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -74,10 +75,12 @@ struct State {
 }
 
 impl State {
-    /// The most jobs that could wait which may run at once.
+    /// The most jobs that could wait which may run at once: never every
+    /// thread of more than one, so a preview needn't wait for one to
+    /// finish.
     fn later_allowed(&self) -> usize {
         match self.busy {
-            Busy::Idle => self.threads,
+            Busy::Idle => self.threads.saturating_sub(1).max(1),
             Busy::Playing | Busy::Recording => 1,
         }
     }
@@ -131,6 +134,11 @@ impl Queue {
         Self::new((num_cpus::get_physical() / 2).clamp(1, 4))
     }
 
+    /// How many threads it has.
+    pub fn threads(&self) -> usize {
+        self.threads.len()
+    }
+
     /// A pace for a long job that can wait, to keep step with between the
     /// pieces of its work.
     pub fn pace(&self) -> Pace {
@@ -143,10 +151,14 @@ impl Queue {
     /// Runs `job` on one of the threads, after the more urgent jobs waiting
     /// and those as urgent added before it.
     pub fn add(&self, priority: Priority, job: impl FnOnce() + Send + 'static) {
-        let mut state = self.shared.state();
-        state.waiting[priority as usize].push_back(Box::new(job));
-        drop(state);
-        self.shared.work.notify_one();
+        self.shared.add(priority, Box::new(job));
+    }
+
+    /// A way for its jobs to add jobs: see [`Adder`].
+    pub fn adder(&self) -> Adder {
+        Adder {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Says what the engine is doing, which says how much the jobs that can
@@ -186,6 +198,34 @@ impl Drop for Queue {
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+        // The jobs left waiting go, outside the lock: one that holds an
+        // adder or a pace would otherwise keep itself and the rest for good.
+        let waiting = std::mem::take(&mut self.shared.state().waiting);
+        drop(waiting);
+    }
+}
+
+/// Adds jobs to a [`Queue`] from its own jobs, as a long one does that goes
+/// on in pieces, each a job that adds the next, so the more urgent jobs go
+/// between them. Unlike the queue, a job may hold one. Once the queue
+/// stops, it adds nothing.
+#[derive(Clone)]
+pub struct Adder {
+    shared: Arc<Shared>,
+}
+
+impl Adder {
+    /// Runs `job` on one of the queue's threads, as [`Queue::add`] does.
+    pub fn add(&self, priority: Priority, job: impl FnOnce() + Send + 'static) {
+        self.shared.add(priority, Box::new(job));
+    }
+
+    /// A pace for a long job that can wait, as [`Queue::pace`] makes.
+    pub fn pace(&self) -> Pace {
+        Pace {
+            shared: self.shared.clone(),
+            since: Cell::new(None),
+        }
     }
 }
 
@@ -222,6 +262,16 @@ impl Shared {
     fn state(&self) -> MutexGuard<'_, State> {
         // A job that panics does so outside the lock.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn add(&self, priority: Priority, job: Job) {
+        let mut state = self.state();
+        if state.stop {
+            return;
+        }
+        state.waiting[priority as usize].push_back(job);
+        drop(state);
+        self.work.notify_one();
     }
 }
 
@@ -421,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn jobs_that_can_wait_take_one_thread_while_the_engine_plays() {
+    fn jobs_that_can_wait_leave_a_thread_for_previews_and_take_one_while_playing() {
         let queue = Queue::new(3);
         queue.set_busy(Busy::Playing);
         let (most, running) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
@@ -437,30 +487,49 @@ mod tests {
         queue.wait();
         assert_eq!(most.load(Ordering::SeqCst), 1);
 
-        // Idle, they take every thread.
+        // Idle, they take every thread but one, which is left for a preview.
         queue.set_busy(Busy::Idle);
         most.store(0, Ordering::SeqCst);
-        let (arrived, all) = (Arc::new(AtomicUsize::new(0)), Arc::new(Condvar::new()));
-        let lock = Arc::new(Mutex::new(()));
+        /// How many have started, and whether the preview has run.
+        type Gate = (Mutex<(usize, bool)>, Condvar);
+        fn open(gate: &Gate) {
+            gate.0.lock().unwrap().1 = true;
+            gate.1.notify_all();
+        }
+        let gate: Arc<Gate> = Arc::default();
         for _ in 0..3 {
-            let (arrived, all, lock) = (arrived.clone(), all.clone(), lock.clone());
-            let (most, running) = (most.clone(), running.clone());
+            let (most, running, gate) = (most.clone(), running.clone(), gate.clone());
             queue.add(Priority::Later, move || {
                 let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                 most.fetch_max(now, Ordering::SeqCst);
-                // Each waits for the others to start, so all three run at once.
-                let mut guard = lock.lock().unwrap();
-                arrived.fetch_add(1, Ordering::SeqCst);
-                all.notify_all();
-                while arrived.load(Ordering::SeqCst) < 3 {
-                    guard = all.wait(guard).unwrap();
+                // Each holds its thread until the preview has run.
+                let mut state = gate.0.lock().unwrap();
+                state.0 += 1;
+                gate.1.notify_all();
+                while !state.1 {
+                    state = gate.1.wait(state).unwrap();
                 }
-                drop(guard);
+                drop(state);
                 running.fetch_sub(1, Ordering::SeqCst);
             });
         }
+        let mut state = gate.0.lock().unwrap();
+        while state.0 < 2 {
+            state = gate.1.wait(state).unwrap();
+        }
+        drop(state);
+        let (done, previewed) = mpsc::channel();
+        let preview = gate.clone();
+        queue.add(Priority::Now, move || {
+            open(&preview);
+            done.send(()).unwrap();
+        });
+        let ran = previewed.recv_timeout(Duration::from_secs(10));
+        // Lets them go, whatever happened.
+        open(&gate);
+        assert_eq!(ran, Ok(()));
         queue.wait();
-        assert_eq!(most.load(Ordering::SeqCst), 3);
+        assert_eq!(most.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -514,6 +583,50 @@ mod tests {
         queue.set_busy(Busy::Playing);
         thread::sleep(work);
         assert!(step(&pace) < work);
+    }
+
+    #[test]
+    fn jobs_go_on_in_pieces_with_urgent_jobs_between() {
+        let queue = Queue::new(1);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started, wait) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        /// A piece of a long job, which adds the next.
+        fn piece(n: usize, adder: Adder, order: Arc<Mutex<Vec<String>>>) {
+            order.lock().unwrap().push(format!("piece {n}"));
+            if n < 3 {
+                let next = adder.clone();
+                adder.add(Priority::Later, move || piece(n + 1, next, order));
+            }
+        }
+        let (adder, pieces) = (queue.adder(), order.clone());
+        queue.add(Priority::Later, move || {
+            started.send(()).unwrap();
+            released.recv().unwrap();
+            piece(1, adder, pieces);
+        });
+        wait.recv().unwrap();
+        let previews = order.clone();
+        queue.add(Priority::Now, move || {
+            previews.lock().unwrap().push("preview".to_owned())
+        });
+        release.send(()).unwrap();
+        queue.wait();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["piece 1", "preview", "piece 2", "piece 3"]
+        );
+
+        // A queue that stops drops what's waiting, and adds nothing more.
+        let (release, released) = mpsc::channel::<()>();
+        let (adder, dropped) = (queue.adder(), Arc::new(()));
+        let held = dropped.clone();
+        queue.add(Priority::Now, move || released.recv().unwrap());
+        queue.add(Priority::Later, move || drop(held));
+        release.send(()).unwrap();
+        drop(queue);
+        adder.add(Priority::Now, || unreachable!("the queue stopped"));
+        assert_eq!(Arc::strong_count(&dropped), 1);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! The browser's library in the app: the folders of samples the user added,
 //! indexed in `library.json` in the config folder, the presets, and the
 //! previews. The file work happens on the background queue: reading the
-//! index file, scanning folders, finding presets, opening the files to
-//! preview and drawing their waveforms, and saving the index.
+//! index file, scanning folders, reading the headers of the files the
+//! scans find, finding presets, opening the files to preview and drawing
+//! their waveforms, and saving the index.
 //!
 //! Commands reach the library through [`LibraryLink`], which implements
 //! [`musicable_commands::Library`]. `docs/app.md` describes the browser.
@@ -10,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,9 +21,10 @@ use std::time::{Duration, Instant};
 use musicable_engine::media::{AudioData, AudioReader, Source, Streamer};
 use musicable_io::audio::Decoder;
 use musicable_library::presets::{self, Loaded};
+use musicable_library::scan::{header, keep_tags};
 use musicable_library::{
-    Busy, FileId, Index, IndexError, Prepared, Preset, Priority, Query, Queue, Record, Searcher,
-    scan,
+    Adder, AudioFacts, Busy, FileId, Index, IndexError, Prepared, Preset, Priority, Query, Queue,
+    Record, Searcher, scan,
 };
 use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
 use musicable_model::{DeviceId, DeviceKind, PluginFormat};
@@ -43,6 +46,14 @@ const PREVIEW_WHOLE: u64 = 1 << 19;
 /// How long the index waits after a change before it's saved, so a run of
 /// changes, such as tagging files one after another, saves it once.
 const SAVE_AFTER: Duration = Duration::from_secs(2);
+/// How many files' headers a job reads before the jobs waiting have their
+/// turn: about half a second's work where opening a file takes 7 ms, as on
+/// Windows while the antivirus looks at each.
+const READ_AT_ONCE: usize = 64;
+
+/// What the headers of files of a place say, by their paths from its
+/// folder: `None` for a file that isn't audio Musicable reads.
+type Headers = Vec<(String, Option<AudioFacts>)>;
 
 /// The browser's library.
 pub struct Library {
@@ -65,7 +76,9 @@ pub struct Library {
     waker: Option<Waker>,
     /// The scans running, by folder.
     scans: BTreeMap<PathBuf, Scan>,
-    /// The id the next scan gets.
+    /// The places whose files' headers are being read, by folder.
+    readings: BTreeMap<PathBuf, Reading>,
+    /// The id the next scan or reading gets.
     next_scan: u64,
     presets: Vec<Preset>,
     /// Whether the presets are being looked for.
@@ -88,16 +101,33 @@ pub struct Library {
     /// When the index first changed since it was saved, if it has.
     changed: Option<Instant>,
     saving: bool,
+    /// Headers read while the index was being saved, which wait for the
+    /// save, as taking them in would copy the place's files.
+    read_while_saving: Vec<(PathBuf, u64, Headers)>,
+    /// Whether headers were read since the index was last saved. They're
+    /// saved once a place's are all read, and when the app closes, rather
+    /// than after every few, as a large library's file takes a while to
+    /// write.
+    read_unsaved: bool,
     busy: Busy,
     /// What went wrong since the last [`take_problems`](Self::take_problems).
     problems: Vec<String>,
 }
 
-/// A scan under way: which it is, how many files it has found, and whether
-/// to stop it.
+/// A scan under way: which it is, how many files it has found, whether to
+/// stop it, and the place's files when it started.
 struct Scan {
     id: u64,
     found: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
+    old: Arc<Vec<Record>>,
+}
+
+/// A reading of the headers of a place's files under way: which it is, how
+/// many are left to read, and whether to stop it.
+struct Reading {
+    id: u64,
+    left: usize,
     cancel: Arc<AtomicBool>,
 }
 
@@ -142,6 +172,12 @@ enum Done {
         id: u64,
         scanned: io::Result<Option<(Vec<Record>, Prepared)>>,
     },
+    /// What the headers of files of the place for `folder` say.
+    Read {
+        folder: PathBuf,
+        id: u64,
+        read: Headers,
+    },
     Presets {
         look: u64,
         found: Vec<Preset>,
@@ -173,6 +209,7 @@ impl Library {
             received,
             waker: None,
             scans: BTreeMap::new(),
+            readings: BTreeMap::new(),
             next_scan: 1,
             presets: Vec::new(),
             finding_presets: false,
@@ -186,6 +223,8 @@ impl Library {
             streamer: OnceLock::new(),
             changed: None,
             saving: false,
+            read_while_saving: Vec::new(),
+            read_unsaved: false,
             busy: Busy::Idle,
             problems: Vec::new(),
         }
@@ -255,6 +294,7 @@ impl Library {
                     id,
                     scanned,
                 } => self.scanned(&folder, id, scanned),
+                Done::Read { folder, id, read } => self.headers_read(folder, id, read),
                 Done::Presets { look, found } => {
                     if look == self.presets_looks {
                         self.presets = found;
@@ -272,6 +312,9 @@ impl Library {
                     if let Err(error) = saved {
                         self.problems
                             .push(format!("Couldn't save the browser's library: {error}."));
+                    }
+                    for (folder, id, read) in std::mem::take(&mut self.read_while_saving) {
+                        self.headers_read(folder, id, read);
                     }
                 }
             }
@@ -344,18 +387,26 @@ impl Library {
         if self.scans.get(folder).is_none_or(|scan| scan.id != id) {
             return;
         }
-        self.scans.remove(folder);
+        let Some(scan) = self.scans.remove(folder) else {
+            return;
+        };
         match scanned {
-            Ok(Some((records, prepared))) => {
-                if !self.index.set_files(folder, records) {
+            Ok(Some((mut records, prepared))) => {
+                let Some(place) = self.index.place(folder) else {
                     // Taken out of the library meanwhile.
                     return;
+                };
+                // The scan went by the files as they were when it started,
+                // so tags given or taken away since stay so.
+                let now = self.index.places()[place].shared_files();
+                if !Arc::ptr_eq(&now, &scan.old) {
+                    keep_tags(&mut records, &now);
                 }
-                if let Some(place) = self.index.place(folder) {
-                    self.searcher.put(&self.index, place, prepared);
-                }
+                self.index.set_files(folder, records);
+                self.searcher.put(&self.index, place, prepared);
                 self.changed();
                 self.relist();
+                self.read(folder);
             }
             // Only scans overtaken stop, and they return above.
             Ok(None) => {}
@@ -398,6 +449,7 @@ impl Library {
     /// Saves the index on the queue: a copy of it, which shares the files.
     fn save(&mut self) {
         self.changed = None;
+        self.read_unsaved = false;
         let Some(file) = self.file.clone() else {
             return;
         };
@@ -436,6 +488,11 @@ impl Library {
         if let Some(scan) = self.scans.remove(folder) {
             scan.cancel.store(true, Relaxed);
         }
+        // The headers read so far are in the files the scan goes by, and
+        // the reading after it reads the rest.
+        if let Some(reading) = self.readings.remove(folder) {
+            reading.cancel.store(true, Relaxed);
+        }
         let old = self.index.places()[place].shared_files();
         let id = self.next_scan;
         self.next_scan += 1;
@@ -445,6 +502,7 @@ impl Library {
             id,
             found: found.clone(),
             cancel: cancel.clone(),
+            old: old.clone(),
         };
         self.scans.insert(folder.to_owned(), running);
         let folder = folder.to_owned();
@@ -474,6 +532,77 @@ impl Library {
                 scanned,
             });
         });
+    }
+
+    /// Reads the headers of the files of the place for `folder` that its
+    /// scan left to read, a few at a time in jobs on the queue, each adding
+    /// the next as it finishes, so previews and waveforms go between them.
+    fn read(&mut self, folder: &Path) {
+        let (Some(place), Some(queue)) = (self.index.place(folder), &self.queue) else {
+            return;
+        };
+        let files = self.index.places()[place].files().iter();
+        let paths: Vec<String> = files
+            .filter(|record| record.unread)
+            .map(|record| record.path.clone())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let id = self.next_scan;
+        self.next_scan += 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let reading = Reading {
+            id,
+            left: paths.len(),
+            cancel: cancel.clone(),
+        };
+        if let Some(reading) = self.readings.insert(folder.to_owned(), reading) {
+            reading.cancel.store(true, Relaxed);
+        }
+        let unread = Arc::new(Unread {
+            folder: folder.to_owned(),
+            id,
+            paths,
+            next: AtomicUsize::new(0),
+            cancel,
+            adder: queue.adder(),
+            done: self.done.clone(),
+            waker: self.waker.clone(),
+        });
+        // A job for each thread, of which the queue runs as many as it
+        // allows.
+        for _ in 0..queue.threads() {
+            let unread = unread.clone();
+            queue.add(Priority::Later, move || read_some(&unread));
+        }
+    }
+
+    /// Takes in the headers a job read of files of the place for `folder`.
+    fn headers_read(&mut self, folder: PathBuf, id: u64, read: Headers) {
+        // Those of a reading stopped meanwhile, by another scan or the
+        // folder being taken out, are left.
+        if self
+            .readings
+            .get(&folder)
+            .is_none_or(|reading| reading.id != id)
+        {
+            return;
+        }
+        if self.saving {
+            self.read_while_saving.push((folder, id, read));
+            return;
+        }
+        self.index.set_audio(&folder, &read);
+        self.read_unsaved = true;
+        let Some(reading) = self.readings.get_mut(&folder) else {
+            return;
+        };
+        reading.left = reading.left.saturating_sub(read.len());
+        if reading.left == 0 {
+            self.readings.remove(&folder);
+            self.changed();
+        }
     }
 
     /// Finds the presets in Musicable's folder for them and VST3's.
@@ -639,6 +768,9 @@ impl Library {
         if let Some(scan) = self.scans.remove(folder) {
             scan.cancel.store(true, Relaxed);
         }
+        if let Some(reading) = self.readings.remove(folder) {
+            reading.cancel.store(true, Relaxed);
+        }
         if !self.index.remove_place(folder) {
             return Err(format!("{} isn't in the library", folder.display()));
         }
@@ -699,6 +831,15 @@ impl Library {
         let scans = self.scans.iter();
         scans
             .map(|(folder, scan)| (folder.clone(), scan.found.load(Relaxed)))
+            .collect()
+    }
+
+    /// The folders whose files' headers are being read, and how many are
+    /// left to read in each.
+    pub fn reading(&self) -> Vec<(PathBuf, usize)> {
+        let readings = self.readings.iter();
+        readings
+            .map(|(folder, reading)| (folder.clone(), reading.left))
             .collect()
     }
 
@@ -810,33 +951,113 @@ impl Library {
     }
 
     /// Waits until the queue has done everything asked of it, and takes in
-    /// what it found. For tests.
+    /// what it found, which may ask more of it, as a scan has headers read.
+    /// For tests.
     #[cfg(test)]
     pub fn wait(&mut self) {
-        if let Some(queue) = &self.queue {
-            queue.wait();
+        loop {
+            if let Some(queue) = &self.queue {
+                queue.wait();
+            }
+            if !self.tick() {
+                break;
+            }
         }
-        self.tick();
     }
 }
 
 impl Drop for Library {
-    /// Stops the scans, and saves the index if it changed since it was last
-    /// saved.
+    /// Stops the scans and the readings, and saves the index if it changed
+    /// since it was last saved, with the headers read so far, so the next
+    /// start reads only the rest.
     fn drop(&mut self) {
         for scan in self.scans.values() {
             scan.cancel.store(true, Relaxed);
         }
+        for reading in self.readings.values() {
+            reading.cancel.store(true, Relaxed);
+        }
         // A save on the queue may not have started, and a queue that stops
         // doesn't start what's waiting.
-        let unsaved = self.changed.is_some() || self.saving;
-        if let (true, Some(file)) = (unsaved, &self.file) {
+        let unsaved =
+            self.changed.is_some() || self.saving || self.read_unsaved || !self.readings.is_empty();
+        if let (true, Some(file)) = (unsaved, self.file.clone()) {
             // A copy on the queue may be saving an older one.
             if let Some(queue) = &self.queue {
                 queue.wait();
             }
-            let _ = self.index.write(file);
+            self.saving = false;
+            let mut read = std::mem::take(&mut self.read_while_saving);
+            for done in self.received.try_iter() {
+                if let Done::Read {
+                    folder,
+                    id,
+                    read: headers,
+                } = done
+                {
+                    read.push((folder, id, headers));
+                }
+            }
+            for (folder, id, headers) in read {
+                self.headers_read(folder, id, headers);
+            }
+            let _ = self.index.write(&file);
         }
+    }
+}
+
+/// The files of a place whose headers a reading reads, and how far its
+/// jobs have got.
+struct Unread {
+    folder: PathBuf,
+    id: u64,
+    /// Their paths, from the place's folder.
+    paths: Vec<String>,
+    /// The first of `paths` no job has taken.
+    next: AtomicUsize,
+    cancel: Arc<AtomicBool>,
+    adder: Adder,
+    done: Sender<Done>,
+    waker: Option<Waker>,
+}
+
+/// Reads the headers of the next few files of `unread`, sends what they
+/// say, and adds a job to read more while there are more, after the jobs
+/// added meanwhile.
+fn read_some(unread: &Arc<Unread>) {
+    if unread.cancel.load(Relaxed) {
+        return;
+    }
+    let start = unread.next.fetch_add(READ_AT_ONCE, Relaxed);
+    let Some(paths) = unread.paths.get(start..).filter(|paths| !paths.is_empty()) else {
+        return;
+    };
+    let paths = &paths[..paths.len().min(READ_AT_ONCE)];
+    // Slower while the engine records.
+    let pace = unread.adder.pace();
+    let mut read = Vec::with_capacity(paths.len());
+    for path in paths {
+        pace.step();
+        if unread.cancel.load(Relaxed) {
+            return;
+        }
+        let mut file = unread.folder.clone();
+        file.extend(path.split('/'));
+        // A file the decoder breaks on isn't audio Musicable reads.
+        let audio = panic::catch_unwind(|| header(&file)).ok().flatten();
+        read.push((path.clone(), audio));
+    }
+    let _ = unread.done.send(Done::Read {
+        folder: unread.folder.clone(),
+        id: unread.id,
+        read,
+    });
+    if let Some(waker) = &unread.waker {
+        waker();
+    }
+    if start + READ_AT_ONCE < unread.paths.len() {
+        let next = unread.clone();
+        unread.adder.add(Priority::Later, move || read_some(&next));
     }
 }
 
@@ -1058,6 +1279,152 @@ mod tests {
     }
 
     #[test]
+    fn tags_given_while_a_folder_is_scanned_stay() {
+        let dir = TempDir::new("tag-race");
+        let samples = dir.0.join("Samples");
+        wav(&samples.join("Kick.wav"), 100);
+        let queue = Arc::new(Queue::new(1));
+        let file = dir.0.join(LIBRARY_FILE);
+        let mut library = Library::open(Some(file), None, queue.clone(), None);
+        library.wait();
+        library.add_folder(&samples).unwrap();
+        library.wait();
+        // Holds the queue's one thread, so the rescan waits.
+        let (release, released) = mpsc::channel::<()>();
+        queue.add(Priority::Now, move || {
+            let _ = released.recv();
+        });
+        library.rescan(Some(&samples)).unwrap();
+        let kick = samples.join("Kick.wav");
+        assert_eq!(library.tag(&kick, "dusty", true), Ok(true));
+        release.send(()).unwrap();
+        library.wait();
+        let id = library.index().find(&kick).unwrap();
+        assert!(library.index().get(id).unwrap().has_tag("dusty"));
+    }
+
+    #[test]
+    fn files_are_listed_before_their_headers_are_read() {
+        let dir = TempDir::new("listed");
+        let samples = dir.0.join("Samples");
+        for name in ["Drums/Kick 01.wav", "Drums/Snare 01.wav", "Keys/Pad.wav"] {
+            wav(&samples.join(name), 100);
+        }
+        let queue = Arc::new(Queue::new(1));
+        let file = dir.0.join(LIBRARY_FILE);
+        let mut library = Library::open(Some(file), None, queue.clone(), None);
+        library.wait();
+        library.add_folder(&samples).unwrap();
+        queue.wait();
+        // Holds the queue's one thread once the scan is done, so no header
+        // is read.
+        let (release, released) = mpsc::channel::<()>();
+        queue.add(Priority::Now, move || {
+            let _ = released.recv();
+        });
+        library.tick();
+        assert!(library.scanning().is_empty());
+        assert_eq!(library.reading(), [(samples.clone(), 3)]);
+        assert_eq!(names(&library.search("kick", 10)), ["Kick 01.wav"]);
+        let files = library.index().places()[0].files();
+        assert!(files.iter().all(|file| file.unread && file.audio.is_none()));
+        // Find Similar has them too.
+        let kick = samples.join("Drums").join("Kick 01.wav");
+        let like = library.find_similar(&kick, 10).unwrap();
+        assert_eq!(names(&like), ["Snare 01.wav"]);
+
+        release.send(()).unwrap();
+        library.wait();
+        assert!(library.reading().is_empty());
+        let files = library.index().places()[0].files();
+        let frames: Vec<Option<u64>> = files.iter().map(|f| f.audio.map(|a| a.frames)).collect();
+        assert_eq!(frames, [Some(100); 3]);
+        assert!(files.iter().all(|file| !file.unread));
+    }
+
+    #[test]
+    fn headers_left_unread_when_the_app_closed_are_read_on_the_next_start() {
+        let dir = TempDir::new("unread");
+        let samples = dir.0.join("Samples");
+        wav(&samples.join("Kick.wav"), 100);
+        wav(&samples.join("Snare.wav"), 200);
+        // As a library closed while it read the snare's header leaves it.
+        let record = |name: &str| {
+            let metadata = fs::metadata(samples.join(name)).unwrap();
+            let modified = metadata.modified().unwrap();
+            let since = modified.duration_since(std::time::UNIX_EPOCH).unwrap();
+            Record::found(name, metadata.len(), since.as_millis() as u64)
+        };
+        let mut kick = record("Kick.wav");
+        // What it read, which isn't read again.
+        let read = header(&samples.join("Kick.wav")).unwrap();
+        kick.audio = Some(AudioFacts { frames: 1, ..read });
+        kick.unread = false;
+        let mut index = Index::new();
+        index.add_place(samples.clone());
+        index.set_files(&samples, vec![kick, record("Snare.wav")]);
+        index.write(&dir.0.join(LIBRARY_FILE)).unwrap();
+
+        let library = open(&dir.0);
+        let files = library.index().places()[0].files();
+        assert_eq!(files[0].audio.map(|a| a.frames), Some(1));
+        assert_eq!(files[1].audio.map(|a| a.frames), Some(200));
+        assert!(!files[1].unread);
+        // And they're kept.
+        drop(library);
+        let index = Index::read(&dir.0.join(LIBRARY_FILE)).unwrap();
+        assert!(index.places()[0].files().iter().all(|file| !file.unread));
+    }
+
+    #[test]
+    fn headers_read_while_the_index_saves_wait_for_it() {
+        let mut library = Library::none();
+        let folder = PathBuf::from("Samples");
+        library.index.add_place(folder.clone());
+        let files = vec![
+            Record::found("Kick.wav", 1, 1),
+            Record::found("Snare.wav", 1, 1),
+        ];
+        library.index.set_files(&folder, files);
+        let reading = Reading {
+            id: 3,
+            left: 2,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        library.readings.insert(folder.clone(), reading);
+        library.saving = true;
+        let facts = AudioFacts {
+            format: musicable_library::Format::Wav,
+            sample_rate: 44_100,
+            channels: 1,
+            frames: 10,
+        };
+        library.headers_read(
+            folder.clone(),
+            3,
+            vec![("Kick.wav".to_owned(), Some(facts))],
+        );
+        // One from a reading stopped before.
+        library.headers_read(
+            folder.clone(),
+            2,
+            vec![("Snare.wav".to_owned(), Some(facts))],
+        );
+        assert!(library.index().places()[0].files()[0].unread);
+        library.done.send(Done::Saved(Ok(()))).unwrap();
+        library.tick();
+        let files = library.index().places()[0].files();
+        assert_eq!((files[0].audio, files[0].unread), (Some(facts), false));
+        assert!(files[1].unread);
+        assert_eq!(library.reading(), [(folder.clone(), 1)]);
+        assert!(library.changed.is_none());
+        // Saved once they're all read.
+        library.headers_read(folder, 3, vec![("Snare.wav".to_owned(), None)]);
+        assert!(library.reading().is_empty());
+        assert!(library.changed.is_some());
+    }
+
+    #[test]
     fn a_scan_overtaken_leaves_the_scan_after_it_running() {
         let mut library = Library::none();
         let folder = PathBuf::from("Samples");
@@ -1065,6 +1432,7 @@ mod tests {
             id: 2,
             found: Arc::new(AtomicUsize::new(10)),
             cancel: Arc::new(AtomicBool::new(false)),
+            old: Arc::default(),
         };
         library.scans.insert(folder.clone(), running);
         library.scanned(&folder, 1, Ok(None));

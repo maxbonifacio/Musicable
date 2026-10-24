@@ -265,8 +265,10 @@ impl Searcher {
     /// its. Until analysis gives files an embedding, names and lengths are
     /// all there is to go on. Numbers shorter than three digits aren't words
     /// here: "Kick 01" and "Kick 02" share "kick", but not "01", while "808"
-    /// is a word. Files that aren't audio Musicable reads are left out. Call
-    /// [`update`](Self::update) with the index first.
+    /// is a word. Files that aren't audio Musicable reads are left out, but
+    /// not those whose headers are still to be read, which come after those
+    /// whose lengths are known. Call [`update`](Self::update) with the index
+    /// first.
     pub fn similar(&self, index: &Index, like: FileId, limit: usize) -> Vec<Hit> {
         let Some(record) = index.get(like) else {
             return Vec::new();
@@ -280,7 +282,7 @@ impl Searcher {
             }
             for (f, (key, other)) in prepared.keys.iter().zip(place.files()).enumerate() {
                 let file = FileId { place: p, file: f };
-                if file == like || other.audio.is_none() {
+                if file == like || (other.audio.is_none() && !other.unread) {
                     continue;
                 }
                 // A bit for each of the words it shares.
@@ -656,6 +658,8 @@ mod tests {
             Record::new("Bass/808 Sub.wav", 1, 1, audio(1.0)),
             Record::new("Bass/Pluck.wav", 1, 1, audio(1.0)),
             Record::new("Drums/Kick Broken.wav", 1, 1, None),
+            // Its header is still to be read.
+            Record::found("Drums/Kick Unread.wav", 1, 1),
         ];
         index.set_files(&folder, files);
         let like = index.find(&folder.join("Drums/Kick 808 01.wav")).unwrap();
@@ -671,6 +675,7 @@ mod tests {
             [
                 "Drums/Kick 808 02.wav",
                 "Drums/Kick Acoustic.wav",
+                "Drums/Kick Unread.wav",
                 "Bass/808 Sub.wav",
                 "Drums/Snare.wav",
             ]
