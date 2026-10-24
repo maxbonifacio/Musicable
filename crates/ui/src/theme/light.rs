@@ -48,6 +48,7 @@ impl Theme {
                 rgb(210, 112, 182),
                 rgb(176, 176, 176),
             ],
+            master: gray(110),
             clip_body: alpha(255, 255, 255, 90),
             clip_text: gray(20),
             clip_selected: gray(20),

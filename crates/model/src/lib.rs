@@ -159,6 +159,16 @@ pub enum Chain {
     Master,
 }
 
+impl Chain {
+    /// The track it's on, unless it's the master's.
+    pub fn track(self) -> Option<TrackId> {
+        match self {
+            Self::Track(id) => Some(id),
+            Self::Master => None,
+        }
+    }
+}
+
 /// A plugin format Musicable hosts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PluginFormat {

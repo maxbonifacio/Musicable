@@ -103,7 +103,7 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
     // A click on the track's header selects it, and the devices panel
     // shows its devices, none yet. Add Device opens the plugin browser,
     // with what the last scan found.
-    harness.get_by_label("Select a track to see its devices, or pick Master.");
+    harness.get_by_label("Select a track, or the master track, to see its devices.");
     let header = harness.get_by_label("Track Keys").rect();
     click_at(
         &mut harness,

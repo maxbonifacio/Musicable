@@ -10,8 +10,11 @@
 //! engine rebuilds its graph once. Context menus list commands from the
 //! registry, with their arguments taken from what was clicked.
 //!
+//! The master track's row is pinned along the bottom, under the tracks,
+//! and is selected as they are, for the devices panel to show its devices.
+//!
 //! A track can show automation lanes under its lanes, and the master's go
-//! under the tracks. Their points are added, moved and deleted as Live's
+//! under its row. Their points are added, moved and deleted as Live's
 //! breakpoints are, and a drag draws over them a step of the grid at a
 //! time, as Live's Draw Mode does. Each edit sets the lane's points with
 //! one command.
@@ -26,8 +29,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{
-    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rect, Response, RichText,
-    Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
+    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rangef, Rect, Response,
+    RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
@@ -54,6 +57,10 @@ pub(crate) use header::{HeaderPart, register};
 /// How much a point of the wheel, or of a drag up or down the ruler,
 /// zooms: the zoom changes by `e` to the power of this many points.
 const ZOOM_SPEED: f32 = 0.005;
+/// The most of the lanes' height the master's row and its automation lanes
+/// take, as long as that leaves the tracks a track's height. When they need
+/// more, they scroll on their own.
+const MASTER_SHARE: f32 = 0.5;
 const SCRUB_ZOOM_SPEED: f32 = 0.01;
 /// The most points an automation lane names for screen readers, of those
 /// in sight. A lane drawn freely can have thousands.
@@ -72,6 +79,9 @@ pub(crate) struct Arrangement {
     /// Set when the user scrolls away from the playhead while it plays, so
     /// Follow doesn't scroll back until the playhead is in sight again.
     follow_paused: bool,
+    /// How far the master's row and lanes are scrolled up, when they don't
+    /// all fit.
+    master_scroll: f32,
 }
 
 /// The parts of the arrangement that take the mouse.
@@ -91,8 +101,12 @@ enum Hit {
         part: Part,
     },
     Lane(TrackId),
-    /// Under the last track.
+    /// Under the last track, over the master's.
     Empty,
+    /// The master track's lane, under the tracks.
+    Master,
+    /// The master track's header.
+    MasterHeader,
     Ruler,
     Strip,
     LoopBrace,
@@ -134,8 +148,9 @@ impl Hit {
                 Part::Edge(_) => Target::ClipEdge,
                 Part::Fade(_) => Target::FadeHandle,
             },
-            Hit::Lane(_) => Target::Lane,
+            Hit::Lane(_) | Hit::Master => Target::Lane,
             Hit::Empty => Target::Empty,
+            Hit::MasterHeader => Target::TrackHeader,
             Hit::Ruler => Target::Ruler,
             Hit::Strip => Target::Strip,
             Hit::LoopBrace => Target::LoopBrace,
@@ -173,6 +188,23 @@ impl Hit {
             } => Some(track),
             _ => None,
         }
+    }
+
+    /// Whether it's on the master track: its row or its automation lanes.
+    fn on_master(self) -> bool {
+        matches!(
+            self,
+            Hit::Master
+                | Hit::MasterHeader
+                | Hit::Automation {
+                    chain: Chain::Master,
+                    ..
+                }
+                | Hit::AutomationHeader {
+                    chain: Chain::Master,
+                    ..
+                }
+        )
     }
 
     /// The automation lane it's on, if it's on one.
@@ -346,8 +378,21 @@ impl TakeRow {
     }
 }
 
-/// An automation lane, under its track's lanes, or under the tracks for
-/// the master's.
+/// The master track's row, under the tracks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MasterRow {
+    top: f32,
+    height: f32,
+}
+
+impl MasterRow {
+    fn bottom(&self) -> f32 {
+        self.top + self.height
+    }
+}
+
+/// An automation lane, under its track's lanes, or under the master's row
+/// for the master's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AutoRow {
     /// Its track's place in the project's tracks: `None` for the master's.
@@ -406,11 +451,20 @@ struct Layout {
     rows: Vec<Row>,
     /// The lanes of the takes of the tracks that show them, top to bottom.
     takes: Vec<TakeRow>,
-    /// The automation lanes shown, top to bottom.
+    /// The tracks' automation lanes shown, top to bottom.
     automation: Vec<AutoRow>,
     /// How tall the tracks and their take and automation lanes are
     /// together.
     content: f32,
+    /// Where the master's part of the lanes and the headers starts: it's
+    /// pinned along their bottom, and the tracks scroll over it.
+    master_top: f32,
+    /// The master's row, and its automation lanes under it.
+    master: MasterRow,
+    master_automation: Vec<AutoRow>,
+    /// How far the master's part is scrolled, and how far it can be.
+    master_scroll: f32,
+    master_overflow: f32,
 }
 
 impl Layout {
@@ -420,6 +474,7 @@ impl Layout {
         project: &Project,
         editor: &Editor,
         viewport: Viewport,
+        master_scroll: f32,
     ) -> Self {
         let split = (rect.right() - theme.header_width).max(rect.left());
         let ruler_bottom = (rect.top() + theme.ruler_height).min(rect.bottom());
@@ -435,18 +490,19 @@ impl Layout {
         let mut takes = Vec::new();
         let mut automation = Vec::new();
         let mut y = 0.0;
-        let mut lanes_of = |chain: Chain, track_index: Option<usize>, y: &mut f32| {
-            for &param in editor.automation.get(&chain).into_iter().flatten() {
-                automation.push(AutoRow {
-                    track_index,
-                    chain,
-                    param,
-                    top: *y,
-                    height: theme.automation_height,
-                });
-                *y += theme.automation_height;
-            }
-        };
+        let lanes_of =
+            |chain: Chain, track_index: Option<usize>, y: &mut f32, to: &mut Vec<AutoRow>| {
+                for &param in editor.automation.get(&chain).into_iter().flatten() {
+                    to.push(AutoRow {
+                        track_index,
+                        chain,
+                        param,
+                        top: *y,
+                        height: theme.automation_height,
+                    });
+                    *y += theme.automation_height;
+                }
+            };
         for (index, track) in project.tracks.iter().enumerate() {
             let height = editor
                 .track_heights
@@ -473,12 +529,35 @@ impl Layout {
                     y += theme.take_height;
                 }
             }
-            lanes_of(Chain::Track(track.id), Some(index), &mut y);
+            lanes_of(Chain::Track(track.id), Some(index), &mut y, &mut automation);
         }
-        lanes_of(Chain::Master, None, &mut y);
+        // The master's row and lanes, along the bottom, as much of them as
+        // fits in their share. In a short arrangement the tracks come first.
+        let mut master_automation = Vec::new();
+        let mut master_content = theme.track_height;
+        lanes_of(
+            Chain::Master,
+            None,
+            &mut master_content,
+            &mut master_automation,
+        );
+        let master_height = master_content
+            .min(lanes.height() * MASTER_SHARE)
+            .min((lanes.height() - theme.track_height).max(0.0));
+        let master_top = lanes.bottom() - master_height;
+        let master_overflow = master_content - master_height;
+        let master_scroll = master_scroll.clamp(0.0, master_overflow);
+        let master = MasterRow {
+            top: master_top - master_scroll,
+            height: theme.track_height,
+        };
+        for lane in &mut master_automation {
+            lane.top += master.top;
+        }
+        let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=master_top);
         let viewport = Viewport {
             width: lanes.width(),
-            top: viewport.top.clamp(0.0, lowest_top(y, theme, lanes)),
+            top: viewport.top.clamp(0.0, lowest_top(y, theme, tracks)),
             ..viewport
         };
         for row in &mut rows {
@@ -501,12 +580,42 @@ impl Layout {
             takes,
             automation,
             content: y,
+            master_top,
+            master,
+            master_automation,
+            master_scroll,
+            master_overflow,
         }
     }
 
     /// Where the last track, or the last lane under it, ends.
     fn bottom(&self) -> f32 {
         self.lanes.top() - self.viewport.top + self.content
+    }
+
+    /// The tracks' part of the lanes, or of the headers, across `x`: over
+    /// the master's.
+    fn tracks_part(&self, x: Rangef) -> Rect {
+        Rect::from_x_y_ranges(x, self.lanes.top()..=self.master_top)
+    }
+
+    /// The master's part of the lanes, or of the headers, across `x`.
+    fn master_part(&self, x: Rangef) -> Rect {
+        Rect::from_x_y_ranges(x, self.master_top..=self.lanes.bottom())
+    }
+
+    /// The part the lanes of `chain` are in, across `x`: the master's or
+    /// the tracks'.
+    fn part_of(&self, chain: Chain, x: Rangef) -> Rect {
+        match chain {
+            Chain::Master => self.master_part(x),
+            Chain::Track(_) => self.tracks_part(x),
+        }
+    }
+
+    /// Whether `y` is in the master's part.
+    fn in_master(&self, y: f32) -> bool {
+        y >= self.master_top
     }
 
     fn x_of(&self, at: Beats) -> f32 {
@@ -519,6 +628,9 @@ impl Layout {
 
     /// The row at `y`, if a track is there.
     fn row_at(&self, y: f32) -> Option<&Row> {
+        if self.in_master(y) {
+            return None;
+        }
         let i = self.rows.partition_point(|row| row.bottom() <= y);
         self.rows.get(i).filter(|row| row.top <= y)
     }
@@ -532,6 +644,9 @@ impl Layout {
 
     /// The take lane at `y`, if there's one there.
     fn take_at(&self, y: f32) -> Option<&TakeRow> {
+        if self.in_master(y) {
+            return None;
+        }
         let i = self.takes.partition_point(|take| take.bottom() <= y);
         self.takes.get(i).filter(|take| take.top <= y)
     }
@@ -543,28 +658,41 @@ impl Layout {
             .partition_point(|take| take.bottom() <= self.lanes.top());
         self.takes[first..]
             .iter()
-            .take_while(|take| take.top < self.lanes.bottom())
+            .take_while(|take| take.top < self.master_top)
     }
 
-    /// The automation lane at `y`, if there's one there.
+    /// The automation lane at `y`, if there's one there: a track's, or the
+    /// master's in the master's part.
     fn automation_at(&self, y: f32) -> Option<&AutoRow> {
-        let i = self.automation.partition_point(|lane| lane.bottom() <= y);
-        self.automation.get(i).filter(|lane| lane.top <= y)
+        let lanes = match self.in_master(y) {
+            true => &self.master_automation,
+            false => &self.automation,
+        };
+        let i = lanes.partition_point(|lane| lane.bottom() <= y);
+        lanes.get(i).filter(|lane| lane.top <= y)
     }
 
-    /// The automation lanes in sight, top to bottom.
+    /// The automation lanes in sight: the tracks', top to bottom, then the
+    /// master's.
     fn visible_automation(&self) -> impl Iterator<Item = &AutoRow> {
         let first = self
             .automation
             .partition_point(|lane| lane.bottom() <= self.lanes.top());
-        self.automation[first..]
+        let tracks = self.automation[first..]
             .iter()
-            .take_while(|lane| lane.top < self.lanes.bottom())
+            .take_while(|lane| lane.top < self.master_top);
+        let master = self
+            .master_automation
+            .iter()
+            .filter(|lane| lane.bottom() > self.master_top && lane.top < self.lanes.bottom());
+        tracks.chain(master)
     }
 
     /// The automation lane of `param`, if it's shown.
     fn automation_lane(&self, param: ParamAddress) -> Option<&AutoRow> {
-        self.automation.iter().find(|lane| lane.param == param)
+        (self.automation.iter())
+            .chain(&self.master_automation)
+            .find(|lane| lane.param == param)
     }
 
     fn row(&self, id: TrackId) -> Option<&Row> {
@@ -578,7 +706,7 @@ impl Layout {
             .partition_point(|row| row.bottom() <= self.lanes.top());
         self.rows[first..]
             .iter()
-            .take_while(|row| row.top < self.lanes.bottom())
+            .take_while(|row| row.top < self.master_top)
     }
 
     /// Where `clip` is drawn on `row`, and its title bar and body.
@@ -679,13 +807,16 @@ impl Scene<'_> {
     }
 
     /// Where something dragged from the browser goes if it's let go at
-    /// `pos`: on the track there, from the time there over the lanes, or on
-    /// a new track under the tracks.
+    /// `pos`: on the track there, from the time there over the lanes, on a
+    /// new track under the tracks, or on the master.
     fn destination(&self, pos: Pos2) -> Option<Destination> {
         let layout = &self.layout;
         let in_lanes = layout.lanes.contains(pos);
         if !in_lanes && !layout.headers.contains(pos) {
             return None;
+        }
+        if layout.in_master(pos.y) {
+            return Some(Destination::Chain(Some(Chain::Master)));
         }
         let at = in_lanes.then(|| self.snapped(pos.x));
         let row = (layout.row_at(pos.y).map(|row| (row.index, row.id))).or_else(|| {
@@ -723,6 +854,7 @@ impl Scene<'_> {
                             chain: lane.chain,
                             param: lane.param,
                         },
+                        None if self.layout.in_master(pos.y) => Hit::MasterHeader,
                         None => Hit::Empty,
                     },
                 },
@@ -731,6 +863,16 @@ impl Scene<'_> {
     }
 
     fn hit_lanes(&self, pos: Pos2) -> Hit {
+        if self.layout.in_master(pos.y) {
+            return match self.layout.automation_at(pos.y) {
+                Some(lane) => Hit::Automation {
+                    chain: lane.chain,
+                    param: lane.param,
+                    part: self.envelope_part(lane, pos),
+                },
+                None => Hit::Master,
+            };
+        }
         if let Some(lane) = self.layout.take_at(pos.y) {
             let take = &self.project().tracks[lane.track_index].takes[lane.index];
             // The last drawn is on top.
@@ -1215,6 +1357,8 @@ impl Scene<'_> {
                     length: length.clamp(Beats::ZERO, room.max(Beats::ZERO)),
                 })
             }
+            // There's no time to select on the master.
+            (MouseAction::SelectTime, hit) if hit.on_master() => None,
             (MouseAction::SelectTime, hit) => {
                 let tracks = &project.tracks;
                 let from = match hit.track() {
@@ -1514,7 +1658,15 @@ impl Arrangement {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, Sense::hover());
         let editor = view.editor;
-        let layout = Layout::new(rect, theme, view.project, editor, editor.viewport);
+        let master_scroll = self.master_scroll;
+        let layout = Layout::new(
+            rect,
+            theme,
+            view.project,
+            editor,
+            editor.viewport,
+            master_scroll,
+        );
         let pointer = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|&pos| rect.contains(pos) && ui.rect_contains_pointer(rect));
@@ -1563,8 +1715,12 @@ impl Arrangement {
         self.follow(&scene, &mut viewport);
         if viewport != editor.viewport {
             set_viewport(actions, &viewport);
-            scene.layout = Layout::new(rect, theme, view.project, editor, viewport);
         }
+        if viewport != editor.viewport || self.master_scroll != master_scroll {
+            let scroll = self.master_scroll;
+            scene.layout = Layout::new(rect, theme, view.project, editor, viewport, scroll);
+        }
+        self.master_scroll = scene.layout.master_scroll;
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene, plan.as_ref());
         let plan = plan.or(self.landed.take());
@@ -1629,7 +1785,9 @@ impl Arrangement {
                     _ => None,
                 };
                 let part = match hit {
-                    Hit::Header(_) | Hit::TrackEdge(_) => header::part_at(&columns, pos.x),
+                    Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader => {
+                        header::part_at(&columns, pos.x)
+                    }
                     _ => None,
                 };
                 let spot = Spot {
@@ -1784,6 +1942,10 @@ impl Arrangement {
                     .with("toggle", toggle);
                 run(actions, edit::SELECT_TRACKS, args);
             }
+            // The master is selected alone.
+            (MouseAction::Select | MouseAction::ToggleSelect, Hit::MasterHeader) => {
+                run(actions, edit::SELECT_MASTER, Args::new());
+            }
             (MouseAction::PlaceMarker, Hit::Lane(track)) => {
                 select_time(actions, vec![track]);
                 marker(actions);
@@ -1792,24 +1954,27 @@ impl Arrangement {
                 select_time(actions, Vec::new());
                 marker(actions);
             }
-            (MouseAction::PlaceMarker, Hit::Automation { chain, .. }) => {
-                let tracks = match chain {
-                    Chain::Track(track) => vec![track],
-                    Chain::Master => Vec::new(),
-                };
-                select_time(actions, tracks);
+            (MouseAction::PlaceMarker, hit) if hit.on_master() => {
+                run(actions, edit::SELECT_MASTER, Args::new());
                 marker(actions);
             }
             (
-                MouseAction::Select,
-                Hit::AutomationHeader {
+                MouseAction::PlaceMarker,
+                Hit::Automation {
                     chain: Chain::Track(track),
                     ..
                 },
             ) => {
-                let args = Args::new().with("tracks", vec![track]);
-                run(actions, edit::SELECT_TRACKS, args);
+                select_time(actions, vec![track]);
+                marker(actions);
             }
+            (MouseAction::Select, Hit::AutomationHeader { chain, .. }) => match chain {
+                Chain::Track(track) => {
+                    let args = Args::new().with("tracks", vec![track]);
+                    run(actions, edit::SELECT_TRACKS, args);
+                }
+                Chain::Master => run(actions, edit::SELECT_MASTER, Args::new()),
+            },
             (MouseAction::AddPoint, Hit::Automation { param, part, .. }) => {
                 let Some(lane) = scene.layout.automation_lane(param) else {
                     return false;
@@ -2050,7 +2215,8 @@ impl Arrangement {
         buttons
     }
 
-    /// Scrolls and zooms with the wheel, over the tracks and the ruler.
+    /// Scrolls and zooms with the wheel, over the tracks and the ruler. Over
+    /// the master's part, when its lanes don't all fit, it scrolls them.
     fn wheel(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) {
         let layout = &scene.layout;
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
@@ -2065,6 +2231,7 @@ impl Arrangement {
         let line = ui.ctx().options(|o| o.input_options.line_scroll_speed);
         let x = pos.x.clamp(layout.lanes.left(), layout.lanes.right());
         let at = layout.viewport.beats_at(x - layout.lanes.left());
+        let master = layout.in_master(pos.y) && layout.master_overflow > 0.0;
         let mut wheel = Vec::new();
         let before = *viewport;
         ui.input(|i| {
@@ -2091,7 +2258,10 @@ impl Arrangement {
             let target = Target::Timeline;
             match scene.mouse.action(target, Gesture::Wheel, modifiers(mods)) {
                 Some(MouseAction::Scroll) => {
-                    viewport.top -= delta.y;
+                    match master {
+                        true => self.master_scroll -= delta.y,
+                        false => viewport.top -= delta.y,
+                    }
                     viewport.start -= viewport.beats_in(delta.x);
                 }
                 Some(MouseAction::ScrollSideways) => {
@@ -2105,8 +2275,10 @@ impl Arrangement {
             }
         }
         viewport.start = viewport.start.max(Beats::ZERO);
-        let lowest = lowest_top(layout.content, scene.theme, layout.lanes);
+        let tracks = layout.tracks_part(layout.lanes.x_range());
+        let lowest = lowest_top(layout.content, scene.theme, tracks);
         viewport.top = viewport.top.clamp(0.0, lowest);
+        self.master_scroll = self.master_scroll.clamp(0.0, layout.master_overflow);
         let sideways = viewport.start != before.start || viewport.zoom != before.zoom;
         if sideways && scene.view.playback.playing {
             self.follow_paused = true;
@@ -2269,10 +2441,11 @@ struct Button {
     colour: Color32,
 }
 
-/// How far down the tracks scroll, when they and their take lanes are
-/// `content` tall: until a track's height is left under the last.
-fn lowest_top(content: f32, theme: &Theme, lanes: Rect) -> f32 {
-    (content + theme.track_height - lanes.height()).max(0.0)
+/// How far down the tracks scroll in `tracks`, their part of the lanes,
+/// when they and their take lanes are `content` tall: until a track's
+/// height is left under the last.
+fn lowest_top(content: f32, theme: &Theme, tracks: Rect) -> f32 {
+    (content + theme.track_height - tracks.height()).max(0.0)
 }
 
 /// The ruler, the lanes and the headers together.
@@ -2299,6 +2472,9 @@ fn select_for_menu(scene: &Scene<'_>, spot: Spot, actions: &mut Vec<Action>) {
                 Args::new().with("tracks", vec![track]),
             );
         }
+        Hit::Master | Hit::MasterHeader if scene.editor().selected_track != Some(Chain::Master) => {
+            run(actions, edit::SELECT_MASTER, Args::new());
+        }
         Hit::Lane(track) if selection.time.is_none() => {
             let args = Args::new()
                 .with("start", spot.at)
@@ -2322,11 +2498,13 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
     let project = scene.project();
     let selection = &scene.editor().selection;
     let visible = layout.viewport.visible();
+    let headers = layout.headers.x_range();
+    let lanes = layout.lanes.x_range();
     for row in layout.visible_rows() {
         let track = &project.tracks[row.index];
-        let header = Rect::from_x_y_ranges(layout.headers.x_range(), row.top..=row.bottom());
+        let header = Rect::from_x_y_ranges(headers, row.top..=row.bottom());
         let response = ui.interact(
-            header.intersect(layout.headers),
+            header.intersect(layout.tracks_part(headers)),
             id.with(("track", track.id)),
             Sense::hover(),
         );
@@ -2341,7 +2519,7 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
             let rect = layout
                 .clip(scene.theme, row, clip)
                 .rect
-                .intersect(layout.lanes);
+                .intersect(layout.tracks_part(lanes));
             let response = ui.interact(rect, id.with(("clip", clip.id)), Sense::hover());
             let selected = selection.clips.contains(&clip.id);
             response.widget_info(|| {
@@ -2349,12 +2527,21 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
             });
         }
     }
+    let master = layout.master;
+    let header = Rect::from_x_y_ranges(headers, master.top..=master.bottom());
+    let response = ui.interact(
+        header.intersect(layout.master_part(headers)),
+        id.with("master"),
+        Sense::hover(),
+    );
+    let selected = scene.editor().selected_track == Some(Chain::Master);
+    response.widget_info(|| WidgetInfo::selected(Role::Row, true, selected, "Master track"));
     for lane in layout.visible_takes() {
         let track = &project.tracks[lane.track_index];
         let take = &track.takes[lane.index];
-        let header = Rect::from_x_y_ranges(layout.headers.x_range(), lane.top..=lane.bottom());
+        let header = Rect::from_x_y_ranges(headers, lane.top..=lane.bottom());
         let response = ui.interact(
-            header.intersect(layout.headers),
+            header.intersect(layout.tracks_part(headers)),
             id.with(("take", take.id)),
             Sense::hover(),
         );
@@ -2364,9 +2551,9 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
     }
     for lane in layout.visible_automation() {
         let name = scene.lane_label(lane);
-        let header = Rect::from_x_y_ranges(layout.headers.x_range(), lane.top..=lane.bottom());
+        let header = Rect::from_x_y_ranges(headers, lane.top..=lane.bottom());
         let response = ui.interact(
-            header.intersect(layout.headers),
+            header.intersect(layout.part_of(lane.chain, headers)),
             id.with(("automation", lane.param)),
             Sense::hover(),
         );
@@ -2391,7 +2578,7 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
             let at = pos2(layout.x_of(point.at), lane.y_of(scene.theme, unit));
             let rect = Rect::from_center_size(at, vec2(2.0, 2.0) * scene.theme.point);
             let response = ui.interact(
-                rect.intersect(layout.lanes),
+                rect.intersect(layout.part_of(lane.chain, lanes)),
                 id.with(("point", lane.param, i)),
                 Sense::hover(),
             );

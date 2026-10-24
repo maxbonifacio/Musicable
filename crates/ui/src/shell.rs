@@ -319,7 +319,7 @@ struct Followed {
     /// The clip the piano roll shows, and whether it's selected.
     clip: Option<ClipId>,
     selected: bool,
-    track: Option<TrackId>,
+    track: Option<Chain>,
 }
 
 /// A rename in progress.
@@ -389,7 +389,8 @@ impl Shell {
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
         });
-        let chain = (self.panels.devices).chain(view.project, view.editor.selected_track);
+        // The devices panel shows the selected track's devices.
+        let chain = view.editor.selected_track;
         let drawn = actions.len();
         let mut draw = Draw {
             registry: &self.registry,
@@ -1931,7 +1932,7 @@ mod tests {
         // A hidden piano roll stays hidden.
         let select = |harness: &mut Harness, track, clips: &[ClipId]| {
             let editor = &mut harness.state_mut().editor;
-            editor.selected_track = Some(track);
+            editor.selected_track = Some(Chain::Track(track));
             editor.selection = musicable_commands::editor::Selection::clips(clips.to_vec());
             if let Some(&clip) = clips.first() {
                 editor.piano_roll.clip = Some(clip);

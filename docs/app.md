@@ -196,7 +196,8 @@ That's what `ParallelOptions::inline_below` is for
   the master's on the right (see [The mixer](#the-mixer)). **View > Mixer**
   (Ctrl+Alt+M) hides or shows it.
 - **The devices panel** is under the mixer: the selected track's devices,
-  or the master's, with Add Device to open the browser's devices (see
+  the master's while the master track is selected, with its name, and Add
+  Device to open the browser's devices (see
   [Built-in devices](#built-in-devices) and [Plugins](#plugins)). **View >
   Devices** (Ctrl+Alt+L) hides or shows it.
 - **The piano roll** is in a tab beside the devices panel, as Live's clip
@@ -398,6 +399,15 @@ undo history and the engine rebuilds its graph once.
   ([Configurable views](#configurable-views)). A selected track's header
   and lane are lighter. The corner over the headers says what the grid is,
   such as "Grid 1/16".
+- **The master track** is pinned along the bottom, as Live's Main track
+  is, and the tracks scroll over it, with room under the last one for a
+  new track. Its header has its name, A and its meter, the same parts as
+  the tracks' but for mute, solo and arm. Clicking its header or its lane
+  selects it, alone, so the devices panel shows the master's devices, and
+  **Edit > Select Master Track** does the same. Devices dragged onto it go
+  on the master. With its automation lanes it takes at most half the
+  arrangement's height, and the wheel over it scrolls them when they need
+  more; in a short arrangement the tracks keep a track's height first.
 - **Takes** show in lanes under their track, each named in its header,
   after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
   track header's menu. A take's clips show their waveforms or their notes,
@@ -412,8 +422,9 @@ undo history and the engine rebuilds its graph once.
 - **Automation** shows in lanes under a track's lanes after the A button in
   its header, **Automation > Show/Hide Automation** (A), or the same in the
   header's menu: a lane for each parameter the track automates, or else
-  one for its volume. The master's lanes go under the last track; the
-  master strip's controls show them, in the mixer. A lane's header names
+  one for its volume. The master's lanes go under its row, after its A
+  button, or its controls' menus in the mixer's master strip. A lane's
+  header names
   the parameter, with its value at the playhead, or "Overridden" once
   someone moved its control by hand, and has three buttons: ▾ chooses the
   parameter the lane shows (the track's volume, pan and sends, then each
@@ -439,30 +450,31 @@ page changes it ([your mouse map file](#settings-and-your-keymap)):
 | | Drag | Selects time, as on an empty lane |
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
 | A fade handle | Drag | Makes the fade longer or shorter |
-| A lane | Click | Selects the track and puts the start marker there |
+| A lane | Click | Selects the track, or the master, and puts the start marker there |
 | | Drag | Selects the time dragged over, on the tracks dragged over |
 | The ruler | Click | Puts the start marker and the playhead there |
 | | Drag | Zooms up and down, and scrolls sideways |
 | The ruler's strip | Drag | Draws a new loop region, and turns looping on |
 | The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
-| A track's header | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it |
+| A track's header | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header selects the master |
 | A track's bottom edge | Drag | Makes the track taller or shorter |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
-| An automation lane | Click; double-click | Selects the track and puts the start marker there; adds a point there |
+| An automation lane | Click; double-click | Selects the track, or the master, and puts the start marker there; adds a point there |
 | | Drag; Alt-drag | Draws a value for each step of the grid crossed, as Live's Draw Mode does; draws freely, off the grid, as it does with Snap to Grid off |
 | An automation lane's line | Click; drag | Adds a point on the line, on the grid; moves that stretch of the line, with its points, up or down |
 | An automation point | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
-| An automation lane's header | Click | Selects the track |
+| An automation lane's header | Click | Selects the track, or the master |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
 Escape cancels a drag. A right-click opens a context menu of commands from
 the registry for what was clicked: Cut, Copy, Duplicate, Split and the grid
 on a clip, Insert MIDI Clip and Add Locator on a lane, the new tracks on a
-header, Locate and Toggle Loop on the ruler, Rename and Delete Locator on a
-locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
+header, Add Locator and Show/Hide Automation on the master track's lane and
+Show/Hide Automation on its header, Locate and Toggle Loop on the ruler,
+Rename and Delete Locator on a locator, Comp, Rename, Delete Take and Show/Hide Take Lanes on a take,
 and Re-Enable Automation, Clear Automation and Hide Automation Lane on an
 automation lane. Each shows its keys, and takes its arguments from where
 the menu was opened: the clip, the track, the parameter, or the position.
@@ -1151,17 +1163,19 @@ kind and its format. A plugin installed in both formats is listed in each,
 with its format after its name: "Surge XT (CLAP)" and "Surge XT (VST3)".
 The search field finds plugins by name or vendor, the
 best matches first. Double-click a device or a plugin to put it at the end
-of the selected track's devices, or the master's while the devices panel
-shows those. Or drag it: into the devices panel, onto a track for the end of
-its devices, or below the tracks for a new track named after it, a MIDI
+of the selected track's devices, the master's while the master track is
+selected. Or drag it: into the devices panel, onto a track for the end of
+its devices, onto the master track for the master's, or below the tracks
+for a new track named after it, a MIDI
 track for an instrument and an audio track for an effect. The list's foot
 says how many plugins there are, and has Rescan, or says "Scanning..."
 while a scan runs.
 
 **The devices panel** shows the devices of the selected track, which a
 click on its header selects, in the order the signal goes through them,
-left to right. The buttons above them pick the selected track's or the
-master's. A built-in device has its name and its controls
+left to right, with the track's name over them. Clicking the master track's
+header, at the bottom of the arrangement, shows the master's. A built-in
+device has its name and its controls
 ([above](#built-in-devices)). A plugin device has its name, its kind and
 format ("Instrument · CLAP"), and:
 
@@ -1990,7 +2004,8 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   points take whole values, but the value passes through the ones between
   two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
-  devices in the mixer.
+  devices in the mixer. Resizing the master track's row, selecting time on
+  it, and selecting the master by clicking its mixer strip.
 - Moving devices along a chain, and a device's parameters in the devices
   panel.
 - In the browser: analysis, which will tag sounds by how they sound and

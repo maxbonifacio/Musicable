@@ -1,12 +1,14 @@
 //! Drawing the arrangement: the lanes with their clips, and the takes' and
-//! automation lanes under the tracks that show them, the ruler over them,
-//! the tracks' headers, and the corner between the ruler and the headers.
-//! Only what's in sight is drawn.
+//! automation lanes under the tracks that show them, the master's row and
+//! its lanes along the bottom, the ruler over them, the tracks' headers,
+//! and the corner between the ruler and the headers. Only what's in sight
+//! is drawn, and the tracks only in their part, over the master's.
 
 use egui::{
     Align2, CornerRadius, FontId, Mesh, Painter, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
 use musicable_commands::take::comped;
+use musicable_model::Chain;
 use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip};
 use musicable_model::time::Beats;
@@ -22,17 +24,21 @@ const MIN_KEYS: u8 = 12;
 /// The lanes: each track's clips over the grid, and its takes' and its
 /// automation lanes under it if it shows them, with what the tracks are
 /// recording, the loop region, the time selection, the start marker and the
-/// playhead, and where `plan` would put things.
+/// playhead, and where `plan` would put things; and the master's under
+/// them.
 pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
     let layout = &scene.layout;
     let project = scene.project();
     let editor = scene.editor();
     let lanes = layout.lanes;
-    painter.rect_filled(lanes, 0.0, theme.empty);
+    let whole = painter;
+    let part = layout.tracks_part(lanes.x_range());
+    let painter = &painter.with_clip_rect(part.intersect(painter.clip_rect()));
+    painter.rect_filled(part, 0.0, theme.empty);
     for row in layout.visible_rows() {
-        let selected =
-            editor.selected_track == Some(row.id) || editor.selection.tracks.contains(&row.id);
+        let selected = editor.selected_track == Some(Chain::Track(row.id))
+            || editor.selection.tracks.contains(&row.id);
         let fill = if selected {
             theme.lane_selected
         } else if row.index % 2 == 1 {
@@ -50,7 +56,7 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let rect = Rect::from_x_y_ranges(lanes.x_range(), lane.top..=lane.bottom());
         painter.rect_filled(rect, 0.0, theme.automation_lane);
     }
-    let bottom = layout.bottom().clamp(lanes.top(), lanes.bottom());
+    let bottom = layout.bottom().clamp(lanes.top(), part.bottom());
     let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=bottom);
     if project.looping {
         let region = project.loop_region;
@@ -68,19 +74,83 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
     clips(painter, scene);
     takes(painter, scene);
-    automation(painter, scene, plan);
     recordings(painter, scene);
     time_selection(painter, scene);
     if let Some(plan) = plan {
         ghosts(painter, scene, plan);
     }
-    let start = layout.x_of(editor.start_marker);
-    let x = painter.round_to_pixel_center(start);
-    painter.vline(x, tracks.y_range(), Stroke::new(1.0, theme.start_marker));
-    if let Some(x) = playhead(scene) {
-        let x = painter.round_to_pixel_center(x);
-        painter.vline(x, lanes.y_range(), Stroke::new(1.0, theme.playhead));
+    let master = layout.master_part(lanes.x_range());
+    let filled = self::master(
+        &whole.with_clip_rect(master.intersect(whole.clip_rect())),
+        scene,
+    );
+    // Each lane's in its own part.
+    automation(whole, scene, plan);
+    let start = whole.round_to_pixel_center(layout.x_of(editor.start_marker));
+    let marker = Stroke::new(1.0, theme.start_marker);
+    painter.vline(start, tracks.y_range(), marker);
+    let in_master = filled.intersect(master);
+    if in_master.height() > 0.0 {
+        whole.vline(start, in_master.y_range(), marker);
     }
+    if let Some(x) = playhead(scene) {
+        let x = whole.round_to_pixel_center(x);
+        whole.vline(x, lanes.y_range(), Stroke::new(1.0, theme.playhead));
+    }
+}
+
+/// The master's part of the lanes: its row, lit while it's selected, and
+/// its automation lanes under it, with the grid and the loop region over
+/// them, and a line along its top that sets it apart from the tracks.
+/// Returns where its row and lanes are.
+fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
+    let theme = scene.theme;
+    let layout = &scene.layout;
+    let editor = scene.editor();
+    let part = layout.master_part(layout.lanes.x_range());
+    painter.rect_filled(part, 0.0, theme.empty);
+    let row = layout.master;
+    let fill = match editor.selected_track == Some(Chain::Master) {
+        true => theme.lane_selected,
+        false => theme.lane,
+    };
+    let across = part.x_range();
+    painter.rect_filled(
+        Rect::from_x_y_ranges(across, row.top..=row.bottom()),
+        0.0,
+        fill,
+    );
+    for lane in &layout.master_automation {
+        let rect = Rect::from_x_y_ranges(across, lane.top..=lane.bottom());
+        painter.rect_filled(rect, 0.0, theme.automation_lane);
+    }
+    let bottom = (layout.master_automation.last()).map_or(row.bottom(), AutoRow::bottom);
+    let filled = Rect::from_x_y_ranges(across, row.top..=bottom);
+    let project = scene.project();
+    if project.looping {
+        let region = project.loop_region;
+        let x = layout.x_of(region.start)..=layout.x_of(region.end);
+        let shade = Rect::from_x_y_ranges(x, filled.y_range());
+        painter.rect_filled(shade, 0.0, theme.loop_shade);
+    }
+    timeline::grid(painter, theme, &self::timeline(scene), editor.grid, filled);
+    let bottoms =
+        std::iter::once(row.bottom()).chain(layout.master_automation.iter().map(AutoRow::bottom));
+    for bottom in bottoms {
+        let y = painter.round_to_pixel_center(bottom - 0.5);
+        painter.hline(across, y, Stroke::new(1.0, theme.divider));
+    }
+    master_line(painter, scene, across);
+    filled
+}
+
+/// The line along the top of the master's part, across `x`.
+fn master_line(painter: &Painter, scene: &Scene<'_>, x: egui::Rangef) {
+    let top = scene.layout.master_top;
+    painter.line_segment(
+        [pos2(x.min, top + 1.0), pos2(x.max, top + 1.0)],
+        Stroke::new(2.0, scene.theme.divider),
+    );
 }
 
 /// Where the playhead is drawn, if it is.
@@ -229,8 +299,10 @@ fn automation(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         .filter(|&pos| lanes.contains(pos))
         .map(|pos| scene.hit_lanes(pos));
     for lane in scene.layout.visible_automation() {
+        let part = scene.layout.part_of(lane.chain, lanes.x_range());
         let painter = painter.with_clip_rect(
-            Rect::from_x_y_ranges(scene.layout.lanes.x_range(), lane.top..=lane.bottom())
+            Rect::from_x_y_ranges(lanes.x_range(), lane.top..=lane.bottom())
+                .intersect(part)
                 .intersect(painter.clip_rect()),
         );
         let planned = match plan {
@@ -598,24 +670,41 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
 }
 
 /// The tracks' headers, for their parts to paint over: each track's, lit
-/// while it's selected, over the room under the tracks.
+/// while it's selected, over the room under the tracks, and the master's
+/// under them.
 pub(super) fn headers(painter: &Painter, scene: &Scene<'_>) {
     let theme = scene.theme;
     let layout = &scene.layout;
     let editor = scene.editor();
     let headers = layout.headers;
     painter.rect_filled(headers, 0.0, theme.empty);
+    let fill = |selected| match selected {
+        true => theme.header_selected,
+        false => theme.header,
+    };
+    let tracks = tracks_painter(painter, scene);
     for row in layout.visible_rows() {
         let rect = Rect::from_x_y_ranges(headers.x_range(), row.top..=row.bottom());
-        let selected =
-            editor.selection.tracks.contains(&row.id) || editor.selected_track == Some(row.id);
-        let fill = if selected {
-            theme.header_selected
-        } else {
-            theme.header
-        };
-        painter.rect_filled(rect, 0.0, fill);
+        let selected = editor.selection.tracks.contains(&row.id)
+            || editor.selected_track == Some(Chain::Track(row.id));
+        tracks.rect_filled(rect, 0.0, fill(selected));
     }
+    let master = layout.master;
+    let rect = Rect::from_x_y_ranges(headers.x_range(), master.top..=master.bottom());
+    let selected = editor.selected_track == Some(Chain::Master);
+    master_painter(painter, scene).rect_filled(rect, 0.0, fill(selected));
+}
+
+/// `painter`, painting only in the tracks' part of the headers.
+pub(super) fn tracks_painter(painter: &Painter, scene: &Scene<'_>) -> Painter {
+    let part = scene.layout.tracks_part(scene.layout.headers.x_range());
+    painter.with_clip_rect(part.intersect(painter.clip_rect()))
+}
+
+/// `painter`, painting only in the master's part of the headers.
+pub(super) fn master_painter(painter: &Painter, scene: &Scene<'_>) -> Painter {
+    let part = scene.layout.master_part(scene.layout.headers.x_range());
+    painter.with_clip_rect(part.intersect(painter.clip_rect()))
 }
 
 /// What goes over the tracks' headers once their parts are painted: a
@@ -625,10 +714,15 @@ pub(super) fn over_headers(painter: &Painter, scene: &Scene<'_>) {
     let theme = scene.theme;
     let layout = &scene.layout;
     let headers = layout.headers;
+    let whole = painter;
+    let painter = &tracks_painter(painter, scene);
     for row in layout.visible_rows() {
         let y = painter.round_to_pixel_center(row.bottom() - 0.5);
         painter.hline(headers.x_range(), y, Stroke::new(1.0, theme.divider));
     }
+    let master = master_painter(whole, scene);
+    let y = master.round_to_pixel_center(layout.master.bottom() - 0.5);
+    master.hline(headers.x_range(), y, Stroke::new(1.0, theme.divider));
     for lane in layout.visible_takes() {
         let take = &scene.project().tracks[lane.track_index].takes[lane.index];
         let rect = Rect::from_x_y_ranges(headers.x_range(), lane.top..=lane.bottom());
@@ -653,10 +747,11 @@ pub(super) fn over_headers(painter: &Painter, scene: &Scene<'_>) {
         painter.hline(rect.x_range(), y, Stroke::new(1.0, theme.divider));
     }
     for lane in layout.visible_automation() {
-        automation_header(painter, scene, lane);
+        automation_header(whole, scene, lane);
     }
-    let x = painter.round_to_pixel_center(headers.left() + 0.5);
-    painter.vline(x, headers.y_range(), Stroke::new(1.0, theme.divider));
+    master_line(&master, scene, headers.x_range());
+    let x = whole.round_to_pixel_center(headers.left() + 0.5);
+    whole.vline(x, headers.y_range(), Stroke::new(1.0, theme.divider));
 }
 
 /// An automation lane's header: its parameter's name, and its value at the
@@ -665,12 +760,12 @@ pub(super) fn over_headers(painter: &Painter, scene: &Scene<'_>) {
 fn automation_header(painter: &Painter, scene: &Scene<'_>, lane: &AutoRow) {
     let theme = scene.theme;
     let headers = scene.layout.headers;
+    let part = scene.layout.part_of(lane.chain, headers.x_range());
+    let painter = &painter.with_clip_rect(part.intersect(painter.clip_rect()));
     let rect = Rect::from_x_y_ranges(headers.x_range(), lane.top..=lane.bottom());
     painter.rect_filled(rect, 0.0, theme.automation_lane);
     let strip = Rect::from_min_size(rect.left_top(), vec2(theme.colour_strip, rect.height()));
-    let colour = lane
-        .track_index
-        .map_or(theme.automation_off, |i| theme.clip(i));
+    let colour = lane.track_index.map_or(theme.master, |i| theme.clip(i));
     painter.rect_filled(strip, 0.0, colour);
     let buttons = lane_buttons(scene, lane);
     let right = buttons
@@ -710,7 +805,7 @@ fn automation_header(painter: &Painter, scene: &Scene<'_>, lane: &AutoRow) {
         );
     }
     let y = painter.round_to_pixel_center(lane.bottom() - 0.5);
-    painter.with_clip_rect(rect.intersect(headers)).hline(
+    painter.with_clip_rect(rect.intersect(part)).hline(
         rect.x_range(),
         y,
         Stroke::new(1.0, theme.divider),
@@ -722,6 +817,7 @@ fn automation_header(painter: &Painter, scene: &Scene<'_>, lane: &AutoRow) {
 pub(super) fn lane_buttons(scene: &Scene<'_>, lane: &AutoRow) -> Vec<(LaneButton, Rect)> {
     let theme = scene.theme;
     let headers = scene.layout.headers;
+    let part = scene.layout.part_of(lane.chain, headers.x_range());
     let size = theme.button;
     let mut right = headers.right() - theme.padding;
     let mut placed: Vec<(LaneButton, Rect)> =
@@ -736,9 +832,7 @@ pub(super) fn lane_buttons(scene: &Scene<'_>, lane: &AutoRow) -> Vec<(LaneButton
             .collect();
     placed.reverse();
     let fits = placed.iter().all(|(_, rect)| {
-        headers.contains_rect(*rect)
-            && rect.bottom() <= lane.bottom()
-            && rect.left() > headers.left()
+        part.contains_rect(*rect) && rect.bottom() <= lane.bottom() && rect.left() > headers.left()
     });
     if fits { placed } else { Vec::new() }
 }
@@ -788,13 +882,20 @@ pub(super) fn drop_hint(painter: &Painter, scene: &Scene<'_>) {
     );
 }
 
-/// Where something dragged from the browser would go: its track's row, or a
-/// new track's under the others, with a line where a sample would start.
+/// Where something dragged from the browser would go: its track's row, a
+/// new track's under the others, or the master's row, with a line where a
+/// sample would start.
 pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination) {
     let theme = scene.theme;
     let layout = &scene.layout;
     let across = layout.headers.left().min(layout.lanes.left())
         ..=layout.headers.right().max(layout.lanes.right());
+    let x = egui::Rangef::new(*across.start(), *across.end());
+    let part = match to {
+        Destination::Chain(Some(Chain::Master)) => layout.master_part(x),
+        _ => layout.tracks_part(x),
+    };
+    let painter = &painter.with_clip_rect(part.intersect(painter.clip_rect()));
     let outline = Stroke::new(2.0, theme.start_marker);
     let (rows, at) = match *to {
         Destination::Track { track, at, .. } => {
@@ -819,6 +920,9 @@ pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination
                 theme.header_text,
             );
             (rows, at)
+        }
+        Destination::Chain(Some(Chain::Master)) => {
+            (layout.master.top..=layout.master.bottom(), None)
         }
         Destination::Chain(_) => return,
     };
