@@ -395,12 +395,12 @@ fn without_a_midi_clip_it_says_how_to_show_one() {
 fn clicks_select_notes_and_place_the_start_marker() {
     let (project, clip, [c3, e3, _]) = project();
     let mut harness = harness(project, Some(clip));
-    harness.state_mut().document.editor_mut().focus = Focus::Arrangement;
+    harness.state_mut().document.editor_mut().focus = Focus::ARRANGEMENT;
     let on = note(&harness, "Note C3 at 2. 1. 1").center();
     click(&mut harness, on, Modifiers::NONE);
     assert_eq!(harness.state().selected(), [c3]);
     // Clicking gives the piano roll the focus, so the keys act on its notes.
-    assert_eq!(harness.state().editor().focus, Focus::PianoRoll);
+    assert_eq!(harness.state().editor().focus, Focus::PIANO_ROLL);
     let on = note(&harness, "Note E3 at 2. 2. 1").center();
     click(&mut harness, on, Modifiers::COMMAND);
     assert_eq!(harness.state().selected(), [c3, e3]);
@@ -651,7 +651,7 @@ fn the_ruler_locates_and_dragging_it_zooms() {
 fn context_menus_offer_commands_for_what_was_clicked() {
     let (project, clip, [c3, ..]) = project();
     let mut harness = harness(project, Some(clip));
-    harness.state_mut().document.editor_mut().focus = Focus::Arrangement;
+    harness.state_mut().document.editor_mut().focus = Focus::ARRANGEMENT;
     harness.get_by_label("Note C3 at 2. 1. 1").click_secondary();
     harness.run();
     for item in [
@@ -665,7 +665,7 @@ fn context_menus_offer_commands_for_what_was_clicked() {
     // The menu selects the note and gives the piano roll the focus, so the
     // edit commands act on it.
     assert_eq!(harness.state().selected(), [c3]);
-    assert_eq!(harness.state().editor().focus, Focus::PianoRoll);
+    assert_eq!(harness.state().editor().focus, Focus::PIANO_ROLL);
     harness.get_by_label("Delete Backspace, Delete").click();
     harness.run();
     assert_eq!(harness.state().notes().len(), 2);

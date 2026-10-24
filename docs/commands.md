@@ -59,7 +59,8 @@ key bound to one goes on to the window instead
 `run_with` returns `CommandError::NotNow`. A command given arguments runs
 whatever is selected, as they say what it works on. What's selected depends
 on the focus ([below](#the-editors-state)): the edit commands' conditions
-mean the piano roll's notes while it has the focus.
+mean the piano roll's notes while it has the focus, and nothing while the
+devices panel or the browser has it.
 
 ### Transport
 
@@ -127,7 +128,11 @@ While the piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select
 All act on its notes instead, as they do in Live's MIDI note editor: Paste
 puts the notes at the start marker, in the clip the piano roll shows, and
 Duplicate puts a copy just after the selected notes. Split always acts on
-clips, and doesn't apply while the piano roll has the focus.
+clips, and doesn't apply while the piano roll has the focus. The mixer
+shows the arrangement's tracks, so while it has the focus they act on the
+arrangement's selection, as Live's mixer does in its Arrangement View. The
+devices panel and the browser have nothing they take, so there they don't
+apply.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -150,7 +155,8 @@ And for the arrangement's clicks, scripts and agents:
 | `edit.select_time` | Select Time | `start`, `end`, `tracks` | Selects a stretch of time on some tracks |
 | `edit.select_tracks` | Select Tracks | `tracks`, `toggle`? | Selects tracks |
 
-These give the arrangement the focus. Selecting clips also shows the last
+These give the arrangement the focus, unless the mixer has it, which edits
+the same selection. Selecting clips also shows the last
 MIDI clip selected in the piano roll, without giving it the focus, as
 selecting a clip in Live shows it in the clip view.
 
@@ -212,7 +218,9 @@ start and at the lowest and the highest key, and a note never gets shorter
 than a tick. Two notes on one key can overlap, and play as two notes.
 
 And these act on the notes selected in the piano roll while it has the
-focus, with the keys of Live's MIDI note editor:
+focus, with the keys of Live's MIDI note editor. The arrow keys are the
+piano roll's own ([below](#the-keymap-file)): they run these while it has
+the focus, and nothing in the other panels.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -230,8 +238,9 @@ focus, with the keys of Live's MIDI note editor:
 | `notes.toggle_draw` | Draw Mode | Turns the piano roll's Draw Mode on or off | B | B |
 
 The grid's step is the one the piano roll shows at its zoom. With no notes
-selected, or the arrangement's focus, these don't apply, so the arrow keys
-go on to move the keyboard focus between controls ([app.md](app.md#keys)).
+selected these don't apply, and the arrow keys run nothing in the other
+panels, so there the keys go on to move the keyboard focus between controls
+([app.md](app.md#keys)).
 
 ### Controllers
 
@@ -489,8 +498,9 @@ other. They push a `Request`, as the file commands do.
 `view.set_track_height` (`track`, `height`) carry the arrangement's
 scrolling, zooming and track heights, and `view.set_piano_roll_viewport`
 (`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
-roll's, with how tall its rows of keys are. `view.set_focus` gives the
-`arrangement` or the `piano_roll` the focus (`view`). They and the take
+roll's, with how tall its rows of keys are. `view.set_focus` gives a panel
+the focus (`panel`: `arrangement`, `mixer`, `devices`, `piano_roll` or
+`browser`), the piano roll only while it shows a clip. They and the take
 lanes change the editor's state, not the project, so undo leaves them
 alone. Live has no command palette. Ctrl+Shift+P is the usual key for one
 in other apps. Live 12 also switches between its clip view and its device
@@ -521,9 +531,16 @@ for the behaviour settings.
   turns its pages while the playhead plays out of sight.
 - **Track heights** in points, between `view::MIN_TRACK_HEIGHT` and
   `MAX_TRACK_HEIGHT`, for the tracks whose height was changed.
-- **The focus** (`Focus`): the arrangement or the piano roll, where the
-  edit commands and the zoom act. Clicking in either view gives it the
-  focus, and so do its selection commands.
+- **The focus** (`Focus`): the panel the keys and the edit commands act
+  in, by its id (`crates/commands/src/panel.rs`): the arrangement, the
+  mixer, the devices, the piano roll or the browser. `Focus::edits` says
+  what the edit commands act on there (`Edits`): the arrangement's
+  selection in the arrangement and the mixer, the notes in the piano roll,
+  and nothing in the others. The zoom acts on the piano roll while it has
+  the focus, and on the arrangement otherwise. Clicking in a panel or on
+  its tab gives it the focus ([app.md](app.md#the-panels)), and so do the
+  arrangement's and the piano roll's selection commands. A panel's own keys
+  work while it has it ([below](#the-keymap-file)).
 - **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
   selected notes, its own viewport (song positions across, as the
   arrangement's, so the start marker, the playhead and the grid line up,
@@ -661,8 +678,9 @@ thread and sends the engine its tempo map and loop; `Session::open` also
 stops the transport at the start of the song. Then:
 
 - `Session::key_pressed` looks a chord up in the keymap and runs the command
-  bound to it. It returns `false` if no command is bound, so the key can go
-  elsewhere. `Session::takes_key` says whether a chord's command applies
+  bound to it where the focus is (`Keymap::lookup_focused`): the panel's
+  own, or else the one everywhere. It returns `false` if no command is
+  bound, so the key can go elsewhere. `Session::takes_key` says whether a chord's command applies
   now; the window leaves the keys it doesn't take to egui.
 - `Session::run` runs a command by id, for menus and the command palette,
   and `Session::run_with` runs one with arguments, for the arrangement's
@@ -798,6 +816,9 @@ version = 1
 [bindings]
 "transport.toggle_metronome" = ["M", "Ctrl+M"]
 "transport.toggle_loop" = []
+
+[panels.piano_roll]
+"notes.toggle_draw" = ["D"]
 ```
 
 - Each line gives a command the chords that run it, in place of its default
@@ -809,6 +830,14 @@ version = 1
   command that had it.
 - Bare dotted keys work too: `transport.play = ["P"]` is the same as
   `"transport.play" = ["P"]`.
+- `[bindings]` holds the keys that work everywhere. A panel's table,
+  `[panels.piano_roll]` and the others (`arrangement`, `mixer`, `devices`,
+  `browser`), holds the keys that work in that panel only, while it has the
+  focus, where they win over the ones everywhere: in the piano roll, D runs
+  Draw Mode above whatever it runs everywhere else. Its lines give the
+  command its chords in that panel, in place of its default ones there. A
+  chord runs one command in each place. The default keymap's arrow keys for
+  notes are the piano roll's.
 - `format` and `version` are optional when you write the file by hand.
   Musicable writes both, like the header of a project file.
 
@@ -819,8 +848,9 @@ reach you.
 ### Mistakes
 
 A line with a mistake in it, such as a misspelt key, is skipped and the
-command keeps its default chords. A chord that two lines claim runs neither
-command. Musicable reports both and loads the rest of the file. A binding for
+command keeps its default chords. A chord that two lines of one table claim
+runs neither command there. A table for a panel Musicable doesn't have, or a
+panel's entry that isn't a table, is skipped too. Musicable reports both and loads the rest of the file. A binding for
 a command that doesn't exist is kept, in case a later version or a plugin
 adds it, and reported too. Options > Keyboard Shortcuts lists them all, with
 a button to give a chord two lines claim to one of them.
@@ -841,7 +871,8 @@ prints the bindings a keymap file gives, along with any mistakes in it:
 cargo run -p musicable-app -- keymap path/to/keymap.toml
 ```
 
-Leave out the path to see the default keymap.
+Leave out the path to see the default keymap. Keys that work in one panel
+only say which, as in `Up in piano_roll`.
 
 ## Changing keys in the app
 
@@ -849,9 +880,13 @@ The keyboard shortcuts window ([app.md](app.md#changing-keys)) builds on
 these:
 
 - `Keymap::bind` returns the command a chord had, which the window warns
-  about before it takes the chord. `Keymap::reset_command` gives a command
-  its default chords back, taking them from whichever commands have them
-  now.
+  about before it takes the chord, and `bind_in` binds one in a panel
+  (`Scope::Panel`). `Keymap::reset_command` gives a command its default
+  chords back, everywhere and in each panel, taking them from whichever
+  commands have them there now.
+- `Keymap::chords_focused` is what menus and the palette show beside a
+  command: its chords in the panel with the focus, and those everywhere
+  that the panel doesn't give another command.
 - `KeymapFile::diff(&defaults, &keymap)` is what the app saves: only the
   commands whose chords differ from the default. The app keeps the user's
   file with `UserKeymap` (`crates/app/src/keymap_file.rs`), which also makes

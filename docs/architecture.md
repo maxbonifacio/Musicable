@@ -66,8 +66,9 @@ Pressing Space with the demo open:
 1. `musicable_ui::KeyPresses` takes the key press before egui's widgets see
    it and names it as a `KeyChord`, by the rules in
    [app.md](app.md#keyboard-layouts).
-2. `Session::key_pressed` looks the chord up in the `Keymap`, which binds
-   Space to `transport.play_stop`.
+2. `Session::key_pressed` looks the chord up in the `Keymap`: in the keys
+   of the panel with the focus first, then in those that work everywhere,
+   which bind Space to `transport.play_stop`.
 3. `Registry::run` runs the command with a `Context`. Play and stop go
    straight to the `Transport`, which the session implements on top of the
    engine. Changes to the project go through `Document::transact`, which
@@ -263,7 +264,8 @@ lives. What each still lacks is in its doc's "Not done yet".
   and `native_stage()` in `compile.rs` puts their node in the post-fader
   slot. Tier 2's modelled stages go in the slots the same way.
 - **Keys** are done: the keyboard shortcuts window changes any command's
-  keys, shows conflicts and saves them to the keymap file, and the command
+  keys, everywhere or in one panel, shows conflicts and saves them to the
+  keymap file, and the command
   palette runs any command ([app.md](app.md#changing-keys),
   [commands.md](commands.md#changing-keys-in-the-app)). Keymaps in the style
   of other DAWs would be keymap files to import.
@@ -373,10 +375,14 @@ says what's there.
   format version. Tempo from audio is the beats that analysis finds (see
   warping), made into a map.
 - **Windows, panels, workspaces, themes and profiles.** Each view is a
-  panel with its own id (`musicable_ui::MIXER`, `PIANO_ROLL` and the
-  others), which the shell's panel registry holds with its title, its place
-  and its size, docked in splits and tabs the user drags about
+  panel with its own id (`musicable_commands::panel::MIXER`, `PIANO_ROLL`
+  and the others), which the shell's panel registry holds with its title,
+  its place and its size, docked in splits and tabs the user drags about
   ([egui_tiles](https://docs.rs/egui_tiles); [app.md](app.md#the-panels)).
+  Clicking in a panel gives it the focus (`Editor::focus`), which an
+  outline shows: the edit commands act on its selection, and its own keys,
+  from its table in the keymap, win over those that work everywhere
+  ([commands.md](commands.md#the-editors-state)).
   The layout is a `musicable_ui::Workspace`, kept in the config folder;
   workspaces to switch between, and egui's viewports putting panels in
   windows of their own, come next. Every view

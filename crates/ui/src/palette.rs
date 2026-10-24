@@ -71,7 +71,7 @@ impl Palette {
                     let selected = i == self.selected;
                     let button = Button::selectable(selected, label.as_str())
                         .min_size(vec2(ui.available_width(), 0.0));
-                    let button = with_keys(button, view.keymap, &command.id);
+                    let button = with_keys(button, view, &command.id);
                     // Greyed out when it doesn't apply, as in the menus.
                     let applies = command.when.applies(view.project, view.editor);
                     let response = ui.add_enabled(applies, button);
@@ -114,7 +114,7 @@ impl Palette {
             .filter(|command| !command.needs_arguments())
             .filter_map(|command| {
                 let label = label(command);
-                let chords: Vec<_> = view.keymap.chords_for(&command.id).collect();
+                let chords = view.keymap.chords_focused(&command.id, view.editor.focus);
                 let score = score(&self.query, &label, command.id.as_str(), &chords)?;
                 Some((command, label, score))
             })
@@ -136,11 +136,10 @@ impl Palette {
 mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
-    use musicable_commands::{file, transport};
+    use musicable_commands::{Focus, file, transport};
     use musicable_model::Project;
 
     use super::*;
-    use crate::shell::chords;
     use crate::testing::{State, harness};
 
     /// The shell with the command palette open.
@@ -168,10 +167,11 @@ mod tests {
     #[test]
     fn every_command_is_listed_with_its_keys() {
         let harness = palette();
-        let commands = &harness.state().commands;
-        let keymap = &harness.state().keymap;
-        for command in commands.iter().filter(|c| !c.needs_arguments()) {
-            let row = match chords(keymap, &command.id) {
+        let state = harness.state();
+        for command in state.commands.iter().filter(|c| !c.needs_arguments()) {
+            let chords = (state.keymap).chords_focused(&command.id, state.editor.focus);
+            let keys: Vec<_> = chords.iter().map(ToString::to_string).collect();
+            let row = match keys.join(", ") {
                 keys if keys.is_empty() => label(command),
                 keys => format!("{} {keys}", label(command)),
             };
@@ -183,6 +183,25 @@ mod tests {
         // The palette can't say which clips to move.
         assert!(harness.query_by_label_contains("Move Clips").is_none());
         assert!(harness.state().shell.asking(), "keys don't run commands");
+    }
+
+    #[test]
+    fn the_keys_are_those_that_work_where_the_focus_is() {
+        let mut harness = palette();
+        // The arrow keys move notes in the piano roll only.
+        type_text(&mut harness, "transpose up");
+        harness.get_by_label("Notes: Transpose Up");
+        harness.state_mut().editor.focus = Focus::PIANO_ROLL;
+        harness.run();
+        harness.get_by_label("Notes: Transpose Up Up");
+        // There, they find what they run.
+        let mut harness = palette();
+        harness.state_mut().editor.focus = Focus::PIANO_ROLL;
+        type_text(&mut harness, "shift+up");
+        harness.get_by_label("Notes: Octave Up Shift+Up");
+        let mut harness = palette();
+        type_text(&mut harness, "shift+up");
+        assert!(harness.query_by_label_contains("Octave Up").is_none());
     }
 
     #[test]

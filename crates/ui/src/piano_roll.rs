@@ -1072,8 +1072,8 @@ fn sent_as(plan: &Plan) -> Plan {
 /// Gives the piano roll the focus, so the keys and the edit commands act on
 /// its notes, if it hasn't got it.
 fn focus(scene: &Scene<'_>, actions: &mut Vec<Action>) {
-    if scene.editor().focus != Focus::PianoRoll {
-        let args = Args::new().with("view", "piano_roll");
+    if scene.editor().focus != Focus::PIANO_ROLL {
+        let args = Args::new().with("panel", "piano_roll");
         run(actions, views::SET_FOCUS, args);
     }
 }

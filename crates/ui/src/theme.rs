@@ -154,6 +154,9 @@ pub struct Theme {
     /// Lines between tracks and around panels.
     #[serde(with = "values::colour")]
     pub divider: Color32,
+    /// The outline around the panel with the focus.
+    #[serde(with = "values::colour")]
+    pub focus: Color32,
     /// The devices panel's boxes, one for each device.
     #[serde(with = "values::colour")]
     pub device: Color32,
@@ -241,6 +244,8 @@ pub struct DockSizes {
     pub tab_bar: f32,
     /// The gap between panels side by side or one over another.
     pub gap: f32,
+    /// The width of the outline around the panel with the focus.
+    pub outline: f32,
     /// The smallest a panel gets when the user drags its edge, and what
     /// the arrangement keeps at least when the window's too small for the
     /// panels around it.
@@ -585,6 +590,7 @@ impl Theme {
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),
             divider: Color32::from_gray(24),
+            focus: Color32::from_rgb(70, 130, 200),
             device: Color32::from_gray(46),
             preview_wave: Color32::from_rgb(150, 200, 255),
 
@@ -656,6 +662,7 @@ impl Theme {
             dock: DockSizes {
                 tab_bar: 22.0,
                 gap: 1.0,
+                outline: 1.0,
                 min_panel: 96.0,
             },
             widgets: Widgets::dark(),

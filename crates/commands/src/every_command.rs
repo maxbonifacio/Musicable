@@ -956,12 +956,15 @@ fn examples() -> Vec<Example> {
         leaves(view::FIXED_GRID, bare),
         leaves(view::NARROW_GRID, bare),
         leaves(view::SET_FOCUS, |_| {
-            Some(Args::new().with("view", "arrangement"))
+            Some(Args::new().with("panel", "arrangement"))
+        }),
+        leaves(view::SET_FOCUS, |_| {
+            Some(Args::new().with("panel", "mixer"))
         }),
         leaves(view::SET_FOCUS, |s| {
             let clip = find_clip(s, is_midi)?.id;
             s.select_clips(&[clip]);
-            Some(Args::new().with("view", "piano_roll"))
+            Some(Args::new().with("panel", "piano_roll"))
         }),
         leaves(view::SET_PIANO_ROLL_VIEWPORT, |_| {
             Some(

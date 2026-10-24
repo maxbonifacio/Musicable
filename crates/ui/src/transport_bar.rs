@@ -336,7 +336,7 @@ fn hint(view: &View<'_>, id: &CommandId) -> String {
         .commands
         .get(id)
         .map_or(id.as_str(), |c| c.title.as_str());
-    match chords(view.keymap, id).as_str() {
+    match chords(view, id).as_str() {
         "" => title.to_owned(),
         chords => format!("{title} ({chords})"),
     }

@@ -1,22 +1,27 @@
 //! The keyboard shortcuts window, where every command's keys can be changed.
 //!
-//! Each command shows its keys. Clicking a key changes it, and + adds one:
-//! the window waits for the keys to be pressed, says whether another command
-//! has them, and gives them to the command on Assign. The app saves every
-//! change to the user's keymap file.
+//! Each command shows its keys, a row for each place they work: everywhere,
+//! or in one panel while it has the focus, where they win over the keys
+//! that work everywhere. Clicking a key changes it, and + adds one: the
+//! window waits for the keys to be pressed, lets the user pick where they
+//! work, says whether another command has them there, and gives them to the
+//! command on Assign. The app saves every change to the user's keymap file.
 
 use egui::{
     Align, Align2, Button, Event, Label, Layout, RichText, Role, ScrollArea, TextEdit, Ui,
     WidgetInfo, vec2,
 };
-use musicable_commands::{Command, CommandId, KeyChord, Problem};
+use musicable_commands::{Command, CommandId, KeyChord, Problem, Scope};
 
 use crate::menus::{label, menus};
+use crate::panels::Registry;
 use crate::search::score;
 use crate::shell::{Action, View};
 
 /// How wide the column of command titles is.
 const TITLE_WIDTH: f32 = 200.0;
+/// How wide the column that says where the keys work is.
+const WHERE_WIDTH: f32 = 90.0;
 
 /// The keyboard shortcuts window's own state.
 #[derive(Debug, Default)]
@@ -34,8 +39,14 @@ pub(crate) struct Shortcuts {
 #[derive(Debug, Clone, PartialEq)]
 struct Editing {
     command: CommandId,
-    /// The chord the new keys replace, or `None` when adding keys.
-    replacing: Option<KeyChord>,
+    /// The row whose keys change, or whose + was clicked.
+    row: Scope,
+    /// Where the new keys work: the row's place, until the user picks
+    /// another.
+    scope: Scope,
+    /// The chord the new keys replace, where it works, or `None` when
+    /// adding keys.
+    replacing: Option<(Scope, KeyChord)>,
     /// The keys pressed, once they have been. They wait for Assign.
     chord: Option<KeyChord>,
 }
@@ -68,21 +79,29 @@ impl Shortcuts {
         self.editing = None;
     }
 
-    pub(crate) fn show(&mut self, ctx: &egui::Context, view: &View<'_>, actions: &mut Vec<Action>) {
+    /// Shows the window, if it's open, naming the panels as `panels` does.
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        view: &View<'_>,
+        panels: &Registry,
+        actions: &mut Vec<Action>,
+    ) {
         // Escape closes the window, unless it's giving a command keys: then
         // it stops that.
         if self.open && self.editing.is_none() {
             self.open = !ctx.input_mut(|i| first_press(i, egui::Key::Escape));
         }
         let mut open = self.open;
+        let places = Places(panels);
         // It opens below the transport bar, where the command palette does.
         let top = ctx.content_rect().center_top() + vec2(0.0, 72.0);
         let window = egui::Window::new("Keyboard Shortcuts")
             .open(&mut open)
             .pivot(Align2::CENTER_TOP)
             .default_pos(top)
-            .default_width(600.0)
-            .show(ctx, |ui| self.contents(ui, view, actions));
+            .default_width(680.0)
+            .show(ctx, |ui| self.contents(ui, view, &places, actions));
         // Clicking anywhere else stops the editing, as closing the window does.
         let elsewhere = window.is_some_and(|w| w.response.clicked_elsewhere());
         if !open || elsewhere {
@@ -91,7 +110,13 @@ impl Shortcuts {
         self.open = open;
     }
 
-    fn contents(&mut self, ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+    fn contents(
+        &mut self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        places: &Places<'_>,
+        actions: &mut Vec<Action>,
+    ) {
         if self.asking() {
             // Enter assigns the keys pressed, and Escape doesn't. Repeats of
             // the keys just captured don't count.
@@ -122,13 +147,19 @@ impl Shortcuts {
         ScrollArea::vertical()
             .max_height(380.0)
             .auto_shrink([false, true])
-            .show(ui, |ui| self.table(ui, view, actions));
+            .show(ui, |ui| self.table(ui, view, places, actions));
         ui.separator();
-        file(ui, view, actions);
+        file(ui, view, places, actions);
     }
 
     /// The commands that match the search, by menu, with their keys.
-    fn table(&mut self, ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+    fn table(
+        &mut self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        places: &Places<'_>,
+        actions: &mut Vec<Action>,
+    ) {
         let menus = menus(view.commands);
         let shown: Vec<(&str, Vec<&Command>)> = menus
             .iter()
@@ -151,62 +182,136 @@ impl Shortcuts {
             }
             ui.label(RichText::new(title).strong());
             for command in commands {
-                self.row(ui, view, command, actions);
+                self.rows(ui, view, places, command, actions);
             }
         }
     }
 
+    /// Whether `command`'s name or any of its keys, wherever they work,
+    /// match the search.
     fn matches(&self, view: &View<'_>, command: &Command) -> bool {
-        let chords: Vec<_> = view.keymap.chords_for(&command.id).collect();
+        let chords: Vec<_> = (view.keymap.bindings_for(&command.id))
+            .map(|(_, chord)| chord)
+            .collect();
         score(&self.search, &label(command), command.id.as_str(), &chords).is_some()
     }
 
-    /// A command's row: its title, its keys, and a reset button if its keys
-    /// aren't the default ones. Under it, while it gets new keys, what to do.
-    fn row(&mut self, ui: &mut Ui, view: &View<'_>, command: &Command, actions: &mut Vec<Action>) {
+    /// A command's rows: one for its keys everywhere, then one for each
+    /// panel it has keys in. Under the row whose keys change, what to do.
+    fn rows(
+        &mut self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        places: &Places<'_>,
+        command: &Command,
+        actions: &mut Vec<Action>,
+    ) {
+        let id = &command.id;
+        let panels = view.keymap.bindings_for(id).map(|(scope, _)| scope);
+        let mut scopes: Vec<Scope> = std::iter::once(Scope::Everywhere).chain(panels).collect();
+        scopes.dedup();
+        let editing = self.editing.as_ref().filter(|e| e.command == *id).cloned();
+        // The prompt goes under the last row if its own went.
+        let under = editing
+            .as_ref()
+            .map(|editing| match scopes.contains(&editing.row) {
+                true => editing.row,
+                false => scopes[scopes.len() - 1],
+            });
+        for (i, &scope) in scopes.iter().enumerate() {
+            self.row(ui, view, places, command, scope, i == 0, actions);
+            if let Some(editing) = editing.as_ref().filter(|_| under == Some(scope)) {
+                ui.horizontal(|ui| {
+                    ui.add_space(TITLE_WIDTH + ui.spacing().item_spacing.x);
+                    ui.vertical(|ui| self.prompt(ui, view, places, command, editing, actions));
+                });
+            }
+        }
+    }
+
+    /// A row of a command's keys: its title on the first, where the keys
+    /// work, the keys, and a reset button if the command's keys aren't the
+    /// default ones. A panel's keys that run another command everywhere
+    /// else say so.
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        places: &Places<'_>,
+        command: &Command,
+        scope: Scope,
+        first: bool,
+        actions: &mut Vec<Action>,
+    ) {
         let id = &command.id;
         let editing = self.editing.as_ref().filter(|e| e.command == *id).cloned();
         let height = ui.spacing().interact_size.y;
+        let here = places.suffix(scope);
         ui.horizontal(|ui| {
-            let title = Layout::left_to_right(Align::Center);
-            ui.allocate_ui_with_layout(vec2(TITLE_WIDTH, height), title, |ui| {
+            let column = Layout::left_to_right(Align::Center);
+            ui.allocate_ui_with_layout(vec2(TITLE_WIDTH, height), column, |ui| {
                 ui.set_width(TITLE_WIDTH);
-                ui.add(Label::new(&command.title).truncate())
-                    .on_hover_text(id.as_str());
+                if first {
+                    ui.add(Label::new(&command.title).truncate())
+                        .on_hover_text(id.as_str());
+                }
             });
-            for chord in view.keymap.chords_for(id) {
-                let changing = editing.as_ref().is_some_and(|e| e.replacing == Some(chord));
+            ui.allocate_ui_with_layout(vec2(WHERE_WIDTH, height), column, |ui| {
+                ui.set_width(WHERE_WIDTH);
+                ui.add(Label::new(RichText::new(places.name(scope)).weak()).truncate());
+            });
+            let chords: Vec<KeyChord> = view.keymap.chords_in(id, scope).collect();
+            for chord in chords {
+                let changing =
+                    (editing.as_ref()).is_some_and(|e| e.replacing == Some((scope, chord)));
                 let key =
                     Button::new(RichText::new(chord.to_string()).monospace()).selected(changing);
-                if ui
-                    .add(key)
-                    .on_hover_text("Click, then press the keys to use instead")
-                    .clicked()
-                {
-                    self.edit(id, Some(chord));
+                // Where else it runs another command, which it doesn't run
+                // in this panel.
+                let over = match scope {
+                    Scope::Panel(_) => view.keymap.lookup(chord).filter(|other| *other != id),
+                    Scope::Everywhere => None,
+                };
+                let hint = match over {
+                    Some(other) => format!(
+                        "Everywhere else, {chord} runs {}.\nClick, then press the keys to use \
+                         instead",
+                        title_of(view, other)
+                    ),
+                    None => "Click, then press the keys to use instead".to_owned(),
+                };
+                if ui.add(key).on_hover_text(hint).clicked() {
+                    self.edit(id, scope, Some(chord));
                 }
                 let remove = ui.add(Button::new("\u{d7}").small().frame(false));
-                named(&remove, format!("Remove {chord}"));
-                if remove.on_hover_text(format!("Remove {chord}")).clicked() {
+                let name = format!("Remove {chord}{here}");
+                named(&remove, name.clone());
+                if remove.on_hover_text(name).clicked() {
                     let mut keymap = view.keymap.clone();
-                    keymap.unbind(chord);
+                    keymap.unbind_in(scope, chord);
                     self.editing = None;
                     actions.push(Action::SetKeymap(keymap));
                 }
+                if let Some(other) = over {
+                    let text = format!("over {}", title_of(view, other));
+                    ui.label(RichText::new(text).small().weak());
+                }
             }
-            let adding = editing.as_ref().is_some_and(|e| e.replacing.is_none());
+            let adding =
+                (editing.as_ref()).is_some_and(|e| e.replacing.is_none() && e.row == scope);
             let add = ui.add(Button::new("+").small().selected(adding));
-            named(&add, format!("Add keys to {}", command.title));
+            named(&add, format!("Add keys to {}{here}", command.title));
             if add.on_hover_text("Add keys").clicked() {
-                self.edit(id, None);
+                self.edit(id, scope, None);
             }
-            let defaults: Vec<KeyChord> = view.default_keymap.chords_for(id).collect();
-            if view.keymap.chords_for(id).ne(defaults.iter().copied()) {
+            let defaults: Vec<(Scope, KeyChord)> = view.default_keymap.bindings_for(id).collect();
+            if first && view.keymap.bindings_for(id).ne(defaults.iter().copied()) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let reset = ui.small_button("Reset");
                     named(&reset, format!("Reset {}", command.title));
                     let reset = reset.on_hover_ui(|ui| {
-                        ui.label(reset_hint(view, id, &defaults));
+                        ui.label(reset_hint(view, places, id, &defaults));
                     });
                     if reset.clicked() {
                         let mut keymap = view.keymap.clone();
@@ -217,36 +322,63 @@ impl Shortcuts {
                 });
             }
         });
-        if let Some(editing) = editing {
-            ui.horizontal(|ui| {
-                ui.add_space(TITLE_WIDTH + ui.spacing().item_spacing.x);
-                ui.horizontal_wrapped(|ui| self.prompt(ui, view, command, &editing, actions));
-            });
-        }
     }
 
-    /// Starts giving `command` new keys, in place of `replacing` if given.
-    fn edit(&mut self, command: &CommandId, replacing: Option<KeyChord>) {
+    /// Starts giving `command` new keys from the row of `scope`, in place
+    /// of `replacing` there if given.
+    fn edit(&mut self, command: &CommandId, scope: Scope, replacing: Option<KeyChord>) {
         self.editing = Some(Editing {
             command: command.clone(),
-            replacing,
+            row: scope,
+            scope,
+            replacing: replacing.map(|chord| (scope, chord)),
             chord: None,
         });
     }
 
-    /// What to do while a command gets new keys: press them, then assign
-    /// them.
+    /// What to do while a command gets new keys: pick where they work,
+    /// press them, then assign them.
     fn prompt(
         &mut self,
         ui: &mut Ui,
         view: &View<'_>,
+        places: &Places<'_>,
+        command: &Command,
+        editing: &Editing,
+        actions: &mut Vec<Action>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Where:");
+            for scope in places.all() {
+                let (name, chosen) = (places.name(scope), editing.scope == scope);
+                let choice = ui.selectable_label(chosen, name);
+                choice.widget_info(|| {
+                    WidgetInfo::selected(Role::RadioButton, true, chosen, format!("Where: {name}"))
+                });
+                if choice.clicked()
+                    && let Some(editing) = self.editing.as_mut()
+                {
+                    editing.scope = scope;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| self.ask(ui, view, places, command, editing, actions));
+    }
+
+    /// Asks for the keys, then says what they run where they'd work, and
+    /// offers to assign them.
+    fn ask(
+        &mut self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        places: &Places<'_>,
         command: &Command,
         editing: &Editing,
         actions: &mut Vec<Action>,
     ) {
         let Some(chord) = editing.chord else {
             let text = match editing.replacing {
-                Some(old) => format!("Press the keys to use in place of {old}..."),
+                Some((_, old)) => format!("Press the keys to use in place of {old}..."),
                 None => format!("Press the keys to add to {}...", command.title),
             };
             ui.label(RichText::new(text).strong());
@@ -255,22 +387,49 @@ impl Shortcuts {
             }
             return;
         };
-        let chord_text = RichText::new(chord.to_string()).monospace().strong();
-        let assign = match view.keymap.lookup(chord) {
-            Some(owner) if *owner == command.id => {
-                ui.label(chord_text);
-                ui.label(format!("runs {} already.", command.title));
+        let (scope, here) = (editing.scope, places.suffix(editing.scope));
+        let title = &command.title;
+        ui.label(RichText::new(chord.to_string()).monospace().strong());
+        let warn = ui.visuals().warn_fg_color;
+        let assign = match runs(view, scope, chord) {
+            Runs::Here(owner) if *owner == command.id => {
+                ui.label(format!("runs {title}{here} already."));
                 None
             }
-            Some(owner) => {
-                ui.label(chord_text);
-                let warn = ui.visuals().warn_fg_color;
-                ui.label(RichText::new(format!("runs {} now.", title_of(view, owner))).color(warn));
+            Runs::Here(owner) => {
+                let text = format!("runs {}{here} now.", title_of(view, owner));
+                ui.label(RichText::new(text).color(warn));
                 Some("Reassign")
             }
-            None => {
-                ui.label(chord_text);
-                ui.label("isn't used yet.");
+            Runs::Everywhere(owner) if *owner == command.id => {
+                ui.label(format!("runs {title} everywhere already."));
+                None
+            }
+            Runs::Everywhere(owner) => {
+                let other = title_of(view, owner);
+                ui.label(format!(
+                    "runs {other} everywhere, and would run {title}{here} instead."
+                ));
+                Some("Assign")
+            }
+            Runs::Nothing => {
+                // Panels that give the keys to other commands keep them.
+                let kept: Vec<String> = (view.keymap.iter())
+                    .filter(|&(place, other, owner)| {
+                        scope == Scope::Everywhere
+                            && place != scope
+                            && other == chord
+                            && *owner != command.id
+                    })
+                    .map(|(place, _, owner)| {
+                        let panel = places.name(place);
+                        format!("the {panel} panel keeps it for {}", title_of(view, owner))
+                    })
+                    .collect();
+                match kept.is_empty() {
+                    true => ui.label("isn't used yet."),
+                    false => ui.label(format!("isn't used yet, but {}.", joined(&kept))),
+                };
                 Some("Assign")
             }
         };
@@ -294,32 +453,86 @@ impl Shortcuts {
         }
     }
 
-    /// Gives the command being edited the keys pressed, taking them from any
-    /// command that has them.
+    /// Gives the command being edited the keys pressed, where they're to
+    /// work, taking them from any command that has them there.
     fn assign(&mut self, view: &View<'_>, actions: &mut Vec<Action>) {
         let Some(Editing {
             command,
+            scope,
             replacing,
             chord: Some(chord),
+            ..
         }) = self.editing.take()
         else {
             return;
         };
-        if view.keymap.lookup(chord) == Some(&command) {
+        let already = match runs(view, scope, chord) {
+            Runs::Here(owner) | Runs::Everywhere(owner) => *owner == command,
+            Runs::Nothing => false,
+        };
+        if already {
             return;
         }
         let mut keymap = view.keymap.clone();
-        if let Some(old) = replacing.filter(|&old| keymap.lookup(old) == Some(&command)) {
-            keymap.unbind(old);
+        if let Some((place, old)) =
+            replacing.filter(|&(place, old)| keymap.lookup_in(place, old) == Some(&command))
+        {
+            keymap.unbind_in(place, old);
         }
-        keymap.bind(chord, command);
+        keymap.bind_in(scope, chord, command);
         actions.push(Action::SetKeymap(keymap));
+    }
+}
+
+/// What a chord runs in a place.
+enum Runs<'a> {
+    /// The place's own command for it.
+    Here(&'a CommandId),
+    /// The command it runs everywhere, which a panel without its own runs.
+    Everywhere(&'a CommandId),
+    Nothing,
+}
+
+/// What `chord` runs in `scope` now.
+fn runs<'a>(view: &View<'a>, scope: Scope, chord: KeyChord) -> Runs<'a> {
+    let keymap = view.keymap;
+    match (keymap.lookup_in(scope, chord), scope) {
+        (Some(owner), _) => Runs::Here(owner),
+        (None, Scope::Panel(_)) => keymap.lookup(chord).map_or(Runs::Nothing, Runs::Everywhere),
+        (None, Scope::Everywhere) => Runs::Nothing,
+    }
+}
+
+/// Names the places keys work, by the panels' titles.
+struct Places<'a>(&'a Registry);
+
+impl Places<'_> {
+    /// "Everywhere", or the panel's title.
+    fn name(&self, scope: Scope) -> &'static str {
+        match scope {
+            Scope::Everywhere => "Everywhere",
+            Scope::Panel(id) => self.0.get(id).map_or(id, |panel| panel.title),
+        }
+    }
+
+    /// Nothing, or " in the Piano Roll panel", to follow what keys run.
+    fn suffix(&self, scope: Scope) -> String {
+        match scope {
+            Scope::Everywhere => String::new(),
+            Scope::Panel(_) => format!(" in the {} panel", self.name(scope)),
+        }
+    }
+
+    /// Everywhere, then each panel, in the order the window places them.
+    fn all(&self) -> impl Iterator<Item = Scope> + '_ {
+        let panels = self.0.iter().filter_map(|panel| Scope::panel(panel.id));
+        std::iter::once(Scope::Everywhere).chain(panels)
     }
 }
 
 /// The user's keymap file, what was wrong with it, and what can be done with
 /// it.
-fn file(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
+fn file(ui: &mut Ui, view: &View<'_>, places: &Places<'_>, actions: &mut Vec<Action>) {
     let status = &view.keymap_file;
     let warn = ui.visuals().warn_fg_color;
     if let Some(error) = status.error {
@@ -327,10 +540,18 @@ fn file(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
     }
     for problem in status.problems {
         match problem {
-            Problem::Conflict { chord, commands } => {
+            Problem::Conflict {
+                scope,
+                chord,
+                commands,
+            } => {
                 let titles: Vec<_> = commands.iter().map(|id| title_of(view, id)).collect();
+                let (here, there) = match scope {
+                    Scope::Everywhere => (String::new(), ""),
+                    Scope::Panel(_) => (places.suffix(*scope), " there"),
+                };
                 let text = format!(
-                    "Your keymap file gives {chord} to {}, so it runs none of them.",
+                    "Your keymap file gives {chord} to {}{here}, so it runs none of them{there}.",
                     joined(&titles)
                 );
                 ui.label(RichText::new(text).color(warn));
@@ -338,7 +559,7 @@ fn file(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                     for (id, title) in commands.iter().zip(&titles) {
                         if ui.button(format!("Give {chord} to {title}")).clicked() {
                             let mut keymap = view.keymap.clone();
-                            keymap.bind(*chord, id.clone());
+                            keymap.bind_in(*scope, *chord, id.clone());
                             actions.push(Action::SetKeymap(keymap));
                         }
                     }
@@ -349,16 +570,17 @@ fn file(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
             }
         }
     }
-    for (chord, id) in view.keymap.dangling(view.commands) {
+    for (scope, chord, id) in view.keymap.dangling(view.commands) {
+        let here = places.suffix(scope);
         ui.horizontal_wrapped(|ui| {
             ui.label(format!(
-                "{chord} runs {id}, which this version doesn't have."
+                "{chord} runs {id}{here}, which this version doesn't have."
             ));
             let remove = ui.small_button("Remove");
-            named(&remove, format!("Remove {chord}"));
+            named(&remove, format!("Remove {chord}{here}"));
             if remove.clicked() {
                 let mut keymap = view.keymap.clone();
-                keymap.unbind(chord);
+                keymap.unbind_in(scope, chord);
                 actions.push(Action::SetKeymap(keymap));
             }
         });
@@ -427,17 +649,26 @@ fn file(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
 }
 
 /// What resetting a command's keys does, for the reset button's tooltip.
-fn reset_hint(view: &View<'_>, id: &CommandId, defaults: &[KeyChord]) -> String {
+fn reset_hint(
+    view: &View<'_>,
+    places: &Places<'_>,
+    id: &CommandId,
+    defaults: &[(Scope, KeyChord)],
+) -> String {
     let mut hint = match defaults {
         [] => "Back to no keys, as by default.".to_owned(),
         _ => {
-            let defaults: Vec<_> = defaults.iter().map(KeyChord::to_string).collect();
+            let defaults: Vec<_> = (defaults.iter())
+                .map(|&(scope, chord)| format!("{chord}{}", places.suffix(scope)))
+                .collect();
             format!("Back to the default keys: {}.", defaults.join(", "))
         }
     };
-    for &chord in defaults {
-        if let Some(owner) = view.keymap.lookup(chord).filter(|owner| *owner != id) {
-            hint += &format!("\nTakes {chord} from {}.", title_of(view, owner));
+    for &(scope, chord) in defaults {
+        let owner = view.keymap.lookup_in(scope, chord);
+        if let Some(owner) = owner.filter(|owner| *owner != id) {
+            let here = places.suffix(scope);
+            hint += &format!("\nTakes {chord}{here} from {}.", title_of(view, owner));
         }
     }
     hint
@@ -477,13 +708,17 @@ fn joined(items: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use egui::accesskit::Toggled;
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
-    use musicable_commands::{Keymap, transport};
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use musicable_commands::{Keymap, notes, transport};
     use musicable_model::Project;
 
     use super::*;
+    use crate::panels::PIANO_ROLL;
     use crate::testing::{State, harness};
+
+    const ROLL: Scope = Scope::Panel(PIANO_ROLL);
 
     fn chord(text: &str) -> KeyChord {
         text.parse().unwrap()
@@ -665,6 +900,7 @@ mod tests {
         let mut harness = window();
         let l = chord("L");
         harness.state_mut().keymap_problems = vec![Problem::Conflict {
+            scope: Scope::Everywhere,
             chord: l,
             commands: vec![transport::TOGGLE_LOOP, transport::TOGGLE_METRONOME],
         }];
@@ -684,6 +920,26 @@ mod tests {
     }
 
     #[test]
+    fn conflicts_in_a_panel_s_table_are_resolved_there() {
+        let mut harness = window();
+        let l = chord("L");
+        harness.state_mut().keymap_problems = vec![Problem::Conflict {
+            scope: ROLL,
+            chord: l,
+            commands: vec![notes::TRANSPOSE_UP, notes::TRANSPOSE_DOWN],
+        }];
+        harness.run();
+        harness.get_by_label(
+            "Your keymap file gives L to Transpose Up and Transpose Down in the Piano Roll \
+             panel, so it runs none of them there.",
+        );
+        click(&mut harness, "Give L to Transpose Down");
+        let keymap = &harness.state().keymap;
+        assert_eq!(keymap.lookup_in(ROLL, l), Some(&notes::TRANSPOSE_DOWN));
+        assert_eq!(keymap.lookup(l), None);
+    }
+
+    #[test]
     fn keys_for_commands_this_version_lacks_are_shown() {
         let mut harness = window();
         harness
@@ -693,6 +949,124 @@ mod tests {
         harness.run();
         harness.get_by_label("Ctrl+F12 runs later.thing, which this version doesn't have.");
         click(&mut harness, "Remove Ctrl+F12");
+        assert_eq!(harness.state().keymap, Keymap::default_keymap());
+
+        // And in a panel's table.
+        (harness.state_mut().keymap).bind_in(ROLL, chord("Ctrl+F12"), "later.thing");
+        harness.run();
+        harness.get_by_label(
+            "Ctrl+F12 runs later.thing in the Piano Roll panel, which this version doesn't have.",
+        );
+        click(&mut harness, "Remove Ctrl+F12 in the Piano Roll panel");
+        assert_eq!(harness.state().keymap, Keymap::default_keymap());
+    }
+
+    #[test]
+    fn each_command_shows_where_its_keys_work() {
+        let mut harness = window();
+        // The note commands' arrow keys work in the piano roll only, on a
+        // row of their own.
+        harness
+            .get_by_role(Role::TextInput)
+            .type_text("transpose up");
+        harness.run();
+        harness.get_by_label("Transpose Up");
+        harness.get_by_label("Everywhere");
+        harness.get_by_label("Add keys to Transpose Up");
+        harness.get_by_label("Piano Roll");
+        harness.get_by_label("Remove Up in the Piano Roll panel");
+        harness.get_by_label("Add keys to Transpose Up in the Piano Roll panel");
+        // Undo has keys everywhere only.
+        let mut harness = window();
+        harness.get_by_role(Role::TextInput).type_text("undo");
+        harness.run();
+        harness.get_by_label("Everywhere");
+        harness.get_by_label("Add keys to Undo");
+        assert!(harness.query_by_label("Piano Roll").is_none());
+    }
+
+    #[test]
+    fn keys_can_be_given_to_a_command_in_one_panel() {
+        let mut harness = window();
+        let metronome = transport::TOGGLE_METRONOME;
+        click(&mut harness, "Add keys to Toggle Metronome");
+        // They work everywhere, unless another place is picked.
+        let everywhere = harness.get_by_label("Where: Everywhere");
+        assert_eq!(everywhere.accesskit_node().toggled(), Some(Toggled::True));
+        click(&mut harness, "Where: Piano Roll");
+        press(&mut harness, "M");
+        harness.get_by_label("isn't used yet.");
+        click(&mut harness, "Assign");
+
+        let keymap = &harness.state().keymap;
+        assert_eq!(keymap.lookup_in(ROLL, chord("M")), Some(&metronome));
+        assert_eq!(keymap.lookup(chord("M")), None);
+        assert_eq!(keys(keymap, &metronome), ["O"]);
+        // A row of its own says where.
+        harness.get_by_label("Remove M in the Piano Roll panel");
+        harness.get_by_label("Reset Toggle Metronome");
+    }
+
+    #[test]
+    fn a_panel_s_keys_over_keys_that_work_everywhere_say_so() {
+        let mut harness = window();
+        let transpose = notes::TRANSPOSE_UP;
+        // In the piano roll, O transposes instead of the metronome.
+        click(
+            &mut harness,
+            "Add keys to Transpose Up in the Piano Roll panel",
+        );
+        press(&mut harness, "O");
+        harness.get_by_label(
+            "runs Toggle Metronome everywhere, and would run Transpose Up in the Piano Roll \
+             panel instead.",
+        );
+        click(&mut harness, "Assign");
+        let keymap = &harness.state().keymap;
+        assert_eq!(keymap.lookup_in(ROLL, chord("O")), Some(&transpose));
+        assert_eq!(
+            keymap.lookup(chord("O")),
+            Some(&transport::TOGGLE_METRONOME)
+        );
+        harness.get_by_label("over Toggle Metronome");
+
+        // Keys the piano roll gives another command can still work
+        // everywhere else.
+        click(&mut harness, "Add keys to Toggle Loop");
+        press(&mut harness, "Up");
+        harness.get_by_label("isn't used yet, but the Piano Roll panel keeps it for Transpose Up.");
+        click(&mut harness, "Assign");
+        let keymap = &harness.state().keymap;
+        assert_eq!(keymap.lookup(chord("Up")), Some(&transport::TOGGLE_LOOP));
+        assert_eq!(keymap.lookup_in(ROLL, chord("Up")), Some(&transpose));
+    }
+
+    #[test]
+    fn keys_move_between_places() {
+        let mut harness = window();
+        let transpose = notes::TRANSPOSE_UP;
+        // Up moves from the piano roll to everywhere.
+        harness
+            .get_by_role(Role::TextInput)
+            .type_text("transpose up");
+        harness.run();
+        click(&mut harness, "Up");
+        harness.get_by_label_contains("Press the keys to use in place of Up");
+        let roll = harness.get_by_label("Where: Piano Roll");
+        assert_eq!(roll.accesskit_node().toggled(), Some(Toggled::True));
+        click(&mut harness, "Where: Everywhere");
+        press(&mut harness, "Up");
+        harness.get_by_label("isn't used yet.");
+        click(&mut harness, "Assign");
+        let keymap = &harness.state().keymap;
+        assert_eq!(keymap.lookup(chord("Up")), Some(&transpose));
+        assert_eq!(keymap.lookup_in(ROLL, chord("Up")), None);
+
+        // Reset puts it back.
+        harness.get_by_label("Reset Transpose Up").hover();
+        harness.run();
+        harness.get_by_label_contains("Back to the default keys: Up in the Piano Roll panel.");
+        click(&mut harness, "Reset Transpose Up");
         assert_eq!(harness.state().keymap, Keymap::default_keymap());
     }
 

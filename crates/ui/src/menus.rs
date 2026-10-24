@@ -277,7 +277,7 @@ pub(crate) fn context_menu(
         };
         let id = &command.id;
         let enabled = !args.is_empty() || command.when.applies(view.project, view.editor);
-        let mut button = with_keys(Button::new(command.title.as_str()), view.keymap, id);
+        let mut button = with_keys(Button::new(command.title.as_str()), view, id);
         if let Some(on) = toggled(view, id) {
             button = button.selected(on);
         }

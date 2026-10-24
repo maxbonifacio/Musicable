@@ -63,21 +63,11 @@ version = 1
 "view.toggle_piano_roll" = ["Ctrl+Alt+3"]
 "view.switch_devices_piano_roll" = ["F12"]
 
-# Live's keys for its MIDI note editor. The arrow keys act on the notes
-# selected in the piano roll while it has the focus; with none selected,
-# they move the keyboard focus between controls instead.
+# Live's keys for its MIDI note editor that work everywhere: Draw Mode, and
+# Quantize, which quantizes the selected MIDI clips outside the piano roll.
+# The arrow keys are the piano roll's own, under [panels.piano_roll] below.
 "notes.toggle_draw" = ["B"]
 "notes.quantize" = ["Ctrl+U"]
-"notes.transpose_up" = ["Up"]
-"notes.transpose_down" = ["Down"]
-"notes.octave_up" = ["Shift+Up"]
-"notes.octave_down" = ["Shift+Down"]
-"notes.nudge_left" = ["Left"]
-"notes.nudge_right" = ["Right"]
-"notes.shorten" = ["Shift+Left"]
-"notes.lengthen" = ["Shift+Right"]
-"notes.velocity_up" = ["Ctrl+Up"]
-"notes.velocity_down" = ["Ctrl+Down"]
 
 # Live's A shows every track's automation in Automation Mode. Here it shows
 # the selected track's automation lanes, or hides them.
@@ -103,3 +93,21 @@ version = 1
 "options.audio_settings" = ["Ctrl+Comma"]
 "options.keyboard_shortcuts" = ["Ctrl+K"]
 "view.command_palette" = ["Ctrl+Shift+P"]
+
+# Keys that work in one panel only, while it has the focus, where they win
+# over the keys above.
+#
+# Live's arrow keys for its MIDI note editor act on the notes selected in the
+# piano roll. With none selected, they move the keyboard focus between
+# controls instead.
+[panels.piano_roll]
+"notes.transpose_up" = ["Up"]
+"notes.transpose_down" = ["Down"]
+"notes.octave_up" = ["Shift+Up"]
+"notes.octave_down" = ["Shift+Down"]
+"notes.nudge_left" = ["Left"]
+"notes.nudge_right" = ["Right"]
+"notes.shorten" = ["Shift+Left"]
+"notes.lengthen" = ["Shift+Right"]
+"notes.velocity_up" = ["Ctrl+Up"]
+"notes.velocity_down" = ["Ctrl+Down"]

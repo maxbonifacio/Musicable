@@ -12,7 +12,10 @@
 
 use std::collections::BTreeMap;
 
-use egui::{Id, Rect, Response, Role, Ui, WidgetInfo, WidgetText, pos2, vec2};
+use egui::{
+    Event, Id, Order, Rect, Response, Role, Stroke, StrokeKind, Ui, WidgetInfo, WidgetText, pos2,
+    vec2,
+};
 use egui_tiles::{
     Behavior, Container, EditAction, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId,
     Tiles, Tree, UiResponse,
@@ -50,6 +53,9 @@ pub(crate) struct Dock {
     sizes: Sizes,
     /// Whether the user changed the layout since it was last saved.
     changed: bool,
+    /// The widget with the keyboard focus, as last seen, to tell when the
+    /// focus moves into a panel.
+    keyboard: Option<Id>,
 }
 
 impl Dock {
@@ -89,6 +95,7 @@ impl Dock {
             tree: Tree::empty(Id::unique("dock")),
             sizes: Sizes::new(),
             changed: false,
+            keyboard: None,
         }
     }
 
@@ -430,6 +437,41 @@ impl Dock {
         }
     }
 
+    /// The panel a mouse button went down in this frame, where nothing such
+    /// as a menu or a window was over it, or else the panel the keyboard
+    /// focus moved into, as Tab moves it.
+    fn pressed_in(&mut self, ui: &Ui) -> Option<&'static str> {
+        let ctx = ui.ctx();
+        let keyboard = ctx.memory(|memory| memory.focused());
+        let moved = std::mem::replace(&mut self.keyboard, keyboard) != keyboard;
+        // From the events, as a press shorter than a frame has no origin.
+        let pressed = ui.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                Event::PointerButton {
+                    pos, pressed: true, ..
+                } => Some(*pos),
+                _ => None,
+            })
+        });
+        let pressed = pressed.filter(|&at| {
+            (ctx.layer_id_at(at)).is_none_or(|layer| layer.order == Order::Background)
+        });
+        // Where the widget is, as drawn this frame, without asking for its
+        // response, which would act on this frame's input again.
+        let keyed = (keyboard.filter(|_| moved))
+            .and_then(|id| ctx.viewport(|viewport| viewport.this_pass.widgets.get(id).copied()))
+            .filter(|widget| widget.layer_id == ui.layer_id())
+            .map(|widget| widget.rect.center());
+        let at = pressed.or(keyed)?;
+        let tiles = &self.tree.tiles;
+        tiles.iter().find_map(|(&tile, kind)| match kind {
+            Tile::Pane(pane) if tiles.rect(tile).is_some_and(|rect| rect.contains(at)) => {
+                Some(pane.0)
+            }
+            _ => None,
+        })
+    }
+
     /// Whether the user changed the layout since this was last asked.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
@@ -454,6 +496,8 @@ impl Dock {
             self.tree.set_visible(tile, false);
             self.changed = true;
         }
+        let pressed = self.pressed_in(ui);
+        draw.focused = draw.focused.or(pressed);
         // The parts whose edges the user dragged keep their new sizes.
         let defaults = Sizes::new();
         let measure = Measure::new(registry, theme, &defaults);
@@ -753,12 +797,23 @@ pub(crate) struct Draw<'a, 'v> {
     /// The tabs the user closed, to hide once the tree's drawn: hiding
     /// them while it's drawn leaves the splits without their parts.
     pub closed: Vec<TileId>,
+    /// The panel the user clicked in or on the tab of, or moved the
+    /// keyboard focus into, this frame, to give the focus.
+    pub focused: Option<&'static str>,
 }
 
 impl Behavior<Pane> for Draw<'_, '_> {
     fn pane_ui(&mut self, ui: &mut Ui, _tile: TileId, pane: &mut Pane) -> UiResponse {
+        let rect = ui.max_rect();
         if let Some(panel) = self.registry.get(pane.0) {
             (panel.show)(self.panels, ui, &mut self.cx);
+        }
+        // A thin outline around the panel with the focus, over what's in it.
+        if self.cx.view.editor.focus.panel() == pane.0 {
+            let theme = self.cx.theme;
+            let outline = Stroke::new(theme.dock.outline, theme.focus);
+            ui.painter()
+                .rect_stroke(rect, 0.0, outline, StrokeKind::Inside);
         }
         UiResponse::None
     }
@@ -782,7 +837,8 @@ impl Behavior<Pane> for Draw<'_, '_> {
     }
 
     /// Tabs are tabs to screen readers, called "Mixer panel" and so on, so
-    /// they're told from what's in the panels.
+    /// they're told from what's in the panels. Clicking one gives its panel
+    /// the focus.
     fn on_tab_button(
         &mut self,
         tiles: &mut Tiles<Pane>,
@@ -802,6 +858,9 @@ impl Behavior<Pane> for Draw<'_, '_> {
             response.widget_info(|| {
                 WidgetInfo::selected(Role::Tab, enabled, front, format!("{title} panel"))
             });
+            if response.clicked() {
+                self.focused = Some(pane.0);
+            }
         }
         response
     }
