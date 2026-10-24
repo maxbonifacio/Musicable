@@ -193,6 +193,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),
+                        workspaces: crate::Workspaces::default(),
                     };
                     let (theme, mouse) = (&state.theme, &state.mouse);
                     state

@@ -507,6 +507,26 @@ in other apps. Live 12 also switches between its clip view and its device
 view with Shift+Tab; here Shift+Tab moves the keyboard focus back, as it
 does everywhere else.
 
+### Workspace
+
+Workspaces lay the panels out ([app.md](app.md#workspaces)). They're the
+app's, not the project's, so these push a `Request` too, and don't change
+the project. Each of the user's workspaces, up to nine, is in a numbered
+slot, the first being Default, so its switch command, and its key, stay the
+same as others come and go. The Workspaces menu shows each slot's workspace
+by name, and leaves empty slots out.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `workspace.switch_1` | Switch to Workspace 1 | Switches to Default, saving the workspace in use first | Alt+1 | none |
+| `workspace.switch_2` to `workspace.switch_9` | Switch to Workspace 2 to 9 | Switches to the workspace in that slot, if there's one | Alt+2 to Alt+9 | none |
+| `workspace.save_as` | Save Workspace As... | Asks for a name, and keeps the layout as a new workspace under it, in the lowest slot free, which is in use from then on | none | none |
+| `workspace.rename` | Rename Workspace... | Asks for a new name for the workspace in use; Default keeps its name | none | none |
+| `workspace.delete` | Delete Workspace... | Deletes the workspace in use, once the user says so, and switches to Default, which can't be deleted | none | none |
+| `workspace.reset` | Reset Workspace | Lays the panels out as at first, all in the main window | none | none |
+
+Live has one layout, so no workspaces.
+
 ## The editor's state
 
 What the arrangement and the piano roll edit besides the project lives in

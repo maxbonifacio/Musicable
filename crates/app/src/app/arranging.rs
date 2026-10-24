@@ -295,10 +295,15 @@ fn the_demos_arranging_steps_work_with_the_mouse_and_the_keys() {
         harness.state().messages
     );
 
-    // Ctrl+S saves it, and it opens again as it was.
+    // Ctrl+S saves it, and it opens again as it was, with the workspace
+    // it was saved with.
     press(&mut harness, chord("Ctrl+S"));
     assert!(!harness.state().session.is_modified());
     drop(harness);
     let harness = window(&config.0, Some(path));
-    assert_eq!(*song(&harness), arranged);
+    let saved = Project {
+        workspace: Some("Default".to_owned()),
+        ..arranged
+    };
+    assert_eq!(*song(&harness), saved);
 }

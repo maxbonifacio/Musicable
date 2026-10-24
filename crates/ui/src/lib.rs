@@ -9,7 +9,8 @@
 //! splits and tabs the user drags about: the arrangement in the middle,
 //! with the mixer and the devices or the piano roll under it and the
 //! browser beside it. The keyboard shortcuts window and the command palette
-//! go over them. The layout is a [`Workspace`], which the app saves. Views
+//! go over them. The layout is one of the user's [`Workspace`]s, which the
+//! app saves and switches between. Views
 //! draw from a [`Theme`], and look mouse gestures up in a [`MouseMap`].
 //! `docs/app.md` describes it all.
 
@@ -43,7 +44,8 @@ pub use mixer::{InputChoice, Level, Levels, MidiChoice};
 pub use mouse::{Gesture, MouseAction, MouseMap, Target};
 pub use panels::{ARRANGEMENT, BROWSER, DEVICES, MIXER, PIANO_ROLL};
 pub use shell::{
-    Action, Audio, KeymapStatus, Playback, Recording, SaveChoice, Shell, View, ask_to_save,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
+    Workspaces, ask_to_save,
 };
 pub use theme::{
     Base, BrowserSizes, DeviceSizes, DockSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes,
@@ -51,4 +53,4 @@ pub use theme::{
 };
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};
-pub use workspace::{Layout, Split, WindowLayout, Workspace, WorkspaceError};
+pub use workspace::{Layout, MAX_NAME, Split, WindowLayout, Workspace, WorkspaceError, check_name};

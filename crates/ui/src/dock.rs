@@ -113,7 +113,11 @@ impl Dock {
         let layout = (self.tree.root)
             .and_then(|root| self.part(root, None, &measure))
             .unwrap_or_else(|| Layout::new(Split::Across(Vec::new())));
-        WindowLayout { hidden, layout }
+        WindowLayout {
+            hidden,
+            layout,
+            ..WindowLayout::default()
+        }
     }
 
     /// The part of the layout that's the tile `id`, in a split across or
@@ -475,6 +479,11 @@ impl Dock {
     /// Whether the user changed the layout since this was last asked.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    /// Has the layout saved, as if the user had changed it.
+    pub fn mark_changed(&mut self) {
+        self.changed = true;
     }
 
     /// Lays the panels out in `ui`'s space and draws them with `draw`.
@@ -926,6 +935,7 @@ mod tests {
                     },
                 ])),
             ])),
+            ..WindowLayout::default()
         }
     }
 
@@ -986,6 +996,7 @@ mod tests {
                     },
                 ),
             ])),
+            ..WindowLayout::default()
         };
         let dock = Dock::from_layout(&window, &registry, &theme);
         assert_eq!(dock.layout(&registry, &theme), window);
@@ -1006,6 +1017,7 @@ mod tests {
                 Layout::panel(ARRANGEMENT),
                 Layout::new(Split::Tabs(vec![MIXER.into(), ARRANGEMENT.into()])),
             ])),
+            ..WindowLayout::default()
         };
         let dock = Dock::from_layout(&window, &registry, &theme);
         // The browser goes on the left and the devices under the
@@ -1024,6 +1036,7 @@ mod tests {
                 ])),
                 Layout::panel(MIXER),
             ])),
+            ..WindowLayout::default()
         };
         assert_eq!(dock.layout(&registry, &theme), expected);
         assert!(dock.shown(ARRANGEMENT));
@@ -1031,6 +1044,7 @@ mod tests {
         let nothing = WindowLayout {
             hidden: Vec::new(),
             layout: Layout::panel("later"),
+            ..WindowLayout::default()
         };
         let dock = Dock::from_layout(&nothing, &registry, &theme);
         assert_eq!(dock.layout(&registry, &theme), default_layout());

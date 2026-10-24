@@ -4,7 +4,7 @@
 use egui::{Button, Ui};
 use musicable_commands::{
     Args, Command, CommandId, Registry, arrange, automation, browser, controllers, edit, file,
-    locator, notes, options, track, transport, view,
+    locator, notes, options, track, transport, view, workspace,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -132,7 +132,7 @@ const MENUS: [MenuSpec; 8] = [
 ];
 
 /// The menus that come last, after those for other areas.
-const LAST_MENUS: [MenuSpec; 3] = [
+const LAST_MENUS: [MenuSpec; 4] = [
     (
         "Browser",
         "browser",
@@ -168,6 +168,27 @@ const LAST_MENUS: [MenuSpec; 3] = [
             Some(view::TOGGLE_SNAP),
             None,
             Some(view::COMMAND_PALETTE),
+        ],
+    ),
+    (
+        "Workspaces",
+        "workspace",
+        &[
+            Some(workspace::SWITCH_1),
+            Some(workspace::SWITCH_2),
+            Some(workspace::SWITCH_3),
+            Some(workspace::SWITCH_4),
+            Some(workspace::SWITCH_5),
+            Some(workspace::SWITCH_6),
+            Some(workspace::SWITCH_7),
+            Some(workspace::SWITCH_8),
+            Some(workspace::SWITCH_9),
+            None,
+            Some(workspace::SAVE_AS),
+            Some(workspace::RENAME),
+            Some(workspace::DELETE),
+            None,
+            Some(workspace::RESET),
         ],
     ),
     (
@@ -327,8 +348,8 @@ mod tests {
         commands.register("macro.later", "Later", |_| {});
 
         let menus = menus(&commands);
-        // Areas without a menu of their own come before View and Options,
-        // and the mixer's commands all need arguments.
+        // Areas without a menu of their own come before the last menus, and
+        // the mixer's commands all need arguments.
         assert_eq!(
             titles(&menus),
             [
@@ -343,6 +364,7 @@ mod tests {
                 "Macro",
                 "Browser",
                 "View",
+                "Workspaces",
                 "Options"
             ]
         );

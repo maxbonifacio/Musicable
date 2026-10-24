@@ -12,8 +12,8 @@ use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project};
 
 use crate::{
-    Action, Audio, KeymapStatus, Levels, Library, Listing, Peaks, Playback, PluginEntry,
-    PluginStatus, Plugins, Preview, Shell, View, Waveforms,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Levels, Library, Listing, Peaks, Playback,
+    PluginEntry, PluginStatus, Plugins, Preview, Shell, View, Waveforms, Workspaces,
 };
 
 /// What the shell shows in the tests, and what it hands back.
@@ -42,6 +42,9 @@ pub(crate) struct State {
     /// The built-in devices the browser lists: all of them.
     pub native: Vec<NativeKind>,
     pub library: LibraryState,
+    /// The workspaces' names, by slot, and the slot of the one in use.
+    pub workspaces: Vec<Option<String>>,
+    pub workspace: usize,
     pub actions: Vec<Action>,
 }
 
@@ -232,6 +235,8 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         plugin_status: BTreeMap::new(),
         native: NativeKind::ALL.to_vec(),
         library: LibraryState::default(),
+        workspaces: vec![Some(DEFAULT_WORKSPACE.to_owned())],
+        workspace: 0,
         actions: Vec::new(),
     };
     builder.with_size([1100.0, 720.0]).build_ui_state(
@@ -278,6 +283,10 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 },
                 native: &state.native,
                 library: state.library.view(),
+                workspaces: Workspaces {
+                    slots: &state.workspaces,
+                    current: state.workspace,
+                },
             };
             let mut actions = state.shell.show(ui, &view);
             for action in &actions {
