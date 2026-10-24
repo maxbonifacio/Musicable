@@ -422,7 +422,8 @@ undo history and the engine rebuilds its graph once.
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
   Gestures snap to it while Snap to Grid is on (Ctrl+4).
 
-The mouse does what it does in Live:
+The mouse does what it does in Live, until the Settings window's Mouse
+page changes it ([your mouse map file](#settings-and-your-keymap)):
 
 | Where | Gesture | What it does |
 |---|---|---|
@@ -477,12 +478,15 @@ each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is the table above and the piano roll's.
 `Shell::set_theme` and `set_mouse_map` change them: the app sets the theme
 from the Settings window's Appearance page and theme files
-([Themes](#themes)), and the
-mouse map is for the profiles of Tier 2. Each view is a panel with its own
-id, such as `musicable_ui::MIXER` and `PIANO_ROLL`, which the shell's panel
-registry (`crates/ui/src/panels.rs`) holds with its title, its place and
-size in the default layout, and how it's drawn: the dock lays the panels
-out by id, and the workspace file names them by it.
+([Themes](#themes)), and the mouse map from the Mouse page and the user's
+mouse map file, which holds the changes to `MouseMap::live()`
+(`musicable_ui::MouseMapFile`). What each place can do with each gesture,
+which the page offers, is `Target::actions`: a new action goes in that
+table, as well as in the views that carry it out. Each view is a panel
+with its own id, such as `musicable_ui::MIXER` and `PIANO_ROLL`, which the
+shell's panel registry (`crates/ui/src/panels.rs`) holds with its title,
+its place and size in the default layout, and how it's drawn: the dock
+lays the panels out by id, and the workspace file names them by it.
 
 ### How fast it draws
 
@@ -650,12 +654,13 @@ for each area of the settings listed down its left side, as Live's
 Preferences has a tab for each. It opens at the page it showed last, and
 **Options > Audio Settings**, **Keyboard Shortcuts** (Ctrl+K) and
 **Appearance** open it at theirs. Changes apply at once, and are kept: in
-[settings.toml](#settings-and-your-keymap), or in the keymap's, the theme's
-or the workspaces' own files. Every setting in settings.toml has a control
-here but the export window's, which that window keeps as it was last used.
-The window isn't a panel, so no workspace has it. Escape closes it, unless
-a menu or the command palette is open over it, or the Keys page is waiting
-for keys: then Escape closes that, or stops waiting, first.
+[settings.toml](#settings-and-your-keymap), or in the keymap's, the mouse
+map's, the theme's or the workspaces' own files. Every setting in
+settings.toml has a control here but the export window's, which that
+window keeps as it was last used. The window isn't a panel, so no
+workspace has it. Escape closes it, unless a menu or the command palette
+is open over it, or the Keys page is waiting for keys: then Escape closes
+that, or stops waiting, first.
 
 - **Audio**: the device to play through, its mode, rate and buffer size,
   which **Apply** opens ([Audio](#audio)), and what's playing now.
@@ -663,6 +668,16 @@ for keys: then Escape closes that, or stops waiting, first.
   and the [recording offset](#recording) of the device playing, in its mode
   and at its rate.
 - **Keys**: every command's keys ([below](#changing-keys)).
+- **Mouse**: what each gesture does, from where it starts: in the
+  arrangement, the ruler and the loop, takes and automation, the piano
+  roll, the mixer and devices, and for the wheel. Each gesture has a menu
+  of what it can do there. Without modifiers, it can do nothing; with
+  them, it can do the same as without them, which is what modifiers that
+  have no action of their own there do. **Add Modifiers...** gives a
+  gesture an action with other modifiers held, starting with what it does
+  now, **Reset** puts one back as it was at first, and **Reset All** puts
+  them all back. Gestures with Cmd show on a Mac only. The changes go to
+  your [mouse map file](#settings-and-your-keymap).
 - **Behaviour**: where Play/Stop plays from, the start marker, as in Live,
   or wherever the playhead stopped, and what the piano roll calls middle C.
 - **Appearance**: the theme ([Themes](#themes)).
@@ -1441,8 +1456,8 @@ scaled or rounded. A cancelled or failed export leaves no files behind.
 
 ## Settings and your keymap
 
-The app keeps its settings, your keymap, your themes and the panels'
-layout in its config folder:
+The app keeps its settings, your keymap, your mouse map, your themes and
+the panels' layout in its config folder:
 
 | System | Folder |
 |---|---|
@@ -1482,6 +1497,37 @@ Single changes to a file without mistakes make no backup: there's nothing to
 lose. Without a config folder, changes last until the app closes. If the
 backup or the file can't be written, the page says so, and the keys you
 set still work until the app closes.
+
+`mouse.toml` is your mouse map file: the changes made on the Settings
+window's Mouse page to what the mouse does, which is Live's at first. The
+app reads it at startup and on Reload, writes each change to it at once,
+and keeps `mouse.backup.toml` before writing over what would be lost, as it
+does for the keymap file. Each table is a place where gestures start, and
+each line under it gives a gesture there, with the modifiers held, what it
+does in place of what it did:
+
+```toml
+format = "musicable-mouse"
+version = 1
+
+[clip_body]
+"Drag" = "move"
+"Double-click" = "none"
+
+[solo_button]
+"Click" = "add_solo"
+"Ctrl+Click" = "exclusive_solo"
+```
+
+The modifiers are written as in key chords, Ctrl, Alt, Shift and Cmd, and
+the gestures are `Click`, `Double-click`, `Drag` and `Wheel`. `"none"` takes
+a gesture's action away, so it does what it does without the modifiers,
+or nothing if none are held. **Create It**, on the page, writes a file
+that lists every place, what its gestures can do there, and what they do
+at first, commented out: take the `#` off a line to change it. An action a
+gesture can't do there, a place or a gesture this version doesn't have,
+and other mistakes are left out, and the page lists them; a file that
+can't be read leaves the mouse as it is at first, and says why.
 
 `workspaces` holds a file for each workspace ([Workspaces](#workspaces)),
 named after it, such as `Mixing.toml`: `Default.toml` once you've changed
@@ -1861,8 +1907,7 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   Window sends a panel back.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips.
-- The Settings window's Mouse page, for what the mouse does where, and
-  profiles of keys, mouse, theme, workspaces and behaviour to switch
+- Profiles of keys, mouse, theme, workspaces and behaviour to switch
   between, which come next in Tier 2's UI foundations.
 - Editing a theme on the Appearance page, with colour pickers: theme
   files are edited in a text editor for now. Plugins' own windows keep
