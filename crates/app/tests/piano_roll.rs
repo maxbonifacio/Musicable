@@ -132,7 +132,7 @@ fn notes_edited_as_the_piano_roll_does_play_as_they_are_now() {
         panic!("Add Note returns the note");
     };
     let editor = rig.session.editor();
-    assert_eq!(editor.focus, Focus::PianoRoll);
+    assert_eq!(editor.focus, Focus::PIANO_ROLL);
     assert_eq!(editor.piano_roll.notes.iter().collect::<Vec<_>>(), [&note]);
     let played = rig.first_beat();
     // Half a second of 440 Hz.
@@ -173,7 +173,7 @@ fn notes_edited_as_the_piano_roll_does_play_as_they_are_now() {
     assert!(cycles(&played).abs_diff(440) <= 2, "{}", cycles(&played));
 
     // With the arrangement's focus, the arrow keys go to the window again.
-    rig.session.editor_mut().focus = Focus::Arrangement;
+    rig.session.editor_mut().focus = Focus::ARRANGEMENT;
     assert!(!rig.takes("Up"));
     let stats = rig.session.stats();
     assert_eq!(stats.events_late, 0);

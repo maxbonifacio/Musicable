@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui_kittest::{Harness, HarnessBuilder};
-use musicable_commands::{Editor, Keymap, Problem, Registry, Transport, browser, view};
+use musicable_commands::{Editor, Focus, Keymap, Problem, Registry, Transport, browser, view};
 use musicable_library::{FileId, Index, Preset};
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
@@ -298,9 +298,15 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 }
             }
             // As the app would, keep the zoom and scrolling the
-            // arrangement and the piano roll ask for, as the tests don't
-            // look for them.
+            // arrangement and the piano roll ask for, and give the focus to
+            // the panel clicked in, as the tests look for the editor's
+            // state, not these.
             actions.retain(|action| match action {
+                Action::RunWith(id, args) if *id == view::SET_FOCUS => {
+                    let panel = args.get::<String>("panel").unwrap();
+                    state.editor.focus = Focus::on(&panel).unwrap();
+                    false
+                }
                 Action::RunWith(id, args)
                     if *id == view::SET_VIEWPORT || *id == view::SET_PIANO_ROLL_VIEWPORT =>
                 {

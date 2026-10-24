@@ -37,6 +37,7 @@ pub mod locator;
 pub mod mixer;
 pub mod notes;
 pub mod options;
+pub mod panel;
 pub mod take;
 #[cfg(test)]
 mod testing;
@@ -47,9 +48,9 @@ pub mod view;
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use browser::{Library, NoLibrary};
 pub use document::{Committed, Document, Edit, Transaction};
-pub use editor::{Editor, Focus};
+pub use editor::{Editor, Edits, Focus};
 pub use key::{ChordError, Key, KeyChord, Modifiers};
-pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem};
+pub use keymap::{KEYMAP_VERSION, Keymap, KeymapFile, KeymapFileError, Problem, Scope};
 
 /// Dotted, stable command name, e.g. `"transport.play"`. Keymap files refer
 /// to commands by it, so a command keeps its id once it has shipped.
@@ -138,8 +139,8 @@ pub enum When {
     Always,
     /// Clips are selected.
     ClipsSelected,
-    /// Clips are selected, or a stretch of time is, and the arrangement has
-    /// the focus.
+    /// Clips are selected, or a stretch of time is, and the arrangement or
+    /// the mixer has the focus.
     ClipsOrTimeSelected,
     /// Something Copy can take is selected where the focus is: notes, or
     /// clips or time.
@@ -147,6 +148,9 @@ pub enum When {
     /// Something is selected where the focus is: notes, or clips, time or
     /// tracks.
     SomethingSelected,
+    /// The panel with the focus has things to select: the arrangement's
+    /// clips, or the piano roll's notes.
+    CanSelectAll,
     /// Tracks are selected.
     TracksSelected,
     /// Cut or Copy took something to paste where the focus is.
@@ -171,22 +175,24 @@ impl When {
     pub fn applies(self, project: &Project, editor: &Editor) -> bool {
         let selection = &editor.selection;
         let roll = &editor.piano_roll;
-        let notes = editor.focus == Focus::PianoRoll;
+        let edits = editor.focus.edits();
+        let notes = edits == Edits::Notes;
+        let arranging = edits == Edits::Arrangement;
         match self {
             When::Always => true,
             When::ClipsSelected => !selection.clips.is_empty(),
-            When::ClipsOrTimeSelected => {
-                !notes && (!selection.clips.is_empty() || selection.time.is_some())
-            }
             When::CanCopy | When::SomethingSelected | When::NotesSelected if notes => {
                 roll.clip.is_some() && !roll.notes.is_empty()
             }
             When::NotesSelected => false,
-            When::CanCopy => !selection.clips.is_empty() || selection.time.is_some(),
-            When::SomethingSelected => !selection.is_empty(),
+            When::ClipsOrTimeSelected | When::CanCopy => {
+                arranging && (!selection.clips.is_empty() || selection.time.is_some())
+            }
+            When::SomethingSelected => arranging && !selection.is_empty(),
+            When::CanSelectAll => edits != Edits::Nothing,
             When::TracksSelected => !selection.tracks.is_empty(),
             When::CanPaste if notes => roll.clip.is_some() && roll.clipboard.is_some(),
-            When::CanPaste => editor.clipboard.is_some(),
+            When::CanPaste => arranging && editor.clipboard.is_some(),
             When::CanRename => selection.clips.len() == 1 || editor.selected_track.is_some(),
             When::HasLocators => !project.locators.is_empty(),
             When::CanQuantize if notes => roll.clip.is_some(),

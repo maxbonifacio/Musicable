@@ -363,7 +363,7 @@ pub fn register(registry: &mut Registry) {
             let ends = args.opt("ends")?.unwrap_or(false);
             let notes: Option<Vec<NoteId>> = args.opt("notes")?;
             let editor = ctx.document.editor();
-            let arranging = editor.focus == Focus::Arrangement
+            let arranging = editor.focus != Focus::PIANO_ROLL
                 && notes.is_none()
                 && args.value("clip").is_none();
             let (targets, zoom) = if arranging {
@@ -701,7 +701,7 @@ pub fn quantize(
 fn selected(ctx: &Context<'_>) -> Option<(ClipId, Vec<NoteId>)> {
     let editor = ctx.document.editor();
     let roll = &editor.piano_roll;
-    let clip = roll.clip.filter(|_| editor.focus == Focus::PianoRoll)?;
+    let clip = roll.clip.filter(|_| editor.focus == Focus::PIANO_ROLL)?;
     (!roll.notes.is_empty()).then(|| (clip, roll.notes.iter().copied().collect()))
 }
 
@@ -926,7 +926,7 @@ mod tests {
     use crate::arrange::INSERT_MIDI_CLIP;
     use crate::editor::Viewport;
     use crate::testing::Setup;
-    use crate::{Keymap, edit, view};
+    use crate::{Keymap, Scope, edit, panel, view};
 
     /// Keys, a MIDI track with a clip from beat 4 to 12 that starts playing
     /// a beat into its own time, and Vox, an audio track with a clip. The
@@ -996,7 +996,7 @@ mod tests {
         let before = notes(&setup, k);
         select(&mut setup, k, &[]);
         let editor = setup.document.editor();
-        assert_eq!(editor.focus, Focus::PianoRoll);
+        assert_eq!(editor.focus, Focus::PIANO_ROLL);
         assert_eq!(editor.piano_roll.clip, Some(k));
         // Showing the clip zooms to its 8 beats, so the grid steps by
         // sixteenths: a note drawn without a length lasts one.
@@ -1191,25 +1191,33 @@ mod tests {
     #[test]
     fn the_keys_change_the_selected_notes_as_live_s_do() {
         let keymap = Keymap::default_keymap();
-        let chords =
-            |id| -> Vec<String> { keymap.chords_for(&id).map(|c| c.to_string()).collect() };
+        let chords = |id, scope| -> Vec<String> {
+            let chords = keymap.chords_in(&id, scope);
+            chords.map(|c| c.to_string()).collect()
+        };
+        // The arrow keys are the piano roll's own.
+        let piano_roll = Scope::Panel(panel::PIANO_ROLL);
         let expected = [
-            (TRANSPOSE_UP, "Up"),
-            (TRANSPOSE_DOWN, "Down"),
-            (OCTAVE_UP, "Shift+Up"),
-            (OCTAVE_DOWN, "Shift+Down"),
-            (NUDGE_LEFT, "Left"),
-            (NUDGE_RIGHT, "Right"),
-            (SHORTEN, "Shift+Left"),
-            (LENGTHEN, "Shift+Right"),
-            (VELOCITY_UP, "Ctrl+Up"),
-            (VELOCITY_DOWN, "Ctrl+Down"),
-            (TOGGLE_DRAW, "B"),
-            (QUANTIZE, "Ctrl+U"),
+            (TRANSPOSE_UP, "Up", piano_roll),
+            (TRANSPOSE_DOWN, "Down", piano_roll),
+            (OCTAVE_UP, "Shift+Up", piano_roll),
+            (OCTAVE_DOWN, "Shift+Down", piano_roll),
+            (NUDGE_LEFT, "Left", piano_roll),
+            (NUDGE_RIGHT, "Right", piano_roll),
+            (SHORTEN, "Shift+Left", piano_roll),
+            (LENGTHEN, "Shift+Right", piano_roll),
+            (VELOCITY_UP, "Ctrl+Up", piano_roll),
+            (VELOCITY_DOWN, "Ctrl+Down", piano_roll),
+            (TOGGLE_DRAW, "B", Scope::Everywhere),
+            (QUANTIZE, "Ctrl+U", Scope::Everywhere),
         ];
-        for (id, chord) in expected {
-            assert_eq!(chords(id.clone()), [chord], "{id}");
+        for (id, chord, scope) in expected {
+            assert_eq!(chords(id.clone(), scope), [chord], "{id}");
+            let focused = keymap.chords_focused(&id, Focus::PIANO_ROLL);
+            assert_eq!(focused, [chord.parse().unwrap()], "{id}");
         }
+        let up = "Up".parse().unwrap();
+        assert_eq!(keymap.lookup_focused(up, Focus::ARRANGEMENT), None);
 
         let (mut setup, _, [k, _], [c, e, _]) = roll();
         // Nothing selected: the keys do nothing, and go on to the controls.
@@ -1297,7 +1305,7 @@ mod tests {
         setup.select_clips(&[k]);
         setup.run(&edit::COPY);
         let editor = setup.document.editor();
-        assert_eq!(editor.focus, Focus::Arrangement);
+        assert_eq!(editor.focus, Focus::ARRANGEMENT);
         assert_eq!(editor.clipboard.as_ref().map(|c| c.clips.len()), Some(1));
         assert_eq!(
             editor.piano_roll.clipboard.as_ref().map(|c| c.notes.len()),
@@ -1365,7 +1373,7 @@ mod tests {
         let editor = setup.document.editor();
         // The last MIDI clip selected, without the focus.
         assert_eq!(editor.piano_roll.clip, Some(k));
-        assert_eq!(editor.focus, Focus::Arrangement);
+        assert_eq!(editor.focus, Focus::ARRANGEMENT);
         // Its whole length in sight, its notes' keys in the middle.
         let visible = editor.piano_roll.viewport.visible();
         assert!(visible.start < Beats::new(4) && Beats::new(12) < visible.end);
@@ -1376,7 +1384,7 @@ mod tests {
         assert_eq!(selected(&setup), [0]);
         // Selecting time or tracks gives the arrangement the focus back.
         setup.select_tracks(&[keys]);
-        assert_eq!(setup.document.editor().focus, Focus::Arrangement);
+        assert_eq!(setup.document.editor().focus, Focus::ARRANGEMENT);
         // The clip going takes it out of the piano roll.
         setup.document.transact("Delete", |tx| {
             tx.remove_clip(k);

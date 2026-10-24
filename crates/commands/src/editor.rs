@@ -14,6 +14,8 @@ use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
+use crate::panel;
+
 /// The arrangement's and the piano roll's editing state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Editor {
@@ -129,7 +131,15 @@ impl Editor {
     /// piano roll the focus.
     pub fn open_in_piano_roll(&mut self, clip: &Clip) {
         if self.show_in_piano_roll(clip) {
-            self.focus = Focus::PianoRoll;
+            self.focus = Focus::PIANO_ROLL;
+        }
+    }
+
+    /// Gives the arrangement the focus, as selecting in it does, unless a
+    /// panel that edits its selection, such as the mixer, has it.
+    pub fn focus_arrangement(&mut self) {
+        if self.focus.edits() != Edits::Arrangement {
+            self.focus = Focus::ARRANGEMENT;
         }
     }
 
@@ -181,21 +191,64 @@ impl Editor {
             None => {
                 roll.clip = None;
                 roll.notes.clear();
-                self.focus = Focus::Arrangement;
+                if self.focus == Focus::PIANO_ROLL {
+                    self.focus = Focus::ARRANGEMENT;
+                }
             }
         }
     }
 }
 
-/// The views that edit: where the edit commands, such as Copy and Delete,
-/// and the keys act.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Focus {
-    /// The arrangement, and its selected clips, time or tracks.
-    #[default]
+/// The panel with the focus, by id: where the edit commands, such as Copy
+/// and Delete, and the keys act. Clicking in a panel gives it the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Focus(&'static str);
+
+impl Focus {
+    pub const ARRANGEMENT: Self = Self(panel::ARRANGEMENT);
+    pub const MIXER: Self = Self(panel::MIXER);
+    pub const DEVICES: Self = Self(panel::DEVICES);
+    pub const PIANO_ROLL: Self = Self(panel::PIANO_ROLL);
+    pub const BROWSER: Self = Self(panel::BROWSER);
+
+    /// The focus on the panel with id `id`, if there's one.
+    pub fn on(id: &str) -> Option<Self> {
+        panel::find(id).map(Self)
+    }
+
+    /// The id of the panel with the focus.
+    pub fn panel(self) -> &'static str {
+        self.0
+    }
+
+    /// What the edit commands act on while the panel has the focus.
+    pub fn edits(self) -> Edits {
+        match self.0 {
+            panel::ARRANGEMENT | panel::MIXER => Edits::Arrangement,
+            panel::PIANO_ROLL => Edits::Notes,
+            _ => Edits::Nothing,
+        }
+    }
+}
+
+impl Default for Focus {
+    fn default() -> Self {
+        Self::ARRANGEMENT
+    }
+}
+
+/// What the edit commands, such as Copy and Delete, act on while a panel
+/// has the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edits {
+    /// The arrangement's selected clips, time or tracks: in the arrangement,
+    /// and in the mixer, which shows its tracks, as Live's Arrangement View
+    /// has its mixer.
     Arrangement,
-    /// The piano roll, and its selected notes.
-    PianoRoll,
+    /// The piano roll's selected notes.
+    Notes,
+    /// Nothing: the panel has nothing selected that they take.
+    Nothing,
 }
 
 /// What the piano roll edits: the MIDI clip it shows, its selected notes,

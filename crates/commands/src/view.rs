@@ -58,8 +58,7 @@ pub const SET_VIEWPORT: CommandId = CommandId::new("view.set_viewport");
 pub const SET_TRACK_HEIGHT: CommandId = CommandId::new("view.set_track_height");
 /// Sets the piano roll's zoom, scrolling and key height.
 pub const SET_PIANO_ROLL_VIEWPORT: CommandId = CommandId::new("view.set_piano_roll_viewport");
-/// Gives the arrangement or the piano roll the focus, where the edit
-/// commands and the keys act.
+/// Gives a panel the focus, where the edit commands and the keys act.
 pub const SET_FOCUS: CommandId = CommandId::new("view.set_focus");
 
 /// How much Zoom In and Zoom Out zoom by.
@@ -249,19 +248,19 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         Command::new(SET_FOCUS, "Set Focus").with_params(&[Param::required(
-            "view",
+            "panel",
             Type::Text,
-            "\"arrangement\" or \"piano_roll\".",
+            "The panel's id, such as \"arrangement\" or \"piano_roll\".",
         )]),
         |ctx, args| {
-            let view: String = args.get("view")?;
+            let id: String = args.get("panel")?;
             let editor = ctx.document.editor_mut();
-            editor.focus = match view.as_str() {
-                "arrangement" => Focus::Arrangement,
-                "piano_roll" if editor.piano_roll.clip.is_some() => Focus::PianoRoll,
-                "piano_roll" => return Err(CommandError::invalid("the piano roll shows no clip")),
-                _ => return Err(CommandError::invalid(format!("there's no view {view}"))),
-            };
+            let focus = Focus::on(&id)
+                .ok_or_else(|| CommandError::invalid(format!("there's no panel {id}")))?;
+            if focus == Focus::PIANO_ROLL && editor.piano_roll.clip.is_none() {
+                return Err(CommandError::invalid("the piano roll shows no clip"));
+            }
+            editor.focus = focus;
             Ok(Value::None)
         },
     );
@@ -293,8 +292,8 @@ fn zoom(ctx: &mut Context<'_>, factor: f64) {
     let editor = ctx.document.editor_mut();
     let start_marker = editor.start_marker;
     let viewport = match editor.focus {
-        Focus::Arrangement => &mut editor.viewport,
-        Focus::PianoRoll => &mut editor.piano_roll.viewport,
+        Focus::PIANO_ROLL => &mut editor.piano_roll.viewport,
+        _ => &mut editor.viewport,
     };
     let at = match viewport.visible().contains(start_marker) {
         true => start_marker,
@@ -306,14 +305,14 @@ fn zoom(ctx: &mut Context<'_>, factor: f64) {
 fn zoom_to_selection(ctx: &mut Context<'_>) {
     let (project, editor) = ctx.document.parts();
     match editor.focus {
-        Focus::Arrangement => {
-            if let Some(range) = editor.selected_range(project) {
-                editor.viewport.show(range);
-            }
-        }
-        Focus::PianoRoll => {
+        Focus::PIANO_ROLL => {
             if let Some((range, low, high)) = crate::notes::selected_range(project, editor) {
                 editor.piano_roll.show_notes(range, low, high);
+            }
+        }
+        _ => {
+            if let Some(range) = editor.selected_range(project) {
+                editor.viewport.show(range);
             }
         }
     }
@@ -538,16 +537,23 @@ mod tests {
         let a3 = (127.0 - 69.0) * roll.key_height;
         assert!((a3..a3 + roll.key_height).contains(&middle), "{middle}");
 
-        let focus = |view: &str| Args::new().with("view", view);
+        let focus = |panel: &str| Args::new().with("panel", panel);
         setup.run_with(&SET_FOCUS, focus("arrangement")).unwrap();
         setup.run(&ZOOM_IN);
         assert_eq!(
             setup.document.editor().viewport.zoom,
             arrangement.zoom * 2.0
         );
+        // The mixer zooms the arrangement, which it shows the tracks of.
+        setup.run_with(&SET_FOCUS, focus("mixer")).unwrap();
+        setup.run(&ZOOM_IN);
         assert_eq!(
-            setup.run_with(&SET_FOCUS, focus("mixer")),
-            Err(CommandError::invalid("there's no view mixer"))
+            setup.document.editor().viewport.zoom,
+            arrangement.zoom * 4.0
+        );
+        assert_eq!(
+            setup.run_with(&SET_FOCUS, focus("later")),
+            Err(CommandError::invalid("there's no panel later"))
         );
         setup.document.transact("Delete", |tx| {
             tx.remove_clip(clip);

@@ -648,7 +648,7 @@ fn a_double_click_opens_a_midi_clip_in_the_piano_roll() {
     );
     let editor = harness.state().editor();
     assert_eq!(editor.piano_roll.clip, Some(ids.chords));
-    assert_eq!(editor.focus, musicable_commands::Focus::PianoRoll);
+    assert_eq!(editor.focus, musicable_commands::Focus::PIANO_ROLL);
 }
 
 #[test]
