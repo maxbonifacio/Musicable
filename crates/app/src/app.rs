@@ -18,14 +18,16 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_plugins::{ParamInfo, PluginInfo, Waker};
 use musicable_ui::{
-    Action, Audio, DEFAULT_WORKSPACE, InputChoice, KeyPresses, KeymapStatus, Level, Levels,
-    MidiChoice, Playback, PluginEntry, PluginParam, PluginStatus, Plugins, SaveChoice, Shell, View,
+    Action, Audio, DEFAULT_WORKSPACE, DEVICES, InputChoice, KeyPresses, KeymapStatus, Level,
+    Levels, MidiChoice, Monitor, Playback, PluginEntry, PluginParam, PluginStatus, Plugins,
+    SaveChoice, Shell, View,
 };
 
 use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::export::{self, Export, ExportSettings, Job, Report};
 use crate::export_window::{Asked, ExportWindow};
+use crate::frame_times::FrameTimes;
 use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::mouse_file::UserMouse;
@@ -37,7 +39,7 @@ use crate::settings::{
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
-use crate::workspaces::{Place, ReadError, Workspaces};
+use crate::workspaces::{self, Place, ReadError, Workspaces};
 use crate::{Output, Session, capital};
 
 /// How often the window redraws while the transport plays or the mixer's
@@ -47,6 +49,8 @@ const STOPPED_FRAME: Duration = Duration::from_millis(250);
 /// How often the app looks for a graph while one compiles, to send it to the
 /// engine soon after it's ready.
 const COMPILING_FRAME: Duration = Duration::from_millis(5);
+/// How often the app lists the monitors, which windows of their own go on.
+const MONITORS_EVERY: Duration = Duration::from_secs(1);
 /// The audio files the Import Audio and Load Sample dialogs show. The app
 /// reads a file by what's in it, whatever it's called.
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"];
@@ -111,6 +115,15 @@ pub struct App {
     /// Where the main window goes, once it can be moved there: the place
     /// the workspace switched to has for it.
     unplaced: Option<Place>,
+    /// The window of its own the devices were last found in, as egui and
+    /// Win32 know it, so it's looked for once.
+    devices_hwnd: Option<(egui::ViewportId, isize)>,
+    /// How long frames take, when `MUSICABLE_FRAME_TIMES` asks.
+    frame_times: Option<FrameTimes>,
+    /// The monitors, as last listed, where windows of their own go.
+    monitors: Vec<Monitor>,
+    /// When the monitors were last listed.
+    monitors_listed: Option<Instant>,
     /// What waits for the user to say whether to save their changes first.
     pending: Option<Request>,
     /// Set once the user has said what to do with their changes, so the
@@ -241,6 +254,10 @@ impl App {
             theme_message: None,
             workspaces,
             unplaced: None,
+            devices_hwnd: None,
+            frame_times: FrameTimes::from_env(),
+            monitors: Vec::new(),
+            monitors_listed: None,
             pending: None,
             closing: false,
             title: String::new(),
@@ -602,6 +619,18 @@ impl App {
                 self.shell.switch_devices_piano_roll();
                 self.focus_in_sight();
             }
+            Request::MoveToNewWindow => {
+                let panel = self.session.editor().focus.panel();
+                if let Err(problem) = self.shell.move_to_new_window(panel) {
+                    self.messages.push(problem);
+                }
+            }
+            Request::MoveToMainWindow => {
+                let panel = self.session.editor().focus.panel();
+                if let Err(problem) = self.shell.move_to_main_window(panel) {
+                    self.messages.push(problem);
+                }
+            }
             Request::Rename(named) => self.shell.rename(named),
             Request::PluginWindow { device, show: true } => {
                 self.show_plugin_window(device, ctx, frame);
@@ -679,21 +708,42 @@ impl App {
         }
     }
 
-    /// Shows the device `device`'s plugin's own window, in front of the
-    /// app's.
+    /// Shows the device `device`'s plugin window over the window the
+    /// devices are in, on its monitor.
     fn show_plugin_window(&mut self, device: DeviceId, ctx: &egui::Context, frame: &eframe::Frame) {
-        // The display's scale, without egui's zoom, which the plugin
+        // That monitor's scale, without egui's zoom, which the plugin
         // doesn't know of.
-        let scale = ctx.native_pixels_per_point().unwrap_or(1.0);
+        let viewport = self.shell.viewport_of(DEVICES);
+        let scale = ctx.input_for(viewport, |i| i.viewport().native_pixels_per_point);
+        let scale = scale.or(ctx.native_pixels_per_point()).unwrap_or(1.0);
+        let owner = self.devices_window(ctx, frame);
         let shown = self.plugin_windows.show(
             &mut self.session,
             device,
-            owner(frame),
+            owner,
             f64::from(scale),
             waker(ctx),
         );
         if let Err(error) = shown {
             self.messages.push(capital(&format!("{error}.")));
+        }
+    }
+
+    /// The window the devices are in, as Win32's `HWND`, which plugin
+    /// windows stay in front of: the main window, or the window of its own
+    /// the user moved them to, once it has opened.
+    fn devices_window(&mut self, ctx: &egui::Context, frame: &eframe::Frame) -> Option<isize> {
+        let viewport = self.shell.viewport_of(DEVICES);
+        if viewport == egui::ViewportId::ROOT {
+            return owner(frame);
+        }
+        match self.devices_hwnd {
+            Some((found, hwnd)) if found == viewport => Some(hwnd),
+            _ => {
+                let hwnd = window_of(ctx, viewport)?;
+                self.devices_hwnd = Some((viewport, hwnd));
+                Some(hwnd)
+            }
         }
     }
 
@@ -1182,6 +1232,20 @@ impl App {
         }
     }
 
+    /// Lists the monitors again, now and then, as they come and go.
+    fn list_monitors(&mut self, frame: &eframe::Frame) {
+        if self
+            .monitors_listed
+            .is_some_and(|at| at.elapsed() < MONITORS_EVERY)
+        {
+            return;
+        }
+        if let Some(window) = frame.winit_window() {
+            self.monitors = workspaces::monitors(window);
+        }
+        self.monitors_listed = Some(Instant::now());
+    }
+
     fn update_title(&mut self, ctx: &egui::Context) {
         let modified = if self.session.is_modified() { "*" } else { "" };
         let title = format!("{}{modified} - Musicable", self.name());
@@ -1286,6 +1350,7 @@ impl eframe::App for App {
         // Commands that keys ran before this frame.
         self.handle_requests(&ctx, frame);
         self.update_plugin_status();
+        self.list_monitors(frame);
 
         let stats = self.session.stats();
         let heard = self.session.heard_position(self.output.latency());
@@ -1367,6 +1432,7 @@ impl eframe::App for App {
                 slots: self.workspaces.slots(),
                 current: self.workspaces.current(),
             },
+            monitors: &self.monitors,
         };
         let mut actions = self.shell.show(ui, &view);
         // The Settings window, whose Keys page the shell draws.
@@ -1388,6 +1454,13 @@ impl eframe::App for App {
         }
         if let Some(asked) = asked {
             self.settings_asked(asked, &ctx, frame);
+        }
+        // Plugin windows go with the devices to the window they're in, and
+        // before the window they were in closes.
+        if self.plugin_windows.any_open()
+            && let Some(owner) = self.devices_window(&ctx, frame)
+        {
+            self.plugin_windows.set_owner(owner);
         }
         // A tab's close button hides its panel, and a tab clicked puts
         // another in front of it, without a command.
@@ -1420,6 +1493,10 @@ impl eframe::App for App {
         }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
+        if let Some(times) = &mut self.frame_times {
+            times.frame(frame.info().cpu_usage, self.shell.windows() + 1);
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -1507,6 +1584,25 @@ fn owner(frame: &eframe::Frame) -> Option<isize> {
 
 #[cfg(not(windows))]
 fn owner(_frame: &eframe::Frame) -> Option<isize> {
+    None
+}
+
+/// The window of its own that egui shows as `viewport`, as Win32's `HWND`,
+/// found by where it is, once it has opened: eframe hands out only the main
+/// window's.
+#[cfg(windows)]
+fn window_of(ctx: &egui::Context, viewport: egui::ViewportId) -> Option<isize> {
+    let zoom = ctx.zoom_factor();
+    let rect = ctx.input_for(viewport, |i| {
+        let info = i.viewport();
+        Some(info.outer_rect? * (info.native_pixels_per_point? * zoom))
+    })?;
+    let edges = [rect.left(), rect.top(), rect.right(), rect.bottom()];
+    crate::plugin_windows::window_at(edges.map(|edge| edge.round() as i32))
+}
+
+#[cfg(not(windows))]
+fn window_of(_ctx: &egui::Context, _viewport: egui::ViewportId) -> Option<isize> {
     None
 }
 

@@ -957,6 +957,8 @@ fn examples() -> Vec<Example> {
         edits(transport::TOGGLE_PUNCH_OUT, bare),
         leaves(view::COMMAND_PALETTE, bare),
         leaves(view::FIXED_GRID, bare),
+        leaves(view::MOVE_TO_MAIN_WINDOW, bare),
+        leaves(view::MOVE_TO_NEW_WINDOW, bare),
         leaves(view::NARROW_GRID, bare),
         leaves(view::SET_FOCUS, |_| {
             Some(Args::new().with("panel", "arrangement"))

@@ -9,12 +9,17 @@
 //! left, and the others keep their sizes as the window grows and shrinks.
 //! A panel's size is its own: it keeps it as it moves about, a group takes
 //! its front tab's, and dragging a group's edge sizes all its tabs.
+//!
+//! Each window has a tree of its own. A panel moved to a window of its own,
+//! from its tab's menu or by dragging its tab out past the window's edge,
+//! keeps its place in the main window's tree, hidden, to go back to.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::{
-    Event, Id, Order, Rect, Response, Role, Stroke, StrokeKind, Ui, WidgetInfo, WidgetText, pos2,
-    vec2,
+    Event, Id, Order, Pos2, Rect, Response, Role, Stroke, StrokeKind, Ui, Vec2, Visuals,
+    WidgetInfo, WidgetText, pos2, vec2,
 };
 use egui_tiles::{
     Behavior, Container, EditAction, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId,
@@ -56,6 +61,9 @@ pub(crate) struct Dock {
     /// The widget with the keyboard focus, as last seen, to tell when the
     /// focus moves into a panel.
     keyboard: Option<Id>,
+    /// Where the pointer was last seen while a tab was dragged, for when
+    /// the release comes with none.
+    dragged_to: Option<Pos2>,
 }
 
 impl Dock {
@@ -90,12 +98,56 @@ impl Dock {
         dock
     }
 
+    /// The tree of a window of its own with just the panel `id`, in a tab.
+    pub fn of_panel(id: &'static str) -> Self {
+        let mut dock = Self::empty();
+        let pane = dock.tree.tiles.insert_pane(Pane(id));
+        dock.tree.root = Some(pane);
+        dock.tree.simplify(&TIDY);
+        dock
+    }
+
+    /// The tree of a window of its own that `window` describes, with only
+    /// the panels it has that the user can hide and that aren't in
+    /// `placed`, which gathers them. `None` if that leaves it none.
+    pub fn of_window(
+        window: &WindowLayout,
+        registry: &Registry,
+        theme: &Theme,
+        placed: &mut Vec<&'static str>,
+    ) -> Option<Self> {
+        let mut dock = Self::empty();
+        // The panels that stay in the main window can't come here.
+        let mut taken = placed.clone();
+        taken.extend(
+            (registry.iter())
+                .filter(|panel| !panel.hides)
+                .map(|panel| panel.id),
+        );
+        let first = taken.len();
+        let root = dock.build(&window.layout, None, registry, theme, &mut taken)?;
+        dock.tree.root = Some(root);
+        placed.extend_from_slice(&taken[first..]);
+        for id in &window.hidden {
+            if let Some(tile) = dock.find(id) {
+                dock.tree.set_visible(tile, false);
+            }
+        }
+        dock.tree.simplify(&TIDY);
+        Some(dock)
+    }
+
     fn empty() -> Self {
+        // egui keeps what the tree's tab bars and drags remember by its id,
+        // for every window at once, so each tree has its own.
+        static TREES: AtomicU64 = AtomicU64::new(0);
+        let tree = TREES.fetch_add(1, Ordering::Relaxed);
         Self {
-            tree: Tree::empty(Id::unique("dock")),
+            tree: Tree::empty(Id::unique(("dock", tree))),
             sizes: Sizes::new(),
             changed: false,
             keyboard: None,
+            dragged_to: None,
         }
     }
 
@@ -441,6 +493,47 @@ impl Dock {
         }
     }
 
+    /// The panels in the tree, left to right and top to bottom, and whether
+    /// each is shown or hidden.
+    pub fn panels(&self) -> Vec<(&'static str, bool)> {
+        let mut panes = Vec::new();
+        if let Some(root) = self.tree.root {
+            collect_panes(&self.tree.tiles, root, &mut panes);
+        }
+        (panes.into_iter())
+            .filter_map(|pane| {
+                let tile = self.find(pane.0)?;
+                Some((pane.0, self.tree.tiles.is_visible(tile)))
+            })
+            .collect()
+    }
+
+    /// How many panels in the tree aren't hidden.
+    pub fn count_shown(&self) -> usize {
+        (self.panels().iter()).filter(|(_, shown)| *shown).count()
+    }
+
+    /// Whether the panel with id `id` is in the tree, shown or hidden.
+    pub fn has(&self, id: &str) -> bool {
+        self.find(id).is_some()
+    }
+
+    /// Takes the panel with id `id` out of the tree, place and all.
+    pub fn remove_panel(&mut self, id: &str) {
+        if let Some(tile) = self.find(id) {
+            self.tree.remove_recursively(tile);
+            self.tree.simplify(&TIDY);
+            self.changed = true;
+        }
+    }
+
+    /// How big the panel with id `id` was as last drawn, with its tab bar,
+    /// in points.
+    pub fn panel_size(&self, id: &str, theme: &Theme) -> Option<Vec2> {
+        let rect = self.tree.tiles.rect(self.find(id)?)?;
+        Some(rect.size() + vec2(0.0, theme.dock.tab_bar))
+    }
+
     /// The panel a mouse button went down in this frame, where nothing such
     /// as a menu or a window was over it, or else the panel the keyboard
     /// focus moved into, as Tab moves it.
@@ -457,8 +550,11 @@ impl Dock {
                 _ => None,
             })
         });
+        // The panels are in the background, or in a window of egui's own
+        // where viewports can't have windows of the system's own.
         let pressed = pressed.filter(|&at| {
-            (ctx.layer_id_at(at)).is_none_or(|layer| layer.order == Order::Background)
+            (ctx.layer_id_at(at))
+                .is_none_or(|layer| layer.order == Order::Background || layer == ui.layer_id())
         });
         // Where the widget is, as drawn this frame, without asking for its
         // response, which would act on this frame's input again.
@@ -500,6 +596,7 @@ impl Dock {
             let tiles = &mut self.tree.tiles;
             fit(tiles, root, rect, &measure, middle, &mut fitted);
         }
+        self.drag_out(ui, draw);
         self.tree.ui(draw, ui);
         for tile in draw.closed.drain(..) {
             self.tree.set_visible(tile, false);
@@ -523,6 +620,34 @@ impl Dock {
             }
         }
         self.changed |= std::mem::take(&mut draw.edited);
+    }
+
+    /// A tab let go of past the edge of the window, `draw.bounds`, moves its
+    /// panel to a new window there, rather than to the nearest place in the
+    /// tree, as egui_tiles would put it. While it's out there, `draw` shows
+    /// no place for it.
+    fn drag_out(&mut self, ui: &Ui, draw: &mut Draw<'_, '_>) {
+        let dragged = (self.tree.dragged_id(ui.ctx()))
+            .and_then(|tile| self.tree.tiles.get_pane(&tile).map(|pane| pane.0));
+        let Some(panel) = dragged else {
+            self.dragged_to = None;
+            draw.outside = false;
+            return;
+        };
+        let (pointer, released) = ui.input(|i| {
+            let pointer = i.pointer.interact_pos().or(i.pointer.latest_pos());
+            (pointer, i.pointer.any_released())
+        });
+        let at = pointer.or(self.dragged_to);
+        self.dragged_to = at;
+        draw.outside = at.is_some_and(|at| !draw.bounds.contains(at)) && draw.movable(panel);
+        if draw.outside && released {
+            ui.ctx().stop_dragging();
+            let size = self.panel_size(panel, draw.cx.theme);
+            draw.moves.push(Move::ToNewWindow { panel, at, size });
+            self.dragged_to = None;
+            draw.outside = false;
+        }
     }
 }
 
@@ -809,6 +934,42 @@ pub(crate) struct Draw<'a, 'v> {
     /// The panel the user clicked in or on the tab of, or moved the
     /// keyboard focus into, this frame, to give the focus.
     pub focused: Option<&'static str>,
+    /// The panels the user moved to another window this frame, from their
+    /// tabs' menus or by dragging their tabs out of the window.
+    pub moves: Vec<Move>,
+    /// Whether the panels are in a window of their own, which a tab's menu
+    /// sends them back to the main window from.
+    pub detached: bool,
+    /// How many panels the window shows: the last one in a window of its
+    /// own stays there.
+    pub shown: usize,
+    /// The window's area: a tab dragged past it goes to a new window.
+    pub bounds: Rect,
+    /// Whether a tab is dragged out past `bounds`.
+    pub outside: bool,
+}
+
+/// A panel the user moved to another window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Move {
+    /// To a window of its own: let go of at `at` in the window's points if
+    /// its tab was dragged out, and as big as `size`, in points, as it was.
+    ToNewWindow {
+        panel: &'static str,
+        at: Option<Pos2>,
+        size: Option<Vec2>,
+    },
+    /// Back to where it was in the main window.
+    ToMainWindow(&'static str),
+}
+
+impl Draw<'_, '_> {
+    /// Whether the panel `id` can move to a new window: one the user can
+    /// hide, and not the last a window of its own shows.
+    pub fn movable(&self, id: &str) -> bool {
+        let hides = self.registry.get(id).is_some_and(|panel| panel.hides);
+        hides && (!self.detached || self.shown > 1)
+    }
 }
 
 impl Behavior<Pane> for Draw<'_, '_> {
@@ -870,6 +1031,26 @@ impl Behavior<Pane> for Draw<'_, '_> {
             if response.clicked() {
                 self.focused = Some(pane.0);
             }
+            let panel = pane.0;
+            response.context_menu(|ui| {
+                let movable = self.movable(panel);
+                if ui
+                    .add_enabled(movable, egui::Button::new("Move to New Window"))
+                    .clicked()
+                {
+                    let size = tiles
+                        .rect(tile)
+                        .map(|rect| rect.size() + vec2(0.0, self.cx.theme.dock.tab_bar));
+                    self.moves.push(Move::ToNewWindow {
+                        panel,
+                        at: None,
+                        size,
+                    });
+                }
+                if self.detached && ui.button("Move to Main Window").clicked() {
+                    self.moves.push(Move::ToMainWindow(panel));
+                }
+            });
         }
         response
     }
@@ -893,6 +1074,25 @@ impl Behavior<Pane> for Draw<'_, '_> {
     /// Keys are the keymap's.
     fn cycle_tabs_with_keyboard(&self) -> bool {
         false
+    }
+
+    /// A tab dragged out past the window's edge has no place in the tree.
+    fn paint_drag_preview(
+        &self,
+        visuals: &Visuals,
+        painter: &egui::Painter,
+        parent_rect: Option<Rect>,
+        preview_rect: Rect,
+    ) {
+        if self.outside {
+            return;
+        }
+        let stroke = self.drag_preview_stroke(visuals);
+        if let Some(parent_rect) = parent_rect {
+            painter.rect_stroke(parent_rect, 1.0, stroke, StrokeKind::Inside);
+        }
+        let color = self.drag_preview_color(visuals);
+        painter.rect(preview_rect, 1.0, color, stroke, StrokeKind::Inside);
     }
 
     fn on_edit(&mut self, edit: EditAction) {

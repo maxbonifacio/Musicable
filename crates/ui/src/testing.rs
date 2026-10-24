@@ -1,9 +1,15 @@
-//! The shell as the UI's tests drive it, standing in for the app.
+//! The shell as the UI's tests drive it, standing in for the app, and for
+//! the system where windows of their own open.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use egui::{
+    Event, ImmediateViewport, Pos2, RawInput, Rect, ViewportBuilder, ViewportCommand, ViewportId,
+    ViewportInfo, pos2, vec2,
+};
 use egui_kittest::{Harness, HarnessBuilder};
 use musicable_commands::{Editor, Focus, Keymap, Problem, Registry, Transport, browser, view};
 use musicable_library::{FileId, Index, Preset};
@@ -291,6 +297,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                     slots: &state.workspaces,
                     current: state.workspace,
                 },
+                monitors: &[],
             };
             let mut actions = state.shell.show(ui, &view);
             if state.keys_page {
@@ -357,4 +364,161 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         },
         state,
     )
+}
+
+/// A window of its own, as a test has the system show it.
+#[derive(Debug, Clone)]
+pub(crate) struct Own {
+    pub id: ViewportId,
+    /// Where it is, how big, and whether it has the focus, as egui
+    /// describes it to the window's passes.
+    pub info: ViewportInfo,
+    /// What the shell made it with, as of its last pass.
+    pub builder: ViewportBuilder,
+    /// The events for its next pass.
+    pub events: Vec<Event>,
+    /// The commands its own passes sent it, which moved and sized it.
+    pub commands: Vec<ViewportCommand>,
+}
+
+thread_local! {
+    /// The windows of their own the system shows, in the order they opened.
+    static OWN: RefCell<Vec<Own>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Like [`harness`], with windows of their own as the system shows them,
+/// rather than inside the main window: each has passes of its own, with
+/// the input [`with_own`] gives it, as eframe gives them. The main window
+/// is at the desktop's corner, at 100%, with the system's focus.
+pub(crate) fn own_windows_harness(project: Project) -> Harness<'static, State> {
+    OWN.with_borrow_mut(Vec::clear);
+    let mut harness = harness(project);
+    harness.ctx.set_embed_viewports(false);
+    egui::Context::set_immediate_viewport_renderer(show_own);
+    let size = harness.ctx.content_rect().size();
+    let main = (harness.input_mut().viewports)
+        .entry(ViewportId::ROOT)
+        .or_default();
+    main.inner_rect = Some(Rect::from_min_size(Pos2::ZERO, size));
+    main.outer_rect = main.inner_rect;
+    main.native_pixels_per_point = Some(1.0);
+    main.focused = Some(true);
+    harness.run();
+    harness
+}
+
+/// The windows of their own the system shows, in the order they opened.
+pub(crate) fn own_windows() -> Vec<Own> {
+    OWN.with_borrow(Clone::clone)
+}
+
+/// Changes the window of its own `id` with `change`, and tells the main
+/// window where it is, as the system would.
+pub(crate) fn with_own(
+    harness: &mut Harness<'_, State>,
+    id: ViewportId,
+    change: impl FnOnce(&mut Own),
+) {
+    let info = OWN.with_borrow_mut(|windows| {
+        let window = (windows.iter_mut()).find(|window| window.id == id)?;
+        change(window);
+        Some(window.info.clone())
+    });
+    let info = info.expect("a window of its own");
+    harness.input_mut().viewports.insert(id, info);
+}
+
+/// Gives the main window the system's focus, or takes it away.
+pub(crate) fn focus_main(harness: &mut Harness<'_, State>, focused: bool) {
+    let main = harness
+        .input_mut()
+        .viewports
+        .entry(ViewportId::ROOT)
+        .or_default();
+    main.focused = Some(focused);
+}
+
+/// Shows a window of its own, as eframe does: a pass of its own, nested in
+/// the main window's, with the input the test gave it. It goes where the
+/// shell moves it and is as big as the shell makes it, as at 100%, with no
+/// frame.
+fn show_own(ctx: &egui::Context, viewport: ImmediateViewport<'_>) {
+    let ImmediateViewport {
+        ids,
+        builder,
+        mut viewport_ui_cb,
+    } = viewport;
+    let id = ids.this;
+    let mut viewports = ctx.input(|i| i.raw.viewports.clone());
+    let time = ctx.input(|i| i.time);
+    let input = OWN.with_borrow_mut(|windows| {
+        if !windows.iter().any(|window| window.id == id) {
+            let at = builder.position.unwrap_or(pos2(1200.0, 0.0));
+            let size = builder.inner_size.unwrap_or(vec2(400.0, 300.0));
+            let rect = Rect::from_min_size(at, size);
+            windows.push(Own {
+                id,
+                info: ViewportInfo {
+                    inner_rect: Some(rect),
+                    outer_rect: Some(rect),
+                    native_pixels_per_point: Some(1.0),
+                    focused: Some(false),
+                    minimized: Some(false),
+                    maximized: Some(false),
+                    ..ViewportInfo::default()
+                },
+                builder: builder.clone(),
+                events: Vec::new(),
+                commands: Vec::new(),
+            });
+        }
+        for window in windows.iter() {
+            viewports.insert(window.id, window.info.clone());
+        }
+        let window = (windows.iter_mut()).find(|window| window.id == id)?;
+        window.builder = builder;
+        let size = window
+            .info
+            .inner_rect
+            .map_or(vec2(400.0, 300.0), |rect| rect.size());
+        // Its events, such as Close, go to one pass.
+        window.info.events.clear();
+        Some(RawInput {
+            viewport_id: id,
+            viewports,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(time),
+            focused: window.info.focused == Some(true),
+            events: std::mem::take(&mut window.events),
+            ..RawInput::default()
+        })
+    });
+    let Some(input) = input else {
+        return;
+    };
+    let output = ctx.run_ui(input, |ui| viewport_ui_cb(ui));
+    let commands = (output.viewport_output.get(&id)).map(|output| output.commands.clone());
+    output.drop_without_applying_deltas();
+    OWN.with_borrow_mut(|windows| {
+        let Some(window) = (windows.iter_mut()).find(|window| window.id == id) else {
+            return;
+        };
+        for command in commands.into_iter().flatten() {
+            let rect = window.info.inner_rect.unwrap_or(Rect::ZERO);
+            let rect = match command {
+                ViewportCommand::OuterPosition(at) => Some(Rect::from_min_size(at, rect.size())),
+                ViewportCommand::InnerSize(size) => Some(Rect::from_min_size(rect.min, size)),
+                ViewportCommand::Maximized(maximized) => {
+                    window.info.maximized = Some(maximized);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(rect) = rect {
+                window.info.inner_rect = Some(rect);
+                window.info.outer_rect = Some(rect);
+            }
+            window.commands.push(command);
+        }
+    });
 }

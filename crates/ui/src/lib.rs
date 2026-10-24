@@ -12,12 +12,14 @@
 //! app's Settings window, whose Keys page the shell draws. The transport
 //! bar, the track headers and the mixer strips are made of parts the user
 //! can hide, move and resize. The layout and the parts are one of the
-//! user's [`Workspace`]s, which the app saves and switches between. Views
-//! draw from a [`Theme`], and look mouse gestures up in a [`MouseMap`].
+//! user's [`Workspace`]s, which the app saves and switches between, and
+//! panels move out to windows of their own, which it keeps too. Views draw
+//! from a [`Theme`], and look mouse gestures up in a [`MouseMap`].
 //! `docs/app.md` describes it all.
 
 mod arrangement;
 mod browser;
+mod carry;
 mod devices;
 mod dock;
 mod keys;
@@ -39,6 +41,7 @@ mod timeline;
 mod transport_bar;
 mod waveform;
 mod widgets;
+mod windows;
 mod workspace;
 
 pub use browser::{Library, Listing, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Preview};
@@ -61,4 +64,5 @@ pub use theme::{
 };
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{clock, position};
+pub use windows::{Monitor, on_a_monitor};
 pub use workspace::{Layout, MAX_NAME, Split, WindowLayout, Workspace, WorkspaceError, check_name};

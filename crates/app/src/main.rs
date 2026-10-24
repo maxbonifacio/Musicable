@@ -68,6 +68,9 @@ fn main() -> ExitCode {
 /// Opens the app's window, with the project at `path` if given, and returns
 /// once it closes.
 fn run(path: Option<PathBuf>) -> ExitCode {
+    if std::env::var_os(musicable_app::FRAME_TIMES).is_some() {
+        attach_console();
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Musicable")

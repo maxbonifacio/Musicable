@@ -13,7 +13,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use musicable_commands::workspace::SLOTS;
-use musicable_ui::{DEFAULT_WORKSPACE, WindowLayout, Workspace, WorkspaceError};
+use musicable_ui::{
+    DEFAULT_WORKSPACE, Monitor, WindowLayout, Workspace, WorkspaceError, on_a_monitor,
+};
 use winit::dpi::{LogicalSize, PhysicalPosition};
 
 /// The folder of workspace files in the config folder.
@@ -278,12 +280,6 @@ pub struct Place {
     pub maximized: bool,
 }
 
-/// How much of a window's title bar has to be on a monitor for the window
-/// to go there, in pixels across and down.
-const ON_A_MONITOR: [i64; 2] = [100, 16];
-/// How tall a window's title bar is taken to be, in pixels.
-const TITLE_BAR: i64 = 32;
-
 impl Place {
     /// Where `window` says its window goes, if it says.
     pub fn of(window: &WindowLayout) -> Option<Self> {
@@ -298,12 +294,7 @@ impl Place {
     /// the one it's on, and it's never bigger than its monitor. A hidden
     /// window stays hidden.
     pub fn apply(self, window: &winit::window::Window) {
-        let monitors: Vec<_> = (window.available_monitors())
-            .map(|monitor| {
-                let (at, size) = (monitor.position(), monitor.size());
-                ([at.x, at.y], [size.width, size.height])
-            })
-            .collect();
+        let monitors = monitors(window);
         if window.is_maximized() {
             window.set_maximized(false);
         }
@@ -326,22 +317,19 @@ impl Place {
     }
 }
 
-/// Whether a window whose top left corner is at `at`, `width` pixels wide,
-/// has enough of its title bar on one of `monitors`, given as their top
-/// left corners and sizes, to be dragged. With no monitors listed, it's
-/// taken to have.
-fn on_a_monitor(at: [i32; 2], width: u32, monitors: &[([i32; 2], [u32; 2])]) -> bool {
-    let [x, y] = at.map(i64::from);
-    let right = x + i64::from(width);
-    let needed = [ON_A_MONITOR[0].min(i64::from(width)), ON_A_MONITOR[1]];
-    monitors.is_empty()
-        || monitors.iter().any(|&(corner, size)| {
-            let [left, top] = corner.map(i64::from);
-            let [across, down] = size.map(i64::from);
-            let wide = right.min(left + across) - x.max(left);
-            let high = (y + TITLE_BAR).min(top + down) - y.max(top);
-            wide >= needed[0] && high >= needed[1]
+/// The monitors `window` can go on, the main one marked, where windows go.
+pub fn monitors(window: &winit::window::Window) -> Vec<Monitor> {
+    let primary = window.primary_monitor();
+    (window.available_monitors())
+        .map(|monitor| {
+            let (at, size) = (monitor.position(), monitor.size());
+            Monitor {
+                at: [at.x, at.y],
+                size: [size.width, size.height],
+                primary: primary.as_ref() == Some(&monitor),
+            }
         })
+        .collect()
 }
 
 #[cfg(test)]
@@ -483,21 +471,5 @@ mod tests {
         let error = workspaces.add("More", &layout(&[])).unwrap_err();
         assert_eq!(error.to_string(), "there's room for 9 workspaces");
         assert!(!folder.join("More.toml").exists());
-    }
-
-    #[test]
-    fn a_window_goes_where_its_title_bar_can_be_dragged() {
-        // Two monitors side by side, the second to the left of the main one.
-        let monitors = [([0, 0], [1920, 1080]), ([-3840, -200], [3840, 1600])];
-        assert!(on_a_monitor([100, 100], 1280, &monitors));
-        assert!(on_a_monitor([-3000, -150], 1280, &monitors));
-        // Maximized windows hang over their monitor's edges.
-        assert!(on_a_monitor([-8, -8], 1936, &monitors));
-        // Off every monitor, or with its title bar off the top.
-        assert!(!on_a_monitor([2500, 100], 1280, &monitors));
-        assert!(!on_a_monitor([100, -40], 1280, &monitors));
-        assert!(!on_a_monitor([1880, 100], 1280, &monitors), "40 pixels on");
-        assert!(on_a_monitor([1820, 100], 1280, &monitors));
-        assert!(on_a_monitor([2500, 100], 1280, &[]), "monitors unknown");
     }
 }

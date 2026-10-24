@@ -384,10 +384,17 @@ says what's there.
   outline shows: the edit commands act on its selection, and its own keys,
   from its table in the keymap, win over those that work everywhere
   ([commands.md](commands.md#the-editors-state)).
-  The layout, with where the window is, is a `musicable_ui::Workspace`,
-  a file in the config folder for each of the user's workspaces, which the
-  app switches between ([app.md](app.md#workspaces)); egui's viewports
-  putting panels in windows of their own come next. Every view
+  Panels the user moves out of the main window go in windows of their
+  own (`crates/ui/src/windows.rs`; [app.md](app.md#windows-of-their-own)):
+  egui immediate viewports that the shell draws in the main window's
+  pass, each with its own tree of panels, its own focus, and the keys
+  pressed in it, which the shell hands the keymap itself. While a drag
+  from the browser is on, an egui plugin (`crates/ui/src/carry.rs`)
+  passes the pointer on to the window under it, as the system sends it
+  only to the window the drag started in. The layout, with where each
+  window is, is a `musicable_ui::Workspace`, a file in the config folder
+  for each of the user's workspaces, which the app switches between
+  ([app.md](app.md#workspaces)). Every view
   draws from a `Theme` and takes its gestures from a `MouseMap`
   (`Shell::set_theme`, `set_mouse_map`; [app.md](app.md#the-arrangement)),
   so a theme file fills a `Theme` ([app.md](app.md#themes)), a mouse map

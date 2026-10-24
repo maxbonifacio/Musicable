@@ -484,6 +484,8 @@ other. They push a `Request`, as the file commands do.
 | `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in a tab beside the devices | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
 | `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Brings the piano roll in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
 | `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
+| `view.move_to_new_window` | Move Panel to New Window | Moves the panel with the focus to a new window of its own, as its tab's menu does; the arrangement and a window's last panel stay where they are | none | none |
+| `view.move_to_main_window` | Move Panel to Main Window | Sends the panel with the focus back to where it was in the main window | none | none |
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
 | `view.zoom_in` | Zoom In | Zooms the view with the focus in, around the start marker | Equals, NumpadAdd | + |
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
@@ -528,7 +530,8 @@ slot's workspace by name, and leaves empty slots out.
 | `workspace.delete` | Delete Workspace... | Deletes the workspace in use, once the user says so, and switches to Default, which can't be deleted | none | none |
 | `workspace.reset` | Reset Workspace | Lays the panels out as at first, all in the main window, and shows the views' parts as at first | none | none |
 
-Live has one layout, so no workspaces.
+Live has one layout, so no workspaces, and a second window that shows
+its other view, rather than windows of their own for its panels.
 
 ## The editor's state
 
