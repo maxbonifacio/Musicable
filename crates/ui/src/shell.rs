@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Button, DragValue, Layout, RichText, Ui};
+use egui::{Align, Button, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
@@ -14,7 +14,7 @@ use musicable_commands::{
     controllers, edit, locator, notes, options, take, track, transport, view,
 };
 use musicable_model::native::NativeKind;
-use musicable_model::time::{BeatRange, Beats, TempoMap};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackId};
 
 use crate::arrangement::Arrangement;
@@ -24,11 +24,13 @@ use crate::menus::menus;
 use crate::mixer::{self, Choices, InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
+use crate::parts::{Parts, Views};
 use crate::piano_roll::{PIANO_ROLL, PianoRoll};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
+use crate::transport_bar;
 use crate::waveform::Waveforms;
-use crate::widgets::{Icon, clock, icon_button, meter, name_box, position};
+use crate::widgets::name_box;
 
 /// The mixer's panel, under the arrangement.
 pub const MIXER: &str = "mixer";
@@ -207,6 +209,9 @@ pub struct Shell {
     mouse: MouseMap,
     /// The panels hidden, by id.
     hidden: BTreeSet<&'static str>,
+    /// The parts of the transport bar, the track headers and the mixer
+    /// strips, as the user has them.
+    parts: Parts,
     /// What's being renamed, and the name typed so far.
     rename: Option<Rename>,
 }
@@ -225,6 +230,7 @@ impl Default for Shell {
             // The browser waits to be asked for, and the piano roll for a
             // MIDI clip to be opened in it.
             hidden: BTreeSet::from([BROWSER, PIANO_ROLL]),
+            parts: Parts::default(),
             rename: None,
         }
     }
@@ -250,13 +256,12 @@ impl Shell {
     pub fn show(&mut self, ui: &mut Ui, view: &View<'_>) -> Vec<Action> {
         let mut actions = Vec::new();
         let theme = &self.theme;
+        let parts = &self.parts;
         egui::Panel::top("menu_bar").show(ui, |ui| {
-            menu_bar(ui, view, &self.hidden, theme, &mut actions);
+            menu_bar(ui, view, &self.hidden, &mut actions);
         });
         egui::Panel::top("transport_bar").show(ui, |ui| {
-            ui.add_space(4.0);
-            transport_bar(ui, view, theme, &mut actions);
-            ui.add_space(4.0);
+            transport_bar::show(ui, view, theme, parts, &mut actions);
         });
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             status_bar(ui, view, &mut actions);
@@ -322,19 +327,22 @@ impl Shell {
                         view.playback.playhead,
                         theme,
                         &self.mouse,
+                        parts,
                         &mut actions,
                     );
                 });
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.arrangement
-                .show(ui, view, theme, &self.mouse, &mut actions);
+                .show(ui, view, theme, &self.mouse, parts, &mut actions);
         });
+        self.parts.carry_out();
         // The boxes that take keys go first, so the keys they take while
         // they're open, such as Escape, don't reach the windows under them.
         self.show_rename(ui.ctx(), view, &mut actions);
         self.palette.show(ui.ctx(), view, &mut actions);
         self.shortcuts.show(ui.ctx(), view, &mut actions);
+        self.parts.show_customise(ui.ctx(), &self.theme);
         browser::show_dragged(ui.ctx());
         actions
     }
@@ -402,6 +410,25 @@ impl Shell {
     /// Does what `mouse` says mouse gestures do from now on.
     pub fn set_mouse_map(&mut self, mouse: MouseMap) {
         self.mouse = mouse;
+    }
+
+    /// What the user changed about the transport bar, the track headers
+    /// and the mixer strips: the parts they show, in what order and at
+    /// what size.
+    pub fn views(&self) -> Views {
+        self.parts.views()
+    }
+
+    /// What the user changed about the views, if they changed them since
+    /// this was last asked, for the app to save.
+    pub fn changed_views(&mut self) -> Option<Views> {
+        self.parts.take_changed().then(|| self.parts.views())
+    }
+
+    /// Shows the transport bar, the track headers and the mixer strips as
+    /// `views` has them, and the views it leaves out as at first.
+    pub fn set_views(&mut self, views: &Views) {
+        self.parts.set_views(views);
     }
 
     /// The box that renames a track, a clip, a locator or a take, while
@@ -503,12 +530,11 @@ fn sharing(id: &str) -> Option<&'static str> {
     }
 }
 
-/// The menus, with every command and its keys, and the meters on the right.
+/// The menus, with every command and its keys.
 fn menu_bar(
     ui: &mut Ui,
     view: &View<'_>,
     hidden: &BTreeSet<&'static str>,
-    theme: &Theme,
     actions: &mut Vec<Action>,
 ) {
     egui::MenuBar::new().ui(ui, |ui| {
@@ -524,9 +550,6 @@ fn menu_bar(
                 }
             });
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            meters(ui, &view.audio, theme, actions);
-        });
     });
 }
 
@@ -598,144 +621,6 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         .map(|(_, on)| on)
 }
 
-fn transport_bar(ui: &mut Ui, view: &View<'_>, theme: &Theme, actions: &mut Vec<Action>) {
-    let project = view.project;
-    let tempo = &project.tempo;
-    let playhead = view.playback.playhead;
-    // Runs `id` when `response` was clicked, with its keys in the tooltip.
-    let run = |response: egui::Response, id: CommandId, actions: &mut Vec<Action>| {
-        if response.on_hover_text(hint(view, &id)).clicked() {
-            actions.push(Action::Run(id));
-        }
-    };
-    ui.horizontal(|ui| {
-        let start = icon_button(ui, Icon::ToStart, false, theme);
-        run(start, transport::GO_TO_START, actions);
-        let play = icon_button(ui, Icon::Play, view.playback.playing, theme);
-        run(play, transport::PLAY, actions);
-        let stop = icon_button(ui, Icon::Stop, false, theme);
-        run(stop, transport::STOP, actions);
-        let record = icon_button(ui, Icon::Record, view.playback.record, theme);
-        run(record, transport::RECORD, actions);
-        let capture = ui.add(Button::new("Capture"));
-        run(capture, transport::CAPTURE, actions);
-        ui.separator();
-
-        // Punching in and out happens at the loop's ends.
-        let region = project.loop_region;
-        let ends = |toggle: &CommandId, what: &str| {
-            format!(
-                "{}\n{what} {} to {}",
-                hint(view, toggle),
-                position(tempo, region.start),
-                position(tempo, region.end)
-            )
-        };
-        let looping = ui
-            .add(Button::selectable(project.looping, "Loop"))
-            .on_hover_text(ends(&transport::TOGGLE_LOOP, "Loops"));
-        if looping.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_LOOP));
-        }
-        let punch_in = ui
-            .add(Button::selectable(project.punch_in, "Punch In"))
-            .on_hover_text(format!(
-                "{}\nRecords from {} on",
-                hint(view, &transport::TOGGLE_PUNCH_IN),
-                position(tempo, region.start)
-            ));
-        if punch_in.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_PUNCH_IN));
-        }
-        let punch_out = ui
-            .add(Button::selectable(project.punch_out, "Punch Out"))
-            .on_hover_text(format!(
-                "{}\nRecords up to {}",
-                hint(view, &transport::TOGGLE_PUNCH_OUT),
-                position(tempo, region.end)
-            ));
-        if punch_out.clicked() {
-            actions.push(Action::Run(transport::TOGGLE_PUNCH_OUT));
-        }
-        ui.separator();
-
-        let metronome = ui.add(Button::selectable(project.metronome, "Metronome"));
-        run(metronome, transport::TOGGLE_METRONOME, actions);
-        ui.separator();
-
-        let mut bpm = tempo.bpm_at(playhead);
-        let field = ui
-            .add(
-                DragValue::new(&mut bpm)
-                    .speed(0.1)
-                    .range(TempoMap::MIN_BPM..=TempoMap::MAX_BPM)
-                    .fixed_decimals(2)
-                    .suffix(" BPM")
-                    // A typed tempo applies on Enter, not at each digit.
-                    .update_while_editing(false),
-            )
-            .on_hover_text("Drag, or click and type, to set the tempo");
-        // One drag is one step in the undo history.
-        if field.drag_started() {
-            actions.push(Action::BeginGesture);
-        }
-        if field.changed() {
-            actions.push(Action::SetTempo(bpm));
-        }
-        if field.drag_stopped() {
-            actions.push(Action::EndGesture);
-        }
-        run(ui.small_button("\u{2212}"), transport::TEMPO_DOWN, actions);
-        run(ui.small_button("+"), transport::TEMPO_UP, actions);
-        let signature = tempo.signature_at(playhead);
-        ui.label(format!(
-            "{}/{}",
-            signature.numerator(),
-            signature.denominator()
-        ));
-        ui.separator();
-
-        ui.label(
-            RichText::new(position(tempo, playhead))
-                .monospace()
-                .size(theme.position_text)
-                .strong(),
-        )
-        .on_hover_text("Bars, beats and sixteenths");
-        ui.label(
-            RichText::new(clock(view.playback.seconds))
-                .monospace()
-                .weak(),
-        );
-    });
-}
-
-/// The CPU meter and the dropout counter, laid out right to left.
-fn meters(ui: &mut Ui, audio: &Audio<'_>, theme: &Theme, actions: &mut Vec<Action>) {
-    let dropouts = if audio.dropouts == 0 {
-        RichText::new("No dropouts")
-    } else {
-        let plural = if audio.dropouts == 1 { "" } else { "s" };
-        RichText::new(format!("{} dropout{plural}", audio.dropouts)).color(theme.warning)
-    };
-    let counter = ui
-        .add(Button::new(dropouts).frame(false))
-        .on_hover_text(format!(
-            "{}\n\nClick to count from zero again.",
-            audio.details
-        ));
-    if counter.clicked() {
-        actions.push(Action::ResetDropouts);
-    }
-    ui.separator();
-    meter(ui, audio.load, theme).on_hover_text(audio.details);
-    let load = audio.load.map_or("CPU --".to_owned(), |load| {
-        format!("CPU {:.0}%", load * 100.0)
-    });
-    ui.label(RichText::new(load).monospace())
-        .on_hover_text(audio.details);
-}
-
 fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         match view.messages {
@@ -803,18 +688,6 @@ pub fn ask_to_save(ctx: &egui::Context, name: &str) -> Option<SaveChoice> {
         return Some(SaveChoice::Cancel);
     }
     modal.inner
-}
-
-/// A command's title and keys, for a tooltip: "Play (Shift+Space)".
-fn hint(view: &View<'_>, id: &CommandId) -> String {
-    let title = view
-        .commands
-        .get(id)
-        .map_or(id.as_str(), |c| c.title.as_str());
-    match chords(view.keymap, id).as_str() {
-        "" => title.to_owned(),
-        chords => format!("{title} ({chords})"),
-    }
 }
 
 /// The chords that run `id`, as keymap files write them.

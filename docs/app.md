@@ -38,8 +38,8 @@ reference renderer (see [The null test](#the-null-test)), and
    metronome on.
 2. Press Space. It plays, loops and clicks.
 3. **Options > Audio Settings** picks the device, shared or exclusive mode,
-   and the buffer size. The corner of the menu bar shows the CPU load and
-   counts dropouts.
+   and the buffer size. The right end of the transport bar shows the CPU
+   load and counts dropouts.
 4. **File > Save Project As**, then **File > Open Project**: the project comes
    back as it was. Saving the demo writes the same bytes as the fixture.
 5. `musicable null-test` checks what you can't hear: that the parallel
@@ -175,14 +175,14 @@ That's what `ParallelOptions::inline_below` is for
   Toggles, such as Follow and Snap to Grid, are ticked while on. A command
   in an area with no menu yet gets a menu named after its area, before
   Browser, so every command can be reached; commands that need arguments
-  are left out, as menus can't give them. On the right are the CPU meter and
-  the dropout counter.
-- **The transport bar** has go to start, play, stop, record, loop, punch in
-  and punch out, the metronome, the tempo, the time signature, and the
-  playhead in bars, beats and sixteenths and in minutes and seconds.
-  Hovering a button shows its command and keys, hovering Loop shows the
-  loop region, and Punch In and Punch Out where they punch
-  ([Recording](#recording)).
+  are left out, as menus can't give them.
+- **The transport bar** has go to start, play, stop, record, Capture, loop,
+  punch in and punch out, the metronome, the tempo, the time signature, and
+  the playhead in bars, beats and sixteenths and in minutes and seconds, and
+  at its right end the CPU meter and the dropout counter
+  ([Meters](#meters)). Hovering a button shows its command and keys,
+  hovering Loop shows the loop region, and Punch In and Punch Out where
+  they punch ([Recording](#recording)).
 - **The tempo field** sets the tempo where the playhead is, and moves any
   other tempos in the song by as much, as Tempo Up and Down do. Drag it, or
   click it and type a tempo, which applies on Enter. Each change is a "Set
@@ -222,6 +222,37 @@ first: on Windows, within the double-click time in its mouse settings, as
 in other Windows apps, which the app reads as it starts; elsewhere, within
 egui's 0.3 seconds.
 
+### Configurable views
+
+The transport bar, the track headers and the mixer strips are made of
+parts, and each part can be hidden, shown again and moved, and some
+resized:
+
+- **Right-click a part** for **Hide** with the part's name, and
+  **Customise...** for its view. A control with a menu of its own, such as
+  a track's header or a send, has them at the end of its menu.
+  Right-clicking between the parts of the transport bar or of a strip has
+  Customise alone.
+- **The Customise window** lists the view's parts in order. Tick a part to
+  show it or untick it to hide it, drag it by its handle to move it, and
+  give a size in points to those that can take one: the width of the CPU
+  meter, and of the headers' colour and meter. **Reset** shows the view as
+  Musicable does at first, and Escape closes the window.
+
+| View | Its parts, in the order they show at first |
+| --- | --- |
+| The transport bar | Go to Start · Play and Stop · Record · Capture · Loop and Punch · Metronome · Tempo · Time Signature · Position · Flexible Space · CPU Meter |
+| The track headers | Colour · Name · Automation Button (A) · Mute, Solo and Arm · Meter |
+| The mixer strips | Name · Input · Monitoring · Output · Sends · Pan · Fader and Meter · Gain and Peak · Mute, Solo and Arm · Clip Type |
+
+The transport bar's Flexible Space takes the room the other parts leave,
+which keeps the parts after it at the bar's right end. Across a header the
+name takes what's left, and down a strip the fader does, so a hidden part
+gives the fader its room. Each part takes as many rows in every strip, so
+the faders line up even where a track has no input or sends, and return
+and group tracks keep M and S where the other tracks have them, with an
+empty place for the arm button.
+
 ## The arrangement
 
 The arrangement shows the song's tracks over time, as Live's Arrangement
@@ -240,9 +271,11 @@ undo history and the engine rebuilds its graph once.
   waveform, with its fades and their handles, or a MIDI clip's notes. A
   clip takes the colour of its track's place in the list. Selected clips
   are outlined. While a drag lasts, a ghost shows where the clips will go.
-- **Track headers** have the track's name, M, S and the arm button, and a
-  meter. A selected track's header and lane are lighter. The corner over
-  the headers says what the grid is, such as "Grid 1/16".
+- **Track headers** have the track's colour, its name, A, M, S and the arm
+  button, and a meter, which can be hidden, moved and some resized
+  ([Configurable views](#configurable-views)). A selected track's header
+  and lane are lighter. The corner over the headers says what the grid is,
+  such as "Grid 1/16".
 - **Takes** show in lanes under their track, each named in its header,
   after **View > Show/Hide Take Lanes** (Ctrl+Alt+U) or the same in the
   track header's menu. A take's clips show their waveforms or their notes,
@@ -510,7 +543,8 @@ Under the list:
 
 Each track has a channel strip, in the project's order, and the master's
 strip is on the right. Tracks scroll sideways when they don't fit, and only
-the strips in sight are drawn. From the top, a strip has:
+the strips in sight are drawn. From the top, a strip has these parts, which
+can be hidden and moved ([Configurable views](#configurable-views)):
 
 - **The name.** Hovering it shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
@@ -1445,6 +1479,11 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   commands and the library's types only. The app hands it a `View` of what
   to show each frame, and carries out the `Action`s it hands back. Its
   tests drive the shell with `egui_kittest`.
+- `crates/ui/src/parts.rs` keeps the views made of parts. Each kind of part
+  registers its id, title, size, the views it fits and what draws it, in
+  `transport_bar.rs`, `arrangement/header.rs` and `mixer.rs`, so a feature
+  adds a part in one place. The views ask it which parts to show, in what
+  order and at what sizes, and `Views` is what a workspace keeps of them.
 - `crates/library` is the browser's library: the index and its file,
   scanning folders, searching, presets, and the queue for file work, with
   no app or UI in it. `crates/app/src/library.rs` puts it to work for the
@@ -1549,6 +1588,8 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - VST3 plugins' windows on macOS and Linux.
 - Nudging clips with the arrow keys, consolidating them, and crossfades
   drawn between clips; a window for the behaviour settings.
+- Keeping the views' parts with the workspace: for now they come back as
+  Musicable shows them at first each time it starts.
 - Editing a theme in the Appearance window, with colour pickers: theme
   files are edited in a text editor for now. Plugins' own windows keep
   their own look.

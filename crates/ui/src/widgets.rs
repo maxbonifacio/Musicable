@@ -102,10 +102,10 @@ pub(crate) fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, theme: &Theme
     response
 }
 
-/// A horizontal meter, full at 1.0. It turns yellow above 70% and red above
-/// 90%, where an audio thread starts to run late.
-pub(crate) fn meter(ui: &mut Ui, value: Option<f32>, theme: &Theme) -> Response {
-    let (rect, response) = ui.allocate_exact_size(theme.cpu_meter, Sense::hover());
+/// A horizontal meter `size` big, full at 1.0. It turns yellow above 70%
+/// and red above 90%, where an audio thread starts to run late.
+pub(crate) fn meter(ui: &mut Ui, value: Option<f32>, size: Vec2, theme: &Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     response.widget_info(|| WidgetInfo {
         value: value.map(f64::from),
         ..WidgetInfo::labeled(Role::Meter, true, "CPU load")
