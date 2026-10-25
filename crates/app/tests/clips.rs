@@ -1,9 +1,11 @@
 //! Clips through the app: a saved project whose audio clips play WAV, AIFF
 //! and FLAC files from its folder, one of them long enough to stream, one
-//! warped, and one in Spectral, which plays segments of the file that
-//! streams rendered ahead, and whose MIDI clip plays a test instrument. It
-//! finds its files, loops, and plays the same with every renderer, before
-//! and after saving, as `musicable null-test` checks it.
+//! warped, two in Spectral, which play segments of the file that streams
+//! rendered ahead, and three in Granular, a voice and a bass line whose
+//! grains follow the pitch marks found in them and a texture of the file
+//! that streams, and whose MIDI clip plays a test instrument. It finds its files, loops, and
+//! plays the same with every renderer, before and after saving, as
+//! `musicable null-test` checks it.
 
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -47,6 +49,24 @@ fn signal(channels: usize, frames: usize, rate: u32) -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// A voice singing one note at `hz`, with a little vibrato, for Granular
+/// to follow its pitch.
+fn voice(hz: f64, frames: usize, rate: u32) -> Vec<f32> {
+    let mut phase = 0.0;
+    (0..frames)
+        .map(|i| {
+            let t = i as f64 / f64::from(rate);
+            let frequency = hz * (1.0 + 0.01 * (std::f64::consts::TAU * 5.0 * t).sin());
+            phase += frequency / f64::from(rate);
+            let harmonics = [1.0, 0.6, 0.3, 0.15].into_iter().enumerate();
+            let sum: f64 = harmonics
+                .map(|(h, a)| a * (std::f64::consts::TAU * phase * (h + 1) as f64).sin())
+                .sum();
+            (0.35 * sum) as f32
+        })
+        .collect()
+}
+
 fn planar(channels: &[Vec<f32>]) -> Vec<&[f32]> {
     channels.iter().map(Vec::as_slice).collect()
 }
@@ -77,6 +97,20 @@ fn folder() -> PathBuf {
         &planar(&long),
     )
     .unwrap();
+    save_wav(
+        &audio.join("Voice.wav"),
+        48_000,
+        SampleFormat::Int24,
+        &[&voice(165.0, 72_000, 48_000)],
+    )
+    .unwrap();
+    save_wav(
+        &audio.join("Bass line.wav"),
+        44_100,
+        SampleFormat::Int16,
+        &[&voice(55.0, 66_150, 44_100)],
+    )
+    .unwrap();
     let flac =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../io/tests/audio/ffmpeg-stereo-16.flac");
     fs::copy(flac, audio.join("Strings.flac")).unwrap();
@@ -94,7 +128,9 @@ fn audio_clip(project: &mut Project, track: TrackId, from: Beats, to: Beats, aud
 
 /// Four beats that loop: drums crossfading into a stream from near the end
 /// of a long file, a bass line and strings, the long file again in
-/// Spectral, with High quality off and on, and chords on a test instrument.
+/// Spectral, with High quality off and on, a voice and a bass line in
+/// Granular following their pitch, the long file as a texture of grains,
+/// and chords on a test instrument.
 fn song() -> Project {
     let mut p = Project::new();
     p.looping = true;
@@ -172,6 +208,48 @@ fn song() -> Project {
     };
     assert!(audio.set_warping(warping));
     audio_clip(&mut p, choir, beats(2, 1), beats(4, 1), audio);
+    // In Granular, following the pitch: a voice warped at 100 BPM, so it
+    // plays faster than the file, two semitones up.
+    let tones = p.add_track("Tones", TrackKind::Audio);
+    let mut audio = AudioClip::new("Audio/Voice.wav");
+    let mut warp = Warp::new(0, Beats::ZERO, 100.0);
+    warp.mode = WarpMode::Granular;
+    warp.transpose = 2;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio_clip(&mut p, tones, beats(0, 1), beats(2, 1), audio);
+    // And a bass line, at another rate than the device's, so every grain
+    // is resampled, warped at 150 BPM, so it plays slower than the file,
+    // in grains of three of its periods.
+    let mut audio = AudioClip::new("Audio/Bass line.wav");
+    let mut warp = Warp::new(0, Beats::ZERO, 150.0);
+    warp.mode = WarpMode::Granular;
+    warp.granular.grain_size = 100.0;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio_clip(&mut p, tones, beats(2, 1), beats(4, 1), audio);
+    // And not: the long file as it streams, in longer grains spread at
+    // random, a fifth down.
+    let texture = p.add_track("Texture", TrackKind::Audio);
+    let mut audio = AudioClip::new("Audio/Long.wav");
+    let mut warp = Warp::new(LONG as u64 - 200_000, Beats::ZERO, 80.0);
+    warp.mode = WarpMode::Granular;
+    warp.transpose = -7;
+    warp.granular.follow_pitch = false;
+    warp.granular.grain_size = 80.0;
+    warp.granular.fluctuation = 60.0;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio_clip(&mut p, texture, beats(2, 1), beats(4, 1), audio);
 
     let keys = p.add_track("Keys", TrackKind::Midi);
     let mut chords = MidiClip::default();
@@ -223,8 +301,8 @@ fn a_saved_project_with_clips_plays_the_same_with_every_renderer() {
         assert!(player.stats().position < 4 * 24_000, "it loops");
     }
     assert!(players[0].peak() > 0.5, "peak {}", players[0].peak());
-    // The clips in Spectral play, heard on their own.
-    for name in ["Voice", "Choir"] {
+    // The clips in Spectral and Granular play, heard on their own.
+    for name in ["Voice", "Choir", "Tones", "Texture"] {
         let mut alone = saved.clone();
         for track in &mut alone.tracks {
             track.solo = track.name == name;

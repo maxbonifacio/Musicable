@@ -12,8 +12,10 @@ use std::time::Duration;
 use musicable_commands::{
     Context, Document, Editor, Keymap, NoLibrary, Registry, Request, Steps, Transport,
 };
-use musicable_model::Project;
-use musicable_model::time::Beats;
+use musicable_model::clip::{AudioClip, ClipContent, Offset, Warping};
+use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::Warp;
+use musicable_model::{Project, TrackKind};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
 };
@@ -597,6 +599,45 @@ fn reads_give_clips_devices_automation_and_the_editor() {
     assert_eq!(editor["selected_track"], json!({"track": 0}));
     assert_eq!(editor["focus"], "arrangement");
     assert_eq!(editor["piano_roll"]["clip"], 0);
+}
+
+#[test]
+fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
+    let mut project = Project::new();
+    let track = project.add_track("Voice", TrackKind::Audio);
+    let mut audio = AudioClip::new("Voice.wav");
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(Warp::new(0, Beats::ZERO, 120.0)),
+    };
+    assert!(audio.set_warping(warping));
+    let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+    let clip = project.new_clip("Voice", range, ClipContent::Audio(audio));
+    project.track_mut(track).unwrap().clips.push(clip);
+    let mut rig = Rig::new(project);
+    rig.call(
+        "run_commands",
+        json!({"name": "Texture", "commands": [
+            {"id": "warp.set_mode", "args": {"clip": 0, "mode": "granular"}},
+            {"id": "warp.set_follow_pitch", "args": {"clip": 0, "on": false}},
+            {"id": "warp.set_grain_size", "args": {"clip": 0, "milliseconds": 65}},
+            {"id": "warp.set_fluctuation", "args": {"clip": 0, "fluctuation": 60}},
+        ]}),
+    )
+    .unwrap();
+    let clip = rig.call("get_clip", json!({"clip": 0})).unwrap();
+    let warp = &clip["warp"];
+    assert_eq!(warp["mode"], "granular");
+    assert_eq!(
+        warp["granular"],
+        json!({"follow_pitch": false, "grain_size": 65.0, "fluctuation": 60.0})
+    );
+    // The other modes' settings stay as they were.
+    assert_eq!(
+        warp["spectral"],
+        json!({"high_quality": false, "formants": 100.0, "envelope": 128.0})
+    );
+    assert_eq!(warp["slice"]["preserve"], "transients");
 }
 
 #[test]

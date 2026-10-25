@@ -243,6 +243,7 @@ struct Warp {
     transpose: i8,
     detune: i8,
     slice: SliceSettings,
+    granular: GranularSettings,
     spectral: SpectralSettings,
     markers: Vec<(u64, i64)>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -254,6 +255,7 @@ struct Warp {
 enum WarpMode {
     RePitch,
     Slice,
+    Granular,
     Spectral,
 }
 
@@ -263,6 +265,14 @@ struct SliceSettings {
     preserve: Preserve,
     transient_loop: TransientLoop,
     envelope: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GranularSettings {
+    follow_pitch: bool,
+    grain_size: f64,
+    fluctuation: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -324,6 +334,8 @@ enum ClipParam {
     TransientEnvelope,
     Preserve,
     TransientLoop,
+    GrainSize,
+    Fluctuation,
     Formants,
     Envelope,
 }
@@ -1331,6 +1343,7 @@ impl From<&warp::Warp> for Warp {
             transpose,
             detune,
             slice,
+            granular,
             spectral,
         } = warp;
         let origin = |origin| match origin {
@@ -1343,6 +1356,11 @@ impl From<&warp::Warp> for Warp {
             transient_loop,
             envelope,
         } = slice;
+        let warp::GranularSettings {
+            follow_pitch,
+            grain_size,
+            fluctuation,
+        } = granular;
         let warp::SpectralSettings {
             high_quality,
             formants,
@@ -1352,6 +1370,7 @@ impl From<&warp::Warp> for Warp {
             mode: match mode {
                 warp::WarpMode::RePitch => WarpMode::RePitch,
                 warp::WarpMode::Slice => WarpMode::Slice,
+                warp::WarpMode::Granular => WarpMode::Granular,
                 warp::WarpMode::Spectral => WarpMode::Spectral,
             },
             tempo: *tempo,
@@ -1373,6 +1392,11 @@ impl From<&warp::Warp> for Warp {
                     warp::TransientLoop::BackAndForth => TransientLoop::BackAndForth,
                 },
                 envelope: *envelope,
+            },
+            granular: GranularSettings {
+                follow_pitch: *follow_pitch,
+                grain_size: *grain_size,
+                fluctuation: *fluctuation,
             },
             spectral: SpectralSettings {
                 high_quality: *high_quality,
@@ -1400,6 +1424,8 @@ impl From<&clip::ClipLane> for ClipLane {
                 param::ClipParam::TransientEnvelope => ClipParam::TransientEnvelope,
                 param::ClipParam::Preserve => ClipParam::Preserve,
                 param::ClipParam::TransientLoop => ClipParam::TransientLoop,
+                param::ClipParam::GrainSize => ClipParam::GrainSize,
+                param::ClipParam::Fluctuation => ClipParam::Fluctuation,
                 param::ClipParam::Formants => ClipParam::Formants,
                 param::ClipParam::Envelope => ClipParam::Envelope,
             },
@@ -1481,6 +1507,7 @@ impl Warp {
             transpose,
             detune,
             slice,
+            granular,
             spectral,
             markers,
             onsets,
@@ -1525,6 +1552,32 @@ impl Warp {
                 TransientLoop::BackAndForth => warp::TransientLoop::BackAndForth,
             },
             envelope: *envelope,
+        };
+        let GranularSettings {
+            follow_pitch,
+            grain_size,
+            fluctuation,
+        } = granular;
+        let (least, most) = (
+            warp::GranularSettings::GRAIN_SIZE_MIN,
+            warp::GranularSettings::GRAIN_SIZE_MAX,
+        );
+        if !(least..=most).contains(grain_size) {
+            let message = format!("must be from {least} to {most}");
+            return Err(Invalid::new(format!("{path}.granular.grain_size"), message));
+        }
+        let most = warp::GranularSettings::FLUCTUATION_MAX;
+        if !(0.0..=most).contains(fluctuation) {
+            let message = format!("must be from 0 to {most}");
+            return Err(Invalid::new(
+                format!("{path}.granular.fluctuation"),
+                message,
+            ));
+        }
+        let granular = warp::GranularSettings {
+            follow_pitch: *follow_pitch,
+            grain_size: *grain_size,
+            fluctuation: *fluctuation,
         };
         let SpectralSettings {
             high_quality,
@@ -1581,6 +1634,7 @@ impl Warp {
             mode: match mode {
                 WarpMode::RePitch => warp::WarpMode::RePitch,
                 WarpMode::Slice => warp::WarpMode::Slice,
+                WarpMode::Granular => warp::WarpMode::Granular,
                 WarpMode::Spectral => warp::WarpMode::Spectral,
             },
             markers: model_markers,
@@ -1589,6 +1643,7 @@ impl Warp {
             transpose: *transpose,
             detune: *detune,
             slice,
+            granular,
             spectral,
         })
     }
@@ -1643,6 +1698,8 @@ impl ClipLane {
             ClipParam::TransientEnvelope => param::ClipParam::TransientEnvelope,
             ClipParam::Preserve => param::ClipParam::Preserve,
             ClipParam::TransientLoop => param::ClipParam::TransientLoop,
+            ClipParam::GrainSize => param::ClipParam::GrainSize,
+            ClipParam::Fluctuation => param::ClipParam::Fluctuation,
             ClipParam::Formants => param::ClipParam::Formants,
             ClipParam::Envelope => param::ClipParam::Envelope,
         };

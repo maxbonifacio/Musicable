@@ -409,19 +409,22 @@ transaction; the value a setting has already is none.
 
 | Command | Title | Arguments | What it does |
 |---|---|---|---|
-| `warp.set_mode` | Set Warp Mode | `mode`, `clip`? | Sets how the audio between the markers plays: `re_pitch`, resampled so its pitch follows its speed, `slice`, cut into slices, each played at the file's own speed, or `spectral`, stretched in the frequency domain, keeping its pitch |
+| `warp.set_mode` | Set Warp Mode | `mode`, `clip`? | Sets how the audio between the markers plays: `re_pitch`, resampled so its pitch follows its speed, `slice`, cut into slices, each played at the file's own speed, `granular`, played as short overlapping grains, each at the file's own speed, or `spectral`, stretched in the frequency domain, keeping its pitch |
 | `warp.set_transpose` | Set Clip Transpose | `semitones`, `clip`? | Sets how far every mode but Re-Pitch moves the audio's pitch, from -48 to 48 semitones |
 | `warp.set_detune` | Set Clip Detune | `cents`, `clip`? | And by cents, from -50 to 50 |
 | `warp.set_preserve` | Set Slice Preserve | `preserve`, `clip`? | Sets where Slice cuts the audio: `transients`, or on a grid of `bar`, `1/2`, `1/4`, `1/8`, `1/16` or `1/32` from the clip's 1.1.1 |
 | `warp.set_transient_loop` | Set Transient Loop Mode | `mode`, `clip`? | Sets what a slice plays once its audio runs out before the next starts: `off`, `forward` or `back_and_forth` |
 | `warp.set_transient_envelope` | Set Transient Envelope | `envelope`, `clip`? | Sets how much each slice fades as it plays, from 0, a very quick decay, to 100, no fade |
+| `warp.set_follow_pitch` | Set Follow Pitch | `on`, `clip`? | Sets whether Granular fits its grains to the audio's pitch, where analysis found one, as Live's Tones does, or cuts them on a steady grid, as Live's Texture does |
+| `warp.set_grain_size` | Set Grain Size | `milliseconds`, `clip`? | Sets how long each of Granular's grains is, from 5 to 500 ms |
+| `warp.set_fluctuation` | Set Fluctuation | `fluctuation`, `clip`? | Sets, while Follow pitch is off, how far each grain strays from where and when it would play, as a share of its length, from 0 to 100 |
 | `warp.set_formants` | Set Formants | `formants`, `clip`? | Sets how far Spectral keeps the formants in place as it transposes, from 0, moving with the pitch, to 100, staying where they were |
 | `warp.set_high_quality` | Set High Quality | `on`, `clip`? | Sets whether Spectral renders with Rubber Band's R3 engine, the best quality and slower to render, rather than Signalsmith Stretch |
 | `warp.set_envelope` | Set Spectral Envelope | `envelope`, `clip`? | Sets, while High quality is on, how fine the outline of the spectrum is that Spectral keeps the formants by, from 8 to 512 |
-| `clip.show_lane` | Show Clip Lane | `param`, `clip`? | Shows the clip in the Sample Editor, with the curve of its parameter `param` in the lane: `gain`, `transpose`, `detune`, `transient_envelope`, `preserve`, `transient_loop`, `formants` or `envelope`. It isn't a step to undo |
+| `clip.show_lane` | Show Clip Lane | `param`, `clip`? | Shows the clip in the Sample Editor, with the curve of its parameter `param` in the lane: `gain`, `transpose`, `detune`, `transient_envelope`, `preserve`, `transient_loop`, `grain_size`, `fluctuation`, `formants` or `envelope`. It isn't a step to undo |
 
-Each of these settings but the mode and High quality is one of the clip's
-parameters too (`ClipParam`, with Gain), so the automation commands give it
+Each of these settings but the mode, Follow pitch and High quality is one
+of the clip's parameters too (`ClipParam`, with Gain), so the automation commands give it
 a curve in the clip ([Automation](#automation)), and setting its value
 (`Transaction::set_param_value`) sets the warp's setting, kept in range and
 to whole semitones, cents and steps (`Warp::set_param`). The parameters

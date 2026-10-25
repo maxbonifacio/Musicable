@@ -1245,7 +1245,8 @@ fn examples() -> Vec<Example> {
             let (clip, warp) = find_warp(s)?;
             let mode = match warp.mode {
                 WarpMode::RePitch => WarpMode::Slice,
-                WarpMode::Slice => WarpMode::Spectral,
+                WarpMode::Slice => WarpMode::Granular,
+                WarpMode::Granular => WarpMode::Spectral,
                 WarpMode::Spectral => WarpMode::RePitch,
             };
             Some(Args::new().with("clip", clip).with("mode", mode.key()))
@@ -1286,6 +1287,33 @@ fn examples() -> Vec<Example> {
                 50.0
             };
             Some(Args::new().with("clip", clip).with("envelope", envelope))
+        }),
+        edits(warp_mode::SET_FOLLOW_PITCH, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let on = !warp.granular.follow_pitch;
+            Some(Args::new().with("clip", clip).with("on", on))
+        }),
+        edits(warp_mode::SET_GRAIN_SIZE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let size = if warp.granular.grain_size == 65.0 {
+                12.0
+            } else {
+                65.0
+            };
+            Some(Args::new().with("clip", clip).with("milliseconds", size))
+        }),
+        edits(warp_mode::SET_FLUCTUATION, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let fluctuation = if warp.granular.fluctuation == 60.0 {
+                10.0
+            } else {
+                60.0
+            };
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("fluctuation", fluctuation),
+            )
         }),
         edits(warp_mode::SET_FORMANTS, |s| {
             let (clip, warp) = find_warp(s)?;

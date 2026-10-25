@@ -24,8 +24,8 @@ use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
-    Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
-    WarpMarker, WarpMode,
+    GranularSettings, Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings,
+    TransientLoop, Warp, WarpMarker, WarpMode,
 };
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
@@ -52,6 +52,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("slicing", slicing()),
         ("spectral", spectral()),
         ("high-quality", high_quality()),
+        ("granular", granular()),
     ]
 }
 
@@ -1047,6 +1048,72 @@ fn high_quality() -> Project {
     moving.set_lane(ClipParam::Transpose, vec![point(0, 0.0), point(4, 12.0)]);
     let moving = project.new_clip("Moving", beats(32, 36), ClipContent::Audio(moving));
     project.track_mut(vocal).unwrap().clips = vec![mix, high, low, quick, kept, moving];
+    project
+}
+
+/// Granular, from version 16: a vocal and a bass line following their
+/// pitch with Grain Size at both ends and between, transposed, pads off it
+/// with Fluctuation at both ends and between, a clip in Spectral keeping
+/// its own Granular settings, and curves for Grain Size and Fluctuation.
+fn granular() -> Project {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let warped = |file, warp: Warp| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = Offset::Beats(Beats::ZERO);
+        audio.warp = Some(warp);
+        audio
+    };
+    let granular = |follow_pitch, grain_size, fluctuation| Warp {
+        mode: WarpMode::Granular,
+        granular: GranularSettings {
+            follow_pitch,
+            grain_size,
+            fluctuation,
+        },
+        ..Warp::new(0, Beats::ZERO, 96.0)
+    };
+    let vox = granular(true, GranularSettings::GRAIN_SIZE_DEFAULT, 25.0);
+    let vox = project.new_clip(
+        "Vox",
+        beats(0, 8),
+        ClipContent::Audio(warped("Vox.wav", vox)),
+    );
+    let mut bass = granular(true, GranularSettings::GRAIN_SIZE_MAX, 0.0);
+    (bass.transpose, bass.detune) = (-7, 33);
+    let bass = warped("Bass.wav", bass);
+    let bass = project.new_clip("Bass", beats(8, 12), ClipContent::Audio(bass));
+    let pad = granular(false, GranularSettings::GRAIN_SIZE_MIN, 0.0);
+    let pad = project.new_clip(
+        "Pad",
+        beats(12, 16),
+        ClipContent::Audio(warped("Pad.wav", pad)),
+    );
+    let mut wide = granular(false, 137.5, GranularSettings::FLUCTUATION_MAX);
+    wide.transpose = 12;
+    let wide = project.new_clip(
+        "Wide",
+        beats(16, 20),
+        ClipContent::Audio(warped("Pad.wav", wide)),
+    );
+    let mut kept = granular(false, 72.25, 62.5);
+    kept.mode = WarpMode::Spectral;
+    let kept = project.new_clip(
+        "Kept",
+        beats(20, 24),
+        ClipContent::Audio(warped("Pad.wav", kept)),
+    );
+    let mut moving = warped("Pad.wav", granular(false, 30.0, 25.0));
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    moving.set_lane(
+        ClipParam::GrainSize,
+        vec![point(0, 5.0), point(2, 60.0), point(4, 500.0)],
+    );
+    moving.set_lane(ClipParam::Fluctuation, vec![point(0, 100.0), point(4, 0.0)]);
+    moving.set_lane(ClipParam::Transpose, vec![point(0, 0.0), point(4, -12.0)]);
+    let moving = project.new_clip("Moving", beats(24, 28), ClipContent::Audio(moving));
+    project.track_mut(vocal).unwrap().clips = vec![vox, bass, pad, wide, kept, moving];
     project
 }
 

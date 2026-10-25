@@ -5,7 +5,9 @@
 
 use crate::clip::{ClipContent, ClipId};
 use crate::native::ParamInfo;
-use crate::warp::{Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode};
+use crate::warp::{
+    GranularSettings, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
+};
 use crate::{Chain, DeviceId, DeviceKind, Project, SendId};
 
 /// A parameter anywhere in the project: one address that automation,
@@ -47,6 +49,10 @@ pub enum ClipParam {
     /// Slice's Transient Loop Mode, in steps: the place of a
     /// [`TransientLoop`](crate::warp::TransientLoop) in its list.
     TransientLoop,
+    /// Granular's Grain Size, in milliseconds, from 5 to 500.
+    GrainSize,
+    /// Granular's Fluctuation, while Follow pitch is off, from 0 to 100.
+    Fluctuation,
     /// Spectral's Formants, from 0 to 100.
     Formants,
     /// Spectral's Envelope, while High quality is on, from 8 to 512.
@@ -55,13 +61,15 @@ pub enum ClipParam {
 
 impl ClipParam {
     /// Every one, in order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Gain,
         Self::Transpose,
         Self::Detune,
         Self::TransientEnvelope,
         Self::Preserve,
         Self::TransientLoop,
+        Self::GrainSize,
+        Self::Fluctuation,
         Self::Formants,
         Self::Envelope,
     ];
@@ -105,6 +113,19 @@ impl ClipParam {
                 let default = TransientLoop::default().step();
                 steps("Transient Loop Mode", TransientLoop::ALL.len(), default)
             }
+            Self::GrainSize => ParamSpec {
+                name: "Grain Size".into(),
+                min: GranularSettings::GRAIN_SIZE_MIN,
+                max: GranularSettings::GRAIN_SIZE_MAX,
+                default: GranularSettings::GRAIN_SIZE_DEFAULT,
+                scale: Scale::Log,
+            },
+            Self::Fluctuation => linear(
+                "Fluctuation",
+                0.0,
+                GranularSettings::FLUCTUATION_MAX,
+                GranularSettings::FLUCTUATION_DEFAULT,
+            ),
             Self::Formants => linear(
                 "Formants",
                 0.0,
@@ -129,7 +150,8 @@ impl ClipParam {
 
     /// Whether it plays in a clip warped as `warp`, or unwarped: Gain
     /// always, Transpose and Detune in every mode but Re-Pitch, each mode's
-    /// own in it, and Envelope in Spectral while High quality is on.
+    /// own in it, Fluctuation in Granular while Follow pitch is off, and
+    /// Envelope in Spectral while High quality is on.
     pub fn plays_in(self, warp: Option<&Warp>) -> bool {
         let mode = warp.map(|warp| warp.mode);
         match self {
@@ -137,6 +159,10 @@ impl ClipParam {
             Self::Transpose | Self::Detune => mode.is_some_and(WarpMode::transposes),
             Self::TransientEnvelope | Self::Preserve | Self::TransientLoop => {
                 mode == Some(WarpMode::Slice)
+            }
+            Self::GrainSize => mode == Some(WarpMode::Granular),
+            Self::Fluctuation => {
+                warp.is_some_and(|w| w.mode == WarpMode::Granular && !w.granular.follow_pitch)
             }
             Self::Formants => mode == Some(WarpMode::Spectral),
             Self::Envelope => {
@@ -154,6 +180,8 @@ impl ClipParam {
             Self::TransientEnvelope => "transient_envelope",
             Self::Preserve => "preserve",
             Self::TransientLoop => "transient_loop",
+            Self::GrainSize => "grain_size",
+            Self::Fluctuation => "fluctuation",
             Self::Formants => "formants",
             Self::Envelope => "envelope",
         }
@@ -545,9 +573,10 @@ mod tests {
         let steps = |param: ClipParam| param.spec().max as usize + 1;
         assert_eq!(steps(ClipParam::Preserve), Preserve::ALL.len());
         assert_eq!(steps(ClipParam::TransientLoop), TransientLoop::ALL.len());
-        let in_mode = |mode, high_quality| {
+        let in_mode = |mode, setting| {
             let mut warp = Warp::new(0, Beats::ZERO, 120.0);
-            (warp.mode, warp.spectral.high_quality) = (mode, high_quality);
+            (warp.mode, warp.spectral.high_quality) = (mode, setting);
+            warp.granular.follow_pitch = setting;
             warp
         };
         assert!(ClipParam::Gain.plays_in(None));
@@ -558,6 +587,11 @@ mod tests {
         assert!(!ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Spectral, false))));
         assert!(ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Spectral, true))));
         assert!(!ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Slice, true))));
+        assert!(ClipParam::GrainSize.plays_in(Some(&in_mode(WarpMode::Granular, true))));
+        assert!(!ClipParam::GrainSize.plays_in(Some(&in_mode(WarpMode::Spectral, true))));
+        assert!(ClipParam::Fluctuation.plays_in(Some(&in_mode(WarpMode::Granular, false))));
+        assert!(!ClipParam::Fluctuation.plays_in(Some(&in_mode(WarpMode::Granular, true))));
+        assert!(ClipParam::Transpose.plays_in(Some(&in_mode(WarpMode::Granular, true))));
 
         let mut p = Project::new();
         let drums = p.add_track("Drums", TrackKind::Audio);

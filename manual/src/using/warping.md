@@ -213,6 +213,45 @@ Its settings are under the mode in the Sample Editor:
   next one starts, and at 0 it's a click. A lower envelope tightens a
   loop played slower, where the slices' loops fill the gaps.
 
+### Granular
+
+Granular is for voices, bass lines and leads, with one note at a time, and
+for pads, textures and noise, as Live's Tones and Texture modes are. It
+plays the audio as short grains, each fading in as the one before fades
+out, so two play at once. Each grain plays the file at its own speed from
+where the song has got to in it, so the audio keeps its pitch at any tempo:
+where the song plays the file slower than its own speed, the grains go over
+some of its audio again, and where faster, they leave some out. Transpose
+and Detune play each grain faster or slower, resampled, so they move the
+pitch without changing the speed. Where the clip plays its file at the
+file's own speed and isn't transposed, Granular plays the file sample for
+sample.
+
+Its settings are under the mode in the Sample Editor:
+
+- **Follow pitch**, on as a clip starts, is Live's Tones. Where Musicable's
+  analysis has found a pitch in the file, each grain is a whole number of
+  its periods long and starts where one does, so the grains that overlap
+  are in step and a note keeps its sound. Elsewhere, in noise and silence,
+  and until the file is analysed, the grains are cut as with it off, but
+  not spread. Off is Live's Texture: the grains are cut on a steady grid,
+  whatever the audio, for pads, chords and noise.
+- **Grain Size**, from 5 to 500 milliseconds, is how long each grain is:
+  30 ms as a clip starts. Short grains follow quick notes and hits closely;
+  longer ones smooth the audio into a texture, and repeat its attacks where
+  the song plays it slower. Following the pitch, a grain is a whole
+  number of the audio's periods long, within a period of its size, and two
+  periods at least.
+- **Fluctuation**, Live's Flux, shows while Follow pitch is off: how far
+  each grain strays, earlier or later and reading from further back or on,
+  as a share of its length, from **0%**, a steady grid, to **100%**, a
+  cloud. **25%** as a clip starts. The grains stray the same way every time
+  the clip plays, and in an export.
+
+The grains are placed in the clip's own time, from its start, so splitting
+or moving the clip doesn't move them, and when the song's tempo changes,
+they're placed again for it.
+
 ### Spectral
 
 Spectral is for full mixes, chords, voices and anything else with more than
@@ -273,16 +312,18 @@ the Files page of the Settings window changes both
 **Transpose**, from -48 to +48 semitones (st), and **Detune**, from -50 to
 +50 cents (ct), move the audio's pitch in every mode but Re-Pitch. Slice
 plays each slice faster or slower to move its pitch, resampled, so a slice
-an octave up plays twice as fast, for half as long. Spectral moves the pitch
-in its stretcher, keeping the audio's speed, and keeps the formants where
-Formants says. Drag them in the Sample Editor, or click them and type.
+an octave up plays twice as fast, for half as long. Granular does the same
+with each grain, keeping the grains as long. Spectral moves the pitch in its
+stretcher, keeping the audio's speed, and keeps the formants where Formants
+says. Drag them in the Sample Editor, or click them and type.
 
 ## Curves in the clip
 
-Every setting of a warped clip but its mode and High quality can follow a
-curve, as Live's clip envelopes can move its volume and transpose: its
-gain, its Transpose and Detune, Slice's Envelope, Preserve and Loop, and
-Spectral's Formants and Envelope. The lane under the Sample Editor's
+Every setting of a warped clip but its mode, Follow pitch and High quality
+can follow a curve, as Live's clip envelopes can move its volume and
+transpose: its gain, its Transpose and Detune, Slice's Envelope, Preserve
+and Loop, Granular's Grain Size and Fluctuation, and Spectral's Formants and
+Envelope. The lane under the Sample Editor's
 waveform shows one of the curves at a time: click its name, beside it, to
 choose which. A curve is part of the clip, in the clip's own time, so it
 moves, copies and splits with the clip and stays with its audio.
@@ -291,7 +332,8 @@ Where a setting has a curve, the curve gives its value all through the
 clip: the first point's value before the first point, and the last's after
 the last. The gain follows its curve smoothly, and Slice reads the others
 where each slice starts, so a change in the middle of a slice waits for the
-next one. Spectral renders the curves of Transpose, Detune, Formants and
+next one. Granular reads them where each grain is centred, so they move a
+grain at a time. Spectral renders the curves of Transpose, Detune, Formants and
 Envelope into its segments, reading them every 30 milliseconds, or about
 every 5 with High quality, so a curve redrawn renders again only the
 segments it crosses. Preserve and Loop are steps: each point holds its
@@ -302,8 +344,6 @@ from each point on.
 
 These come in later versions:
 
-- Granular, which plays the audio in grains, for pads, textures and
-  noise, as Live's Tones and Texture modes do.
 - Quantize Settings, for moving hits part of the way to the grid, or to a
   grid of their own: Quantize goes all the way, to the grid the panel shows.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV

@@ -12,7 +12,8 @@ use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::warp::{
-    Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
+    GranularSettings, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
+    WarpMode,
 };
 use musicable_model::{
     AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
@@ -1614,6 +1615,58 @@ fn warped_clips_formants_and_envelope_are_within_their_range() {
 }
 
 #[test]
+fn warped_clips_grains_are_within_their_range() {
+    let file = edited_warp(|a| {
+        a["warp"]["mode"] = json!("granular");
+        a["warp"]["granular"] =
+            json!({"follow_pitch": false, "grain_size": 137.5, "fluctuation": 62.5});
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    let warp = audio.warp.as_ref().unwrap();
+    assert_eq!(warp.mode, WarpMode::Granular);
+    let granular = GranularSettings {
+        follow_pitch: false,
+        grain_size: 137.5,
+        fluctuation: 62.5,
+    };
+    assert_eq!(warp.granular, granular);
+    let warp = format!("{AUDIO}.warp");
+    for grain_size in [4.5, 500.5] {
+        refused(
+            &edited_warp(|a| a["warp"]["granular"]["grain_size"] = json!(grain_size)),
+            &format!("{warp}.granular.grain_size"),
+            "must be from 5 to 500",
+        );
+    }
+    for fluctuation in [-0.5, 101.0] {
+        refused(
+            &edited_warp(|a| a["warp"]["granular"]["fluctuation"] = json!(fluctuation)),
+            &format!("{warp}.granular.fluctuation"),
+            "must be from 0 to 100",
+        );
+    }
+    refused(
+        &edited_warp(|a| a["warp"]["granular"]["follow_pitch"] = json!(1)),
+        &format!("{warp}.granular.follow_pitch"),
+        "expected a boolean",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["granular"]["seed"] = json!(7)),
+        &format!("{warp}.granular.seed"),
+        "unknown field `seed`",
+    );
+    refused(
+        &edited_warp(|a| {
+            a["warp"].as_object_mut().unwrap().remove("granular");
+        }),
+        &warp,
+        "missing field `granular`",
+    );
+}
+
+#[test]
 fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
     let gain = |points| json!([{"param": "gain", "points": points}]);
     let lanes = format!("{AUDIO}.automation");
@@ -1676,6 +1729,9 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("transient_envelope", 12.5),
         ("preserve", 6.0),
         ("transient_loop", 2.0),
+        ("grain_size", 5.0),
+        ("grain_size", 500.0),
+        ("fluctuation", 100.0),
         ("formants", 0.0),
         ("envelope", 8.0),
         ("envelope", 512.0),
@@ -1693,6 +1749,8 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("preserve", 7.0, "must be from 0 to 6"),
         ("preserve", 2.5, "must be a whole number"),
         ("transient_loop", 0.5, "must be a whole number"),
+        ("grain_size", 4.0, "must be from 5 to 500"),
+        ("fluctuation", -1.0, "must be from 0 to 100"),
         ("formants", 100.5, "must be from 0 to 100"),
         ("envelope", 7.0, "must be from 8 to 512"),
     ] {

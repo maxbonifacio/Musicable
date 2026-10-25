@@ -2,8 +2,8 @@
 //! Sample Editor's controls for them.
 //!
 //! The commands here set the warp mode of an audio clip, the transpose and
-//! detune every mode but Re-Pitch moves its pitch by, and Slice's and
-//! Spectral's own settings: the clip their `clip` argument names, or else
+//! detune every mode but Re-Pitch moves its pitch by, and Slice's,
+//! Granular's and Spectral's own settings: the clip their `clip` argument names, or else
 //! the one the Sample Editor shows. A clip keeps each mode's settings while
 //! another plays, as Live does, so setting one in another mode is kept for
 //! when it plays. Each setting is one of the clip's parameters too (see
@@ -13,7 +13,7 @@
 use musicable_model::clip::ClipId;
 use musicable_model::param::ClipParam;
 use musicable_model::warp::{
-    Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
+    GranularSettings, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
 };
 
 use crate::warp::{CLIP, audio, change_warp, clip_arg, warped};
@@ -31,6 +31,12 @@ pub const SET_PRESERVE: CommandId = CommandId::new("warp.set_preserve");
 pub const SET_TRANSIENT_LOOP: CommandId = CommandId::new("warp.set_transient_loop");
 /// Sets how much each of Slice's slices fades as it plays.
 pub const SET_TRANSIENT_ENVELOPE: CommandId = CommandId::new("warp.set_transient_envelope");
+/// Sets whether Granular fits a warped clip's grains to its audio's pitch.
+pub const SET_FOLLOW_PITCH: CommandId = CommandId::new("warp.set_follow_pitch");
+/// Sets how long Granular's grains are.
+pub const SET_GRAIN_SIZE: CommandId = CommandId::new("warp.set_grain_size");
+/// Sets how far Granular's grains stray, while they don't follow the pitch.
+pub const SET_FLUCTUATION: CommandId = CommandId::new("warp.set_fluctuation");
 /// Sets how far Spectral keeps a warped clip's formants in place as it
 /// transposes.
 pub const SET_FORMANTS: CommandId = CommandId::new("warp.set_formants");
@@ -45,14 +51,14 @@ pub const SET_ENVELOPE: CommandId = CommandId::new("warp.set_envelope");
 pub const SHOW_LANE: CommandId = CommandId::new("clip.show_lane");
 
 /// The keys of the modes, as [`SET_MODE`] takes them.
-const MODES: &str = "re_pitch, slice or spectral";
+const MODES: &str = "re_pitch, slice, granular or spectral";
 /// The keys of the places Slice cuts at, as [`SET_PRESERVE`] takes them.
 const PRESERVES: &str = "transients, bar, 1/2, 1/4, 1/8, 1/16 or 1/32";
 /// The keys of the transient loop modes.
 const LOOPS: &str = "off, forward or back_and_forth";
 /// The keys of the clip's parameters, as [`SHOW_LANE`] takes them.
-const PARAMS: &str =
-    "gain, transpose, detune, transient_envelope, preserve, transient_loop, formants or envelope";
+const PARAMS: &str = "gain, transpose, detune, transient_envelope, preserve, transient_loop, \
+                      grain_size, fluctuation, formants or envelope";
 
 /// Registers the commands for the warp modes' settings.
 pub fn register(registry: &mut Registry) {
@@ -63,8 +69,9 @@ pub fn register(registry: &mut Registry) {
                 Type::Text,
                 "How the audio between the markers plays: re_pitch, resampled so its pitch \
                  follows its speed, slice, cut into slices at its transients, each played \
-                 at the file's own speed, or spectral, stretched in the frequency domain, \
-                 keeping its pitch.",
+                 at the file's own speed, granular, played as short overlapping grains, \
+                 each at the file's own speed, or spectral, stretched in the frequency \
+                 domain, keeping its pitch.",
             ),
             CLIP,
         ]),
@@ -175,6 +182,68 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_FOLLOW_PITCH, "Set Follow Pitch").with_params(&[
+            Param::required(
+                "on",
+                Type::Bool,
+                "Whether Granular fits the grains to the audio's pitch, where analysis found \
+                 one, so a line with one note at a time keeps its sound, as Live's Tones \
+                 does, rather than cutting them on a steady grid, spread by Fluctuation, as \
+                 Live's Texture cuts pads and noise.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let on: bool = args.get("on")?;
+            set(ctx, args, "Set Follow Pitch", |warp| {
+                warp.granular.follow_pitch = on
+            })
+        },
+    );
+    registry.add(
+        Command::new(SET_GRAIN_SIZE, "Set Grain Size").with_params(&[
+            Param::required(
+                "milliseconds",
+                Type::Number,
+                "How long each of Granular's grains is, from 5 to 500 ms: with Follow pitch \
+                 on, a whole number of the pitch's periods, within a period of this, and two \
+                 at least.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let size: f64 = args.get("milliseconds")?;
+            let range = GranularSettings::GRAIN_SIZE_MIN..=GranularSettings::GRAIN_SIZE_MAX;
+            if !range.contains(&size) {
+                return Err(CommandError::invalid("a Grain Size goes from 5 to 500 ms"));
+            }
+            set(ctx, args, "Set Grain Size", |warp| {
+                warp.granular.grain_size = size
+            })
+        },
+    );
+    registry.add(
+        Command::new(SET_FLUCTUATION, "Set Fluctuation").with_params(&[
+            Param::required(
+                "fluctuation",
+                Type::Number,
+                "While Follow pitch is off, how far each grain strays from where and when \
+                 it would play, as a share of its length, from 0, a steady grid, to 100. \
+                 It's the same every time the clip plays.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let fluctuation: f64 = args.get("fluctuation")?;
+            if !(0.0..=GranularSettings::FLUCTUATION_MAX).contains(&fluctuation) {
+                return Err(CommandError::invalid("Fluctuation goes from 0 to 100"));
+            }
+            set(ctx, args, "Set Fluctuation", |warp| {
+                warp.granular.fluctuation = fluctuation
+            })
+        },
+    );
+    registry.add(
         Command::new(SET_FORMANTS, "Set Formants").with_params(&[
             Param::required(
                 "formants",
@@ -241,7 +310,8 @@ pub fn register(registry: &mut Registry) {
                 "param",
                 Type::Text,
                 "The parameter whose curve the Sample Editor's lane shows: gain, transpose, \
-                 detune, transient_envelope, preserve, transient_loop, formants or envelope.",
+                 detune, transient_envelope, preserve, transient_loop, grain_size, \
+                 fluctuation, formants or envelope.",
             ),
             CLIP,
         ]),
@@ -309,13 +379,16 @@ mod tests {
     #[test]
     fn each_setting_is_a_step_and_undo_takes_it_back() {
         let (mut setup, clip) = analysed_song();
-        let runs: [(CommandId, &str, Value); 9] = [
+        let runs: [(CommandId, &str, Value); 12] = [
             (SET_MODE, "mode", "slice".into()),
             (SET_TRANSPOSE, "semitones", (-7_i64).into()),
             (SET_DETUNE, "cents", 12_i64.into()),
             (SET_PRESERVE, "preserve", "1/8".into()),
             (SET_TRANSIENT_LOOP, "mode", "back_and_forth".into()),
             (SET_TRANSIENT_ENVELOPE, "envelope", 40.0.into()),
+            (SET_FOLLOW_PITCH, "on", false.into()),
+            (SET_GRAIN_SIZE, "milliseconds", 65.0.into()),
+            (SET_FLUCTUATION, "fluctuation", 50.0.into()),
             (SET_FORMANTS, "formants", 25.0.into()),
             (SET_HIGH_QUALITY, "on", true.into()),
             (SET_ENVELOPE, "envelope", 64.0.into()),
@@ -335,6 +408,12 @@ mod tests {
                 envelope: 40.0,
             }
         );
+        let granular = GranularSettings {
+            follow_pitch: false,
+            grain_size: 65.0,
+            fluctuation: 50.0,
+        };
+        assert_eq!(warp.granular, granular);
         let spectral = SpectralSettings {
             high_quality: true,
             formants: 25.0,
@@ -350,6 +429,9 @@ mod tests {
                 "Set Slice Preserve",
                 "Set Transient Loop Mode",
                 "Set Transient Envelope",
+                "Set Follow Pitch",
+                "Set Grain Size",
+                "Set Fluctuation",
                 "Set Formants",
                 "Set High Quality",
                 "Set Spectral Envelope",
@@ -369,6 +451,12 @@ mod tests {
         setup.run(&edit::UNDO);
         assert_eq!(warp_of(&setup, clip).spectral.formants, 100.0);
         setup.run(&edit::UNDO);
+        assert_eq!(warp_of(&setup, clip).granular.fluctuation, 25.0);
+        setup.run(&edit::UNDO);
+        assert_eq!(warp_of(&setup, clip).granular.grain_size, 30.0);
+        setup.run(&edit::UNDO);
+        assert!(warp_of(&setup, clip).granular.follow_pitch);
+        setup.run(&edit::UNDO);
         assert_eq!(warp_of(&setup, clip).slice.envelope, 100.0);
         let markers = warp_of(&setup, clip).markers;
         assert_eq!(markers, warp.markers, "the markers stay as they were");
@@ -377,8 +465,13 @@ mod tests {
     #[test]
     fn settings_out_of_range_or_unknown_are_refused() {
         let (mut setup, clip) = analysed_song();
-        let wrong: [(CommandId, &str, Value); 13] = [
+        let wrong: [(CommandId, &str, Value); 18] = [
             (SET_MODE, "mode", "complex".into()),
+            (SET_FOLLOW_PITCH, "on", 1_i64.into()),
+            (SET_GRAIN_SIZE, "milliseconds", 4.9.into()),
+            (SET_GRAIN_SIZE, "milliseconds", 501.0.into()),
+            (SET_FLUCTUATION, "fluctuation", (-0.5).into()),
+            (SET_FLUCTUATION, "fluctuation", 100.5.into()),
             (SET_TRANSPOSE, "semitones", 49_i64.into()),
             (SET_TRANSPOSE, "semitones", (-300_i64).into()),
             (SET_DETUNE, "cents", 51_i64.into()),
@@ -440,6 +533,8 @@ mod tests {
             tx.set_param_value(param(ClipParam::Preserve), 2.2);
             tx.set_param_value(param(ClipParam::TransientLoop), -1.0);
             tx.set_param_value(param(ClipParam::TransientEnvelope), 250.0);
+            tx.set_param_value(param(ClipParam::GrainSize), 1000.0);
+            tx.set_param_value(param(ClipParam::Fluctuation), -5.0);
             tx.set_param_value(param(ClipParam::Formants), -3.0);
             tx.set_param_value(param(ClipParam::Envelope), 2.0);
         });
@@ -448,6 +543,8 @@ mod tests {
         assert_eq!(warp.slice.preserve, Preserve::Half);
         assert_eq!(warp.slice.transient_loop, TransientLoop::Off);
         assert_eq!(warp.slice.envelope, 100.0);
+        assert_eq!(warp.granular.grain_size, 500.0);
+        assert_eq!(warp.granular.fluctuation, 0.0);
         assert_eq!(warp.spectral.formants, 0.0);
         assert_eq!(warp.spectral.envelope, 8.0);
         // Clearing a curve leaves the setting at the value it had at the

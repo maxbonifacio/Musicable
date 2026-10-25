@@ -43,8 +43,8 @@ use musicable_model::clip::{AudioClip, Clip, ClipContent};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::{
-    Onset, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMarker,
-    WarpMode,
+    GranularSettings, Onset, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop,
+    Warp, WarpMarker, WarpMode,
 };
 
 use crate::arrangement::{distance_to_segment, simplified};
@@ -930,6 +930,8 @@ fn value_text(param: ClipParam, value: f64) -> String {
         ClipParam::TransientEnvelope => format!("{value:.0}"),
         ClipParam::Preserve => Preserve::at_step(value).name().to_owned(),
         ClipParam::TransientLoop => TransientLoop::at_step(value).name().to_owned(),
+        ClipParam::GrainSize => format!("{value:.0} ms"),
+        ClipParam::Fluctuation => format!("{value:.0}%"),
         ClipParam::Formants => format!("{value:.0}%"),
         ClipParam::Envelope => format!("{value:.0}"),
     }
@@ -1448,6 +1450,7 @@ fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
                         match warp.mode {
                             WarpMode::RePitch => {}
                             WarpMode::Slice => slice(ui, scene, warp, actions),
+                            WarpMode::Granular => granular(ui, scene, warp, actions),
                             WarpMode::Spectral => spectral(ui, scene, warp, actions),
                         }
                         tempo(ui, scene, warp, actions);
@@ -1487,8 +1490,10 @@ fn warp_and_mode(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
         let hint = "How the audio between the markers plays: Re-Pitch resamples it, so its \
                     pitch follows its speed, as on a turntable, Slice cuts it into slices at \
                     its transients, each played at the file's own speed, for drums and other \
-                    percussive loops, and Spectral stretches it keeping its pitch, for full \
-                    mixes, chords and voices";
+                    percussive loops, Granular plays it as short overlapping grains, each at \
+                    the file's own speed, for lines with one note at a time and for pads, \
+                    and Spectral stretches it keeping its pitch, for full mixes, chords and \
+                    voices";
         let (shown, modes) = (RichText::new(warp.mode.name()), &WarpMode::ALL);
         if let Some(mode) = menu(
             ui,
@@ -1623,6 +1628,76 @@ fn spectral(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Actio
         name_field(&field, "Envelope", envelope);
         edited(&field, actions, warp_mode::SET_ENVELOPE, || {
             Args::new().with("envelope", envelope).with("clip", clip)
+        });
+    });
+}
+
+/// Granular's own settings: whether the grains follow the pitch, how long
+/// they are, and, while they don't follow it, how far they stray.
+fn granular(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let settings = warp.granular;
+    let mut follow_pitch = settings.follow_pitch;
+    let toggle = ui
+        .checkbox(&mut follow_pitch, "Follow pitch")
+        .on_hover_text(
+            "Fits the grains to the audio's pitch, where analysis found one, so a voice or a \
+             bass line with one note at a time keeps its sound, as Live's Tones does. Off, \
+             the grains are cut on a steady grid, spread by Fluctuation, as Live's Texture \
+             cuts pads and noise",
+        );
+    if toggle.changed() {
+        let args = Args::new().with("on", follow_pitch).with("clip", clip);
+        run(actions, warp_mode::SET_FOLLOW_PITCH, args);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Grain Size");
+        let mut size = settings.grain_size;
+        let range = GranularSettings::GRAIN_SIZE_MIN..=GranularSettings::GRAIN_SIZE_MAX;
+        let field = ui
+            .add(
+                DragValue::new(&mut size)
+                    .speed(0.5)
+                    .range(range)
+                    .fixed_decimals(0)
+                    .suffix(" ms")
+                    .update_while_editing(false),
+            )
+            .on_hover_text(
+                "How long each grain is: short grains follow quick notes and transients, \
+                 long ones smear them into a texture. Following the pitch, a whole number \
+                 of its periods, within a period of this, and two at least",
+            );
+        name_field(&field, "Grain Size", size);
+        edited(&field, actions, warp_mode::SET_GRAIN_SIZE, || {
+            Args::new().with("milliseconds", size).with("clip", clip)
+        });
+    });
+    if settings.follow_pitch {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Fluctuation");
+        let mut fluctuation = settings.fluctuation;
+        let field = ui
+            .add(
+                DragValue::new(&mut fluctuation)
+                    .speed(0.5)
+                    .range(0.0..=GranularSettings::FLUCTUATION_MAX)
+                    .fixed_decimals(0)
+                    .suffix("%")
+                    .update_while_editing(false),
+            )
+            .on_hover_text(
+                "How far each grain strays from where and when it would play, as a share of \
+                 its length: 0% is a steady grid, and more blurs the audio into a cloud. It's \
+                 the same every time the clip plays",
+            );
+        name_field(&field, "Fluctuation", fluctuation);
+        edited(&field, actions, warp_mode::SET_FLUCTUATION, || {
+            Args::new()
+                .with("fluctuation", fluctuation)
+                .with("clip", clip)
         });
     });
 }

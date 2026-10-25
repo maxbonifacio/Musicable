@@ -1016,8 +1016,9 @@ impl App {
     /// project's audio files when the project has changed, and takes in
     /// those found since. Warped clips take the transients analysis found
     /// in their files as it finds them, and when the project changes, so
-    /// those that undo brings back without them take them again. Files
-    /// dropped before they'd been analysed are auto-warped once they have.
+    /// those that undo brings back without them take them again, and clips
+    /// in Granular the pitch marks. Files dropped before they'd been
+    /// analysed are auto-warped once they have.
     fn read_audio_files(&mut self, ctx: &egui::Context) {
         let revision = self.session.revision();
         let changed = self.files_found != Some(revision);
@@ -1038,6 +1039,9 @@ impl App {
         }
         if (changed || analysed) && self.session.take_transients() {
             ctx.request_repaint();
+        }
+        if analysed {
+            self.session.take_pitch_marks();
         }
         let analyses = &self.analyses;
         if (changed || analysed) && self.session.auto_warp(|file| analyses.waits_for(file)) {
