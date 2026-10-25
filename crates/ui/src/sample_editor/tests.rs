@@ -685,6 +685,16 @@ fn the_context_menu_inserts_deletes_and_resets_transients() {
         harness.state().transients(),
         [2 * BEAT + BEAT / 10, 3 * BEAT]
     );
+    // Quantize on its pseudo marker moves it to the nearest sixteenth,
+    // with a warp marker.
+    let at = in_top(&harness, 6.1);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Quantize Ctrl+U").click();
+    harness.run();
+    assert_eq!(
+        harness.state().markers(),
+        [(0, 0.0), (2 * BEAT + BEAT / 10, 2.0)]
+    );
     // Reset Transients brings back those analysis found.
     let at = in_bottom(&harness, 8.0);
     secondary_click(&mut harness, at);
@@ -692,6 +702,43 @@ fn the_context_menu_inserts_deletes_and_resets_transients() {
     harness.run();
     assert_eq!(harness.state().transients(), [BEAT, 3 * BEAT]);
     assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_context_menu_sets_the_downbeat_and_warps_again_from_a_point() {
+    let (project, clip) = project(&[(0, 0.0), (4 * BEAT, 4.0)]);
+    let mut harness = harness(project, Some(clip));
+    // On a marker, it's the clip's first downbeat, on the bar line where it
+    // plays.
+    let at = on_handle(&harness, 8.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Set 1.1.1 Here").click();
+    harness.run();
+    assert_eq!(harness.state().markers(), [(0, -4.0), (4 * BEAT, 0.0)]);
+    assert_eq!(harness.state().clip().0.start, Beats::new(4));
+    // On the waveform, where the menu was opened: one tempo from there to
+    // the file's end, the clip's.
+    let at = in_bottom(&harness, 6.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Warp From Here (Straight)").click();
+    harness.run();
+    let straight = [(0, -4.0), (2 * BEAT, -2.0), (FRAMES, 4.0)];
+    assert_eq!(harness.state().markers(), straight);
+    // In the time selected, a bar of it: a loop of a bar from beat 4.
+    let (from, to) = (in_bottom(&harness, 5.0), in_bottom(&harness, 9.0));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let inside = in_bottom(&harness, 7.0);
+    secondary_click(&mut harness, inside);
+    harness.get_by_label("Warp Selection as a Loop").click();
+    harness.run();
+    assert_eq!(harness.state().markers(), [(BEAT, 0.0)]);
+    let (clip, _) = harness.state().clip();
+    assert_eq!((clip.start, clip.length), (Beats::new(4), Beats::new(4)));
+    assert!(
+        harness.state().errors.is_empty(),
+        "{:?}",
+        harness.state().errors
+    );
 }
 
 #[test]

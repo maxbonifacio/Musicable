@@ -45,8 +45,8 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, history, json, locator, mixer, notes, options, take, track,
-    transient, transport, view, warp, workspace,
+    controllers, device, edit, file, history, json, locator, mixer, notes, options, rewarp, take,
+    track, transient, transport, view, warp, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -527,6 +527,32 @@ fn examples() -> Vec<Example> {
             start_marker(s, at);
             Some(Args::new())
         }),
+        edits(edit::QUANTIZE, |s| {
+            let (clip, notes) = find_notes(s)?;
+            Some(Args::new().with("clip", clip).with("notes", notes))
+        }),
+        // Without arguments, while the arrangement has the focus: the notes
+        // of the selected MIDI clips.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, _) = find_notes(s)?;
+            s.select_clips(&[clip]);
+            Some(Args::new())
+        }),
+        // A warped clip's transients, which gain warp markers.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, frame) = find_transient(s)?;
+            let frames = vec![frame as i64];
+            Some(Args::new().with("clip", clip).with("frames", frames))
+        }),
+        // Without arguments: those in the Sample Editor's time selection.
+        edits(edit::QUANTIZE, transient_selected),
+        // And while the arrangement has the focus, those of the selected
+        // warped clips.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, _) = find_transient(s)?;
+            s.select_clips(&[clip]);
+            Some(Args::new())
+        }),
         steps(edit::REDO, bare),
         leaves(edit::RENAME, |s| {
             let clip = find_clip(s, |_| true)?.id;
@@ -862,17 +888,6 @@ fn examples() -> Vec<Example> {
         leaves(notes::OPEN, |s| {
             let clip = find_clip(s, is_midi)?.id;
             Some(Args::new().with("clip", clip))
-        }),
-        edits(notes::QUANTIZE, |s| {
-            let (clip, notes) = find_notes(s)?;
-            Some(Args::new().with("clip", clip).with("notes", notes))
-        }),
-        // Without arguments, while the arrangement has the focus: the notes
-        // of the selected MIDI clips.
-        edits(notes::QUANTIZE, |s| {
-            let (clip, _) = find_notes(s)?;
-            s.select_clips(&[clip]);
-            Some(Args::new())
         }),
         leaves(notes::SELECT, |s| {
             let (clip, notes) = find_notes(s)?;
@@ -1224,6 +1239,41 @@ fn examples() -> Vec<Example> {
                 .ok()?;
             Some(Args::new())
         }),
+        edits(rewarp::FROM_HERE, marker_frame),
+        edits(rewarp::FROM_HERE_AT_SONG_TEMPO, marker_frame),
+        edits(rewarp::FROM_HERE_STRAIGHT, marker_frame),
+        edits(rewarp::SELECTION_AS_LOOP, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            // All of the clip.
+            let offset = audio.offset.beats()?;
+            let args = Args::new()
+                .with("clip", clip)
+                .with("start", offset)
+                .with("end", offset + c.length);
+            Some(args)
+        }),
+        // Without arguments: the Sample Editor's time selection.
+        edits(rewarp::SELECTION_AS_LOOP, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            // Its first two beats.
+            let offset = audio.offset.beats()?;
+            let args = Args::new()
+                .with("clip", clip)
+                .with("start", offset)
+                .with("end", offset + Beats::new(2).min(c.length));
+            s.run_with(&warp::SELECT_TIME, args).ok()?;
+            Some(Args::new())
+        }),
+        edits(rewarp::SET_DOWNBEAT, marker_frame),
+        edits(rewarp::SONG_TEMPO_FROM_HERE, marker_frame),
         edits(transient::DELETE, |s| {
             let (clip, frame) = find_transient(s)?;
             Some(
@@ -1458,6 +1508,19 @@ fn transient_selected(s: &mut Rig) -> Option<Args> {
     Some(Args::new())
 }
 
+/// A warped clip and the frame of one of its markers, for the commands
+/// that warp it from a point.
+fn marker_frame(s: &mut Rig) -> Option<Args> {
+    let (clip, beat) = find_marker(s, |_| true)?;
+    let (_, c) = project(s).find_clip(clip)?;
+    let ClipContent::Audio(audio) = &c.content else {
+        return None;
+    };
+    let warp = audio.warp.as_ref()?;
+    let frame = warp.markers[warp.marker_at(beat)?].frame;
+    Some(Args::new().with("clip", clip).with("frame", frame as i64))
+}
+
 /// Shows a warped clip in the Sample Editor, for a command without
 /// arguments.
 fn warped_shown(s: &mut Rig) -> Option<Args> {
@@ -1678,7 +1741,24 @@ fn setup() -> Rig {
         strength: 0.5,
         percussiveness: 0.75,
     });
-    let analysis = Analysis::with_onsets(48_000, 4 * 48_000, onsets.to_vec());
+    // A steady beat at 120 BPM, for Warp From Here.
+    let beats: Vec<u64> = (0..8).map(|k| k * 24_000).collect();
+    let steady = musicable_analysis::Steady {
+        bpm: 120.0,
+        origin: 0.0,
+        error_ms: 0.0,
+        drift_ms: 0.0,
+    };
+    let analysis = Analysis {
+        pulse: true,
+        steady: Some(steady),
+        downbeats: vec![0, 4],
+        tracker: musicable_analysis::Tracker::Network,
+        agreement: Some(1.0),
+        events: beats.len(),
+        beats,
+        ..Analysis::with_onsets(48_000, 4 * 48_000, onsets.to_vec())
+    };
     let analyses = &mut s.document.editor_mut().analyses;
     analyses.insert(GROOVE.to_owned(), Arc::new(analysis));
     // Two seconds of the loop, four of the groove, and ten of the others:

@@ -127,9 +127,13 @@ version = 1
   command that had it.
 - Bare dotted names work too: `transport.play = ["P"]` is the same as
   `"transport.play" = ["P"]`.
+- A command whose id has changed can still be named by its old one, which
+  Musicable writes as the new one: Quantize was `notes.quantize`, and is
+  `edit.quantize`.
 - `[bindings]` holds the keys that work everywhere. A panel's table,
   `[panels.piano_roll]` and the others (`arrangement`, `mixer`, `devices`,
-  `browser`, `history`), holds the keys that work in that panel only, while
+  `browser`, `history`, `sample_editor`), holds the keys that work in that
+  panel only, while
   it has the focus, where they win over the ones everywhere: in the piano
   roll, D runs Draw Mode above whatever it runs everywhere else. Its lines
   give the command its keys in that panel, in place of its default ones

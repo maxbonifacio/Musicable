@@ -14,8 +14,10 @@
 //! While the Sample Editor has the focus, Delete and Select All act on its
 //! markers too (see [`edit`](crate::edit)): the functions for that are here.
 //!
-//! Until analysis can find a file's tempo, turning Warp on puts one marker
-//! at the clip's start, at the tempo [`first_tempo`] gives. Warp keeps the
+//! Turning Warp on warps a clip as [`auto_warp`](crate::auto_warp)'s rule
+//! for its file says, where analysis is sure of the file, and else puts
+//! one marker at the clip's start, at the tempo
+//! [`tempo_guess`](crate::auto_warp::tempo_guess) gives. Warp keeps the
 //! stretch of the file a clip plays, as Live does, so turning it on or off,
 //! or changing the clip's tempo, changes the clip's length, overwriting
 //! what it comes to cover, as trimming does.
@@ -33,9 +35,10 @@ use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Offset, Timing, Warping};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Onset, Onsets, Origin, Warp, tempo_in_name};
+use musicable_model::warp::{Onset, Onsets, Origin, Warp};
 
 use crate::arrange::{after_frames, clear};
+use crate::auto_warp;
 use crate::editor::{Editor, Focus};
 use crate::{
     Args, Command, CommandError, CommandId, Context, Document, Param, Registry, Request,
@@ -72,7 +75,7 @@ pub const NUDGE_LEFT: CommandId = CommandId::new("warp.nudge_left");
 /// Moves the selected warp markers a step of the grid later.
 pub const NUDGE_RIGHT: CommandId = CommandId::new("warp.nudge_right");
 
-const CLIP: Param = Param::optional(
+pub(crate) const CLIP: Param = Param::optional(
     "clip",
     Type::Clip,
     "The audio clip: the one the Sample Editor shows, without it.",
@@ -80,10 +83,6 @@ const CLIP: Param = Param::optional(
 const BEATS: Type = Type::List(&Type::Beats);
 /// Frames of a file.
 pub(crate) const FRAMES: Type = Type::List(&Type::Int);
-
-/// A number on its own in a file's name is its tempo if the file is this
-/// close to a whole number of beats at it, in seconds.
-const WHOLE_BEATS: f64 = 0.005;
 
 type Handler = fn(&mut Context<'_>);
 
@@ -707,16 +706,13 @@ fn set_warp(tx: &mut Transaction<'_>, clip: ClipId, on: bool) {
         (Offset::Frames(first), None, true) => {
             // The file's frames the clip plays, at the file's own speed.
             let played = tempo.sample_at(c.end(), rate) - tempo.sample_at(c.start, rate);
-            let bpm = first_tempo(tx.project(), tx.editor(), &c, &a);
-            let warp = Warp {
-                onsets: found_onsets(tx.editor(), &a.file),
-                ..Warp::new(first, Beats::ZERO, bpm)
-            };
-            let end = warp.beat_at(first as f64 + played, rate);
+            let warp = auto_warp::warp_on(tx.project(), tx.editor(), &c, &a);
+            let offset = Beats::from_f64(warp.beat_at(first as f64, rate));
+            let end = Beats::from_f64(warp.beat_at(first as f64 + played, rate));
             let timing = Timing {
                 start: c.start,
-                length: at_least_a_tick(Beats::from_f64(end)),
-                offset: Offset::Beats(Beats::ZERO),
+                length: at_least_a_tick(end - offset),
+                offset: Offset::Beats(offset),
             };
             let warping = Warping {
                 offset: timing.offset,
@@ -828,7 +824,7 @@ fn scale_tempo(tx: &mut Transaction<'_>, clip: ClipId, factor: f64, keep_end: bo
 
 /// Gives `clip` the warping `warping` and the timing `timing`, its offset
 /// the same, overwriting what it comes to cover on its track.
-fn retime(tx: &mut Transaction<'_>, clip: &Clip, warping: Warping, timing: Timing) {
+pub(crate) fn retime(tx: &mut Transaction<'_>, clip: &Clip, warping: Warping, timing: Timing) {
     let Some((track, _)) = tx.project().find_clip(clip.id) else {
         return;
     };
@@ -838,31 +834,6 @@ fn retime(tx: &mut Transaction<'_>, clip: &Clip, warping: Warping, timing: Timin
     clear(tx, track, BeatRange::new(clip.end(), timing.end()), &keep);
     tx.set_clip_warping(clip.id, warping);
     tx.set_clip_timing(clip.id, timing);
-}
-
-/// The tempo Warp starts `clip`, playing `audio`, at, until analysis can
-/// find its file's tempo: the one the file's loop data gives, or else one
-/// its name gives next to "bpm", as in "Drums 120 BPM.wav", or a number on
-/// its own in its name that the file is a whole number of beats long at,
-/// as in "Bass_Am_128.wav", or else the song's where the clip starts.
-pub fn first_tempo(project: &Project, editor: &Editor, clip: &Clip, audio: &AudioClip) -> f64 {
-    let file = editor.files.get(&audio.file);
-    let looped = file.and_then(|f| f.tempo);
-    let tempo = looped.filter(|&bpm| (Warp::MIN_TEMPO..=Warp::MAX_TEMPO).contains(&bpm));
-    if let Some(tempo) = tempo {
-        return tempo;
-    }
-    if let Some(named) = tempo_in_name(&audio.file) {
-        let whole = |seconds: f64| {
-            let beats = seconds * named.bpm / 60.0;
-            beats.round() >= 1.0 && (beats - beats.round()).abs() * 60.0 / named.bpm <= WHOLE_BEATS
-        };
-        let fits = file.is_some_and(|f| whole(f.frames as f64 / f64::from(f.sample_rate)));
-        if named.marked || fits {
-            return named.bpm;
-        }
-    }
-    project.tempo.bpm_at(clip.start)
 }
 
 /// The song position where `at`, a moment of the warped clip `clip`'s own
@@ -886,11 +857,11 @@ fn spread(beat: Beats, about: Beats, factor: f64) -> Beats {
 }
 
 /// `beats`, rounded up to a tick.
-fn ceil_beats(beats: f64) -> Beats {
+pub(crate) fn ceil_beats(beats: f64) -> Beats {
     Beats::from_ticks((beats * Beats::TICKS_PER_BEAT as f64).ceil() as i64)
 }
 
-fn at_least_a_tick(length: Beats) -> Beats {
+pub(crate) fn at_least_a_tick(length: Beats) -> Beats {
     length.max(Beats::from_ticks(1))
 }
 
@@ -1266,7 +1237,7 @@ pub(crate) mod tests {
                 length: Beats::new(4),
                 content: ClipContent::Audio(audio.clone()),
             };
-            first_tempo(&project, &editor, &clip, &audio)
+            auto_warp::tempo_guess(&project, &editor, &clip, &audio)
         };
         // The loop data's, if it's in range.
         assert_eq!(tempo(LOOP, LOOP_FRAMES, Some(97.5)), 97.5);

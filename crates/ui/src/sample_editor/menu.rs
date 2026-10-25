@@ -3,12 +3,15 @@
 //! arguments taken from where the menu was opened. On a marker, they act on
 //! the selected markers if it's one of them; on a transient's pseudo
 //! marker, on the transient; in the time selected, on the transients in it;
-//! and elsewhere, where the menu was opened. The menu gives the Sample
-//! Editor the focus, so the commands without arguments act on what it has
-//! selected.
+//! and elsewhere, where the menu was opened. Set 1.1.1 Here and Warp From
+//! Here act at the marker, the transient, or the audio where the menu was
+//! opened, and Warp Selection as a Loop on the time selected. Quantize
+//! moves the transient, or else those in the time selected, or all of
+//! them. The menu gives the Sample Editor the focus, so the commands
+//! without arguments act on what it has selected.
 
 use egui::Ui;
-use musicable_commands::{Args, Command, CommandId, transient, warp};
+use musicable_commands::{Args, Command, CommandId, edit, rewarp, transient, warp};
 
 use super::{Hit, Scene, Spot, of, run};
 use crate::menus::context_menu;
@@ -51,12 +54,16 @@ fn entries(scene: &Scene<'_>, spot: Spot) -> Vec<Option<(CommandId, Args)>> {
             .with("frames", vec![frame as i64])
             .with("clip", clip)
     };
+    // The point the warp commands act at.
+    let mut point = spot.frame;
     match spot.hit {
         Hit::Marker(i) => {
+            point = scene.markers().get(i).map(|marker| marker.frame);
             let markers = selected_with(scene, i);
             entries.push(Some((warp::DELETE_MARKERS, of(scene, &markers))));
         }
         Hit::Transient(frame) => {
+            point = Some(frame);
             entries.push(Some((warp::INSERT_MARKERS, frames(frame))));
             entries.push(Some((transient::DELETE, frames(frame))));
         }
@@ -77,6 +84,34 @@ fn entries(scene: &Scene<'_>, spot: Spot) -> Vec<Option<(CommandId, Args)>> {
         }
     }
     entries.push(None);
+    if let Some(frame) = point {
+        let at = Args::new().with("frame", frame as i64).with("clip", clip);
+        entries.push(Some((rewarp::SET_DOWNBEAT, at.clone())));
+        entries.push(None);
+        for id in [
+            rewarp::FROM_HERE,
+            rewarp::FROM_HERE_AT_SONG_TEMPO,
+            rewarp::FROM_HERE_STRAIGHT,
+            rewarp::SONG_TEMPO_FROM_HERE,
+        ] {
+            entries.push(Some((id, at.clone())));
+        }
+    }
+    let time = scene.editor().sample_editor.time;
+    if time.is_some_and(|time| time.start <= spot.own && spot.own <= time.end) {
+        entries.push(Some((rewarp::SELECTION_AS_LOOP, Args::new())));
+    }
+    entries.push(None);
+    if scene
+        .warp()
+        .is_some_and(|w| w.transients().next().is_some())
+    {
+        let quantize = match spot.hit {
+            Hit::Transient(frame) => frames(frame),
+            _ => Args::new().with("clip", clip),
+        };
+        entries.push(Some((edit::QUANTIZE, quantize)));
+    }
     entries.push(Some((transient::RESET, Args::new())));
     entries.push(None);
     entries.push(warp_switch);

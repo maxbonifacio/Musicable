@@ -3,19 +3,60 @@
 An audio clip plays its file at the file's own speed, whatever the song's
 tempo, until it's warped. A warped clip follows the tempo: its audio is
 placed on beats, so it stays in time when the tempo changes, and a loop
-recorded at one tempo lines up with a song at another. Turn it on with
-**Warp** in the [Sample Editor](../window/sample-editor.md), or
-**Clip > Warp** for the clip the Sample Editor shows.
+recorded at one tempo lines up with a song at another. Audio files dropped
+into the song are warped as they come in, by what Musicable finds in them
+([Auto-warp](#auto-warp)), and a clip can be warped by hand with **Warp** in
+the [Sample Editor](../window/sample-editor.md), or **Clip > Warp** for the
+clip the Sample Editor shows.
+
+## Auto-warp
+
+Musicable analyses the project's audio files in the background, finding
+their tempo, their beats and downbeats, and their transients, and the status
+bar says so while it does. An audio file dropped into the song, from the
+browser or elsewhere, or imported, is warped by the rule for its kind of
+sound:
+
+- **A loop** of whole bars at a steady tempo gets one warp marker at its
+  start, at the tempo its length gives, so it fills its bars exactly.
+- **A file at a steady tempo**, such as a bounced song or a stem, gets one
+  marker on its first downbeat, at its tempo, and that downbeat lands on the
+  bar line nearest where the file was dropped, with any pickup before it.
+- **A file whose tempo drifts**, such as a band recorded without a click,
+  gets a marker on every downbeat, and on each beat between them that
+  strays, so it locks to the grid but keeps its feel.
+- **A sound without a pulse**, such as a one-shot, an effect or speech,
+  stays unwarped, and plays its first hit, or the peak a riser builds to,
+  where it was dropped.
+
+A file's tempo is read at the octave nearest the song's, so it stretches
+least: an 85 BPM loop in a 170 BPM song plays at its own speed, as
+half-time. The first file with a pulse dropped into an empty song gives the
+song its tempo and meter, rather than being stretched.
+
+A file dropped before Musicable has analysed it comes in as it is, and is
+warped once its analysis is ready, unless you've changed the clip since.
+That's part of the drop in the undo history while the drop is the last step,
+and else a step of its own. Where analysis is unsure of a file, as when the
+beat slips, the file comes in as it is: the Sample Editor shows the best
+guess at its tempo, greyed out, and **Warp** warps it at that tempo.
+
+Each rule can be switched off on the Behaviour page of the Settings window,
+and so can [recordings](#recordings) following the tempo and the first file
+setting it ([Settings](../customising/settings.md#behaviour)).
 
 ## Turning Warp on
 
-Warp starts the clip with one warp marker, at its start, and a tempo for its
-audio: the tempo the file's loop data gives, as in a WAV file made for loops,
-or else a tempo in its name, such as "Drums 120 BPM.wav", or a number in its
-name that the file is a whole number of beats long at, as in
-"Bass_Am_128.wav", or else the song's tempo where the clip starts. Warp
-doesn't use the tempo Musicable finds in a file's audio yet, so a file
-without loop data or a tempo in its name may need its tempo set by hand.
+Warp warps the clip as auto-warp's rule for its file says, where analysis is
+sure of the file and the rule is switched on. Otherwise it starts the clip
+with one warp marker, at its start, at the tempo analysis found in the file,
+read at the octave nearest the song's. Where the file's loop data or name
+gives a tempo near that, at any octave, it takes that one instead: the
+tempo in a WAV file made for loops, or else a tempo in its name, such as
+"Drums 120 BPM.wav", or a number in its name that the file is a whole
+number of beats long at, as in "Bass_Am_128.wav". Before the file's been
+analysed, it takes the tempo its loop data or name gives, or else the
+song's tempo where the clip starts.
 
 The clip keeps the stretch of the file it plays, as in Live, so it gets
 longer or shorter if the tempo it starts at isn't the song's, covering what
@@ -78,6 +119,54 @@ transients can be changed:
 A clip warped before Musicable has analysed its file takes the transients
 once it has, and so does a clip in a project saved by an earlier version.
 
+## Quantize
+
+**Quantize** (Ctrl+U) moves the hits in warped audio onto the grid, as it
+moves notes in the piano roll. In the Sample Editor, it moves the transients
+in the time selected, or all those the clip plays if none are; in the
+arrangement, all those of the selected warped clips, and the notes of the
+selected MIDI clips. Each transient gets a warp marker where it plays, or
+keeps the one on it, and the marker moves to the nearest line of the grid,
+as the panel shows it at its zoom, stretching the audio either side.
+
+The transient nearest its line goes first. One that would then land on a
+line another took, as the second hit of a flam would, or pass a marker on
+another transient, stays where it plays. A marker in a transient's way that
+isn't on a transient goes, as the marker at the start of a recording does
+when its first hit was late. Quantize is on the Edit menu and the
+arrangement's right-click menu for clips, and on the Sample Editor's, where
+it moves the transient it was opened on.
+
+## Warping again from a point
+
+Right-clicking the waveform, a marker or a transient's pseudo marker opens
+a menu with Live's warp commands, which act at that point:
+
+- **Set 1.1.1 Here** makes the point the clip's first downbeat: the clip's
+  bars count from there, and the clip moves so the point plays on the bar
+  line nearest where it played.
+- **Warp From Here** warps the rest of the clip again by analysis, from the
+  point to its end, keeping the markers before it, as auto-warp would warp
+  the file. **Warp From Here (Start at Song Tempo)** reads the file's tempo
+  at the octave nearest the song's, rather than the clip's.
+- **Warp From Here (Straight)** plays the rest of the clip at one tempo, the
+  file's, or the clip's there before the file's been analysed, and **Warp
+  at Song Tempo From Here** at the song's tempo there.
+- **Warp Selection as a Loop**, in the time selected, makes the clip that
+  stretch, fitted into the nearest whole number of bars from the bar line
+  nearest its start, as a loop. It's on the Clip menu too.
+
+Each keeps the clip's curves with its audio, and the clip covers what it
+grows into on its track, as trimming does.
+
+## Recordings
+
+A clip recorded into the song follows the tempo it was played to, sample
+for sample, so it stays in time when the song's tempo changes later, even
+where the tempo changed while it was played. **Recordings follow the
+tempo**, on the Behaviour page of the Settings window, switches that off,
+for recordings that play at their own speed.
+
 ## Re-Pitch
 
 Re-Pitch, the one mode so far, plays the audio faster or slower to fit the
@@ -91,11 +180,7 @@ These come in later versions:
 
 - The other modes, Slice, Granular and Spectral, which keep the audio's
   pitch as its speed changes, and the clip's Transpose and Detune.
-- Warp putting markers on a file's beats, as Live's auto-warp does.
-  Musicable already finds the tempo and the beats of the project's audio
-  files in the background, with their transients, and the status bar says
-  so while it does, but Warp doesn't use the tempo and the beats yet.
-- Recordings that follow the tempo: a clip recorded into a song plays
-  unwarped, at its own speed.
+- Quantize Settings, for moving hits part of the way to the grid, or to a
+  grid of their own: Quantize goes all the way, to the grid the panel shows.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV
   files' is read.

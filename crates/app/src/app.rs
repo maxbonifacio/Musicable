@@ -1014,7 +1014,8 @@ impl App {
     /// project's audio files when the project has changed, and takes in
     /// those found since. Warped clips take the transients analysis found
     /// in their files as it finds them, and when the project changes, so
-    /// those that undo brings back without them take them again.
+    /// those that undo brings back without them take them again. Files
+    /// dropped before they'd been analysed are auto-warped once they have.
     fn read_audio_files(&mut self, ctx: &egui::Context) {
         let revision = self.session.revision();
         let changed = self.files_found != Some(revision);
@@ -1036,6 +1037,10 @@ impl App {
         if (changed || analysed) && self.session.take_transients() {
             ctx.request_repaint();
         }
+        let analyses = &self.analyses;
+        if (changed || analysed) && self.session.auto_warp(|file| analyses.waits_for(file)) {
+            ctx.request_repaint();
+        }
     }
 
     /// Starts analysing the project's audio files for warping, in the
@@ -1048,6 +1053,7 @@ impl App {
         let cache = settings::cache_dir().map(|dir| dir.join(ANALYSIS_FOLDER));
         let models = musicable_analysis::models_folder();
         self.analyses = Analyses::new(queue, cache, models, Some(waker(ctx)));
+        self.analyses.set_fast(self.settings.analysis.fast);
         // The next frame asks for the open project's files.
         self.files_found = None;
     }
@@ -1296,6 +1302,11 @@ impl App {
                 self.profile.behaviour = behaviour;
                 self.session.editor_mut().behaviour = behaviour;
                 self.save_profile();
+            }
+            Asked::FastAnalysis(fast) => {
+                self.settings.analysis.fast = fast;
+                self.analyses.set_fast(fast);
+                self.save_settings();
             }
             Asked::Mouse(asked) => self.mouse(asked),
             Asked::Profiles(asked) => self.profiles_asked(asked, ctx),

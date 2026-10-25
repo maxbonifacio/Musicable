@@ -40,6 +40,7 @@ use musicable_model::clip::{Clip, ClipContent, ClipId, Offset};
 use musicable_model::native::{compressor, eq, reverb};
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
+use musicable_model::warp::WarpMarker;
 use musicable_model::{Chain, DeviceId, PluginFormat, Project, TrackId};
 use musicable_plugins::{Instance, PluginInfo, scan};
 use musicable_test_plugins::testing::Library;
@@ -537,7 +538,14 @@ fn record(studio: &mut Studio, made: Made) {
             panic!("{clip:?}");
         };
         let played = (audio.file.as_str(), audio.offset);
-        assert_eq!(played, (file, Offset::Frames(n as u64 * BAR)));
+        assert_eq!(played, (file, Offset::Beats(Beats::ZERO)));
+        // It follows the tempo, from where its pass is in the file.
+        let warp = audio.warp.as_ref().expect("a recording follows the tempo");
+        let marker = WarpMarker {
+            frame: n as u64 * BAR,
+            beat: Beats::ZERO,
+        };
+        assert_eq!(warp.markers, [marker]);
     }
     let [clip] = &track.clips[..] else {
         panic!("{:?}", track.clips);
@@ -597,14 +605,21 @@ fn comp(studio: &mut Studio, made: Made) {
             let ClipContent::Audio(audio) = &clip.content else {
                 panic!("{clip:?}");
             };
-            (clip.start, clip.end(), audio.offset)
+            // The frame of the file that plays at its start.
+            let warp = audio.warp.as_ref().expect("a recording follows the tempo");
+            let at = audio
+                .offset
+                .beats()
+                .expect("a warped clip's offset is in beats");
+            let first = warp.frame_at(at.to_f64(), CONFIG.sample_rate).round() as u64;
+            (clip.start, clip.end(), first)
         })
         .collect();
     assert_eq!(
         comp,
         [
-            (Beats::ZERO, beats(2), Offset::Frames(0)),
-            (beats(2), beats(4), Offset::Frames(BAR + BAR / 2))
+            (Beats::ZERO, beats(2), 0),
+            (beats(2), beats(4), BAR + BAR / 2)
         ]
     );
 

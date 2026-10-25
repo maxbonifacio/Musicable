@@ -159,6 +159,13 @@ impl Analysis {
         }
     }
 
+    /// Each beat's number, from 0 at the first: a gap that spans several
+    /// beats, where the tracker missed some, counts them all, so the bars
+    /// stay in step.
+    pub fn beat_numbers(&self) -> Vec<f64> {
+        beats::numbers(&self.beats)
+    }
+
     /// Seconds, as frames of the sound.
     fn frames_of(&self, seconds: f64) -> f64 {
         seconds * f64::from(self.sample_rate)

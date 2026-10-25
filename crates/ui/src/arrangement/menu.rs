@@ -32,6 +32,7 @@ const CLIP: Items = &[
     None,
     Some(edit::SPLIT),
     Some(edit::RENAME),
+    Some(edit::QUANTIZE),
     None,
     Some(view::ZOOM_TO_SELECTION),
 ];
@@ -168,6 +169,11 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
 /// The arguments `command` takes from `spot`, or `None` if it needs one
 /// that can't be taken from there.
 fn args(command: &Command, scene: &Scene<'_>, spot: Spot) -> Option<Args> {
+    // Quantize acts on the clips selected, as the menu leaves them, at the
+    // arrangement's grid.
+    if command.id == edit::QUANTIZE {
+        return Some(Args::new());
+    }
     let selection = &scene.editor().selection;
     let mut args = Args::new();
     for param in &command.params {

@@ -13,6 +13,7 @@
 //! [behaviour]
 //! play_from = "start_marker"
 //! middle_c = "c3"
+//! warp_drifting = false
 //!
 //! [appearance]
 //! theme = "Studio.toml"
@@ -35,6 +36,9 @@
 //! [browser]
 //! auto_preview = true
 //! preview_volume = -6
+//!
+//! [analysis]
+//! fast = true
 //!
 //! [agents]
 //! enabled = true
@@ -146,6 +150,7 @@ pub struct Settings {
     pub export: ExportSettings,
     pub browser: BrowserSettings,
     pub recording: RecordingSettings,
+    pub analysis: AnalysisSettings,
     pub agents: AgentSettings,
 }
 
@@ -294,6 +299,16 @@ impl BrowserSettings {
             .clamp(MIN_PREVIEW_VOLUME, MAX_PREVIEW_VOLUME);
         10f32.powf(db as f32 / 20.0)
     }
+}
+
+/// How Musicable analyses audio files for warping: see `docs/analysis.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalysisSettings {
+    /// Whether analysis leaves the Beat This! network out, finding beats
+    /// with the classic tracker alone: quicker on slower computers, but
+    /// less accurate. Off, as it is at first, the network finds them.
+    pub fast: bool,
 }
 
 /// Whether agents, such as Claude Code, can control Musicable: see
@@ -549,6 +564,8 @@ mod tests {
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
                 middle_c: MiddleC::C4,
+                warp_drifting: false,
+                ..Behaviour::default()
             },
             appearance: AppearanceSettings {
                 theme: "Studio.toml".into(),
@@ -580,6 +597,7 @@ mod tests {
                     frames: 878,
                 }],
             },
+            analysis: AnalysisSettings { fast: true },
             agents: AgentSettings { enabled: true },
         };
         let text = settings.to_toml();
@@ -603,6 +621,9 @@ mod tests {
         assert_eq!(settings.profiles.current, "Default");
         // Agents can't control Musicable until the user lets them.
         assert!(!settings.agents.enabled);
+        // Auto-warp's rules are all on, and analysis uses the network.
+        assert!(settings.behaviour.warp_loops && settings.behaviour.tempo_from_first_file);
+        assert!(!settings.analysis.fast);
         assert_eq!(
             settings.audio.request(),
             StreamRequest {
@@ -713,6 +734,7 @@ mod tests {
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
                 middle_c: MiddleC::C4,
+                ..Behaviour::default()
             },
             appearance: AppearanceSettings {
                 theme: "light".into(),
@@ -729,6 +751,7 @@ mod tests {
             "[browser]",
             "[recording]",
             "[profiles]",
+            "[analysis]",
             "[agents]",
         ] {
             assert!(!text.contains(left_out), "{text}");

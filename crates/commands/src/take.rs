@@ -15,6 +15,7 @@ use musicable_model::clip::{
     AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, MidiClip, Offset, Point,
 };
 use musicable_model::time::{BeatRange, Beats, TempoMap};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{Project, TakeId, Track, TrackId, TrackKind};
 
 use crate::arrange::{after_frames, clear, crop};
@@ -312,6 +313,13 @@ fn midi_takes(
 
 /// A clip playing `pass`, named `name`, with a new id, or `None` if the
 /// pass is too short to place.
+///
+/// Recordings follow the tempo, unless the behaviour says otherwise: the
+/// clip is warped, pinned to the song's grid as it was as the pass was
+/// played, so it plays sample for sample until the song's tempo changes,
+/// and stretches with it after. Its own time is the song's, and it has a
+/// marker where it starts, and at each tempo change it spans and where it
+/// ends, if it spans any.
 fn clip_of(tx: &mut Transaction<'_>, name: &str, rate: u32, pass: &Pass) -> Option<Clip> {
     let tempo = &tx.project().tempo;
     let first = i64::try_from(pass.start).ok()?;
@@ -324,6 +332,31 @@ fn clip_of(tx: &mut Transaction<'_>, name: &str, rate: u32, pass: &Pass) -> Opti
     }
     let mut audio = AudioClip::new(pass.file.clone());
     audio.offset = Offset::Frames(pass.offset + skip);
+    if tx.editor().behaviour.warp_recordings {
+        // The file's frame that plays at `at`, as it was recorded.
+        let frame = |at: Beats| {
+            let since = (tempo.sample_at(at, rate) - first as f64).round().max(0.0) as u64;
+            pass.offset + since.min(pass.frames)
+        };
+        let mut warp = Warp::new(pass.offset + skip, start, tempo.bpm_at(start));
+        let changes: Vec<Beats> = (tempo.tempos().iter())
+            .map(|change| change.at)
+            .filter(|&at| start < at && at < end)
+            .collect();
+        if !changes.is_empty() {
+            for at in changes.into_iter().chain([end]) {
+                let marker = WarpMarker {
+                    frame: frame(at),
+                    beat: at,
+                };
+                if warp.markers.last().is_some_and(|m| m.frame < marker.frame) {
+                    warp.markers.push(marker);
+                }
+            }
+        }
+        audio.offset = Offset::Beats(start);
+        audio.warp = Some(warp);
+    }
     Some(tx.new_clip(name, BeatRange::new(start, end), ClipContent::Audio(audio)))
 }
 
@@ -420,7 +453,8 @@ mod tests {
         }
     }
 
-    /// The track's clips, by position, as (start, end, file offset).
+    /// The track's clips, by position, as (start, end, the file's frame
+    /// that plays at the start).
     fn clips(setup: &Setup, track: TrackId) -> Vec<(Beats, Beats, u64)> {
         let mut clips: Vec<_> = setup
             .document
@@ -433,11 +467,27 @@ mod tests {
                 let ClipContent::Audio(audio) = &clip.content else {
                     panic!("an audio clip");
                 };
-                (clip.start, clip.end(), audio.offset.frames().unwrap())
+                let first = match (&audio.warp, audio.offset) {
+                    (Some(warp), Offset::Beats(at)) => warp.frame_at(at.to_f64(), RATE).round(),
+                    (_, offset) => offset.frames().unwrap() as f64,
+                };
+                (clip.start, clip.end(), first as u64)
             })
             .collect();
         clips.sort();
         clips
+    }
+
+    /// The clip's warp markers, as frames and beats, and its tempo.
+    fn warp_of(clip: &Clip) -> (Vec<(u64, Beats)>, f64) {
+        let ClipContent::Audio(AudioClip {
+            warp: Some(warp), ..
+        }) = &clip.content
+        else {
+            panic!("a warped audio clip");
+        };
+        let markers = warp.markers.iter().map(|m| (m.frame, m.beat));
+        (markers.collect(), warp.tempo)
     }
 
     #[test]
@@ -518,16 +568,64 @@ mod tests {
             track: vocal,
             passes: vec![pass(start, 48_001, 17)],
         };
-        add_recording(&mut setup.document, RATE, &[recorded]);
+        add_recording(&mut setup.document, RATE, std::slice::from_ref(&recorded));
         let project = setup.document.project();
         let clip = &project.tracks[0].clips[0];
         let frame = |at| project.tempo.frame_at(at, RATE);
         assert_eq!(frame(clip.start), start as i64);
         assert_eq!(frame(clip.end()), start as i64 + 48_001);
+        // It follows the tempo, at the song's speed: frame 17 of its file
+        // plays where it was recorded.
+        assert_eq!(warp_of(clip), (vec![(17, clip.start)], 97.3));
         let ClipContent::Audio(audio) = &clip.content else {
             panic!("an audio clip");
         };
-        assert_eq!(audio.offset, Offset::Frames(17));
+        assert_eq!(audio.offset, Offset::Beats(clip.start));
+        // With recordings left unwarped, it plays from frame 17 all the same.
+        setup.document.editor_mut().behaviour.warp_recordings = false;
+        add_recording(&mut setup.document, RATE, &[recorded]);
+        let project = setup.document.project();
+        let clip = &project.tracks[0].clips[0];
+        assert_eq!(project.tempo.frame_at(clip.start, RATE), start as i64);
+        let ClipContent::Audio(audio) = &clip.content else {
+            panic!("an audio clip");
+        };
+        assert_eq!(
+            (audio.offset, audio.warp.as_ref()),
+            (Offset::Frames(17), None)
+        );
+    }
+
+    #[test]
+    fn a_recording_across_tempo_changes_keeps_to_the_beats_it_was_played_to() {
+        let (mut setup, vocal, _) = setup();
+        // 120 BPM, then 90 from beat 4: 32,000 frames to the beat.
+        let mut tempo = setup.document.project().tempo.clone();
+        tempo.insert_tempo(Beats::new(4), 90.0);
+        setup.document.transact("Tempo", |tx| tx.set_tempo(tempo));
+        // From beat 2 to 7, from frame 100 of its file.
+        let recorded = Recorded::Audio {
+            track: vocal,
+            passes: vec![pass(2 * BEAT, 2 * BEAT + 3 * 32_000, 100)],
+        };
+        add_recording(&mut setup.document, RATE, &[recorded]);
+        let clip = setup.document.project().tracks[0].clips[0].clone();
+        assert_eq!(clip.range(), beats(2, 7));
+        // A marker where it starts, at the change and at its end.
+        let marker = |frame, beat| (frame, Beats::new(beat));
+        let markers = vec![
+            marker(100, 2),
+            marker(100 + 2 * BEAT, 4),
+            marker(144_100, 7),
+        ];
+        assert_eq!(warp_of(&clip), (markers, 120.0));
+        // So its beats stay on the song's when the tempo changes.
+        let mut tempo = setup.document.project().tempo.clone();
+        tempo.set_tempo(100.0);
+        setup.document.transact("Tempo", |tx| tx.set_tempo(tempo));
+        let clip = &setup.document.project().tracks[0].clips[0];
+        assert_eq!(clip.range(), beats(2, 7));
+        assert_eq!(warp_of(clip).0[1], marker(100 + 2 * BEAT, 4));
     }
 
     #[test]

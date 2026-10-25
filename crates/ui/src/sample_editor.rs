@@ -31,8 +31,8 @@ use egui::{
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
-    Args, CommandId, Editor, Focus, Modifiers, automation, transient, transport, view as views,
-    warp,
+    Args, CommandId, Editor, Focus, Modifiers, auto_warp, automation, transient, transport,
+    view as views, warp,
 };
 use musicable_model::Project;
 use musicable_model::automation::Point;
@@ -1331,7 +1331,8 @@ fn clicked(
 }
 
 /// The clip's controls, in the column beside the waveform: Warp, its mode
-/// and its tempo, with Live's ×2 and ÷2, and its gain.
+/// and its tempo, with Live's ×2 and ÷2, and its gain. An unwarped clip's
+/// tempo is the one Warp would warp it at, greyed.
 fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
     let theme = scene.theme;
     let column = scene.layout.controls.shrink(theme.padding);
@@ -1384,6 +1385,12 @@ fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
                     actions.push(Action::Run(warp::DOUBLE_TEMPO));
                 }
             });
+        } else {
+            let (project, editor) = (scene.project(), scene.editor());
+            let mut bpm = auto_warp::tempo_guess(project, editor, scene.clip, scene.audio);
+            let field = DragValue::new(&mut bpm).fixed_decimals(2).suffix(" BPM");
+            ui.add_enabled(false, field)
+                .on_disabled_hover_text("The tempo Warp warps the clip at: its file's, as found");
         }
         let mut db = gain_to_db(scene.audio.gain);
         let max = 20.0 * ParamSpec::CLIP_GAIN_MAX.log10();

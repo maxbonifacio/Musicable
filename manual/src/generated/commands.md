@@ -26,6 +26,7 @@
 | Delete | Backspace, Delete | `edit.delete` |
 | Split | Ctrl+E | `edit.split` |
 | Rename | Ctrl+R | `edit.rename` |
+| Quantize | Ctrl+U | `edit.quantize` |
 | Select All | Ctrl+A | `edit.select_all` |
 | Select Master Track |  | `edit.select_master` |
 
@@ -47,6 +48,7 @@
 | Warp |  | `clip.set_warp` |
 | Double Clip Tempo |  | `warp.double_tempo` |
 | Halve Clip Tempo |  | `warp.halve_tempo` |
+| Warp Selection as a Loop |  | `warp.selection_as_loop` |
 | Insert Warp Marker | Ctrl+I in the Sample Editor panel | `warp.insert_markers` |
 | Delete Warp Markers |  | `warp.delete_markers` |
 | Nudge Warp Markers Left | Left in the Sample Editor panel | `warp.nudge_left` |
@@ -60,7 +62,6 @@
 | Command | Keys | Id |
 |---|---|---|
 | Draw Mode | B | `notes.toggle_draw` |
-| Quantize | Ctrl+U | `notes.quantize` |
 | Transpose Up | Up in the Piano Roll panel | `notes.transpose_up` |
 | Transpose Down | Down in the Piano Roll panel | `notes.transpose_down` |
 | Octave Up | Shift+Up in the Piano Roll panel | `notes.octave_up` |

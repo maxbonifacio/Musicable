@@ -233,12 +233,18 @@ fn every_setting_but_the_export_windows_has_a_control() {
         &mut harness,
         "C4, as in Reaper and scientific pitch notation",
     );
+    click(&mut harness, "Files whose tempo drifts lock to the grid");
     let behaviour = Behaviour {
         play_from: PlayFrom::Playhead,
         middle_c: MiddleC::C4,
+        warp_drifting: false,
+        ..Behaviour::default()
     };
     assert_eq!(harness.state().session.editor().behaviour, behaviour);
     assert_eq!(saved(&config).behaviour, behaviour);
+    // How analysis finds beats is the computer's.
+    click(&mut harness, "Fast analysis");
+    assert!(saved(&config).analysis.fast);
 
     // The theme.
     turn_to(&mut harness, "Appearance");

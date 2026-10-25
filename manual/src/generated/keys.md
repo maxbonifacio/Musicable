@@ -41,7 +41,7 @@
 | Ctrl+R | Edit: Rename |
 | Ctrl+S | File: Save Project |
 | Ctrl+T | Track: New Audio Track |
-| Ctrl+U | Notes: Quantize |
+| Ctrl+U | Edit: Quantize |
 | Ctrl+V | Edit: Paste |
 | Ctrl+X | Edit: Cut |
 | Ctrl+Y | Edit: Redo |

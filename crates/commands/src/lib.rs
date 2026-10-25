@@ -21,6 +21,7 @@ use musicable_model::{Chain, DeviceId, LocatorId, Project, TakeId, TrackId};
 
 mod args;
 pub mod arrange;
+pub mod auto_warp;
 pub mod automation;
 pub mod browser;
 pub mod controllers;
@@ -40,6 +41,7 @@ pub mod mixer;
 pub mod notes;
 pub mod options;
 pub mod panel;
+pub mod rewarp;
 pub mod take;
 #[cfg(test)]
 mod testing;
@@ -193,8 +195,11 @@ pub enum When {
     HasLocators,
     /// The piano roll has the focus, and notes selected.
     NotesSelected,
-    /// Quantize has notes to move: the piano roll's, while it has the focus
-    /// and shows a clip, or else those of the selected MIDI clips.
+    /// Quantize has something to move: the piano roll's notes, while it has
+    /// the focus and shows a clip, the transients of the Sample Editor's
+    /// warped clip, while it has the focus, or else the notes of the
+    /// selected MIDI clips, or the transients of the selected warped audio
+    /// clips.
     CanQuantize,
     /// The piano roll's lane shows a controller its clip moves: a curve
     /// Clear Controller can take away.
@@ -205,6 +210,9 @@ pub enum When {
     SampleEditorClip,
     /// The Sample Editor shows a warped audio clip.
     WarpedClip,
+    /// The Sample Editor shows a warped audio clip, with a stretch of its
+    /// time selected.
+    TimeInSampleEditor,
     /// The Sample Editor has the focus, and warp markers selected.
     MarkersSelected,
     /// The Sample Editor shows a warped audio clip that has taken its
@@ -255,10 +263,13 @@ impl When {
             }
             When::HasLocators => !project.locators.is_empty(),
             When::CanQuantize if notes => roll.clip.is_some(),
+            When::CanQuantize if markers => sample
+                .clip
+                .is_some_and(|id| transient::has_transients(project, id)),
             When::CanQuantize => selection.clips.iter().any(|&id| {
-                project
-                    .find_clip(id)
+                (project.find_clip(id))
                     .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Midi(_)))
+                    || transient::has_transients(project, id)
             }),
             When::ControllerCurve => controllers::shown(project, editor).is_some(),
             When::AutomationOverridden => project.automation.iter().any(|l| l.overridden),
@@ -266,6 +277,10 @@ impl When {
             When::WarpedClip => sample
                 .clip
                 .is_some_and(|id| warp::warped(project, id).is_ok()),
+            When::TimeInSampleEditor => {
+                sample.time.is_some()
+                    && (sample.clip).is_some_and(|id| warp::warped(project, id).is_ok())
+            }
             When::Transients => sample.clip.is_some_and(|id| {
                 warp::warped(project, id).is_ok_and(|(_, _, warp)| warp.onsets.is_some())
             }),
@@ -592,6 +607,7 @@ pub fn register_all(registry: &mut Registry) {
     notes::register(registry);
     controllers::register(registry);
     warp::register(registry);
+    rewarp::register(registry);
     transient::register(registry);
     automation::register(registry);
     view::register(registry);

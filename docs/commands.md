@@ -159,7 +159,10 @@ doesn't apply while the piano roll or the Sample Editor has the focus. The
 mixer shows the arrangement's tracks, so while it has the focus they act on
 the arrangement's selection, as Live's mixer does in its Arrangement View. The
 devices panel, the browser and the History panel have nothing they take,
-so there they don't apply.
+so there they don't apply. Quantize moves the piano roll's notes while it
+has the focus, the Sample Editor's transients while it has it
+([Transients](#transients)), and else those of the selected clips, MIDI and
+warped audio, at the zoom of the panel they're in.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -174,6 +177,7 @@ so there they don't apply.
 | `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip, or every warp marker of the Sample Editor's | Ctrl+A | Ctrl+A |
 | `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header or its mixer strip does | none | Clicking the Main track |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
+| `edit.quantize` | Quantize | Moves the selected notes' starts to the nearest line of the grid, or all the clip's notes if none are selected; the transients in the Sample Editor's time selection, or all those its clip plays, giving each a warp marker; or the notes and transients of the selected clips. `notes`, `frames` and `clip` name what it moves, `amount` moves them part of the way, and `ends` moves notes' ends too. It was `notes.quantize`, which keymap files can still name | Ctrl+U | Ctrl+U |
 
 And for the arrangement's clicks, scripts and agents:
 
@@ -270,7 +274,6 @@ the focus, and nothing in the other panels.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `notes.quantize` | Quantize | Moves the selected notes' starts to the nearest line of the grid, or all the clip's notes if none are selected; while the arrangement has the focus, all the notes of the selected MIDI clips. `amount` moves them part of the way, and `ends` moves their ends too | Ctrl+U | Ctrl+U |
 | `notes.transpose_up` | Transpose Up | Moves them a semitone up | Up | Up |
 | `notes.transpose_down` | Transpose Down | A semitone down | Down | Down |
 | `notes.octave_up` | Octave Up | An octave up | Shift+Up | Shift+Up |
@@ -340,11 +343,15 @@ transaction, so a drag is one step to undo.
 Warp keeps the stretch of the file a clip plays, as Live's does, so
 turning it on or off, or changing the clip's tempo, changes the clip's
 length, and what the clip comes to cover on its track is overwritten, as
-trimming does. Turning Warp on puts one marker at the clip's start, at the
-tempo the file's loop data gives (`AudioFile::tempo`), or else one in its
-name, or else the song's where the clip starts (`warp::first_tempo`),
-until analysis can find a file's tempo. Turning it off forgets the
-markers. The clip's gain curve stays with its audio both ways. A change
+trimming does. Turning Warp on warps the clip as auto-warp's rule for its
+file says, where analysis is sure of the file and the rule is on
+([Auto-warp](#auto-warp)), and else puts one marker at the clip's start, at
+the tempo `auto_warp::tempo_guess` gives: the one analysis found, or the
+file's loop data's (`AudioFile::tempo`) or name's where that's near it at
+any octave, or either alone before the file's analysed, or else the song's
+where the clip starts, read at the octave nearest the song's. The Sample
+Editor shows that tempo, greyed out, while the clip is unwarped. Turning
+Warp off forgets the markers. The clip's gain curve stays with its audio both ways. A change
 that would take the clip's tempo out of range, bring two markers onto one
 tick or, with `keep_end`, put the clip's start before the song's is an
 error that changes nothing.
@@ -367,6 +374,27 @@ selected marker is, at its zoom. Delete and Select All delete and select
 its markers while it has the focus ([Edit](#edit)), and Select All selects
 all the clip's time too.
 
+And these are the Sample Editor's right-click menu's, as Live's, which warp
+a clip again from a point (`crates/commands/src/rewarp.rs`). The point is a
+frame of the clip's file, as the menu finds it: a marker's, a transient's,
+or the one that plays where it was opened. Each keeps the clip's curves
+with its audio, overwrites what the clip comes to cover, and checks
+everything before it changes anything, so an error changes nothing.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `warp.set_downbeat` | Set 1.1.1 Here | `frame`, `clip`? | Makes the point the clip's 1.1.1: its markers' beats count from there, and the clip moves, and its offset with it, so the point plays on the bar line nearest where it played, cut at the song's start |
+| `warp.from_here` | Warp From Here | `frame`, `clip`? | Keeps the markers before the point, adding one there, and warps the rest by analysis, as auto-warp's rule for the file would: straight at the file's tempo for a loop or a steady file, read at the octave nearest the clip's tempo there, and a marker on each downbeat and each beat that strays for a file that drifts. An error before the file's analysed, or for one without a pulse |
+| `warp.from_here_at_song_tempo` | Warp From Here (Start at Song Tempo) | `frame`, `clip`? | The same, reading the file's tempo at the octave nearest the song's |
+| `warp.from_here_straight` | Warp From Here (Straight) | `frame`, `clip`? | Plays the rest at one tempo: the file's, read at the octave nearest the clip's there, or the clip's there before the file's analysed |
+| `warp.song_tempo_from_here` | Warp at Song Tempo From Here | `frame`, `clip`? | Plays the rest at the song's tempo where the point plays |
+| `warp.selection_as_loop` | Warp Selection as a Loop | `start`?, `end`?, `clip`? | Makes the clip the stretch of its own time from `start` to `end`, or the time selected without them, fitted into the nearest whole number of bars from the bar line nearest where it starts: one marker at its start, at the tempo that fits it. It selects the loop. The Clip menu has it, while time is selected |
+
+Warp From Here and its variants keep the stretch of the file the clip
+plays, so its end moves. With one marker left, they set the warp's tempo;
+with more, they add a marker where the file ends, or a beat after the last
+one if the file's length isn't known.
+
 ### Transients
 
 A warped clip keeps its file's transients, where the sounds in it start,
@@ -388,10 +416,52 @@ analysed yet has none to change, which is an error.
 Deleting a transient analysis found hides it, and so does moving it, so
 Reset Transients can bring it back even when the file's analysis is gone.
 The keys are Live's, and the Sample Editor's own, and the Clip menu has
-these but Move Transient. `warp.take_transients` isn't a command: it gives
+these but Move Transient.
+
+Quantize ([Edit](#edit)) moves transients towards the grid
+(`transient::quantized`): each gets a warp marker where it plays, which
+changes nothing, or keeps the one on it, and then the markers move, the
+transient nearest its line first. A marker in a transient's way that isn't
+on a transient goes; one on a transient stops it, as does a line another
+took, and the transient stays where it plays. With an `amount` under 1
+nothing can pass anything, so only a whole move can be stopped. The clip's
+timing stays, and so do its curves, in its own time, as when markers move. `warp.take_transients` isn't a command: it gives
 the warped clips that haven't any yet the transients analysis has found, as
 a change the project follows rather than a step to undo, and the app calls
 it as analyses arrive and the project changes.
+
+### Auto-warp
+
+Auto-warp isn't a command: it's how Insert Audio, which drops and imports
+run, warps the files it puts in, by what analysis found in them
+(`crates/commands/src/auto_warp.rs`). `auto_warp::kind` sorts a file into a
+loop of whole bars, a steady file, a drifting one or a sound without a
+pulse, or nothing where analysis is unsure of it: where the classic
+tracker's beats agree with the network's less than 0.8 as an F-measure, or
+the beat slips. Each kind has a rule, and a switch in `Behaviour`, which
+Settings keeps per profile ([app.md](app.md#settings-and-your-keymap)):
+
+| Kind | Switch | What it gets |
+|---|---|---|
+| Loop | `warp_loops` | One marker at its start, at the tempo its length gives for its bars |
+| Steady | `warp_steady` | One marker on its first downbeat, at its tempo, the downbeat on the bar line nearest where it was dropped, cutting a pickup of under 50 ms at the song's start |
+| Drifting | `warp_drifting` | A marker on each downbeat, and on each beat that those would play more than 10 ms from where it is |
+| No pulse | `sync_one_shots` | No warp: its sync point, the first strong attack or a riser's peak, plays where it was dropped |
+
+A file's tempo comes from analysis, or from its loop data or name where
+that keeps within 10 ms of analysis's beats across the file, and is read at
+the octave nearest the song's (`least_stretch`). With
+`tempo_from_first_file`, the first file with a pulse dropped into a song
+with no clips gives it its tempo and meter. `warp_recordings` is for takes
+([Take](#take)).
+
+Insert Audio warps the files whose analyses the editor has as it puts them
+in. For the others, it leaves a `Pending` in the editor, with its step in
+the undo history, and the app calls `auto_warp::apply_pending` as analyses
+land (`Session::auto_warp`), once none of a drop's files is waiting. That
+joins the drop's step (`Document::amend`) while it's the last, and else is
+a step of its own, Auto-Warp, which leaves other clips alone. A clip
+changed since the drop stays as it is.
 
 ### Locator
 
@@ -426,7 +496,11 @@ there.
 the track's highest, so one undo takes a whole recording back. A pass
 starts on the frame it was recorded at, whatever the tempo, and one that
 went on in another file, at WAV's 4 GB, is a take with a clip for each
-file. A MIDI track's pass (`Recorded::Midi`) is a take with a MIDI clip of
+file. With `Behaviour::warp_recordings`, as it is unless it's switched off,
+an audio pass follows the tempo: its clip is warped, its own time the
+song's, with a marker where it starts, and where it spans tempo changes, at
+each of them and where it ends, so it plays sample for sample as it was
+played, and stretches with the tempo if that changes later. A MIDI track's pass (`Recorded::Midi`) is a take with a MIDI clip of
 the notes played, each starting and ending on its frames, with its
 expression, and of how the controllers moved, as curves that start with
 what each held as the pass began; a pass without notes makes no take.

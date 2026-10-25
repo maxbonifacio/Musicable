@@ -10,13 +10,22 @@
 //! arguments, Insert Transient adds one at the start marker and Delete
 //! Transients deletes those in the Sample Editor's time selection, with
 //! Live's keys.
+//!
+//! Quantize moves transients towards the grid, as it moves notes (see
+//! [`edit::QUANTIZE`](crate::edit::QUANTIZE)): the functions for that are
+//! here.
 
-use musicable_model::clip::ClipId;
+use std::collections::BTreeSet;
+
+use musicable_model::Project;
+use musicable_model::clip::{AudioClip, Clip, ClipId};
+use musicable_model::time::Beats;
 use musicable_model::warp::{Onsets, Warp};
 
+use crate::editor::Editor;
 use crate::warp::{
     FRAMES, change_warp, clip_arg, clip_position, file_frames, found_onsets, selected_transients,
-    warped,
+    song_position, warped,
 };
 use crate::{Command, CommandError, CommandId, Context, Param, Registry, Type, Value, When};
 
@@ -164,6 +173,118 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
+/// Whether the clip with id `id` is a warped audio clip with transients in
+/// sight, for Quantize to move.
+pub(crate) fn has_transients(project: &Project, id: ClipId) -> bool {
+    warped(project, id).is_ok_and(|(_, _, warp)| warp.transients().next().is_some())
+}
+
+/// The frames of the transients of the warped clip `clip` that Quantize
+/// moves, in order: `frames`, which must be its transients', or else those
+/// in the Sample Editor's time selection while it shows the clip, or else
+/// all those the clip plays.
+pub(crate) fn to_quantize(
+    project: &Project,
+    editor: &Editor,
+    clip: ClipId,
+    frames: Option<Vec<i64>>,
+) -> Result<Vec<u64>, CommandError> {
+    let (c, a, warp) = warped(project, clip)?;
+    if warp.onsets.is_none() {
+        return Err(not_found(clip));
+    }
+    if let Some(frames) = frames {
+        let mut frames = file_frames(Some(frames))?;
+        let transients: BTreeSet<u64> = warp.transients().map(|o| o.frame).collect();
+        if let Some(frame) = frames.iter().find(|f| !transients.contains(f)) {
+            return Err(CommandError::invalid(format!(
+                "clip {} has no transient at frame {frame}",
+                clip.0
+            )));
+        }
+        frames.sort_unstable();
+        frames.dedup();
+        return Ok(frames);
+    }
+    if let Some((shown, frames)) = selected_transients(project, editor)
+        && shown == clip
+        && !frames.is_empty()
+    {
+        return Ok(frames);
+    }
+    Ok(played(c, a, warp, editor.sample_rate_of(&a.file)))
+}
+
+/// The frames of the transients the warped clip `clip` plays, from its
+/// start to its end, in order. `audio` is what it plays, and `warp` its
+/// warp, for a file at `rate`.
+pub(crate) fn played(clip: &Clip, audio: &AudioClip, warp: &Warp, rate: u32) -> Vec<u64> {
+    let offset = audio.offset.beats().unwrap_or(Beats::ZERO);
+    let first = warp.frame_at(offset.to_f64(), rate);
+    let last = warp.frame_at((offset + clip.length).to_f64(), rate);
+    (warp.transients())
+        .map(|o| o.frame)
+        .filter(|&f| first <= f as f64 && (f as f64) < last)
+        .collect()
+}
+
+/// The warp of the warped clip `clip` with its transients at `frames`
+/// moved towards the nearest lines of the grid at `zoom`, by `amount` of
+/// the way: what Quantize does to audio. Each gets a warp marker where it
+/// plays, or keeps the one on it, and the marker moves, stretching the
+/// audio either side. The transient nearest its line goes first, and a
+/// marker in its way that isn't on a transient goes. One that would then
+/// come onto or past a line another took, or past a marker on a transient,
+/// stays where it plays. `None` if nothing changes.
+pub(crate) fn quantized(
+    project: &Project,
+    editor: &Editor,
+    clip: ClipId,
+    frames: &[u64],
+    zoom: f64,
+    amount: f64,
+) -> Option<Warp> {
+    let (c, a, warp) = warped(project, clip).ok()?;
+    let rate = editor.sample_rate_of(&a.file);
+    let index = |warp: &Warp, frame: u64| warp.markers.binary_search_by_key(&frame, |m| m.frame);
+    // Pinned first, which moves nothing.
+    let mut new = warp.clone();
+    for &frame in frames {
+        if index(&new, frame).is_err() {
+            new.insert_at_frame(frame, rate);
+        }
+    }
+    // A transient within a tick of a marker beside it has none of its own.
+    let mut moves: Vec<(i64, u64, Beats)> = (frames.iter())
+        .filter_map(|&frame| {
+            let beat = new.markers[index(&new, frame).ok()?].beat;
+            let at = song_position(c, a, beat);
+            let line = editor.grid.nearest(&project.tempo, at, zoom);
+            let away = (line - at).ticks();
+            let by = Beats::from_ticks((away as f64 * amount).round() as i64);
+            Some((away.abs(), frame, by))
+        })
+        .collect();
+    moves.sort_unstable();
+    let transients: BTreeSet<u64> = warp.transients().map(|o| o.frame).collect();
+    for (_, frame, by) in moves {
+        while by != Beats::ZERO
+            && let Ok(i) = index(&new, frame)
+        {
+            if new.move_markers(&[i], by) {
+                break;
+            }
+            // The marker in the way: the one beside it, the way it moves.
+            let beside = if by > Beats::ZERO { i + 1 } else { i - 1 };
+            if transients.contains(&new.markers[beside].frame) {
+                break;
+            }
+            new.delete(&[beside], rate);
+        }
+    }
+    (new != *warp).then_some(new)
+}
+
 /// The transients of `warp`, the warp of clip `clip`, to change: an error
 /// if it hasn't taken them from analysis yet.
 fn own_onsets(warp: &Warp, clip: ClipId) -> Result<Onsets, CommandError> {
@@ -193,12 +314,110 @@ mod tests {
     use musicable_model::time::Beats;
 
     use super::*;
+    use crate::testing::Setup;
     use crate::warp::tests::{AT_100, FOUND, analysed_song, time, transients};
     use crate::{Args, edit, warp};
 
     fn frames(frames: &[u64]) -> Args {
         let frames: Vec<i64> = frames.iter().map(|&f| f as i64).collect();
         Args::new().with("frames", frames)
+    }
+
+    /// The clip's warp markers, as (frame, beat).
+    fn markers(setup: &Setup, clip: ClipId) -> Vec<(u64, f64)> {
+        let (_, _, warp) = warped(setup.document.project(), clip).unwrap();
+        (warp.markers.iter())
+            .map(|m| (m.frame, m.beat.to_f64()))
+            .collect()
+    }
+
+    /// The song with the loop's transient on its second beat a tenth of a
+    /// beat late, and the one on its fourth a fifth early: at 1.1 and 2.8
+    /// in its own time, which plays from beat 4 of the song. At 30 points
+    /// a beat, the grid steps by quarter notes, in the Sample Editor and
+    /// the arrangement.
+    fn loose() -> (Setup, ClipId, [u64; 2]) {
+        let (mut setup, clip) = analysed_song();
+        let (late, early) = (AT_100 + AT_100 / 10, 3 * AT_100 - AT_100 / 5);
+        for (frame, to) in [(AT_100, late), (3 * AT_100, early)] {
+            let args = Args::new().with("frame", frame as i64);
+            setup.run_with(&MOVE, args.with("to", to as i64)).unwrap();
+        }
+        let editor = setup.document.editor_mut();
+        editor.sample_editor.viewport.zoom = 30.0;
+        editor.viewport.zoom = 30.0;
+        setup.committed_names();
+        (setup, clip, [late, early])
+    }
+
+    #[test]
+    fn quantize_moves_transients_to_the_grid_with_warp_markers() {
+        let (mut setup, clip, [late, early]) = loose();
+        let [first, half, _, two, _] = FOUND;
+        assert_eq!(markers(&setup, clip), [(0, 0.0)]);
+        // The Sample Editor has the focus, and none are selected: all of
+        // them. Each gets a marker, the first keeping the one on it, and
+        // those off the grid move to it. The one halfway through the first
+        // beat is as near the clip's start as its second beat, and goes
+        // for the start, which the first took: it stays.
+        assert!(setup.applies(&edit::QUANTIZE));
+        setup.run(&edit::QUANTIZE);
+        assert_eq!(
+            markers(&setup, clip),
+            [
+                (first, 0.0),
+                (half, 0.5),
+                (late, 1.0),
+                (two, 2.0),
+                (early, 3.0)
+            ]
+        );
+        assert_eq!(setup.committed_names(), ["Quantize"]);
+        setup.run(&edit::UNDO);
+        assert_eq!(markers(&setup, clip), [(0, 0.0)]);
+
+        // Half way, those in the time selected.
+        setup.run_with(&warp::SELECT_TIME, time(2.5, 3.0)).unwrap();
+        let half_way = Args::new().with("amount", 0.5);
+        setup.run_with(&edit::QUANTIZE, half_way).unwrap();
+        assert_eq!(markers(&setup, clip), [(0, 0.0), (early, 2.9)]);
+
+        // While the arrangement has the focus, the selected clips'.
+        setup.run(&edit::UNDO);
+        setup.select_clips(&[clip]);
+        assert!(setup.applies(&edit::QUANTIZE));
+        setup.run(&edit::QUANTIZE);
+        assert_eq!(markers(&setup, clip).len(), 5);
+    }
+
+    #[test]
+    fn a_marker_in_a_transient_s_way_goes_unless_it_s_on_a_transient() {
+        let (mut setup, clip, [late, _]) = loose();
+        // A marker between the late transient and the line it goes to.
+        let at = Args::new().with("at", vec![Beats::from_f64(1.05)]);
+        setup.run_with(&warp::INSERT_MARKERS, at).unwrap();
+        let between = (AT_100 as f64 * 1.05) as u64;
+        assert_eq!(markers(&setup, clip), [(0, 0.0), (between, 1.05)]);
+        let quantize = |frames: &[u64]| self::frames(frames).with("clip", clip);
+        setup.run_with(&edit::QUANTIZE, quantize(&[late])).unwrap();
+        assert_eq!(markers(&setup, clip), [(0, 0.0), (late, 1.0)]);
+        // With a transient where the marker is, it's on one: the late
+        // transient can't pass it, and stays where it plays.
+        setup.run(&edit::UNDO);
+        setup.run_with(&INSERT, frames(&[between])).unwrap();
+        setup.run_with(&edit::QUANTIZE, quantize(&[late])).unwrap();
+        assert_eq!(
+            markers(&setup, clip),
+            [(0, 0.0), (between, 1.05), (late, 1.1)]
+        );
+        // Transients only, of audio clips.
+        assert!(
+            setup
+                .run_with(&edit::QUANTIZE, quantize(&[late + 1]))
+                .is_err()
+        );
+        let notes = Args::new().with("clip", clip).with("notes", vec![0]);
+        assert!(setup.run_with(&edit::QUANTIZE, notes).is_err());
     }
 
     fn ints(frames: &[u64]) -> Value {

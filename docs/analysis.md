@@ -10,7 +10,8 @@ The app analyses each audio file the open project plays in the
 background, and keeps what it finds in a cache, so a file is analysed only
 the first time ([In the app](#in-the-app)). Warped clips take their
 transients from it ([app.md](app.md#the-sample-editor)), and auto-warp
-comes next.
+warps the files dropped into the song by it
+([commands.md](commands.md#auto-warp)).
 `musicable analyse` measures analysis against labelled files and against
 Live's auto-warp ([Measuring it](#measuring-it)).
 
@@ -168,6 +169,12 @@ the app sets a stop flag, which the job's step and the network check before
 each piece of their work, so closing never waits for a long file. If the
 network doesn't load, the status bar says so once, and analysis goes on
 without it.
+
+Fast analysis, a setting of the computer's (`analysis.fast` in
+settings.toml), keeps the network from loading at all: files are analysed
+by the classic tracker alone, and the cache's analyses by either tracker
+count. Once it's off again, the files it analysed are analysed again with
+the network the next time they're asked for.
 
 ### The cache
 

@@ -389,7 +389,13 @@ looks at those near the pointer or on screen. A warped clip's transients
 come from analysis: the app gives each warped clip that has none yet those
 of its file as analyses arrive and the project changes
 (`warp::take_transients`), as a change the project follows rather than a
-step to undo. Its waveform comes from the same peaks as the arrangement's,
+step to undo. As analyses arrive, the app also warps the files dropped
+before they were analysed (`Session::auto_warp`,
+[commands.md](commands.md#auto-warp)), once none of a drop's files is
+waiting (`Analyses::waits_for`). Its context menu has the warp commands
+that act at a point, which it gives the frame of the marker, the transient
+or the audio where it was opened ([commands.md](commands.md#warping)), and
+Quantize. Its waveform comes from the same peaks as the arrangement's,
 read along the clip's warp, so the two agree. Its keys are the Sample
 Editor panel's own in the default keymap, as the piano roll's are, and
 hiding it gives the arrangement the focus. Clip Editor and Switch Devices
@@ -438,6 +444,10 @@ profile in use's keymap, mouse map, workspaces and settings
 ([Profiles](#profiles)), or in the theme's own file. Every setting in
 settings.toml has a control here but the export window's, which that window
 keeps as it was last used. The window isn't a panel, so no workspace has it.
+The Behaviour page has auto-warp's switches, which go with the profile, and
+Fast analysis, which doesn't: it's `Settings::analysis`, the computer's,
+and the app hands it to the analysis jobs (`Analyses::set_fast`), so the
+next file analysed uses it.
 
 ### Profiles
 
@@ -777,7 +787,8 @@ absolute ([project-format.md](project-format.md#track)). The app reads WAV,
 AIFF and FLAC files (`musicable_io::audio` lists the sample formats), and
 resamples a file at another rate than the device's. Adding files runs
 `clip.insert_audio`, which reads each file's header first, so the clips are
-as long as their files.
+as long as their files, and auto-warps them by what analysis found in them
+([commands.md](commands.md#auto-warp)).
 
 Each time the session builds a graph, on the compiler's thread, it finds
 the files the project's audio clips play (`crates/app/src/media.rs`):

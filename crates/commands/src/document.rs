@@ -107,6 +107,36 @@ impl Document {
         result
     }
 
+    /// The id of the last step in the undo history, which names it while
+    /// it's the last, for [`amend`](Self::amend).
+    pub fn last_step(&self) -> Option<u64> {
+        self.history.last_step()
+    }
+
+    /// Runs `edit` as part of the last step in the undo history, if that's
+    /// the step with id `step`, as if the step had made its edits too: undo
+    /// takes them back with it. Returns `None`, running nothing, if another
+    /// step has come since, or that one was undone.
+    pub fn amend<R>(
+        &mut self,
+        step: u64,
+        edit: impl FnOnce(&mut Transaction<'_>) -> R,
+    ) -> Option<R> {
+        if self.history.last_step() != Some(step) {
+            return None;
+        }
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
+        let result = edit(&mut transaction);
+        let edits = transaction.edits;
+        if !edits.is_empty()
+            && let Some(name) = self.history.amend(step, &edits)
+        {
+            self.committed.push(Committed { name, edits });
+            self.editor.prune(&self.project);
+        }
+        Some(result)
+    }
+
     /// Takes back the last step in the undo history, by setting what it
     /// changed back the way it was. Returns `false` if there's nothing to
     /// undo.
