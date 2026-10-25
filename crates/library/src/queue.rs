@@ -316,6 +316,13 @@ fn run(shared: &Shared) {
     }
 }
 
+/// Lowers the calling thread's priority to the queue's threads', below
+/// normal, for threads that help with the queue's jobs, as the beat
+/// tracking network's do.
+pub fn lower_priority() {
+    priority::lower();
+}
+
 /// Lowering the queue's threads' priority.
 mod priority {
     #[cfg(windows)]

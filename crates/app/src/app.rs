@@ -24,6 +24,7 @@ use musicable_ui::{
 };
 
 use self::agents::Agents;
+use crate::analyses::Analyses;
 use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
 use crate::export::{self, Export, ExportSettings, FileFormat, Job, Report, Span};
@@ -39,8 +40,8 @@ use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
 use crate::settings::{
-    self, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, SETTINGS_FILE, Settings,
-    THEMES_FOLDER,
+    self, ANALYSIS_FOLDER, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, SETTINGS_FILE,
+    Settings, THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -83,6 +84,8 @@ pub struct App {
     shell: Shell,
     /// The headers and the waveforms of the project's audio files.
     audio_files: AudioFiles,
+    /// What analysis finds in them, for warping.
+    analyses: Analyses,
     /// The session's revision whose audio files were asked for.
     files_found: Option<u64>,
     keys: KeyPresses,
@@ -171,6 +174,7 @@ impl App {
         let (output, handle) = Output::open(settings.audio.request(), &mut messages);
         let mut app = Self::with_output(path, config_dir, settings, output, handle, messages, ctx);
         app.scan_plugins(false, ctx);
+        app.start_analysing(ctx);
         // The window is still hidden, so it opens where the workspace has
         // it.
         if let (Some(place), Some(window)) = (app.unplaced.take(), cc.winit_window()) {
@@ -255,6 +259,7 @@ impl App {
             midi_choices: Vec::new(),
             shell: Shell::new(),
             audio_files: AudioFiles::new(),
+            analyses: Analyses::off(),
             files_found: None,
             keys: KeyPresses::new(),
             settings_window: SettingsWindow::new(),
@@ -948,6 +953,7 @@ impl App {
         self.session
             .open(project, path.as_deref().and_then(Path::parent));
         self.audio_files.forget();
+        self.analyses.forget();
         self.set_path(path);
         // The panels as they were when the project was saved.
         if let Some(slot) = saved_with {
@@ -997,8 +1003,9 @@ impl App {
         }
     }
 
-    /// Asks for the headers and the waveforms of the project's audio files
-    /// when the project has changed, and takes in those read since.
+    /// Asks for the headers, the waveforms and the analyses of the
+    /// project's audio files when the project has changed, and takes in
+    /// those found since.
     fn read_audio_files(&mut self, ctx: &egui::Context) {
         let revision = self.session.revision();
         if self.files_found != Some(revision) {
@@ -1006,10 +1013,29 @@ impl App {
             let folder = self.project_folder().map(Path::to_owned);
             self.audio_files
                 .find(self.session.project(), folder.as_deref());
+            self.analyses
+                .find(self.session.project(), folder.as_deref());
         }
         if self.audio_files.receive(self.session.editor_mut()) {
             ctx.request_repaint();
         }
+        if (self.analyses).receive(self.session.editor_mut(), &mut self.messages) {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Starts analysing the project's audio files for warping, in the
+    /// background on the library's queue, keeping what's found in the cache
+    /// folder.
+    fn start_analysing(&mut self, ctx: &egui::Context) {
+        let Some(queue) = self.session.library().queue().cloned() else {
+            return;
+        };
+        let cache = settings::cache_dir().map(|dir| dir.join(ANALYSIS_FOLDER));
+        let models = musicable_analysis::models_folder();
+        self.analyses = Analyses::new(queue, cache, models, Some(waker(ctx)));
+        // The next frame asks for the open project's files.
+        self.files_found = None;
     }
 
     fn set_path(&mut self, path: Option<PathBuf>) {
@@ -1637,6 +1663,7 @@ impl eframe::App for App {
         let reading = library.reading();
         let (found, total) = library.found();
         let agent = self.agents.status();
+        let analysing = self.analyses.status();
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -1672,6 +1699,7 @@ impl eframe::App for App {
             },
             messages: &self.messages,
             agent: agent.as_deref(),
+            analysing: analysing.as_deref(),
             plugins: Plugins {
                 installed: &self.plugin_entries,
                 scanning: self.plugin_scan.is_running(),

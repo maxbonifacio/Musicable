@@ -56,6 +56,24 @@ Plugins and their SDKs are built with MSVC, and Windows debuggers read its
 debug information. The GNU toolchain (`x86_64-pc-windows-gnu`) builds
 Musicable too, but nothing tests it.
 
+## The beat tracker's models
+
+Analysis finds beats with the Beat This! network, whose model files, 83 MB,
+aren't in the repository. Fetch them into `models/`, which git ignores,
+before running the tests:
+
+```sh
+scripts/fetch-models.sh
+```
+
+In PowerShell, it's `scripts\fetch-models.ps1`. The script checks each file
+against the SHA-256 it pins, and fetches only what's missing or different.
+Without the files, the tests that need them skip, saying so, and analysis
+finds beats with its classic tracker alone. CI fetches them, so there a
+test that needs them fails if they're missing.
+[docs/analysis.md](docs/analysis.md#the-network) says where they come from,
+and why they aren't committed.
+
 ## Before opening a pull request
 
 ```sh

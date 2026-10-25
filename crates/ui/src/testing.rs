@@ -300,6 +300,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 },
                 messages: &[],
                 agent: None,
+                analysing: None,
                 plugins: Plugins {
                     installed: &state.plugins,
                     scanning: state.scanning,

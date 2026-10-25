@@ -653,7 +653,9 @@ recording they rest as long as they work, so the disk and the cores are
 left to the recorder and the engine. Headers are read 64 files to a job,
 each job adding the next as it ends, so the jobs added meanwhile go
 first. On Windows and macOS they also run in the system's background
-mode, which puts their reads behind others. Analysis will run on it too.
+mode, which puts their reads behind others. The analysis of the project's
+audio files runs on it too, one file at a time
+([analysis.md](analysis.md#in-the-app)).
 
 **Why headers come after.** Opening a file takes far longer than finding
 it. On a Windows PC with Defender's real-time protection on, opening each

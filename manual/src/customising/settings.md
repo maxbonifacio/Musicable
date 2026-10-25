@@ -80,6 +80,22 @@ Musicable closes.
 The keymap, the mouse map, the workspaces and the settings that go with a
 profile, in `settings.toml`, are the profile Default's.
 
+## The cache folder
+
+Musicable keeps what it can work out again in its cache folder: in
+`analysis`, what it found in each audio file a project played, so it finds
+a file's tempo and beats only the first time, even after the file moves.
+
+| System | Folder |
+|---|---|
+| Windows | `%LOCALAPPDATA%\Musicable\Cache` |
+| macOS | `~/Library/Caches/Musicable` |
+| Linux | `$XDG_CACHE_HOME/musicable`, or `~/.cache/musicable` |
+
+The `MUSICABLE_CACHE_DIR` environment variable picks another folder. It
+grows by tens of kilobytes for each minute of audio. Deleting it, or
+anything in it, is safe: Musicable works it out again when it next needs it.
+
 ## The settings file
 
 `settings.toml` holds the audio settings, written whenever you apply new

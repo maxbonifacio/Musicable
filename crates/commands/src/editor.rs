@@ -7,7 +7,9 @@
 //! and agents. It isn't saved with the project, and undo leaves it alone.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use musicable_analysis::Analysis;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
@@ -40,6 +42,9 @@ pub struct Editor {
     /// What the app has read about the audio files that clips play, by the
     /// path the clips give.
     pub files: BTreeMap<String, AudioFile>,
+    /// What analysis found in those files, by the same paths, as far as
+    /// the app has analysed them.
+    pub analyses: BTreeMap<String, Arc<Analysis>>,
     /// The engine's sample rate: an audio file that isn't in
     /// [`files`](Self::files) yet is taken to have it.
     pub sample_rate: u32,
@@ -75,6 +80,7 @@ impl Default for Editor {
             track_heights: BTreeMap::new(),
             behaviour: Behaviour::default(),
             files: BTreeMap::new(),
+            analyses: BTreeMap::new(),
             sample_rate: 48_000,
             clipboard: None,
             take_lanes: BTreeSet::new(),

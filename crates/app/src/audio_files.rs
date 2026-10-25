@@ -179,7 +179,7 @@ impl AudioFiles {
 }
 
 /// Where the file a clip names `name` is: relative to `folder`, or absolute.
-fn locate(name: &str, folder: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn locate(name: &str, folder: Option<&Path>) -> Option<PathBuf> {
     let path = Path::new(name);
     match (path.is_absolute(), folder) {
         (true, _) => Some(path.to_owned()),

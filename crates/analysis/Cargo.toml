@@ -1,0 +1,23 @@
+[package]
+name = "musicable-analysis"
+description = "Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network beside a classic tracker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+beat-this.workspace = true
+flate2.workspace = true
+musicable-io.workspace = true
+rayon.workspace = true
+realfft.workspace = true
+rten.workspace = true
+rten-tensor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+siphasher.workspace = true
+
+[lints]
+workspace = true

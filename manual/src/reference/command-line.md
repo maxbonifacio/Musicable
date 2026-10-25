@@ -9,6 +9,7 @@ project. These do more:
 | `musicable export PROJECT FILE` | Renders the project file PROJECT to the audio file FILE, as **File > Export Audio** does, faster than real time. |
 | `musicable keymap [FILE]` | Prints every command with its keys: the default keys, with the changes in the keymap file FILE if you give one, and any mistakes in that file. |
 | `musicable null-test [PROJECT]` | Plays PROJECT, or the demo, with Musicable's two renderers side by side, and checks that they play exactly the same. It's a check for developers. |
+| `musicable analyse FILE...` | Finds the tempo, beats and downbeats of audio files, as warping will, and scores them against beats you've marked, and against Live's: see [Analysing files](#analysing-files). |
 | `musicable mcp` | Connects an agent, such as Claude Code, to the Musicable that's running. The agent's app starts it: see [Agents](#agents). |
 | `musicable api` | Prints the commands agents can run, with their arguments, as JSON. |
 | `musicable --help` | Lists these. |
@@ -36,6 +37,47 @@ takes these options after the file:
 | `--no-tail` | Stops at the end, without the tail of echoes and reverb. |
 
 `musicable export --help` lists them too.
+
+## Analysing files
+
+`musicable analyse FILE...` finds what warping needs to know about each
+audio file, and prints it: its tempo and whether it's steady, whether it
+has a beat at all, whether it's a loop of whole bars, and how many beats,
+bars and transients it has. It finds the beats with a neural network, Beat
+This!, and checks them with a classic beat tracker.
+
+To see how well it does, mark a file's beats yourself. It then scores what
+it found against them: a number from 0 to 1 for the beats, and another for
+the downbeats, where 1 means it found every beat within 70 ms and nothing
+else. There are two ways to mark them:
+
+- **In a `.beats` file** beside the audio, with the same name, such as
+  `Drums.beats` beside `Drums.wav`. Each line is a beat: its time in
+  seconds, then its place in the bar, where 1 starts a bar, such as
+  `12.345 1`. Sonic Visualiser exports time instants this way.
+- **In Live**: warp the files by hand in a Live Set, save it, and give it
+  with `--labels`. The beats between two warp markers are spread evenly, so
+  put a marker wherever the playing moves off the grid.
+
+With `--live`, it scores Live's own auto-warp of the same files too: drop
+them into a new Live Set with auto-warp on, save it, and give it with
+`--live`. At the end it prints the mean of each, so you can compare them.
+
+| Option | What it does |
+|---|---|
+| `--fast` | Leaves the network out, as Fast analysis will. |
+| `--labels <set>` | Takes the beats you marked from the warp markers in the Live Set, instead of from `.beats` files. |
+| `--live <set>` | Scores Live's warping of the files in the Live Set too. |
+| `--json` | Prints everything it found in each file, as a line of JSON. |
+
+In a Live Set, bars count as four beats from 1.1.1.
+
+The network needs its two model files in a `models` folder beside the
+program, or in a folder above it. In the source code,
+`scripts/fetch-models.sh`, or `scripts\fetch-models.ps1` in PowerShell,
+fetches them into the folder a build finds them in. The environment
+variable `MUSICABLE_MODELS` can name another folder. Without them, give
+`--fast`.
 
 ## Agents
 

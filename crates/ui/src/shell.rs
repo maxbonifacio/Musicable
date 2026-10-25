@@ -80,6 +80,9 @@ pub struct View<'a> {
     /// "Agent: Move Notes": its last change. Clicked, it shows the Settings
     /// window's Agents page.
     pub agent: Option<&'a str>,
+    /// What the status bar says while the project's audio files are being
+    /// analysed for warping, such as "Analysing Drums.wav".
+    pub analysing: Option<&'a str>,
     /// The plugins installed, and how the project's are doing.
     pub plugins: Plugins<'a>,
     /// Musicable's own devices that play, which the browser lists: the
@@ -1558,6 +1561,11 @@ fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                 if agent.clicked() {
                     actions.push(Action::Run(options::AGENTS));
                 }
+            }
+            if let Some(analysing) = view.analysing {
+                ui.separator();
+                ui.label(RichText::new(analysing).weak())
+                    .on_hover_text("Finding the tempo and the beats of the project's audio files");
             }
         });
     });

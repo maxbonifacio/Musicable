@@ -37,7 +37,9 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
                                           Musicable that's running, over MCP on the standard
                                           input and output: see docs/agents.md
        musicable api                      print the commands agents can run, with their
-                                          arguments' JSON Schema, as JSON";
+                                          arguments' JSON Schema, as JSON
+       musicable analyse FILE...          analyse audio files as warping does, scoring their
+                                          beats against labels: see analyse --help";
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -64,6 +66,10 @@ fn main() -> ExitCode {
         Some("api") => {
             attach_console();
             print_api()
+        }
+        Some("analyse") => {
+            attach_console();
+            analyse(args)
         }
         Some("-h" | "--help") => {
             attach_console();
@@ -637,6 +643,315 @@ fn export(args: impl Iterator<Item = OsString>) -> ExitCode {
         seconds / took.max(1e-9)
     );
     ExitCode::SUCCESS
+}
+
+const ANALYSE_USAGE: &str = "\
+usage: musicable analyse [options] FILE...
+
+Analyses each audio file as warping does, with the Beat This! network and
+the classic tracker that checks it, and prints what it found: the tempo,
+whether it's steady, whether the file has a pulse or loops, and its beats.
+A file with labels beside it, a .beats file of the same name with a line
+for each beat (its time in seconds, then 1 if it starts a bar), is scored
+against them: the F-measure of its beats and downbeats within 70 ms.
+
+  --fast           leave the network out, as Fast analysis does
+  --labels <SET>   take the labels from the warp markers of the files'
+                   clips in the Live Set SET, warped by hand, instead
+  --live <SET>     score Live's auto-warp of the same files too, from the
+                   warp markers of their clips in the Live Set SET
+  --json           print each file's analysis as a line of JSON instead
+
+A Live Set's bars are taken to be 4/4.";
+
+/// What `musicable analyse` analyses.
+struct Analyse {
+    files: Vec<PathBuf>,
+    fast: bool,
+    labels: Option<PathBuf>,
+    live: Option<PathBuf>,
+    json: bool,
+}
+
+impl Analyse {
+    /// The options in `args`, or `None` if they ask for help.
+    fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Option<Self>, String> {
+        let mut analyse = Self {
+            files: Vec::new(),
+            fast: false,
+            labels: None,
+            live: None,
+            json: false,
+        };
+        while let Some(arg) = args.next() {
+            let Some(option) = arg.to_str().filter(|arg| arg.starts_with('-')) else {
+                analyse.files.push(PathBuf::from(arg));
+                continue;
+            };
+            match option {
+                "-h" | "--help" => return Ok(None),
+                "--fast" => analyse.fast = true,
+                "--json" => analyse.json = true,
+                "--labels" => {
+                    let set = args.next().ok_or("--labels needs a Live Set")?;
+                    analyse.labels = Some(PathBuf::from(set));
+                }
+                "--live" => {
+                    let set = args.next().ok_or("--live needs a Live Set")?;
+                    analyse.live = Some(PathBuf::from(set));
+                }
+                _ => return Err(format!("unknown option \"{option}\"")),
+            }
+        }
+        if analyse.files.is_empty() {
+            return Err("analyse needs a file to analyse".to_owned());
+        }
+        Ok(Some(analyse))
+    }
+}
+
+/// `musicable analyse`: see [`ANALYSE_USAGE`].
+fn analyse(args: impl Iterator<Item = OsString>) -> ExitCode {
+    use musicable_analysis::evaluate::{self, Labels, Score};
+    let options = match Analyse::parse(args) {
+        Ok(Some(options)) => options,
+        Ok(None) => {
+            println!("{ANALYSE_USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}\n\n{ANALYSE_USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The beats of each file warped in a Live Set, by its name.
+    let read_set = |set: &Option<PathBuf>| match set {
+        Some(set) => {
+            evaluate::live_beats(set).map(|warped| Some((set.display().to_string(), warped)))
+        }
+        None => Ok(None),
+    };
+    let (set_labels, live) = match (read_set(&options.labels), read_set(&options.live)) {
+        (Ok(set_labels), Ok(live)) => (set_labels, live),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut network = None;
+    if !options.fast {
+        match musicable_analysis::models_folder() {
+            Some(folder) => {
+                let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+                match musicable_analysis::Network::load(&folder, threads, || {}, Default::default())
+                {
+                    Ok(loaded) => network = Some(loaded),
+                    Err(error) => {
+                        eprintln!("The Beat This! network didn't load: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            None => {
+                eprintln!(
+                    "The Beat This! models aren't there: fetch them with scripts/fetch-models.sh \
+                     (or .ps1), point {} at them, or pass --fast.",
+                    musicable_analysis::MODELS_VARIABLE,
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let mut ours: Vec<Score> = Vec::new();
+    let mut lives: Vec<Score> = Vec::new();
+    let mut failed = false;
+    for path in &options.files {
+        let name = path.display();
+        let started = std::time::Instant::now();
+        let result = musicable_analysis::File::open(path)
+            .map_err(|error| error.to_string())
+            .and_then(|mut file| {
+                musicable_analysis::analyse(&mut file, network.as_mut(), &mut || true)
+                    .map_err(|error| error.to_string())
+            });
+        let (analysis, network_failed) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("{name}: {error}");
+                failed = true;
+                continue;
+            }
+        };
+        let took = started.elapsed().as_secs_f64();
+        if let Some(error) = network_failed {
+            eprintln!("{name}: the network failed, so the classic tracker's beats stand: {error}");
+        }
+        if options.json {
+            let line = serde_json::json!({ "file": path, "seconds": took, "analysis": analysis });
+            println!("{line}");
+            continue;
+        }
+        let rate = f64::from(analysis.sample_rate);
+        let tracker = match (analysis.tracker, analysis.agreement) {
+            (musicable_analysis::Tracker::Network, Some(agreement)) => {
+                format!("the network, the classic tracker agreeing {agreement:.2}")
+            }
+            _ => "the classic tracker".to_owned(),
+        };
+        println!(
+            "{name}: {:.1} s at {} Hz, by {tracker}, in {took:.2} s",
+            analysis.frames as f64 / rate,
+            analysis.sample_rate,
+        );
+        println!("  {}", summary(&analysis));
+        let found = Labels {
+            beats: analysis.beats.iter().map(|&b| b as f64 / rate).collect(),
+            downbeats: (analysis.downbeats.iter())
+                .map(|&i| analysis.beats[i] as f64 / rate)
+                .collect(),
+        };
+        let file_name =
+            (path.file_name()).map_or_else(String::new, |n| n.to_string_lossy().to_lowercase());
+        let (labels, source) = match &set_labels {
+            Some((set, warped)) => match warped.get(&file_name) {
+                Some(labels) => (labels.clone(), set.clone()),
+                None => {
+                    println!("  not warped in {set}, so not scored");
+                    continue;
+                }
+            },
+            None => {
+                let beside = [path.with_extension("beats"), {
+                    let mut beside = path.clone().into_os_string();
+                    beside.push(".beats");
+                    PathBuf::from(beside)
+                }]
+                .into_iter()
+                .find(|labels| labels.is_file());
+                let Some(beside) = beside else {
+                    continue;
+                };
+                match std::fs::read_to_string(&beside)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| evaluate::read_labels(&text))
+                {
+                    Ok(labels) => (labels, beside.display().to_string()),
+                    Err(error) => {
+                        eprintln!("{}: {error}", beside.display());
+                        failed = true;
+                        continue;
+                    }
+                }
+            }
+        };
+        let score = evaluate::score(&found, &labels);
+        ours.push(score);
+        let mut line = format!("  against {source}: {}", scored(score));
+        if let Some((set, warped)) = &live {
+            match warped.get(&file_name) {
+                Some(beats) => {
+                    let score = evaluate::score(beats, &labels);
+                    lives.push(score);
+                    line += &format!("; Live's {}", scored(score));
+                }
+                None => line += &format!("; not warped in {set}"),
+            }
+        }
+        println!("{line}");
+    }
+    if !ours.is_empty() {
+        println!(
+            "\nMean of {} labelled files: {}",
+            ours.len(),
+            scored(mean(&ours))
+        );
+        if !lives.is_empty() {
+            println!(
+                "Live's, on {} of them: {}",
+                lives.len(),
+                scored(mean(&lives))
+            );
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// What an analysis found, in a line.
+fn summary(analysis: &musicable_analysis::Analysis) -> String {
+    let rate = f64::from(analysis.sample_rate);
+    let mut parts = Vec::new();
+    if analysis.pulse {
+        parts.push("a pulse".to_owned());
+    } else if analysis.riser {
+        parts.push("no pulse, a riser".to_owned());
+    } else {
+        parts.push(match analysis.events {
+            1 => "no pulse, one event".to_owned(),
+            n => format!("no pulse, {n} events"),
+        });
+    }
+    if let Some(steady) = analysis.steady {
+        let steadiness = match steady.drift_ms <= musicable_analysis::STEADY_DRIFT_MS {
+            true => "steady",
+            false => "drifting",
+        };
+        parts.push(format!(
+            "{:.2} BPM, {steadiness} (drift {:.1} ms, beats {:.1} ms off it)",
+            steady.bpm, steady.drift_ms, steady.error_ms,
+        ));
+    }
+    match analysis.breaks {
+        0 => {}
+        1 => parts.push("1 break in the beat".to_owned()),
+        n => parts.push(format!("{n} breaks in the beat")),
+    }
+    if let Some(looped) = analysis.looped {
+        let bars = match looped.bars {
+            1 => "1 bar".to_owned(),
+            n => format!("{n} bars"),
+        };
+        parts.push(format!("a loop of {bars} at {:.4} BPM", looped.bpm));
+    }
+    if let Some(sync) = analysis.sync {
+        parts.push(format!("syncs at {:.3} s", sync as f64 / rate));
+    }
+    let tempi: Vec<String> = (analysis.tempi.iter().take(3))
+        .map(|c| format!("{:.1} ({:.2})", c.bpm, c.score))
+        .collect();
+    if !tempi.is_empty() {
+        parts.push(format!("flux tempi {}", tempi.join(", ")));
+    }
+    parts.push(format!(
+        "{}/4, {} beats, {} downbeats, {} onsets",
+        analysis.meter,
+        analysis.beats.len(),
+        analysis.downbeats.len(),
+        analysis.onsets.len(),
+    ));
+    parts.join("; ")
+}
+
+/// A score, in words.
+fn scored(score: musicable_analysis::evaluate::Score) -> String {
+    match score.downbeats {
+        Some(downbeats) => format!("beats {:.3}, downbeats {downbeats:.3}", score.beats),
+        None => format!("beats {:.3}", score.beats),
+    }
+}
+
+/// The mean of `scores`, the downbeats' over those that have them.
+fn mean(scores: &[musicable_analysis::evaluate::Score]) -> musicable_analysis::evaluate::Score {
+    let beats = scores.iter().map(|s| s.beats).sum::<f64>() / scores.len() as f64;
+    let downbeats: Vec<f64> = scores.iter().filter_map(|s| s.downbeats).collect();
+    musicable_analysis::evaluate::Score {
+        beats,
+        downbeats: (!downbeats.is_empty())
+            .then(|| downbeats.iter().sum::<f64>() / downbeats.len() as f64),
+    }
 }
 
 /// `text` starting with a capital letter.
