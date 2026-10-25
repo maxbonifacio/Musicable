@@ -5,8 +5,8 @@
 # Getting started
 
 - [Installing Musicable](getting-started/installing.md)
-- [Setting up audio]()
-- [A first song]()
+- [Setting up audio](getting-started/audio.md)
+- [A first song](getting-started/first-song.md)
 
 # Using Musicable
 
@@ -54,7 +54,7 @@
 - [Every command](reference/commands.md)
 - [Default keys](reference/keys.md)
 - [The command line](reference/command-line.md)
-- [Troubleshooting]()
+- [Troubleshooting](reference/troubleshooting.md)
 - [Glossary]()
 
 ---
