@@ -11,6 +11,7 @@ mod export_window;
 mod frame_times;
 mod keymap_file;
 pub mod library;
+pub mod log_file;
 mod media;
 mod mouse_file;
 mod mouse_page;

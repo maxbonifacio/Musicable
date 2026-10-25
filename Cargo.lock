@@ -1909,6 +1909,7 @@ dependencies = [
  "eframe",
  "egui-winit",
  "egui_kittest",
+ "log",
  "musicable-audio",
  "musicable-commands",
  "musicable-engine",

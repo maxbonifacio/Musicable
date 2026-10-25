@@ -30,6 +30,8 @@ toml.workspace = true
 # Reads a theme's font files as egui will, which can't take one it can't
 # read. The version egui's text uses.
 skrifa = "0.44"
+# What egui, wgpu and the app log, which goes to the log file.
+log = "0.4"
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }

@@ -22,6 +22,19 @@ On Windows, release builds open no console window, so double-clicking
 console, and are much slower: the engine checks every allocation, and egui
 runs unoptimised.
 
+On Windows, the app draws with Direct3D 12. With Vulkan, which wgpu would
+pick, an NVIDIA card lost the graphics device as the displays woke up, and
+egui-wgpu can't carry on without it, so the app crashed. The `WGPU_BACKEND`
+environment variable picks another of wgpu's backends, as
+`$env:WGPU_BACKEND = "vulkan"` does in PowerShell.
+
+What goes wrong while the app runs goes to the log file, `musicable.log` in
+the config folder ([Settings and your keymap](#settings-and-your-keymap)):
+warnings and errors from the crates the app is built on, such as wgpu, the
+graphics adapter the app draws with, the graphics device being lost, and
+panics, with the calls that led to them, each line with the time in UTC.
+The console the app was started from, if any, shows them too.
+
 `musicable keymap [FILE]` still prints the keys, as
 [commands.md](commands.md#trying-it-out) describes,
 `musicable null-test [PROJECT]` checks the parallel scheduler against the
@@ -1614,6 +1627,10 @@ scan load every library again.
 added, what's in them, and your tags ([The browser](#the-browser)).
 Deleting it empties the library, tags and all.
 
+`musicable.log` is the log file ([Running it](#running-it)). Once it has
+grown past a megabyte, it moves to `musicable.old.log`, so the two hold the
+latest lines.
+
 `keymap.toml` is your keymap file, as [commands.md](commands.md#the-keymap-file)
 describes. The app reads it at startup and when you click Reload on the
 Settings window's Keys page, which shows any mistakes in it. A file that
@@ -1958,6 +1975,8 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   shell draws the Keys page, as it holds the keymap's commands.
   `profiles.rs` lists the user's profiles and keeps their folders, and the
   app reads the profile in use's files at once when it switches.
+  `log_file.rs` keeps the log file, and logs panics and the graphics device
+  being lost.
 - [`crates/app/src/app/remapping.rs`](../crates/app/src/app/remapping.rs)
   drives the whole window with `egui_kittest`, handing it key presses as
   eframe does, without an audio device. It gives every command new keys on
@@ -2077,6 +2096,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   be a keymap file to import.
 - A macOS default keymap with Cmd.
 - Following the default output when it changes.
+- Carrying on when the graphics device is lost, which eframe can't do: the
+  app crashes, losing unsaved changes. A copy of the project to restore
+  after a crash, as Live offers, would keep them.
 - An icon, and opening `.musicable` files from the file manager.
 - Exporting to MP3 or other lossy formats, stems with the returns' and the
   master's effects (Live's "Include Return and Master Effects"), and
