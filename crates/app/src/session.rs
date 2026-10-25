@@ -1062,6 +1062,8 @@ impl Session {
                     | Edit::RemoveClip { .. }
                     | Edit::ClipTiming { .. }
                     | Edit::ClipFades { .. }
+                    | Edit::ClipWarping { .. }
+                    | Edit::ClipGain { .. }
                     | Edit::AddNote { .. }
                     | Edit::RemoveNote { .. }
                     | Edit::NoteTiming { .. }

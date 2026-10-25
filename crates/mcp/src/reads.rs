@@ -8,10 +8,10 @@ use musicable_commands::{
     Command, CommandId, FromValue, Keymap, Param, Registry, Scope, Value, device, json, param_text,
 };
 use musicable_model::automation::Lane;
-use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, Point};
+use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, Offset, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, Unit};
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::Beats;
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Master, Monitor, PluginFormat, Track, TrackKind,
@@ -352,14 +352,37 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
         ClipContent::Audio(audio) => {
             entry["kind"] = "audio".into();
             entry["file"] = audio.file.as_str().into();
-            entry["offset_frames"] = audio.offset.into();
+            match (audio.offset, &audio.warp) {
+                (Offset::Beats(offset), Some(warp)) => {
+                    let rate = window.editor().sample_rate_of(&audio.file);
+                    let markers: Vec<Json> = (warp.markers.iter())
+                        .map(|m| json!({ "frame": m.frame, "beat": beats(m.beat) }))
+                        .collect();
+                    entry["offset"] = beats(offset);
+                    entry["warp"] = json!({
+                        "mode": warp.mode.name(),
+                        "tempo": json::to_json(&Value::Number(warp.clip_tempo(rate))),
+                        "markers": markers,
+                    });
+                }
+                (offset, _) => entry["offset_frames"] = offset.frames().unwrap_or(0).into(),
+            }
             entry["gain"] = short(audio.gain);
+            if let Some(lane) = audio.lane(ClipParam::Gain) {
+                let points: Vec<Json> = (lane.points.iter())
+                    .map(|p| json!({ "at": beats(p.at), "value": json::to_json(&Value::Number(p.value)) }))
+                    .collect();
+                entry["gain_curve"] = points.into();
+            }
             entry["fade_in"] = beats(audio.fade_in);
             entry["fade_out"] = beats(audio.fade_out);
             if let Some(file) = window.editor().files.get(&audio.file) {
                 entry["sample_rate"] = file.sample_rate.into();
                 entry["frames"] = file.frames.into();
                 entry["channels"] = file.channels.into();
+                if let Some(tempo) = file.tempo {
+                    entry["file_tempo"] = json::to_json(&Value::Number(tempo));
+                }
             }
         }
     }
@@ -572,6 +595,7 @@ pub(crate) fn editor(window: &impl Window) -> Json {
     let viewport = &editor.viewport;
     let width = f64::from(viewport.width) / viewport.zoom.max(f64::MIN_POSITIVE);
     let roll = &editor.piano_roll;
+    let sample = &editor.sample_editor;
     let lane = match roll.lane {
         PianoRollLane::Velocity => json!("velocity"),
         PianoRollLane::Controller(controller) => controller_entry(controller, &[]),
@@ -600,6 +624,10 @@ pub(crate) fn editor(window: &impl Window) -> Json {
             "notes": ids(&mut roll.notes.iter().map(|n| n.0)),
             "draw": roll.draw,
             "lane": lane,
+        },
+        "sample_editor": {
+            "clip": sample.clip.map(|clip| clip.0),
+            "markers": sample.markers.iter().map(|&beat| beats(beat)).collect::<Vec<_>>(),
         },
     })
 }

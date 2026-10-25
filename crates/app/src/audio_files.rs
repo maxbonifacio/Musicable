@@ -218,6 +218,7 @@ fn header(decoder: &Decoder) -> AudioFile {
         sample_rate: info.sample_rate,
         frames: info.frames,
         channels: info.channels,
+        tempo: decoder.tempo(),
     }
 }
 
@@ -352,6 +353,7 @@ mod tests {
             sample_rate: 48_000,
             frames: 48_000,
             channels: 1,
+            tempo: None,
         };
         assert_eq!(editor.files.get("tone.wav"), Some(&tone));
         assert!(!editor.files.contains_key("gone.wav"));

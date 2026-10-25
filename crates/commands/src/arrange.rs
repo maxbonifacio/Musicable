@@ -14,7 +14,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Fades, MidiClip, Timing};
+use musicable_model::clip::{
+    AudioClip, Clip, ClipContent, ClipId, Fades, MidiClip, Offset, Timing,
+};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Project, TrackId, TrackKind};
 
@@ -658,15 +660,39 @@ fn timing_over(
         ClipContent::Audio(audio) => {
             let rate = editor.sample_rate_of(&audio.file);
             if let Some(file) = editor.files.get(&audio.file) {
-                // The song's frame that the file's first frame plays on.
-                let first = tempo.frame_at(clip.start, rate) - audio.offset as i64;
-                range.end = range.end.min(after_frames(tempo, rate, first, file.frames));
+                range.end = range.end.min(file_end(tempo, rate, clip, audio, file.frames));
             }
             rate
         }
         ClipContent::Midi(_) => editor.sample_rate,
     };
     clip.timing_over(range, tempo, rate)
+}
+
+/// Where the last of the `frames` frames of `audio`'s file, at `rate`, has
+/// played, with the clip `clip` playing it: the position of the frame after
+/// them, or just after it if that falls between ticks.
+pub(crate) fn file_end(
+    tempo: &TempoMap,
+    rate: u32,
+    clip: &Clip,
+    audio: &AudioClip,
+    frames: u64,
+) -> Beats {
+    match (audio.offset, &audio.warp) {
+        (Offset::Beats(offset), Some(warp)) => {
+            // Where the frame after the file's last plays in the clip's own
+            // time, and so in the song.
+            let end = warp.beat_at(frames as f64, rate);
+            let ticks = (end * Beats::TICKS_PER_BEAT as f64).ceil() as i64;
+            clip.start - offset + Beats::from_ticks(ticks)
+        }
+        (offset, _) => {
+            // The song's frame that the file's first frame plays on.
+            let first = tempo.frame_at(clip.start, rate) - offset.frames().unwrap_or(0) as i64;
+            after_frames(tempo, rate, first, frames)
+        }
+    }
 }
 
 /// Where `frames` frames from the song's frame `first`, at `rate`, have all
@@ -692,8 +718,6 @@ fn after(tx: &Transaction<'_>, track: TrackId, clip: ClipId) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::clip::Offset;
-
     use super::*;
     use crate::editor::{AudioFile, TimeSelection};
     use crate::testing::Setup;
@@ -726,6 +750,7 @@ mod tests {
             sample_rate: 48_000,
             frames: 288_000,
             channels: 2,
+            tempo: None,
         };
         setup
             .document

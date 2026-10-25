@@ -9,7 +9,7 @@
 //! - WAV: 8-bit unsigned, 16-, 24- and 32-bit integer and 32- and 64-bit
 //!   float PCM, plain or `WAVE_FORMAT_EXTENSIBLE`. A data chunk whose size
 //!   runs past the end of the file, as a recorder that didn't finish leaves
-//!   it, ends with the file.
+//!   it, ends with the file. A loop's tempo comes from its ACID chunk.
 //! - AIFF and AIFF-C: 8-, 16-, 24- and 32-bit integer PCM, big-endian or
 //!   little-endian (`sowt`), and 32- and 64-bit float (`fl32`, `fl64`).
 //! - FLAC: 8-, 12-, 16-, 20- and 24-bit, in blocks of any size. Reading
@@ -127,6 +127,7 @@ impl<T: Read + Seek + Send> Source for T {}
 /// Reads an audio file, from any frame.
 pub struct Decoder {
     info: Info,
+    tempo: Option<f64>,
     inner: Inner,
 }
 
@@ -148,29 +149,35 @@ impl Decoder {
         let read = read_up_to(source.as_mut(), &mut magic)?;
         source.seek(SeekFrom::Start(0))?;
         let magic = &magic[..read];
-        let (info, inner) = if magic.starts_with(b"fLaC") {
+        let (info, tempo, inner) = if magic.starts_with(b"fLaC") {
             let flac = flac::Flac::new(source)?;
-            (flac.info(), Inner::Flac(Box::new(flac)))
+            (flac.info(), None, Inner::Flac(Box::new(flac)))
         } else if magic.len() == 12 && &magic[..4] == b"RIFF" && &magic[8..] == b"WAVE" {
-            let pcm = wav::open(source)?;
-            (pcm.info(Format::Wav), Inner::Pcm(pcm))
+            let (pcm, tempo) = wav::open(source)?;
+            (pcm.info(Format::Wav), tempo, Inner::Pcm(pcm))
         } else if magic.len() == 12
             && &magic[..4] == b"FORM"
             && (&magic[8..] == b"AIFF" || &magic[8..] == b"AIFC")
         {
             let pcm = aiff::open(source)?;
-            (pcm.info(Format::Aiff), Inner::Pcm(pcm))
+            (pcm.info(Format::Aiff), None, Inner::Pcm(pcm))
         } else {
             return Err(AudioError::UnknownFormat);
         };
         if info.channels == 0 || info.sample_rate == 0 {
             return invalid("no channels or no sample rate");
         }
-        Ok(Self { info, inner })
+        Ok(Self { info, tempo, inner })
     }
 
     pub fn info(&self) -> Info {
         self.info
+    }
+
+    /// The tempo the file's loop data gives, in quarter notes a minute, if
+    /// it has some and isn't a one-shot: a WAV file's ACID chunk, so far.
+    pub fn tempo(&self) -> Option<f64> {
+        self.tempo
     }
 
     /// Reads frames from frame `start` on into `out`, interleaved, as many

@@ -108,6 +108,7 @@ impl Bench {
                 sample_rate: SAMPLE_RATE,
                 frames: frames as u64,
                 channels: 2,
+                tempo: None,
             };
             editor.files.insert(file.clone(), info);
         }

@@ -78,6 +78,9 @@ impl Theme {
             outside_clip: alpha(0, 0, 0, 24),
             area: alpha(40, 110, 210, 40),
 
+            warp_marker: rgb(170, 130, 20),
+            warp_marker_selected: rgb(220, 160, 0),
+
             widgets: Widgets::light(),
             ..Self::dark()
         }

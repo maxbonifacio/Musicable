@@ -37,7 +37,7 @@ use egui::{
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
-    take as takes, transport, view as views,
+    take as takes, transport, view as views, warp,
 };
 use musicable_model::automation::Point;
 use musicable_model::clip::{Clip, ClipContent, ClipId};
@@ -1547,7 +1547,7 @@ fn unknown(name: String) -> ParamSpec {
 }
 
 /// How far `pos` is from the line from `a` to `b`.
-fn distance_to_segment(pos: Pos2, a: Pos2, b: Pos2) -> f32 {
+pub(crate) fn distance_to_segment(pos: Pos2, a: Pos2, b: Pos2) -> f32 {
     let along = b - a;
     let length = along.length_sq();
     let t = match length {
@@ -1559,7 +1559,7 @@ fn distance_to_segment(pos: Pos2, a: Pos2, b: Pos2) -> f32 {
 
 /// `points` without those that change nothing: one just like the one
 /// before it, and one in a level stretch between two of the same value.
-fn simplified(points: Vec<Point>) -> Vec<Point> {
+pub(crate) fn simplified(points: Vec<Point>) -> Vec<Point> {
     let mut kept: Vec<Point> = Vec::with_capacity(points.len());
     for point in points {
         if kept.last() == Some(&point) {
@@ -2088,14 +2088,17 @@ impl Arrangement {
             (MouseAction::Rename, Hit::Clip { clip, .. }) => {
                 run(actions, edit::RENAME, Args::new().with("clip", clip));
             }
-            // MIDI clips open in the piano roll.
+            // MIDI clips open in the piano roll, and audio clips in the
+            // Sample Editor.
             (MouseAction::Open, Hit::Clip { clip, .. }) => {
-                let midi = find(project, clip)
-                    .is_some_and(|(_, c)| matches!(c.content, ClipContent::Midi(_)));
-                if !midi {
+                let Some((_, c)) = find(project, clip) else {
                     return false;
-                }
-                run(actions, notes::OPEN, Args::new().with("clip", clip));
+                };
+                let open = match c.content {
+                    ClipContent::Midi(_) => notes::OPEN,
+                    ClipContent::Audio(_) => warp::OPEN,
+                };
+                run(actions, open, Args::new().with("clip", clip));
             }
             (MouseAction::Rename, Hit::Header(track)) => {
                 run(actions, edit::RENAME, Args::new().with("track", track));

@@ -8,17 +8,17 @@ const PCM: u16 = 1;
 const FLOAT: u16 = 3;
 const EXTENSIBLE: u16 = 0xFFFE;
 
-/// Finds the format and the samples of a WAV file.
-pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
+/// Finds the format and the samples of a WAV file, and the tempo its ACID
+/// chunk gives, if it has one and isn't a one-shot.
+pub(super) fn open(mut source: Box<dyn Source>) -> Result<(Pcm, Option<f64>), AudioError> {
     source.seek(SeekFrom::Start(12))?;
     let mut format = None;
+    let mut acid = None;
     loop {
-        let mut header = [0; 8];
-        if super::read_up_to(source.as_mut(), &mut header)? < 8 {
+        let Some((id, size)) = chunk_header(source.as_mut())? else {
             return invalid("no data chunk");
-        }
-        let size = u32::from_le_bytes(header[4..].try_into().expect("four bytes"));
-        match &header[..4] {
+        };
+        match &id {
             b"fmt " => {
                 let mut fmt = vec![0; size as usize];
                 source
@@ -28,6 +28,7 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
                 // Chunks start on even bytes.
                 source.seek(SeekFrom::Current(i64::from(size % 2)))?;
             }
+            b"acid" => acid = read_acid(source.as_mut(), size)?,
             b"data" => {
                 let Some((channels, sample_rate, encoding)) = format else {
                     return invalid("the data chunk comes before the fmt chunk");
@@ -40,13 +41,82 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
                     0 | u32::MAX => u64::MAX,
                     size => u64::from(size),
                 };
-                return Pcm::new(source, start, size, channels, sample_rate, encoding);
+                // The ACID chunk can come after the samples too.
+                if acid.is_none() && size != u64::MAX {
+                    source.seek(SeekFrom::Start(start + size + size % 2))?;
+                    while let Some((id, size)) = chunk_header(source.as_mut())? {
+                        if &id == b"acid" {
+                            acid = read_acid(source.as_mut(), size)?;
+                            break;
+                        }
+                        source.seek(SeekFrom::Current(i64::from(size) + i64::from(size % 2)))?;
+                    }
+                }
+                let pcm = Pcm::new(source, start, size, channels, sample_rate, encoding)?;
+                let tempo = acid.and_then(|acid| acid.tempo(pcm.frames, sample_rate));
+                return Ok((pcm, tempo));
             }
             _ => {
                 source.seek(SeekFrom::Current(i64::from(size) + i64::from(size % 2)))?;
             }
         }
     }
+}
+
+/// The next chunk's id and size, if the file goes on to one.
+fn chunk_header(source: &mut dyn Source) -> Result<Option<([u8; 4], u32)>, AudioError> {
+    let mut header = [0; 8];
+    if super::read_up_to(source, &mut header)? < 8 {
+        return Ok(None);
+    }
+    let id = header[..4].try_into().expect("four bytes");
+    let size = u32::from_le_bytes(header[4..].try_into().expect("four bytes"));
+    Ok(Some((id, size)))
+}
+
+/// What an ACID chunk says about a loop that matters here.
+#[derive(Debug, Clone, Copy)]
+struct Acid {
+    one_shot: bool,
+    beats: u32,
+    tempo: f32,
+}
+
+impl Acid {
+    /// The loop's tempo, unless it's a one-shot: the chunk's, to a
+    /// ten-thousandth of a beat a minute, which takes off what storing it in
+    /// 32 bits added, or else the one its beats give the file's `frames`.
+    fn tempo(self, frames: u64, sample_rate: u32) -> Option<f64> {
+        if self.one_shot {
+            return None;
+        }
+        let tempo = f64::from(self.tempo);
+        if tempo.is_finite() && tempo > 0.0 {
+            return Some((tempo * 1e4).round() / 1e4);
+        }
+        let seconds = frames as f64 / f64::from(sample_rate);
+        (self.beats > 0 && seconds > 0.0).then(|| f64::from(self.beats) * 60.0 / seconds)
+    }
+}
+
+/// Reads an ACID chunk of `size` bytes, which the source is at the start
+/// of, leaving it at the next chunk: its flags, then the root note, two
+/// fields no one uses, the loop's beats, its meter and its tempo.
+fn read_acid(source: &mut dyn Source, size: u32) -> Result<Option<Acid>, AudioError> {
+    let mut acid = [0; 24];
+    let read = super::read_up_to(source, &mut acid[..size.min(24) as usize])?;
+    source.seek(SeekFrom::Current(
+        i64::from(size) + i64::from(size % 2) - read as i64,
+    ))?;
+    if read < 24 {
+        return Ok(None);
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(acid[i..i + 4].try_into().expect("four bytes"));
+    Ok(Some(Acid {
+        one_shot: u32_at(0) & 1 != 0,
+        beats: u32_at(12),
+        tempo: f32::from_bits(u32_at(20)),
+    }))
 }
 
 /// The channels, sample rate and encoding a fmt chunk gives.
@@ -316,6 +386,48 @@ mod tests {
         fmt.extend_from_slice(&block.to_le_bytes());
         fmt.extend_from_slice(&bits.to_le_bytes());
         fmt
+    }
+
+    /// An ACID chunk's body, for a loop of `beats` beats in 4/4 at `tempo`.
+    fn acid(flags: u32, beats: u32, tempo: f32) -> Vec<u8> {
+        let mut acid = flags.to_le_bytes().to_vec();
+        // The root note, and two fields no one uses.
+        acid.extend_from_slice(&60u16.to_le_bytes());
+        acid.extend_from_slice(&0x8000u16.to_le_bytes());
+        acid.extend_from_slice(&0f32.to_le_bytes());
+        acid.extend_from_slice(&beats.to_le_bytes());
+        acid.extend_from_slice(&4u16.to_le_bytes());
+        acid.extend_from_slice(&4u16.to_le_bytes());
+        acid.extend_from_slice(&tempo.to_le_bytes());
+        acid
+    }
+
+    #[test]
+    fn a_loop_s_tempo_comes_from_its_acid_chunk() {
+        // A second of mono 16-bit samples.
+        let samples = vec![0; 2 * 44_100];
+        let before = |body: &[u8]| {
+            let file = wav(&fmt(PCM, 1, 16), &[(b"acid", body)], &samples, None);
+            decode(file).tempo()
+        };
+        // As it's stored, to a ten-thousandth.
+        assert_eq!(before(&acid(0, 2, 97.3)), Some(97.3));
+        // A one-shot isn't a loop.
+        assert_eq!(before(&acid(1, 2, 97.3)), None);
+        // Without a tempo, two beats in a second are 120 BPM.
+        assert_eq!(before(&acid(0, 2, 0.0)), Some(120.0));
+        assert_eq!(before(&acid(0, 0, 0.0)), None);
+        assert_eq!(before(&acid(0, 2, 97.3)[..20]), None, "a short chunk");
+        // After the samples, as some editors put it.
+        let mut file = wav(&fmt(PCM, 1, 16), &[(b"LIST", b"odd")], &samples, None);
+        file.extend_from_slice(b"acid");
+        file.extend_from_slice(&24u32.to_le_bytes());
+        file.extend_from_slice(&acid(0, 8, 128.0));
+        let mut decoder = decode(file);
+        assert_eq!(decoder.tempo(), Some(128.0));
+        assert_eq!(decoder.read_all().unwrap()[0].len(), 44_100);
+        let plain = decode(wav(&fmt(PCM, 1, 16), &[], &samples, None));
+        assert_eq!(plain.tempo(), None);
     }
 
     #[test]

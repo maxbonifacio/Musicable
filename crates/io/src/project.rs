@@ -35,7 +35,7 @@ pub const FORMAT: &str = "musicable-project";
 
 /// The format version this build writes. It reads every version up to this
 /// one.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// How far from the start of the song a position in a file can be, either
 /// way, in ticks. It's the largest whole number a double holds exactly, so a
@@ -82,6 +82,7 @@ pub fn from_slice(bytes: &[u8]) -> Result<Project, LoadError> {
 
 /// Writes `project` as the text of a project file.
 pub fn to_string(project: &Project) -> Result<String, SaveError> {
+    schema::check_offsets(project).map_err(SaveError::Invalid)?;
     let file = schema::File::from(project);
     // Checked as loading will check it, so saving never writes a file that
     // won't load.

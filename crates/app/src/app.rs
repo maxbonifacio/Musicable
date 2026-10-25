@@ -795,8 +795,8 @@ impl App {
                 self.shell.show_panel(panel);
                 self.focus_in_sight();
             }
-            Request::SwitchDevicesPianoRoll => {
-                self.shell.switch_devices_piano_roll();
+            Request::SwitchDevicesClipEditor(panel) => {
+                self.shell.switch_devices_clip_editor(panel);
                 self.focus_in_sight();
             }
             Request::ShowDevice(device) => {

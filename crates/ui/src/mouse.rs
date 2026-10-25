@@ -86,6 +86,14 @@ pub enum Target {
     VelocityLane,
     /// The lane under the rows while it shows a controller.
     ControllerLane,
+    /// A warp marker in the Sample Editor: its handle, along the top of the
+    /// waveform, or its line down the waveform's top half.
+    WarpMarker,
+    /// The top half of the Sample Editor's waveform, where the warp markers
+    /// are, away from them.
+    WaveformTop,
+    /// The bottom half of the Sample Editor's waveform.
+    Waveform,
 }
 
 /// What the user does with the mouse.
@@ -194,7 +202,8 @@ pub enum MouseAction {
     AddKey,
     /// Makes the keys' rows taller or shorter, around the pointer.
     ZoomKeys,
-    /// Shows the MIDI clip in the piano roll, and gives it the focus.
+    /// Shows the clip in the piano roll, or an audio clip in the Sample
+    /// Editor, and gives it the focus.
     Open,
     /// Draws the controller's curve along the drag, a step of the grid at a
     /// time, at the heights the drag passes.
@@ -202,12 +211,25 @@ pub enum MouseAction {
     /// Erases the controller's curve along the drag, so what came before
     /// holds there.
     EraseController,
+    /// Stretches a warped clip, changing its tempo, so its audio fills it
+    /// as it plays: Live's Shift-drag of a clip's edge.
+    Stretch,
+    /// Adds a warp marker there, snapping to the grid, pinning the audio
+    /// that plays there.
+    AddMarker,
+    DeleteMarker,
+    /// Moves the warp marker, or the selected ones with it, snapping to the
+    /// grid: the audio either side stretches.
+    MoveMarker,
+    MoveMarkerFree,
+    /// Moves the audio under the warp marker, which stays where it is.
+    MoveAudio,
 }
 
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 31] = [
+    pub const ALL: [Target; 34] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -235,6 +257,9 @@ impl Target {
         Target::PianoKey,
         Target::VelocityLane,
         Target::ControllerLane,
+        Target::WarpMarker,
+        Target::WaveformTop,
+        Target::Waveform,
         Target::SoloButton,
         Target::MixerControl,
         Target::DeviceControl,
@@ -275,6 +300,9 @@ impl Target {
             Target::PianoKey => "piano_key",
             Target::VelocityLane => "velocity_lane",
             Target::ControllerLane => "controller_lane",
+            Target::WarpMarker => "warp_marker",
+            Target::WaveformTop => "waveform_top",
+            Target::Waveform => "waveform",
         }
     }
 
@@ -312,6 +340,9 @@ impl Target {
             Target::PianoKey => "The piano roll's keys",
             Target::VelocityLane => "The velocity lane",
             Target::ControllerLane => "A controller's lane",
+            Target::WarpMarker => "A warp marker",
+            Target::WaveformTop => "The waveform's top half",
+            Target::Waveform => "The waveform's bottom half",
         }
     }
 
@@ -323,11 +354,12 @@ impl Target {
     }
 
     /// What `gesture` can do here: the actions the arrangement, the piano
-    /// roll, the mixer and the devices carry out for it, in the order the
-    /// Mouse page offers them. None for a gesture that does nothing here.
+    /// roll, the Sample Editor, the mixer and the devices carry out for it,
+    /// in the order the Mouse page offers them. None for a gesture that
+    /// does nothing here.
     ///
-    /// A target the arrangement and the piano roll share, such as the
-    /// ruler, has the actions both carry out.
+    /// A target they share, such as the ruler, has the actions all of them
+    /// carry out.
     pub fn actions(self, gesture: Gesture) -> &'static [MouseAction] {
         use Gesture::{Click, DoubleClick, Drag, Wheel};
         use MouseAction as A;
@@ -342,7 +374,14 @@ impl Target {
                 A::Open,
             ],
             (T::ClipTitle | T::ClipBody, Drag) => &[A::Move, A::Copy, A::MoveFree, A::SelectTime],
-            (T::ClipEdge, Drag) => &[A::Trim, A::TrimFree, A::Move, A::Copy, A::MoveFree],
+            (T::ClipEdge, Drag) => &[
+                A::Trim,
+                A::TrimFree,
+                A::Stretch,
+                A::Move,
+                A::Copy,
+                A::MoveFree,
+            ],
             (T::FadeHandle, Drag) => &[A::Fade, A::Move, A::Copy, A::MoveFree],
             (T::Lane | T::Empty, Click | DoubleClick) => &[A::PlaceMarker, A::Locate],
             (T::Lane | T::Empty, Drag) => &[A::SelectTime],
@@ -379,6 +418,14 @@ impl Target {
             (T::PianoKey, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::ZoomKeys],
             (T::VelocityLane, Drag) => &[A::Velocity],
             (T::ControllerLane, Click | Drag) => &[A::DrawController, A::EraseController],
+            // The Sample Editor's. Its rulers are the ruler's, and its gain
+            // lane is an automation lane.
+            (T::WarpMarker, Click | DoubleClick) => {
+                &[A::Select, A::ToggleSelect, A::DeleteMarker, A::PlaceMarker]
+            }
+            (T::WarpMarker, Drag) => &[A::MoveMarker, A::MoveMarkerFree, A::MoveAudio],
+            (T::WaveformTop, Click | DoubleClick) => &[A::AddMarker, A::PlaceMarker],
+            (T::Waveform, Click | DoubleClick) => &[A::PlaceMarker, A::AddMarker],
             // The mixer's and the devices'.
             (T::SoloButton, Click) => &[A::ExclusiveSolo, A::AddSolo],
             (T::MixerControl | T::DeviceControl, Drag) => &[A::Coarse, A::Fine],
@@ -457,7 +504,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 47] = [
+    pub const ALL: [MouseAction; 53] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -505,6 +552,12 @@ impl MouseAction {
         MouseAction::Open,
         MouseAction::DrawController,
         MouseAction::EraseController,
+        MouseAction::Stretch,
+        MouseAction::AddMarker,
+        MouseAction::DeleteMarker,
+        MouseAction::MoveMarker,
+        MouseAction::MoveMarkerFree,
+        MouseAction::MoveAudio,
     ];
 
     /// Its name in mouse map files.
@@ -557,6 +610,12 @@ impl MouseAction {
             MouseAction::Open => "open",
             MouseAction::DrawController => "draw_controller",
             MouseAction::EraseController => "erase_controller",
+            MouseAction::Stretch => "stretch",
+            MouseAction::AddMarker => "add_marker",
+            MouseAction::DeleteMarker => "delete_marker",
+            MouseAction::MoveMarker => "move_marker",
+            MouseAction::MoveMarkerFree => "move_marker_free",
+            MouseAction::MoveAudio => "move_audio",
         }
     }
 
@@ -607,9 +666,15 @@ impl MouseAction {
             MouseAction::SelectKey => "Select the key's notes",
             MouseAction::AddKey => "Add the key's notes to the selection",
             MouseAction::ZoomKeys => "Make the keys taller or shorter",
-            MouseAction::Open => "Open in the piano roll",
+            MouseAction::Open => "Open in the piano roll or the Sample Editor",
             MouseAction::DrawController => "Draw the controller",
             MouseAction::EraseController => "Erase the controller",
+            MouseAction::Stretch => "Stretch, changing a warped clip's tempo",
+            MouseAction::AddMarker => "Add a warp marker",
+            MouseAction::DeleteMarker => "Delete the warp marker",
+            MouseAction::MoveMarker => "Move the warp marker",
+            MouseAction::MoveMarkerFree => "Move the warp marker off the grid",
+            MouseAction::MoveAudio => "Move the audio under the warp marker",
         }
     }
 
@@ -744,6 +809,7 @@ impl MouseMap {
         bind(T::ClipBody, Drag, &[none], A::SelectTime);
         bind(T::ClipEdge, Drag, &[none], A::Trim);
         bind(T::ClipEdge, Drag, &[alt], A::TrimFree);
+        bind(T::ClipEdge, Drag, &[shift], A::Stretch);
         bind(T::FadeHandle, Drag, &[none], A::Fade);
         bind(T::Lane, Click, &[none], A::PlaceMarker);
         bind(T::Lane, Drag, &[none], A::SelectTime);
@@ -815,6 +881,16 @@ impl MouseMap {
             bind(T::ControllerLane, gesture, &[none], A::DrawController);
             bind(T::ControllerLane, gesture, &[alt], A::EraseController);
         }
+        // The Sample Editor's: Live's warp markers.
+        bind(T::WarpMarker, Click, &[none], A::Select);
+        bind(T::WarpMarker, Click, &toggle, A::ToggleSelect);
+        bind(T::WarpMarker, DoubleClick, &[none], A::DeleteMarker);
+        bind(T::WarpMarker, Drag, &[none], A::MoveMarker);
+        bind(T::WarpMarker, Drag, &[alt], A::MoveMarkerFree);
+        bind(T::WarpMarker, Drag, &[shift], A::MoveAudio);
+        bind(T::WaveformTop, Click, &[none], A::PlaceMarker);
+        bind(T::WaveformTop, DoubleClick, &[none], A::AddMarker);
+        bind(T::Waveform, Click, &[none], A::PlaceMarker);
         map
     }
 }

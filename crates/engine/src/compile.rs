@@ -156,18 +156,20 @@ pub mod keys {
     /// The node with the parameter at `address`, and the parameter: a
     /// channel's fader's [`Gain::GAIN`] for its volume and [`Gain::PAN`] for
     /// its pan, a send's [`Gain::GAIN`], and a device's parameter `n` as
-    /// `ParamId(n)`.
-    pub fn param(address: ParamAddress) -> (NodeKey, ParamId) {
+    /// `ParamId(n)`. A clip's parameters have none: its clip player follows
+    /// the curves the clip keeps.
+    pub fn param(address: ParamAddress) -> Option<(NodeKey, ParamId)> {
         let fader = |chain| match chain {
             Chain::Track(track) => track_gain(track),
             Chain::Master => master_gain(),
         };
-        match address {
+        Some(match address {
             ParamAddress::Volume(chain) => (fader(chain), Gain::GAIN),
             ParamAddress::Pan(chain) => (fader(chain), Gain::PAN),
             ParamAddress::Send(send) => (self::send(send), Gain::GAIN),
             ParamAddress::Device(device, n) => (self::device(device), ParamId(n)),
-        }
+            ParamAddress::Clip(..) => return None,
+        })
     }
 
     fn track_key(role: u64, track: TrackId) -> NodeKey {
@@ -658,7 +660,9 @@ fn build(
     // A parameter whose node isn't in the graph, such as a missing
     // plugin's, has nothing to automate.
     for lane in project.automation.iter().filter(|lane| !lane.overridden) {
-        let (key, param) = keys::param(lane.param);
+        let Some((key, param)) = keys::param(lane.param) else {
+            continue;
+        };
         let scale = project.param_scale(lane.param);
         if let (Some(node), Some(automation)) =
             (graph.find(key), Automation::new(&lane.points, scale))

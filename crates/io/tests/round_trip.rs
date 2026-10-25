@@ -5,10 +5,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, LoadError, MAX_TICKS, SaveError};
-use musicable_model::clip::{AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Point};
+use musicable_model::automation;
+use musicable_model::clip::{
+    AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Offset, Point,
+};
+use musicable_model::param::{ClipParam, ParamSpec};
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{
     AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
     TrackId, TrackKind,
@@ -191,6 +196,53 @@ impl Random {
         }
     }
 
+    /// A warp of one marker or a few, rising in frames and in ticks, at any
+    /// tempo it allows.
+    fn warp(&mut self) -> Warp {
+        let tempo = match self.below(3) {
+            0 => self.pick(&[Warp::MIN_TEMPO, Warp::MAX_TEMPO, 120.0]),
+            _ => Warp::MIN_TEMPO + self.below(10_000) as f64 / 10_000.0 * 994.0,
+        };
+        let mut frame = self.below(1 << 20);
+        let mut beat = self.signed_ticks().min(MAX_TICKS - 100);
+        let mut markers = Vec::new();
+        for _ in 0..=self.below(4) {
+            if frame > MAX_TICKS as u64 || beat > MAX_TICKS {
+                break;
+            }
+            markers.push(WarpMarker {
+                frame,
+                beat: Beats::from_ticks(beat),
+            });
+            frame += 1 + self.below(100_000);
+            beat += 1 + self.below(Beats::new(4).ticks() as u64) as i64;
+        }
+        Warp {
+            markers,
+            ..Warp::new(0, Beats::ZERO, tempo)
+        }
+    }
+
+    /// A curve's points, in order, with at most two at one place, before
+    /// zero or after it, with values from 0 to `max`.
+    fn points(&mut self, max: f64) -> Vec<automation::Point> {
+        let mut at = self.signed_ticks().min(MAX_TICKS - 100);
+        let mut points: Vec<automation::Point> = Vec::new();
+        for _ in 0..=self.below(4) {
+            let value = match self.below(3) {
+                0 => self.pick(&[0.0, 1.0, max]),
+                _ => self.below(1_001) as f64 / 1_000.0 * max,
+            };
+            points.push(automation::Point::new(Beats::from_ticks(at), value));
+            let step = points.len() >= 2 && points[points.len() - 2].at == points[points.len() - 1].at;
+            if step || !self.one_in(3) {
+                at = (at + 1 + self.below(Beats::new(2).ticks() as u64) as i64).min(MAX_TICKS);
+            }
+        }
+        points.dedup_by(|b, a| a.at == b.at && a.value == b.value);
+        points
+    }
+
     /// A clip for a track of `kind`, as long as the file allows.
     fn clip(&mut self, project: &mut Project, kind: TrackKind) -> Clip {
         let start = self.ticks().min(MAX_TICKS - 1);
@@ -203,13 +255,25 @@ impl Random {
                 }
                 let fade_in = self.below(length as u64 + 1) as i64;
                 let fade_out = self.below((length - fade_in) as u64 + 1) as i64;
-                ClipContent::Audio(AudioClip {
+                let warp = self.one_in(2).then(|| self.warp());
+                let offset = match warp {
+                    Some(_) => Offset::Beats(Beats::from_ticks(self.signed_ticks())),
+                    None => Offset::Frames(self.below(MAX_TICKS as u64 + 1)),
+                };
+                let mut audio = AudioClip {
                     file,
-                    offset: self.below(MAX_TICKS as u64 + 1),
+                    offset,
                     gain: self.gain(),
                     fade_in: Beats::from_ticks(fade_in),
                     fade_out: Beats::from_ticks(fade_out),
-                })
+                    warp,
+                    automation: Vec::new(),
+                };
+                if self.one_in(2) {
+                    let points = self.points(ParamSpec::CLIP_GAIN_MAX);
+                    audio.set_lane(ClipParam::Gain, points);
+                }
+                ClipContent::Audio(audio)
             }
             _ => {
                 let mut midi = MidiClip {

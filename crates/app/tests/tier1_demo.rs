@@ -36,7 +36,7 @@ use musicable_engine::{
 };
 use musicable_io::audio::Decoder;
 use musicable_io::project;
-use musicable_model::clip::{Clip, ClipContent, ClipId};
+use musicable_model::clip::{Clip, ClipContent, ClipId, Offset};
 use musicable_model::native::{compressor, eq, reverb};
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
@@ -536,7 +536,8 @@ fn record(studio: &mut Studio, made: Made) {
         let ClipContent::Audio(audio) = &clip.content else {
             panic!("{clip:?}");
         };
-        assert_eq!((audio.file.as_str(), audio.offset), (file, n as u64 * BAR));
+        let played = (audio.file.as_str(), audio.offset);
+        assert_eq!(played, (file, Offset::Frames(n as u64 * BAR)));
     }
     let [clip] = &track.clips[..] else {
         panic!("{:?}", track.clips);
@@ -602,8 +603,8 @@ fn comp(studio: &mut Studio, made: Made) {
     assert_eq!(
         comp,
         [
-            (Beats::ZERO, beats(2), 0),
-            (beats(2), beats(4), BAR + BAR / 2)
+            (Beats::ZERO, beats(2), Offset::Frames(0)),
+            (beats(2), beats(4), Offset::Frames(BAR + BAR / 2))
         ]
     );
 

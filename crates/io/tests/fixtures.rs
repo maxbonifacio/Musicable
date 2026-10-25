@@ -17,12 +17,13 @@ use std::path::{Path, PathBuf};
 
 use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
 use musicable_model::automation::{self, Lane};
-use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
+use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Offset, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth, utility};
-use musicable_model::param::{ParamAddress, ParamSpec};
+use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
     TestTone, Track, TrackId, TrackKind,
@@ -43,6 +44,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("built-in", built_in()),
         ("automation", automation()),
         ("workspace", workspace()),
+        ("warping", warping()),
     ]
 }
 
@@ -275,7 +277,7 @@ fn clips() -> Project {
     first.fade_out = Beats::new(1);
     let first = project.new_clip("Take 1", beats(0, 8), ClipContent::Audio(first));
     let mut second = AudioClip::new("Audio/Drums take 2.flac");
-    second.offset = 48_000;
+    second.offset = Offset::Frames(48_000);
     second.gain = 0.5;
     second.fade_in = Beats::new(1);
     second.fade_out = Beats::from_ratio(1, 3);
@@ -443,7 +445,7 @@ fn recording() -> Project {
     let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
     let audio = |file: &str, offset| {
         let mut audio = AudioClip::new(file);
-        audio.offset = offset;
+        audio.offset = Offset::Frames(offset);
         ClipContent::Audio(audio)
     };
 
@@ -729,6 +731,88 @@ fn automation() -> Project {
             &[(4.0, 4.0), (4.0, 9.0)],
         ),
     ];
+    project
+}
+
+/// Warping, from version 11: a loop warped with one marker at a tempo of
+/// its own; a vocal with markers that slow it down and speed it up, from
+/// before its own time's zero, starting before its first marker, with a
+/// gain curve that starts before it too and steps up to the top; the
+/// slowest and fastest tempos, and markers as far in as a file reaches; an
+/// unwarped clip with a gain curve in its file's seconds; and a warped take.
+fn warping() -> Project {
+    let mut project = Project::new();
+    project.tempo.set_tempo(128.0);
+    let drums = project.add_track("Drums", TrackKind::Audio);
+    let vocals = project.add_track("Vocals", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let marker = |frame, beat| WarpMarker { frame, beat };
+    let point = |at, value| automation::Point::new(at, value);
+    let warped = |file: &str, offset, warp| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = Offset::Beats(offset);
+        audio.warp = Some(warp);
+        audio
+    };
+
+    let breaks = warped(
+        "Loops/Break 120 BPM.wav",
+        Beats::ZERO,
+        Warp::new(0, Beats::ZERO, 120.0),
+    );
+    let breaks = project.new_clip("Break", beats(0, 8), ClipContent::Audio(breaks));
+    let slowest = warped(
+        "Pad.wav",
+        Beats::new(-2),
+        Warp::new(MAX_TICKS as u64, Beats::from_ticks(MAX_TICKS), Warp::MIN_TEMPO),
+    );
+    let slowest = project.new_clip("Slowest", beats(8, 16), ClipContent::Audio(slowest));
+    let fastest = warped(
+        "Hats.wav",
+        Beats::from_ticks(-MAX_TICKS),
+        Warp::new(12_345, Beats::from_ticks(-MAX_TICKS), Warp::MAX_TEMPO),
+    );
+    let fastest = project.new_clip("Fastest", beats(16, 17), ClipContent::Audio(fastest));
+    project.track_mut(drums).unwrap().clips = vec![breaks, slowest, fastest];
+
+    let mut vocal = warped(
+        "Vocal.wav",
+        Beats::from_ratio(-1, 4),
+        Warp {
+            markers: vec![
+                marker(1_000, Beats::from_ratio(1, 2)),
+                marker(48_000, Beats::new(1)),
+                marker(60_000, Beats::from_ratio(10, 3)),
+            ],
+            ..Warp::new(0, Beats::ZERO, 90.0)
+        },
+    );
+    vocal.gain = 0.5;
+    vocal.fade_in = Beats::from_ratio(1, 8);
+    vocal.set_lane(
+        ClipParam::Gain,
+        vec![
+            point(Beats::from_ratio(-1, 2), 0.0),
+            point(Beats::new(1), 1.0),
+            point(Beats::new(1), ParamSpec::CLIP_GAIN_MAX),
+        ],
+    );
+    let vocal = project.new_clip("Vocal", beats(4, 8), ClipContent::Audio(vocal));
+    let mut take = AudioClip::new("Vocal.wav");
+    take.offset = Offset::Frames(96_000);
+    take.set_lane(
+        ClipParam::Gain,
+        vec![point(Beats::new(2), 1.0), point(Beats::new(4), 0.0)],
+    );
+    let take = project.new_clip("Vocal", beats(8, 12), ClipContent::Audio(take));
+    let mut first = project.new_take("Take 1");
+    let looped = warped("Vocal.wav", Beats::new(1), Warp::new(0, Beats::ZERO, 64.5));
+    first
+        .clips
+        .push(project.new_clip("Vocal", beats(4, 12), ClipContent::Audio(looped)));
+    let track = project.track_mut(vocals).unwrap();
+    track.clips = vec![vocal, take];
+    track.takes = vec![first];
     project
 }
 

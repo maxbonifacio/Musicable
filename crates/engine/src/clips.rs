@@ -6,28 +6,50 @@
 use std::collections::BTreeMap;
 use std::f64::consts::FRAC_PI_2;
 
-use musicable_model::clip::{self, Clip, ClipContent, ClipId, Controller, Dimension};
-use musicable_model::time::Beats;
+use musicable_model::automation::Point;
+use musicable_model::clip::{self, Clip, ClipContent, ClipId, Controller, Dimension, Offset};
+use musicable_model::param::{ClipParam, Scale};
+use musicable_model::time::{Beats, TempoMap};
+use musicable_model::warp::Segment;
 
-use crate::media::Source;
+use crate::media::{CHUNK, Source};
 use crate::resample::Resampler;
 use crate::{AudioMut, EngineConfig, Inputs, Node, NoteEvent, NoteId, Notes, ProcessContext};
+
+/// How many times a warped clip's resampler widens its sinc at most, for a
+/// file that plays faster than the device's rate: up to three octaves up,
+/// its cutoff falls with the speed, and beyond, what's above the cutoff
+/// folds back.
+const WIDEST: f64 = 8.0;
+
+/// How close to the device's rate a warped clip's file has to play to play
+/// sample for sample: within a frame over a billion of them, six hours at
+/// 48 kHz.
+const SAME_SPEED: f64 = 1e-9;
 
 /// Plays a track's audio clips, added to what comes into it, such as the
 /// track's test tone.
 ///
-/// A clip plays its file at the file's own speed, from the frame it starts
-/// at in the file, for as long as the clip lasts. A file at the device's
-/// sample rate plays sample for sample; one at another rate is resampled
-/// (see `resample.rs`). Mono files play in both channels, and files with
-/// more than two play their first two. Fades are equal-power, so where one
-/// clip fades out over the same frames another fades in, they crossfade at
-/// constant power. A clip without a source, such as one whose file is
-/// missing, is silent.
+/// An unwarped clip plays its file at the file's own speed, from the frame
+/// it starts at in the file, for as long as the clip lasts. A warped clip
+/// follows its warp (see [`warp`](musicable_model::warp)): the song's beats
+/// move its own time, and its markers say which frame of the file plays at
+/// each beat of that, so the file speeds up and slows down with the tempo.
+/// In Re-Pitch, the file is resampled at the speed it plays at, so its pitch
+/// follows, as on a turntable. A file that plays at the device's sample
+/// rate plays sample for sample, and anything else is resampled (see
+/// `resample.rs`). Mono files play in both channels, and files with more
+/// than two play their first two.
+///
+/// A clip's gain follows its Gain curve, in its own time, where it has
+/// one. Fades are equal-power, so where one clip fades out over the same
+/// frames another fades in, they crossfade at constant power. A clip
+/// without a source, such as one whose file is missing, is silent.
 ///
 /// Clips that stream tell their [`Stream`](crate::media::Stream) where
 /// they'll read next every block, playing or not, and where they'll read
-/// after the loop jumps back.
+/// after the loop jumps back, and again before each read of a block too
+/// long for the stream to hold at once, as an offline render's can be.
 #[derive(Debug, Default)]
 pub struct AudioClips {
     /// In order of start, then id.
@@ -37,10 +59,14 @@ pub struct AudioClips {
     reach: Vec<Beats>,
     /// The clips that stream.
     streams: Vec<usize>,
-    /// One clip's input for one block, a channel after another.
+    /// The frames of the file one read takes in, at most.
+    room: usize,
+    /// One read's frames, a channel after another: `room` for each of two.
     input: Vec<f32>,
     /// The resampler's weights for one frame.
     weights: Vec<f32>,
+    /// The gain on each frame of one read, where it moves.
+    gains: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -51,12 +77,205 @@ struct Placed {
     /// Where the fade in ends and where the fade out starts.
     fade_in: Beats,
     fade_out: Beats,
-    /// The file frame the clip starts at.
-    offset: u64,
     gain: f32,
+    /// The clip's gain where it has a curve for it.
+    gain_curve: Option<Curve>,
+    time: Time,
     source: Option<Source>,
-    /// For a file that isn't at the device's rate, once prepared.
+    /// For an unwarped file that isn't at the device's rate, once prepared.
     resampler: Option<Resampler>,
+    /// Where the clip reads after the loop jumps back, as hinted for this
+    /// block.
+    after_loop: Option<u64>,
+}
+
+/// How a clip's file follows the song.
+#[derive(Debug)]
+enum Time {
+    /// At its own speed, from frame `offset` at the clip's start.
+    Unwarped { offset: u64 },
+    /// Warped: the clip's own time is the song's beats plus `shift`, and
+    /// each segment plays at its own speed, from its marker. A clip
+    /// without a source has none.
+    Warped { shift: Beats, segments: Vec<Segment> },
+}
+
+/// A run of song frames over which a clip reads its file at one speed: all
+/// of an unwarped clip, or where one of a warped clip's segments plays at
+/// one of the song's tempos.
+#[derive(Debug, Clone, Copy)]
+struct Piece {
+    /// The song frames it covers, from `from` up to `to`. Where it starts
+    /// places its frames, however the blocks fall.
+    from: i64,
+    to: i64,
+    /// The file's position on `from`, fractional, and how far it moves on
+    /// each song frame.
+    at: f64,
+    step: f64,
+    /// The clip's own time on `from`, and how far it moves on each song
+    /// frame, for its curves.
+    own: f64,
+    own_step: f64,
+}
+
+impl Piece {
+    /// The file's position on song frame `frame`.
+    fn position(&self, frame: i64) -> f64 {
+        self.at + (frame - self.from) as f64 * self.step
+    }
+
+    /// The clip's own time on song frame `frame`.
+    fn own_time(&self, frame: i64) -> f64 {
+        self.own + (frame - self.from) as f64 * self.own_step
+    }
+}
+
+/// How a clip reads its file over a piece.
+#[derive(Debug, Clone, Copy)]
+enum Reading {
+    /// Sample for sample: song frame `n` plays the file's frame `n + by`.
+    Copy { by: i64 },
+    Resample(Resampler),
+}
+
+impl Placed {
+    /// Calls `each` with the pieces that cover the song's frames from
+    /// `from` up to `to`, in order, with `tempo` placing the beats at
+    /// `rate`. They can start before `from` and end after `to`.
+    fn pieces(&self, tempo: &TempoMap, rate: u32, from: i64, to: i64, mut each: impl FnMut(Piece)) {
+        let (shift, segments) = match &self.time {
+            Time::Unwarped { offset } => {
+                // Its own time is the file's seconds.
+                let file_rate = f64::from(self.source.as_ref().map_or(rate, Source::sample_rate));
+                let step = self.resampler.map_or(1.0, |r| r.step());
+                let at = *offset as f64;
+                each(Piece {
+                    from: tempo.frame_at(self.start, rate),
+                    to: i64::MAX,
+                    at,
+                    step,
+                    own: at / file_rate,
+                    own_step: step / file_rate,
+                });
+                return;
+            }
+            Time::Warped { shift, segments } if !segments.is_empty() => (*shift, segments),
+            Time::Warped { .. } => return,
+        };
+        // The first song frame on or after `at`: frames from there on
+        // count as after it, as `TempoMap::beats_at` counts them.
+        let after = |at: Beats| tempo.sample_at(at, rate).ceil() as i64;
+        let tempos = tempo.tempos();
+        let mut t = tempos.partition_point(|c| after(c.at) <= from).saturating_sub(1);
+        let mut s = segments[1..].partition_point(|g| after(g.beat - shift) <= from);
+        let mut frame = from;
+        while frame < to {
+            let (change, segment) = (tempos[t], segments[s]);
+            let tempo_to = tempos.get(t + 1).map_or(i64::MAX, |c| after(c.at));
+            let segment_to = segments.get(s + 1).map_or(i64::MAX, |g| after(g.beat - shift));
+            // The first segment plays the file before its marker too.
+            let segment_from = if s == 0 {
+                i64::MIN
+            } else {
+                after(segment.beat - shift)
+            };
+            let piece_from = after(change.at).max(segment_from);
+            let piece_to = tempo_to.min(segment_to);
+            if piece_from < piece_to {
+                let beats_per_frame = change.bpm / (60.0 * f64::from(rate));
+                let since = piece_from as f64 - tempo.sample_at(change.at, rate);
+                let own = change.at + shift;
+                let into = (own - segment.beat).to_f64() + since * beats_per_frame;
+                each(Piece {
+                    from: piece_from,
+                    to: piece_to,
+                    at: segment.frame as f64 + into * segment.frames_per_beat,
+                    step: beats_per_frame * segment.frames_per_beat,
+                    own: own.to_f64() + since * beats_per_frame,
+                    own_step: beats_per_frame,
+                });
+            }
+            frame = piece_to;
+            if piece_to == tempo_to {
+                t += 1;
+            }
+            if piece_to == segment_to {
+                s += 1;
+            }
+        }
+    }
+
+    /// How the clip reads its file over `piece`.
+    fn reading(&self, piece: &Piece) -> Reading {
+        let copy = Reading::Copy {
+            by: piece.at.round() as i64 - piece.from,
+        };
+        match (&self.time, self.resampler) {
+            (Time::Unwarped { .. }, None) => copy,
+            (Time::Unwarped { .. }, Some(resampler)) => Reading::Resample(resampler),
+            (Time::Warped { .. }, _) if (piece.step - 1.0).abs() < SAME_SPEED => copy,
+            (Time::Warped { .. }, _) => {
+                Reading::Resample(Resampler::with_step_widened_at_most(piece.step, WIDEST))
+            }
+        }
+    }
+
+    /// Where the clip's first read for song frame `frame` starts in its
+    /// file.
+    fn read_start(&self, tempo: &TempoMap, rate: u32, frame: i64) -> i64 {
+        let mut start = 0;
+        self.pieces(tempo, rate, frame, frame + 1, |piece| {
+            start = match self.reading(&piece) {
+                Reading::Copy { by } => frame + by,
+                Reading::Resample(r) => piece.position(frame).floor() as i64 - r.reach() as i64 + 1,
+            };
+        });
+        start
+    }
+
+    /// The clip's gain on song frame `frame` of `piece`, before its fades.
+    fn gain_at(&self, piece: &Piece, frame: i64) -> f32 {
+        match &self.gain_curve {
+            Some(curve) => curve.value_at(piece.own_time(frame)) as f32,
+            None => self.gain,
+        }
+    }
+}
+
+/// One of a clip's curves, in its own time.
+#[derive(Debug)]
+struct Curve {
+    /// At least one, in order: where each falls in the clip's own time,
+    /// and its value.
+    points: Vec<(f64, f64)>,
+    scale: Scale,
+}
+
+impl Curve {
+    fn new(points: &[Point], scale: Scale) -> Option<Self> {
+        (!points.is_empty()).then(|| Self {
+            points: points.iter().map(|p| (p.at.to_f64(), p.value)).collect(),
+            scale,
+        })
+    }
+
+    /// The value at `at` in the clip's own time, moving evenly in the scale
+    /// between points, as the model's
+    /// [`ClipLane::value_at`](musicable_model::clip::ClipLane::value_at)
+    /// works it out: at a step, the value after it.
+    fn value_at(&self, at: f64) -> f64 {
+        let after = self.points.partition_point(|p| p.0 <= at);
+        match (after.checked_sub(1), self.points.get(after)) {
+            (Some(before), Some(&(to, next))) => {
+                let (from, value) = self.points[before];
+                self.scale.mix(value, next, (at - from) / (to - from))
+            }
+            (Some(before), None) => self.points[before].1,
+            (None, Some(&(_, next))) => next,
+            (None, None) => unreachable!("a curve has a point"),
+        }
+    }
 }
 
 impl AudioClips {
@@ -69,16 +288,34 @@ impl AudioClips {
         let ClipContent::Audio(audio) = &clip.content else {
             return;
         };
+        let time = match (&audio.warp, audio.offset) {
+            (Some(warp), Offset::Beats(offset)) => Time::Warped {
+                shift: offset - clip.start,
+                segments: source
+                    .as_ref()
+                    .map(|s| warp.segments(s.sample_rate()).collect())
+                    .unwrap_or_default(),
+            },
+            (_, offset) => Time::Unwarped {
+                offset: offset.frames().unwrap_or(0),
+            },
+        };
+        let gain = ClipParam::Gain;
+        let gain_curve = audio
+            .lane(gain)
+            .and_then(|lane| Curve::new(&lane.points, gain.spec().scale));
         self.clips.push(Placed {
             id: clip.id,
             start: clip.start,
             end: clip.end(),
             fade_in: clip.start + audio.fade_in,
             fade_out: clip.end() - audio.fade_out,
-            offset: audio.offset,
             gain: audio.gain,
+            gain_curve,
+            time,
             source,
             resampler: None,
+            after_loop: None,
         });
     }
 
@@ -89,7 +326,7 @@ impl AudioClips {
 
     /// Tells each stream where its clip reads next, from where the block
     /// starts.
-    fn hint(&self, ctx: &ProcessContext<'_>) {
+    fn hint(&mut self, ctx: &ProcessContext<'_>) {
         let (tempo, rate) = (ctx.tempo, ctx.sample_rate);
         let first = ctx.transport.position as i64;
         let looping = ctx.transport.looping.map(|region| {
@@ -97,7 +334,7 @@ impl AudioClips {
             (start, tempo.frame_at(region.end, rate))
         });
         for &i in &self.streams {
-            let clip = &self.clips[i];
+            let clip = &mut self.clips[i];
             let Some(Source::Stream(stream)) = &clip.source else {
                 continue;
             };
@@ -105,17 +342,7 @@ impl AudioClips {
                 tempo.frame_at(clip.start, rate),
                 tempo.frame_at(clip.end, rate),
             );
-            // Where the clip's first read for a frame starts.
-            let read_at = |frame: i64| {
-                let (position, reach) = match &clip.resampler {
-                    None => (clip.offset as i64 + (frame - start), 1),
-                    Some(r) => {
-                        let x = clip.offset as f64 + (frame - start) as f64 * r.step();
-                        (x.floor() as i64, r.reach() as i64)
-                    }
-                };
-                (position - reach + 1).max(0) as u64
-            };
+            let read_at = |frame: i64| clip.read_start(tempo, rate, frame).max(0) as u64;
             let next = match first {
                 f if start <= f && f < end => read_at(f),
                 _ => read_at(start),
@@ -124,6 +351,7 @@ impl AudioClips {
                 .filter(|&(from, to)| from < to && from < end && start < to)
                 .map(|(from, _)| read_at(from.max(start)));
             stream.hint(next, after_loop);
+            clip.after_loop = after_loop;
         }
     }
 
@@ -145,55 +373,118 @@ impl AudioClips {
             return;
         }
         let fades = Fades {
-            gain: clip.gain,
             fade_in: (start, tempo.frame_at(clip.fade_in, rate)),
             fade_out: (tempo.frame_at(clip.fade_out, rate), end),
         };
-        let frames = (to - from) as usize;
-        let at = (from - first) as usize;
-        let channels = source.channels().min(2);
-        match &clip.resampler {
-            None => {
-                let input = &mut self.input[..channels * frames];
-                read(source, clip.offset as i64 + (from - start), input, channels);
-                let flat = fades.flat(from, to);
-                for c in 0..output.channels() {
-                    let input = &input[c.min(channels - 1) * frames..][..frames];
-                    let out = &mut output.channel_mut(c)[at..at + frames];
-                    match flat {
-                        Some(gain) => out.iter_mut().zip(input).for_each(|(o, &x)| *o += x * gain),
-                        None => {
-                            for (k, (o, &x)) in out.iter_mut().zip(input).enumerate() {
-                                *o += x * fades.at(from + k as i64);
+        let mut reader = Reader {
+            source,
+            channels: source.channels().min(2),
+            after_loop: clip.after_loop,
+            room: self.room,
+            input: &mut self.input,
+        };
+        let (room, channels) = (reader.room, reader.channels);
+        let (weights, gains) = (&mut self.weights, &mut self.gains);
+        clip.pieces(tempo, rate, from, to, |piece| {
+            let (from, to) = (from.max(piece.from), to.min(piece.to));
+            if from >= to {
+                return;
+            }
+            // The clip's gain on each frame, with its fades.
+            let gain = |frame: i64| clip.gain_at(&piece, frame) * fades.at(frame);
+            let steady = (clip.gain_curve.is_none() && fades.flat(from, to)).then_some(clip.gain);
+            match clip.reading(&piece) {
+                Reading::Copy { by } => {
+                    let mut frame = from;
+                    while frame < to {
+                        let frames = ((to - frame) as usize).min(room);
+                        let input = reader.read(frame + by, frames);
+                        let gains = &mut gains[..frames];
+                        if steady.is_none() {
+                            for (k, g) in gains.iter_mut().enumerate() {
+                                *g = gain(frame + k as i64);
                             }
                         }
+                        let at = (frame - first) as usize;
+                        for c in 0..output.channels() {
+                            let input = &input[c.min(channels - 1) * frames..][..frames];
+                            let out = &mut output.channel_mut(c)[at..at + frames];
+                            match steady {
+                                Some(g) => out.iter_mut().zip(input).for_each(|(o, &x)| *o += x * g),
+                                None => {
+                                    let samples = out.iter_mut().zip(input).zip(gains.iter());
+                                    samples.for_each(|((o, &x), &g)| *o += x * g);
+                                }
+                            }
+                        }
+                        frame += frames as i64;
+                    }
+                }
+                Reading::Resample(resampler) => {
+                    let reach = resampler.reach() as i64;
+                    let weights = &mut weights[..2 * reach as usize];
+                    // The frames of the file that `count` frames from `frame`
+                    // read, from the first.
+                    let span = |frame: i64, count: i64, first_in: i64| {
+                        (piece.position(frame + count - 1).floor() as i64 + reach - first_in + 1)
+                            as usize
+                    };
+                    let mut frame = from;
+                    while frame < to {
+                        let first_in = piece.position(frame).floor() as i64 - reach + 1;
+                        // As many frames as the input has room for.
+                        let fit = (room as f64 - 2.0 * reach as f64 - 2.0) / piece.step;
+                        let mut count = (fit.floor() as i64 + 1).clamp(1, to - frame);
+                        while count > 1 && span(frame, count, first_in) > room {
+                            count -= 1;
+                        }
+                        let span = span(frame, count, first_in);
+                        let input = reader.read(first_in, span);
+                        for n in frame..frame + count {
+                            let x = piece.position(n);
+                            let base = (resampler.weights(x, weights) - first_in) as usize;
+                            let gain = steady.unwrap_or_else(|| gain(n));
+                            let mut sums = [0.0f32; 2];
+                            for (c, sum) in sums.iter_mut().enumerate().take(channels) {
+                                let input = &input[c * span + base..][..weights.len()];
+                                *sum = input.iter().zip(weights.iter()).map(|(x, w)| x * w).sum();
+                            }
+                            let at = (n - first) as usize;
+                            for c in 0..output.channels() {
+                                output.channel_mut(c)[at] += sums[c.min(channels - 1)] * gain;
+                            }
+                        }
+                        frame += count;
                     }
                 }
             }
-            Some(resampler) => {
-                let position =
-                    |frame: i64| clip.offset as f64 + (frame - start) as f64 * resampler.step();
-                let reach = resampler.reach() as i64;
-                let first_in = position(from).floor() as i64 - reach + 1;
-                let span = (position(to - 1).floor() as i64 + reach - first_in + 1) as usize;
-                let input = &mut self.input[..channels * span];
-                read(source, first_in, input, channels);
-                let weights = &mut self.weights[..2 * reach as usize];
-                for k in 0..frames {
-                    let frame = from + k as i64;
-                    let base = (resampler.weights(position(frame), weights) - first_in) as usize;
-                    let gain = fades.at(frame);
-                    let mut sums = [0.0f32; 2];
-                    for (c, sum) in sums.iter_mut().enumerate().take(channels) {
-                        let input = &input[c * span + base..][..weights.len()];
-                        *sum = input.iter().zip(weights.iter()).map(|(x, w)| x * w).sum();
-                    }
-                    for c in 0..output.channels() {
-                        output.channel_mut(c)[at + k] += sums[c.min(channels - 1)] * gain;
-                    }
-                }
-            }
+        });
+    }
+}
+
+/// Reads a clip's file a run of frames at a time.
+struct Reader<'a> {
+    source: &'a Source,
+    /// The channels it reads: one or two.
+    channels: usize,
+    after_loop: Option<u64>,
+    room: usize,
+    input: &'a mut [f32],
+}
+
+impl Reader<'_> {
+    /// The file's `frames` frames from `start`, a channel after another: at
+    /// most `room`. A stream is told first that the clip reads there, so
+    /// one that waits for the disk loads them, however far into a long
+    /// block they are.
+    fn read(&mut self, start: i64, frames: usize) -> &[f32] {
+        debug_assert!(frames <= self.room, "a read fits");
+        if let Source::Stream(stream) = self.source {
+            stream.hint(start.max(0) as u64, self.after_loop);
         }
+        let input = &mut self.input[..self.channels * frames];
+        read(self.source, start, input, self.channels);
+        input
     }
 }
 
@@ -234,10 +525,9 @@ pub(crate) fn read(source: &Source, start: i64, out: &mut [f32], channels: usize
     }
 }
 
-/// A clip's gain and fades, in song frames.
+/// A clip's fades, in song frames.
 #[derive(Debug, Clone, Copy)]
 struct Fades {
-    gain: f32,
     /// The fade in's first frame, and the frame after its last.
     fade_in: (i64, i64),
     /// The same for the fade out.
@@ -245,8 +535,9 @@ struct Fades {
 }
 
 impl Fades {
-    /// The clip's gain on `frame`: a quarter sine from silence up to full
-    /// over the fade in, and down over the fade out.
+    /// How far the fades let the clip through on `frame`: a quarter sine
+    /// from silence up to full over the fade in, and down over the fade
+    /// out.
     fn at(&self, frame: i64) -> f32 {
         let mut level = 1.0;
         let (start, end) = self.fade_in;
@@ -257,14 +548,14 @@ impl Fades {
         if frame >= start && start < end {
             level *= (FRAC_PI_2 * (end - frame) as f64 / (end - start) as f64).sin();
         }
-        self.gain * level as f32
+        level as f32
     }
 
-    /// The gain, if no fade touches the frames from `from` to `to`.
-    fn flat(&self, from: i64, to: i64) -> Option<f32> {
+    /// Whether no fade touches the frames from `from` to `to`.
+    fn flat(&self, from: i64, to: i64) -> bool {
         let fading_in = from < self.fade_in.1 && self.fade_in.0 < self.fade_in.1;
         let fading_out = to > self.fade_out.0 && self.fade_out.0 < self.fade_out.1;
-        (!fading_in && !fading_out).then_some(self.gain)
+        !fading_in && !fading_out
     }
 }
 
@@ -283,20 +574,33 @@ impl Node for AudioClips {
         self.streams = (0..self.clips.len())
             .filter(|&i| matches!(self.clips[i].source, Some(Source::Stream(_))))
             .collect();
-        let (mut input, mut weights) = (config.max_block, 0);
+        let mut reach = 0;
         for clip in &mut self.clips {
             let rate = clip.source.as_ref().map(Source::sample_rate);
-            clip.resampler = rate
-                .filter(|&rate| rate != config.sample_rate)
-                .map(|rate| Resampler::new(rate, config.sample_rate));
-            if let Some(r) = &clip.resampler {
-                let span = ((config.max_block - 1) as f64 * r.step()).ceil() as usize;
-                input = input.max(span + 2 * r.reach() + 2);
-                weights = weights.max(2 * r.reach());
-            }
+            clip.resampler = match &clip.time {
+                Time::Unwarped { .. } => rate
+                    .filter(|&rate| rate != config.sample_rate)
+                    .map(|rate| Resampler::new(rate, config.sample_rate)),
+                Time::Warped { .. } => None,
+            };
+            reach = reach.max(match (&clip.time, &clip.resampler) {
+                (_, Some(r)) => r.reach(),
+                (Time::Warped { segments, .. }, None) if !segments.is_empty() => {
+                    // Its resamplers are made as it plays: the kernel they
+                    // share is made now, off the audio thread.
+                    let _ = Resampler::with_step(1.0);
+                    Resampler::most_reach(WIDEST)
+                }
+                _ => 0,
+            });
         }
-        self.input = vec![0.0; 2 * input];
-        self.weights = vec![0.0; weights];
+        // Room for a block's reads at up to twice the device's rate, but no
+        // more than a stream holds at once.
+        let room = (2 * config.max_block + 2 * reach + 2).min(CHUNK as usize);
+        self.room = room.max(2 * reach + 3);
+        self.input = vec![0.0; 2 * self.room];
+        self.weights = vec![0.0; 2 * reach];
+        self.gains = vec![0.0; self.room];
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
@@ -760,6 +1064,7 @@ mod tests {
 
     use musicable_model::clip::{AudioClip, MidiClip, Note, Point};
     use musicable_model::time::{TempoMap, TimeSignature};
+    use musicable_model::warp::{Warp, WarpMarker};
 
     use super::*;
     use crate::media::AudioData;
@@ -1287,13 +1592,22 @@ mod tests {
     /// Plays `player` from frame `from` for `frames` frames, in blocks of
     /// up to `block`, and returns the left and right channels.
     fn audio(player: AudioClips, from: u64, frames: usize, block: usize) -> [Vec<f32>; 2] {
-        let mut player = player;
+        audio_at(&TempoMap::default(), player, from, frames, block)
+    }
+
+    /// Plays `player` as [`audio`] does, at `tempo`.
+    fn audio_at(
+        tempo: &TempoMap,
+        mut player: AudioClips,
+        from: u64,
+        frames: usize,
+        block: usize,
+    ) -> [Vec<f32>; 2] {
         let config = EngineConfig {
             max_block: block,
             ..CONFIG
         };
         player.prepare(&config);
-        let tempo = TempoMap::default();
         let mut buffer = AudioBuffer::new(2, block);
         let (mut left, mut right) = (Vec::new(), Vec::new());
         while left.len() < frames {
@@ -1307,7 +1621,7 @@ mod tests {
                     position: from + left.len() as u64,
                     ..TransportState::default()
                 },
-                tempo: &tempo,
+                tempo,
                 events: &[],
                 input: crate::AudioRef::empty(n),
                 midi: &[],
@@ -1340,7 +1654,7 @@ mod tests {
     #[test]
     fn audio_clips_play_their_files_sample_for_sample() {
         let mut take = AudioClip::new("take.wav");
-        take.offset = 1000;
+        take.offset = Offset::Frames(1000);
         take.gain = 0.5;
         // From beat 1, for a beat and a half, but the file runs out first.
         let clip = audio_clip(1.0, 1.5, take);
@@ -1437,6 +1751,224 @@ mod tests {
         // However the blocks fall.
         assert_eq!(audio(player(), 0, 40_000, 7)[0], out);
         assert_eq!(audio(player(), 1000, 5000, 64)[0], out[1000..6000]);
+    }
+
+    /// `clip`, an audio clip, warped with `markers` at `tempo`, playing from
+    /// `offset` in its own time.
+    fn warp(mut clip: Clip, markers: &[(u64, f64)], tempo: f64, offset: f64) -> Clip {
+        let ClipContent::Audio(audio) = &mut clip.content else {
+            unreachable!("an audio clip");
+        };
+        let markers = markers.iter().map(|&(frame, beat)| WarpMarker {
+            frame,
+            beat: beats(beat),
+        });
+        audio.warp = Some(Warp {
+            markers: markers.collect(),
+            ..Warp::new(0, Beats::ZERO, tempo)
+        });
+        audio.offset = Offset::Beats(beats(offset));
+        clip
+    }
+
+    /// Where `clip`'s pieces say its file plays on song frame `frame`, and
+    /// how fast.
+    fn plays(player: &AudioClips, tempo: &TempoMap, frame: i64) -> (f64, f64) {
+        let mut at = None;
+        player.clips[0].pieces(tempo, 48_000, frame, frame + 1, |piece| {
+            assert!(piece.from <= frame && frame < piece.to);
+            at = Some((piece.position(frame), piece.step));
+        });
+        at.expect("a piece")
+    }
+
+    #[test]
+    fn warped_clips_play_where_their_markers_say() {
+        // Twice the song's speed for half a beat of the clip's own time,
+        // then at it for a beat, then at a third of it, from an eighth of a
+        // beat in.
+        let markers = [(0, 0.0), (24_000, 0.5), (48_000, 1.5), (60_000, 3.0)];
+        let clip = warp(
+            audio_clip(2.0, 3.0, AudioClip::new("breaks.wav")),
+            &markers,
+            120.0,
+            0.125,
+        );
+        let mut player = AudioClips::new().with_clip(&clip, Some(counting(72_000, 48_000)));
+        player.prepare(&CONFIG);
+        let tempo = TempoMap::default();
+        let frame = |beat: f64| (beat * BEAT as f64) as i64;
+        assert_eq!(plays(&player, &tempo, frame(2.0)), (6_000.0, 2.0));
+        assert_eq!(plays(&player, &tempo, frame(2.375)), (24_000.0, 1.0));
+        assert_eq!(plays(&player, &tempo, frame(3.0)), (39_000.0, 1.0));
+        let (at, step) = plays(&player, &tempo, frame(4.875));
+        assert!((at - 60_000.0).abs() < 1e-6 && (step - 1.0 / 3.0).abs() < 1e-12);
+        // Before the first marker, at the first segment's speed.
+        assert_eq!(plays(&player, &tempo, frame(1.0)), (-42_000.0, 2.0));
+        let clip = &player.clips[0];
+        let mut readings = Vec::new();
+        clip.pieces(&tempo, 48_000, frame(2.0), frame(5.0), |piece| {
+            readings.push(match clip.reading(&piece) {
+                Reading::Copy { by } => format!("copy {by}"),
+                Reading::Resample(r) => format!("resample {:.3}", r.step()),
+            });
+        });
+        assert_eq!(readings, ["resample 2.000", "copy -33000", "resample 0.333"]);
+    }
+
+    #[test]
+    fn warped_clips_follow_the_songs_tempo_changes() {
+        let mut tempo = TempoMap::default();
+        tempo.insert_tempo(beats(2.0), 60.0);
+        // At 120 BPM, as the song is until beat 2.
+        let clip = warp(
+            audio_clip(0.0, 4.0, AudioClip::new("loop.wav")),
+            &[(0, 0.0)],
+            120.0,
+            0.0,
+        );
+        let mut player = AudioClips::new().with_clip(&clip, Some(counting(200_000, 48_000)));
+        player.prepare(&CONFIG);
+        assert_eq!(plays(&player, &tempo, 24_000), (24_000.0, 1.0));
+        // A beat at 60 BPM is a second: twice as many frames.
+        assert_eq!(plays(&player, &tempo, 48_000), (48_000.0, 0.5));
+        assert_eq!(plays(&player, &tempo, 96_000), (72_000.0, 0.5));
+        // Sample for sample until the change, then at half speed.
+        let [left, _] = audio_at(&tempo, player, 0, 100_000, 64);
+        assert_eq!(left[..48_000], (0..48_000).map(|i| i as f32).collect::<Vec<_>>()[..]);
+        for (i, &s) in left.iter().enumerate().skip(48_100).step_by(997) {
+            let expected = 48_000.0 + (i - 48_000) as f32 / 2.0;
+            assert!((s - expected).abs() < 0.5, "frame {i}: {s}");
+        }
+    }
+
+    #[test]
+    fn a_clip_warped_to_the_songs_tempo_plays_as_it_would_unwarped() {
+        let mut take = AudioClip::new("take.wav");
+        take.offset = Offset::Frames(1000);
+        take.gain = 0.5;
+        let unwarped = audio_clip(1.0, 1.5, take);
+        // The marker pins frame 1,000 to the clip's start.
+        let warped = warp(unwarped.clone(), &[(1000, 0.0)], 120.0, 0.0);
+        for block in [1, 64, 1000] {
+            let play = |clip: &Clip| {
+                let player = AudioClips::new().with_clip(clip, Some(counting(20_000, 48_000)));
+                audio(player, 0, 70_000, block)
+            };
+            assert_eq!(play(&warped), play(&unwarped), "blocks of {block}");
+        }
+    }
+
+    #[test]
+    fn warped_clips_are_resampled_to_their_speed_however_the_blocks_fall() {
+        let sine = |frequency: f64, i: usize| {
+            (std::f64::consts::TAU * frequency * i as f64 / 48_000.0).sin() as f32
+        };
+        let samples = (0..100_000).map(|i| sine(1_000.0, i)).collect();
+        let source = Source::Whole(Arc::new(AudioData::new(48_000, vec![samples])));
+        // At 60 BPM in a song at 120 the file plays twice as fast, an
+        // octave up, and at 240, half as fast, an octave down.
+        for (tempo, frequency) in [(60.0, 2_000.0), (240.0, 500.0)] {
+            let clip = warp(
+                audio_clip(0.0, 3.0, AudioClip::new("sine.wav")),
+                &[(0, 0.0)],
+                tempo,
+                0.0,
+            );
+            let player = || AudioClips::new().with_clip(&clip, Some(source.clone()));
+            let [out, _] = audio(player(), 0, 40_000, 64);
+            for (i, &s) in out.iter().enumerate().skip(300) {
+                let e = (s - sine(frequency, i)).abs();
+                assert!(e < 2e-3, "{tempo} BPM, frame {i}: off by {e}");
+            }
+            assert_eq!(audio(player(), 0, 40_000, 7)[0], out);
+            assert_eq!(audio(player(), 0, 40_000, 1000)[0], out);
+            assert_eq!(audio(player(), 1000, 5000, 64)[0], out[1000..6000]);
+        }
+    }
+
+    #[test]
+    fn gain_curves_follow_the_clips_own_time() {
+        let dc = || Source::Whole(Arc::new(AudioData::new(48_000, vec![vec![1.0; 200_000]])));
+        let point = musicable_model::automation::Point::new;
+        let rising = vec![point(beats(0.0), 0.0), point(beats(1.0), 1.0)];
+        // Halfway up a fader's taper is a sixteenth: the fourth root spreads
+        // evenly.
+        let halfway = 0.0625;
+        // Unwarped, the clip's own time is the file's seconds: from half a
+        // second in, it reaches the top half a second later, at the song's
+        // beat 1, and its gain of 0.5 doesn't count.
+        let mut take = AudioClip::new("dc.wav");
+        take.offset = Offset::Frames(24_000);
+        take.gain = 0.5;
+        take.set_lane(ClipParam::Gain, rising.clone());
+        let clip = audio_clip(0.0, 3.0, take);
+        let [out, _] = audio(AudioClips::new().with_clip(&clip, Some(dc())), 0, 48_000, 64);
+        assert_eq!(out[0], halfway);
+        assert_eq!(out[24_000..], [1.0; 24_000]);
+        // Warped, it's in beats: at 60 BPM, a beat of the clip's own time
+        // is two of the song's. Resampled, the file's 1.0 comes through to
+        // within the weights' rounding.
+        let mut loop_ = AudioClip::new("dc.wav");
+        loop_.set_lane(ClipParam::Gain, rising);
+        let clip = warp(audio_clip(0.0, 3.0, loop_), &[(0, 0.0)], 60.0, 0.0);
+        let [out, _] = audio(AudioClips::new().with_clip(&clip, Some(dc())), 0, 72_000, 64);
+        assert_eq!(out[0], 0.0);
+        assert!((out[12_000] - halfway).abs() < 1e-6, "{}", out[12_000]);
+        assert!(out[24_000..].iter().all(|&s| (s - 1.0).abs() < 1e-6));
+    }
+
+    /// Reads `data` as a file on disk would be.
+    struct InMemory(Arc<AudioData>);
+
+    impl crate::media::AudioReader for InMemory {
+        fn channels(&self) -> usize {
+            self.0.channels()
+        }
+
+        fn sample_rate(&self) -> u32 {
+            self.0.sample_rate()
+        }
+
+        fn frames(&self) -> u64 {
+            self.0.frames()
+        }
+
+        fn read(&mut self, start: u64, out: &mut [f32]) -> std::io::Result<usize> {
+            let channels = self.channels();
+            let frames = (out.len() / channels).min(self.frames().saturating_sub(start) as usize);
+            for (i, frame) in out.chunks_exact_mut(channels).take(frames).enumerate() {
+                for (c, sample) in frame.iter_mut().enumerate() {
+                    *sample = self.0.channel(c)[start as usize + i];
+                }
+            }
+            Ok(frames)
+        }
+    }
+
+    #[test]
+    fn long_blocks_read_a_stream_a_piece_at_a_time() {
+        let Source::Whole(data) = counting(400_000, 48_000) else {
+            unreachable!()
+        };
+        // Twice the song's speed: a block of 65,536 frames reads more of the
+        // file than a stream holds at once.
+        let clip = warp(
+            audio_clip(0.5, 6.0, AudioClip::new("long.wav")),
+            &[(1_000, 0.0)],
+            60.0,
+            0.0,
+        );
+        let whole = AudioClips::new().with_clip(&clip, Some(Source::Whole(data.clone())));
+        let expected = audio(whole, 0, 150_000, 64);
+        let streamer = crate::media::Streamer::spawn(true);
+        for block in [65_536, 512] {
+            let stream = streamer.stream(Box::new(InMemory(data.clone())));
+            let player = AudioClips::new().with_clip(&clip, Some(Source::Stream(stream.clone())));
+            let played = audio(player, 0, 150_000, block);
+            assert!(played == expected, "blocks of {block}");
+            assert_eq!(stream.missed(), 0);
+        }
     }
 
     #[test]

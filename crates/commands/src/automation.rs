@@ -3,10 +3,18 @@
 //! overrode by moving a control by hand.
 //!
 //! Each command names its parameter by [`ParamAddress`], which scripts
-//! write as text: "track 3 volume", "master pan", "send 2" or "device 4
-//! param 17" (see [`param_text`](crate::param_text)).
+//! write as text: "track 3 volume", "master pan", "send 2", "device 4
+//! param 17" or "clip 5 gain" (see [`param_text`](crate::param_text)).
+//!
+//! An audio clip's own parameters, such as its gain, have their curves in
+//! the clip, in its own time, which the Sample Editor draws under its
+//! waveform rather than under the track: places on them are in the clip's
+//! own time too, which is in beats while the clip is warped, and in seconds
+//! of its file while it isn't (see
+//! [`AudioClip`](musicable_model::clip::AudioClip)).
 
 use musicable_model::automation::Point;
+use musicable_model::clip::ClipContent;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
 use musicable_model::{Chain, Project, TrackId};
@@ -82,6 +90,11 @@ pub fn register(registry: &mut Registry) {
         |ctx, args| {
             let param: ParamAddress = args.get("param")?;
             let instead_of: Option<ParamAddress> = args.opt("instead_of")?;
+            if let ParamAddress::Clip(..) = param {
+                return Err(CommandError::invalid(
+                    "a clip's parameters have their lane in the Sample Editor",
+                ));
+            }
             let (project, editor) = ctx.document.parts();
             let chain = project.param_chain(param).ok_or_else(|| no_param(param))?;
             let shown = editor.automation.entry(chain).or_default();
@@ -153,7 +166,7 @@ pub fn register(registry: &mut Registry) {
             let param = automatable(ctx, args.get("param")?)?;
             let point = Point::new(args.get("at")?, args.get("value")?);
             let project = ctx.document.project();
-            let mut points = project.lane(param).map(|l| l.points.clone());
+            let mut points = project.lane_points(param).map(<[Point]>::to_vec);
             let mut points = points.take().unwrap_or_default();
             // After any at the same place, so it ends a step there.
             let index = points.partition_point(|p| p.at <= point.at);
@@ -174,10 +187,10 @@ pub fn register(registry: &mut Registry) {
         |ctx, args| {
             let param: ParamAddress = args.get("param")?;
             let (start, end): (Beats, Beats) = (args.get("start")?, args.get("end")?);
-            let Some(lane) = ctx.document.project().lane(param) else {
+            let Some(points) = ctx.document.project().lane_points(param) else {
                 return Ok(Value::None);
             };
-            let mut points = lane.points.clone();
+            let mut points = points.to_vec();
             points.retain(|p| p.at < start || p.at > end);
             let playhead = ctx.transport.playhead();
             ctx.document.transact("Delete Automation Points", |tx| {
@@ -225,9 +238,29 @@ pub fn register(registry: &mut Registry) {
 }
 
 /// Removes the lane of `param`, leaving the parameter with the value its
-/// automation gave it at `playhead`, as Live does, so nothing jumps.
+/// automation gave it at `playhead`, as Live does, so nothing jumps. A
+/// clip's parameter keeps the value at the playhead, or at the clip's edge
+/// nearest it.
 fn clear(tx: &mut crate::Transaction<'_>, param: ParamAddress, playhead: Beats) {
     let project = tx.project();
+    if let ParamAddress::Clip(clip, clip_param) = param {
+        let Some((_, c)) = project.find_clip(clip) else {
+            return;
+        };
+        let ClipContent::Audio(audio) = &c.content else {
+            return;
+        };
+        let Some(lane) = audio.lane(clip_param) else {
+            return;
+        };
+        let rate = tx.editor().sample_rate_of(&audio.file);
+        let at = playhead.clamp(c.start, c.end());
+        let own = c.own_time_at(at, &project.tempo, rate);
+        let value = lane.value_at(Beats::from_f64(own));
+        tx.remove_lane(param);
+        tx.set_param_value(param, value);
+        return;
+    }
     let scale = project.param_scale(param);
     let Some(lane) = project.lane(param) else {
         return;

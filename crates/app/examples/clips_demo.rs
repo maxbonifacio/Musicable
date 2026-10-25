@@ -20,7 +20,7 @@ use std::process::ExitCode;
 
 use musicable_io::audio::{SampleFormat, save_wav, write_aiff};
 use musicable_io::project;
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Point};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceKind, Project, TrackKind};
 
@@ -157,7 +157,7 @@ fn song() -> Project {
     let pad = p.add_track("Pad", TrackKind::Audio);
     let mut audio = AudioClip::new("Audio/Pad.wav");
     // From ten seconds into the file.
-    audio.offset = 10 * 48_000;
+    audio.offset = Offset::Frames(10 * 48_000);
     audio.gain = 0.8;
     audio.fade_in = bar(2);
     audio.fade_out = bar(2);

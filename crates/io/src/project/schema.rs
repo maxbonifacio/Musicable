@@ -16,8 +16,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use musicable_model::automation;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{self as param, ParamAddress};
 use musicable_model::time::{self, Beats};
+use musicable_model::warp;
 use musicable_model::{self as model, Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
 use serde::de::{self, Deserializer, MapAccess};
 use serde::ser::{SerializeMap, Serializer};
@@ -218,11 +219,47 @@ enum ClipContent {
 #[serde(deny_unknown_fields)]
 struct AudioClip {
     file: String,
-    /// In frames of the file.
-    offset: u64,
+    /// In frames of the file while the clip is unwarped, and in ticks of
+    /// its own time while it's warped.
+    offset: i64,
     gain: f32,
     fade_in: i64,
     fade_out: i64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    warp: Option<Warp>,
+    /// In order of parameter, at most one for each.
+    automation: Vec<ClipLane>,
+}
+
+/// How a warped clip follows the tempo: its markers as `[frame, at]`
+/// pairs, `at` in ticks of the clip's own time.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Warp {
+    mode: WarpMode,
+    tempo: f64,
+    markers: Vec<(u64, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WarpMode {
+    RePitch,
+}
+
+/// The curve of one of an audio clip's own parameters: its points as `[at,
+/// value]` pairs, `at` in ticks of the clip's own time.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipLane {
+    param: ClipParam,
+    points: Vec<(i64, f64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClipParam {
+    Gain,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -466,7 +503,11 @@ impl From<&model::Project> for File {
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
-            automation: automation.iter().map(Lane::from).collect(),
+            // A clip's own parameters' curves are in the clip.
+            automation: (automation.iter())
+                .filter(|lane| !matches!(lane.param, ParamAddress::Clip(..)))
+                .map(Lane::from)
+                .collect(),
             workspace: workspace.clone(),
         }
     }
@@ -1195,13 +1236,50 @@ impl From<&clip::AudioClip> for AudioClip {
             gain,
             fade_in,
             fade_out,
+            warp,
+            automation,
         } = audio;
         Self {
             file: file.clone(),
-            offset: *offset,
+            offset: match *offset {
+                // Beyond what an i64 holds, it's refused on the way back.
+                clip::Offset::Frames(frames) => i64::try_from(frames).unwrap_or(i64::MAX),
+                clip::Offset::Beats(beats) => beats.ticks(),
+            },
             gain: *gain,
             fade_in: fade_in.ticks(),
             fade_out: fade_out.ticks(),
+            warp: warp.as_ref().map(Warp::from),
+            automation: automation.iter().map(ClipLane::from).collect(),
+        }
+    }
+}
+
+impl From<&warp::Warp> for Warp {
+    fn from(warp: &warp::Warp) -> Self {
+        let warp::Warp {
+            mode,
+            markers,
+            tempo,
+        } = warp;
+        Self {
+            mode: match mode {
+                warp::WarpMode::RePitch => WarpMode::RePitch,
+            },
+            tempo: *tempo,
+            markers: markers.iter().map(|m| (m.frame, m.beat.ticks())).collect(),
+        }
+    }
+}
+
+impl From<&clip::ClipLane> for ClipLane {
+    fn from(lane: &clip::ClipLane) -> Self {
+        let clip::ClipLane { param, points } = lane;
+        Self {
+            param: match param {
+                param::ClipParam::Gain => ClipParam::Gain,
+            },
+            points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
         }
     }
 }
@@ -1215,14 +1293,25 @@ impl AudioClip {
             gain,
             fade_in,
             fade_out,
+            warp,
+            automation,
         } = self;
         if file.is_empty() {
             return Err(Invalid::new(format!("{path}.file"), "must name a file"));
         }
-        if *offset > MAX_TICKS.unsigned_abs() {
-            let message = format!("must be {MAX_TICKS} or less");
-            return Err(Invalid::new(format!("{path}.offset"), message));
-        }
+        let offset_path = || format!("{path}.offset");
+        let offset = match warp {
+            Some(_) => clip::Offset::Beats(position(*offset, offset_path)?),
+            None if *offset < 0 => {
+                let message = "must be 0 or more: a frame of the file, while the clip is unwarped";
+                return Err(Invalid::new(offset_path(), message));
+            }
+            None if *offset > MAX_TICKS => {
+                let message = format!("must be {MAX_TICKS} or less");
+                return Err(Invalid::new(offset_path(), message));
+            }
+            None => clip::Offset::Frames(offset.unsigned_abs()),
+        };
         for (fade, name) in [(*fade_in, "fade_in"), (*fade_out, "fade_out")] {
             if !(0..=length.ticks()).contains(&fade) {
                 let message = "must be from 0 to the clip's length";
@@ -1233,13 +1322,92 @@ impl AudioClip {
             let message = "must fit in the clip's length with fade_in";
             return Err(Invalid::new(format!("{path}.fade_out"), message));
         }
+        let warp = match warp {
+            Some(warp) => Some(warp.to_model(&format!("{path}.warp"))?),
+            None => None,
+        };
+        let mut lanes: Vec<clip::ClipLane> = Vec::with_capacity(automation.len());
+        for (k, lane) in automation.iter().enumerate() {
+            let path = format!("{path}.automation[{k}]");
+            let lane = lane.to_model(&path)?;
+            if lanes.iter().any(|l| l.param == lane.param) {
+                let message = format!("the clip moves {} twice", lane.param.key());
+                return Err(Invalid::new(format!("{path}.param"), message));
+            }
+            lanes.push(lane);
+        }
+        lanes.sort_by_key(|l| l.param);
         Ok(clip::AudioClip {
             file: file.clone(),
-            offset: *offset,
+            offset,
             gain: finite(*gain, || format!("{path}.gain"))?,
             fade_in: Beats::from_ticks(*fade_in),
             fade_out: Beats::from_ticks(*fade_out),
+            warp,
+            automation: lanes,
         })
+    }
+}
+
+impl Warp {
+    fn to_model(&self, path: &str) -> Result<warp::Warp, Invalid> {
+        let Self {
+            mode,
+            tempo,
+            markers,
+        } = self;
+        let (low, high) = (warp::Warp::MIN_TEMPO, warp::Warp::MAX_TEMPO);
+        if !(low..=high).contains(tempo) {
+            let message = format!("must be from {low} to {high}");
+            return Err(Invalid::new(format!("{path}.tempo"), message));
+        }
+        if markers.is_empty() {
+            let message = "needs at least one marker: a warped clip has one";
+            return Err(Invalid::new(format!("{path}.markers"), message));
+        }
+        let mut model_markers: Vec<warp::WarpMarker> = Vec::with_capacity(markers.len());
+        for (k, &(frame, at)) in markers.iter().enumerate() {
+            let path = format!("{path}.markers[{k}]");
+            if frame > MAX_TICKS.unsigned_abs() {
+                let message = format!("must be {MAX_TICKS} or less");
+                return Err(Invalid::new(format!("{path}[0]"), message));
+            }
+            let beat = position(at, || format!("{path}[1]"))?;
+            if let Some(before) = model_markers.last() {
+                if frame <= before.frame {
+                    let message = "must be after the frame of the marker before it";
+                    return Err(Invalid::new(format!("{path}[0]"), message));
+                }
+                if beat <= before.beat {
+                    let message = "must be after the position of the marker before it";
+                    return Err(Invalid::new(format!("{path}[1]"), message));
+                }
+            }
+            model_markers.push(warp::WarpMarker { frame, beat });
+        }
+        Ok(warp::Warp {
+            mode: match mode {
+                WarpMode::RePitch => warp::WarpMode::RePitch,
+            },
+            markers: model_markers,
+            tempo: *tempo,
+        })
+    }
+}
+
+impl ClipLane {
+    fn to_model(&self, path: &str) -> Result<clip::ClipLane, Invalid> {
+        let Self { param, points } = self;
+        let param = match param {
+            ClipParam::Gain => param::ClipParam::Gain,
+        };
+        let spec = param.spec();
+        let (low, high) = (spec.min, spec.max);
+        let range = |value: f64| {
+            (!(low..=high).contains(&value)).then(|| format!("must be from {low} to {high}"))
+        };
+        let points = lane_points(points, path, false, range)?;
+        Ok(clip::ClipLane { param, points })
     }
 }
 
@@ -1817,6 +1985,7 @@ impl From<&automation::Lane> for Lane {
                     id: device.0,
                     param,
                 },
+                ParamAddress::Clip(..) => unreachable!("a clip's curves are in the clip"),
             },
             points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
             overridden: *overridden,
@@ -1855,42 +2024,89 @@ impl Lane {
             }
             Param::Device { id, .. } => return Err(missing("device", id)),
         };
-        if points.is_empty() {
-            let message = "needs at least one point: a parameter without automation has no lane";
-            return Err(Invalid::new(format!("{path}.points"), message));
-        }
-        let mut model_points: Vec<automation::Point> = Vec::with_capacity(points.len());
-        for (j, &(at, value)) in points.iter().enumerate() {
-            let path = format!("{path}.points[{j}]");
-            let at = position(at, || format!("{path}[0]"))?;
-            if at < Beats::ZERO {
-                let message = "can't be before the start of the song";
-                return Err(Invalid::new(format!("{path}[0]"), message));
-            }
-            let value = finite(value, || format!("{path}[1]"))?;
-            if matches!(param, ParamAddress::Pan(_)) && !(-1.0..=1.0).contains(&value) {
-                return Err(Invalid::new(format!("{path}[1]"), "must be from -1 to 1"));
-            }
-            let earlier = model_points.len().checked_sub(1).map(|k| model_points[k]);
-            if earlier.is_some_and(|p| p.at > at) {
-                let message = "must be at or after the point before it";
-                return Err(Invalid::new(format!("{path}[0]"), message));
-            }
-            let twice = model_points.len() >= 2
-                && model_points[model_points.len() - 2].at == at
-                && earlier.is_some_and(|p| p.at == at);
-            if twice {
-                let message = "makes three points at one place: a step needs two";
-                return Err(Invalid::new(format!("{path}[0]"), message));
-            }
-            model_points.push(automation::Point::new(at, value));
-        }
+        let pan = matches!(param, ParamAddress::Pan(_));
+        let range = |value: f64| {
+            (pan && !(-1.0..=1.0).contains(&value)).then(|| "must be from -1 to 1".to_owned())
+        };
         Ok(automation::Lane {
             param,
-            points: model_points,
+            points: lane_points(points, path, true, range)?,
             overridden: *overridden,
         })
     }
+}
+
+/// The points of the lane at `path`, as `[at, value]` pairs: at least one,
+/// in order of position, no more than two at one place, from the start of
+/// the song on if `from_start`, and with finite values that `range` has no
+/// complaint about.
+fn lane_points(
+    points: &[(i64, f64)],
+    path: &str,
+    from_start: bool,
+    range: impl Fn(f64) -> Option<String>,
+) -> Result<Vec<automation::Point>, Invalid> {
+    if points.is_empty() {
+        let message = "needs at least one point: a parameter without automation has no lane";
+        return Err(Invalid::new(format!("{path}.points"), message));
+    }
+    let mut model_points: Vec<automation::Point> = Vec::with_capacity(points.len());
+    for (j, &(at, value)) in points.iter().enumerate() {
+        let path = format!("{path}.points[{j}]");
+        let at = position(at, || format!("{path}[0]"))?;
+        if from_start && at < Beats::ZERO {
+            let message = "can't be before the start of the song";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        let value = finite(value, || format!("{path}[1]"))?;
+        if let Some(message) = range(value) {
+            return Err(Invalid::new(format!("{path}[1]"), message));
+        }
+        let earlier = model_points.len().checked_sub(1).map(|k| model_points[k]);
+        if earlier.is_some_and(|p| p.at > at) {
+            let message = "must be at or after the point before it";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        let twice = model_points.len() >= 2
+            && model_points[model_points.len() - 2].at == at
+            && earlier.is_some_and(|p| p.at == at);
+        if twice {
+            let message = "makes three points at one place: a step needs two";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        model_points.push(automation::Point::new(at, value));
+    }
+    Ok(model_points)
+}
+
+/// Refuses an audio clip whose offset is of the other kind from what its
+/// warp says, before it's saved: the file has one number for both, read as
+/// ticks while the clip is warped and as a frame while it isn't.
+pub(super) fn check_offsets(project: &model::Project) -> Result<(), Invalid> {
+    for (i, track) in project.tracks.iter().enumerate() {
+        let takes = track.takes.iter().enumerate();
+        let lists = std::iter::once((format!("tracks[{i}].clips"), &track.clips))
+            .chain(takes.map(|(j, take)| (format!("tracks[{i}].takes[{j}].clips"), &take.clips)));
+        for (path, clips) in lists {
+            for (k, clip) in clips.iter().enumerate() {
+                let clip::ClipContent::Audio(audio) = &clip.content else {
+                    continue;
+                };
+                let message = match (audio.offset, &audio.warp) {
+                    (clip::Offset::Frames(_), Some(_)) => {
+                        "must be in ticks of the clip's own time while it's warped"
+                    }
+                    (clip::Offset::Beats(_), None) => {
+                        "must be a frame of the file while the clip is unwarped"
+                    }
+                    _ => continue,
+                };
+                let path = format!("{path}[{k}].content.audio.offset");
+                return Err(Invalid::new(path, message));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A position in ticks, if it's within [`MAX_TICKS`] of the song's start.

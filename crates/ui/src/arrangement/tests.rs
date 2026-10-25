@@ -133,6 +133,7 @@ fn harness(project: Project) -> Harness<'static, State> {
             sample_rate: 48_000,
             frames: 48_000 * 60,
             channels: 2,
+            tempo: None,
         };
         document.editor_mut().files.insert(file.to_owned(), info);
     }
@@ -483,7 +484,7 @@ fn edges_trim_and_handles_fade() {
         panic!("Kick is audio");
     };
     // Two beats at 120 BPM is a second of the file.
-    assert_eq!(audio.offset, 48_000);
+    assert_eq!(audio.offset, Offset::Frames(48_000));
 
     // The fade-in's handle is at the top of the body, clear of the edge.
     let rect = harness.get_by_label("Clip Kick").rect();
@@ -1012,7 +1013,7 @@ fn with_takes() -> (Project, Ids, [TakeId; 2]) {
     let mut takes = Vec::new();
     for (name, offset) in [("Take 1", 0), ("Take 2", 48_000)] {
         let mut audio = AudioClip::new("bass.wav");
-        audio.offset = offset;
+        audio.offset = Offset::Frames(offset);
         let clip = project.new_clip("Bass", range, ClipContent::Audio(audio));
         let mut take = project.new_take(name);
         take.clips.push(clip);
@@ -1062,7 +1063,7 @@ fn played(harness: &Harness<'_, State>, track: TrackId) -> Vec<(BeatRange, u64)>
         .clips
         .iter()
         .map(|clip| match &clip.content {
-            ClipContent::Audio(audio) => (clip.range(), audio.offset),
+            ClipContent::Audio(audio) => (clip.range(), audio.offset.frames().unwrap_or(0)),
             ClipContent::Midi(_) => (clip.range(), 0),
         })
         .collect();

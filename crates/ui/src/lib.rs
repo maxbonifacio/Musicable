@@ -35,6 +35,7 @@ mod palette;
 mod panels;
 mod parts;
 mod piano_roll;
+mod sample_editor;
 mod search;
 mod shell;
 mod shortcuts;
@@ -56,7 +57,7 @@ pub use mouse::{
     Gesture, MouseAction, MouseFileError, MouseMap, MouseMapFile, MouseProblem, Target,
     modifier_sets,
 };
-pub use panels::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL};
+pub use panels::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, SAMPLE_EDITOR};
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use shell::{
     Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
@@ -64,7 +65,8 @@ pub use shell::{
 };
 pub use theme::{
     Base, BrowserSizes, DeviceSizes, DockSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes,
-    Theme, ThemeFile, ThemeFileError, ThemeProblem, WidgetState, Widgets, apply as apply_theme,
+    SampleEditorSizes, Theme, ThemeFile, ThemeFileError, ThemeProblem, WidgetState, Widgets,
+    apply as apply_theme,
 };
 pub use waveform::{Peak, Peaks, PeaksBuilder, Waveforms};
 pub use widgets::{checked_name_box, clock, confirm_box, position};

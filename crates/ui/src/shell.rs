@@ -27,7 +27,9 @@ use crate::menus::menus;
 use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
-use crate::panels::{self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels};
+use crate::panels::{
+    self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels, SAMPLE_EDITOR,
+};
 use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
@@ -330,7 +332,9 @@ enum WorkspaceBox {
 /// track the devices.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Followed {
-    /// The clip the piano roll shows, and whether it's selected.
+    /// The editor that fits the clip selected or opened last, the clip it
+    /// shows, and whether that's selected.
+    editor: &'static str,
     clip: Option<ClipId>,
     selected: bool,
     track: Option<Chain>,
@@ -587,10 +591,16 @@ impl Shell {
     }
 
     /// Brings the piano roll forward when the clip it shows is selected,
-    /// and the devices when another track is, if they're not hidden.
+    /// or the Sample Editor when its clip is, and the devices when another
+    /// track is, if they're not hidden.
     fn follow(&mut self, editor: &Editor) {
-        let clip = editor.piano_roll.clip;
+        let panel = editor.clip_editor;
+        let clip = match panel {
+            SAMPLE_EDITOR => editor.sample_editor.clip,
+            _ => editor.piano_roll.clip,
+        };
         let now = Followed {
+            editor: panel,
             clip,
             selected: clip.is_some_and(|clip| editor.selection.clips.contains(&clip)),
             track: editor.selected_track,
@@ -598,8 +608,9 @@ impl Shell {
         let Some(last) = self.followed.replace(now) else {
             return;
         };
-        if now.selected && (!last.selected || now.clip != last.clip) {
-            self.bring_forward(PIANO_ROLL);
+        let other = now.clip != last.clip || now.editor != last.editor;
+        if now.selected && (!last.selected || other) {
+            self.bring_forward(panel);
         } else if now.track != last.track {
             self.bring_forward(DEVICES);
         }
@@ -688,14 +699,15 @@ impl Shell {
         self.panels.devices.reveal(device);
     }
 
-    /// Brings the piano roll forward, or the devices if the piano roll is
-    /// in front, as Live's F12 switches between its clip view and its
-    /// device view. Either comes back if it's hidden.
-    pub fn switch_devices_piano_roll(&mut self) {
-        if self.panel_shown(PIANO_ROLL) {
+    /// Brings the clip editor with id `editor`, the piano roll or the
+    /// Sample Editor, forward, or the devices if it's in front, as Live's
+    /// F12 switches between its clip view and its device view. Either comes
+    /// back if it's hidden.
+    pub fn switch_devices_clip_editor(&mut self, editor: &str) {
+        if self.panel_shown(editor) {
             self.show_panel(DEVICES);
         } else {
-            self.show_panel(PIANO_ROLL);
+            self.show_panel(editor);
         }
     }
 
@@ -1296,6 +1308,8 @@ fn command_button(
         id if *id == view::TOGGLE_MIXER => Some(shown.contains(MIXER)),
         id if *id == view::TOGGLE_DEVICES => Some(shown.contains(DEVICES)),
         id if *id == view::TOGGLE_PIANO_ROLL => Some(shown.contains(PIANO_ROLL)),
+        id if *id == view::TOGGLE_SAMPLE_EDITOR => Some(shown.contains(SAMPLE_EDITOR)),
+        id if *id == view::TOGGLE_CLIP_EDITOR => Some(shown.contains(view.editor.clip_editor)),
         id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
         id if *id == view::TOGGLE_HISTORY => Some(shown.contains(HISTORY)),
         _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
@@ -1309,15 +1323,25 @@ fn command_button(
     }
 }
 
+/// Whether `focus` can have the focus: not the piano roll or the Sample
+/// Editor with no clip to show.
+fn can_focus(focus: Focus, editor: &Editor) -> bool {
+    match focus {
+        Focus::PIANO_ROLL => editor.piano_roll.clip.is_some(),
+        Focus::SAMPLE_EDITOR => editor.sample_editor.clip.is_some(),
+        _ => true,
+    }
+}
+
 /// Gives the panel `id` the focus, before what the panels asked for from
 /// `drawn` on, unless it has the focus, or asked for it, or is the piano
-/// roll with no clip to show. What a click does in a panel can move the
-/// focus on, as opening a clip in the piano roll does.
+/// roll or the Sample Editor with no clip to show. What a click does in a
+/// panel can move the focus on, as opening a clip in the piano roll does.
 fn focus_on(id: &'static str, editor: &Editor, drawn: usize, actions: &mut Vec<Action>) {
     let Some(focus) = Focus::on(id).filter(|&focus| focus != editor.focus) else {
         return;
     };
-    if focus == Focus::PIANO_ROLL && editor.piano_roll.clip.is_none() {
+    if !can_focus(focus, editor) {
         return;
     }
     let asked = (actions[drawn..].iter())
@@ -1377,8 +1401,8 @@ fn title(dock: &Dock, registry: &panels::Registry, name: &str) -> String {
 /// Where keys pressed in `window` go: to the panel with the focus if it's
 /// there, or else to the one that gets it as the user comes to the window,
 /// the one that had it last if it's in sight, or the first in sight. `None`
-/// when none can take it, as the piano roll can't with no clip, so only
-/// keys that work everywhere work.
+/// when none can take it, as the piano roll and the Sample Editor can't with
+/// no clip, so only keys that work everywhere work.
 fn window_focus(window: &Window, editor: &Editor) -> Option<Focus> {
     if window.dock.has(editor.focus.panel()) {
         return Some(editor.focus);
@@ -1386,7 +1410,7 @@ fn window_focus(window: &Window, editor: &Editor) -> Option<Focus> {
     let in_sight = |panel: &&'static str| window.dock.shown(panel);
     let mut panels = (window.dock.panels().into_iter()).map(|(panel, _)| panel);
     let panel = (Some(window.focus).filter(in_sight)).or_else(|| panels.find(in_sight))?;
-    Focus::on(panel).filter(|&focus| focus != Focus::PIANO_ROLL || editor.piano_roll.clip.is_some())
+    Focus::on(panel).filter(|&focus| can_focus(focus, editor))
 }
 
 /// The user came to `window`: the panel that had the focus there last has
@@ -1852,10 +1876,10 @@ mod tests {
         assert!(shell.panel_shown(DEVICES));
         assert!(!shell.panel_shown(PIANO_ROLL));
         // F12 brings one forward, then the other.
-        shell.switch_devices_piano_roll();
+        shell.switch_devices_clip_editor(PIANO_ROLL);
         assert!(shell.panel_shown(PIANO_ROLL));
         assert!(!shell.panel_shown(DEVICES));
-        shell.switch_devices_piano_roll();
+        shell.switch_devices_clip_editor(PIANO_ROLL);
         assert!(shell.panel_shown(DEVICES));
         assert!(!shell.panel_shown(PIANO_ROLL));
         // Its toggle brings the piano roll forward, and then hides it, and
@@ -1869,7 +1893,7 @@ mod tests {
         // With neither shown, switching shows the piano roll.
         shell.toggle_panel(DEVICES);
         assert!(!shell.panel_shown(DEVICES));
-        shell.switch_devices_piano_roll();
+        shell.switch_devices_clip_editor(PIANO_ROLL);
         assert!(shell.panel_shown(PIANO_ROLL));
         shell.show_panel(MIXER);
         assert!(shell.panel_shown(PIANO_ROLL));
@@ -2018,7 +2042,7 @@ mod tests {
         };
         select(&mut harness, keys, &[id]);
         assert!(!harness.state().shell.panel_shown(PIANO_ROLL));
-        harness.state_mut().shell.switch_devices_piano_roll();
+        harness.state_mut().shell.switch_devices_clip_editor(PIANO_ROLL);
         select(&mut harness, drums, &[]);
         assert!(harness.state().shell.panel_shown(DEVICES));
         select(&mut harness, keys, &[id]);
@@ -2048,7 +2072,7 @@ mod tests {
         assert!(!in_sight(&harness));
 
         // Behind the piano roll, the devices come forward, scrolled to it.
-        harness.state_mut().shell.switch_devices_piano_roll();
+        harness.state_mut().shell.switch_devices_clip_editor(PIANO_ROLL);
         harness.run();
         assert!(!harness.state().shell.panel_shown(DEVICES));
         harness.state_mut().shell.show_device(synth);

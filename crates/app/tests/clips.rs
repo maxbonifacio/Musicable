@@ -12,7 +12,7 @@ use musicable_app::null_test::{self, Player, Render};
 use musicable_engine::{EngineConfig, ParallelOptions, rt};
 use musicable_io::audio::{SampleFormat, save_wav, write_aiff};
 use musicable_io::project;
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Point};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceKind, Project, TrackId, TrackKind};
 
@@ -100,7 +100,7 @@ fn song() -> Project {
     audio.fade_out = beats(1, 2);
     audio_clip(&mut p, drums, beats(0, 1), beats(2, 1), audio);
     let mut audio = AudioClip::new("Audio/Long.wav");
-    audio.offset = LONG as u64 - 100_000;
+    audio.offset = Offset::Frames(LONG as u64 - 100_000);
     audio.fade_in = beats(1, 2);
     audio_clip(&mut p, drums, beats(3, 2), beats(4, 1), audio);
 

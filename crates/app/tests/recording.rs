@@ -17,7 +17,7 @@ use musicable_commands::editor::AudioFile;
 use musicable_commands::{Args, Keymap, edit, mixer, track, transport};
 use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, rt};
 use musicable_io::audio::Decoder;
-use musicable_model::clip::ClipContent;
+use musicable_model::clip::{ClipContent, Offset};
 use musicable_model::time::Beats;
 use musicable_model::{Monitor, Project, TrackId, TrackKind};
 
@@ -152,11 +152,12 @@ fn armed_tracks_record_takes_where_they_were_played() {
     let ClipContent::Audio(audio) = &clip.content else {
         panic!("{clip:?}");
     };
-    assert_eq!((audio.file.as_str(), audio.offset), (name.as_str(), 0));
+    assert_eq!((audio.file.as_str(), audio.offset), (name.as_str(), Offset::Frames(0)));
     let file = AudioFile {
         sample_rate: 48_000,
         frames: 48_000,
         channels: 2,
+        tempo: None,
     };
     assert_eq!(studio.session.editor().files.get(&name), Some(&file));
     let channels = Decoder::open(&path).unwrap().read_all().unwrap();

@@ -3,6 +3,7 @@
 //! and a [`ParamSpec`] says what it is: its name, its range, its default
 //! and its [`Scale`].
 
+use crate::clip::{ClipContent, ClipId};
 use crate::native::ParamInfo;
 use crate::{Chain, DeviceId, DeviceKind, Project, SendId};
 
@@ -20,6 +21,47 @@ pub enum ParamAddress {
     /// of one of Musicable's own devices' parameters, never reused. The
     /// device's node has it as `ParamId(n)`.
     Device(DeviceId, u32),
+    /// One of an audio clip's own parameters. Its curve is in the clip, in
+    /// the clip's own time, rather than in the project's lanes, so it
+    /// moves, copies and splits with the clip.
+    Clip(ClipId, ClipParam),
+}
+
+/// One of an audio clip's own parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ClipParam {
+    /// The clip's gain, as linear gain: 1.0 is unity.
+    Gain,
+}
+
+impl ClipParam {
+    /// Every one, in order.
+    pub const ALL: [Self; 1] = [Self::Gain];
+
+    /// What it is.
+    pub fn spec(self) -> ParamSpec {
+        match self {
+            Self::Gain => ParamSpec {
+                name: "Gain".into(),
+                min: 0.0,
+                max: ParamSpec::CLIP_GAIN_MAX,
+                default: 1.0,
+                scale: Scale::Fader,
+            },
+        }
+    }
+
+    /// What scripts call it, as in "clip 3 gain".
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Gain => "gain",
+        }
+    }
+
+    /// The parameter scripts call `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == key)
+    }
 }
 
 /// How a parameter's values spread along its control and its automation
@@ -126,6 +168,9 @@ impl ParamSpec {
     /// The loudest a channel's fader goes: +6 dB, as linear gain.
     pub const VOLUME_MAX: f64 = 1.995_262_314_968_879_5;
 
+    /// The loudest an audio clip's gain goes: +24 dB, as linear gain.
+    pub const CLIP_GAIN_MAX: f64 = 15.848_931_924_611_133;
+
     /// A channel's fader: from silence to +6 dB.
     pub fn volume() -> Self {
         Self {
@@ -187,6 +232,7 @@ impl Project {
                     .to;
                 Some(ParamSpec::send(&self.track(to)?.name))
             }
+            ParamAddress::Clip(_, param) => Some(param.spec()),
             ParamAddress::Device(device, n) => {
                 if let Some(info) = self.native_param(address) {
                     return Some(ParamSpec {
@@ -250,6 +296,10 @@ impl Project {
                 .iter()
                 .find(|t| t.sends.iter().any(|s| s.id == send))
                 .map(|t| Chain::Track(t.id)),
+            ParamAddress::Clip(clip, _) => {
+                let (track, clip) = self.find_clip(clip)?;
+                matches!(clip.content, ClipContent::Audio(_)).then_some(Chain::Track(track.id))
+            }
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
                 let known = match &device.kind {
@@ -280,6 +330,10 @@ impl Project {
                 .flat_map(|t| &t.sends)
                 .find(|s| s.id == send)
                 .map(|s| f64::from(s.level)),
+            ParamAddress::Clip(clip, ClipParam::Gain) => match &self.find_clip(clip)?.1.content {
+                ClipContent::Audio(audio) => Some(f64::from(audio.gain)),
+                ClipContent::Midi(_) => None,
+            },
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {

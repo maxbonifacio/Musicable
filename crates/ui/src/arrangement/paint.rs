@@ -424,9 +424,9 @@ fn waveform(painter: &Painter, scene: &Scene<'_>, body: Rect, clip: &Clip, audio
     let layout = &scene.layout;
     let tempo = &scene.project().tempo;
     let rate = peaks.sample_rate();
-    // The song's sample that the file's first frame plays on.
-    let first = tempo.sample_at(clip.start, rate) - audio.offset as f64;
-    let frame = |x: f32| tempo.sample_at(layout.beats_at(x), rate) - first;
+    // The file's frame that plays at the point `x`: along the warp markers,
+    // for a warped clip.
+    let frame = |x: f32| audio.frame_at(clip.own_time_at(layout.beats_at(x), tempo, rate), rate);
     let left = body.left().max(layout.lanes.left()).floor();
     let right = body.right().min(layout.lanes.right()).ceil();
     let middle = body.center().y;

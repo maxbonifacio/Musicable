@@ -1,5 +1,6 @@
 //! The panels the window docks: the arrangement, the mixer, the devices,
-//! the piano roll, the browser and the history. Each kind of panel
+//! the piano roll, the Sample Editor, the browser and the history. Each
+//! kind of panel
 //! registers its id, its title, where it goes in the default layout and how
 //! it's drawn, and the dock lays them out by id: the shell doesn't name
 //! them.
@@ -17,12 +18,15 @@ use crate::mixer::{self, Choices};
 use crate::mouse::MouseMap;
 use crate::parts::Parts;
 use crate::piano_roll::PianoRoll;
+use crate::sample_editor::SampleEditor;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 
 // The panels' ids, which the focus and the keymaps' panel tables know them
 // by too.
-pub use musicable_commands::panel::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL};
+pub use musicable_commands::panel::{
+    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, SAMPLE_EDITOR,
+};
 
 /// Where a panel goes in the default layout, and in a layout that doesn't
 /// have it yet, such as one saved before it existed.
@@ -172,6 +176,22 @@ impl Registry {
             },
         });
         registry.register(Panel {
+            id: SAMPLE_EDITOR,
+            title: "Sample Editor",
+            // As Live's clip view takes its device view's place.
+            place: Place::With(DEVICES),
+            // It waits for an audio clip to be opened in it.
+            shown: false,
+            size: |theme| theme.sample_editor.panel,
+            hides: true,
+            show: |panels, ui, cx| {
+                framed(ui, |ui| {
+                    let (view, theme, mouse) = (cx.view, cx.theme, cx.mouse);
+                    panels.sample_editor.show(ui, view, theme, mouse, cx.actions);
+                });
+            },
+        });
+        registry.register(Panel {
             id: HISTORY,
             title: "History",
             // A list, as the browser is.
@@ -218,6 +238,7 @@ pub(crate) struct Panels {
     pub arrangement: Arrangement,
     pub devices: DevicesPanel,
     pub piano_roll: PianoRoll,
+    pub sample_editor: SampleEditor,
     pub browser: BrowserPanel,
     pub history: HistoryPanel,
 }

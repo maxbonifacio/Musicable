@@ -25,13 +25,14 @@ use std::path::PathBuf;
 
 use musicable_model::automation::Lane;
 use musicable_model::clip::{
-    AudioClip, Clip, ClipContent, ClipId, Controller, MidiClip, NoteId, Point,
+    AudioClip, Clip, ClipContent, ClipId, Controller, MidiClip, NoteId, Offset, Point,
 };
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, NativeKind};
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{
     Chain, ClipType, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Take, Track, TrackId,
     TrackKind,
@@ -43,13 +44,15 @@ use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
     controllers, device, edit, file, history, json, locator, mixer, notes, options, take, track,
-    transport, view, workspace,
+    transport, view, warp, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
 const LOOP: &str = "loop.wav";
 /// What the takes recorded.
 const RECORDING: &str = "Recordings/Audio 1.wav";
+/// What the warped clip plays.
+const GROOVE: &str = "groove.wav";
 /// A sample in the browser's library.
 const KICK: &str = "/samples/kick.wav";
 /// A preset in the library, which holds an EQ.
@@ -172,6 +175,27 @@ fn examples() -> Vec<Example> {
         edits(automation::RE_ENABLE, |s| {
             let overridden = project(s).automation.iter().any(|l| l.overridden);
             overridden.then(Args::new)
+        }),
+        // A clip's curve, in its own time.
+        edits(automation::CLEAR, |s| {
+            let clip = find_clip(s, |c| curve(c).is_some())?.id;
+            let param = ParamAddress::Clip(clip, ClipParam::Gain);
+            Some(Args::new().with("param", param))
+        }),
+        edits(automation::SET_POINTS, |s| {
+            let clip = find_clip(s, is_audio)?.id;
+            let param = ParamAddress::Clip(clip, ClipParam::Gain);
+            let at = vec![Beats::new(-1), Beats::new(2)];
+            let values = match curve(project(s).find_clip(clip)?.1) {
+                Some(_) => vec![2.0, 0.25],
+                None => vec![0.25, 2.0],
+            };
+            Some(
+                Args::new()
+                    .with("param", param)
+                    .with("at", at)
+                    .with("values", values),
+            )
         }),
         edits(automation::SET_POINTS, |s| {
             let lane = pick(s, project(s).automation.iter());
@@ -478,6 +502,11 @@ fn examples() -> Vec<Example> {
             Some(Args::new())
         }),
         edits(edit::DELETE, note_selected),
+        // The markers selected in the Sample Editor.
+        edits(edit::DELETE, |s| {
+            find_marker(s, |w| w.markers.len() > 1)?;
+            marker_selected(s)
+        }),
         edits(edit::DUPLICATE, clip_selected),
         edits(edit::DUPLICATE, time_selected),
         edits(edit::DUPLICATE, note_selected),
@@ -506,6 +535,8 @@ fn examples() -> Vec<Example> {
         leaves(edit::SELECT_ALL, bare),
         // In the piano roll.
         leaves(edit::SELECT_ALL, note_selected),
+        // In the Sample Editor.
+        leaves(edit::SELECT_ALL, marker_selected),
         leaves(edit::SELECT_CLIPS, |s| {
             let clip = find_clip(s, |_| true)?.id;
             Some(Args::new().with("clips", vec![clip]))
@@ -1013,6 +1044,11 @@ fn examples() -> Vec<Example> {
             s.select_clips(&[clip]);
             Some(Args::new().with("panel", "piano_roll"))
         }),
+        leaves(view::SET_FOCUS, |s| {
+            let clip = find_clip(s, is_audio)?.id;
+            s.select_clips(&[clip]);
+            Some(Args::new().with("panel", "sample_editor"))
+        }),
         leaves(view::SET_PIANO_ROLL_VIEWPORT, |_| {
             Some(
                 Args::new()
@@ -1022,6 +1058,14 @@ fn examples() -> Vec<Example> {
                     .with("width", 800.0)
                     .with("height", 300.0)
                     .with("key_height", 16.0),
+            )
+        }),
+        leaves(view::SET_SAMPLE_EDITOR_VIEWPORT, |_| {
+            Some(
+                Args::new()
+                    .with("start", Beats::new(2))
+                    .with("zoom", 120.0)
+                    .with("width", 640.0),
             )
         }),
         leaves(view::SET_TRACK_HEIGHT, |s| {
@@ -1043,11 +1087,13 @@ fn examples() -> Vec<Example> {
         }),
         leaves(view::SWITCH_DEVICES_PIANO_ROLL, bare),
         leaves(view::TOGGLE_BROWSER, bare),
+        leaves(view::TOGGLE_CLIP_EDITOR, bare),
         leaves(view::TOGGLE_DEVICES, bare),
         leaves(view::TOGGLE_FOLLOW, bare),
         leaves(view::TOGGLE_HISTORY, bare),
         leaves(view::TOGGLE_MIXER, bare),
         leaves(view::TOGGLE_PIANO_ROLL, bare),
+        leaves(view::TOGGLE_SAMPLE_EDITOR, bare),
         leaves(view::TOGGLE_SNAP, bare),
         leaves(view::TOGGLE_TAKE_LANES, |s| {
             let track = find_track(s, |_| true)?.id;
@@ -1058,6 +1104,105 @@ fn examples() -> Vec<Example> {
         leaves(view::ZOOM_IN, bare),
         leaves(view::ZOOM_OUT, bare),
         leaves(view::ZOOM_TO_SELECTION, clip_selected),
+        // The markers selected in the Sample Editor.
+        leaves(view::ZOOM_TO_SELECTION, marker_selected),
+        edits(warp::DELETE_MARKERS, |s| {
+            let (clip, beat) = find_marker(s, |w| w.markers.len() > 1)?;
+            Some(Args::new().with("clip", clip).with("markers", vec![beat]))
+        }),
+        // Without arguments: the markers selected in the Sample Editor.
+        edits(warp::DELETE_MARKERS, |s| {
+            find_marker(s, |w| w.markers.len() > 1)?;
+            marker_selected(s)
+        }),
+        edits(warp::DOUBLE_TEMPO, warped_shown),
+        edits(warp::HALVE_TEMPO, warped_shown),
+        edits(warp::INSERT_MARKERS, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            // Halfway through the clip, where there's no marker.
+            let offset = audio.offset.beats()?;
+            let at = offset + Beats::from_ticks(c.length.ticks() / 2) + Beats::from_ticks(7);
+            Some(Args::new().with("clip", clip).with("at", vec![at]))
+        }),
+        // Without arguments: at the start marker.
+        edits(warp::INSERT_MARKERS, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let c = project(s).find_clip(clip)?.1.clone();
+            s.run_with(&warp::OPEN, Args::new().with("clip", clip))
+                .ok()?;
+            start_marker(s, middle(&c) + Beats::from_ticks(5));
+            Some(Args::new())
+        }),
+        edits(warp::MOVE_AUDIO, |s| {
+            let (clip, beat) = find_marker(s, |w| w.markers.len() > 1)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            let warp = audio.warp.as_ref()?;
+            let index = warp.marker_at(beat)?;
+            let frame = warp.markers[index].frame;
+            // A little later in the file, short of the next marker's frame.
+            let next = warp.markers.get(index + 1).map_or(u64::MAX, |m| m.frame);
+            let frame = (frame + 100).min(next - 1);
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("marker", beat)
+                    .with("frame", frame as i64),
+            )
+        }),
+        edits(warp::MOVE_MARKERS, |s| {
+            let (clip, beat) = find_marker(s, |_| true)?;
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("markers", vec![beat])
+                    .with("by", Beats::from_ratio(-1, 4)),
+            )
+        }),
+        edits(warp::NUDGE_LEFT, marker_selected),
+        edits(warp::NUDGE_RIGHT, marker_selected),
+        leaves(warp::OPEN, |s| {
+            let clip = find_clip(s, is_audio)?.id;
+            Some(Args::new().with("clip", clip))
+        }),
+        leaves(warp::SELECT_MARKERS, |s| {
+            let (clip, beat) = find_marker(s, |_| true)?;
+            Some(Args::new().with("clip", clip).with("markers", vec![beat]))
+        }),
+        edits(warp::SET_GAIN, |s| {
+            let clip = find_clip(s, is_audio)?;
+            let ClipContent::Audio(audio) = &clip.content else {
+                return None;
+            };
+            let gain = other_level(Some(f64::from(audio.gain)));
+            Some(Args::new().with("clip", clip.id).with("gain", gain))
+        }),
+        edits(warp::SET_TEMPO, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            Some(Args::new().with("clip", clip).with("bpm", 140.0))
+        }),
+        edits(warp::SET_WARP, |s| {
+            let clip = find_clip(s, |c| is_audio(c) && !is_warped(c))?.id;
+            Some(Args::new().with("clip", clip).with("on", true))
+        }),
+        edits(warp::SET_WARP, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            Some(Args::new().with("clip", clip).with("on", false))
+        }),
+        // Without arguments: the other way, for the clip the Sample Editor
+        // shows.
+        edits(warp::SET_WARP, |s| {
+            let clip = find_clip(s, is_audio)?.id;
+            s.run_with(&warp::OPEN, Args::new().with("clip", clip))
+                .ok()?;
+            Some(Args::new())
+        }),
         leaves(workspace::DELETE, bare),
         leaves(workspace::RENAME, bare),
         leaves(workspace::RESET, bare),
@@ -1091,6 +1236,35 @@ fn find_clip(s: &Rig, keep: impl Fn(&Clip) -> bool) -> Option<&Clip> {
 
 fn is_midi(clip: &Clip) -> bool {
     matches!(clip.content, ClipContent::Midi(_))
+}
+
+fn is_audio(clip: &Clip) -> bool {
+    matches!(clip.content, ClipContent::Audio(_))
+}
+
+fn is_warped(clip: &Clip) -> bool {
+    matches!(&clip.content, ClipContent::Audio(audio) if audio.is_warped())
+}
+
+/// An audio clip's gain curve, if it has one.
+fn curve(clip: &Clip) -> Option<&[musicable_model::automation::Point]> {
+    match &clip.content {
+        ClipContent::Audio(audio) => audio.lane(ClipParam::Gain).map(|l| l.points.as_slice()),
+        ClipContent::Midi(_) => None,
+    }
+}
+
+/// A warped clip on a track whose warp `keep` keeps, and the beat of one of
+/// its markers.
+fn find_marker(s: &Rig, keep: impl Fn(&Warp) -> bool) -> Option<(ClipId, Beats)> {
+    let clips = project(s).tracks.iter().flat_map(|t| &t.clips);
+    let found = clips.flat_map(|clip| match &clip.content {
+        ClipContent::Audio(AudioClip {
+            warp: Some(warp), ..
+        }) if keep(warp) => warp.markers.iter().map(|m| (clip.id, m.beat)).collect(),
+        _ => Vec::new(),
+    });
+    pick(s, found)
 }
 
 /// A MIDI clip on a track with notes, and its notes' ids.
@@ -1175,6 +1349,24 @@ fn time_selected(s: &mut Rig) -> Option<Args> {
     Some(Args::new())
 }
 
+/// Selects a warp marker, which gives the Sample Editor the focus, for a
+/// command without arguments.
+fn marker_selected(s: &mut Rig) -> Option<Args> {
+    let (clip, beat) = find_marker(s, |_| true)?;
+    let args = Args::new().with("clip", clip).with("markers", vec![beat]);
+    s.run_with(&warp::SELECT_MARKERS, args).ok()?;
+    Some(Args::new())
+}
+
+/// Shows a warped clip in the Sample Editor, for a command without
+/// arguments.
+fn warped_shown(s: &mut Rig) -> Option<Args> {
+    let (clip, _) = find_marker(s, |_| true)?;
+    s.run_with(&warp::OPEN, Args::new().with("clip", clip))
+        .ok()?;
+    Some(Args::new())
+}
+
 /// Selects a note, which gives the piano roll the focus, for a command
 /// without arguments.
 fn note_selected(s: &mut Rig) -> Option<Args> {
@@ -1230,7 +1422,8 @@ fn other_loop(project: &Project) -> (Beats, Beats) {
 
 /// A track of each kind, and a spare audio track that feeds the group: on
 /// the audio track, an audio clip with fades and another clip, two takes,
-/// and a plugin with a state and a parameter set after it; on the MIDI
+/// and a plugin with a state and a parameter set after it; on the spare
+/// track, a warped clip with three markers and a gain curve; on the MIDI
 /// track, a MIDI clip with notes, one off the grid and bending, and the
 /// sustain pedal, a MIDI take and a sampler; sends from both to the return
 /// track; an EQ on the group; two locators; a test device on the master;
@@ -1263,6 +1456,21 @@ fn fixture() -> Project {
     bass.set_controller(Controller::SUSTAIN, pedal.to_vec());
     // As if a fourth note had been added and deleted.
     bass.new_note_id();
+    let mut groove = AudioClip::new(GROOVE);
+    let markers = [(0, 0), (48_000, 2), (60_000, 3)];
+    let markers = markers.map(|(frame, beat)| WarpMarker {
+        frame,
+        beat: Beats::new(beat),
+    });
+    groove.warp = Some(Warp {
+        markers: markers.to_vec(),
+        ..Warp::new(0, Beats::ZERO, 100.0)
+    });
+    groove.offset = Offset::Beats(Beats::from_ratio(1, 2));
+    let swell = [(0, 0.5), (4, 1.0)];
+    let point = |at, value| musicable_model::automation::Point::new(Beats::new(at), value);
+    let swell = swell.map(|(at, value)| point(at, value));
+    groove.set_lane(ClipParam::Gain, swell.to_vec());
     let clips = [
         (audio, "Faded", range(0, 8), ClipContent::Audio(faded)),
         (
@@ -1271,6 +1479,7 @@ fn fixture() -> Project {
             range(8, 12),
             ClipContent::Audio(AudioClip::new("b.wav")),
         ),
+        (spare, "Groove", range(4, 8), ClipContent::Audio(groove)),
         (midi, "Bass", range(4, 8), ClipContent::Midi(bass)),
     ];
     for (track, name, range, content) in clips {
@@ -1344,14 +1553,22 @@ fn fixture() -> Project {
 /// library its samples and a preset, picking the first of everything.
 fn setup() -> Rig {
     let mut s = Setup::new(fixture());
-    // Two seconds of the loop, and ten of the others: longer than their
-    // clips.
+    // Two seconds of the loop, four of the groove, and ten of the others:
+    // longer than their clips.
+    let read = [
+        (LOOP, 2),
+        ("a.wav", 10),
+        ("b.wav", 10),
+        (GROOVE, 4),
+        (RECORDING, 10),
+    ];
     let files = &mut s.document.editor_mut().files;
-    for (path, seconds) in [(LOOP, 2), ("a.wav", 10), ("b.wav", 10), (RECORDING, 10)] {
+    for (path, seconds) in read {
         let file = AudioFile {
             sample_rate: 48_000,
             frames: 48_000 * seconds,
             channels: 2,
+            tempo: None,
         };
         files.insert(path.to_owned(), file);
     }

@@ -11,7 +11,7 @@
 //! record from an [`Input`] into [`Take`]s, and comping copies the best of
 //! them to the track's own clips. [`param`] names every parameter in the
 //! project, and [`automation`] has the lanes that move them as the song
-//! plays.
+//! plays. [`warp`] has how audio clips follow the tempo.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -24,6 +24,7 @@ pub mod native;
 pub mod param;
 pub mod plugin;
 pub mod time;
+pub mod warp;
 
 use automation::Lane;
 use clip::{Clip, ClipContent, ClipId};

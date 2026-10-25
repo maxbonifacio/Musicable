@@ -9,6 +9,7 @@
 //! stays as it is until automation is re-enabled.
 
 use crate::Project;
+use crate::clip::ClipContent;
 use crate::param::{ParamAddress, Scale};
 use crate::time::Beats;
 
@@ -58,27 +59,14 @@ impl Lane {
     /// The lane's value at `at`, moving evenly in `scale` between points.
     /// At a step, the value after it. `None` for a lane without points.
     pub fn value_at(&self, at: Beats, scale: Scale) -> Option<f64> {
-        self.value_from(self.points.partition_point(|p| p.at <= at), at, scale)
+        value_at(&self.points, at, scale)
     }
 
     /// The lane's value as it comes up to `at`: at a step, the value before
     /// it. Where a stretch drawn over the lane starts, the lane steps from
     /// this to what was drawn.
     pub fn value_before(&self, at: Beats, scale: Scale) -> Option<f64> {
-        self.value_from(self.points.partition_point(|p| p.at < at), at, scale)
-    }
-
-    /// The value at `at`, between the points before `after` and the one at
-    /// `after`.
-    fn value_from(&self, after: usize, at: Beats, scale: Scale) -> Option<f64> {
-        let (before, next) = match (after.checked_sub(1), self.points.get(after)) {
-            (None, next) => return next.map(|p| p.value),
-            (Some(before), None) => return Some(self.points[before].value),
-            (Some(before), Some(next)) => (self.points[before], next),
-        };
-        let span = (next.at - before.at).ticks() as f64;
-        let t = (at - before.at).ticks() as f64 / span;
-        Some(scale.mix(before.value, next.value, t))
+        value_before(&self.points, at, scale)
     }
 
     /// Whether the lane holds one value all through: none of its points
@@ -88,15 +76,49 @@ impl Lane {
     }
 }
 
+/// The value a curve of `points`, in order of time, has at `at`, moving
+/// evenly in `scale` between them, as a [`Lane`] does: at a step, the value
+/// after it. `None` without points.
+pub fn value_at(points: &[Point], at: Beats, scale: Scale) -> Option<f64> {
+    value_from(points, points.partition_point(|p| p.at <= at), at, scale)
+}
+
+/// The value a curve of `points`, in order of time, has as it comes up to
+/// `at`, as a [`Lane`]'s does: at a step, the value before it. `None`
+/// without points.
+pub fn value_before(points: &[Point], at: Beats, scale: Scale) -> Option<f64> {
+    value_from(points, points.partition_point(|p| p.at < at), at, scale)
+}
+
+/// The value at `at`, between the points before `after` and the one at
+/// `after`.
+fn value_from(points: &[Point], after: usize, at: Beats, scale: Scale) -> Option<f64> {
+    let (before, next) = match (after.checked_sub(1), points.get(after)) {
+        (None, next) => return next.map(|p| p.value),
+        (Some(before), None) => return Some(points[before].value),
+        (Some(before), Some(next)) => (points[before], next),
+    };
+    let span = (next.at - before.at).ticks() as f64;
+    let t = (at - before.at).ticks() as f64 / span;
+    Some(scale.mix(before.value, next.value, t))
+}
+
 /// Makes `points` fit for a [`Lane`]: drops those with values that aren't
 /// finite, moves those before the start of the song to it, puts them in
 /// order of time, keeping the order of points at the same time, and keeps
 /// only the first and the last of three or more at the same time.
 pub fn tidy(points: &mut Vec<Point>) {
-    points.retain(|p| p.value.is_finite());
     for point in points.iter_mut() {
         point.at = point.at.max(Beats::ZERO);
     }
+    tidy_anywhere(points);
+}
+
+/// Makes `points` fit for a clip's lane, as [`tidy`] does a [`Lane`]'s,
+/// but leaving those before zero where they are: a clip's own time can
+/// start before it.
+pub fn tidy_anywhere(points: &mut Vec<Point>) {
+    points.retain(|p| p.value.is_finite());
     points.sort_by_key(|p| p.at);
     let mut kept: Vec<Point> = Vec::with_capacity(points.len());
     for (i, &point) in points.iter().enumerate() {
@@ -126,9 +148,26 @@ impl Project {
     }
 
     /// Whether the parameter at `param` follows its automation: it has a
-    /// lane, and nobody overrode it.
+    /// lane, and nobody overrode it. A clip's parameter follows its curve
+    /// whenever it has one.
     pub fn is_automated(&self, param: ParamAddress) -> bool {
-        self.lane(param).is_some_and(|l| !l.overridden)
+        match param {
+            ParamAddress::Clip(..) => self.lane_points(param).is_some(),
+            _ => self.lane(param).is_some_and(|l| !l.overridden),
+        }
+    }
+
+    /// The points the parameter at `param` follows, if it has a lane: the
+    /// project's lane for it, or for a clip's own parameter, the clip's
+    /// curve, in the clip's own time.
+    pub fn lane_points(&self, param: ParamAddress) -> Option<&[Point]> {
+        match param {
+            ParamAddress::Clip(clip, param) => match &self.find_clip(clip)?.1.content {
+                ClipContent::Audio(audio) => audio.lane(param).map(|l| l.points.as_slice()),
+                ClipContent::Midi(_) => None,
+            },
+            _ => self.lane(param).map(|l| l.points.as_slice()),
+        }
     }
 
     /// How the parameter at `param` spreads along its lane: the scale of

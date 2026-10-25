@@ -185,6 +185,7 @@ fn stereo(name: &str, frames: u64) -> Vec<(String, AudioFile)> {
         sample_rate: RATE,
         frames,
         channels: 2,
+        tempo: None,
     };
     vec![(name.to_owned(), file)]
 }

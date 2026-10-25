@@ -22,7 +22,7 @@ use musicable_commands::{Editor, Keymap, transport};
 use musicable_engine::{EngineConfig, rt};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav, write_aiff};
 use musicable_model::automation::{Lane, Point};
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset};
 use musicable_model::native::{NativeDevice, NativeKind, compressor};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
@@ -114,7 +114,7 @@ fn song(dir: &Path) -> Project {
     audio.fade_out = beats(1, 4);
     audio_clip(&mut p, drums, beats(0, 1), beats(2, 1), audio);
     let mut audio = AudioClip::new("Audio/Drums.wav");
-    audio.offset = 10_000;
+    audio.offset = Offset::Frames(10_000);
     audio_clip(&mut p, drums, beats(5, 2), beats(4, 1), audio);
     let mut squash = NativeDevice::new(NativeKind::Compressor);
     squash.set(compressor::THRESHOLD, -24.0);

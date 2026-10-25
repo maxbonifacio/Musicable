@@ -1,6 +1,6 @@
-//! What the arrangement and the piano roll edit besides the project: the
-//! selection, the start marker, the grid, the zoom and how the editing
-//! behaves.
+//! What the arrangement, the piano roll and the Sample Editor edit besides
+//! the project: the selection, the start marker, the grid, the zoom and how
+//! the editing behaves.
 //!
 //! It lives with the [`Document`](crate::Document), outside the widgets, so
 //! commands read and change it just as the UI does, and so will extensions
@@ -55,6 +55,12 @@ pub struct Editor {
     pub focus: Focus,
     /// What the piano roll shows and has selected.
     pub piano_roll: PianoRoll,
+    /// What the Sample Editor shows and has selected.
+    pub sample_editor: SampleEditor,
+    /// The panel of the editor that fits the clip selected or opened last:
+    /// the piano roll's for a MIDI clip, the Sample Editor's for an audio
+    /// clip. The piano roll's keys show and hide it.
+    pub clip_editor: &'static str,
 }
 
 impl Default for Editor {
@@ -75,6 +81,8 @@ impl Default for Editor {
             automation: BTreeMap::new(),
             focus: Focus::default(),
             piano_roll: PianoRoll::default(),
+            sample_editor: SampleEditor::default(),
+            clip_editor: panel::PIANO_ROLL,
         }
     }
 }
@@ -125,6 +133,7 @@ impl Editor {
             roll.notes.clear();
             roll.show(clip, &midi.notes);
         }
+        self.clip_editor = panel::PIANO_ROLL;
         true
     }
 
@@ -133,6 +142,32 @@ impl Editor {
     pub fn open_in_piano_roll(&mut self, clip: &Clip) {
         if self.show_in_piano_roll(clip) {
             self.focus = Focus::PIANO_ROLL;
+        }
+    }
+
+    /// Shows `clip` in the Sample Editor, if it's an audio clip, as
+    /// selecting it in the arrangement does. A clip it doesn't show already
+    /// comes into sight with no markers selected. Returns whether it's an
+    /// audio clip.
+    pub fn show_in_sample_editor(&mut self, clip: &Clip) -> bool {
+        if !matches!(clip.content, ClipContent::Audio(_)) {
+            return false;
+        }
+        let shown = &mut self.sample_editor;
+        if shown.clip != Some(clip.id) {
+            shown.clip = Some(clip.id);
+            shown.markers.clear();
+            shown.viewport.show(clip.range());
+        }
+        self.clip_editor = panel::SAMPLE_EDITOR;
+        true
+    }
+
+    /// Shows `clip` in the Sample Editor, if it's an audio clip, and gives
+    /// the Sample Editor the focus.
+    pub fn open_in_sample_editor(&mut self, clip: &Clip) {
+        if self.show_in_sample_editor(clip) {
+            self.focus = Focus::SAMPLE_EDITOR;
         }
     }
 
@@ -199,6 +234,26 @@ impl Editor {
                 }
             }
         }
+        let shown = &mut self.sample_editor;
+        let audio = shown
+            .clip
+            .and_then(|id| match &project.find_clip(id)?.1.content {
+                ClipContent::Audio(audio) => Some(audio),
+                ClipContent::Midi(_) => None,
+            });
+        match audio {
+            Some(audio) => match &audio.warp {
+                Some(warp) => (shown.markers).retain(|&beat| warp.marker_at(beat).is_some()),
+                None => shown.markers.clear(),
+            },
+            None => {
+                shown.clip = None;
+                shown.markers.clear();
+                if self.focus == Focus::SAMPLE_EDITOR {
+                    self.focus = Focus::ARRANGEMENT;
+                }
+            }
+        }
     }
 }
 
@@ -212,6 +267,7 @@ impl Focus {
     pub const MIXER: Self = Self(panel::MIXER);
     pub const DEVICES: Self = Self(panel::DEVICES);
     pub const PIANO_ROLL: Self = Self(panel::PIANO_ROLL);
+    pub const SAMPLE_EDITOR: Self = Self(panel::SAMPLE_EDITOR);
     pub const BROWSER: Self = Self(panel::BROWSER);
     pub const HISTORY: Self = Self(panel::HISTORY);
 
@@ -230,6 +286,7 @@ impl Focus {
         match self.0 {
             panel::ARRANGEMENT | panel::MIXER => Edits::Arrangement,
             panel::PIANO_ROLL => Edits::Notes,
+            panel::SAMPLE_EDITOR => Edits::Markers,
             _ => Edits::Nothing,
         }
     }
@@ -251,6 +308,9 @@ pub enum Edits {
     Arrangement,
     /// The piano roll's selected notes.
     Notes,
+    /// The Sample Editor's selected warp markers: Delete and Select All act
+    /// on them, and the clipboard leaves them alone.
+    Markers,
     /// Nothing: the panel has nothing selected that they take.
     Nothing,
 }
@@ -341,6 +401,37 @@ impl PianoRoll {
         let rows = f32::from(Note::MAX_KEY) + 1.0;
         let middle = (rows - key - 0.5) * key_height;
         (middle - height / 2.0).clamp(0.0, (rows * key_height - height).max(0.0))
+    }
+}
+
+/// What the Sample Editor edits: the audio clip it shows, its selected warp
+/// markers, and its zoom and scrolling. Clicking its waveform moves the
+/// start marker, as clicking the arrangement does, and Insert Warp Marker
+/// adds a marker there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleEditor {
+    /// The audio clip it shows: the one selected or opened last. Always one
+    /// of the tracks' clips.
+    pub clip: Option<ClipId>,
+    /// The selected warp markers of that clip, by their beats in its own
+    /// time, which are each marker's own.
+    pub markers: BTreeSet<Beats>,
+    /// The zoom and the scrolling sideways, in song positions, as the
+    /// arrangement's.
+    pub viewport: Viewport,
+}
+
+impl Default for SampleEditor {
+    /// Four bars of 4/4 across a thousand points, from the song's start.
+    fn default() -> Self {
+        Self {
+            clip: None,
+            markers: BTreeSet::new(),
+            viewport: Viewport {
+                zoom: 62.5,
+                ..Viewport::default()
+            },
+        }
     }
 }
 
@@ -746,11 +837,14 @@ impl MiddleC {
 }
 
 /// What the app read in an audio file's header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioFile {
     pub sample_rate: u32,
     pub frames: u64,
     pub channels: usize,
+    /// The tempo its loop data gives, as a WAV file's ACID chunk does, if
+    /// it has any: what Warp starts it at.
+    pub tempo: Option<f64>,
 }
 
 /// Clips that Cut or Copy took.
@@ -938,6 +1032,7 @@ mod tests {
                 sample_rate: 44_100,
                 frames: 10,
                 channels: 2,
+                tempo: None,
             },
         );
         assert_eq!(editor.sample_rate_of("a.wav"), 44_100);
