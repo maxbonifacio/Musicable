@@ -232,19 +232,31 @@ struct AudioClip {
 }
 
 /// How a warped clip follows the tempo: its markers as `[frame, at]`
-/// pairs, `at` in ticks of the clip's own time.
+/// pairs, `at` in ticks of the clip's own time, and its transients as
+/// `[frame, strength, percussiveness, origin]`, a line each, as a file can
+/// have thousands.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Warp {
     mode: WarpMode,
     tempo: f64,
     markers: Vec<(u64, i64)>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    onsets: Option<Vec<(u64, f32, f32, Origin)>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WarpMode {
     RePitch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Origin {
+    Found,
+    Added,
+    Hidden,
 }
 
 /// The curve of one of an audio clip's own parameters: its points as `[at,
@@ -1261,13 +1273,24 @@ impl From<&warp::Warp> for Warp {
             mode,
             markers,
             tempo,
+            onsets,
         } = warp;
+        let origin = |origin| match origin {
+            warp::Origin::Found => Origin::Found,
+            warp::Origin::Added => Origin::Added,
+            warp::Origin::Hidden => Origin::Hidden,
+        };
         Self {
             mode: match mode {
                 warp::WarpMode::RePitch => WarpMode::RePitch,
             },
             tempo: *tempo,
             markers: markers.iter().map(|m| (m.frame, m.beat.ticks())).collect(),
+            onsets: onsets.as_ref().map(|onsets| {
+                (onsets.all().iter())
+                    .map(|o| (o.frame, o.strength, o.percussiveness, origin(o.origin)))
+                    .collect()
+            }),
         }
     }
 }
@@ -1355,6 +1378,7 @@ impl Warp {
             mode,
             tempo,
             markers,
+            onsets,
         } = self;
         let (low, high) = (warp::Warp::MIN_TEMPO, warp::Warp::MAX_TEMPO);
         if !(low..=high).contains(tempo) {
@@ -1385,14 +1409,58 @@ impl Warp {
             }
             model_markers.push(warp::WarpMarker { frame, beat });
         }
+        let onsets = match onsets {
+            Some(onsets) => Some(onsets_to_model(onsets, &format!("{path}.onsets"))?),
+            None => None,
+        };
         Ok(warp::Warp {
             mode: match mode {
                 WarpMode::RePitch => warp::WarpMode::RePitch,
             },
             markers: model_markers,
             tempo: *tempo,
+            onsets,
         })
     }
+}
+
+/// A warp's transients, the list at `path`: frames of the file rising, and
+/// strengths and percussiveness from 0 to 1.
+fn onsets_to_model(
+    onsets: &[(u64, f32, f32, Origin)],
+    path: &str,
+) -> Result<warp::Onsets, Invalid> {
+    let mut model: Vec<warp::Onset> = Vec::with_capacity(onsets.len());
+    for (k, &(frame, strength, percussiveness, origin)) in onsets.iter().enumerate() {
+        let path = format!("{path}[{k}]");
+        if frame > MAX_TICKS.unsigned_abs() {
+            let message = format!("must be {MAX_TICKS} or less");
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        if model.last().is_some_and(|before| frame <= before.frame) {
+            let message = "must be after the frame of the transient before it";
+            return Err(Invalid::new(format!("{path}[0]"), message));
+        }
+        for (value, index) in [(strength, 1), (percussiveness, 2)] {
+            if !(0.0..=1.0).contains(&value) {
+                return Err(Invalid::new(
+                    format!("{path}[{index}]"),
+                    "must be from 0 to 1",
+                ));
+            }
+        }
+        model.push(warp::Onset {
+            frame,
+            strength,
+            percussiveness,
+            origin: match origin {
+                Origin::Found => warp::Origin::Found,
+                Origin::Added => warp::Origin::Added,
+                Origin::Hidden => warp::Origin::Hidden,
+            },
+        });
+    }
+    Ok(warp::Onsets::new(model))
 }
 
 impl ClipLane {

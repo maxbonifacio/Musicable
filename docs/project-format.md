@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 11,
+  "version": 12,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -427,12 +427,25 @@ A **warp**:
 | `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable. |
 | `tempo` | float | The clip's tempo while it has one marker, in quarter notes a minute of the file, from 5 to 999. With more markers, they say how fast the file plays, and `tempo` waits for all but one of them to go. |
 | `markers` | array of markers | At least one, in order: both their frames and their positions rise. |
+| `onsets` | array of transients or `null` | The file's transients, where the sounds in it start, in order: their frames rise. `null` until the clip takes them from analysis of its file, which it does once, so they're the clip's own from then on, and a better analyser never moves them. |
 
 A **marker** is a pair `[frame, at]`: the frame of the file, from 0 to
 2⁵³ − 1, that plays at `at`, a position in the clip's own time. Between two
 markers the file plays at the speed that takes it from one to the next.
 Before the first marker and after the last, it plays at the speed beside
 it, and a clip with one marker plays at its `tempo` all through.
+
+A **transient** is an array `[frame, strength, percussiveness, origin]`, a
+line each, as a file can have thousands: the frame of the file its attack
+starts at, from 0 to 2⁵³ − 1; how much the spectrum rose there, as a float
+from 0 to 1 of the file's largest rise; how sharp its attack is, a float
+from 0 for a soft start to 1 for a hit; and where it came from:
+
+| Origin | Meaning |
+|---|---|
+| `"found"` | Analysis found it. |
+| `"added"` | The user added it, or moved it there. The user's own count as strength 1 and percussiveness 1, unless they were moved from a found one, which keeps its own. |
+| `"hidden"` | Analysis found it and the user deleted it or moved it away. It's out of sight, and Reset Transients brings it back. |
 
 A **clip curve** moves one of an audio clip's own parameters as the clip
 plays, in place of the parameter's own value:
@@ -822,6 +835,7 @@ Signal flows from tracks to buses without loops:
 | 9 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 8 files have none. |
 | 10 | 2026-10-24 | The workspace a project was saved with. Version 9 files name none. |
 | 11 | 2026-10-25 | Warping: audio clips that follow the tempo, with markers and a mode, Re-Pitch so far, and curves for an audio clip's own parameters, starting with its gain. Version 10 audio clips are unwarped and have no curves. |
+| 12 | 2026-10-25 | Transients: the onsets a warped clip keeps, found by analysis and changed by the user. Version 11 warped clips have none yet, so they take them from analysis. |
 
 ## Changing the format
 

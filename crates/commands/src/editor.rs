@@ -16,6 +16,7 @@ use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
+use crate::auto_warp::Pending;
 use crate::panel;
 
 /// The arrangement's and the piano roll's editing state.
@@ -45,6 +46,9 @@ pub struct Editor {
     /// What analysis found in those files, by the same paths, as far as
     /// the app has analysed them.
     pub analyses: BTreeMap<String, Arc<Analysis>>,
+    /// Files dropped into the song that auto-warp waits for the analyses
+    /// of, a drop at a time.
+    pub auto_warp: Vec<Pending>,
     /// The engine's sample rate: an audio file that isn't in
     /// [`files`](Self::files) yet is taken to have it.
     pub sample_rate: u32,
@@ -81,6 +85,7 @@ impl Default for Editor {
             behaviour: Behaviour::default(),
             files: BTreeMap::new(),
             analyses: BTreeMap::new(),
+            auto_warp: Vec::new(),
             sample_rate: 48_000,
             clipboard: None,
             take_lanes: BTreeSet::new(),
@@ -163,6 +168,7 @@ impl Editor {
         if shown.clip != Some(clip.id) {
             shown.clip = Some(clip.id);
             shown.markers.clear();
+            shown.time = None;
             shown.viewport.show(clip.range());
         }
         self.clip_editor = panel::SAMPLE_EDITOR;
@@ -250,11 +256,15 @@ impl Editor {
         match audio {
             Some(audio) => match &audio.warp {
                 Some(warp) => (shown.markers).retain(|&beat| warp.marker_at(beat).is_some()),
-                None => shown.markers.clear(),
+                None => {
+                    shown.markers.clear();
+                    shown.time = None;
+                }
             },
             None => {
                 shown.clip = None;
                 shown.markers.clear();
+                shown.time = None;
                 if self.focus == Focus::SAMPLE_EDITOR {
                     self.focus = Focus::ARRANGEMENT;
                 }
@@ -411,9 +421,9 @@ impl PianoRoll {
 }
 
 /// What the Sample Editor edits: the audio clip it shows, its selected warp
-/// markers, and its zoom and scrolling. Clicking its waveform moves the
-/// start marker, as clicking the arrangement does, and Insert Warp Marker
-/// adds a marker there.
+/// markers and time, and its zoom and scrolling. Clicking its waveform
+/// moves the start marker, as clicking the arrangement does, and Insert
+/// Warp Marker adds a marker there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SampleEditor {
     /// The audio clip it shows: the one selected or opened last. Always one
@@ -422,6 +432,10 @@ pub struct SampleEditor {
     /// The selected warp markers of that clip, by their beats in its own
     /// time, which are each marker's own.
     pub markers: BTreeSet<Beats>,
+    /// The stretch of the warped clip's own time selected, never empty: its
+    /// transients are the selected ones, which Insert Warp Marker puts
+    /// markers at.
+    pub time: Option<BeatRange>,
     /// The zoom and the scrolling sideways, in song positions, as the
     /// arrangement's.
     pub viewport: Viewport,
@@ -433,6 +447,7 @@ impl Default for SampleEditor {
         Self {
             clip: None,
             markers: BTreeSet::new(),
+            time: None,
             viewport: Viewport {
                 zoom: 62.5,
                 ..Viewport::default()
@@ -792,13 +807,43 @@ impl Grid {
 /// How editing behaves where people's habits differ. Kept as settings, not
 /// built in, so profiles can follow other DAWs: the app reads it from its
 /// settings file, as `[behaviour]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Behaviour {
     /// Where Play/Stop starts playing from.
     pub play_from: PlayFrom,
     /// What the piano roll calls middle C, MIDI note 60.
     pub middle_c: MiddleC,
+    /// Auto-warp's rules, each on or off (see [`auto_warp`](crate::auto_warp)).
+    /// Recordings follow the song's tempo as it was when they were made.
+    pub warp_recordings: bool,
+    /// Loops of whole bars are warped to them.
+    pub warp_loops: bool,
+    /// Files at a steady tempo are warped from their first downbeat.
+    pub warp_steady: bool,
+    /// Files whose tempo drifts get a marker on every downbeat.
+    pub warp_drifting: bool,
+    /// Sounds without a pulse stay unwarped, and land with their hit, or a
+    /// riser's peak, where they're dropped.
+    pub sync_one_shots: bool,
+    /// The first file with a pulse dropped into an empty song gives it its
+    /// tempo and meter.
+    pub tempo_from_first_file: bool,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            play_from: PlayFrom::default(),
+            middle_c: MiddleC::default(),
+            warp_recordings: true,
+            warp_loops: true,
+            warp_steady: true,
+            warp_drifting: true,
+            sync_one_shots: true,
+            tempo_from_first_file: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

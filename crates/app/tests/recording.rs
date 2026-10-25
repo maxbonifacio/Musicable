@@ -19,6 +19,7 @@ use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, rt};
 use musicable_io::audio::Decoder;
 use musicable_model::clip::{ClipContent, Offset};
 use musicable_model::time::Beats;
+use musicable_model::warp::Warp;
 use musicable_model::{Monitor, Project, TrackId, TrackKind};
 
 #[global_allocator]
@@ -154,8 +155,10 @@ fn armed_tracks_record_takes_where_they_were_played() {
     };
     assert_eq!(
         (audio.file.as_str(), audio.offset),
-        (name.as_str(), Offset::Frames(0))
+        (name.as_str(), Offset::Beats(Beats::ZERO))
     );
+    // It follows the tempo, playing sample for sample at the song's.
+    assert_eq!(audio.warp, Some(Warp::new(0, Beats::ZERO, 120.0)));
     let file = AudioFile {
         sample_rate: 48_000,
         frames: 48_000,

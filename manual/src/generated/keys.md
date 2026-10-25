@@ -41,7 +41,7 @@
 | Ctrl+R | Edit: Rename |
 | Ctrl+S | File: Save Project |
 | Ctrl+T | Track: New Audio Track |
-| Ctrl+U | Notes: Quantize |
+| Ctrl+U | Edit: Quantize |
 | Ctrl+V | Edit: Paste |
 | Ctrl+X | Edit: Cut |
 | Ctrl+Y | Edit: Redo |
@@ -100,3 +100,5 @@
 | Left | Warp: Nudge Warp Markers Left |
 | Right | Warp: Nudge Warp Markers Right |
 | Ctrl+I | Warp: Insert Warp Marker |
+| Ctrl+Shift+I | Transient: Insert Transient |
+| Ctrl+Shift+Backspace | Transient: Delete Transients |

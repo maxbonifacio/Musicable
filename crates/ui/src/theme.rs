@@ -197,6 +197,12 @@ pub struct Theme {
     pub warp_marker: Color32,
     #[serde(with = "values::colour")]
     pub warp_marker_selected: Color32,
+    /// The ticks along the waveform's top where the file's transients are,
+    /// and the faint warp marker that shows at one under the pointer.
+    #[serde(with = "values::colour")]
+    pub transient: Color32,
+    #[serde(with = "values::colour")]
+    pub pseudo_marker: Color32,
 
     // The arrangement's sizes, in points.
     /// The ruler over the tracks, and the strip at its top for the loop
@@ -637,6 +643,8 @@ impl Theme {
 
             warp_marker: Color32::from_rgb(200, 170, 70),
             warp_marker_selected: Color32::from_rgb(255, 220, 110),
+            transient: Color32::from_gray(150),
+            pseudo_marker: Color32::from_gray(175),
 
             ruler_height: 40.0,
             ruler_strip: 18.0,

@@ -22,7 +22,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use musicable_analysis::Analysis;
 use musicable_model::automation::Lane;
 use musicable_model::clip::{
     AudioClip, Clip, ClipContent, ClipId, Controller, MidiClip, NoteId, Offset, Point,
@@ -32,7 +34,7 @@ use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
 use musicable_model::{
     Chain, ClipType, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Take, Track, TrackId,
     TrackKind,
@@ -43,8 +45,8 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, history, json, locator, mixer, notes, options, take, track,
-    transport, view, warp, workspace,
+    controllers, device, edit, file, history, json, locator, mixer, notes, options, rewarp, take,
+    track, transient, transport, view, warp, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -525,6 +527,32 @@ fn examples() -> Vec<Example> {
             start_marker(s, at);
             Some(Args::new())
         }),
+        edits(edit::QUANTIZE, |s| {
+            let (clip, notes) = find_notes(s)?;
+            Some(Args::new().with("clip", clip).with("notes", notes))
+        }),
+        // Without arguments, while the arrangement has the focus: the notes
+        // of the selected MIDI clips.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, _) = find_notes(s)?;
+            s.select_clips(&[clip]);
+            Some(Args::new())
+        }),
+        // A warped clip's transients, which gain warp markers.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, frame) = find_transient(s)?;
+            let frames = vec![frame as i64];
+            Some(Args::new().with("clip", clip).with("frames", frames))
+        }),
+        // Without arguments: those in the Sample Editor's time selection.
+        edits(edit::QUANTIZE, transient_selected),
+        // And while the arrangement has the focus, those of the selected
+        // warped clips.
+        edits(edit::QUANTIZE, |s| {
+            let (clip, _) = find_transient(s)?;
+            s.select_clips(&[clip]);
+            Some(Args::new())
+        }),
         steps(edit::REDO, bare),
         leaves(edit::RENAME, |s| {
             let clip = find_clip(s, |_| true)?.id;
@@ -861,17 +889,6 @@ fn examples() -> Vec<Example> {
             let clip = find_clip(s, is_midi)?.id;
             Some(Args::new().with("clip", clip))
         }),
-        edits(notes::QUANTIZE, |s| {
-            let (clip, notes) = find_notes(s)?;
-            Some(Args::new().with("clip", clip).with("notes", notes))
-        }),
-        // Without arguments, while the arrangement has the focus: the notes
-        // of the selected MIDI clips.
-        edits(notes::QUANTIZE, |s| {
-            let (clip, _) = find_notes(s)?;
-            s.select_clips(&[clip]);
-            Some(Args::new())
-        }),
         leaves(notes::SELECT, |s| {
             let (clip, notes) = find_notes(s)?;
             Some(Args::new().with("clip", clip).with("notes", notes))
@@ -1137,6 +1154,17 @@ fn examples() -> Vec<Example> {
             start_marker(s, middle(&c) + Beats::from_ticks(5));
             Some(Args::new())
         }),
+        // On a transient.
+        edits(warp::INSERT_MARKERS, |s| {
+            let (clip, frame) = find_transient(s)?;
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("frames", vec![frame as i64]),
+            )
+        }),
+        // Without arguments: at the transients in the time selection.
+        edits(warp::INSERT_MARKERS, transient_selected),
         edits(warp::MOVE_AUDIO, |s| {
             let (clip, beat) = find_marker(s, |w| w.markers.len() > 1)?;
             let (_, c) = project(s).find_clip(clip)?;
@@ -1175,6 +1203,14 @@ fn examples() -> Vec<Example> {
             let (clip, beat) = find_marker(s, |_| true)?;
             Some(Args::new().with("clip", clip).with("markers", vec![beat]))
         }),
+        leaves(warp::SELECT_TIME, |s| {
+            let (clip, beat) = find_marker(s, |_| true)?;
+            let args = Args::new()
+                .with("clip", clip)
+                .with("start", beat)
+                .with("end", beat + Beats::new(1));
+            Some(args)
+        }),
         edits(warp::SET_GAIN, |s| {
             let clip = find_clip(s, is_audio)?;
             let ClipContent::Audio(audio) = &clip.content else {
@@ -1202,6 +1238,87 @@ fn examples() -> Vec<Example> {
             s.run_with(&warp::OPEN, Args::new().with("clip", clip))
                 .ok()?;
             Some(Args::new())
+        }),
+        edits(rewarp::FROM_HERE, marker_frame),
+        edits(rewarp::FROM_HERE_AT_SONG_TEMPO, marker_frame),
+        edits(rewarp::FROM_HERE_STRAIGHT, marker_frame),
+        edits(rewarp::SELECTION_AS_LOOP, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            // All of the clip.
+            let offset = audio.offset.beats()?;
+            let args = Args::new()
+                .with("clip", clip)
+                .with("start", offset)
+                .with("end", offset + c.length);
+            Some(args)
+        }),
+        // Without arguments: the Sample Editor's time selection.
+        edits(rewarp::SELECTION_AS_LOOP, |s| {
+            let (clip, _) = find_marker(s, |_| true)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            // Its first two beats.
+            let offset = audio.offset.beats()?;
+            let args = Args::new()
+                .with("clip", clip)
+                .with("start", offset)
+                .with("end", offset + Beats::new(2).min(c.length));
+            s.run_with(&warp::SELECT_TIME, args).ok()?;
+            Some(Args::new())
+        }),
+        edits(rewarp::SET_DOWNBEAT, marker_frame),
+        edits(rewarp::SONG_TEMPO_FROM_HERE, marker_frame),
+        edits(transient::DELETE, |s| {
+            let (clip, frame) = find_transient(s)?;
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("frames", vec![frame as i64]),
+            )
+        }),
+        // Without arguments: those in the Sample Editor's time selection.
+        edits(transient::DELETE, transient_selected),
+        edits(transient::INSERT, |s| {
+            let (clip, frame) = find_transient(s)?;
+            // Just after one, where there's none.
+            let frames = vec![frame as i64 + 3];
+            Some(Args::new().with("clip", clip).with("frames", frames))
+        }),
+        // Without arguments: at the start marker, an eighth of a beat after
+        // the transient halfway through the groove.
+        edits(transient::INSERT, |s| {
+            let (clip, _) = find_transient(s)?;
+            let c = project(s).find_clip(clip)?.1.clone();
+            s.run_with(&warp::OPEN, Args::new().with("clip", clip))
+                .ok()?;
+            start_marker(s, middle(&c) + Beats::from_ratio(1, 8));
+            Some(Args::new())
+        }),
+        edits(transient::MOVE, |s| {
+            let (clip, frame) = find_transient(s)?;
+            let (_, c) = project(s).find_clip(clip)?;
+            let ClipContent::Audio(audio) = &c.content else {
+                return None;
+            };
+            let onsets = audio.warp.as_ref()?.onsets.as_ref()?;
+            // A little later, short of the next.
+            let (_, next) = onsets.room(frame)?;
+            let to = (frame + 50).min(next.map_or(u64::MAX, |next| next - 1));
+            let args = Args::new()
+                .with("clip", clip)
+                .with("frame", frame as i64)
+                .with("to", to as i64);
+            (to > frame).then_some(args)
+        }),
+        edits(transient::RESET, |s| {
+            let (clip, _) = find_transient(s)?;
+            Some(Args::new().with("clip", clip))
         }),
         leaves(workspace::DELETE, bare),
         leaves(workspace::RENAME, bare),
@@ -1262,6 +1379,19 @@ fn find_marker(s: &Rig, keep: impl Fn(&Warp) -> bool) -> Option<(ClipId, Beats)>
         ClipContent::Audio(AudioClip {
             warp: Some(warp), ..
         }) if keep(warp) => warp.markers.iter().map(|m| (clip.id, m.beat)).collect(),
+        _ => Vec::new(),
+    });
+    pick(s, found)
+}
+
+/// A warped clip on a track with transients, and the frame of one of
+/// those in sight.
+fn find_transient(s: &Rig) -> Option<(ClipId, u64)> {
+    let clips = project(s).tracks.iter().flat_map(|t| &t.clips);
+    let found = clips.flat_map(|clip| match &clip.content {
+        ClipContent::Audio(AudioClip {
+            warp: Some(warp), ..
+        }) => warp.transients().map(|o| (clip.id, o.frame)).collect(),
         _ => Vec::new(),
     });
     pick(s, found)
@@ -1356,6 +1486,39 @@ fn marker_selected(s: &mut Rig) -> Option<Args> {
     let args = Args::new().with("clip", clip).with("markers", vec![beat]);
     s.run_with(&warp::SELECT_MARKERS, args).ok()?;
     Some(Args::new())
+}
+
+/// Selects a stretch of a warped clip's own time around one of its
+/// transients in the Sample Editor, which gives it the focus, for a command
+/// without arguments.
+fn transient_selected(s: &mut Rig) -> Option<Args> {
+    let (clip, frame) = find_transient(s)?;
+    let (_, c) = project(s).find_clip(clip)?;
+    let ClipContent::Audio(audio) = &c.content else {
+        return None;
+    };
+    let rate = s.document.editor().sample_rate_of(&audio.file);
+    let beat = Beats::from_f64(audio.warp.as_ref()?.beat_at(frame as f64, rate));
+    let around = Beats::from_ticks(9);
+    let args = Args::new()
+        .with("clip", clip)
+        .with("start", beat - around)
+        .with("end", beat + around);
+    s.run_with(&warp::SELECT_TIME, args).ok()?;
+    Some(Args::new())
+}
+
+/// A warped clip and the frame of one of its markers, for the commands
+/// that warp it from a point.
+fn marker_frame(s: &mut Rig) -> Option<Args> {
+    let (clip, beat) = find_marker(s, |_| true)?;
+    let (_, c) = project(s).find_clip(clip)?;
+    let ClipContent::Audio(audio) = &c.content else {
+        return None;
+    };
+    let warp = audio.warp.as_ref()?;
+    let frame = warp.markers[warp.marker_at(beat)?].frame;
+    Some(Args::new().with("clip", clip).with("frame", frame as i64))
 }
 
 /// Shows a warped clip in the Sample Editor, for a command without
@@ -1464,6 +1627,7 @@ fn fixture() -> Project {
     });
     groove.warp = Some(Warp {
         markers: markers.to_vec(),
+        onsets: Some(groove_transients()),
         ..Warp::new(0, Beats::ZERO, 100.0)
     });
     groove.offset = Offset::Beats(Beats::from_ratio(1, 2));
@@ -1551,8 +1715,52 @@ fn fixture() -> Project {
 
 /// The [`fixture`], with the editor knowing its audio files, and the
 /// library its samples and a preset, picking the first of everything.
+/// The groove's transients, as the fixture's warped clip has them: what
+/// analysis found, but for one the user added and one deleted.
+fn groove_transients() -> Onsets {
+    let onset = |frame, origin| Onset {
+        frame,
+        strength: 0.5,
+        percussiveness: 0.75,
+        origin,
+    };
+    let found = GROOVE_ONSETS.map(|frame| onset(frame, Origin::Found));
+    let mut onsets = Onsets::new(found);
+    onsets.delete(&[GROOVE_ONSETS[1]]);
+    onsets.insert(18_000);
+    onsets
+}
+
+/// Where analysis finds the groove's transients.
+const GROOVE_ONSETS: [u64; 5] = [6_000, 12_000, 24_000, 36_000, 54_000];
+
 fn setup() -> Rig {
     let mut s = Setup::new(fixture());
+    let onsets = GROOVE_ONSETS.map(|frame| musicable_analysis::Onset {
+        frame,
+        strength: 0.5,
+        percussiveness: 0.75,
+    });
+    // A steady beat at 120 BPM, for Warp From Here.
+    let beats: Vec<u64> = (0..8).map(|k| k * 24_000).collect();
+    let steady = musicable_analysis::Steady {
+        bpm: 120.0,
+        origin: 0.0,
+        error_ms: 0.0,
+        drift_ms: 0.0,
+    };
+    let analysis = Analysis {
+        pulse: true,
+        steady: Some(steady),
+        downbeats: vec![0, 4],
+        tracker: musicable_analysis::Tracker::Network,
+        agreement: Some(1.0),
+        events: beats.len(),
+        beats,
+        ..Analysis::with_onsets(48_000, 4 * 48_000, onsets.to_vec())
+    };
+    let analyses = &mut s.document.editor_mut().analyses;
+    analyses.insert(GROOVE.to_owned(), Arc::new(analysis));
     // Two seconds of the loop, four of the groove, and ten of the others:
     // longer than their clips.
     let read = [

@@ -130,6 +130,30 @@ impl History {
         }
     }
 
+    /// The id of the last step undo would take back, if there's one.
+    pub(crate) fn last_step(&self) -> Option<u64> {
+        self.undo.back().map(|step| step.id)
+    }
+
+    /// Adds `edits` to the last step, if its id is `step`, as if its
+    /// transaction had made them too, and returns its name. It gets a new
+    /// id, as the project it leads to changes.
+    pub(crate) fn amend(&mut self, step: u64, edits: &[Edit]) -> Option<String> {
+        if self.last_step() != Some(step) {
+            return None;
+        }
+        let id = self.next_id();
+        let last = self.undo.back_mut()?;
+        last.edits.extend_from_slice(edits);
+        compact(&mut last.edits);
+        last.id = id;
+        let name = last.name.clone();
+        if last.edits.is_empty() {
+            self.undo.pop_back();
+        }
+        Some(name)
+    }
+
     /// Lets the oldest steps go while there are more than the limit.
     fn forget_oldest(&mut self) {
         while self.undo.len() > LIMIT {

@@ -826,6 +826,7 @@ fn context_menus_offer_commands_for_what_was_clicked() {
         "Cut Ctrl+X",
         "Copy Ctrl+C",
         "Split Ctrl+E",
+        "Quantize Ctrl+U",
         "Snap to Grid Ctrl+4",
     ] {
         harness.get_by_label(item);

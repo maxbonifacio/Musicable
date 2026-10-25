@@ -377,24 +377,40 @@ what it shows, and what the mouse and the keys do in it, and
 [Warping](../manual/src/using/warping.md) what warping does. Everything it
 does runs a command ([commands.md](commands.md#warping) and
 [automation](commands.md#automation) for the gain lane), and a drag runs
-one when it ends, so it's one step to undo. While a drag lasts, it draws
-the waveform as the drag would leave it, from a copy of the clip's warp
-that the drag changes (`crates/ui/src/sample_editor.rs`), and the rulers,
-the markers and the waveform are drawn in `sample_editor/paint.rs`. Its
-waveform comes from the same peaks as the arrangement's, read along the
-clip's warp, so the two agree. Its keys are the Sample Editor panel's own
-in the default keymap, as the piano roll's are, and hiding it gives the
-arrangement the focus. Clip Editor and Switch Devices and Clip Editor show
-the piano roll or the Sample Editor, whichever fits the clip selected or
-opened last (`Editor::clip_editor`).
+one when it ends, so it's one step to undo: dragging a transient's pseudo
+marker runs Insert Warp Marker and Move Warp Markers as one batch
+(`Action::RunBatch`). While a drag lasts, it draws the waveform as the drag
+would leave it, from a copy of the clip's warp that the drag changes
+(`crates/ui/src/sample_editor.rs`), and the rulers, the markers, the
+transients and the waveform are drawn in `sample_editor/paint.rs`; its
+context menu is `sample_editor/menu.rs`. It finds the transients in sight
+by their frames, which rise across with the warp's markers, so it only
+looks at those near the pointer or on screen. A warped clip's transients
+come from analysis: the app gives each warped clip that has none yet those
+of its file as analyses arrive and the project changes
+(`warp::take_transients`), as a change the project follows rather than a
+step to undo. As analyses arrive, the app also warps the files dropped
+before they were analysed (`Session::auto_warp`,
+[commands.md](commands.md#auto-warp)), once none of a drop's files is
+waiting (`Analyses::waits_for`). Its context menu has the warp commands
+that act at a point, which it gives the frame of the marker, the transient
+or the audio where it was opened ([commands.md](commands.md#warping)), and
+Quantize. Its waveform comes from the same peaks as the arrangement's,
+read along the clip's warp, so the two agree. Its keys are the Sample
+Editor panel's own in the default keymap, as the piano roll's are, and
+hiding it gives the arrangement the focus. Clip Editor and Switch Devices
+and Clip Editor show the piano roll or the Sample Editor, whichever fits
+the clip selected or opened last (`Editor::clip_editor`).
 
 **For Tier 2's extensions and profiles.** What the Sample Editor shows, its
-selected markers and its zoom are the `Editor`'s (`editor::SampleEditor`);
-its colours and sizes are in the `Theme` (`theme.sample_editor`, and the
-`warp_marker`, `warp_marker_selected` and `outside_clip` colours); its
-gestures are the `MouseMap`'s targets `WarpMarker`, `WaveformTop` and
-`Waveform`, and its gain lane's are the automation lanes' targets; and its
-panel's id is `musicable_ui::SAMPLE_EDITOR`.
+selected markers and time, and its zoom are the `Editor`'s
+(`editor::SampleEditor`); its colours and sizes are in the `Theme`
+(`theme.sample_editor`, and the `warp_marker`, `warp_marker_selected`,
+`transient`, `pseudo_marker`, `time_selection` and `outside_clip`
+colours); its gestures are the `MouseMap`'s targets `WarpMarker`,
+`Transient`, `WaveformTop` and `Waveform`, and its gain lane's are the
+automation lanes' targets; and its panel's id is
+`musicable_ui::SAMPLE_EDITOR`.
 
 ## The History panel
 
@@ -428,6 +444,10 @@ profile in use's keymap, mouse map, workspaces and settings
 ([Profiles](#profiles)), or in the theme's own file. Every setting in
 settings.toml has a control here but the export window's, which that window
 keeps as it was last used. The window isn't a panel, so no workspace has it.
+The Behaviour page has auto-warp's switches, which go with the profile, and
+Fast analysis, which doesn't: it's `Settings::analysis`, the computer's,
+and the app hands it to the analysis jobs (`Analyses::set_fast`), so the
+next file analysed uses it.
 
 ### Profiles
 
@@ -767,7 +787,8 @@ absolute ([project-format.md](project-format.md#track)). The app reads WAV,
 AIFF and FLAC files (`musicable_io::audio` lists the sample formats), and
 resamples a file at another rate than the device's. Adding files runs
 `clip.insert_audio`, which reads each file's header first, so the clips are
-as long as their files.
+as long as their files, and auto-warps them by what analysis found in them
+([commands.md](commands.md#auto-warp)).
 
 Each time the session builds a graph, on the compiler's thread, it finds
 the files the project's audio clips play (`crates/app/src/media.rs`):

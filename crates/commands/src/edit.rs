@@ -16,19 +16,25 @@
 //! act on its notes instead (see [`notes`]). While the Sample Editor has
 //! it, Delete and Select All act on its warp markers (see [`warp`]). In the
 //! other panels they don't apply. Split acts on clips only.
+//!
+//! Quantize moves things towards the grid, as Live's does: the piano roll's
+//! notes while it has the focus, the Sample Editor's transients while it
+//! has it (see [`transient`]), and else those of the selected clips, MIDI
+//! and warped audio.
 
 use std::collections::BTreeSet;
 
-use musicable_model::clip::{Clip, ClipContent, ClipId};
+use musicable_model::clip::{Clip, ClipContent, ClipId, NoteId};
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::Warp;
 use musicable_model::{Chain, Project, TrackId};
 
 use crate::editor::{Clipboard, Editor, Edits, Selection, TimeSelection};
 use crate::{
-    Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction, Type,
-    Value, When,
+    Args, Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction,
+    Type, Value, When,
 };
-use crate::{arrange, notes, panel, warp};
+use crate::{arrange, notes, panel, transient, warp};
 
 /// Takes back the last change to the project.
 pub const UNDO: CommandId = CommandId::new("edit.undo");
@@ -50,6 +56,9 @@ pub const DELETE: CommandId = CommandId::new("edit.delete");
 /// Splits the clips at the time selection's edges, or else the selected
 /// clips at the start marker.
 pub const SPLIT: CommandId = CommandId::new("edit.split");
+/// Moves notes, or the transients of warped audio, towards the grid. It
+/// was `notes.quantize`, which keymap files can still name.
+pub const QUANTIZE: CommandId = CommandId::new("edit.quantize");
 /// Selects every clip.
 pub const SELECT_ALL: CommandId = CommandId::new("edit.select_all");
 /// Asks for a new name for a clip, a track or a locator.
@@ -169,6 +178,45 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(QUANTIZE, "Quantize")
+            .when(When::CanQuantize)
+            .with_params(&[
+                Param::optional(
+                    "notes",
+                    Type::NOTES,
+                    "The notes of a MIDI clip, by their ids in it. Without them, the notes \
+                     selected in the piano roll, or all of the clip's if none are.",
+                ),
+                Param::optional(
+                    "frames",
+                    warp::FRAMES,
+                    "The transients of a warped audio clip, by their frames in its file. \
+                     Without them, those in the Sample Editor's time selection, or all those \
+                     the clip plays if none are.",
+                ),
+                Param::optional(
+                    "clip",
+                    Type::Clip,
+                    "The clip. Without it, the one the piano roll shows, while it has the \
+                     focus or for `notes`, or the one the Sample Editor shows, while it has \
+                     the focus or for `frames`; or else the selected clips, all their notes \
+                     and transients.",
+                ),
+                Param::optional(
+                    "amount",
+                    Type::Number,
+                    "How far towards the grid each moves, from 0 to 1: all the way, without \
+                     it.",
+                ),
+                Param::optional(
+                    "ends",
+                    Type::Bool,
+                    "Moves the notes' ends to the grid too, not just their starts.",
+                ),
+            ]),
+        quantize,
+    );
+    registry.add(
         Command::new(SELECT_CLIPS, "Select Clips").with_params(&[
             Param::required("clips", Type::CLIPS, "The clips to select."),
             Param::optional(
@@ -227,6 +275,99 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+}
+
+/// What Quantize changes in a clip: the notes it moves, or the warp it
+/// gives an audio clip.
+enum Quantized {
+    Notes(ClipId, Vec<NoteId>),
+    Warp(ClipId, Warp),
+}
+
+/// Moves notes, or the transients of warped audio clips, towards the grid,
+/// at the zoom of the panel they're in: [`QUANTIZE`].
+fn quantize(ctx: &mut Context<'_>, args: &Args) -> Result<Value, CommandError> {
+    let amount: f64 = args.opt("amount")?.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&amount) {
+        return Err(CommandError::invalid("the amount goes from 0 to 1"));
+    }
+    let ends = args.opt("ends")?.unwrap_or(false);
+    let notes: Option<Vec<NoteId>> = args.opt("notes")?;
+    let frames: Option<Vec<i64>> = args.opt("frames")?;
+    let (project, editor) = (ctx.document.project(), ctx.document.editor());
+    let clip = match args.opt::<ClipId>("clip")? {
+        Some(clip) => Some(clip),
+        None if notes.is_some() => Some(notes::clip_arg(ctx, args)?),
+        None if frames.is_some() => Some(warp::clip_arg(ctx, args)?),
+        None => match editor.focus.edits() {
+            Edits::Notes => Some(notes::clip_arg(ctx, args)?),
+            Edits::Markers => Some(warp::clip_arg(ctx, args)?),
+            Edits::Arrangement | Edits::Nothing => None,
+        },
+    };
+    let mut changes = Vec::new();
+    let warp_of = |clip: ClipId, frames: &[u64], zoom: f64| {
+        let warp = transient::quantized(project, editor, clip, frames, zoom, amount);
+        warp.map(|warp| Quantized::Warp(clip, warp))
+    };
+    let zoom = match clip {
+        Some(clip) => {
+            let (_, c) = (project.find_clip(clip))
+                .ok_or_else(|| CommandError::invalid(format!("there's no clip {}", clip.0)))?;
+            let midi = matches!(c.content, ClipContent::Midi(_));
+            match (midi, &notes, &frames) {
+                (true, _, Some(_)) => {
+                    return Err(CommandError::invalid(format!(
+                        "clip {} is a MIDI clip, which has no transients",
+                        clip.0
+                    )));
+                }
+                (false, Some(_), _) => {
+                    return Err(CommandError::invalid(format!(
+                        "clip {} is an audio clip, which has no notes",
+                        clip.0
+                    )));
+                }
+                (true, ..) => {
+                    let notes = notes::to_quantize(project, editor, clip, notes)?;
+                    changes.push(Quantized::Notes(clip, notes));
+                    editor.piano_roll.viewport.zoom
+                }
+                (false, ..) => {
+                    let zoom = editor.sample_editor.viewport.zoom;
+                    let frames = transient::to_quantize(project, editor, clip, frames)?;
+                    changes.extend(warp_of(clip, &frames, zoom));
+                    zoom
+                }
+            }
+        }
+        None => {
+            let zoom = editor.viewport.zoom;
+            for &id in &editor.selection.clips {
+                if let Ok((_, m)) = notes::midi(project, id) {
+                    let notes = m.notes.iter().map(|n| n.id).collect();
+                    changes.push(Quantized::Notes(id, notes));
+                } else if let Ok((c, a, w)) = warp::warped(project, id) {
+                    let frames = transient::played(c, a, w, editor.sample_rate_of(&a.file));
+                    changes.extend(warp_of(id, &frames, zoom));
+                }
+            }
+            zoom
+        }
+    };
+    if !changes.is_empty() {
+        ctx.document.transact("Quantize", |tx| {
+            for change in changes {
+                match change {
+                    Quantized::Notes(clip, notes) => {
+                        notes::quantize(tx, clip, &notes, zoom, amount, ends)
+                    }
+                    Quantized::Warp(clip, warp) => warp::change_warp(tx, clip, warp),
+                }
+            }
+        });
+    }
+    Ok(Value::None)
 }
 
 /// Selects `clips`, or toggles them in the selection, and makes the track

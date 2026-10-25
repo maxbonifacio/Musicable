@@ -20,6 +20,7 @@ use musicable_model::clip::{
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Project, TrackId, TrackKind};
 
+use crate::auto_warp::{self, Pending};
 use crate::editor::{Editor, Selection};
 use crate::{
     Args, Command, CommandError, CommandId, Context, Param, Registry, Transaction, Type, Value,
@@ -189,7 +190,8 @@ pub fn register(registry: &mut Registry) {
                 "files",
                 Type::List(&Type::Text),
                 "The files' paths, as clips name files. The app must have read each file \
-                 first: see Editor::files.",
+                 first: see Editor::files. Auto-warp warps each as the Behaviour settings \
+                 say, once it's been analysed.",
             ),
             Param::optional(
                 "track",
@@ -526,7 +528,11 @@ fn insert_audio(
     };
     let time = editor.selection.time.as_ref();
     let at = at.unwrap_or_else(|| time.map_or(editor.start_marker, |time| time.range.start));
-    Ok(ctx.document.transact("Insert Audio", |tx| {
+    // Auto-warp warps the files as they go in where they've been analysed,
+    // and else once their analyses land.
+    let empty = auto_warp::is_empty(project).then(|| project.tempo.clone());
+    let analysed = files.iter().all(|file| editor.analyses.contains_key(file));
+    let (track, clips) = ctx.document.transact("Insert Audio", |tx| {
         // A new track is named after the first file.
         let track = track
             .unwrap_or_else(|| crate::track::add_track(tx, file_name(first), TrackKind::Audio));
@@ -539,8 +545,26 @@ fn insert_audio(
                 clips.push(clip);
             }
         }
+        if analysed {
+            auto_warp::warp_dropped(tx, &clips, empty.is_some(), false);
+        }
         (track, clips)
-    }))
+    });
+    if !analysed && !clips.is_empty() {
+        let step = ctx.document.last_step();
+        let project = ctx.document.project();
+        let dropped = (clips.iter())
+            .filter_map(|&id| project.find_clip(id))
+            .map(|(_, clip)| clip.clone())
+            .collect();
+        let pending = Pending {
+            step,
+            clips: dropped,
+            empty,
+        };
+        ctx.document.editor_mut().auto_warp.push(pending);
+    }
+    Ok((track, clips))
 }
 
 /// A file's name without its folder or its extension, for a clip or a

@@ -8,7 +8,8 @@ use std::time::Instant;
 use musicable_audio::{InputBuffer, MidiBuffer};
 use musicable_commands::{
     Args, BatchError, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap,
-    Registry, Request, Steps, Transport, UnknownCommand, Value, mixer, take, transport,
+    Registry, Request, Steps, Transport, UnknownCommand, Value, auto_warp, mixer, take, transport,
+    warp,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
@@ -499,6 +500,34 @@ impl Session {
     /// such as the files its clips play.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Gives the warped clips that haven't taken their transients yet those
+    /// analysis found in their files, where the editor has the analyses,
+    /// then sends the engine what changed: a change the project follows,
+    /// not a step in the undo history. Returns whether any did. See
+    /// [`warp::take_transients`].
+    pub fn take_transients(&mut self) -> bool {
+        let took = warp::take_transients(&mut self.document);
+        if took {
+            self.sync();
+        }
+        took
+    }
+
+    /// Auto-warps the audio files dropped before they'd been analysed whose
+    /// analyses are all in, which `waits_for` says of each file, then sends
+    /// the engine what changed. Returns whether anything did. See
+    /// [`auto_warp::apply_pending`].
+    pub fn auto_warp(&mut self, waits_for: impl Fn(&str) -> bool) -> bool {
+        if self.document.editor().auto_warp.is_empty() {
+            return false;
+        }
+        let warped = auto_warp::apply_pending(&mut self.document, waits_for);
+        if warped {
+            self.sync();
+        }
+        warped
     }
 
     /// Whether the project changed since it was opened or last saved.

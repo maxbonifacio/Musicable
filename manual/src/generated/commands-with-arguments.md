@@ -128,6 +128,12 @@
 |---|---|
 | Rename Track | `track.rename` |
 
+### Transient
+
+| Command | Id |
+|---|---|
+| Move Transient | `transient.move` |
+
 ### Transport
 
 | Command | Id |
@@ -151,7 +157,13 @@
 
 | Command | Id |
 |---|---|
+| Warp From Here | `warp.from_here` |
+| Warp From Here (Start at Song Tempo) | `warp.from_here_at_song_tempo` |
+| Warp From Here (Straight) | `warp.from_here_straight` |
 | Move Audio Under Warp Marker | `warp.move_audio` |
 | Move Warp Markers | `warp.move_markers` |
 | Select Warp Markers | `warp.select_markers` |
+| Select Time in Sample Editor | `warp.select_time` |
+| Set 1.1.1 Here | `warp.set_downbeat` |
 | Set Clip Tempo | `warp.set_tempo` |
+| Warp at Song Tempo From Here | `warp.song_tempo_from_here` |

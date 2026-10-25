@@ -28,6 +28,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     automation,
     workspace,
     warping,
+    transients,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -217,6 +218,40 @@ fn unwarped(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
             let path = format!("{path}[{k}].content.audio");
             add(audio, &path, "warp", Value::Null)?;
             add(audio, &path, "automation", json!([]))?;
+        }
+    }
+    Ok(())
+}
+
+/// Version 12 added the transients a warped clip keeps. Version 11 warped
+/// clips have none yet, so they take them from analysis, on tracks and in
+/// takes.
+fn transients(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let path = format!("tracks[{i}]");
+        no_onsets(track.get_mut("clips"), &format!("{path}.clips"))?;
+        let takes = track.get_mut("takes").and_then(Value::as_array_mut);
+        for (j, take) in takes.into_iter().flatten().enumerate() {
+            no_onsets(take.get_mut("clips"), &format!("{path}.takes[{j}].clips"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Gives the warp of each warped audio clip in `clips`, a list at `path`,
+/// no transients yet.
+fn no_onsets(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let clips = clips.and_then(Value::as_array_mut);
+    for (k, clip) in clips.into_iter().flatten().enumerate() {
+        let warp = clip
+            .get_mut("content")
+            .and_then(|c| c.get_mut("audio"))
+            .and_then(|a| a.get_mut("warp"))
+            .and_then(Value::as_object_mut);
+        if let Some(warp) = warp {
+            let path = format!("{path}[{k}].content.audio.warp");
+            add(warp, &path, "onsets", Value::Null)?;
         }
     }
     Ok(())
@@ -493,6 +528,37 @@ mod tests {
             run(&STEPS[..10], &mut file, 10).unwrap_err().path,
             "tracks[0].clips[0].content.audio.warp",
             "warping in a version 10 file"
+        );
+    }
+
+    #[test]
+    fn version_11_warped_clips_have_no_transients_yet() {
+        let warped = || json!({"content": {"audio": {"warp": {"tempo": 120.0}}}});
+        let unwarped = json!({"content": {"audio": {"warp": null}}});
+        let mut file = json!({
+            "version": 11,
+            "tracks": [
+                {"clips": [warped(), unwarped.clone()], "takes": [{"clips": [warped()]}]},
+                "not a track",
+            ],
+        });
+        run(&STEPS[..11], &mut file, 11).unwrap();
+        let taken = json!({
+            "content": {"audio": {"warp": {"tempo": 120.0, "onsets": null}}},
+        });
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], taken);
+        assert_eq!(tracks[0]["clips"][1], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], taken);
+        assert_eq!(file["version"], json!(12));
+        let mut file = json!({
+            "version": 11,
+            "tracks": [{"clips": [{"content": {"audio": {"warp": {"onsets": []}}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..11], &mut file, 11).unwrap_err().path,
+            "tracks[0].clips[0].content.audio.warp.onsets",
+            "transients in a version 11 file"
         );
     }
 

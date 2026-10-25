@@ -297,7 +297,7 @@ impl KeymapFile {
                 match parse_chords(&command, value) {
                     Ok(chords) => file
                         .bindings
-                        .entry((scope, command))
+                        .entry((scope, current(command)))
                         .or_default()
                         .extend(chords),
                     Err(problem) => problems.push(problem),
@@ -464,6 +464,18 @@ fn flatten<'a>(
             toml::Value::Table(inner) => flatten(inner, &id, entries),
             _ => entries.push((CommandId::from(id), value)),
         }
+    }
+}
+
+/// Commands whose ids have changed, by their old ids, which keymap files
+/// can still name them by.
+const RENAMED: [(&str, CommandId); 1] = [("notes.quantize", crate::edit::QUANTIZE)];
+
+/// The id `command` goes by now.
+fn current(command: CommandId) -> CommandId {
+    match RENAMED.iter().find(|(old, _)| command.as_str() == *old) {
+        Some((_, new)) => new.clone(),
+        None => command,
     }
 }
 
@@ -741,6 +753,16 @@ mod tests {
         assert_eq!(problems, []);
         assert_eq!(map.lookup(chord("P")), Some(&command("transport.play")));
         assert_eq!(map.lookup(chord("Ctrl+Z")), Some(&command("edit.undo")));
+    }
+
+    #[test]
+    fn old_ids_name_the_commands_they_became() {
+        let (map, problems) = load(r#"bindings = { "notes.quantize" = "Q" }"#);
+        assert_eq!(problems, []);
+        assert_eq!(map.lookup(chord("Q")), Some(&crate::edit::QUANTIZE));
+        // Saved again, under the new id.
+        let saved = KeymapFile::diff(&base(), &map).to_toml();
+        assert!(saved.contains("\"edit.quantize\" = [\"Q\"]"), "{saved}");
     }
 
     #[test]

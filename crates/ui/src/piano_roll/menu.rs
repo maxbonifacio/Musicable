@@ -30,7 +30,7 @@ const NOTE: Items = &[
     Some(edit::DUPLICATE),
     Some(edit::DELETE),
     None,
-    Some(notes::QUANTIZE),
+    Some(edit::QUANTIZE),
     None,
     Some(view::ZOOM_TO_SELECTION),
     Some(edit::SELECT_ALL),
@@ -41,7 +41,7 @@ const ROWS: Items = &[
     Some(edit::SELECT_ALL),
     None,
     Some(notes::TOGGLE_DRAW),
-    Some(notes::QUANTIZE),
+    Some(edit::QUANTIZE),
 ];
 
 /// Under the notes' and the rows' own commands.

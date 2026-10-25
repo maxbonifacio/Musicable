@@ -14,6 +14,7 @@ use musicable_commands::{
 use musicable_model::TrackKind;
 use musicable_model::clip::{ClipId, Offset};
 use musicable_model::time::BeatRange;
+use musicable_model::warp::Onsets;
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
@@ -61,6 +62,10 @@ impl State {
         let ran = match action {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
             Action::RunWith(id, args) => self.commands.run_with(id, args, &mut ctx),
+            Action::RunBatch { name, commands } => (self.commands)
+                .run_batch(name, commands, &mut ctx)
+                .map(|_| Value::None)
+                .map_err(|failed| failed.error),
             _ => Ok(Value::None),
         };
         if let Err(error) = ran {
@@ -86,6 +91,13 @@ impl State {
             .iter()
             .map(|m| (m.frame, m.beat.to_f64()))
             .collect()
+    }
+
+    /// The frames of the clip's transients in sight.
+    fn transients(&self) -> Vec<u64> {
+        let (_, audio) = self.clip();
+        let warp = audio.warp.as_ref().expect("a warped clip");
+        warp.transients().map(|o| o.frame).collect()
     }
 
     /// The selected markers' beats.
@@ -131,6 +143,23 @@ fn project(markers: &[(u64, f64)]) -> (Project, ClipId) {
     project.track_mut(drums).unwrap().clips.push(clip);
     project.track_mut(keys).unwrap().clips.push(chords);
     (project, id)
+}
+
+/// The [`project`], with Loop warped with `markers` and transients at the
+/// file's `frames`, as analysis found them.
+fn with_transients(markers: &[(u64, f64)], frames: &[u64]) -> (Project, ClipId) {
+    let (mut project, clip) = project(markers);
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        panic!("Loop is an audio clip");
+    };
+    let found = frames.iter().map(|&frame| Onset {
+        frame,
+        strength: 0.5,
+        percussiveness: 1.0,
+        origin: Origin::Found,
+    });
+    audio.warp.as_mut().expect("a warped clip").onsets = Some(Onsets::new(found));
+    (project, clip)
 }
 
 /// The file's peaks: a click on each beat, dying away.
@@ -341,6 +370,22 @@ fn drag(harness: &mut Harness<'_, State>, from: Pos2, to: Pos2, mods: Modifiers)
     harness.run();
 }
 
+/// Opens the context menu at `at`.
+fn secondary_click(harness: &mut Harness<'_, State>, at: Pos2) {
+    harness.run_steps(30);
+    harness.hover_at(at);
+    harness.run();
+    for pressed in [true, false] {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run();
+}
+
 fn wheel(harness: &mut Harness<'_, State>, over: Pos2, delta: Vec2, mods: Modifiers) {
     harness.hover_at(over);
     harness.run();
@@ -529,6 +574,171 @@ fn clicks_select_markers_and_double_clicks_delete_them() {
     assert_eq!(markers, [(0, 0.0), (4 * BEAT, 4.0)]);
     assert!(harness.query_by_label("Warp marker at 2. 3. 1").is_none());
     assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn dragging_a_transient_s_pseudo_marker_makes_it_a_warp_marker() {
+    let found = [BEAT, 9 * BEAT / 4, 3 * BEAT];
+    let (project, clip) = with_transients(&[(0, 0.0)], &found);
+    let mut harness = harness(project, Some(clip));
+    // Song beat 6.25 is the clip's 2.25, where the second transient plays.
+    let from = in_top(&harness, 6.25);
+    drag(&mut harness, from, from + vec2(78.0, 0.0), Modifiers::NONE);
+    // A marker pins the transient's frame, moved on the grid, as one step
+    // in the undo history: the audio before it stretches.
+    assert_eq!(harness.state().markers(), [(0, 0.0), (9 * BEAT / 4, 3.0)]);
+    assert_eq!(harness.state().selected(), [3.0]);
+    let document = &harness.state().document;
+    assert_eq!(document.undo_name(), Some("Insert Warp Marker"));
+    // The transients stay with the file.
+    assert_eq!(harness.state().transients(), found);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn shift_dragging_a_transient_moves_it_and_double_clicking_one_pins_it() {
+    let off_grid = 3 * BEAT + BEAT / 10;
+    let (project, clip) = with_transients(&[(0, 0.0)], &[BEAT, 9 * BEAT / 4, off_grid]);
+    let mut harness = harness(project, Some(clip));
+    // Half a beat later in the file.
+    let from = in_top(&harness, 5.0);
+    drag(&mut harness, from, from + vec2(50.0, 0.0), Modifiers::SHIFT);
+    let moved = [3 * BEAT / 2, 9 * BEAT / 4, off_grid];
+    assert_eq!(harness.state().transients(), moved);
+    // No further than the next.
+    let from = in_top(&harness, 5.5);
+    drag(
+        &mut harness,
+        from,
+        from + vec2(300.0, 0.0),
+        Modifiers::SHIFT,
+    );
+    let squeezed = [9 * BEAT / 4 - 1, 9 * BEAT / 4, off_grid];
+    assert_eq!(harness.state().transients(), squeezed);
+    assert_eq!(harness.state().markers(), [(0, 0.0)]);
+    // Double-clicking near one pins it where it plays, off the grid.
+    let at = in_top(&harness, 7.1) + vec2(2.0, 0.0);
+    double_click(&mut harness, at);
+    let markers = harness.state().markers();
+    assert_eq!(markers.len(), 2);
+    assert!(
+        markers[1].0 == off_grid && near(markers[1].1, 3.1),
+        "{markers:?}"
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn dragging_the_waveform_selects_time_with_its_markers_and_transients() {
+    let markers = [(0, 0.0), (2 * BEAT, 2.0), (6 * BEAT, 6.0)];
+    let (project, clip) = with_transients(&markers, &[BEAT, 3 * BEAT, 5 * BEAT]);
+    let mut harness = harness(project, Some(clip));
+    let (from, to) = (in_bottom(&harness, 5.5), in_bottom(&harness, 8.5));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    // The clip's own time from 1.5 to 4.5, with the marker and the
+    // transient in it.
+    let own = |beats: f64| Beats::from_f64(beats);
+    let time = harness.state().editor().sample_editor.time;
+    assert_eq!(time, Some(BeatRange::new(own(1.5), own(4.5))));
+    assert_eq!(harness.state().selected(), [2.0]);
+    let state = harness.state();
+    let picked = warp::selected_transients(state.document.project(), state.editor());
+    assert_eq!(picked, Some((clip, vec![3 * BEAT])));
+    // In it, the context menu puts markers on its transients.
+    let inside = in_bottom(&harness, 6.5);
+    secondary_click(&mut harness, inside);
+    harness.get_by_label("Insert Warp Marker Ctrl+I").click();
+    harness.run();
+    assert_eq!(
+        harness.state().markers(),
+        [(0, 0.0), (2 * BEAT, 2.0), (3 * BEAT, 3.0), (6 * BEAT, 6.0)]
+    );
+    // A click takes it away.
+    let at = in_bottom(&harness, 10.0);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(harness.state().editor().sample_editor.time, None);
+    assert!(harness.state().selected().is_empty());
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_context_menu_inserts_deletes_and_resets_transients() {
+    let (project, clip) = with_transients(&[(0, 0.0)], &[BEAT, 3 * BEAT]);
+    let mut harness = harness(project, Some(clip));
+    // On a transient's pseudo marker, for that transient.
+    let at = in_top(&harness, 5.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Insert Warp Marker Ctrl+I");
+    harness
+        .get_by_label("Delete Transients Ctrl+Shift+Backspace")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().transients(), [3 * BEAT]);
+    // Elsewhere, where it was opened, off the grid.
+    let at = in_top(&harness, 6.1);
+    secondary_click(&mut harness, at);
+    harness
+        .get_by_label("Insert Transient Ctrl+Shift+I")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().transients(),
+        [2 * BEAT + BEAT / 10, 3 * BEAT]
+    );
+    // Quantize on its pseudo marker moves it to the nearest sixteenth,
+    // with a warp marker.
+    let at = in_top(&harness, 6.1);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Quantize Ctrl+U").click();
+    harness.run();
+    assert_eq!(
+        harness.state().markers(),
+        [(0, 0.0), (2 * BEAT + BEAT / 10, 2.0)]
+    );
+    // Reset Transients brings back those analysis found.
+    let at = in_bottom(&harness, 8.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Reset Transients").click();
+    harness.run();
+    assert_eq!(harness.state().transients(), [BEAT, 3 * BEAT]);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_context_menu_sets_the_downbeat_and_warps_again_from_a_point() {
+    let (project, clip) = project(&[(0, 0.0), (4 * BEAT, 4.0)]);
+    let mut harness = harness(project, Some(clip));
+    // On a marker, it's the clip's first downbeat, on the bar line where it
+    // plays.
+    let at = on_handle(&harness, 8.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Set 1.1.1 Here").click();
+    harness.run();
+    assert_eq!(harness.state().markers(), [(0, -4.0), (4 * BEAT, 0.0)]);
+    assert_eq!(harness.state().clip().0.start, Beats::new(4));
+    // On the waveform, where the menu was opened: one tempo from there to
+    // the file's end, the clip's.
+    let at = in_bottom(&harness, 6.0);
+    secondary_click(&mut harness, at);
+    harness.get_by_label("Warp From Here (Straight)").click();
+    harness.run();
+    let straight = [(0, -4.0), (2 * BEAT, -2.0), (FRAMES, 4.0)];
+    assert_eq!(harness.state().markers(), straight);
+    // In the time selected, a bar of it: a loop of a bar from beat 4.
+    let (from, to) = (in_bottom(&harness, 5.0), in_bottom(&harness, 9.0));
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let inside = in_bottom(&harness, 7.0);
+    secondary_click(&mut harness, inside);
+    harness.get_by_label("Warp Selection as a Loop").click();
+    harness.run();
+    assert_eq!(harness.state().markers(), [(BEAT, 0.0)]);
+    let (clip, _) = harness.state().clip();
+    assert_eq!((clip.start, clip.length), (Beats::new(4), Beats::new(4)));
+    assert!(
+        harness.state().errors.is_empty(),
+        "{:?}",
+        harness.state().errors
+    );
 }
 
 #[test]

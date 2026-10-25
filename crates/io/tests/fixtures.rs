@@ -23,7 +23,7 @@ use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
     TestTone, Track, TrackId, TrackKind,
@@ -45,6 +45,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("automation", automation()),
         ("workspace", workspace()),
         ("warping", warping()),
+        ("transients", transients()),
     ]
 }
 
@@ -817,6 +818,53 @@ fn warping() -> Project {
     let track = project.track_mut(vocals).unwrap();
     track.clips = vec![vocal, take];
     track.takes = vec![first];
+    project
+}
+
+/// Transients, from version 12: a loop warped with transients analysis
+/// found, one the user added, one deleted and one moved, from the file's
+/// first frame to as far in as a file reaches, with strengths and sharpness
+/// at both ends; a warped take with none; and a warped clip that hasn't
+/// taken them from analysis yet.
+fn transients() -> Project {
+    let mut project = Project::new();
+    let drums = project.add_track("Drums", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let onset = |frame, strength, percussiveness, origin| Onset {
+        frame,
+        strength,
+        percussiveness,
+        origin,
+    };
+    let warped = |file: &str, onsets| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = Offset::Beats(Beats::ZERO);
+        audio.warp = Some(Warp {
+            onsets,
+            ..Warp::new(0, Beats::ZERO, 120.0)
+        });
+        audio
+    };
+    let found = Onsets::new([
+        onset(0, 1.0, 1.0, Origin::Found),
+        onset(12_000, 0.25, 0.75, Origin::Found),
+        onset(24_000, 0.5, 0.0, Origin::Hidden),
+        onset(30_000, 0.0, 0.5, Origin::Added),
+        onset(36_000, 0.125, 1.0, Origin::Hidden),
+        onset(36_500, 0.125, 1.0, Origin::Added),
+        onset(MAX_TICKS as u64, 0.75, 0.25, Origin::Found),
+    ]);
+    let looped = warped("Loops/Break 120 BPM.wav", Some(found));
+    let looped = project.new_clip("Break", beats(0, 8), ClipContent::Audio(looped));
+    let waiting = warped("Loops/Fill.wav", None);
+    let waiting = project.new_clip("Fill", beats(8, 12), ClipContent::Audio(waiting));
+    let mut take = project.new_take("Take 1");
+    let none = warped("Loops/Break 120 BPM.wav", Some(Onsets::default()));
+    take.clips
+        .push(project.new_clip("Break", beats(0, 4), ClipContent::Audio(none)));
+    let track = project.track_mut(drums).unwrap();
+    track.clips = vec![looped, waiting];
+    track.takes = vec![take];
     project
 }
 

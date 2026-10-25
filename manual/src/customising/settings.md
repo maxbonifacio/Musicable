@@ -19,8 +19,9 @@ a panel, so workspaces don't keep it.
   lands](../using/recording.md#where-it-lands)).
 - **Keys**: every command's keys ([Keys](keys.md)).
 - **Mouse**: what each gesture does ([The mouse](mouse.md)).
-- **Behaviour**: where Play/Stop plays from, and what the piano roll calls
-  middle C ([below](#behaviour)).
+- **Behaviour**: where Play/Stop plays from, what the piano roll calls
+  middle C, which of auto-warp's rules are on, and Fast analysis
+  ([below](#behaviour)).
 - **Appearance**: the theme ([Themes](themes.md)).
 - **Workspaces**: your workspaces, with the keys that switch to each, and
   picking one switches to it. **Save As...**, **Rename...**, **Delete...**
@@ -48,6 +49,18 @@ with the [profile](profiles.md) in use.
 - **Middle C, MIDI note 60, is** C3, as in Live, Cubase, Logic and Bitwig;
   C4, as in Reaper and scientific pitch notation; or C5, as in FL Studio.
   The piano roll names its Cs and its notes by it.
+- **Auto-warp** has a switch for each of its rules, all on until you switch
+  them off ([Auto-warp](../using/warping.md#auto-warp)): **Recordings follow
+  the tempo**, **Loops warp to their whole bars**, **Files at a steady tempo
+  warp from their first downbeat**, **Files whose tempo drifts lock to the
+  grid**, **Sounds without a pulse land on their hit**, and **The first file
+  sets the song's tempo**. A file whose rule is off comes in as it is, and
+  **Warp** warps it with one marker.
+- **Fast analysis** finds beats with the classic beat tracker alone, without
+  the Beat This! network, which is quicker on a slow computer but less
+  accurate. It's the computer's setting, the same in every profile. Files
+  analysed before it was switched on keep what was found, and once it's
+  off, those it analysed are analysed again the next time they're opened.
 
 ## The config folder
 
@@ -114,6 +127,10 @@ buffer_size = 128
 [behaviour]
 play_from = "start_marker"
 middle_c = "c3"
+warp_drifting = false
+
+[analysis]
+fast = true
 
 [appearance]
 theme = "Studio.toml"
@@ -160,6 +177,13 @@ Every setting can be left out:
 | `audio.buffer_size` | The buffer size, in frames. | The smallest the device supports, or an ASIO driver's preferred size |
 | `behaviour.play_from` | Where Play/Stop plays from: the start marker (`start_marker`) or where the playhead stopped (`playhead`). | `start_marker` |
 | `behaviour.middle_c` | What the piano roll calls MIDI note 60: `c3`, `c4` or `c5`. | `c3` |
+| `behaviour.warp_recordings` | Whether recordings follow the tempo they were played to. | `true` |
+| `behaviour.warp_loops` | Whether loops of whole bars at a steady tempo warp to them. | `true` |
+| `behaviour.warp_steady` | Whether files at a steady tempo warp from their first downbeat. | `true` |
+| `behaviour.warp_drifting` | Whether files whose tempo drifts get a marker on every downbeat, and on the beats that stray. | `true` |
+| `behaviour.sync_one_shots` | Whether sounds without a pulse play their first hit, or a riser's peak, where they're dropped. | `true` |
+| `behaviour.tempo_from_first_file` | Whether the first file with a pulse dropped into an empty song gives it its tempo and meter. | `true` |
+| `analysis.fast` | Whether analysis finds beats with the classic tracker alone, without the network. It's not one of a profile's settings. | `false` |
 | `appearance.theme` | The theme: `dark`, `light`, or the name of a file in the `themes` folder. | `dark` |
 | `workspaces.current` | The workspace in use, by name, which Musicable opens with unless the project it opens was saved with another. | Default |
 | `profiles.current` | The profile in use, which Musicable opens with: one in the `profiles` folder, whose own settings file has `[behaviour]`, `[appearance]` and `[workspaces]` in place of these. | Default |

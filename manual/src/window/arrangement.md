@@ -94,7 +94,7 @@ A right-click opens a menu of commands for what was clicked:
 
 | Where | Commands |
 |---|---|
-| A clip | Cut, Copy, Duplicate, Split and the grid |
+| A clip | Cut, Copy, Duplicate, Split, Quantize and the grid |
 | A lane | Insert MIDI Clip and Add Locator |
 | A track's header | The new tracks |
 | The master track's lane | Add Locator and Show/Hide Automation |

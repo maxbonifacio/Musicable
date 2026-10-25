@@ -135,6 +135,37 @@ pub struct Loop {
 }
 
 impl Analysis {
+    /// What analysis knows of a sound `frames` long at `sample_rate` once
+    /// it has found its transients, `onsets`: no tempo, beats or pulse yet.
+    pub fn with_onsets(sample_rate: u32, frames: u64, onsets: Vec<Onset>) -> Self {
+        Self {
+            version: VERSION,
+            sample_rate,
+            frames,
+            onsets,
+            tempi: Vec::new(),
+            beats: Vec::new(),
+            downbeats: Vec::new(),
+            meter: 4,
+            tracker: Tracker::Classic,
+            agreement: None,
+            steady: None,
+            breaks: 0,
+            events: 0,
+            pulse: false,
+            sync: None,
+            riser: false,
+            looped: None,
+        }
+    }
+
+    /// Each beat's number, from 0 at the first: a gap that spans several
+    /// beats, where the tracker missed some, counts them all, so the bars
+    /// stay in step.
+    pub fn beat_numbers(&self) -> Vec<f64> {
+        beats::numbers(&self.beats)
+    }
+
     /// Seconds, as frames of the sound.
     fn frames_of(&self, seconds: f64) -> f64 {
         seconds * f64::from(self.sample_rate)
@@ -237,23 +268,8 @@ pub fn analyse(
     let tempi = tempo::candidates(&flux);
     let rate = f64::from(sample_rate);
     let mut analysis = Analysis {
-        version: VERSION,
-        sample_rate,
-        frames,
-        onsets,
         tempi,
-        beats: Vec::new(),
-        downbeats: Vec::new(),
-        meter: 4,
-        tracker: Tracker::Classic,
-        agreement: None,
-        steady: None,
-        breaks: 0,
-        events: 0,
-        pulse: false,
-        sync: None,
-        riser: false,
-        looped: None,
+        ..Analysis::with_onsets(sample_rate, frames, onsets)
     };
     let mut classic_moved = 0;
     match heard {

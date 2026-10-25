@@ -35,8 +35,6 @@ pub const MOVE: CommandId = CommandId::new("notes.move");
 pub const TRIM: CommandId = CommandId::new("notes.trim");
 /// Sets how hard notes start, or changes it.
 pub const SET_VELOCITY: CommandId = CommandId::new("notes.set_velocity");
-/// Moves notes to the grid.
-pub const QUANTIZE: CommandId = CommandId::new("notes.quantize");
 /// Shows a MIDI clip in the piano roll.
 pub const OPEN: CommandId = CommandId::new("notes.open");
 /// Moves the selected notes up a semitone.
@@ -332,77 +330,6 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(QUANTIZE, "Quantize")
-            .when(When::CanQuantize)
-            .with_params(&[
-                Param::optional(
-                    "notes",
-                    Type::NOTES,
-                    "The notes. Without them, the notes selected in the piano roll, or all \
-                     of the clip's if none are; or, while the arrangement has the focus, \
-                     all the notes of the selected clips.",
-                ),
-                CLIP,
-                Param::optional(
-                    "amount",
-                    Type::Number,
-                    "How far towards the grid each note moves, from 0 to 1: all the way, \
-                     without it.",
-                ),
-                Param::optional(
-                    "ends",
-                    Type::Bool,
-                    "Moves the notes' ends to the grid too, not just their starts.",
-                ),
-            ]),
-        |ctx, args| {
-            let amount: f64 = args.opt("amount")?.unwrap_or(1.0);
-            if !(0.0..=1.0).contains(&amount) {
-                return Err(CommandError::invalid("the amount goes from 0 to 1"));
-            }
-            let ends = args.opt("ends")?.unwrap_or(false);
-            let notes: Option<Vec<NoteId>> = args.opt("notes")?;
-            let editor = ctx.document.editor();
-            let arranging = editor.focus != Focus::PIANO_ROLL
-                && notes.is_none()
-                && args.value("clip").is_none();
-            let (targets, zoom) = if arranging {
-                let project = ctx.document.project();
-                let clips: Vec<(ClipId, Vec<NoteId>)> = editor
-                    .selection
-                    .clips
-                    .iter()
-                    .filter_map(|&id| {
-                        let (_, m) = midi(project, id).ok()?;
-                        Some((id, m.notes.iter().map(|n| n.id).collect()))
-                    })
-                    .collect();
-                (clips, editor.viewport.zoom)
-            } else {
-                let clip = clip_arg(ctx, args)?;
-                let (_, m) = midi(ctx.document.project(), clip)?;
-                let roll = &ctx.document.editor().piano_roll;
-                let notes = match notes {
-                    Some(notes) => {
-                        find_notes(m, clip, &notes)?;
-                        notes
-                    }
-                    None if roll.clip == Some(clip) && !roll.notes.is_empty() => {
-                        roll.notes.iter().copied().collect()
-                    }
-                    None => m.notes.iter().map(|n| n.id).collect(),
-                };
-                (vec![(clip, notes)], roll.viewport.zoom)
-            };
-            ctx.document.transact("Quantize", |tx| {
-                for (clip, notes) in &targets {
-                    quantize(tx, *clip, notes, zoom, amount, ends);
-                }
-            });
-            Ok(Value::None)
-        },
-    );
-    registry.add(
         Command::new(OPEN, "Open in Piano Roll").with_params(&[Param::required(
             "clip",
             Type::Clip,
@@ -653,6 +580,29 @@ fn set_velocities(
         let velocity = velocity.unwrap_or(note.velocity) + by;
         tx.set_note_velocity(clip, note.id, velocity);
     }
+}
+
+/// The notes of the MIDI clip `clip` that Quantize moves: `notes`, which
+/// must be its, or else those selected in the piano roll while it shows the
+/// clip, or else all of them.
+pub(crate) fn to_quantize(
+    project: &Project,
+    editor: &Editor,
+    clip: ClipId,
+    notes: Option<Vec<NoteId>>,
+) -> Result<Vec<NoteId>, CommandError> {
+    let (_, m) = midi(project, clip)?;
+    let roll = &editor.piano_roll;
+    Ok(match notes {
+        Some(notes) => {
+            find_notes(m, clip, &notes)?;
+            notes
+        }
+        None if roll.clip == Some(clip) && !roll.notes.is_empty() => {
+            roll.notes.iter().copied().collect()
+        }
+        None => m.notes.iter().map(|n| n.id).collect(),
+    })
 }
 
 /// Moves the starts of the notes with ids `ids` towards the nearest line of
@@ -1209,7 +1159,7 @@ mod tests {
             (VELOCITY_UP, "Ctrl+Up", piano_roll),
             (VELOCITY_DOWN, "Ctrl+Down", piano_roll),
             (TOGGLE_DRAW, "B", Scope::Everywhere),
-            (QUANTIZE, "Ctrl+U", Scope::Everywhere),
+            (edit::QUANTIZE, "Ctrl+U", Scope::Everywhere),
         ];
         for (id, chord, scope) in expected {
             assert_eq!(chords(id.clone(), scope), [chord], "{id}");
@@ -1330,24 +1280,24 @@ mod tests {
         };
         // Nothing selected in the arrangement, and the piano roll shows no
         // clip.
-        assert!(!setup.applies(&QUANTIZE));
+        assert!(!setup.applies(&edit::QUANTIZE));
         select(&mut setup, k, &[e]);
         viewport(&mut setup, &view::SET_PIANO_ROLL_VIEWPORT);
         // Half way: E3 plays at 5.25, so it moves to 5.125.
         setup
-            .run_with(&QUANTIZE, Args::new().with("amount", 0.5))
+            .run_with(&edit::QUANTIZE, Args::new().with("amount", 0.5))
             .unwrap();
         assert_eq!(notes(&setup, k)[1], (1, 2.125, 0.5, 64, 0.75));
         // All the way, its end too: from 5 to 6.
         setup
-            .run_with(&QUANTIZE, Args::new().with("ends", true))
+            .run_with(&edit::QUANTIZE, Args::new().with("ends", true))
             .unwrap();
         assert_eq!(notes(&setup, k)[1], (1, 2.0, 1.0, 64, 0.75));
 
         // In the arrangement, the selected MIDI clips' notes, at its zoom.
         // An audio clip has none.
         setup.select_clips(&[v]);
-        assert!(!setup.applies(&QUANTIZE));
+        assert!(!setup.applies(&edit::QUANTIZE));
         setup.document.transact("Move Notes", |tx| {
             for (note, start) in [(c, 1.75), (g, 4.25)] {
                 let start = Beats::from_f64(start);
@@ -1357,7 +1307,7 @@ mod tests {
         setup.select_clips(&[k, v]);
         viewport(&mut setup, &view::SET_VIEWPORT);
         assert_eq!(setup.document.editor().viewport.zoom, 30.0);
-        setup.run(&QUANTIZE);
+        setup.run(&edit::QUANTIZE);
         let starts: Vec<_> = notes(&setup, k).iter().map(|n| n.1).collect();
         assert_eq!(starts, [2.0, 2.0, 4.0]);
         assert_eq!(

@@ -8,7 +8,7 @@
 //! adds the next when it's done, so the queue's other jobs go between them.
 //! The Beat This! network loads the first time a file needs it, and runs on
 //! threads of its own, as many as the queue has, at the queue's priority.
-//! `docs/analysis.md` describes it.
+//! Fast analysis leaves it out. `docs/analysis.md` describes it.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ struct Shared {
     network: OnceLock<Option<Mutex<Network>>>,
     /// How many threads the network runs on.
     threads: usize,
+    /// Whether analysis leaves the network out, as Fast analysis does.
+    fast: AtomicBool,
     /// Set when the app closes, which stops the analysis under way.
     stop: Arc<AtomicBool>,
     waiting: Mutex<Waiting>,
@@ -123,6 +125,7 @@ impl Analyses {
             models,
             network: OnceLock::new(),
             threads: queue.threads(),
+            fast: AtomicBool::new(false),
             stop: Arc::default(),
             waiting: Mutex::default(),
             adder: queue.adder(),
@@ -136,6 +139,15 @@ impl Analyses {
             project: 0,
             asked: HashSet::new(),
             analysing: BTreeSet::new(),
+        }
+    }
+
+    /// Whether analysis leaves the Beat This! network out from now on,
+    /// finding beats with the classic tracker alone, as Fast analysis does
+    /// on slower computers. What the cache has is good for either.
+    pub(crate) fn set_fast(&mut self, fast: bool) {
+        if let Some(shared) = &self.shared {
+            shared.fast.store(fast, Relaxed);
         }
     }
 
@@ -202,6 +214,13 @@ impl Analyses {
             any = true;
         }
         any
+    }
+
+    /// Whether the file the clips call `file` is still to be analysed: it's
+    /// being analysed, or hasn't been asked for yet. A file that can't be
+    /// found, or analysed, isn't, and nothing is while analysis is off.
+    pub(crate) fn waits_for(&self, file: &str) -> bool {
+        self.shared.is_some() && (self.analysing.contains(file) || !self.asked.contains(file))
     }
 
     /// What the status bar says while files are being analysed.
@@ -303,7 +322,8 @@ impl Shared {
         path: &Path,
         step: &mut dyn FnMut() -> bool,
     ) -> Result<Analysis, AnalysisError> {
-        let network = self.models.is_some() && !matches!(self.network.get(), Some(None));
+        let fast = self.fast.load(Relaxed);
+        let network = !fast && self.models.is_some() && !matches!(self.network.get(), Some(None));
         let missing: Option<Missing> = match &self.cache {
             Some(cache) => match cache.find(path, network, step)? {
                 Found::Kept(analysis) => return Ok(*analysis),
@@ -312,7 +332,12 @@ impl Shared {
             None => None,
         };
         let mut file = File::open(path)?;
-        let (analysis, failed) = match self.network() {
+        // Fast analysis doesn't load the network at all.
+        let network = match fast {
+            true => None,
+            false => self.network(),
+        };
+        let (analysis, failed) = match network {
             Some(network) => {
                 let mut network = network.lock().unwrap_or_else(PoisonError::into_inner);
                 analyse(&mut file, Some(&mut network), step)?

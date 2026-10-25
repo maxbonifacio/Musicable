@@ -13,7 +13,7 @@ use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::{ClipParam, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
 use musicable_model::{
     AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
     TrackId, TrackKind,
@@ -197,7 +197,7 @@ impl Random {
     }
 
     /// A warp of one marker or a few, rising in frames and in ticks, at any
-    /// tempo it allows.
+    /// tempo it allows, with a few transients or none yet.
     fn warp(&mut self) -> Warp {
         let tempo = match self.below(3) {
             0 => self.pick(&[Warp::MIN_TEMPO, Warp::MAX_TEMPO, 120.0]),
@@ -217,8 +217,23 @@ impl Random {
             frame += 1 + self.below(100_000);
             beat += 1 + self.below(Beats::new(4).ticks() as u64) as i64;
         }
+        let onsets = (!self.one_in(3)).then(|| {
+            let mut frame = self.below(1 << 20);
+            let mut onsets = Vec::new();
+            for _ in 0..self.below(6) {
+                onsets.push(Onset {
+                    frame: frame.min(MAX_TICKS as u64),
+                    strength: self.within(0.0, 1.0),
+                    percussiveness: self.within(0.0, 1.0),
+                    origin: self.pick(&[Origin::Found, Origin::Added, Origin::Hidden]),
+                });
+                frame += 1 + self.below(100_000);
+            }
+            Onsets::new(onsets)
+        });
         Warp {
             markers,
+            onsets,
             ..Warp::new(0, Beats::ZERO, tempo)
         }
     }

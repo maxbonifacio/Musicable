@@ -1,0 +1,315 @@
+{
+  "format": "musicable-project",
+  "version": 12,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 8,
+  "next_send_id": 5,
+  "next_device_id": 7,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Kick",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": 4,
+      "sends": [],
+      "tone": {
+        "frequency": 55.0,
+        "level": 0.1
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "kind": {
+            "test_gain": {
+              "gain": 0.5
+            }
+          }
+        }
+      ],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Snare",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": -0.3,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": 4,
+      "sends": [
+        {
+          "id": 1,
+          "to": 6,
+          "level": 0.3,
+          "pre_fader": false
+        }
+      ],
+      "tone": {
+        "frequency": 196.0,
+        "level": 0.1
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 2,
+          "kind": {
+            "test_gain": {
+              "gain": 2.0
+            }
+          }
+        },
+        {
+          "id": 3,
+          "kind": {
+            "test_gain": {
+              "gain": -1.0
+            }
+          }
+        }
+      ],
+      "clip_type": "hard",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Bass",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.25,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": 5,
+      "sends": [],
+      "tone": {
+        "frequency": 82.41,
+        "level": 0.1
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 3,
+      "name": "Vocal",
+      "kind": "audio",
+      "gain": 0.7,
+      "pan": -1.0,
+      "muted": false,
+      "solo": true,
+      "solo_safe": false,
+      "armed": true,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [
+        {
+          "id": 2,
+          "to": 6,
+          "level": 0.5,
+          "pre_fader": true
+        },
+        {
+          "id": 3,
+          "to": 7,
+          "level": 0.25,
+          "pre_fader": false
+        }
+      ],
+      "tone": {
+        "frequency": 440.0,
+        "level": 0.1
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 4,
+      "name": "Drums",
+      "kind": "group",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": 5,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 5,
+      "name": "Band",
+      "kind": "group",
+      "gain": 1.0,
+      "pan": 1.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [
+        {
+          "id": 4,
+          "to": 7,
+          "level": 7.038531e-26,
+          "pre_fader": false
+        }
+      ],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "soft",
+      "console": {}
+    },
+    {
+      "id": 6,
+      "name": "Reverb",
+      "kind": "return",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 7,
+      "name": "Delay",
+      "kind": "return",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 0.8,
+    "pan": -0.0,
+    "devices": [
+      {
+        "id": 4,
+        "kind": {
+          "test_gain": {
+            "gain": 0.9
+          }
+        }
+      }
+    ],
+    "clip_type": "soft",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "workspace": null
+}

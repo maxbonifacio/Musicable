@@ -39,6 +39,11 @@ version = 1
 "edit.rename" = ["Ctrl+R"]
 "clip.insert_midi_clip" = ["Ctrl+Shift+M"]
 
+# Live's key for Quantize, which moves the notes of the piano roll, the
+# transients of the Sample Editor, or else those of the selected clips to the
+# grid.
+"edit.quantize" = ["Ctrl+U"]
+
 # Live's keys for the arrangement's zoom, the grid and Follow, for showing
 # take lanes, for showing the mixer and the devices (Live's Detail View)
 # under the arrangement, and for showing the browser and searching in it.
@@ -68,11 +73,9 @@ version = 1
 # Live has no list of the undo history. Its key follows the other panels'.
 "view.toggle_history" = ["Ctrl+Alt+H"]
 
-# Live's keys for its MIDI note editor that work everywhere: Draw Mode, and
-# Quantize, which quantizes the selected MIDI clips outside the piano roll.
+# Live's key for Draw Mode in its MIDI note editor, which works everywhere.
 # The arrow keys are the piano roll's own, under [panels.piano_roll] below.
 "notes.toggle_draw" = ["B"]
-"notes.quantize" = ["Ctrl+U"]
 
 # Live's A shows every track's automation in Automation Mode. Here it shows
 # the selected track's automation lanes, or hides them.
@@ -136,6 +139,8 @@ version = 1
 "warp.insert_markers" = ["Ctrl+I"]
 "warp.nudge_left" = ["Left"]
 "warp.nudge_right" = ["Right"]
+"transient.insert" = ["Ctrl+Shift+I"]
+"transient.delete" = ["Ctrl+Shift+Backspace"]
 
 # The arrow keys step through the History panel's list: Up takes a step back,
 # as undo does, and Down makes the next one again, as redo does.

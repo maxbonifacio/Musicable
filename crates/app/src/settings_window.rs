@@ -102,7 +102,7 @@ const PAGES: [Page; 10] = [
         id: BEHAVIOUR,
         title: "Behaviour",
         scrolls: false,
-        show: |_, ui, cx, _| behaviour(ui, cx.profile.behaviour).map(Asked::Behaviour),
+        show: |_, ui, cx, _| behaviour(ui, cx),
     },
     Page {
         id: APPEARANCE,
@@ -168,6 +168,8 @@ pub enum Asked {
     CaptureMinutes(u32),
     /// Editing behaves so from now on.
     Behaviour(Behaviour),
+    /// Analysis leaves the Beat This! network out from now on, or doesn't.
+    FastAnalysis(bool),
     /// What the Mouse page asked for.
     Mouse(mouse_page::Asked),
     /// What the Profiles page asked for.
@@ -476,9 +478,11 @@ impl RecordingPage {
     }
 }
 
-/// How editing behaves where people's habits differ. Returns how it's to
-/// behave, once the user changes it.
-fn behaviour(ui: &mut Ui, behaviour: Behaviour) -> Option<Behaviour> {
+/// How editing behaves where people's habits differ, which goes with the
+/// profile, and how analysis finds beats, which is the computer's. Returns
+/// what the user changed.
+fn behaviour(ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
+    let behaviour = cx.profile.behaviour;
     let mut new = behaviour;
     ui.label(RichText::new("Play/Stop plays from").strong());
     ui.radio_value(
@@ -505,7 +509,72 @@ fn behaviour(ui: &mut Ui, behaviour: Behaviour) -> Option<Behaviour> {
     for (middle_c, name) in names {
         ui.radio_value(&mut new.middle_c, middle_c, name);
     }
-    (new != behaviour).then_some(new)
+    ui.add_space(8.0);
+    ui.label(RichText::new("Auto-warp").strong());
+    let rules = [
+        (
+            &mut new.warp_recordings,
+            "Recordings follow the tempo",
+            "Each keeps to the tempo it was played to, sample for sample until the tempo changes",
+        ),
+        (
+            &mut new.warp_loops,
+            "Loops warp to their whole bars",
+            "One marker at the loop's start, at the tempo its length gives",
+        ),
+        (
+            &mut new.warp_steady,
+            "Files at a steady tempo warp from their first downbeat",
+            "One marker on the first downbeat, which lands on the bar line nearest the drop",
+        ),
+        (
+            &mut new.warp_drifting,
+            "Files whose tempo drifts lock to the grid",
+            "A marker on every downbeat, and on each beat that strays, so they keep their feel",
+        ),
+        (
+            &mut new.sync_one_shots,
+            "Sounds without a pulse land on their hit",
+            "One-shots, effects and speech stay unwarped, and play their first hit, or a riser's \
+             peak, where they're dropped",
+        ),
+        (
+            &mut new.tempo_from_first_file,
+            "The first file sets the song's tempo",
+            "The first file with a pulse dropped into an empty song gives it its tempo and meter, \
+             rather than being stretched",
+        ),
+    ];
+    for (on, text, hover) in rules {
+        ui.checkbox(on, text).on_hover_text(hover);
+    }
+    ui.label(
+        RichText::new(
+            "Audio files dropped into the song are warped by what analysis finds in them, by the \
+             rule for their kind. A file analysis is unsure of comes in as it is, and Warp warps \
+             it at the best guess at its tempo.",
+        )
+        .weak(),
+    );
+    ui.add_space(8.0);
+    ui.label(RichText::new("Analysis").strong());
+    let mut fast = cx.settings.analysis.fast;
+    if ui
+        .checkbox(&mut fast, "Fast analysis")
+        .on_hover_text("Quicker on slower computers, but less accurate")
+        .changed()
+    {
+        return Some(Asked::FastAnalysis(fast));
+    }
+    ui.label(
+        RichText::new(
+            "Analysis finds beats with the Beat This! network, and checks them with a classic \
+             beat tracker. Fast analysis uses the classic tracker alone. It's this computer's \
+             setting, the same in every profile.",
+        )
+        .weak(),
+    );
+    (new != behaviour).then_some(Asked::Behaviour(new))
 }
 
 /// The user's workspaces, by slot, with the one in use picked, and what

@@ -11,7 +11,7 @@ use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::warp::Warp;
+use musicable_model::warp::{Origin, Warp};
 use musicable_model::{
     AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
     TestTone, TrackId, TrackKind,
@@ -1450,6 +1450,59 @@ fn warped_clips_have_markers_in_order_and_a_tempo_in_range() {
     };
     audio.warp = Some(Warp::new(0, Beats::ZERO, 120.0));
     refused_saving(&project, &format!("{AUDIO}.offset"), "in ticks");
+}
+
+#[test]
+fn warped_clips_transients_rise_with_values_from_0_to_1() {
+    let file = edited_warp(|a| {
+        a["warp"]["onsets"] = json!([
+            [0, 0.0, 1.0, "found"],
+            [10, 1.0, 0.0, "added"],
+            [MAX_TICKS, 0.5, 0.25, "hidden"]
+        ])
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    let onsets = audio.warp.as_ref().unwrap().onsets.as_ref().unwrap();
+    let origins: Vec<Origin> = onsets.all().iter().map(|o| o.origin).collect();
+    assert_eq!(origins, [Origin::Found, Origin::Added, Origin::Hidden]);
+    assert_eq!(onsets.all()[2].frame, MAX_TICKS as u64);
+    let onsets = format!("{AUDIO}.warp.onsets");
+    refused(
+        &edited_warp(|a| {
+            a["warp"].as_object_mut().unwrap().remove("onsets");
+        }),
+        &format!("{AUDIO}.warp"),
+        "missing field `onsets`",
+    );
+    refused(
+        &edited_warp(|a| {
+            a["warp"]["onsets"] = json!([[10, 0.5, 0.5, "found"], [10, 0.5, 0.5, "added"]])
+        }),
+        &format!("{onsets}[1][0]"),
+        "must be after the frame of the transient before it",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["onsets"] = json!([[MAX_TICKS + 1, 0.5, 0.5, "found"]])),
+        &format!("{onsets}[0][0]"),
+        "or less",
+    );
+    for (onset, index) in [
+        (json!([0, 1.5, 0.5, "found"]), 1),
+        (json!([0, 0.5, -0.1, "found"]), 2),
+    ] {
+        refused(
+            &edited_warp(|a| a["warp"]["onsets"] = json!([onset])),
+            &format!("{onsets}[0][{index}]"),
+            "must be from 0 to 1",
+        );
+    }
+    refused(
+        &edited_warp(|a| a["warp"]["onsets"] = json!([[0, 0.5, 0.5, "guessed"]])),
+        &format!("{onsets}[0][3]"),
+        "unknown variant `guessed`",
+    );
 }
 
 #[test]
