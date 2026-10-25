@@ -155,6 +155,7 @@
 | Audio Settings... |  | `options.audio_settings` |
 | Keyboard Shortcuts... | Ctrl+K | `options.keyboard_shortcuts` |
 | Appearance... |  | `options.appearance` |
+| Agents... |  | `options.agents` |
 | Profiles... |  | `options.profiles` |
 | Switch to Next Profile |  | `options.next_profile` |
 | Rescan Plugins |  | `options.rescan_plugins` |
