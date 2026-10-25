@@ -25,12 +25,14 @@ pub(crate) const LIMIT: usize = 1000;
 /// Registers the history's command.
 pub fn register(registry: &mut Registry) {
     registry.add(
-        Command::new(GO_TO, "Go to Step").with_params(&[Param::required(
-            "step",
-            Type::Int,
-            "The step, numbered from 1 for the oldest the history keeps: it and those \
+        Command::new(GO_TO, "Go to Step")
+            .alone()
+            .with_params(&[Param::required(
+                "step",
+                Type::Int,
+                "The step, numbered from 1 for the oldest the history keeps: it and those \
              before it are done, and those after it undone. 0 undoes every step.",
-        )]),
+            )]),
         |ctx, args| {
             let step: i64 = args.get("step")?;
             let steps = ctx.document.steps().len();
@@ -61,6 +63,19 @@ pub(crate) struct History {
     base: u64,
     /// Where the project was opened or last saved, as a [`position`](Self::position).
     saved: u64,
+    /// The batch in progress, if one is.
+    batch: Option<Batch>,
+}
+
+/// A batch of transactions that make one step.
+#[derive(Debug, Clone)]
+struct Batch {
+    name: String,
+    /// What the batch's step has for its gesture, which no other step has.
+    gesture: u64,
+    /// What redo could make again when the batch began, which it gives
+    /// back if it makes no step.
+    redo: Vec<Step>,
 }
 
 /// A step in the history: one transaction, or a gesture's worth.
@@ -79,12 +94,16 @@ pub(crate) struct Step {
 impl History {
     /// Records a committed transaction. Within a gesture, a transaction with
     /// the same name as the gesture's step joins it, and the step goes if
-    /// its edits cancel out. Either way, what was undone can't be redone
-    /// any more.
+    /// its edits cancel out. Within a batch, every transaction joins the
+    /// batch's step, under the batch's name. Either way, what was undone
+    /// can't be redone any more.
     pub(crate) fn record(&mut self, name: &str, edits: &[Edit]) {
         self.redo.clear();
         let id = self.next_id();
-        let gesture = self.gesture;
+        let (name, gesture) = match &self.batch {
+            Some(batch) => (batch.name.as_str(), Some(batch.gesture)),
+            None => (name, self.gesture),
+        };
         if let Some(step) = self.undo.back_mut()
             && gesture.is_some()
             && step.gesture == gesture
@@ -104,13 +123,61 @@ impl History {
             name: name.to_owned(),
             edits: edits.to_vec(),
         });
-        if self.undo.len() > LIMIT {
+        // A batch keeps the oldest step until it ends, in case it's
+        // cancelled.
+        if self.batch.is_none() {
+            self.forget_oldest();
+        }
+    }
+
+    /// Lets the oldest steps go while there are more than the limit.
+    fn forget_oldest(&mut self) {
+        while self.undo.len() > LIMIT {
             let oldest = self
                 .undo
                 .pop_front()
                 .expect("the history is over its limit");
             self.base = oldest.id;
         }
+    }
+
+    pub(crate) fn begin_batch(&mut self, name: &str) {
+        let gesture = self.next_id();
+        self.batch = Some(Batch {
+            name: name.to_owned(),
+            gesture,
+            redo: std::mem::take(&mut self.redo),
+        });
+    }
+
+    /// Ends the batch, keeping its step, if it made one.
+    pub(crate) fn end_batch(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        if !self.made_by(&batch) {
+            self.redo = batch.redo;
+        }
+        self.forget_oldest();
+    }
+
+    /// Ends the batch, dropping its step, if it made one, and giving redo
+    /// back what it had.
+    pub(crate) fn cancel_batch(&mut self) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        if self.made_by(&batch) {
+            self.undo.pop_back();
+        }
+        self.redo = batch.redo;
+    }
+
+    /// Whether the last step is `batch`'s.
+    fn made_by(&self, batch: &Batch) -> bool {
+        self.undo
+            .back()
+            .is_some_and(|step| step.gesture == Some(batch.gesture))
     }
 
     /// Moves the last step over to the redo side and returns it, for the

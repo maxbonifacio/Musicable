@@ -194,7 +194,7 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(ADD_FOLDER, "Add Folder to Library...").with_params(&[Param::optional(
+        Command::new(ADD_FOLDER, "Add Folder to Library...").with_params(&[Param::asked(
             "folder",
             Type::Text,
             "The folder: the app asks which without it.",
@@ -238,9 +238,13 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
-    registry.register(FOCUS_SEARCH, "Search in Browser", |ctx| {
-        ctx.requests.push(Request::FocusBrowserSearch);
-    });
+    registry.add(
+        Command::new(FOCUS_SEARCH, "Search in Browser").not_for_agents(),
+        |ctx, _| {
+            ctx.requests.push(Request::FocusBrowserSearch);
+            Ok(Value::None)
+        },
+    );
 }
 
 /// The argument `name`, a path.

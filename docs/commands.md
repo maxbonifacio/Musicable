@@ -3,7 +3,8 @@
 Every user action in Musicable is a named command, and key presses reach
 commands only through a keymap. Menus, the command palette and the mouse
 gestures of the arrangement and the piano roll run the same commands, and
-scripts and agents will, so remapping a shortcut is just editing the keymap. This page covers
+so do agents ([agents.md](agents.md)), and scripts will, so remapping a
+shortcut is just editing the keymap. This page covers
 the commands so far, the editor's state they read and change, the
 transactions they change the project through, undo and redo, how the app
 runs them, key chords and the keymap file. How the app's window hands key
@@ -18,7 +19,11 @@ command keeps its id once it has shipped. Each area registers its commands
 with the `Registry`, as `transport::register` does, and
 `musicable_commands::register_all` registers every area's. A new command
 also needs an example for the undo tests
-([below](#testing-every-command)). A running command
+([below](#testing-every-command)). A command that only shows a window or
+asks the user something, which an agent can't see or answer, is marked
+`not_for_agents` (`Command::agents`), and one that can't be part of a
+batch, as those that step through the history or open and save files,
+`alone`. A running command
 gets a `Context`: the open project's `Document`, with the editor's state
 (below), the engine's `Transport`, the browser's `Library`, and a list of
 `Request`s for what only the app can do, such as showing a file dialog.
@@ -48,6 +53,21 @@ line on what it's for.
   out: the Keys page and the palette don't list them. The
   context menus of the arrangement and the piano roll fill them in from
   where they were opened ([app.md](app.md#the-arrangement)).
+- A param made with `Param::asked` is one the app asks the user for when
+  it's left out, such as Open's file. Scripts and agents, which can't
+  answer, must give it.
+- `Registry::run_batch(name, &commands, ctx)` runs commands in order as one
+  step in the undo history called `name`, all or none: if one fails, the
+  project, the editor's state and the history go back to how they were,
+  redo included, nothing they asked the app for is asked for, and the
+  `BatchError` says which failed and why. Commands that run `alone` can't
+  be part of one.
+- The `json` module reads a command's arguments from JSON by its params
+  (`args_from_json`, and `agent_args`, which refuses commands not for
+  agents), writes results as JSON (`to_json`), and describes the params as
+  a JSON Schema (`schema`), for agents and `musicable api`
+  ([agents.md](agents.md)). Positions are numbers of beats, and ids are
+  whole numbers.
 
 ### When a command applies
 
@@ -110,14 +130,17 @@ has run ([app.md](app.md#files)).
 |---|---|---|---|
 | `file.new` | New Project | Starts a new, empty project | Ctrl+N |
 | `file.new_demo` | New Demo Project | Starts the Tier 0 demo project | none |
-| `file.open` | Open Project... | Asks for a project file and opens it | Ctrl+O |
+| `file.open` | Open Project... | Asks for a project file and opens it; `file`? opens that one | Ctrl+O |
 | `file.save` | Save Project | Saves the project, asking where if it has no file yet | Ctrl+S |
-| `file.save_as` | Save Project As... | Asks where to save the project, and saves it there | Ctrl+Shift+S |
-| `file.import_audio` | Import Audio Files... | Asks for audio files, and puts them on the selected track | none |
-| `file.export_audio` | Export Audio... | Shows the export window, which renders the song to audio files ([app.md](app.md#exporting-audio)) | Ctrl+Shift+R |
+| `file.save_as` | Save Project As... | Asks where to save the project, and saves it there; `file`? saves it to that one | Ctrl+Shift+S |
+| `file.import_audio` | Import Audio Files... | Asks for audio files, and puts them on the selected track; `files`?, `track`? and `at`? say which and where | none |
+| `file.export_audio` | Export Audio... | Shows the export window, which renders the song to audio files ([app.md](app.md#exporting-audio)); `file`? renders the mix to it instead, with the window's last settings and the format its extension says | Ctrl+Shift+R |
 | `file.quit` | Quit | Closes Musicable | Ctrl+Q |
 
-New, New Demo, Open and Quit ask about unsaved changes first.
+New, New Demo, Open and Quit ask about unsaved changes first. Each file
+command runs alone, never in a batch. Their files are `Param::asked`, so
+agents give them, and the app skips the dialog
+([agents.md](agents.md#what-agents-can-run)).
 
 ### Edit
 
@@ -498,6 +521,7 @@ other. They push a `Request`, as the file commands do.
 | `options.keyboard_shortcuts` | Keyboard Shortcuts... | Shows the Settings window's Keys page, where keys are changed | Ctrl+K | Ctrl+K (Key Map Mode) |
 | `options.appearance` | Appearance... | Shows the Settings window's Appearance page, where the theme is picked | none | none |
 | `options.profiles` | Profiles... | Shows the Settings window's Profiles page, where profiles are made and switched between | none | none |
+| `options.agents` | Agents... | Shows the Settings window's Agents page, where agents are let in ([agents.md](agents.md)) | none | none |
 | `options.next_profile` | Switch to Next Profile | Switches to the next profile, in the Profiles page's order, and from the last back to Default, saving the workspace in use first | none | none |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
@@ -722,6 +746,15 @@ left and made. They check that:
   engine follows them, stays in step;
 - each project a step makes saves, and loads back as it was.
 
+Each example also runs as an agent runs it, with its arguments written as
+JSON and read back (`json::agent_call`), and must do just what it does from
+the UI, result and all, unless it's left to the user, which a command that
+asks for a window or a question must be, or needs an argument the app would
+have asked the user for. Random runs of examples in one batch check that
+it's one step, which undo takes back whole, or no step at all if one of
+them fails, whatever was there to redo, and that commands that step through
+the history run alone.
+
 To try more runs:
 
 ```sh
@@ -744,6 +777,7 @@ stops the transport at the start of the song. Then:
 - `Session::run` runs a command by id, for menus and the command palette,
   and `Session::run_with` runs one with arguments, for the arrangement's
   gestures and context menus, and returns its result.
+  `Session::run_batch` runs several as one step, for agents.
 - `Session::editor` and `editor_mut` are the editor's state. The app puts
   the audio files' headers there as it reads them.
 - After each command, the session sends the engine what the committed

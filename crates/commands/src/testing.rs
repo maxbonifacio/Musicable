@@ -10,8 +10,8 @@ use musicable_model::time::Beats;
 use musicable_model::{DeviceId, DeviceKind, Project, TrackId};
 
 use crate::{
-    Args, CommandError, CommandId, Context, Document, Library, Registry, Request, Transport, Value,
-    edit,
+    Args, BatchError, CommandError, CommandId, Context, Document, Library, Registry, Request,
+    Transport, Value, edit,
 };
 
 /// Records what commands ask of the transport, and plays along: locating
@@ -203,6 +203,22 @@ impl Setup {
             library: &mut self.library,
         };
         self.registry.run_with(id, &args, &mut ctx)
+    }
+
+    /// Runs `commands` as one step called `name`: see
+    /// [`Registry::run_batch`].
+    pub fn run_batch(
+        &mut self,
+        name: &str,
+        commands: &[(CommandId, Args)],
+    ) -> Result<Vec<Value>, BatchError> {
+        let mut ctx = Context {
+            document: &mut self.document,
+            transport: &mut self.transport,
+            requests: &mut self.requests,
+            library: &mut self.library,
+        };
+        self.registry.run_batch(name, commands, &mut ctx)
     }
 
     /// Whether `id` applies without arguments.

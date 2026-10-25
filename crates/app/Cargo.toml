@@ -19,6 +19,7 @@ musicable-io.workspace = true
 musicable-library.workspace = true
 musicable-ui.workspace = true
 musicable-audio.workspace = true
+musicable-mcp.workspace = true
 eframe.workspace = true
 # The main window, which a workspace puts where it was: eframe's own winit,
 # and egui's way of maximizing a window that's still hidden.
@@ -26,6 +27,7 @@ winit = { version = "0.30", default-features = false }
 egui-winit = { version = "0.37", default-features = false }
 rfd.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 # Reads a theme's font files as egui will, which can't take one it can't
 # read. The version egui's text uses.
@@ -38,6 +40,9 @@ egui_kittest = { workspace = true, features = ["eframe"] }
 # Built for its plugin library, which the tests load, and for the hooks into
 # it.
 musicable-test-plugins = { path = "../test-plugins" }
+# Agents' clients, in the tests of agents controlling the app.
+rmcp.workspace = true
+tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The main window's HWND, which plugin windows stay in front of.

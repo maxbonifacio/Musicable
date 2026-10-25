@@ -45,6 +45,8 @@ pub const WORKSPACES: &str = "workspaces";
 pub const BROWSER: &str = "browser";
 /// The user's profiles.
 pub const PROFILES: &str = "profiles";
+/// Whether agents, such as Claude Code, can control Musicable.
+pub const AGENTS: &str = "agents";
 
 /// A page of the window.
 struct Page {
@@ -62,7 +64,7 @@ struct Page {
 }
 
 /// The pages, in the order the window lists them. A new page goes here.
-const PAGES: [Page; 9] = [
+const PAGES: [Page; 10] = [
     Page {
         id: AUDIO,
         title: "Audio",
@@ -138,6 +140,12 @@ const PAGES: [Page; 9] = [
                 .map(Asked::Profiles)
         },
     },
+    Page {
+        id: AGENTS,
+        title: "Agents",
+        scrolls: false,
+        show: |_, ui, cx, _| agents(ui, &cx.agents),
+    },
 ];
 
 /// How big the window is at first, in points.
@@ -172,6 +180,8 @@ pub enum Asked {
     DefaultPresetsFolder,
     /// Show the workspaces folder in the system's file manager.
     OpenWorkspacesFolder,
+    /// Let agents control Musicable from now on, or stop letting them.
+    Agents(bool),
 }
 
 /// What the pages show, from the app.
@@ -199,6 +209,21 @@ pub struct Cx<'a> {
     pub presets_folder: Option<&'a Path>,
     /// Where the workspaces' files go, if there's a config folder.
     pub workspaces_folder: Option<&'a Path>,
+    pub agents: Agents<'a>,
+}
+
+/// Agents, as the Agents page shows them.
+pub struct Agents<'a> {
+    /// Whether the user lets agents control Musicable.
+    pub enabled: bool,
+    /// Where Musicable listens for them, while it does.
+    pub listening: Option<String>,
+    /// The agents connected, as their clients name themselves.
+    pub connected: Vec<String>,
+    /// Why Musicable can't let agents in, if it can't.
+    pub problem: Option<&'a str>,
+    /// The command that adds Musicable to Claude Code.
+    pub claude_command: &'a str,
 }
 
 /// What the pages keep from frame to frame.
@@ -614,6 +639,75 @@ fn browser(ui: &mut Ui, cx: &mut Cx<'_>) -> Option<Asked> {
             asked = Some(Asked::DefaultPresetsFolder);
         }
     });
+    asked
+}
+
+/// Whether agents can control Musicable, how they're doing, and how to add
+/// Musicable to Claude Code.
+fn agents(ui: &mut Ui, agents: &Agents<'_>) -> Option<Asked> {
+    let mut asked = None;
+    let mut on = agents.enabled;
+    if ui
+        .checkbox(&mut on, "Let agents control Musicable")
+        .on_hover_text(
+            "Listens for agents on a pipe that only your account can open, never on the network",
+        )
+        .changed()
+    {
+        asked = Some(Asked::Agents(on));
+    }
+    ui.label(
+        RichText::new(
+            "Agents, such as Claude Code, can then run Musicable's commands and read the project \
+             while you watch, also with the window minimized. Each change they make is a step in \
+             the undo history, as yours are. They connect from this computer only.",
+        )
+        .weak(),
+    );
+    ui.add_space(8.0);
+    ui.label(RichText::new("Status").strong());
+    match (agents.enabled, agents.problem, &agents.listening) {
+        (false, ..) => {
+            ui.label("Off: Musicable doesn't listen for agents.");
+        }
+        (true, Some(problem), _) => {
+            ui.colored_label(ui.visuals().warn_fg_color, problem);
+        }
+        (true, None, listening) => {
+            match agents.connected.as_slice() {
+                [] => ui.label("Listening for agents. None is connected."),
+                connected => ui.label(format!("Connected: {}.", connected.join(", "))),
+            };
+            if let Some(address) = listening {
+                ui.add(
+                    Label::new(RichText::new(address).monospace().weak())
+                        .selectable(true)
+                        .wrap(),
+                );
+            }
+        }
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Claude Code").strong());
+    ui.label("To add Musicable to Claude Code, run this in a terminal:");
+    ui.horizontal_wrapped(|ui| {
+        let command = RichText::new(agents.claude_command).monospace();
+        ui.add(Label::new(command).selectable(true));
+        if ui
+            .button("Copy")
+            .on_hover_text("Copies the command")
+            .clicked()
+        {
+            ui.ctx().copy_text(agents.claude_command.to_owned());
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Other agents' clients start the same program, with mcp after it: it speaks MCP, the \
+             Model Context Protocol, over its standard input and output.",
+        )
+        .weak(),
+    );
     asked
 }
 

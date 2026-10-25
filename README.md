@@ -41,6 +41,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/library` | The browser's library of samples and presets: indexing, searching, and file work in the background. |
 | `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
+| `crates/mcp` | Lets agents, such as Claude Code, control Musicable over MCP through its commands. See [docs/agents.md](docs/agents.md). |
 | `crates/app` | The `musicable` app: its window, the audio output, and the session that runs commands and keeps the engine in step with the project. |
 
 The engine never depends on the UI, and the UI never drives the engine

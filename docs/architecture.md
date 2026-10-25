@@ -20,6 +20,7 @@ reference renderer bit for bit. This page is the map. The detail is in
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
 | `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
 | `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
+| `mcp` | `model`, `commands` | Agents controlling Musicable over MCP: the tools, the server the window answers through, the local pipe, and the `musicable mcp` bridge ([agents.md](agents.md)) |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
 
 Cargo enforces the directions that matter. The engine knows nothing of
@@ -41,6 +42,7 @@ compiler, a node and the UI, in that order.
 | Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders and reading the headers of the files found, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
 | Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
 | Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
+| Agents (`musicable-agents`, while agents are let in) | The MCP server, with Tokio: the pipe, each agent's connection, and checking their calls, which the main thread answers ([agents.md](agents.md#how-its-built)) | Normal |
 
 There is one worker per physical core, minus one for the audio thread,
 which works too, and no more than 24 on Windows. While audio plays, the
@@ -427,6 +429,10 @@ says what's there.
   can use too. A mapping turns a controller's moves into its parameter's
   changes: on the main thread, as a fader's drag does, or in the graph, on
   their frames.
+- **Agents** control Musicable over MCP already, through the same
+  commands, as one undo step for each call or batch
+  ([agents.md](agents.md)). A window-less `musicable --headless` for them
+  comes later.
 - **Extensions.** They build on what Tier 1 made shareable: commands with
   typed arguments and results, which say when they apply
   ([commands.md](commands.md#arguments-and-results)), the `Editor`'s state

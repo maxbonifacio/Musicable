@@ -246,6 +246,7 @@ impl Bench {
                     notice: None,
                 },
                 messages: &[],
+                agent: None,
                 plugins: Plugins::default(),
                 native: &[],
                 library: Library::default(),

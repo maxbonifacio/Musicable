@@ -40,7 +40,10 @@ The console the app was started from, if any, shows them too.
 `musicable null-test [PROJECT]` checks the parallel scheduler against the
 reference renderer (see [The null test](#the-null-test)), and
 `musicable export PROJECT FILE` renders a project to audio files (see
-[Exporting audio](#exporting-audio)).
+[Exporting audio](#exporting-audio)). `musicable mcp` lets the agent whose
+client starts it, such as Claude Code, control the Musicable that's
+running, and `musicable api` prints the commands agents can run, as JSON
+([agents.md](agents.md)).
 
 ## The Tier 0 demo
 
@@ -227,14 +230,16 @@ That's what `ParallelOptions::inline_below` is for
   ([below](#the-history-panel)).
 - **The status bar** shows errors and notices until they're dismissed, the
   audio device's sample rate, buffer, and latency as the device's clock
-  measures it (click it for the audio settings), and the project's name,
-  with "(not saved)" while it has changes. The window's title marks them
-  with a `*`.
+  measures it (click it for the audio settings), while an agent is
+  connected its last change, such as "Agent: Move Notes" (click it for the
+  Agents page, [agents.md](agents.md)), and the project's name, with "(not
+  saved)" while it has changes. The window's title marks them with a `*`.
 - **View > Command Palette** (Ctrl+Shift+P) finds any command by name or
   keys and runs it ([below](#the-command-palette)).
 - **Options > Settings** (Ctrl+Comma) has a page for each area of the
   settings: the audio device, recording, every command's keys, how editing
-  behaves, the theme, the workspaces and the browser's previews
+  behaves, the theme, the workspaces, the browser's previews, your
+  profiles and whether agents can control Musicable
   ([below](#the-settings-window)). **Options > Keyboard Shortcuts** (Ctrl+K)
   opens it at its Keys page ([below](#changing-keys)), and Audio Settings
   and Appearance at theirs.
@@ -718,7 +723,7 @@ into it and run no commands.
 for each area of the settings listed down its left side, as Live's
 Preferences has a tab for each. It opens at the page it showed last, and
 **Options > Audio Settings**, **Keyboard Shortcuts** (Ctrl+K),
-**Appearance** and **Profiles** open it at theirs. Changes apply at once,
+**Appearance**, **Agents** and **Profiles** open it at theirs. Changes apply at once,
 and are kept: in [settings.toml](#settings-and-your-keymap), in the
 profile in use's keymap, mouse map, workspaces and settings
 ([Profiles](#profiles)), or in the theme's own file. Every setting in
@@ -762,6 +767,9 @@ that, or stops waiting, first.
   delete the profile in use, and deleting asks first, then switches to
   Default, which keeps its name and can't be deleted. **Open Profiles
   Folder** shows their folders.
+- **Agents**: **Let agents control Musicable**, off until you switch it
+  on, how they're doing, and the command that adds Musicable to Claude
+  Code, with a Copy button ([agents.md](agents.md)).
 
 ### Profiles
 
@@ -1471,7 +1479,9 @@ can still be cancelled in the file dialog, which cancels the rest.
 The file commands are real commands (`file.new` and so on, see
 [commands.md](commands.md#file)), so they can be remapped. A command can't
 show a dialog, so it pushes a `Request` into its `Context`, and the app
-carries it out after the command has run.
+carries it out after the command has run. Given a file, as agents give
+them, Open, Save As, Import Audio and Export Audio skip the dialog
+([agents.md](agents.md#what-agents-can-run)).
 
 ## Audio files
 
@@ -1755,8 +1765,8 @@ keymap file, the mouse map file and the workspaces above are Default's.
 `settings.toml` holds the audio settings, written whenever you apply new
 ones, how editing behaves, the theme, the workspace in use, the profile in
 use, the export window's and the browser's settings as they were last
-used, how long Capture holds the inputs, and the devices' recording
-offsets:
+used, how long Capture holds the inputs, the devices' recording offsets,
+and whether agents can control Musicable:
 
 ```toml
 format = "musicable-settings"
@@ -1801,6 +1811,9 @@ device = "{0.0.0.00000000}.{a1b2c3d4-...}"
 exclusive = true
 sample_rate = 44100
 frames = 878
+
+[agents]
+enabled = true
 ```
 
 Every setting is optional: no device is the default output, no
@@ -1829,6 +1842,9 @@ and a `sample_rate` there renders at that rate instead of the engine's.
 `[browser]` has Auto, which plays a sample when it's picked, and the
 previews' volume in dB, from -60 to 6; a `presets_folder` there saves
 presets somewhere other than `Music/Musicable/Presets` in your home folder.
+`enabled`, under `[agents]`, lets agents control Musicable, which they
+can't while it's left out ([agents.md](agents.md)); the pipe they connect
+through is in the `agents` folder on macOS and Linux.
 The [Settings window](#the-settings-window) has a control for every setting
 but those under `[export]`, and writes the file as soon as one changes; the
 app reads it at startup. Fields this version doesn't know are ignored.
@@ -1965,8 +1981,9 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   app: it runs the library's file work on the queue, hands the engine the
   previews, and reaches the commands through `LibraryLink`.
 - `crates/app` has the eframe app (`App`), which holds the `Session`, the
-  `Output`, the Settings window and the user's keymap file
-  (`UserKeymap`), and the binary. Debug builds install the engine's
+  `Output`, the Settings window, the user's keymap file (`UserKeymap`) and
+  the agents' server (`app/agents.rs`, [agents.md](agents.md)), and the
+  binary. Debug builds install the engine's
   allocation checker, as the tests do. The Settings window
   (`settings_window.rs`) lists its pages, draws the small ones, and hands
   what changed to the app to carry out and keep; the Audio, Mouse,
@@ -2011,6 +2028,9 @@ it prefers, and Driver Settings opens the playing driver's own settings.
   makes changes, goes back to the first by clicking it in the History
   panel, steps through the rest with the panel's arrow keys, and moves the
   panel to a window of its own, which comes back with the app.
+  [`crates/app/src/app/controlled_by_agents.rs`](../crates/app/src/app/controlled_by_agents.rs)
+  lets an agent in on the Agents page and has it run, undo and batch
+  commands, save, open and export ([agents.md](agents.md#testing)).
   `crates/app/src/app/testing.rs` has what they share.
 - `crates/ui/src/arrangement/tests.rs` drives the arrangement's gestures,
   context menus, wheel and dropped files on a real document, and checks that

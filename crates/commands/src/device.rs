@@ -271,7 +271,9 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(LOAD_SAMPLE, "Load Sample...").with_params(&[DEVICE]),
+        Command::new(LOAD_SAMPLE, "Load Sample...")
+            .with_params(&[DEVICE])
+            .not_for_agents(),
         |ctx, args| {
             let device = args.get("device")?;
             sampler(ctx, device)?;

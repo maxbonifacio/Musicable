@@ -74,6 +74,10 @@ pub struct View<'a> {
     pub keymap_file: KeymapStatus<'a>,
     /// Errors and notices for the user, oldest first.
     pub messages: &'a [String],
+    /// What the status bar says while an agent controls Musicable, such as
+    /// "Agent: Move Notes": its last change. Clicked, it shows the Settings
+    /// window's Agents page.
+    pub agent: Option<&'a str>,
     /// The plugins installed, and how the project's are doing.
     pub plugins: Plugins<'a>,
     /// Musicable's own devices that play, which the browser lists: the
@@ -1515,6 +1519,15 @@ fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                 .on_hover_text("Audio settings");
             if device.clicked() {
                 actions.push(Action::Run(options::AUDIO_SETTINGS));
+            }
+            if let Some(agent) = view.agent {
+                ui.separator();
+                let agent = ui
+                    .add(Button::new(agent).frame(false))
+                    .on_hover_text("An agent controls Musicable: see the Agents settings");
+                if agent.clicked() {
+                    actions.push(Action::Run(options::AGENTS));
+                }
             }
         });
     });

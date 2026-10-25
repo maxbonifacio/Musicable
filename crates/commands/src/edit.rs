@@ -114,7 +114,12 @@ fn by_focus(ctx: &mut Context<'_>, notes: Handler, arrangement: Handler) {
 /// Registers the edit commands.
 pub fn register(registry: &mut Registry) {
     for (id, title, when, run) in COMMANDS {
-        registry.add(Command::new(id, title).when(when), move |ctx, _| {
+        let mut command = Command::new(id.clone(), title).when(when);
+        // Stepping through the undo history can't be part of a step in it.
+        if id == UNDO || id == REDO {
+            command = command.alone();
+        }
+        registry.add(command, move |ctx, _| {
             run(ctx);
             Ok(Value::None)
         });
@@ -122,6 +127,7 @@ pub fn register(registry: &mut Registry) {
     registry.add(
         Command::new(RENAME, "Rename")
             .when(When::CanRename)
+            .not_for_agents()
             .with_params(&[
                 Param::optional("clip", Type::Clip, "A clip to name."),
                 Param::optional("track", Type::Track, "A track to name."),
