@@ -35,6 +35,9 @@ so this manual gives the default ones.
 Musicable is made on GitHub at
 [maxbonifacio/Musicable](https://github.com/maxbonifacio/Musicable). To
 report a bug, or to ask for something, [open an
-issue](https://github.com/maxbonifacio/Musicable/issues) there. The edit
+issue](https://github.com/maxbonifacio/Musicable/issues) there. If
+Musicable crashed or misbehaved, add its log file to the issue: [Where your
+settings are kept](getting-started/installing.md#where-your-settings-are-kept)
+says where it is. The edit
 button at the top of each page of this manual opens the page on GitHub, so
 you can suggest a fix.

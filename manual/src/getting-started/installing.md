@@ -67,3 +67,8 @@ your profiles in a folder of its own:
 
 To use another folder, such as one for trying things out, set the
 `MUSICABLE_CONFIG_DIR` environment variable to it before starting Musicable.
+
+While it runs, Musicable writes what goes wrong to `musicable.log` in the
+same folder, with the time of each line in UTC. If Musicable crashes or
+misbehaves, that file often says why. Once it grows past a megabyte, it
+moves to `musicable.old.log`, so the two hold the latest lines.
