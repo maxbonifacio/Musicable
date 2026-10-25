@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
@@ -71,6 +72,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
     if std::env::var_os(musicable_app::FRAME_TIMES).is_some() {
         attach_console();
     }
+    musicable_app::log_file::start(musicable_app::config_dir().as_deref());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Musicable")
@@ -83,6 +85,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
         // Ctrl+C, X and V go to the keymap like other keys. Text fields
         // still get them: see `musicable_ui::KeyPresses`.
         clipboard_shortcuts: false,
+        wgpu_options: wgpu_options(),
         ..eframe::NativeOptions::default()
     };
     let result = eframe::run_native(
@@ -91,11 +94,14 @@ fn run(path: Option<PathBuf>) -> ExitCode {
         Box::new(|cc| Ok(Box::new(App::new(path, cc)))),
     );
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            log::info!("Musicable closed");
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             let message = format!("Musicable couldn't open its window: {error}");
             attach_console();
-            eprintln!("{message}");
+            log::error!("{message}");
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
                 .set_title("Musicable")
@@ -103,6 +109,32 @@ fn run(path: Option<PathBuf>) -> ExitCode {
                 .show();
             ExitCode::FAILURE
         }
+    }
+}
+
+/// How eframe draws with wgpu: as it would, but with Direct3D 12 on Windows,
+/// unless the `WGPU_BACKEND` environment variable picks another backend,
+/// such as `vulkan`. Vulkan lost the graphics device on an NVIDIA card as
+/// the displays woke, which egui-wgpu can't carry on from. A window's
+/// surface lost, as may happen then too, is logged.
+fn wgpu_options() -> eframe::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+    use eframe::wgpu::{Backends, CurrentSurfaceTexture};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    if cfg!(windows) && Backends::from_env().is_none() {
+        setup.instance_descriptor.backends = Backends::DX12;
+    }
+    let options = eframe::WgpuConfiguration::default();
+    let on_surface_status = Arc::clone(&options.on_surface_status);
+    eframe::WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        on_surface_status: Arc::new(move |status| {
+            if matches!(status, CurrentSurfaceTexture::Lost) {
+                log::info!("A window's surface was lost, so it's made again");
+            }
+            on_surface_status(status)
+        }),
+        ..options
     }
 }
 

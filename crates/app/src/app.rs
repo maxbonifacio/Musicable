@@ -30,6 +30,7 @@ use crate::export_window::{Asked, ExportWindow};
 use crate::frame_times::FrameTimes;
 use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
+use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
@@ -149,6 +150,9 @@ impl App {
     pub fn new(path: Option<PathBuf>, cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         follow_system_double_clicks(ctx);
+        if let Some(render_state) = &cc.wgpu_render_state {
+            log_file::watch_graphics(render_state);
+        }
         let mut messages = Vec::new();
         let config_dir = settings::config_dir();
         let settings = match &config_dir {
