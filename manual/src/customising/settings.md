@@ -31,6 +31,9 @@ a panel, so workspaces don't keep it.
   ([The browser](../window/browser.md#previews)), and the folder presets are
   saved in: **Choose Folder...** picks another, and **Use the Default** goes
   back to `Music/Musicable/Presets` in your home folder.
+- **Files**: how much the render cache, which keeps the clips in Spectral
+  as they were rendered, holds, and how much of its disk it always leaves
+  free, with **Show Folder** ([Spectral](../using/warping.md#spectral)).
 - **Profiles**: your profiles, and picking one switches to it
   ([Profiles](profiles.md)).
 - **Agents**: **Let agents control Musicable**, off until you switch it on,
@@ -97,7 +100,9 @@ profile, in `settings.toml`, are the profile Default's.
 
 Musicable keeps what it can work out again in its cache folder: in
 `analysis`, what it found in each audio file a project played, so it finds
-a file's tempo and beats only the first time, even after the file moves.
+a file's tempo and beats only the first time, even after the file moves,
+and in `renders`, the render cache, the clips in Spectral as they were
+rendered ([Spectral](../using/warping.md#spectral)).
 
 | System | Folder |
 |---|---|
@@ -105,9 +110,12 @@ a file's tempo and beats only the first time, even after the file moves.
 | macOS | `~/Library/Caches/Musicable` |
 | Linux | `$XDG_CACHE_HOME/musicable`, or `~/.cache/musicable` |
 
-The `MUSICABLE_CACHE_DIR` environment variable picks another folder. It
-grows by tens of kilobytes for each minute of audio. Deleting it, or
-anything in it, is safe: Musicable works it out again when it next needs it.
+The `MUSICABLE_CACHE_DIR` environment variable picks another folder.
+`analysis` grows by tens of kilobytes for each minute of audio, and
+`renders` by about 21 MB for each minute of a stereo clip in Spectral, up
+to the size on the Files page of the Settings window. Deleting the folder,
+or anything in it, is safe: Musicable works it out again when it next needs
+it.
 
 ## The settings file
 
@@ -131,6 +139,10 @@ warp_drifting = false
 
 [analysis]
 fast = true
+
+[render_cache]
+max_size_gb = 50
+min_free_gb = 10
 
 [appearance]
 theme = "Studio.toml"
@@ -184,6 +196,8 @@ Every setting can be left out:
 | `behaviour.sync_one_shots` | Whether sounds without a pulse play their first hit, or a riser's peak, where they're dropped. | `true` |
 | `behaviour.tempo_from_first_file` | Whether the first file with a pulse dropped into an empty song gives it its tempo and meter. | `true` |
 | `analysis.fast` | Whether analysis finds beats with the classic tracker alone, without the network. It's not one of a profile's settings. | `false` |
+| `render_cache.max_size_gb` | The most the render cache holds, in GB of 2^30 bytes, from 1 to 10,000. It's not one of a profile's settings. | 20 |
+| `render_cache.min_free_gb` | How much of its disk the render cache always leaves free, in GB, from 1 to 10,000. It's not one of a profile's settings. | 5 |
 | `appearance.theme` | The theme: `dark`, `light`, or the name of a file in the `themes` folder. | `dark` |
 | `workspaces.current` | The workspace in use, by name, which Musicable opens with unless the project it opens was saved with another. | Default |
 | `profiles.current` | The profile in use, which Musicable opens with: one in the `profiles` folder, whose own settings file has `[behaviour]`, `[appearance]` and `[workspaces]` in place of these. | Default |

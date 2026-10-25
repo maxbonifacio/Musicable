@@ -43,7 +43,8 @@ use musicable_model::clip::{AudioClip, Clip, ClipContent};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::{
-    Onset, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+    Onset, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMarker,
+    WarpMode,
 };
 
 use crate::arrangement::{distance_to_segment, simplified};
@@ -929,6 +930,7 @@ fn value_text(param: ClipParam, value: f64) -> String {
         ClipParam::TransientEnvelope => format!("{value:.0}"),
         ClipParam::Preserve => Preserve::at_step(value).name().to_owned(),
         ClipParam::TransientLoop => TransientLoop::at_step(value).name().to_owned(),
+        ClipParam::Formants => format!("{value:.0}%"),
     }
 }
 
@@ -1442,8 +1444,10 @@ fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
                 warp_and_mode(ui, scene, actions);
                 match scene.warp() {
                     Some(warp) => {
-                        if warp.mode == WarpMode::Slice {
-                            slice(ui, scene, warp, actions);
+                        match warp.mode {
+                            WarpMode::RePitch => {}
+                            WarpMode::Slice => slice(ui, scene, warp, actions),
+                            WarpMode::Spectral => spectral(ui, scene, warp, actions),
                         }
                         tempo(ui, scene, warp, actions);
                         pitch(ui, scene, warp, actions);
@@ -1480,9 +1484,10 @@ fn warp_and_mode(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
             return;
         };
         let hint = "How the audio between the markers plays: Re-Pitch resamples it, so its \
-                    pitch follows its speed, as on a turntable, and Slice cuts it into \
-                    slices at its transients, each played at the file's own speed, for drums \
-                    and other percussive loops";
+                    pitch follows its speed, as on a turntable, Slice cuts it into slices at \
+                    its transients, each played at the file's own speed, for drums and other \
+                    percussive loops, and Spectral stretches it keeping its pitch, for full \
+                    mixes, chords and voices";
         let (shown, modes) = (RichText::new(warp.mode.name()), &WarpMode::ALL);
         if let Some(mode) = menu(
             ui,
@@ -1551,6 +1556,34 @@ fn slice(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>)
         name_field(&field, "Transient Envelope", envelope);
         edited(&field, actions, warp_mode::SET_TRANSIENT_ENVELOPE, || {
             Args::new().with("envelope", envelope).with("clip", clip)
+        });
+    });
+}
+
+/// Spectral's own setting: how far it keeps the formants in place as it
+/// transposes.
+fn spectral(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    ui.horizontal(|ui| {
+        ui.label("Formants");
+        let mut formants = warp.spectral.formants;
+        let field = ui
+            .add(
+                DragValue::new(&mut formants)
+                    .speed(0.5)
+                    .range(0.0..=SpectralSettings::FORMANTS_MAX)
+                    .fixed_decimals(0)
+                    .suffix("%")
+                    .update_while_editing(false),
+            )
+            .on_hover_text(
+                "How far the formants, which give a voice its character, stay in place as \
+                 the clip transposes: at 100% a voice moved up or down sounds like the same \
+                 voice, and at 0% they move with the pitch, as a record's do played faster",
+            );
+        name_field(&field, "Formants", formants);
+        edited(&field, actions, warp_mode::SET_FORMANTS, || {
+            Args::new().with("formants", formants).with("clip", clip)
         });
     });
 }

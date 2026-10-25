@@ -172,8 +172,9 @@ for recordings that play at their own speed.
 
 The clip's mode, the menu after **Warp** in the Sample Editor, says how its
 audio plays between the warp markers. Changing it keeps the markers, and the
-clip keeps each mode's settings while it plays in another, as in Live. Both
-modes sound the same while the song plays and in an export.
+clip keeps each mode's settings while it plays in another, as in Live. Every
+mode sounds the same while the song plays and in an export: Spectral once
+it has rendered the clip ([below](#spectral)).
 
 ### Re-Pitch
 
@@ -212,38 +213,84 @@ Its settings are under the mode in the Sample Editor:
   next one starts, and at 0 it's a click. A lower envelope tightens a
   loop played slower, where the slices' loops fill the gaps.
 
+### Spectral
+
+Spectral is for full mixes, chords, voices and anything else with more than
+one note at once, as Live's Complex mode is. It stretches the audio in the
+frequency domain, with Signalsmith Stretch, so the audio keeps its pitch at
+any speed without being sliced, and Transpose and Detune move its pitch
+without changing its speed. Where the clip plays its file at the file's own
+speed and isn't transposed, Spectral plays the file sample for sample.
+
+Its setting, **Formants**, is under the mode in the Sample Editor. A voice's
+formants are the peaks in the outline of its spectrum that give it its
+character, and they stay where they are as a singer sings higher. At
+**100%**, as it starts, Spectral keeps them in place as it transposes, so a
+voice moved up a fourth sounds like the same voice singing higher; at
+**0%** they move with the pitch, as a record's do played faster, and the
+voice sounds smaller. Formants changes nothing while the clip isn't
+transposed. It keeps the formants closest for voices up to about 250 Hz,
+around B3: a higher voice keeps less of its character, and moved up a long
+way, can come out a few decibels quieter.
+
+Spectral's stretcher remembers what it has just played, so a clip in
+Spectral plays audio rendered ahead of time, in segments of 4 to 8 seconds
+of its file, cut at the strongest hits. They render in the background,
+those the playhead plays next first, whenever the clip's mode, markers,
+tempo, pitch or curves change, or the song's tempo, and the status bar says
+how many segments are still to render. Until a segment is ready, the clip
+plays a live stretch, which sounds close to it, and moves over to the
+rendered audio with a short crossfade where the segment starts. When the
+song's tempo changes, the clip crossfades to the live stretch there and
+then, without a break, until the segments at the new tempo are ready. An
+export waits until every segment is rendered, so it's what the song plays
+once they are, to the sample.
+
+What's rendered is kept in the render cache, in [the cache
+folder](../customising/settings.md#the-cache-folder), so the next time any
+project plays a segment, it's ready. A minute of a stereo file at 44.1 kHz
+takes about 21 MB. The render cache holds up to 20 GB, and always leaves
+5 GB of its disk free, letting go of the segments used longest ago first;
+the Files page of the Settings window changes both
+([Settings](../customising/settings.md)).
+
 ## Transpose and Detune
 
 **Transpose**, from -48 to +48 semitones (st), and **Detune**, from -50 to
 +50 cents (ct), move the audio's pitch in every mode but Re-Pitch. Slice
 plays each slice faster or slower to move its pitch, resampled, so a slice
-an octave up plays twice as fast, for half as long. Drag them in the Sample
-Editor, or click them and type.
+an octave up plays twice as fast, for half as long. Spectral moves the pitch
+in its stretcher, keeping the audio's speed, and keeps the formants where
+Formants says. Drag them in the Sample Editor, or click them and type.
 
 ## Curves in the clip
 
 Every setting of a warped clip but its mode can follow a curve, as Live's
 clip envelopes can move its volume and transpose: its gain, its Transpose
-and Detune, and Slice's Envelope, Preserve and Loop. The lane under the
-Sample Editor's waveform shows one of the curves at a time: click its name,
-beside it, to choose which. A curve is part of the clip, in the clip's own
-time, so it moves, copies and splits with the clip and stays with its
-audio.
+and Detune, Slice's Envelope, Preserve and Loop, and Spectral's Formants.
+The lane under the Sample Editor's waveform shows one of the curves at a
+time: click its name, beside it, to choose which. A curve is part of the
+clip, in the clip's own time, so it moves, copies and splits with the clip
+and stays with its audio.
 
 Where a setting has a curve, the curve gives its value all through the
 clip: the first point's value before the first point, and the last's after
 the last. The gain follows its curve smoothly, and Slice reads the others
 where each slice starts, so a change in the middle of a slice waits for the
-next one. Preserve and Loop are steps: each point holds its value until the
-next, and a curve of Preserve says how the audio is cut from each point on.
+next one. Spectral renders the curves of Transpose, Detune and Formants
+into its segments, reading them every 30 milliseconds, so a curve redrawn
+renders again only the segments it crosses. Preserve and Loop are steps:
+each point holds its value until the next, and a curve of Preserve says how
+the audio is cut from each point on.
 
 ## Not yet
 
 These come in later versions:
 
-- The other modes, Granular and Spectral, which keep the audio's pitch as
-  its speed changes without slicing it, for sounds other than drums, and
-  Spectral's Formants, which keep a voice's character as it's transposed.
+- Granular, which plays the audio in grains, for pads, textures and
+  noise, as Live's Tones and Texture modes do.
+- Spectral's High quality, which renders with Rubber Band for the best
+  sound, as Live's Complex Pro mode does, more slowly.
 - Quantize Settings, for moving hits part of the way to the grid, or to a
   grid of their own: Quantize goes all the way, to the grid the panel shows.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV

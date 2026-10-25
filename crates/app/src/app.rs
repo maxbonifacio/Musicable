@@ -39,9 +39,10 @@ use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
+use crate::renders::RenderCache;
 use crate::settings::{
-    self, ANALYSIS_FOLDER, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, SETTINGS_FILE,
-    Settings, THEMES_FOLDER,
+    self, ANALYSIS_FOLDER, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, RENDER_FOLDER,
+    SETTINGS_FILE, Settings, THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -175,6 +176,7 @@ impl App {
         let mut app = Self::with_output(path, config_dir, settings, output, handle, messages, ctx);
         app.scan_plugins(false, ctx);
         app.start_analysing(ctx);
+        app.start_rendering(ctx);
         // The window is still hidden, so it opens where the workspace has
         // it.
         if let (Some(place), Some(window)) = (app.unplaced.take(), cc.winit_window()) {
@@ -1058,6 +1060,17 @@ impl App {
         self.files_found = None;
     }
 
+    /// Renders clips in Spectral in the background on the library's queue
+    /// from now on, keeping what's rendered in the render cache's folder.
+    fn start_rendering(&mut self, ctx: &egui::Context) {
+        let renders = RenderCache::global();
+        let folder = settings::cache_dir().map(|dir| dir.join(RENDER_FOLDER));
+        renders.set_folder(folder, self.settings.render_cache.limits());
+        if let Some(queue) = self.session.library().queue() {
+            renders.start(queue.adder(), Some(waker(ctx)));
+        }
+    }
+
     fn set_path(&mut self, path: Option<PathBuf>) {
         if let Some(folder) = path.as_deref().and_then(Path::parent) {
             self.folder = Some(folder.to_owned());
@@ -1329,6 +1342,20 @@ impl App {
                     return;
                 };
                 if let Err(error) = fs::create_dir_all(folder).and_then(|()| show_folder(folder)) {
+                    (self.messages).push(format!("Couldn't open {}: {error}.", folder.display()));
+                }
+            }
+            Asked::RenderCache(limits) => {
+                self.settings.render_cache = limits;
+                RenderCache::global().set_limits(limits.limits());
+                self.save_settings();
+            }
+            Asked::OpenRenderCacheFolder => {
+                let Some(folder) = RenderCache::global().folder() else {
+                    return;
+                };
+                if let Err(error) = fs::create_dir_all(&folder).and_then(|()| show_folder(&folder))
+                {
                     (self.messages).push(format!("Couldn't open {}: {error}.", folder.display()));
                 }
             }
@@ -1689,6 +1716,11 @@ impl eframe::App for App {
         let (found, total) = library.found();
         let agent = self.agents.status();
         let analysing = self.analyses.status();
+        let rendering = match RenderCache::global().pending() {
+            0 => None,
+            1 => Some("Rendering 1 segment".to_owned()),
+            n => Some(format!("Rendering {n} segments")),
+        };
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -1725,6 +1757,7 @@ impl eframe::App for App {
             messages: &self.messages,
             agent: agent.as_deref(),
             analysing: analysing.as_deref(),
+            rendering: rendering.as_deref(),
             plugins: Plugins {
                 installed: &self.plugin_entries,
                 scanning: self.plugin_scan.is_running(),
@@ -1764,6 +1797,7 @@ impl eframe::App for App {
             monitors: &self.monitors,
         };
         let mut actions = self.shell.show(ui, &view);
+        let render_folder = RenderCache::global().folder();
         // The Settings window, whose Keys page the shell draws.
         let settings = settings_window::Cx {
             view: &view,
@@ -1778,6 +1812,7 @@ impl eframe::App for App {
             profile: &self.profile,
             presets_folder: library.presets_folder(),
             workspaces_folder: self.workspaces.folder(),
+            render_folder: render_folder.as_deref(),
             agents: self.agents.page(self.settings.agents.enabled),
         };
         let asked = self.settings_window.show(&ctx, settings);

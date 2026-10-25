@@ -1,0 +1,192 @@
+{
+  "format": "musicable-project",
+  "version": 14,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 3,
+  "next_locator_id": 0,
+  "next_take_id": 1,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Drums",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Break",
+          "start": 0,
+          "length": 2580480,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "spectral": {
+                  "formants": 100.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": [
+                  [0, 1.0, 1.0, "found"],
+                  [12000, 0.25, 0.75, "found"],
+                  [24000, 0.5, 0.0, "hidden"],
+                  [30000, 0.0, 0.5, "added"],
+                  [36000, 0.125, 1.0, "hidden"],
+                  [36500, 0.125, 1.0, "added"],
+                  [9007199254740991, 0.75, 0.25, "found"]
+                ]
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "Fill",
+          "start": 2580480,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Fill.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "spectral": {
+                  "formants": 100.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        }
+      ],
+      "takes": [
+        {
+          "id": 0,
+          "name": "Take 1",
+          "clips": [
+            {
+              "id": 2,
+              "name": "Break",
+              "start": 0,
+              "length": 1290240,
+              "content": {
+                "audio": {
+                  "file": "Loops/Break 120 BPM.wav",
+                  "offset": 0,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": {
+                    "mode": "re_pitch",
+                    "tempo": 120.0,
+                    "transpose": 0,
+                    "detune": 0,
+                    "slice": {
+                      "preserve": "transients",
+                      "transient_loop": "forward",
+                      "envelope": 100.0
+                    },
+                    "spectral": {
+                      "formants": 100.0
+                    },
+                    "markers": [
+                      [0, 0]
+                    ],
+                    "onsets": []
+                  },
+                  "automation": []
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "workspace": null
+}

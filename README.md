@@ -81,6 +81,14 @@ Musicable was licensed under either of the Apache License, Version 2.0 or
 the MIT license, at your option, until it moved to the GPL in October 2026.
 Copies from before then, such as v0.1.0, keep those terms.
 
+The Spectral warp mode stretches audio with [Signalsmith
+Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch),
+copyright © 2022 Geraint Luff / Signalsmith Audio Ltd., and [Signalsmith
+Linear](https://github.com/Signalsmith-Audio/linear), copyright © 2025
+Signalsmith Audio, which Musicable includes under the MIT license: see
+[crates/stretch/vendor](crates/stretch/vendor/README.md) and [About this
+manual](https://maxbonifacio.github.io/Musicable/about.html#software-in-musicable).
+
 Contributions are accepted under the same terms. See
 [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see
 [SECURITY.md](SECURITY.md).

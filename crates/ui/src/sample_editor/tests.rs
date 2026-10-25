@@ -278,6 +278,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         messages: &[],
                         agent: None,
                         analysing: None,
+                        rendering: None,
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),
@@ -901,6 +902,42 @@ fn the_mode_menu_and_slice_s_settings_set_the_clip_s_warp() {
 }
 
 #[test]
+fn spectral_s_formants_set_the_clip_s_warp() {
+    let (project, clip) = project(&[(0, 0.0)]);
+    let mut harness = harness(project, Some(clip));
+    assert!(harness.query_by_label("Formants").is_none());
+    pick(&mut harness, "Warp Mode", "Spectral");
+    assert_eq!(harness.state().warp().mode, WarpMode::Spectral);
+    // Spectral's setting shows, not Slice's, and its transpose and detune
+    // play.
+    let preserve = harness.query_by_role_and_label(Role::ComboBox, "Preserve");
+    assert!(preserve.is_none());
+    let formants = harness.get_by_role_and_label(Role::SpinButton, "Formants");
+    assert_eq!(formants.accesskit_node().numeric_value(), Some(100.0));
+    for (name, value) in [("Transpose", 5.0), ("Formants", 30.0)] {
+        let field = harness.get_by_role_and_label(Role::SpinButton, name);
+        assert!(!field.accesskit_node().is_disabled(), "{name}");
+        field.set_value_accesskit(value);
+        harness.run();
+    }
+    let warp = harness.state().warp();
+    assert_eq!((warp.transpose, warp.spectral.formants), (5, 30.0));
+    assert_eq!(harness.state().document.undo_name(), Some("Set Formants"));
+    // Its lane is one of those the mode plays.
+    pick(&mut harness, "Lane", "Formants");
+    assert_eq!(
+        harness.state().editor().sample_editor.lane,
+        ClipParam::Formants
+    );
+    // In another mode, it's kept for when Spectral plays again.
+    pick(&mut harness, "Warp Mode", "Slice");
+    assert!(harness.query_by_label("Formants").is_none());
+    let warp = harness.state().warp();
+    assert_eq!((warp.mode, warp.spectral.formants), (WarpMode::Slice, 30.0));
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
     let (project, clip) = sliced(&[(0, 0.0)]);
     let mut harness = harness(project, Some(clip));
@@ -908,7 +945,7 @@ fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
     assert_eq!(chooser.value().as_deref(), Some("Gain"));
     chooser.click();
     harness.run();
-    // Slice plays all of them.
+    // They're all there: those Slice plays, then Spectral's Formants.
     for param in ClipParam::ALL {
         harness.get_by_role_and_label(Role::Button, &param.spec().name);
     }

@@ -1245,7 +1245,8 @@ fn examples() -> Vec<Example> {
             let (clip, warp) = find_warp(s)?;
             let mode = match warp.mode {
                 WarpMode::RePitch => WarpMode::Slice,
-                WarpMode::Slice => WarpMode::RePitch,
+                WarpMode::Slice => WarpMode::Spectral,
+                WarpMode::Spectral => WarpMode::RePitch,
             };
             Some(Args::new().with("clip", clip).with("mode", mode.key()))
         }),
@@ -1285,6 +1286,15 @@ fn examples() -> Vec<Example> {
                 50.0
             };
             Some(Args::new().with("clip", clip).with("envelope", envelope))
+        }),
+        edits(warp_mode::SET_FORMANTS, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let formants = if warp.spectral.formants == 40.0 {
+                70.0
+            } else {
+                40.0
+            };
+            Some(Args::new().with("clip", clip).with("formants", formants))
         }),
         leaves(warp_mode::SHOW_LANE, |s| {
             let clip = find_clip(s, is_audio)?.id;

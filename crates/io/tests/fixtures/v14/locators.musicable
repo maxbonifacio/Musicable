@@ -1,0 +1,105 @@
+{
+  "format": "musicable-project",
+  "version": 14,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 87.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 0,
+  "next_locator_id": 7,
+  "next_take_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Audio",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [
+    {
+      "id": 0,
+      "name": "Chorus",
+      "at": 20643840
+    },
+    {
+      "id": 1,
+      "name": "Intro",
+      "at": 0
+    },
+    {
+      "id": 3,
+      "name": "Verse \"1\"\t🎤",
+      "at": 5160960
+    },
+    {
+      "id": 4,
+      "name": "Verse 2",
+      "at": 5160960
+    },
+    {
+      "id": 5,
+      "name": "",
+      "at": -752640
+    },
+    {
+      "id": 6,
+      "name": "End",
+      "at": 9007199254740991
+    }
+  ],
+  "automation": [],
+  "workspace": null
+}

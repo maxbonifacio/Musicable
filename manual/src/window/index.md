@@ -157,7 +157,9 @@ The status bar shows errors and notices until they're dismissed, and:
 - while Musicable finds the tempo and the beats of the project's audio
   files, "Analysing" and the file's name, or how many files there are. It
   does this in the background, once for each file
-  ([Warping](../using/warping.md#not-yet));
+  ([Auto-warp](../using/warping.md#auto-warp));
+- while clips in Spectral render, "Rendering" and how many segments of
+  them are still to render ([Spectral](../using/warping.md#spectral));
 - the project's name, with "(not saved)" while it has changes. The window's
   title marks them with a `*`.
 

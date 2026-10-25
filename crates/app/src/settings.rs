@@ -40,6 +40,10 @@
 //! [analysis]
 //! fast = true
 //!
+//! [render_cache]
+//! max_size_gb = 20
+//! min_free_gb = 5
+//!
 //! [agents]
 //! enabled = true
 //!
@@ -73,6 +77,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
 use crate::profiles::DEFAULT_PROFILE;
+use crate::renders::{GB, Limits};
 
 const FORMAT: &str = "musicable-settings";
 const VERSION: u32 = 1;
@@ -87,6 +92,8 @@ pub const MOUSE_FILE: &str = "mouse.toml";
 pub const THEMES_FOLDER: &str = "themes";
 /// The analysis cache's folder, in the cache folder.
 pub const ANALYSIS_FOLDER: &str = "analysis";
+/// The render cache's folder, in the cache folder.
+pub const RENDER_FOLDER: &str = "renders";
 
 /// The folder for the settings, the user's keymap, mouse map and themes:
 /// `%APPDATA%\Musicable` on Windows, `~/Library/Application
@@ -151,6 +158,7 @@ pub struct Settings {
     pub browser: BrowserSettings,
     pub recording: RecordingSettings,
     pub analysis: AnalysisSettings,
+    pub render_cache: RenderCacheSettings,
     pub agents: AgentSettings,
 }
 
@@ -309,6 +317,41 @@ pub struct AnalysisSettings {
     /// with the classic tracker alone: quicker on slower computers, but
     /// less accurate. Off, as it is at first, the network finds them.
     pub fast: bool,
+}
+
+/// How much the render cache keeps of the audio that clips in Spectral play,
+/// rendered ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderCacheSettings {
+    /// The most it holds, in GB.
+    pub max_size_gb: u32,
+    /// How much of its disk it always leaves free, in GB.
+    pub min_free_gb: u32,
+}
+
+impl Default for RenderCacheSettings {
+    fn default() -> Self {
+        Self {
+            max_size_gb: 20,
+            min_free_gb: 5,
+        }
+    }
+}
+
+impl RenderCacheSettings {
+    /// The largest size and free space the settings take, in GB.
+    pub const MAX_GB: u32 = 10_000;
+
+    /// The limits the render cache keeps to, each from 1 GB to
+    /// [`MAX_GB`](Self::MAX_GB), whatever the file says.
+    pub(crate) fn limits(&self) -> Limits {
+        let gb = |n: u32| u64::from(n.clamp(1, Self::MAX_GB)) * GB;
+        Limits {
+            most: gb(self.max_size_gb),
+            free: gb(self.min_free_gb),
+        }
+    }
 }
 
 /// Whether agents, such as Claude Code, can control Musicable: see
@@ -598,6 +641,10 @@ mod tests {
                 }],
             },
             analysis: AnalysisSettings { fast: true },
+            render_cache: RenderCacheSettings {
+                max_size_gb: 50,
+                min_free_gb: 10,
+            },
             agents: AgentSettings { enabled: true },
         };
         let text = settings.to_toml();
@@ -624,6 +671,16 @@ mod tests {
         // Auto-warp's rules are all on, and analysis uses the network.
         assert!(settings.behaviour.warp_loops && settings.behaviour.tempo_from_first_file);
         assert!(!settings.analysis.fast);
+        // The render cache holds up to 20 GB, leaving 5 GB of the disk, and
+        // at least 1 GB of each, whatever the file says.
+        let limits = settings.render_cache.limits();
+        assert_eq!((limits.most, limits.free), (20 << 30, 5 << 30));
+        let none = RenderCacheSettings {
+            max_size_gb: 0,
+            min_free_gb: u32::MAX,
+        };
+        let limits = none.limits();
+        assert_eq!((limits.most, limits.free), (1 << 30, 10_000 << 30));
         assert_eq!(
             settings.audio.request(),
             StreamRequest {

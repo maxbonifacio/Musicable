@@ -243,6 +243,7 @@ struct Warp {
     transpose: i8,
     detune: i8,
     slice: SliceSettings,
+    spectral: SpectralSettings,
     markers: Vec<(u64, i64)>,
     #[serde(deserialize_with = "Option::deserialize")]
     onsets: Option<Vec<(u64, f32, f32, Origin)>>,
@@ -253,6 +254,7 @@ struct Warp {
 enum WarpMode {
     RePitch,
     Slice,
+    Spectral,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -261,6 +263,12 @@ struct SliceSettings {
     preserve: Preserve,
     transient_loop: TransientLoop,
     envelope: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpectralSettings {
+    formants: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -314,6 +322,7 @@ enum ClipParam {
     TransientEnvelope,
     Preserve,
     TransientLoop,
+    Formants,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1319,6 +1328,7 @@ impl From<&warp::Warp> for Warp {
             transpose,
             detune,
             slice,
+            spectral,
         } = warp;
         let origin = |origin| match origin {
             warp::Origin::Found => Origin::Found,
@@ -1330,10 +1340,12 @@ impl From<&warp::Warp> for Warp {
             transient_loop,
             envelope,
         } = slice;
+        let warp::SpectralSettings { formants } = spectral;
         Self {
             mode: match mode {
                 warp::WarpMode::RePitch => WarpMode::RePitch,
                 warp::WarpMode::Slice => WarpMode::Slice,
+                warp::WarpMode::Spectral => WarpMode::Spectral,
             },
             tempo: *tempo,
             transpose: *transpose,
@@ -1354,6 +1366,9 @@ impl From<&warp::Warp> for Warp {
                     warp::TransientLoop::BackAndForth => TransientLoop::BackAndForth,
                 },
                 envelope: *envelope,
+            },
+            spectral: SpectralSettings {
+                formants: *formants,
             },
             markers: markers.iter().map(|m| (m.frame, m.beat.ticks())).collect(),
             onsets: onsets.as_ref().map(|onsets| {
@@ -1376,6 +1391,7 @@ impl From<&clip::ClipLane> for ClipLane {
                 param::ClipParam::TransientEnvelope => ClipParam::TransientEnvelope,
                 param::ClipParam::Preserve => ClipParam::Preserve,
                 param::ClipParam::TransientLoop => ClipParam::TransientLoop,
+                param::ClipParam::Formants => ClipParam::Formants,
             },
             points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
         }
@@ -1455,6 +1471,7 @@ impl Warp {
             transpose,
             detune,
             slice,
+            spectral,
             markers,
             onsets,
         } = self;
@@ -1499,6 +1516,15 @@ impl Warp {
             },
             envelope: *envelope,
         };
+        let SpectralSettings { formants } = spectral;
+        let most = warp::SpectralSettings::FORMANTS_MAX;
+        if !(0.0..=most).contains(formants) {
+            let message = format!("must be from 0 to {most}");
+            return Err(Invalid::new(format!("{path}.spectral.formants"), message));
+        }
+        let spectral = warp::SpectralSettings {
+            formants: *formants,
+        };
         if markers.is_empty() {
             let message = "needs at least one marker: a warped clip has one";
             return Err(Invalid::new(format!("{path}.markers"), message));
@@ -1531,6 +1557,7 @@ impl Warp {
             mode: match mode {
                 WarpMode::RePitch => warp::WarpMode::RePitch,
                 WarpMode::Slice => warp::WarpMode::Slice,
+                WarpMode::Spectral => warp::WarpMode::Spectral,
             },
             markers: model_markers,
             tempo: *tempo,
@@ -1538,6 +1565,7 @@ impl Warp {
             transpose: *transpose,
             detune: *detune,
             slice,
+            spectral,
         })
     }
 }
@@ -1591,6 +1619,7 @@ impl ClipLane {
             ClipParam::TransientEnvelope => param::ClipParam::TransientEnvelope,
             ClipParam::Preserve => param::ClipParam::Preserve,
             ClipParam::TransientLoop => param::ClipParam::TransientLoop,
+            ClipParam::Formants => param::ClipParam::Formants,
         };
         let spec = param.spec();
         let (low, high) = (spec.min, spec.max);

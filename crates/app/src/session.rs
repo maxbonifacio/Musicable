@@ -20,8 +20,10 @@ use musicable_engine::{
     compile_with_inputs, compile_with_stems,
 };
 use musicable_library::Busy;
+use musicable_model::clip::ClipContent;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
+use musicable_model::warp::WarpMode;
 use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
@@ -1007,9 +1009,11 @@ impl Session {
                 };
                 match edit {
                     // Only the last map counts. Clips in Slice are cut on
-                    // grids of bars as they're compiled.
+                    // grids of bars as they're compiled, and those in
+                    // Spectral render for the song's tempo.
                     Edit::Tempo { from, to } => {
-                        if from.signatures() != to.signatures() {
+                        let renders = plays_spectral(self.document.project());
+                        if from.signatures() != to.signatures() || renders {
                             recompile = true;
                         }
                         self.engine.tempo = to.clone();
@@ -1144,6 +1148,19 @@ impl Session {
     }
 }
 
+/// Whether any of `project`'s clips plays in Spectral, which renders for
+/// the song's tempo.
+fn plays_spectral(project: &Project) -> bool {
+    let mut clips = project.tracks.iter().flat_map(|track| &track.clips);
+    clips.any(|clip| match &clip.content {
+        ClipContent::Audio(audio) => audio
+            .warp
+            .as_ref()
+            .is_some_and(|w| w.mode == WarpMode::Spectral),
+        ClipContent::Midi(_) => false,
+    })
+}
+
 /// Sets the engine's loop to the project's.
 fn loop_event(project: &Project) -> Event {
     let region = project.looping.then_some(project.loop_region);
@@ -1199,6 +1216,14 @@ struct EngineLink {
     gates: BTreeMap<NodeKey, bool>,
 }
 
+impl Drop for EngineLink {
+    fn drop(&mut self) {
+        // Before the compiler goes, which waits for the graph it's building:
+        // nothing will play it.
+        self.media.stop();
+    }
+}
+
 /// Something for the engine, in the order it was sent.
 enum Message {
     Event(Event),
@@ -1241,9 +1266,11 @@ impl EngineLink {
         let devices = self.devices.clone();
         let inputs = self.inputs.clone();
         let project = project.clone();
+        let playhead = self.playhead();
         self.asked = self.compiler.compile(self.handle.config(), move || {
-            // Files load here, on the compiler's thread, with the graph.
-            let media = media.media(&project, folder.as_deref());
+            // Files load here, on the compiler's thread, with the graph, and
+            // clips in Spectral ask for their segments.
+            let media = media.media(&project, folder.as_deref(), playhead);
             build(&project, &meters, &media, &devices, &inputs)
         });
         self.asked

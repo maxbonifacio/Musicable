@@ -8,8 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 musicable-model.workspace = true
+musicable-stretch.workspace = true
 rtrb.workspace = true
 num_cpus.workspace = true
+siphasher.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

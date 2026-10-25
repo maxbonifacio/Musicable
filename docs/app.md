@@ -171,8 +171,10 @@ them ([The Tier 1 demo](#the-tier-1-demo)).
 Audio clips play their files from the project file's folder, as in the app
 (see [Audio files](#audio-files)). Clips that stream wait for the disk here
 instead of missing what it hasn't read yet, so every run plays them the
-same however fast it renders. Files that can't be read are listed before
-the results, and their clips are silent in every run.
+same however fast it renders, and clips in Spectral wait for their
+segments to render, as an export's do ([The render
+cache](#the-render-cache)). Files that can't be read are listed before the
+results, and their clips are silent in every run.
 
 On a 4-core cloud VM:
 
@@ -460,7 +462,9 @@ keeps as it was last used. The window isn't a panel, so no workspace has it.
 The Behaviour page has auto-warp's switches, which go with the profile, and
 Fast analysis, which doesn't: it's `Settings::analysis`, the computer's,
 and the app hands it to the analysis jobs (`Analyses::set_fast`), so the
-next file analysed uses it.
+next file analysed uses it. The Files page has the render cache's limits,
+`Settings::render_cache`, the computer's too, which the app hands to the
+cache ([The render cache](#the-render-cache)).
 
 ### Profiles
 
@@ -839,6 +843,53 @@ fading in and out, and chords on the test instrument that swell with
 pressure and bend at the end of each bar. The null test plays it too:
 `musicable null-test "target/clips-demo/Clips demo.musicable"`.
 
+## The render cache
+
+[Spectral](../manual/src/using/warping.md#spectral) in the manual says what
+it does for a clip in Spectral, which plays segments of its file rendered
+ahead ([engine.md](engine.md#clips)). `crates/app/src/renders.rs` renders
+them and keeps them:
+
+- As the session builds a graph, `MediaPool::media` plans each clip in
+  Spectral at the song's tempo (`spectral::Plan::new`) and asks the render
+  cache for its segments (`RenderCache::plan`). One that a graph has
+  already, rendered or still to be, is shared, by its key: the segment's
+  own (`SegmentPlan::key`) hashed with its file's, from the file's path,
+  size and modification time when it was read. The cache keeps each as a
+  `Weak`, so what no graph holds any more goes, and `prune` forgets it.
+- The others render on the library's queue at `Priority::Soon`, ahead of
+  scans and analysis, the segments the playhead plays next first
+  (`renders::order`), and the status bar counts them down
+  (`RenderCache::pending`). A job looks its segment up as it runs, and does
+  nothing if no graph wants it any more or it's rendered already. It
+  renders from the file in memory, or else from the file, opened afresh, as
+  long as its key still matches: a file changed since it was read isn't
+  rendered from.
+- An offline session, such as an export's or the null test's, waits for
+  its segments: `media` renders them there and then, on every core
+  (`RenderCache::render_now`), before the graph is built, and so it does
+  those its graph shares that are still waiting in the background.
+  Whichever renders a segment first fills it. A session that goes stops the
+  renders it waits for between segments (`MediaPool::stop`).
+- The cache is the app's, the same for every session
+  (`RenderCache::global`), so an export finds what playback rendered.
+
+**The folder.** Rendered segments are kept in `renders` in the cache
+folder ([The cache
+folder](../manual/src/customising/settings.md#the-cache-folder)), a file for
+each, named by its key, `KEY.render`: a 24-byte header, `MSRN`, the format
+(1), the channels, the rate and the frames, then each channel's frames in
+turn, as little-endian 32-bit floats. A file is written to a part file
+beside it and renamed, so a reader never sees half of one, and one whose
+header doesn't match the segment asked for counts as missing. A job looks
+in the folder before it renders, and reading a file sets its modification
+time, which says when it was used. Before writing one, the cache makes
+room: while the folder would hold more than `render_cache.max_size_gb` or
+leave less of its disk free than `render_cache.min_free_gb`, the files used
+longest ago go, until a tenth of the size is to spare, up to 1 GB, so the
+next writes needn't look again. Lowering a limit on the Settings window's
+Files page lets go at once (`RenderCache::set_limits`).
+
 ## Exporting audio
 
 [Exporting audio](../manual/src/using/exporting.md) in the manual has the
@@ -884,8 +935,9 @@ engine sets the pace: the null test renders it at 46 times real time.
 
 [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) is the done
 test: an exported mixdown is what the app plays live, sample for sample,
-with a latent plugin, an audio file at 44.1 kHz, a test instrument and a
-muted track, the live render asked for in 441-frame buffers. Each stem is
+with a latent plugin, an audio file at 44.1 kHz, a clip in Spectral, a
+test instrument and a muted track, the live render asked for in 441-frame
+buffers. Each stem is
 its track soloed, the tail is the release the live render plays, and
 normalised, 16-bit, AIFF, FLAC and 96 kHz files hold the same samples,
 scaled or rounded. A cancelled or failed export leaves no files behind.
