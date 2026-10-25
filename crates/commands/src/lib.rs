@@ -13,6 +13,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use musicable_model::clip::{ClipContent, ClipId};
 use musicable_model::time::Beats;
@@ -31,6 +32,7 @@ pub mod editor;
 mod every_command;
 pub mod file;
 pub mod history;
+pub mod json;
 mod key;
 mod keymap;
 pub mod locator;
@@ -97,6 +99,14 @@ pub struct Command {
     /// When it applies without arguments. Menus grey it out, and keys skip
     /// it, when it doesn't.
     pub when: When,
+    /// Whether agents can run it. Those that only show a window or ask the
+    /// user for something, which an agent can't see or answer, are the
+    /// user's, and so is Quit.
+    pub agents: bool,
+    /// Whether it runs on its own only, never among others as one step of
+    /// the undo history ([`Registry::run_batch`]): it opens, saves or
+    /// replaces the project, or steps through the undo history.
+    pub alone: bool,
 }
 
 impl Command {
@@ -107,6 +117,8 @@ impl Command {
             title: title.into(),
             params: Vec::new(),
             when: When::Always,
+            agents: true,
+            alone: false,
         }
     }
 
@@ -117,6 +129,18 @@ impl Command {
 
     pub fn when(mut self, when: When) -> Self {
         self.when = when;
+        self
+    }
+
+    /// Leaves it to the user: see [`agents`](Self::agents).
+    pub fn not_for_agents(mut self) -> Self {
+        self.agents = false;
+        self
+    }
+
+    /// Runs it on its own only: see [`alone`](Self::alone).
+    pub fn alone(mut self) -> Self {
+        self.alone = true;
         self
     }
 
@@ -213,19 +237,27 @@ impl When {
 
 /// Something only the app can do, which a command asks for: commands can't
 /// show a dialog or a window, or close one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     New,
     NewDemo,
-    Open,
+    /// Open the project file at this path, or else ask for one.
+    Open(Option<PathBuf>),
     Save,
-    SaveAs,
+    /// Save the project to the file at this path, or else ask where.
+    SaveAs(Option<PathBuf>),
     Quit,
-    /// Ask for audio files, read them, and insert them with
-    /// [`arrange::INSERT_AUDIO`].
-    ImportAudio,
-    /// Show the export window, to render the song to audio files.
-    ExportAudio,
+    /// Read audio files, and insert them with [`arrange::INSERT_AUDIO`] on
+    /// `track` from `at`, or where it puts them without those: these files,
+    /// or else those the user picks.
+    ImportAudio {
+        files: Option<Vec<PathBuf>>,
+        track: Option<TrackId>,
+        at: Option<Beats>,
+    },
+    /// Render the mix to the audio file at this path, as the export window
+    /// last did, or else show the export window.
+    ExportAudio(Option<PathBuf>),
     /// Show the command palette.
     CommandPalette,
     /// Show the Settings window, at the page it showed last.
@@ -239,6 +271,8 @@ pub enum Request {
     Appearance,
     /// Show the Settings window's Profiles page.
     Profiles,
+    /// Show the Settings window's Agents page, where agents are let in.
+    Agents,
     /// Switch to the next of the user's profiles, or from the last back to
     /// the first.
     NextProfile,
@@ -290,6 +324,31 @@ pub enum Request {
     DeleteWorkspace,
     /// Lay the panels of the workspace in use out as at first.
     ResetWorkspace,
+}
+
+impl Request {
+    /// Whether an agent can ask for it. Agents can't see a window, or
+    /// answer a question in one, so the requests that only show a window
+    /// or ask the user for something are the user's, and so is quitting.
+    pub fn for_agents(&self) -> bool {
+        !matches!(
+            self,
+            Request::Quit
+                | Request::CommandPalette
+                | Request::Settings
+                | Request::AudioSettings
+                | Request::KeyboardShortcuts
+                | Request::Appearance
+                | Request::Profiles
+                | Request::Agents
+                | Request::Rename(_)
+                | Request::LoadSample(_)
+                | Request::FocusBrowserSearch
+                | Request::SaveWorkspaceAs
+                | Request::RenameWorkspace
+                | Request::DeleteWorkspace
+        )
+    }
 }
 
 /// Something in the project with a name the user can change.
@@ -418,6 +477,48 @@ impl Registry {
         run(context, args)
     }
 
+    /// Runs `commands` in order, each with its arguments, as one step in
+    /// the undo history called `name`, and returns their results. Each acts
+    /// on what those before it left, as if run on its own.
+    ///
+    /// If one fails, the project and the editor's state go back to how they
+    /// were before the first, and so does the undo history, and nothing
+    /// they asked the app for is asked for. What they did to the transport
+    /// or the library stays. Commands that run [alone](Command::alone) can't
+    /// be among them.
+    pub fn run_batch(
+        &self,
+        name: &str,
+        commands: &[(CommandId, Args)],
+        context: &mut Context<'_>,
+    ) -> Result<Vec<Value>, BatchError> {
+        for (index, (id, _)) in commands.iter().enumerate() {
+            let failed = |error| BatchError { index, error };
+            let command = self
+                .get(id)
+                .ok_or_else(|| failed(CommandError::Unknown(id.clone())))?;
+            if command.alone {
+                let problem = format!("{id} runs on its own, not among other commands");
+                return Err(failed(CommandError::Invalid(problem)));
+            }
+        }
+        let requests = context.requests.len();
+        context.document.begin_batch(name);
+        let mut values = Vec::with_capacity(commands.len());
+        for (index, (id, args)) in commands.iter().enumerate() {
+            match self.run_with(id, args, context) {
+                Ok(value) => values.push(value),
+                Err(error) => {
+                    context.document.cancel_batch();
+                    context.requests.truncate(requests);
+                    return Err(BatchError { index, error });
+                }
+            }
+        }
+        context.document.end_batch();
+        Ok(values)
+    }
+
     /// Whether the command `id` applies to `document` now, without
     /// arguments: see [`When`].
     pub fn applies(&self, id: &CommandId, document: &Document) -> bool {
@@ -453,15 +554,35 @@ pub fn register_all(registry: &mut Registry) {
     options::register(registry);
 }
 
-/// Registers commands that each ask the app for something.
+/// Registers commands that each ask the app for something. Agents can run
+/// those whose requests are [for agents](Request::for_agents).
 fn register_requests(registry: &mut Registry, commands: &[(CommandId, &str, Request)]) {
     for (id, title, request) in commands {
-        let request = *request;
-        registry.register(id.clone(), *title, move |ctx: &mut Context<'_>| {
-            ctx.requests.push(request);
+        let mut command = Command::new(id.clone(), *title);
+        command.agents = request.for_agents();
+        let request = request.clone();
+        registry.add(command, move |ctx, _| {
+            ctx.requests.push(request.clone());
+            Ok(Value::None)
         });
     }
 }
+
+/// Why [`Registry::run_batch`] stopped: the command at `index` failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchError {
+    /// The failed command's place among those run, from 0.
+    pub index: usize,
+    pub error: CommandError,
+}
+
+impl fmt::Display for BatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "command {} failed: {}", self.index + 1, self.error)
+    }
+}
+
+impl std::error::Error for BatchError {}
 
 /// No command has this id.
 #[derive(Debug, Clone, PartialEq, Eq)]

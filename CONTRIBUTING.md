@@ -102,8 +102,11 @@ cargo test --workspace
 Every command needs an example in
 [`crates/commands/src/every_command.rs`](crates/commands/src/every_command.rs),
 which the tests undo and redo on its own and in random runs with the
-others. [docs/commands.md](docs/commands.md#testing-every-command) says what
-they check.
+others, and run as an agent runs them.
+[docs/commands.md](docs/commands.md#testing-every-command) says what
+they check. Agents can run every command unless it's marked
+`not_for_agents`, as one that only shows a window or asks the user
+something must be ([docs/agents.md](docs/agents.md#what-agents-can-run)).
 
 ## Project files
 

@@ -23,13 +23,15 @@ use musicable_ui::{
     Plugins, SaveChoice, Shell, View,
 };
 
+use self::agents::Agents;
 use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
-use crate::export::{self, Export, ExportSettings, Job, Report};
+use crate::export::{self, Export, ExportSettings, FileFormat, Job, Report, Span};
 use crate::export_window::{Asked, ExportWindow};
 use crate::frame_times::FrameTimes;
 use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
+use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
@@ -141,6 +143,8 @@ pub struct App {
     closing: bool,
     /// The window's title, as last set.
     title: String,
+    /// Agents controlling the app, while the user lets them.
+    agents: Agents,
 }
 
 impl App {
@@ -149,6 +153,9 @@ impl App {
     pub fn new(path: Option<PathBuf>, cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         follow_system_double_clicks(ctx);
+        if let Some(render_state) = &cc.wgpu_render_state {
+            log_file::watch_graphics(render_state);
+        }
         let mut messages = Vec::new();
         let config_dir = settings::config_dir();
         let settings = match &config_dir {
@@ -275,6 +282,7 @@ impl App {
             pending: None,
             closing: false,
             title: String::new(),
+            agents: Agents::new(),
         };
         app.use_theme(ctx);
         app.shell.set_mouse_map(mouse);
@@ -283,6 +291,7 @@ impl App {
         }
         app.list_inputs();
         app.open_workspace();
+        app.follow_agent_settings(ctx);
         app
     }
 
@@ -715,7 +724,7 @@ impl App {
         for request in self.session.take_requests() {
             let loses_changes = matches!(
                 request,
-                Request::New | Request::NewDemo | Request::Open | Request::Quit
+                Request::New | Request::NewDemo | Request::Open(_) | Request::Quit
             );
             if self.pending.is_some() {
                 // One question at a time.
@@ -731,22 +740,24 @@ impl App {
         match request {
             Request::New => self.open_project(Project::new(), None),
             Request::NewDemo => self.open_project(crate::demo_project(), None),
-            Request::Open => {
-                let Some(path) = self.file_dialog(frame).pick_file() else {
+            Request::Open(path) => {
+                let Some(path) = path.or_else(|| self.file_dialog(frame).pick_file()) else {
                     return;
                 };
-                match project::load(&path) {
-                    Ok(project) => self.open_project(project, Some(path)),
-                    Err(error) => self
-                        .messages
-                        .push(format!("Couldn't open {}: {error}", path.display())),
+                if let Err(message) = self.open_file(path) {
+                    self.messages.push(message);
                 }
             }
             Request::Save => {
                 self.save(false, frame);
             }
-            Request::SaveAs => {
+            Request::SaveAs(None) => {
                 self.save(true, frame);
+            }
+            Request::SaveAs(Some(path)) => {
+                if let Err(message) = self.save_to(with_extension(path)) {
+                    self.messages.push(message);
+                }
             }
             Request::Quit => {
                 self.closing = true;
@@ -758,18 +769,24 @@ impl App {
             Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),
             Request::Appearance => self.settings_window.open(Some(settings_window::APPEARANCE)),
             Request::Profiles => self.settings_window.open(Some(settings_window::PROFILES)),
+            Request::Agents => self.settings_window.open(Some(settings_window::AGENTS)),
             Request::NextProfile => self.next_profile(ctx),
-            Request::ImportAudio => {
-                if let Some(files) = self.audio_dialog(frame).pick_files() {
-                    self.insert_audio(files, None, None);
+            Request::ImportAudio { files, track, at } => {
+                if let Some(files) = files.or_else(|| self.audio_dialog(frame).pick_files()) {
+                    self.insert_audio(files, track, at);
                 }
             }
-            Request::ExportAudio => self.export_window.open(
+            Request::ExportAudio(None) => self.export_window.open(
                 &self.settings.export,
                 self.session.project(),
                 self.session.editor(),
                 self.export.is_some(),
             ),
+            Request::ExportAudio(Some(file)) => {
+                if let Err(message) = self.export_mix_to(&file, ctx) {
+                    self.messages.push(message);
+                }
+            }
             Request::TogglePanel(panel) => {
                 self.shell.toggle_panel(panel);
                 self.focus_in_sight();
@@ -914,6 +931,17 @@ impl App {
         }
     }
 
+    /// Opens the project file at `path`, or says why it couldn't.
+    fn open_file(&mut self, path: PathBuf) -> Result<(), String> {
+        match project::load(&path) {
+            Ok(project) => {
+                self.open_project(project, Some(path));
+                Ok(())
+            }
+            Err(error) => Err(format!("Couldn't open {}: {error}", path.display())),
+        }
+    }
+
     fn open_project(&mut self, project: Project, path: Option<PathBuf>) {
         let saved_with =
             (project.workspace.as_deref()).and_then(|name| self.workspaces.slot_named(name));
@@ -1006,19 +1034,27 @@ impl App {
                 }
             }
         };
+        match self.save_to(path) {
+            Ok(_) => true,
+            Err(message) => {
+                self.messages.push(message);
+                false
+            }
+        }
+    }
+
+    /// Saves the project to the file at `path`, which is its file from then
+    /// on, and returns it, or says why it couldn't.
+    fn save_to(&mut self, path: PathBuf) -> Result<PathBuf, String> {
         let mut project = self.session.saved_project();
         project.workspace = Some(self.workspaces.current_name().to_owned());
         match project::save(&path, &project) {
             Ok(()) => {
                 self.session.mark_saved();
-                self.set_path(Some(path));
-                true
+                self.set_path(Some(path.clone()));
+                Ok(path)
             }
-            Err(error) => {
-                self.messages
-                    .push(format!("Couldn't save {}: {error}", path.display()));
-                false
-            }
+            Err(error) => Err(format!("Couldn't save {}: {error}", path.display())),
         }
     }
 
@@ -1061,6 +1097,55 @@ impl App {
         self.export_folder = file.parent().map(Path::to_owned);
         self.settings.export = settings;
         self.save_settings();
+        if let Err(error) = self.start_job(file, range, settings, tracks, ctx) {
+            self.export_window.finished(Report {
+                failed: Some(error),
+                ..Report::default()
+            });
+        }
+    }
+
+    /// Renders the mix to `file`, as a script or an agent asks: with the
+    /// export window's last settings, and the format `file`'s extension
+    /// says, from what the window starts out with, the time selection or
+    /// else the song. Says why it can't start, if it can't.
+    fn export_mix_to(&mut self, file: &Path, ctx: &egui::Context) -> Result<(), String> {
+        if self.export.is_some() {
+            return Err("An export is under way already: try again once it's finished.".into());
+        }
+        let mut settings = self.settings.export;
+        if let Some(extension) = file.extension() {
+            let extension = extension.to_string_lossy();
+            let format = FileFormat::ALL.into_iter().find(|format| {
+                (format.extensions().iter()).any(|known| known.eq_ignore_ascii_case(&extension))
+            });
+            settings.format = format.ok_or_else(|| {
+                format!("Musicable exports WAV, AIFF and FLAC files, not .{extension} files.")
+            })?;
+        }
+        settings.mixdown = true;
+        settings.stems = false;
+        let (project, editor) = (self.session.project(), self.session.editor());
+        let Some(range) = Span::default_for(project, editor).range(project, editor) else {
+            return Err(
+                "There's nothing to export: the song has no clips, and nothing is selected.".into(),
+            );
+        };
+        (self.start_job(file, range, settings, &BTreeSet::new(), ctx))
+            .map_err(|error| format!("The export couldn't start: {error}."))
+    }
+
+    /// Starts rendering `range` of the song with `settings` to `file`, and
+    /// the tracks `tracks` on their own next to it if the settings want
+    /// stems, or says why it can't.
+    fn start_job(
+        &mut self,
+        file: &Path,
+        range: BeatRange,
+        settings: ExportSettings,
+        tracks: &BTreeSet<TrackId>,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         let project = self.session.saved_project();
         let (mixdown, stems) = export::files_for(file, &project, &settings, tracks);
         let job = Job {
@@ -1074,13 +1159,8 @@ impl App {
             mixdown,
             stems,
         };
-        match Export::start(job) {
-            Ok(export) => self.export = Some(export),
-            Err(error) => self.export_window.finished(Report {
-                failed: Some(error),
-                ..Report::default()
-            }),
-        }
+        self.export = Some(Export::start(job)?);
+        Ok(())
     }
 
     /// Carries the export under way on, and once it's finished, says how it
@@ -1101,6 +1181,7 @@ impl App {
             (None, false, files) => format!("Exported {files} files."),
         };
         self.messages.push(message);
+        self.exported_for_agent(&report);
         self.export_window.finished(report);
     }
 
@@ -1191,6 +1272,7 @@ impl App {
                 }
             }
             Asked::DefaultPresetsFolder => self.set_presets_folder(None),
+            Asked::Agents(on) => self.let_agents_in(on, ctx),
             Asked::OpenWorkspacesFolder => {
                 let Some(folder) = self.workspaces.folder() else {
                     return;
@@ -1402,7 +1484,7 @@ impl App {
     /// Asks whether to save the changes, while a request waits for that, and
     /// carries the request out once the user says.
     fn ask_to_save(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let Some(request) = self.pending else {
+        let Some(request) = self.pending.clone() else {
             return;
         };
         let Some(choice) = musicable_ui::ask_to_save(ctx, &self.name()) else {
@@ -1414,7 +1496,8 @@ impl App {
             SaveChoice::Discard => true,
             SaveChoice::Cancel => false,
         };
-        if go_ahead {
+        // An agent's New or Open hears how it went.
+        if !self.answered_for_agent(request.clone(), go_ahead) && go_ahead {
             self.carry_out(request, ctx, frame);
         }
     }
@@ -1472,10 +1555,13 @@ impl eframe::App for App {
         });
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.theme_file.poll() {
             self.use_theme(ctx);
         }
+        // Here, rather than in `ui`, as it runs while the window is
+        // minimized too.
+        self.answer_agents(ctx, frame);
         if let Some(scanned) = self.plugin_scan.receive() {
             self.messages.extend(scanned.problems);
             self.set_installed_plugins(scanned.plugins);
@@ -1550,6 +1636,7 @@ impl eframe::App for App {
         let scanning = library.scanning();
         let reading = library.reading();
         let (found, total) = library.found();
+        let agent = self.agents.status();
         let view = View {
             project: self.session.project(),
             name: &name,
@@ -1584,6 +1671,7 @@ impl eframe::App for App {
                 notice: self.keymap_file.notice(),
             },
             messages: &self.messages,
+            agent: agent.as_deref(),
             plugins: Plugins {
                 installed: &self.plugin_entries,
                 scanning: self.plugin_scan.is_running(),
@@ -1637,6 +1725,7 @@ impl eframe::App for App {
             profile: &self.profile,
             presets_folder: library.presets_folder(),
             workspaces_folder: self.workspaces.folder(),
+            agents: self.agents.page(self.settings.agents.enabled),
         };
         let asked = self.settings_window.show(&ctx, settings);
         for action in actions {
@@ -1883,6 +1972,7 @@ fn with_extension(path: PathBuf) -> PathBuf {
     }
 }
 
+mod agents;
 #[cfg(test)]
 mod arranging;
 #[cfg(test)]
@@ -1891,6 +1981,8 @@ mod browsing;
 mod built_in_devices;
 #[cfg(test)]
 mod configuring;
+#[cfg(test)]
+mod controlled_by_agents;
 #[cfg(test)]
 mod exporting;
 #[cfg(test)]

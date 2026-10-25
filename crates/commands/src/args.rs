@@ -123,6 +123,10 @@ pub struct Param {
     /// Whether the command runs without it, doing what [`about`](Self::about)
     /// says.
     pub optional: bool,
+    /// Whether the app asks the user for it when it's left out, such as for
+    /// a file in a dialog. Scripts and agents, which can't answer, must give
+    /// it.
+    pub asked: bool,
     /// What it's for, for the command palette, scripts and agents.
     pub about: Cow<'static, str>,
 }
@@ -133,6 +137,7 @@ impl Param {
             name: Cow::Borrowed(name),
             ty,
             optional: false,
+            asked: false,
             about: Cow::Borrowed(about),
         }
     }
@@ -142,6 +147,19 @@ impl Param {
             name: Cow::Borrowed(name),
             ty,
             optional: true,
+            asked: false,
+            about: Cow::Borrowed(about),
+        }
+    }
+
+    /// An optional parameter that the app asks the user for when it's left
+    /// out: see [`asked`](Self::asked).
+    pub const fn asked(name: &'static str, ty: Type, about: &'static str) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            ty,
+            optional: true,
+            asked: true,
             about: Cow::Borrowed(about),
         }
     }
@@ -455,6 +473,9 @@ pub enum CommandError {
     /// The arguments name something the project doesn't have, or ask for
     /// something it can't do, as the message says.
     Invalid(String),
+    /// An agent asked for a command that's left to the user: see
+    /// [`Command::agents`](crate::Command::agents).
+    NotForAgents(CommandId),
 }
 
 impl CommandError {
@@ -475,6 +496,7 @@ impl fmt::Display for CommandError {
                 write!(f, "the argument {name} must be {expected}")
             }
             Self::Invalid(message) => f.write_str(message),
+            Self::NotForAgents(id) => write!(f, "agents can't run {id}: it's left to the user"),
         }
     }
 }

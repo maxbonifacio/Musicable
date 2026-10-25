@@ -2,7 +2,8 @@
 //! its pages, switching profiles, and scanning for plugins.
 //!
 //! Commands can't show a window, or reach the user's profiles, which are
-//! the app's, so these ask the app, with a [`Request`].
+//! the app's, so these ask the app, with a [`Request`]. Agents can't see the
+//! Settings window, so the commands that show it are the user's.
 
 use crate::{CommandId, Registry, Request};
 
@@ -19,6 +20,9 @@ pub const APPEARANCE: CommandId = CommandId::new("options.appearance");
 /// Shows the Settings window's Profiles page, where profiles are made and
 /// switched between.
 pub const PROFILES: CommandId = CommandId::new("options.profiles");
+/// Shows the Settings window's Agents page, which lets agents such as
+/// Claude Code control Musicable.
+pub const AGENTS: CommandId = CommandId::new("options.agents");
 /// Switches to the next of the user's profiles, in the order the Profiles
 /// page lists them, and from the last back to the first: its keys, mouse
 /// map, theme, workspaces and behaviour, all at once.
@@ -28,7 +32,7 @@ pub const NEXT_PROFILE: CommandId = CommandId::new("options.next_profile");
 pub const RESCAN_PLUGINS: CommandId = CommandId::new("options.rescan_plugins");
 
 /// Every options command, with its title and what it asks for.
-const COMMANDS: [(CommandId, &str, Request); 7] = [
+const COMMANDS: [(CommandId, &str, Request); 8] = [
     (SETTINGS, "Settings...", Request::Settings),
     (AUDIO_SETTINGS, "Audio Settings...", Request::AudioSettings),
     (
@@ -38,6 +42,7 @@ const COMMANDS: [(CommandId, &str, Request); 7] = [
     ),
     (APPEARANCE, "Appearance...", Request::Appearance),
     (PROFILES, "Profiles...", Request::Profiles),
+    (AGENTS, "Agents...", Request::Agents),
     (NEXT_PROFILE, "Switch to Next Profile", Request::NextProfile),
     (RESCAN_PLUGINS, "Rescan Plugins", Request::RescanPlugins),
 ];
@@ -68,18 +73,19 @@ mod tests {
             KEYBOARD_SHORTCUTS,
             APPEARANCE,
             PROFILES,
+            AGENTS,
             NEXT_PROFILE,
             RESCAN_PLUGINS,
             view::COMMAND_PALETTE,
         ];
-        for id in ids {
+        for id in &ids {
             let mut ctx = Context {
                 document: &mut document,
                 transport: &mut StubTransport::default(),
                 requests: &mut requests,
                 library: &mut crate::NoLibrary,
             };
-            registry.run(&id, &mut ctx).unwrap();
+            registry.run(id, &mut ctx).unwrap();
         }
         assert_eq!(
             requests,
@@ -89,12 +95,18 @@ mod tests {
                 Request::KeyboardShortcuts,
                 Request::Appearance,
                 Request::Profiles,
+                Request::Agents,
                 Request::NextProfile,
                 Request::RescanPlugins,
                 Request::CommandPalette
             ]
         );
         assert_eq!(document.take_committed(), []);
+        // Agents can't see the windows, but can switch profiles and rescan.
+        let for_agents: Vec<_> = (ids.iter())
+            .filter(|&id| registry.get(id).unwrap().agents)
+            .collect();
+        assert_eq!(for_agents, [&NEXT_PROFILE, &RESCAN_PLUGINS]);
 
         // Live's keys for its settings and its key map mode, and the usual
         // key for a command palette, which Live doesn't have.

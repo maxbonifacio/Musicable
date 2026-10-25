@@ -4,8 +4,10 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
@@ -30,7 +32,12 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
        musicable export PROJECT FILE      render PROJECT to the audio file FILE, as File >
                                           Export Audio does
        musicable scan-plugin LIBRARY      list the plugins in the plugin library LIBRARY, as
-                                          the app's plugin scan does in a process of its own";
+                                          the app's plugin scan does in a process of its own
+       musicable mcp                      let the agent whose client starts it control the
+                                          Musicable that's running, over MCP on the standard
+                                          input and output: see docs/agents.md
+       musicable api                      print the commands agents can run, with their
+                                          arguments' JSON Schema, as JSON";
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -51,6 +58,13 @@ fn main() -> ExitCode {
         // The app runs it, and reads what it prints through a pipe, so it
         // doesn't attach to a console.
         Some(musicable_app::SCAN_PLUGIN) => scan_plugin(args.next()),
+        // An agent's client runs it, and speaks MCP with it through pipes,
+        // so it doesn't either.
+        Some("mcp") => mcp(),
+        Some("api") => {
+            attach_console();
+            print_api()
+        }
         Some("-h" | "--help") => {
             attach_console();
             println!("{USAGE}");
@@ -71,6 +85,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
     if std::env::var_os(musicable_app::FRAME_TIMES).is_some() {
         attach_console();
     }
+    musicable_app::log_file::start(musicable_app::config_dir().as_deref());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Musicable")
@@ -83,6 +98,7 @@ fn run(path: Option<PathBuf>) -> ExitCode {
         // Ctrl+C, X and V go to the keymap like other keys. Text fields
         // still get them: see `musicable_ui::KeyPresses`.
         clipboard_shortcuts: false,
+        wgpu_options: wgpu_options(),
         ..eframe::NativeOptions::default()
     };
     let result = eframe::run_native(
@@ -91,11 +107,14 @@ fn run(path: Option<PathBuf>) -> ExitCode {
         Box::new(|cc| Ok(Box::new(App::new(path, cc)))),
     );
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            log::info!("Musicable closed");
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             let message = format!("Musicable couldn't open its window: {error}");
             attach_console();
-            eprintln!("{message}");
+            log::error!("{message}");
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
                 .set_title("Musicable")
@@ -103,6 +122,32 @@ fn run(path: Option<PathBuf>) -> ExitCode {
                 .show();
             ExitCode::FAILURE
         }
+    }
+}
+
+/// How eframe draws with wgpu: as it would, but with Direct3D 12 on Windows,
+/// unless the `WGPU_BACKEND` environment variable picks another backend,
+/// such as `vulkan`. Vulkan lost the graphics device on an NVIDIA card as
+/// the displays woke, which egui-wgpu can't carry on from. A window's
+/// surface lost, as may happen then too, is logged.
+fn wgpu_options() -> eframe::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew};
+    use eframe::wgpu::{Backends, CurrentSurfaceTexture};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    if cfg!(windows) && Backends::from_env().is_none() {
+        setup.instance_descriptor.backends = Backends::DX12;
+    }
+    let options = eframe::WgpuConfiguration::default();
+    let on_surface_status = Arc::clone(&options.on_surface_status);
+    eframe::WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        on_surface_status: Arc::new(move |status| {
+            if matches!(status, CurrentSurfaceTexture::Lost) {
+                log::info!("A window's surface was lost, so it's made again");
+            }
+            on_surface_status(status)
+        }),
+        ..options
     }
 }
 
@@ -117,6 +162,38 @@ fn scan_plugin(library: Option<OsString>) -> ExitCode {
     };
     musicable_plugins::scan::child(Path::new(&library));
     ExitCode::SUCCESS
+}
+
+/// `musicable mcp`: lets the agent whose client started it control the
+/// Musicable that's running, over MCP on the standard input and output,
+/// until the client goes. See `docs/agents.md`.
+fn mcp() -> ExitCode {
+    match musicable_mcp::bridge::run(musicable_app::config_dir().as_deref()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("musicable mcp: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `musicable api`: prints the commands agents can run, with their titles,
+/// their arguments' JSON Schema and their default keys, as JSON, without
+/// opening the app.
+fn print_api() -> ExitCode {
+    let commands = musicable_app::commands();
+    let catalogue = musicable_mcp::catalogue(&commands, &Keymap::default_keymap());
+    match serde_json::to_string_pretty(&catalogue) {
+        Ok(text) => {
+            // A reader that stops early, such as `head`, isn't a failure.
+            let _ = writeln!(std::io::stdout().lock(), "{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("musicable api: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `musicable keymap [FILE]`: prints the key bindings of the default keymap,

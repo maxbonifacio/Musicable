@@ -219,6 +219,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         },
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
+                        agent: None,
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),

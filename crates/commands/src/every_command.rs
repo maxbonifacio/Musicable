@@ -13,6 +13,11 @@
 //! and load back as it was. Undo and redo must lead back to those projects
 //! exactly, but for the counters that hand out ids, which never go back, so
 //! that no id is handed out twice.
+//!
+//! Each example also runs as an agent runs it, with its arguments and its
+//! result as JSON, and must do just what it does from the UI, unless it's
+//! left to the user. And in random orders, the examples run as one batch,
+//! which must be one step, or nothing at all once it's cancelled.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
@@ -37,7 +42,7 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, history, locator, mixer, notes, options, take, track,
+    controllers, device, edit, file, history, json, locator, mixer, notes, options, take, track,
     transport, view, workspace,
 };
 
@@ -539,15 +544,35 @@ fn examples() -> Vec<Example> {
         edits(edit::SPLIT, time_selected),
         steps(edit::UNDO, bare),
         leaves(file::EXPORT_AUDIO, bare),
+        // Given files, as scripts and agents give them, the file commands
+        // ask for no dialog.
+        leaves(file::EXPORT_AUDIO, |_| {
+            Some(Args::new().with("file", "/exports/Song.wav"))
+        }),
         leaves(file::IMPORT_AUDIO, bare),
+        leaves(file::IMPORT_AUDIO, |s| {
+            let track = find_track(s, |t| t.kind == TrackKind::Audio)?.id;
+            Some(
+                Args::new()
+                    .with("files", vec![KICK])
+                    .with("track", track)
+                    .with("at", Beats::new(2)),
+            )
+        }),
         leaves(file::NEW, bare),
         leaves(file::NEW_DEMO, bare),
         leaves(file::OPEN, bare),
+        leaves(file::OPEN, |_| {
+            Some(Args::new().with("file", "/songs/Other.musicable"))
+        }),
         leaves(file::QUIT, bare),
         leaves(file::SAVE, bare),
         // Before every step, which the fixture's history hasn't.
         steps(history::GO_TO, |_| Some(Args::new().with("step", 0_i64))),
         leaves(file::SAVE_AS, bare),
+        leaves(file::SAVE_AS, |_| {
+            Some(Args::new().with("file", "/songs/Copy.musicable"))
+        }),
         edits(locator::ADD, |s| {
             let locators = &project(s).locators;
             let free = |at: &Beats| locators.iter().all(|l| l.at != *at);
@@ -850,6 +875,7 @@ fn examples() -> Vec<Example> {
         }),
         edits(notes::VELOCITY_DOWN, note_selected),
         edits(notes::VELOCITY_UP, note_selected),
+        leaves(options::AGENTS, bare),
         leaves(options::APPEARANCE, bare),
         leaves(options::AUDIO_SETTINGS, bare),
         leaves(options::KEYBOARD_SHORTCUTS, bare),
@@ -1549,6 +1575,223 @@ fn undo_takes_back_what_each_command_does_and_redo_makes_it_again() {
         assert_eq!(s.document.redo_name(), None, "{redo}");
         replay(&mut mirror, &redone, &redo);
         assert_eq!(masked(mirror.project()), masked(&after), "{redo}");
+    }
+}
+
+/// Runs each example as an agent runs it, through `run_command`: its
+/// arguments written as JSON and read back as [`json::agent_call`] reads
+/// them, and its result written as JSON. It must do just what it does from
+/// the UI, unless it's left to the user, or needs an argument the app would
+/// have asked the user for.
+#[test]
+fn agents_run_each_command_as_the_ui_does() {
+    for example in examples() {
+        let what = &example.command;
+        let mut ui = setup();
+        let mut agent = setup();
+        let (Some(args), Some(same)) = ((example.prepare)(&mut ui), (example.prepare)(&mut agent))
+        else {
+            panic!("{what} finds nothing to act on in the fixture");
+        };
+        assert_eq!(args, same, "{what} gets ready the same way twice");
+        let command = ui.registry.get(what).expect("it has an example").clone();
+        let ran = ui.run_with(what, args.clone());
+        // What only the user can see or answer is the user's.
+        if ui.requests.iter().any(|request| !request.for_agents()) {
+            let asked = &ui.requests;
+            assert!(
+                !command.agents,
+                "{what} asks for {asked:?}, which is the user's"
+            );
+        }
+
+        let written = json::args_to_json(&args);
+        let call = json::agent_call(&agent.registry, what.as_str(), &written);
+        if !command.agents {
+            assert_eq!(call, Err(CommandError::NotForAgents(what.clone())));
+            continue;
+        }
+        let asked = (command.params.iter()).find(|p| p.asked && args.value(&p.name).is_none());
+        if let Some(param) = asked {
+            let missing = CommandError::MissingArgument(param.name.to_string());
+            assert_eq!(call, Err(missing), "{what}");
+            continue;
+        }
+        let (id, read) = call.unwrap_or_else(|error| panic!("{what}: {error}"));
+        let result = agent.run_with(&id, read);
+        let as_json = |result: &Result<Value, CommandError>| {
+            (result.as_ref())
+                .map(json::to_json)
+                .map_err(ToString::to_string)
+        };
+        assert_eq!(as_json(&result), as_json(&ran), "{what}");
+        assert_eq!(agent.committed_names(), ui.committed_names(), "{what}");
+        assert_eq!(project(&agent), project(&ui), "{what}");
+        assert_eq!(agent.document.editor(), ui.document.editor(), "{what}");
+        assert_eq!(
+            agent.document.undo_name(),
+            ui.document.undo_name(),
+            "{what}"
+        );
+        assert_eq!(agent.requests, ui.requests, "{what}");
+        assert_eq!(agent.transport.calls, ui.transport.calls, "{what}");
+        assert_eq!(agent.library.calls, ui.library.calls, "{what}");
+    }
+}
+
+#[test]
+fn commands_run_as_a_batch_make_one_step_or_none() {
+    let mut s = setup();
+    let fixture = project(&s).clone();
+    let tempo = Args::new().with("bpm", 92.0);
+    let locator = Args::new().with("at", Beats::new(48)).with("name", "Drop");
+    let batch = [
+        (track::NEW_MIDI_TRACK, Args::new()),
+        (transport::SET_TEMPO, tempo),
+        (locator::ADD, locator),
+    ];
+    let values = s.run_batch("Start a Beat", &batch).unwrap();
+    let after = project(&s).clone();
+    let track = after.tracks.iter().find(|t| t.name == "MIDI 2");
+    assert_eq!(values[0], Value::Track(track.expect("the new track").id));
+    assert_eq!(values.len(), 3);
+    // Each transaction keeps its name for the engine, and the undo history
+    // has one step.
+    let committed = s.committed_names();
+    assert_eq!(committed.len(), 3);
+    assert_eq!(s.document.steps().len(), 1);
+    assert_eq!(s.document.undo_name(), Some("Start a Beat"));
+    assert!(s.document.undo());
+    assert_eq!(masked(project(&s)), masked(&fixture));
+    assert!(s.document.redo());
+    assert_eq!(project(&s), &after);
+    s.document.take_committed();
+
+    // One that fails takes back all that ran before it, asks the app for
+    // nothing, and leaves the history alone.
+    let editor = s.document.editor().clone();
+    let failing = [
+        (track::NEW_AUDIO_TRACK, Args::new()),
+        (file::OPEN, Args::new()),
+    ];
+    let error = s.run_batch("Open", &failing).unwrap_err();
+    assert_eq!(error.index, 1);
+    assert_eq!(
+        error.error,
+        CommandError::invalid("file.open runs on its own, not among other commands")
+    );
+    let missing = Args::new().with("locator", 999_i64).with("name", "Outro");
+    let failing = [
+        (track::NEW_AUDIO_TRACK, Args::new()),
+        (
+            edit::SELECT_TRACKS,
+            Args::new().with("tracks", Vec::<TrackId>::new()),
+        ),
+        (locator::RENAME, missing),
+    ];
+    let error = s.run_batch("Broken", &failing).unwrap_err();
+    assert_eq!(error.index, 2, "{error}");
+    assert_eq!(
+        error.to_string(),
+        "command 3 failed: there's no locator 999"
+    );
+    assert_eq!(masked(project(&s)), masked(&after));
+    kept_counters(&after, project(&s), "the broken batch");
+    assert_eq!(s.document.editor(), &editor);
+    assert_eq!(s.document.take_committed(), []);
+    assert_eq!(s.document.steps().len(), 1);
+    assert_eq!(s.document.redo_name(), None);
+    assert_eq!(s.requests, []);
+    let unknown = [(CommandId::from("track.nope"), Args::new())];
+    let error = s.run_batch("Nope", &unknown).unwrap_err();
+    assert_eq!(error.error, CommandError::Unknown("track.nope".into()));
+    // Undo, redo and Go to Step step through the history, so they can't be
+    // part of a step in it.
+    for example in examples().iter().filter(|e| e.does == Does::Steps) {
+        let command = s.registry.get(&example.command).unwrap();
+        assert!(command.alone, "{} runs alone", example.command);
+    }
+
+    // A batch that changes nothing leaves no step, and what was undone
+    // before it can still be redone.
+    assert!(s.document.undo());
+    s.document.take_committed();
+    let select = [(
+        edit::SELECT_TRACKS,
+        Args::new().with("tracks", Vec::<TrackId>::new()),
+    )];
+    s.run_batch("Select", &select).unwrap();
+    assert_eq!(s.document.undo_name(), None);
+    assert_eq!(s.document.redo_name(), Some("Start a Beat"));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        cases: 64,
+        ..ProptestConfig::default()
+    })]
+
+    /// Runs examples in random orders in one batch, as `run_commands` runs
+    /// commands, with a step to redo from before it. Ended, the batch is
+    /// one step, which undo takes back whole and redo makes again, or no
+    /// step if its changes cancel out. Cancelled, it's as if it never ran.
+    #[test]
+    fn a_batch_is_one_step_or_nothing(
+        runs in prop::collection::vec((0..runnable().len(), 0..32_usize), 1..16),
+        cancel in any::<bool>(),
+    ) {
+        let examples = runnable();
+        let mut s = setup();
+        let before = Args::new().with("at", Beats::new(64)).with("name", "Before");
+        s.run_with(&locator::ADD, before).unwrap();
+        s.document.undo();
+        s.document.take_committed();
+        let redo = s.document.redo_name().map(str::to_owned);
+        let start = project(&s).clone();
+        let editor = s.document.editor().clone();
+        s.document.begin_batch("Batch");
+        let mut ran = Vec::new();
+        for (i, pick) in runs {
+            let example = &examples[i];
+            s.pick = pick;
+            ran.push(example.command.to_string());
+            if let Some(args) = (example.prepare)(&mut s) {
+                let _ = s.run_with(&example.command, args);
+            }
+        }
+        let what = format!("{ran:?}");
+        if cancel {
+            s.document.cancel_batch();
+            prop_assert_eq!(s.document.take_committed(), [], "{}", what);
+            prop_assert_eq!(masked(project(&s)), masked(&start), "{}", what);
+            kept_counters(&start, project(&s), &what);
+            prop_assert_eq!(s.document.editor(), &editor, "{}", what);
+            prop_assert_eq!(s.document.steps().done(), 0, "{}", what);
+            prop_assert_eq!(s.document.redo_name().map(str::to_owned), redo, "{}", what);
+            return Ok(());
+        }
+        s.document.end_batch();
+        let committed = s.document.take_committed();
+        let end = project(&s).clone();
+        saves(&end, &what);
+        match s.document.steps().done() {
+            0 => {
+                prop_assert_eq!(masked(&end), masked(&start), "{}", what);
+                prop_assert_eq!(s.document.redo_name().map(str::to_owned), redo, "{}", what);
+            }
+            1 => {
+                prop_assert!(!committed.is_empty());
+                prop_assert_eq!(s.document.undo_name(), Some("Batch"), "{}", what);
+                prop_assert_eq!(s.document.redo_name(), None, "{}", what);
+                s.document.undo();
+                prop_assert_eq!(masked(project(&s)), masked(&start), "undoing {}", what);
+                kept_counters(&end, project(&s), &what);
+                s.document.redo();
+                prop_assert_eq!(project(&s), &end, "redoing {}", what);
+            }
+            done => prop_assert!(false, "{} made {} steps", what, done),
+        }
     }
 }
 

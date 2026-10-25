@@ -204,6 +204,7 @@ const LAST_MENUS: [MenuSpec; 4] = [
             Some(options::AUDIO_SETTINGS),
             Some(options::KEYBOARD_SHORTCUTS),
             Some(options::APPEARANCE),
+            Some(options::AGENTS),
             None,
             Some(options::PROFILES),
             Some(options::NEXT_PROFILE),

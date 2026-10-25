@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use musicable_audio::{InputBuffer, MidiBuffer};
 use musicable_commands::{
-    Args, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap, Registry,
-    Request, Steps, Transport, UnknownCommand, Value, mixer, take, transport,
+    Args, BatchError, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap,
+    Registry, Request, Steps, Transport, UnknownCommand, Value, mixer, take, transport,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
@@ -644,6 +644,30 @@ impl Session {
             library: &mut library,
         };
         let result = self.commands.run_with(id, args, &mut context);
+        self.sync();
+        result
+    }
+
+    /// Runs `commands` in order as one step in the undo history called
+    /// `name`, all or none, then sends the engine what they changed, and
+    /// returns their results. See [`Registry::run_batch`].
+    pub fn run_batch(
+        &mut self,
+        name: &str,
+        commands: &[(CommandId, Args)],
+    ) -> Result<Vec<Value>, BatchError> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
+        };
+        let mut context = Context {
+            document: &mut self.document,
+            transport: &mut self.engine,
+            requests: &mut self.requests,
+            library: &mut library,
+        };
+        let result = self.commands.run_batch(name, commands, &mut context);
         self.sync();
         result
     }
