@@ -1,4 +1,4 @@
-# Built-in devices
+# Using the devices
 
 Musicable has eight devices of its own, which play without plugins:
 

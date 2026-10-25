@@ -30,15 +30,15 @@
 
 # Built-in devices
 
-- [Built-in devices](devices/index.md)
-  - [EQ](devices/eq.md)
-  - [Compressor](devices/compressor.md)
-  - [Gate](devices/gate.md)
-  - [Delay](devices/delay.md)
-  - [Reverb](devices/reverb.md)
-  - [Utility](devices/utility.md)
-  - [Sampler](devices/sampler.md)
-  - [Synth](devices/synth.md)
+- [Using the devices](devices/index.md)
+- [EQ](devices/eq.md)
+- [Compressor](devices/compressor.md)
+- [Gate](devices/gate.md)
+- [Delay](devices/delay.md)
+- [Reverb](devices/reverb.md)
+- [Utility](devices/utility.md)
+- [Sampler](devices/sampler.md)
+- [Synth](devices/synth.md)
 
 # Customising
 
