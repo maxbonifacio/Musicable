@@ -240,6 +240,9 @@ struct AudioClip {
 struct Warp {
     mode: WarpMode,
     tempo: f64,
+    transpose: i8,
+    detune: i8,
+    slice: SliceSettings,
     markers: Vec<(u64, i64)>,
     #[serde(deserialize_with = "Option::deserialize")]
     onsets: Option<Vec<(u64, f32, f32, Origin)>>,
@@ -249,6 +252,40 @@ struct Warp {
 #[serde(rename_all = "snake_case")]
 enum WarpMode {
     RePitch,
+    Slice,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SliceSettings {
+    preserve: Preserve,
+    transient_loop: TransientLoop,
+    envelope: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Preserve {
+    Transients,
+    Bar,
+    #[serde(rename = "1/2")]
+    Half,
+    #[serde(rename = "1/4")]
+    Quarter,
+    #[serde(rename = "1/8")]
+    Eighth,
+    #[serde(rename = "1/16")]
+    Sixteenth,
+    #[serde(rename = "1/32")]
+    ThirtySecond,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransientLoop {
+    Off,
+    Forward,
+    BackAndForth,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -272,6 +309,11 @@ struct ClipLane {
 #[serde(rename_all = "snake_case")]
 enum ClipParam {
     Gain,
+    Transpose,
+    Detune,
+    TransientEnvelope,
+    Preserve,
+    TransientLoop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1274,17 +1316,45 @@ impl From<&warp::Warp> for Warp {
             markers,
             tempo,
             onsets,
+            transpose,
+            detune,
+            slice,
         } = warp;
         let origin = |origin| match origin {
             warp::Origin::Found => Origin::Found,
             warp::Origin::Added => Origin::Added,
             warp::Origin::Hidden => Origin::Hidden,
         };
+        let warp::SliceSettings {
+            preserve,
+            transient_loop,
+            envelope,
+        } = slice;
         Self {
             mode: match mode {
                 warp::WarpMode::RePitch => WarpMode::RePitch,
+                warp::WarpMode::Slice => WarpMode::Slice,
             },
             tempo: *tempo,
+            transpose: *transpose,
+            detune: *detune,
+            slice: SliceSettings {
+                preserve: match preserve {
+                    warp::Preserve::Transients => Preserve::Transients,
+                    warp::Preserve::Bar => Preserve::Bar,
+                    warp::Preserve::Half => Preserve::Half,
+                    warp::Preserve::Quarter => Preserve::Quarter,
+                    warp::Preserve::Eighth => Preserve::Eighth,
+                    warp::Preserve::Sixteenth => Preserve::Sixteenth,
+                    warp::Preserve::ThirtySecond => Preserve::ThirtySecond,
+                },
+                transient_loop: match transient_loop {
+                    warp::TransientLoop::Off => TransientLoop::Off,
+                    warp::TransientLoop::Forward => TransientLoop::Forward,
+                    warp::TransientLoop::BackAndForth => TransientLoop::BackAndForth,
+                },
+                envelope: *envelope,
+            },
             markers: markers.iter().map(|m| (m.frame, m.beat.ticks())).collect(),
             onsets: onsets.as_ref().map(|onsets| {
                 (onsets.all().iter())
@@ -1301,6 +1371,11 @@ impl From<&clip::ClipLane> for ClipLane {
         Self {
             param: match param {
                 param::ClipParam::Gain => ClipParam::Gain,
+                param::ClipParam::Transpose => ClipParam::Transpose,
+                param::ClipParam::Detune => ClipParam::Detune,
+                param::ClipParam::TransientEnvelope => ClipParam::TransientEnvelope,
+                param::ClipParam::Preserve => ClipParam::Preserve,
+                param::ClipParam::TransientLoop => ClipParam::TransientLoop,
             },
             points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
         }
@@ -1377,6 +1452,9 @@ impl Warp {
         let Self {
             mode,
             tempo,
+            transpose,
+            detune,
+            slice,
             markers,
             onsets,
         } = self;
@@ -1385,6 +1463,42 @@ impl Warp {
             let message = format!("must be from {low} to {high}");
             return Err(Invalid::new(format!("{path}.tempo"), message));
         }
+        for (value, max, name) in [
+            (*transpose, warp::Warp::TRANSPOSE_MAX, "transpose"),
+            (*detune, warp::Warp::DETUNE_MAX, "detune"),
+        ] {
+            if !(-max..=max).contains(&value) {
+                let message = format!("must be from -{max} to {max}");
+                return Err(Invalid::new(format!("{path}.{name}"), message));
+            }
+        }
+        let SliceSettings {
+            preserve,
+            transient_loop,
+            envelope,
+        } = slice;
+        let most = warp::SliceSettings::ENVELOPE_MAX;
+        if !(0.0..=most).contains(envelope) {
+            let message = format!("must be from 0 to {most}");
+            return Err(Invalid::new(format!("{path}.slice.envelope"), message));
+        }
+        let slice = warp::SliceSettings {
+            preserve: match preserve {
+                Preserve::Transients => warp::Preserve::Transients,
+                Preserve::Bar => warp::Preserve::Bar,
+                Preserve::Half => warp::Preserve::Half,
+                Preserve::Quarter => warp::Preserve::Quarter,
+                Preserve::Eighth => warp::Preserve::Eighth,
+                Preserve::Sixteenth => warp::Preserve::Sixteenth,
+                Preserve::ThirtySecond => warp::Preserve::ThirtySecond,
+            },
+            transient_loop: match transient_loop {
+                TransientLoop::Off => warp::TransientLoop::Off,
+                TransientLoop::Forward => warp::TransientLoop::Forward,
+                TransientLoop::BackAndForth => warp::TransientLoop::BackAndForth,
+            },
+            envelope: *envelope,
+        };
         if markers.is_empty() {
             let message = "needs at least one marker: a warped clip has one";
             return Err(Invalid::new(format!("{path}.markers"), message));
@@ -1416,10 +1530,14 @@ impl Warp {
         Ok(warp::Warp {
             mode: match mode {
                 WarpMode::RePitch => warp::WarpMode::RePitch,
+                WarpMode::Slice => warp::WarpMode::Slice,
             },
             markers: model_markers,
             tempo: *tempo,
             onsets,
+            transpose: *transpose,
+            detune: *detune,
+            slice,
         })
     }
 }
@@ -1468,11 +1586,19 @@ impl ClipLane {
         let Self { param, points } = self;
         let param = match param {
             ClipParam::Gain => param::ClipParam::Gain,
+            ClipParam::Transpose => param::ClipParam::Transpose,
+            ClipParam::Detune => param::ClipParam::Detune,
+            ClipParam::TransientEnvelope => param::ClipParam::TransientEnvelope,
+            ClipParam::Preserve => param::ClipParam::Preserve,
+            ClipParam::TransientLoop => param::ClipParam::TransientLoop,
         };
         let spec = param.spec();
         let (low, high) = (spec.min, spec.max);
-        let range = |value: f64| {
-            (!(low..=high).contains(&value)).then(|| format!("must be from {low} to {high}"))
+        let stepped = param.stepped();
+        let range = |value: f64| match () {
+            _ if !(low..=high).contains(&value) => Some(format!("must be from {low} to {high}")),
+            _ if stepped && value.fract() != 0.0 => Some("must be a whole number".to_owned()),
+            _ => None,
         };
         let points = lane_points(points, path, false, range)?;
         Ok(clip::ClipLane { param, points })

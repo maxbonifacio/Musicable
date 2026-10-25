@@ -1,20 +1,20 @@
 //! Drawing the Sample Editor: the waveform against the song's beats, with
 //! the warp markers on it and their handles along its top, the transients'
 //! ticks under them and the time selected, the ruler of the song's bars over
-//! it and the ruler of the file's time under it, the lane of the clip's gain
-//! under them, and the column of the clip's controls beside them. Only
-//! what's in sight is drawn.
+//! it and the ruler of the file's time under it, the lane of one of the
+//! clip's parameters under them, and the column of the clip's controls
+//! beside them. Only what's in sight is drawn.
 
-use egui::{Align2, Color32, FontId, Mesh, Painter, Rect, Shape, Stroke, pos2};
+use egui::{Align2, Color32, FontId, Mesh, Painter, Rect, Response, Shape, Stroke, pos2};
 use musicable_commands::warp;
 use musicable_model::automation::Point;
 use musicable_model::clip::AudioClip;
 use musicable_model::warp::WarpMarker;
 
-use super::{Envelope, Plan, Scene};
+use super::{Envelope, Plan, Scene, value_text};
 use crate::theme::Theme;
 use crate::timeline::{self, Timeline};
-use crate::widgets::clock;
+use crate::widgets::{clock, drop_down_mark};
 
 /// The steps the ruler of the file's time can go in, in seconds: the
 /// first that leaves room for its labels.
@@ -332,10 +332,11 @@ fn time_label(seconds: f64, step: f64) -> String {
     }
 }
 
-/// The lane of the clip's gain, over the grid: the line through the gain
-/// curve's points as `plan` would leave them, level before the first and
-/// after the last, or a dashed line at the clip's gain where it has no
-/// curve, shaded where the clip doesn't play.
+/// The lane, over the grid: the line through the points of the curve it
+/// shows as `plan` would leave them, level before the first and after the
+/// last, or a dashed line at the parameter's own value where it has no
+/// curve, shaded where the clip doesn't play, and greyed where the clip's
+/// mode doesn't play the parameter.
 pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -348,7 +349,7 @@ pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     };
     let points = planned.unwrap_or(scene.curve());
     if points.is_empty() {
-        let y = painter.round_to_pixel_center(scene.y_of(f64::from(scene.audio.gain)));
+        let y = painter.round_to_pixel_center(scene.y_of(scene.level()));
         let line = [pos2(lane.left(), y), pos2(lane.right(), y)];
         let stroke = Stroke::new(1.0, theme.automation_off);
         painter.extend(Shape::dashed_line(&line, stroke, 4.0, 4.0));
@@ -369,15 +370,25 @@ pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
 }
 
 /// The line through `points`, level before the first and after the last,
-/// and the points in sight, with the one at `hovered` filled in.
+/// and for a parameter in steps, level from each to the next, and the
+/// points in sight, with the one at `hovered` filled in.
 fn envelope(painter: &Painter, scene: &Scene<'_>, points: &[Point], hovered: Option<usize>) {
     let theme = scene.theme;
     let lane = scene.layout.lane;
-    let colour = theme.automation;
+    let colour = match scene.lane_plays() {
+        true => theme.automation,
+        false => theme.automation_off,
+    };
     let at: Vec<_> = points.iter().map(|point| scene.point_at(point)).collect();
-    let mut line = Vec::with_capacity(at.len() + 2);
+    let stepped = scene.lane().stepped();
+    let mut line = Vec::with_capacity(2 * at.len() + 2);
     line.push(pos2(lane.left(), at[0].y));
-    line.extend(at.iter().copied());
+    for (i, &pos) in at.iter().enumerate() {
+        if stepped && i > 0 {
+            line.push(pos2(pos.x, at[i - 1].y));
+        }
+        line.push(pos);
+    }
     line.push(pos2(lane.right(), at[at.len() - 1].y));
     painter.add(Shape::line(line, Stroke::new(1.5, colour)));
     let reach = lane.x_range().expand(theme.point);
@@ -393,18 +404,42 @@ fn envelope(painter: &Painter, scene: &Scene<'_>, points: &[Point], hovered: Opt
     }
 }
 
-/// The name of the lane beside it: "Gain".
-pub(super) fn label(painter: &Painter, scene: &Scene<'_>) {
+/// The name of what the lane shows, beside it: "Gain", or another of the
+/// clip's parameters, with a triangle after it while a click on it,
+/// `chooser`, chooses another. Under it, the mode that doesn't play it, if
+/// the clip's mode doesn't, "Not in Re-Pitch", and the value `readout`, if
+/// there's one to show.
+pub(super) fn label(
+    painter: &Painter,
+    scene: &Scene<'_>,
+    chooser: Option<&Response>,
+    readout: Option<f64>,
+) {
     let theme = scene.theme;
     let label = scene.layout.label;
-    painter.rect_filled(label, 0.0, theme.ruler);
-    painter.text(
-        pos2(label.left() + theme.padding, label.top() + theme.padding),
-        Align2::LEFT_TOP,
-        "Gain",
-        FontId::proportional(theme.small_text),
-        theme.ruler_text,
-    );
+    let fill = match chooser.is_some_and(Response::hovered) {
+        true => theme.header,
+        false => theme.ruler,
+    };
+    painter.rect_filled(label, 0.0, fill);
+    let font = FontId::proportional(theme.small_text);
+    let at = pos2(label.left() + theme.padding, label.top() + theme.padding);
+    let name = scene.spec().name;
+    let name = painter.text(at, Align2::LEFT_TOP, name, font.clone(), theme.ruler_text);
+    if chooser.is_some() {
+        drop_down_mark(painter, theme, name);
+    }
+    let mut bottom = name.bottom();
+    let mut line = |text: String, colour: Color32| {
+        let under = pos2(at.x, bottom + 2.0);
+        bottom = (painter.text(under, Align2::LEFT_TOP, text, font.clone(), colour)).bottom();
+    };
+    if let Some(warp) = scene.warp().filter(|_| !scene.lane_plays()) {
+        line(format!("Not in {}", warp.mode.name()), theme.automation_off);
+    }
+    if let Some(value) = readout {
+        line(value_text(scene.lane(), value), theme.ruler_text);
+    }
     let y = painter.round_to_pixel_center(label.top() + 0.5);
     painter.hline(label.x_range(), y, Stroke::new(1.0, theme.divider));
     let x = painter.round_to_pixel_center(label.right() - 0.5);

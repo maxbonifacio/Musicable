@@ -321,11 +321,12 @@ says what's there.
 - **Warping and time-stretch.** Warping has started: format 11 gives
   `AudioClip` a warp, markers pinning frames of the file to beats of the
   clip's own time, and the clip player reads the file through them in
-  Re-Pitch mode, resampling each piece at the speed it plays at
+  Re-Pitch mode, resampling each piece at the speed it plays at, and in
+  Slice, cutting it into slices that each play from where they land
   ([engine.md](engine.md#clips)), while the Sample Editor edits the markers
-  ([app.md](app.md#the-sample-editor)). Re-Pitch carries no state but the
-  resampler's, so it starts at any song position at once, as every node
-  must. A stretch that carries state from frame to frame, as a phase
+  ([app.md](app.md#the-sample-editor)). Re-Pitch and Slice carry no state
+  but the resampler's, so they start at any song position at once, as every
+  node must. A stretch that carries state from frame to frame, as a phase
   vocoder does for Spectral, can't, so it would play from stretched
   segments rendered ahead, on the disk thread that streams files now.
   Tempo, beats and transients come

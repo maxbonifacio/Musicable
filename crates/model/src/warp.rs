@@ -12,8 +12,12 @@
 //!
 //! Beats are whole ticks and frames whole numbers, so a marker stays
 //! exactly where it's put. The [`WarpMode`] says how the audio between
-//! markers plays: Re-Pitch, so far, which resamples it, so its pitch
-//! follows its speed, as on a turntable.
+//! markers plays: Re-Pitch resamples it, so its pitch follows its speed, as
+//! on a turntable, and Slice cuts it into slices at its transients, or on a
+//! grid of notes, and plays each at the file's own speed from where it
+//! lands, as Live's Beats does. Every mode but Re-Pitch moves the audio's
+//! pitch by the warp's transpose and detune, and keeps its own settings in
+//! the warp while another mode plays.
 //!
 //! A warp also keeps its file's transients, the [`Onsets`]: where the
 //! sounds in it start, as analysis found them and the user changed them.
@@ -23,6 +27,7 @@
 
 use std::sync::Arc;
 
+use crate::param::ClipParam;
 use crate::time::Beats;
 
 /// How a warped clip's file follows the clip's own time.
@@ -39,6 +44,15 @@ pub struct Warp {
     /// The file's transients, or `None` until the clip takes them from
     /// analysis, which it does once: they're its own from then on.
     pub onsets: Option<Onsets>,
+    /// How far every mode but Re-Pitch moves the audio's pitch, in
+    /// semitones, from -[`TRANSPOSE_MAX`](Self::TRANSPOSE_MAX) to
+    /// [`TRANSPOSE_MAX`](Self::TRANSPOSE_MAX), and cents, from
+    /// -[`DETUNE_MAX`](Self::DETUNE_MAX) to [`DETUNE_MAX`](Self::DETUNE_MAX),
+    /// where the clip's curves don't say otherwise.
+    pub transpose: i8,
+    pub detune: i8,
+    /// How Slice cuts the audio and plays the slices.
+    pub slice: SliceSettings,
 }
 
 /// A frame of the file, pinned to the beat of the clip's own time it plays
@@ -56,18 +70,229 @@ pub enum WarpMode {
     /// its speed, as on a turntable.
     #[default]
     RePitch,
+    /// Cut into slices, each played at the file's own speed from where it
+    /// lands, so a hit keeps its sound at any tempo: for drums and other
+    /// percussive loops. See [`SliceSettings`].
+    Slice,
 }
 
 impl WarpMode {
     /// Every mode, in the order the Sample Editor lists them.
-    pub const ALL: [Self; 1] = [Self::RePitch];
+    pub const ALL: [Self; 2] = [Self::RePitch, Self::Slice];
 
     /// What the Sample Editor calls it.
     pub fn name(self) -> &'static str {
         match self {
             Self::RePitch => "Re-Pitch",
+            Self::Slice => "Slice",
         }
     }
+
+    /// What scripts call it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::RePitch => "re_pitch",
+            Self::Slice => "slice",
+        }
+    }
+
+    /// The mode scripts call `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.key() == key)
+    }
+
+    /// Whether it moves the audio's pitch by the warp's transpose and
+    /// detune: every mode but Re-Pitch, whose pitch follows its speed.
+    pub fn transposes(self) -> bool {
+        self != Self::RePitch
+    }
+}
+
+/// How Slice cuts a clip's audio into slices and plays them, as Live's
+/// Beats does. A clip keeps them while another mode plays.
+///
+/// Each slice starts playing where its start lands in the clip's own time,
+/// at the file's own speed, or faster or slower by the transpose. Where the
+/// song plays the file faster than that, a slice is cut short by the next
+/// one, and where it plays slower, the slice's audio runs out before the
+/// next starts, and [`transient_loop`](Self::transient_loop) says what
+/// fills the gap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliceSettings {
+    /// Where the audio is cut.
+    pub preserve: Preserve,
+    pub transient_loop: TransientLoop,
+    /// Transient Envelope: how much each slice fades as it plays, from 0, a
+    /// very quick decay, to [`ENVELOPE_MAX`](Self::ENVELOPE_MAX), no fade.
+    pub envelope: f64,
+}
+
+impl SliceSettings {
+    pub const ENVELOPE_MAX: f64 = 100.0;
+}
+
+impl Default for SliceSettings {
+    /// Live's: cut at the transients, loop forward, and no fade.
+    fn default() -> Self {
+        Self {
+            preserve: Preserve::Transients,
+            transient_loop: TransientLoop::Forward,
+            envelope: Self::ENVELOPE_MAX,
+        }
+    }
+}
+
+/// Where Slice cuts a clip's audio: at its transients, or on a grid of
+/// notes in the clip's own time, whatever the audio, from its 1.1.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Preserve {
+    /// At each transient in sight, or on a grid of sixteenth notes until
+    /// the audio's analysis gives the clip its transients.
+    #[default]
+    Transients,
+    Bar,
+    Half,
+    Quarter,
+    Eighth,
+    Sixteenth,
+    ThirtySecond,
+}
+
+impl Preserve {
+    /// Every one, in the order the Sample Editor lists them, which is the
+    /// order of their steps in automation, from 0.
+    pub const ALL: [Self; 7] = [
+        Self::Transients,
+        Self::Bar,
+        Self::Half,
+        Self::Quarter,
+        Self::Eighth,
+        Self::Sixteenth,
+        Self::ThirtySecond,
+    ];
+
+    /// What the Sample Editor calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Transients => "Transients",
+            Self::Bar => "1 Bar",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+            Self::Sixteenth => "1/16",
+            Self::ThirtySecond => "1/32",
+        }
+    }
+
+    /// What scripts and project files call it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Transients => "transients",
+            Self::Bar => "bar",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+            Self::Sixteenth => "1/16",
+            Self::ThirtySecond => "1/32",
+        }
+    }
+
+    /// The one scripts call `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == key)
+    }
+
+    /// Its step in automation: its place in [`ALL`](Self::ALL).
+    pub fn step(self) -> usize {
+        Self::ALL.iter().position(|&p| p == self).unwrap_or(0)
+    }
+
+    /// The one at step `value` of its automation, to the nearest step.
+    pub fn at_step(value: f64) -> Self {
+        Self::ALL[nearest_step(value, Self::ALL.len())]
+    }
+
+    /// How long each slice of the grid is, with a bar `bar` long, or `None`
+    /// for the transients.
+    pub fn length(self, bar: Beats) -> Option<Beats> {
+        let notes = |n: i64| Beats::from_ticks(4 * Beats::TICKS_PER_BEAT / n);
+        match self {
+            Self::Transients => None,
+            Self::Bar => Some(bar),
+            Self::Half => Some(notes(2)),
+            Self::Quarter => Some(notes(4)),
+            Self::Eighth => Some(notes(8)),
+            Self::Sixteenth => Some(notes(16)),
+            Self::ThirtySecond => Some(notes(32)),
+        }
+    }
+}
+
+/// What a slice plays once its audio runs out before the next slice
+/// starts, as it does where the song plays the file slower than its own
+/// speed, as Live's Transient Loop Mode does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransientLoop {
+    /// Nothing: silence until the next slice.
+    Off,
+    /// The second half of the slice, over and over.
+    #[default]
+    Forward,
+    /// The second half of the slice, backwards and then forwards again.
+    BackAndForth,
+}
+
+impl TransientLoop {
+    /// Every one, in the order the Sample Editor lists them, which is the
+    /// order of their steps in automation, from 0.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Forward, Self::BackAndForth];
+
+    /// What the Sample Editor calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Forward => "Forward",
+            Self::BackAndForth => "Back-and-Forth",
+        }
+    }
+
+    /// What scripts and project files call it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Forward => "forward",
+            Self::BackAndForth => "back_and_forth",
+        }
+    }
+
+    /// The one scripts call `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.key() == key)
+    }
+
+    /// Its step in automation: its place in [`ALL`](Self::ALL).
+    pub fn step(self) -> usize {
+        Self::ALL.iter().position(|&l| l == self).unwrap_or(0)
+    }
+
+    /// The one at step `value` of its automation, to the nearest step.
+    pub fn at_step(value: f64) -> Self {
+        Self::ALL[nearest_step(value, Self::ALL.len())]
+    }
+}
+
+/// The step nearest `value` of `steps` of them, from 0.
+fn nearest_step(value: f64, steps: usize) -> usize {
+    match value.is_nan() {
+        true => 0,
+        false => value.round().clamp(0.0, (steps - 1) as f64) as usize,
+    }
+}
+
+/// How much faster a transpose of `semitones` and `cents` plays audio:
+/// twice as fast an octave up.
+pub fn pitch_ratio(semitones: f64, cents: f64) -> f64 {
+    ((semitones + cents / 100.0) / 12.0).exp2()
 }
 
 /// A transient: where a sound in the file starts.
@@ -297,20 +522,31 @@ impl Warp {
     pub const MIN_TEMPO: f64 = 5.0;
     pub const MAX_TEMPO: f64 = 999.0;
 
+    /// The furthest a warp transposes either way: four octaves.
+    pub const TRANSPOSE_MAX: i8 = 48;
+    /// The furthest it detunes either way, in cents.
+    pub const DETUNE_MAX: i8 = 50;
+
     /// A Re-Pitch warp with one marker, pinning `frame` to `beat`, at
-    /// `tempo`, clamped to the range.
+    /// `tempo`, clamped to the range, with no transpose and Slice's
+    /// settings as Live's.
     pub fn new(frame: u64, beat: Beats, tempo: f64) -> Self {
         Self {
             mode: WarpMode::RePitch,
             markers: vec![WarpMarker { frame, beat }],
             tempo: clamp_tempo(tempo),
             onsets: None,
+            transpose: 0,
+            detune: 0,
+            slice: SliceSettings::default(),
         }
     }
 
     /// Whether the warp keeps its rules: a marker or more, their frames and
-    /// beats rising, a tempo in range, and transients that keep theirs.
+    /// beats rising, a tempo in range, transients that keep theirs, and a
+    /// transpose, detune and Transient Envelope in range.
     pub fn is_valid(&self) -> bool {
+        let envelope = 0.0..=SliceSettings::ENVELOPE_MAX;
         !self.markers.is_empty()
             && self
                 .markers
@@ -318,6 +554,40 @@ impl Warp {
                 .all(|w| w[0].frame < w[1].frame && w[0].beat < w[1].beat)
             && (Self::MIN_TEMPO..=Self::MAX_TEMPO).contains(&self.tempo)
             && self.onsets.as_ref().is_none_or(Onsets::is_valid)
+            && self.transpose.unsigned_abs() <= Self::TRANSPOSE_MAX.unsigned_abs()
+            && self.detune.unsigned_abs() <= Self::DETUNE_MAX.unsigned_abs()
+            && envelope.contains(&self.slice.envelope)
+    }
+
+    /// The value of the setting the clip parameter `param` is, as its
+    /// automation has it: `None` for Gain, which is the clip's own.
+    pub fn param(&self, param: ClipParam) -> Option<f64> {
+        match param {
+            ClipParam::Gain => None,
+            ClipParam::Transpose => Some(f64::from(self.transpose)),
+            ClipParam::Detune => Some(f64::from(self.detune)),
+            ClipParam::TransientEnvelope => Some(self.slice.envelope),
+            ClipParam::Preserve => Some(self.slice.preserve.step() as f64),
+            ClipParam::TransientLoop => Some(self.slice.transient_loop.step() as f64),
+        }
+    }
+
+    /// Sets the setting the clip parameter `param` is to `value`, kept in
+    /// its range and rounded to a whole semitone, cent or step. Gain, and
+    /// values that aren't numbers, change nothing.
+    pub fn set_param(&mut self, param: ClipParam, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let value = param.spec().clamp(value);
+        match param {
+            ClipParam::Gain => {}
+            ClipParam::Transpose => self.transpose = value.round() as i8,
+            ClipParam::Detune => self.detune = value.round() as i8,
+            ClipParam::TransientEnvelope => self.slice.envelope = value,
+            ClipParam::Preserve => self.slice.preserve = Preserve::at_step(value),
+            ClipParam::TransientLoop => self.slice.transient_loop = TransientLoop::at_step(value),
+        }
     }
 
     /// The transients in sight, found or added, in order: none until the
@@ -915,5 +1185,110 @@ mod tests {
         );
         assert_eq!(bpm("Vocal 1.25.wav"), None);
         assert_eq!(bpm(""), None);
+    }
+
+    #[test]
+    fn modes_and_slice_settings_have_keys_steps_and_lengths() {
+        for mode in WarpMode::ALL {
+            assert_eq!(WarpMode::from_key(mode.key()), Some(mode));
+        }
+        assert!(!WarpMode::RePitch.transposes() && WarpMode::Slice.transposes());
+        for (i, preserve) in Preserve::ALL.into_iter().enumerate() {
+            assert_eq!(Preserve::from_key(preserve.key()), Some(preserve));
+            assert_eq!(preserve.step(), i);
+            assert_eq!(Preserve::at_step(i as f64 + 0.4), preserve);
+        }
+        for (i, looping) in TransientLoop::ALL.into_iter().enumerate() {
+            assert_eq!(TransientLoop::from_key(looping.key()), Some(looping));
+            assert_eq!(looping.step(), i);
+            assert_eq!(TransientLoop::at_step(i as f64 - 0.4), looping);
+        }
+        // Beyond the steps, the nearest end, and not a number, the first.
+        assert_eq!(Preserve::at_step(-3.0), Preserve::Transients);
+        assert_eq!(Preserve::at_step(99.0), Preserve::ThirtySecond);
+        assert_eq!(TransientLoop::at_step(f64::NAN), TransientLoop::Off);
+        let bar = Beats::new(3);
+        assert_eq!(Preserve::Transients.length(bar), None);
+        assert_eq!(Preserve::Bar.length(bar), Some(bar));
+        assert_eq!(Preserve::Half.length(bar), Some(Beats::new(2)));
+        assert_eq!(Preserve::Quarter.length(bar), Some(Beats::new(1)));
+        assert_eq!(Preserve::ThirtySecond.length(bar), Some(beats(0.125)));
+        assert_eq!(pitch_ratio(12.0, 0.0), 2.0);
+        assert_eq!(pitch_ratio(0.0, 0.0), 1.0);
+        assert!((pitch_ratio(-7.0, 50.0) - (-6.5f64 / 12.0).exp2()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_warp_s_transpose_detune_and_envelope_stay_in_range() {
+        let warp = Warp::new(0, Beats::ZERO, 120.0);
+        assert_eq!((warp.transpose, warp.detune), (0, 0));
+        assert_eq!(warp.slice, SliceSettings::default());
+        assert_eq!(warp.slice.transient_loop, TransientLoop::Forward);
+        assert_eq!(warp.slice.envelope, SliceSettings::ENVELOPE_MAX);
+        let ends = Warp {
+            transpose: -Warp::TRANSPOSE_MAX,
+            detune: Warp::DETUNE_MAX,
+            slice: SliceSettings {
+                envelope: 0.0,
+                ..warp.slice
+            },
+            ..warp.clone()
+        };
+        assert!(ends.is_valid());
+        let envelope = |envelope| Warp {
+            slice: SliceSettings {
+                envelope,
+                ..warp.slice
+            },
+            ..warp.clone()
+        };
+        for wrong in [
+            Warp {
+                transpose: 49,
+                ..warp.clone()
+            },
+            Warp {
+                detune: -51,
+                ..warp.clone()
+            },
+            envelope(100.5),
+            envelope(-0.5),
+            envelope(f64::NAN),
+        ] {
+            assert!(!wrong.is_valid(), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn the_clip_s_parameters_set_its_warp_s_settings_in_range_and_in_steps() {
+        let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+        for (param, value) in [
+            (ClipParam::Transpose, 7.4),
+            (ClipParam::Detune, -80.0),
+            (ClipParam::TransientEnvelope, 37.5),
+            (ClipParam::Preserve, 4.6),
+            (ClipParam::TransientLoop, 9.0),
+            (ClipParam::Gain, 0.5),
+            (ClipParam::Transpose, f64::NAN),
+        ] {
+            warp.set_param(param, value);
+        }
+        assert_eq!((warp.transpose, warp.detune), (7, -50));
+        assert_eq!(warp.slice.envelope, 37.5);
+        assert_eq!(warp.slice.preserve, Preserve::Sixteenth);
+        assert_eq!(warp.slice.transient_loop, TransientLoop::BackAndForth);
+        assert!(warp.is_valid());
+        let values = ClipParam::ALL.map(|param| warp.param(param));
+        assert_eq!(
+            values,
+            [
+                None,
+                Some(7.0),
+                Some(-50.0),
+                Some(37.5),
+                Some(5.0),
+                Some(2.0)
+            ]
+        );
     }
 }

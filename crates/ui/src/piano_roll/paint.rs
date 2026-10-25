@@ -3,7 +3,7 @@
 //! velocities or a controller's curve under them, and the corners. Only
 //! what's in sight is drawn.
 
-use egui::{Align2, FontId, Painter, Rect, Response, Shape, Stroke, StrokeKind, Vec2, pos2};
+use egui::{Align2, FontId, Painter, Rect, Response, Stroke, StrokeKind, Vec2, pos2};
 use musicable_commands::editor::Lane;
 use musicable_model::clip::{self, Controller, Note, Point};
 use musicable_model::time::{BeatRange, Beats};
@@ -11,6 +11,7 @@ use musicable_model::time::{BeatRange, Beats};
 use super::{Plan, Scene, Side};
 use crate::theme::Theme;
 use crate::timeline::{self, Timeline};
+use crate::widgets::drop_down_mark;
 
 /// The least room a note needs for its name, in points.
 const NAME_WIDTH: f32 = 28.0;
@@ -397,20 +398,7 @@ pub(super) fn label(painter: &Painter, scene: &Scene<'_>, chooser: &Response) {
         let under = pos2(at.x, name.bottom() + 2.0);
         painter.text(under, Align2::LEFT_TOP, detail, font, theme.ruler_text);
     }
-    // A triangle pointing down, after the name.
-    let size = theme.small_text * 0.5;
-    let left = name.right() + theme.padding;
-    let top = name.center().y - size / 4.0;
-    let triangle = vec![
-        pos2(left, top),
-        pos2(left + size, top),
-        pos2(left + size / 2.0, top + size / 2.0),
-    ];
-    painter.add(Shape::convex_polygon(
-        triangle,
-        theme.ruler_text,
-        Stroke::NONE,
-    ));
+    drop_down_mark(painter, theme, name);
     let y = painter.round_to_pixel_center(label.top() + 0.5);
     painter.hline(label.x_range(), y, Stroke::new(1.0, theme.divider));
 }

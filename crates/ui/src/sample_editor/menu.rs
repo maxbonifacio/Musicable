@@ -9,9 +9,12 @@
 //! moves the transient, or else those in the time selected, or all of
 //! them. The menu gives the Sample Editor the focus, so the commands
 //! without arguments act on what it has selected.
+//!
+//! And the menu of what the lane under the waveform can show.
 
-use egui::Ui;
-use musicable_commands::{Args, Command, CommandId, edit, rewarp, transient, warp};
+use egui::{Popup, Response, Role, Ui, WidgetInfo};
+use musicable_commands::{Args, Command, CommandId, edit, rewarp, transient, warp, warp_mode};
+use musicable_model::param::ClipParam;
 
 use super::{Hit, Scene, Spot, of, run};
 use crate::menus::context_menu;
@@ -137,4 +140,53 @@ fn in_time_selected(scene: &Scene<'_>, spot: Spot) -> bool {
     let inside = time.is_some_and(|time| time.start <= spot.own && spot.own <= time.end);
     let selected = warp::selected_transients(scene.project(), scene.editor());
     inside && selected.is_some_and(|(_, frames)| !frames.is_empty())
+}
+
+/// The menu of the clip's parameters whose curves the lane can show, which
+/// a click on its name, `chooser`, opens: those the clip's mode plays, then
+/// the rest of its warp's, which the clip keeps for the modes that play
+/// them.
+pub(super) fn lanes(chooser: &Response, scene: &Scene<'_>, actions: &mut Vec<Action>) {
+    let shown = scene.lane();
+    chooser.widget_info(|| WidgetInfo {
+        current_text_value: Some(shown.spec().name),
+        ..WidgetInfo::labeled(Role::ComboBox, true, "Lane")
+    });
+    let mode = scene.warp().map(|warp| warp.mode);
+    let (playing, rest): (Vec<ClipParam>, Vec<ClipParam>) =
+        (ClipParam::ALL.into_iter()).partition(|param| param.plays_in(mode));
+    Popup::menu(chooser).show(|ui| {
+        let mut item = |ui: &mut Ui, param: ClipParam| {
+            let name = param.spec().name;
+            let item = ui
+                .selectable_label(param == shown, name)
+                .on_hover_text(plays_in(param));
+            if item.clicked() && param != shown {
+                let args = Args::new()
+                    .with("param", param.key())
+                    .with("clip", scene.clip.id);
+                run(actions, warp_mode::SHOW_LANE, args);
+            }
+        };
+        for &param in &playing {
+            item(ui, param);
+        }
+        if !rest.is_empty() {
+            ui.separator();
+        }
+        for &param in &rest {
+            item(ui, param);
+        }
+    });
+}
+
+/// Which modes play `param`, as its entry in the menu of the lanes says.
+fn plays_in(param: ClipParam) -> &'static str {
+    match param {
+        ClipParam::Gain => "Plays in every mode, and while the clip isn't warped",
+        ClipParam::Transpose | ClipParam::Detune => "Plays in every mode but Re-Pitch",
+        ClipParam::TransientEnvelope | ClipParam::Preserve | ClipParam::TransientLoop => {
+            "Plays in Slice"
+        }
+    }
 }

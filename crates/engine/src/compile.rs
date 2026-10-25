@@ -32,6 +32,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
+use musicable_model::time::TempoMap;
 use musicable_model::{
     AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, MidiInput,
     Project, Track, TrackId, TrackKind,
@@ -550,7 +551,7 @@ fn build(
     let silenced = project.silenced();
     let mut tapped = HashMap::new();
     for track in &project.tracks {
-        let player = clip_player(track, media).map(|player| {
+        let player = clip_player(track, media, &project.tempo).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
             if let Some(tone) = track.tone {
                 let sine = Sine::new(tone.frequency, tone.level);
@@ -686,9 +687,9 @@ fn native_stage(channel: Channel<'_>, slot: Slot) -> Option<Box<dyn Node>> {
     }
 }
 
-/// The clip player at the head of an audio or MIDI track's strip. Buses
-/// have none.
-fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
+/// The clip player at the head of an audio or MIDI track's strip, in a song
+/// whose tempo map is `tempo`. Buses have none.
+fn clip_player(track: &Track, media: &Media, tempo: &TempoMap) -> Option<Box<dyn Node>> {
     // In order of start, so the clips sum in the same order however the
     // project lists them.
     let mut clips: Vec<_> = track.clips.iter().collect();
@@ -697,7 +698,7 @@ fn clip_player(track: &Track, media: &Media) -> Option<Box<dyn Node>> {
         TrackKind::Audio => {
             let mut player = AudioClips::new();
             for clip in clips {
-                player.add(clip, media.get(clip.id).cloned());
+                player.add(clip, media.get(clip.id).cloned(), tempo);
             }
             Some(Box::new(player))
         }
