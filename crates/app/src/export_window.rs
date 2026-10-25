@@ -1,6 +1,6 @@
 //! The export window: what to render to audio files and how, how the export
-//! under way is going, and how the last one went. `docs/app.md` describes
-//! it.
+//! under way is going, and how the last one went. The manual's Exporting
+//! audio page (`manual/src/using/exporting.md`) describes it.
 
 use std::collections::BTreeSet;
 

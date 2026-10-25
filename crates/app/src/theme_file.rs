@@ -1,6 +1,6 @@
 //! The theme in use: a built-in one, or a theme file in the themes folder,
-//! which is read again whenever it changes. `docs/app.md` describes the
-//! files.
+//! which is read again whenever it changes. The manual's Themes page
+//! (`manual/src/customising/themes.md`) describes the files.
 
 use std::ffi::OsStr;
 use std::fs;

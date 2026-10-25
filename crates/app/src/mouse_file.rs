@@ -1,6 +1,6 @@
 //! The user's mouse map file: their changes to what the mouse does, made on
-//! the Settings window's Mouse page or by editing the file. `docs/app.md`
-//! describes the file.
+//! the Settings window's Mouse page or by editing the file. The manual's
+//! Mouse page (`manual/src/customising/mouse.md`) describes the file.
 
 use std::fs;
 use std::io;

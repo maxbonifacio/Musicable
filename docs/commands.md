@@ -8,8 +8,8 @@ shortcut is just editing the keymap. This page covers
 the commands so far, the editor's state they read and change, the
 transactions they change the project through, undo and redo, how the app
 runs them, key chords and the keymap file. How the app's window hands key
-presses to the keymap, and how keys are changed there, is in
-[app.md](app.md#keys).
+presses to the keymap is in [app.md](app.md#keys), and how people change
+their keys in the manual's [Keys](../manual/src/customising/keys.md) page.
 
 ## Commands
 
@@ -110,9 +110,10 @@ These take arguments, for the ruler's gestures and the tempo field:
 
 Space plays from the start marker, as in Live, so playing again starts
 where the last play did. The `play_from` setting
-([app.md](app.md#settings-and-your-keymap)) has it play from wherever the
-playhead stopped instead. Live has no keys for stop and tempo; the ones
-chosen do nothing in Live outside its MIDI note editor.
+([Settings](../manual/src/customising/settings.md#behaviour) in the manual)
+has it play from wherever the playhead stopped instead. Live has no keys
+for stop and tempo; the ones chosen do nothing in Live outside its MIDI
+note editor.
 
 Stopping stops recording too. `transport.toggle_punch_in` and
 `transport.toggle_punch_out` (Toggle Punch In, Toggle Punch Out) have
@@ -866,103 +867,64 @@ instrument plays them as they are after each change and each undo.
 
 ## Key chords
 
-A key chord is its modifiers and its key, joined by `+`: `Space`, `Ctrl+L`,
-`Ctrl+Shift+Up`. Case doesn't matter and the modifiers can come in any
-order. Musicable writes them as Ctrl, Alt, Shift, Cmd.
-
-| Modifier | Also written | Notes |
-|---|---|---|
-| `Ctrl` | `Control` | |
-| `Alt` | `Option` | |
-| `Shift` | | |
-| `Cmd` | `Command`, `Super`, `Win` | Command on macOS, the Windows key on Windows |
-
-The keys:
-
-- Letters `A` to `Z` and digits `0` to `9`.
-- `F1` to `F24`.
-- `Space`, `Enter`, `Tab`, `Backspace`, `Escape`, `Insert`, `Delete`, `Home`,
-  `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right`.
-- Punctuation, named after the character the key types without Shift on a US
-  layout: `Minus`, `Equals`, `OpenBracket`, `CloseBracket`, `Backslash`,
-  `Semicolon`, `Quote`, `Backtick`, `Comma`, `Period`, `Slash`. The character
-  itself works too: `Ctrl+.` is `Ctrl+Period`. The `+` key is `Equals` (or
-  `NumpadAdd`), since `+` joins the parts of a chord.
-- The numeric keypad: `Numpad0` to `Numpad9`, `NumpadAdd`, `NumpadSubtract`,
-  `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`, `NumpadEnter`.
-- Other spellings: `Esc`, `Return`, `Del`, `PgUp`, `PgDn`, and `ArrowUp`,
-  `ArrowDown`, `ArrowLeft`, `ArrowRight`.
-
-How key presses on other keyboard layouts get these names is in
-[app.md](app.md#keyboard-layouts). The default keymap uses Ctrl for now; a macOS default with Cmd comes with
-macOS support.
+A key chord is a `KeyChord`: its `Modifiers` and its `Key`, which keymap
+files write joined by `+`, as `Space`, `Ctrl+L` or `Ctrl+Shift+Up`, in any
+case and with the modifiers in any order. Displaying a chord writes it with
+the modifiers as Ctrl, Alt, Shift, Cmd
+([`key.rs`](../crates/commands/src/key.rs)). [Key
+names](../manual/src/customising/keys.md#key-names) in the manual lists
+the modifiers and the keys, with the other spellings they take, and
+[app.md](app.md#keyboard-layouts) says how key presses on other keyboard
+layouts get their names. The default keymap uses Ctrl for now; a macOS
+default with Cmd comes with macOS support.
 
 ## The keymap file
 
 The default keymap is
 [`crates/commands/keymaps/default.toml`](../crates/commands/keymaps/default.toml),
-built into the app. Your keymap file holds only your changes to it:
+built into the app, and a user's keymap file holds only their changes to it,
+as [Your keymap file](../manual/src/customising/keys.md#your-keymap-file) in
+the manual describes. `KeymapFile` is such a file:
 
-```toml
-format = "musicable-keymap"
-version = 1
-
-[bindings]
-"transport.toggle_metronome" = ["M", "Ctrl+M"]
-"transport.toggle_loop" = []
-
-[panels.piano_roll]
-"notes.toggle_draw" = ["D"]
-```
-
-- Each line gives a command the chords that run it, in place of its default
-  ones. A single chord can be written without the list: `"transport.stop" =
-  "Escape"`.
-- An empty list, `[]`, unbinds the command.
-- Commands that aren't listed keep their default chords.
-- A chord runs one command. Giving a chord to one command takes it from the
-  command that had it.
-- Bare dotted keys work too: `transport.play = ["P"]` is the same as
-  `"transport.play" = ["P"]`.
-- `[bindings]` holds the keys that work everywhere. A panel's table,
-  `[panels.piano_roll]` and the others (`arrangement`, `mixer`, `devices`,
-  `browser`, `history`), holds the keys that work in that panel only, while
-  it has the focus, where they win over the ones everywhere: in the piano
-  roll, D runs Draw Mode above whatever it runs everywhere else. Its lines
-  give the command its chords in that panel, in place of its default ones
-  there. A chord runs one command in each place. The default keymap's
-  arrow keys for notes are the piano roll's, and Up and Down are Undo and
-  Redo in the History panel.
-- `format` and `version` are optional when you write the file by hand.
-  Musicable writes both, like the header of a project file.
-
-When Musicable saves your keymap, it writes only the commands whose chords
-differ from the default, so new default shortcuts in later versions still
-reach you.
+- `KeymapFile::parse` reads one. An error means the file as a whole can't be
+  used ([below](#mistakes)); a mistake in one entry comes back with the file,
+  as a `Problem`, and the entry is skipped.
+- Entries under `[bindings]` work everywhere (`Scope::Everywhere`), and
+  those under a panel's table in `[panels]` in that panel only, while it has
+  the focus (`Scope::Panel`), where they win over the ones everywhere. A
+  chord runs one command in each place. The default keymap's arrow keys for
+  notes are the piano roll's, and Up and Down are Undo and Redo in the
+  History panel.
+- The app writes only the commands whose chords differ from the default,
+  everywhere or in a panel ([below](#changing-keys-in-the-app)), so new
+  default shortcuts in later versions still reach the user. `format` and
+  `version` are optional in a file written by hand; Musicable writes both,
+  like the header of a project file.
 
 ### Mistakes
 
-A line with a mistake in it, such as a misspelt key, is skipped and the
-command keeps its default chords. A chord that two lines of one table claim
-runs neither command there. A table for a panel Musicable doesn't have, or a
-panel's entry that isn't a table, is skipped too. Musicable reports both and loads the rest of the file. A binding for
-a command that doesn't exist is kept, in case a later version or a plugin
-adds it, and reported too. The Settings window's Keys page (Options >
-Keyboard Shortcuts) lists them all, with a button to give a chord two lines
-claim to one of them.
+`KeymapFile::parse` reports a `Problem` for:
 
-A file that isn't valid TOML, has an unknown field or comes from a newer
-version is ignored as a whole: Musicable uses the default keymap and shows
-the error.
+- an entry that isn't a chord or a list of them, or has a chord that
+  doesn't parse, which leaves the command its default chords;
+- a chord that two entries of one table claim, which then runs neither
+  command there;
+- a table for a panel Musicable doesn't have, or a panel's entry that isn't
+  a table, which is skipped.
+
+A binding for a command this version doesn't have isn't a problem: it's
+kept, in case a later version or a plugin adds it, and `Keymap::dangling`
+lists it. A `KeymapFileError` means the file as a whole can't be used: it
+isn't valid TOML, has an unknown field, names another `format`, or comes
+from a newer version. Musicable then uses the default keymap and shows the
+error. The Settings window's Keys page lists the problems and the dangling
+bindings ([Mistakes](../manual/src/customising/keys.md#mistakes) in the
+manual).
 
 ### Trying it out
 
-The app reads your keymap file from its config folder at startup
-([app.md](app.md#settings-and-your-keymap)). The Settings window's Keys
-page (Options > Keyboard Shortcuts) shows the keys and any mistakes, and
-saves every change you make there to the file
-([app.md](app.md#changing-keys)). Without opening the window, this prints
-the bindings a keymap file gives, along with any mistakes in it:
+`musicable keymap [FILE]` prints the chords a keymap file gives every
+command, along with any mistakes in it, without opening the window:
 
 ```sh
 cargo run -p musicable-app -- keymap path/to/keymap.toml
@@ -973,8 +935,9 @@ only say which, as in `Up in piano_roll`.
 
 ## Changing keys in the app
 
-The Settings window's Keys page ([app.md](app.md#changing-keys)) builds on
-these:
+The Settings window's Keys page
+([Keys](../manual/src/customising/keys.md#the-keys-page) in the manual)
+builds on these:
 
 - `Keymap::bind` returns the command a chord had, which the page warns
   about before it takes the chord, and `bind_in` binds one in a panel
