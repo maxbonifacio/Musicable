@@ -184,6 +184,13 @@ pub enum Action {
     /// Run a command with arguments, as the arrangement's gestures and
     /// context menus do.
     RunWith(CommandId, Args),
+    /// Run commands in order, all or none, as one step in the undo history
+    /// called `name`, as a gesture that does more than one command's work
+    /// does.
+    RunBatch {
+        name: String,
+        commands: Vec<(CommandId, Args)>,
+    },
     /// Read these audio files and insert them, as
     /// [`arrange::INSERT_AUDIO`] does: on `track` at `at` when they're
     /// dropped there.

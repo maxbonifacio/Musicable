@@ -51,6 +51,9 @@
 | Delete Warp Markers |  | `warp.delete_markers` |
 | Nudge Warp Markers Left | Left in the Sample Editor panel | `warp.nudge_left` |
 | Nudge Warp Markers Right | Right in the Sample Editor panel | `warp.nudge_right` |
+| Insert Transient | Ctrl+Shift+I in the Sample Editor panel | `transient.insert` |
+| Delete Transients | Ctrl+Shift+Backspace in the Sample Editor panel | `transient.delete` |
+| Reset Transients |  | `transient.reset` |
 
 ### Notes
 

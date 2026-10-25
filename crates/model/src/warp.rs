@@ -14,6 +14,14 @@
 //! exactly where it's put. The [`WarpMode`] says how the audio between
 //! markers plays: Re-Pitch, so far, which resamples it, so its pitch
 //! follows its speed, as on a turntable.
+//!
+//! A warp also keeps its file's transients, the [`Onsets`]: where the
+//! sounds in it start, as analysis found them and the user changed them.
+//! They're in frames of the file, so moving markers never moves them, and
+//! the clip keeps its own, so a better analyser later never moves them
+//! either.
+
+use std::sync::Arc;
 
 use crate::time::Beats;
 
@@ -28,6 +36,9 @@ pub struct Warp {
     /// [`MAX_TEMPO`](Self::MAX_TEMPO). With more, the markers say how fast
     /// the file goes, and this waits for all but one of them to go.
     pub tempo: f64,
+    /// The file's transients, or `None` until the clip takes them from
+    /// analysis, which it does once: they're its own from then on.
+    pub onsets: Option<Onsets>,
 }
 
 /// A frame of the file, pinned to the beat of the clip's own time it plays
@@ -56,6 +67,198 @@ impl WarpMode {
         match self {
             Self::RePitch => "Re-Pitch",
         }
+    }
+}
+
+/// A transient: where a sound in the file starts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Onset {
+    /// The frame of the file its attack starts at.
+    pub frame: u64,
+    /// How much the spectrum rose there, as a fraction of the file's
+    /// largest rise, from 0 to 1.
+    pub strength: f32,
+    /// How sharp its attack is, from 0 for a soft start to 1 for a hit.
+    pub percussiveness: f32,
+    pub origin: Origin,
+}
+
+/// Where a transient came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Analysis found it.
+    Found,
+    /// The user added it, or moved it there.
+    Added,
+    /// Analysis found it, and the user deleted it or moved it away. It's
+    /// kept out of sight, so Reset Transients can bring it back.
+    Hidden,
+}
+
+/// A warped clip's transients, in order of frame, one at most at a frame.
+/// Clones share them, so the undo history and copies of the clip hold
+/// thousands without copying them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Onsets(Arc<[Onset]>);
+
+impl Onsets {
+    /// What the user's transients count as: a sharp hit, as strong as the
+    /// file's strongest.
+    pub const ADDED_STRENGTH: f32 = 1.0;
+    pub const ADDED_PERCUSSIVENESS: f32 = 1.0;
+
+    /// `onsets`, in order of frame, keeping the first at each frame.
+    pub fn new(onsets: impl IntoIterator<Item = Onset>) -> Self {
+        let mut onsets: Vec<Onset> = onsets.into_iter().collect();
+        onsets.sort_by_key(|o| o.frame);
+        onsets.dedup_by_key(|o| o.frame);
+        Self(onsets.into())
+    }
+
+    /// Every one, the hidden ones too, in order.
+    pub fn all(&self) -> &[Onset] {
+        &self.0
+    }
+
+    /// The ones in sight, found or added, in order.
+    pub fn visible(&self) -> impl DoubleEndedIterator<Item = &Onset> + '_ {
+        self.0.iter().filter(|o| o.origin != Origin::Hidden)
+    }
+
+    /// Whether they keep their rules: frames rising, and strengths and
+    /// percussiveness from 0 to 1.
+    pub fn is_valid(&self) -> bool {
+        let unit = |value: f32| (0.0..=1.0).contains(&value);
+        self.0.windows(2).all(|w| w[0].frame < w[1].frame)
+            && self
+                .0
+                .iter()
+                .all(|o| unit(o.strength) && unit(o.percussiveness))
+    }
+
+    /// The place among all of the one at `frame`, if there's one.
+    fn find(&self, frame: u64) -> Result<usize, usize> {
+        self.0.binary_search_by_key(&frame, |o| o.frame)
+    }
+
+    /// The place among all of the one in sight at `frame`, if there's one.
+    fn find_visible(&self, frame: u64) -> Option<usize> {
+        self.find(frame)
+            .ok()
+            .filter(|&i| self.0[i].origin != Origin::Hidden)
+    }
+
+    /// Adds a transient at `frame`, as the user's: one hidden there comes
+    /// back as it was found. Returns `false`, changing nothing, where
+    /// there's one in sight already.
+    pub fn insert(&mut self, frame: u64) -> bool {
+        let mut onsets = self.0.to_vec();
+        match self.find(frame) {
+            Ok(i) if onsets[i].origin == Origin::Hidden => onsets[i].origin = Origin::Found,
+            Ok(_) => return false,
+            Err(i) => onsets.insert(i, Self::added(frame)),
+        }
+        self.0 = onsets.into();
+        true
+    }
+
+    /// A transient at `frame` that the user added.
+    fn added(frame: u64) -> Onset {
+        Onset {
+            frame,
+            strength: Self::ADDED_STRENGTH,
+            percussiveness: Self::ADDED_PERCUSSIVENESS,
+            origin: Origin::Added,
+        }
+    }
+
+    /// The frames the transient in sight at `frame` can move between, not
+    /// taking them in: those of the ones in sight either side, or the
+    /// file's ends.
+    pub fn room(&self, frame: u64) -> Option<(Option<u64>, Option<u64>)> {
+        let i = self.find_visible(frame)?;
+        let before = self.0[..i]
+            .iter()
+            .rev()
+            .find(|o| o.origin != Origin::Hidden);
+        let after = self.0[i + 1..].iter().find(|o| o.origin != Origin::Hidden);
+        Some((before.map(|o| o.frame), after.map(|o| o.frame)))
+    }
+
+    /// Moves the transient in sight at `from` to `to`, keeping its strength
+    /// and how percussive it is. A found one is hidden where it was and
+    /// added where it goes, so Reset Transients can bring it back, and one
+    /// hidden at `to` comes back instead. Returns `false`, changing
+    /// nothing, if there's none at `from`, or `to` isn't between the frames
+    /// of those in sight either side.
+    pub fn move_to(&mut self, from: u64, to: u64) -> bool {
+        let Some((before, after)) = self.room(from) else {
+            return false;
+        };
+        let between = before.is_none_or(|b| b < to) && after.is_none_or(|a| to < a);
+        if from == to || !between {
+            return false;
+        }
+        let mut onsets = self.0.to_vec();
+        let i = self.find(from).expect("one is in sight there");
+        let moved = onsets[i];
+        match moved.origin {
+            Origin::Found => onsets[i].origin = Origin::Hidden,
+            _ => {
+                onsets.remove(i);
+            }
+        }
+        match onsets.binary_search_by_key(&to, |o| o.frame) {
+            // Hidden: nothing in sight is between.
+            Ok(j) => onsets[j].origin = Origin::Found,
+            Err(j) => onsets.insert(
+                j,
+                Onset {
+                    frame: to,
+                    origin: Origin::Added,
+                    ..moved
+                },
+            ),
+        }
+        self.0 = onsets.into();
+        true
+    }
+
+    /// Deletes the transients in sight at `frames`: found ones are hidden,
+    /// so Reset Transients can bring them back, and added ones go. Returns
+    /// how many there were.
+    pub fn delete(&mut self, frames: &[u64]) -> usize {
+        let mut onsets = self.0.to_vec();
+        let mut deleted = 0;
+        for &frame in frames {
+            if let Ok(i) = onsets.binary_search_by_key(&frame, |o| o.frame) {
+                match onsets[i].origin {
+                    Origin::Found => onsets[i].origin = Origin::Hidden,
+                    Origin::Added => {
+                        onsets.remove(i);
+                    }
+                    Origin::Hidden => continue,
+                }
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            self.0 = onsets.into();
+        }
+        deleted
+    }
+
+    /// Goes back to the transients analysis found: the added ones go, and
+    /// the hidden ones come back.
+    pub fn reset(&mut self) {
+        let onsets: Vec<Onset> = (self.0.iter())
+            .filter(|o| o.origin != Origin::Added)
+            .map(|&o| Onset {
+                origin: Origin::Found,
+                ..o
+            })
+            .collect();
+        self.0 = onsets.into();
     }
 }
 
@@ -101,11 +304,12 @@ impl Warp {
             mode: WarpMode::RePitch,
             markers: vec![WarpMarker { frame, beat }],
             tempo: clamp_tempo(tempo),
+            onsets: None,
         }
     }
 
     /// Whether the warp keeps its rules: a marker or more, their frames and
-    /// beats rising, and a tempo in range.
+    /// beats rising, a tempo in range, and transients that keep theirs.
     pub fn is_valid(&self) -> bool {
         !self.markers.is_empty()
             && self
@@ -113,6 +317,13 @@ impl Warp {
                 .windows(2)
                 .all(|w| w[0].frame < w[1].frame && w[0].beat < w[1].beat)
             && (Self::MIN_TEMPO..=Self::MAX_TEMPO).contains(&self.tempo)
+            && self.onsets.as_ref().is_none_or(Onsets::is_valid)
+    }
+
+    /// The transients in sight, found or added, in order: none until the
+    /// clip takes them from analysis.
+    pub fn transients(&self) -> impl DoubleEndedIterator<Item = &Onset> + '_ {
+        self.onsets.iter().flat_map(Onsets::visible)
     }
 
     /// The stretches that play at one speed, in order, for a file at
@@ -216,6 +427,25 @@ impl Warp {
                 .markers
                 .get(index)
                 .is_none_or(|next| frame < next.frame);
+        if !fits {
+            return None;
+        }
+        self.markers.insert(index, WarpMarker { frame, beat });
+        Some(index)
+    }
+
+    /// Adds a marker pinning the file's `frame` where it plays now, to the
+    /// nearest tick, as for a marker on a transient. Returns its index, or
+    /// `None`, changing nothing, where there's a marker at that frame or
+    /// that tick already.
+    pub fn insert_at_frame(&mut self, frame: u64, sample_rate: u32) -> Option<usize> {
+        let beat = Beats::from_f64(self.beat_at(frame as f64, sample_rate));
+        let index = self.markers.partition_point(|m| m.frame < frame);
+        let fits = (index == 0 || self.markers[index - 1].beat < beat)
+            && self
+                .markers
+                .get(index)
+                .is_none_or(|next| frame < next.frame && beat < next.beat);
         if !fits {
             return None;
         }
@@ -572,6 +802,98 @@ mod tests {
         // stays in range.
         assert!(!warp.scale(1_000.0 / 45.0, Beats::ZERO, RATE));
         assert!(!warp.scale(f64::NAN, Beats::ZERO, RATE));
+    }
+
+    #[test]
+    fn a_marker_on_a_frame_pins_it_where_it_plays() {
+        let mut warp = two_tempos();
+        // Halfway through the second stretch, at 60 BPM.
+        assert_eq!(warp.insert_at_frame(72_000, RATE), Some(2));
+        assert_eq!(warp.markers[2], marker(72_000, 2.5));
+        assert_eq!(warp.insert_at_frame(72_000, RATE), None, "one is there");
+        // Before the first, at its stretch's 120 BPM, and after the last.
+        assert_eq!(warp.insert_at_frame(200_000, RATE), Some(4));
+        assert_eq!(warp.markers[4].beat, beats(3.0 + 104_000.0 / 48_000.0));
+        let mut warp = Warp::new(24_000, beats(1.0), 120.0);
+        assert_eq!(warp.insert_at_frame(0, RATE), Some(0));
+        assert_eq!(warp.markers[0], marker(0, 0.0));
+        assert!(warp.is_valid());
+    }
+
+    fn found(frame: u64) -> Onset {
+        Onset {
+            frame,
+            strength: 0.5,
+            percussiveness: 0.25,
+            origin: Origin::Found,
+        }
+    }
+
+    fn visible(onsets: &Onsets) -> Vec<(u64, Origin)> {
+        onsets.visible().map(|o| (o.frame, o.origin)).collect()
+    }
+
+    #[test]
+    fn transients_are_kept_in_order_once_each() {
+        let onsets = Onsets::new([found(300), found(100), found(300), found(200)]);
+        let frames: Vec<u64> = onsets.all().iter().map(|o| o.frame).collect();
+        assert_eq!(frames, [100, 200, 300]);
+        assert!(onsets.is_valid());
+        let loud = Onset {
+            strength: 1.5,
+            ..found(400)
+        };
+        assert!(!Onsets::new([loud]).is_valid());
+        let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+        assert_eq!(warp.transients().count(), 0, "none until analysis");
+        warp.onsets = Some(onsets);
+        assert_eq!(warp.transients().count(), 3);
+        assert!(warp.is_valid());
+    }
+
+    #[test]
+    fn deleted_and_moved_transients_hide_what_analysis_found_until_a_reset() {
+        let mut onsets = Onsets::new([found(100), found(200), found(300)]);
+        assert_eq!(onsets.delete(&[200, 250]), 1);
+        assert_eq!(
+            visible(&onsets),
+            [(100, Origin::Found), (300, Origin::Found)]
+        );
+        assert_eq!(onsets.delete(&[200]), 0, "hidden already");
+        // Moving one keeps its strength where it goes, and it can't pass
+        // those in sight either side.
+        assert!(!onsets.move_to(100, 300));
+        assert!(!onsets.move_to(100, 100));
+        assert!(onsets.move_to(100, 150));
+        assert_eq!(onsets.all().len(), 4);
+        let moved = onsets.visible().next().copied().unwrap();
+        assert_eq!((moved.frame, moved.origin), (150, Origin::Added));
+        assert_eq!((moved.strength, moved.percussiveness), (0.5, 0.25));
+        // Past the hidden one at 200, which stays hidden.
+        assert!(onsets.move_to(150, 250));
+        assert_eq!(
+            visible(&onsets),
+            [(250, Origin::Added), (300, Origin::Found)]
+        );
+        // Onto it, which brings it back instead.
+        assert!(onsets.move_to(250, 200));
+        assert_eq!(
+            visible(&onsets),
+            [(200, Origin::Found), (300, Origin::Found)]
+        );
+        // An added one goes for good, and a hidden one comes back where one
+        // is added.
+        assert!(onsets.insert(50));
+        let added = onsets.visible().next().copied().unwrap();
+        assert_eq!(added.origin, Origin::Added);
+        assert_eq!(added.strength, Onsets::ADDED_STRENGTH);
+        assert!(!onsets.insert(50));
+        assert!(onsets.insert(100));
+        assert_eq!(onsets.visible().nth(1).unwrap().origin, Origin::Found);
+        onsets.reset();
+        let frames: Vec<u64> = onsets.visible().map(|o| o.frame).collect();
+        assert_eq!(frames, [100, 200, 300]);
+        assert_eq!(onsets, Onsets::new([found(100), found(200), found(300)]));
     }
 
     #[test]

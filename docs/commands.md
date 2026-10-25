@@ -329,8 +329,9 @@ transaction, so a drag is one step to undo.
 | `clip.open` | Open in Sample Editor | `clip` | Shows an audio clip in the Sample Editor, gives it the focus, and shows the Sample Editor |
 | `clip.set_warp` | Warp | `on`?, `clip`? | Turns the clip's Warp on or off, or the other way from now without `on` |
 | `clip.set_gain` | Set Clip Gain | `gain`, `clip`? | Sets the clip's gain, linear, from 0 to about 15.85 (+24 dB), where its gain curve doesn't say otherwise |
-| `warp.select_markers` | Select Warp Markers | `markers`, `clip`?, `toggle`? | Selects the markers, or adds them to the selection or takes them away, and gives the Sample Editor the focus |
-| `warp.insert_markers` | Insert Warp Marker | `at`?, `clip`? | Adds a marker at each position, or at the start marker without them, pinning the audio that plays there, and selects them; gives back where they went |
+| `warp.select_markers` | Select Warp Markers | `markers`, `clip`?, `toggle`? | Selects the markers, or adds them to the selection or takes them away, and gives the Sample Editor the focus; selecting just them takes away the time selected |
+| `warp.select_time` | Select Time in Sample Editor | `start`, `end`, `clip`? | Selects a stretch of the clip's own time, with the markers in it, as a drag across the waveform does; its transients are the selected ones. At the start, it selects nothing |
+| `warp.insert_markers` | Insert Warp Marker | `at`?, `frames`?, `clip`? | Adds a marker at each position, pinning the audio that plays there, and at each of the file's frames, pinning it where it plays, or without them at each transient in the time selected, or else at the start marker, and selects them; gives back where they went |
 | `warp.move_markers` | Move Warp Markers | `markers`, `by`, `clip`? | Moves markers some beats later or earlier, stretching the audio either side, as far as they can go before the markers either side or a tempo out of range; gives back how far they went |
 | `warp.move_audio` | Move Audio Under Warp Marker | `marker`, `frame`, `clip`? | Has the file's frame `frame` play at the marker, which stays where it is; the frame must be between those of the markers either side |
 | `warp.delete_markers` | Delete Warp Markers | `markers`?, `clip`? | Deletes the markers, or the selected ones without them; a warped clip keeps its first if they're all of them |
@@ -355,7 +356,7 @@ these while it has the focus. The Clip menu has them too.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `warp.insert_markers` | Insert Warp Marker | Puts a marker at the start marker | Ctrl+I | Ctrl+I |
+| `warp.insert_markers` | Insert Warp Marker | Puts a marker at each transient in the time selected, or else at the start marker | Ctrl+I | Ctrl+I |
 | `warp.nudge_left` | Nudge Warp Markers Left | Moves the selected markers a step of the grid earlier | Left | Left |
 | `warp.nudge_right` | Nudge Warp Markers Right | A step of the grid later | Right | Right |
 | `warp.double_tempo` | Double Clip Tempo | Doubles the clip's tempo, so its audio plays half as fast, over twice the beats | none | ×2 |
@@ -363,7 +364,34 @@ these while it has the focus. The Clip menu has them too.
 
 The grid's step is the one the Sample Editor shows where the first
 selected marker is, at its zoom. Delete and Select All delete and select
-its markers while it has the focus ([Edit](#edit)).
+its markers while it has the focus ([Edit](#edit)), and Select All selects
+all the clip's time too.
+
+### Transients
+
+A warped clip keeps its file's transients, where the sounds in it start,
+as analysis found them, with the user's changes
+([project-format.md](project-format.md#track)). These change them, for
+the Sample Editor's gestures, scripts and agents
+(`crates/commands/src/transient.rs`). Like the warping commands, each takes
+the clip as `clip`, or the one the Sample Editor shows without it, and
+names transients by their frames in the file. A clip whose file hasn't been
+analysed yet has none to change, which is an error.
+
+| Command | Title | Arguments | What it does | Default key |
+|---|---|---|---|---|
+| `transient.insert` | Insert Transient | `frames`?, `clip`? | Adds a transient at each frame, or at the start marker without them; gives back the frames it added at | Ctrl+Shift+I |
+| `transient.move` | Move Transient | `frame`, `to`, `clip`? | Moves the transient at `frame` to `to`, between the transients either side | none |
+| `transient.delete` | Delete Transients | `frames`?, `clip`? | Deletes the transients at the frames, or those in the time selected without them; gives back how many | Ctrl+Shift+Backspace |
+| `transient.reset` | Reset Transients | `clip`? | Goes back to the transients analysis found, without the user's changes | none |
+
+Deleting a transient analysis found hides it, and so does moving it, so
+Reset Transients can bring it back even when the file's analysis is gone.
+The keys are Live's, and the Sample Editor's own, and the Clip menu has
+these but Move Transient. `warp.take_transients` isn't a command: it gives
+the warped clips that haven't any yet the transients analysis has found, as
+a change the project follows rather than a step to undo, and the app calls
+it as analyses arrive and the project changes.
 
 ### Locator
 

@@ -163,6 +163,7 @@ impl Editor {
         if shown.clip != Some(clip.id) {
             shown.clip = Some(clip.id);
             shown.markers.clear();
+            shown.time = None;
             shown.viewport.show(clip.range());
         }
         self.clip_editor = panel::SAMPLE_EDITOR;
@@ -250,11 +251,15 @@ impl Editor {
         match audio {
             Some(audio) => match &audio.warp {
                 Some(warp) => (shown.markers).retain(|&beat| warp.marker_at(beat).is_some()),
-                None => shown.markers.clear(),
+                None => {
+                    shown.markers.clear();
+                    shown.time = None;
+                }
             },
             None => {
                 shown.clip = None;
                 shown.markers.clear();
+                shown.time = None;
                 if self.focus == Focus::SAMPLE_EDITOR {
                     self.focus = Focus::ARRANGEMENT;
                 }
@@ -411,9 +416,9 @@ impl PianoRoll {
 }
 
 /// What the Sample Editor edits: the audio clip it shows, its selected warp
-/// markers, and its zoom and scrolling. Clicking its waveform moves the
-/// start marker, as clicking the arrangement does, and Insert Warp Marker
-/// adds a marker there.
+/// markers and time, and its zoom and scrolling. Clicking its waveform
+/// moves the start marker, as clicking the arrangement does, and Insert
+/// Warp Marker adds a marker there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SampleEditor {
     /// The audio clip it shows: the one selected or opened last. Always one
@@ -422,6 +427,10 @@ pub struct SampleEditor {
     /// The selected warp markers of that clip, by their beats in its own
     /// time, which are each marker's own.
     pub markers: BTreeSet<Beats>,
+    /// The stretch of the warped clip's own time selected, never empty: its
+    /// transients are the selected ones, which Insert Warp Marker puts
+    /// markers at.
+    pub time: Option<BeatRange>,
     /// The zoom and the scrolling sideways, in song positions, as the
     /// arrangement's.
     pub viewport: Viewport,
@@ -433,6 +442,7 @@ impl Default for SampleEditor {
         Self {
             clip: None,
             markers: BTreeSet::new(),
+            time: None,
             viewport: Viewport {
                 zoom: 62.5,
                 ..Viewport::default()

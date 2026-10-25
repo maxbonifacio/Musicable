@@ -1,0 +1,103 @@
+{
+  "format": "musicable-project",
+  "version": 12,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 133.0
+      },
+      {
+        "at": 5160960,
+        "bpm": 87.5
+      },
+      {
+        "at": 10429440,
+        "bpm": 174.25
+      },
+      {
+        "at": 20180160,
+        "bpm": 99.99
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      },
+      {
+        "bar": 4,
+        "numerator": 6,
+        "denominator": 8
+      },
+      {
+        "bar": 8,
+        "numerator": 7,
+        "denominator": 8
+      },
+      {
+        "bar": 10,
+        "numerator": 3,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 9031680,
+    "end": 11289600
+  },
+  "looping": true,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Lead",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 392.0,
+        "level": 0.25
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "workspace": null
+}

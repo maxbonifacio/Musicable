@@ -1,0 +1,276 @@
+{
+  "format": "musicable-project",
+  "version": 12,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 999.0
+      },
+      {
+        "at": 1,
+        "bpm": 20.0
+      },
+      {
+        "at": 9007199254740991,
+        "bpm": 33.33333333333333
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 255,
+        "denominator": 1
+      },
+      {
+        "bar": 1,
+        "numerator": 1,
+        "denominator": 64
+      },
+      {
+        "bar": 446785660999,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 9007199254740991,
+    "end": -9007199254740991
+  },
+  "looping": true,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 12,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "tracks": [
+    {
+      "id": 6,
+      "name": "  ",
+      "kind": "midi",
+      "gain": 0.1,
+      "pan": 0.0,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 0.0,
+        "level": 1.0
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "\"Quotes\" and \\backslashes\\",
+      "kind": "midi",
+      "gain": 1.1754944e-38,
+      "pan": 0.0,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 1.7976931348623157e+308,
+        "level": -3.4028235e+38
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Tab\tnew\nline\r",
+      "kind": "return",
+      "gain": 1e-45,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 5e-324,
+        "level": -0.0
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 4,
+      "name": "Ünïcödé • 音楽 • 🎛️",
+      "kind": "group",
+      "gain": 3.4028235e+38,
+      "pan": 0.0,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": -440.0,
+        "level": -7.038531e-26
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 5,
+      "name": "\u0000\u001f",
+      "kind": "audio",
+      "gain": -1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 1e-300,
+        "level": 1e-38
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 0,
+      "name": "",
+      "kind": "audio",
+      "gain": -0.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 7,
+      "name": "  spaces  ",
+      "kind": "return",
+      "gain": 0.33333334,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": -0.0,
+        "level": 3.4028235e+38
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 8,
+      "name": "مرحبا",
+      "kind": "group",
+      "gain": 7.038531e-26,
+      "pan": 0.0,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "workspace": null
+}

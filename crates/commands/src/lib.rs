@@ -44,6 +44,7 @@ pub mod take;
 #[cfg(test)]
 mod testing;
 pub mod track;
+pub mod transient;
 pub mod transport;
 pub mod view;
 pub mod warp;
@@ -206,6 +207,12 @@ pub enum When {
     WarpedClip,
     /// The Sample Editor has the focus, and warp markers selected.
     MarkersSelected,
+    /// The Sample Editor shows a warped audio clip that has taken its
+    /// transients from analysis.
+    Transients,
+    /// The Sample Editor has the focus, and transients in its time
+    /// selection.
+    TransientsSelected,
 }
 
 impl When {
@@ -259,6 +266,14 @@ impl When {
             When::WarpedClip => sample
                 .clip
                 .is_some_and(|id| warp::warped(project, id).is_ok()),
+            When::Transients => sample.clip.is_some_and(|id| {
+                warp::warped(project, id).is_ok_and(|(_, _, warp)| warp.onsets.is_some())
+            }),
+            When::TransientsSelected => {
+                markers
+                    && warp::selected_transients(project, editor)
+                        .is_some_and(|(_, frames)| !frames.is_empty())
+            }
         }
     }
 }
@@ -577,6 +592,7 @@ pub fn register_all(registry: &mut Registry) {
     notes::register(registry);
     controllers::register(registry);
     warp::register(registry);
+    transient::register(registry);
     automation::register(registry);
     view::register(registry);
     workspace::register(registry);

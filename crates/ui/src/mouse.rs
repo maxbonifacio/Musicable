@@ -89,8 +89,12 @@ pub enum Target {
     /// A warp marker in the Sample Editor: its handle, along the top of the
     /// waveform, or its line down the waveform's top half.
     WarpMarker,
+    /// A transient of a warped clip's file, in the Sample Editor: near its
+    /// tick in the waveform's top half, away from the warp markers, where
+    /// its pseudo marker shows.
+    Transient,
     /// The top half of the Sample Editor's waveform, where the warp markers
-    /// are, away from them.
+    /// are, away from them and the transients.
     WaveformTop,
     /// The bottom half of the Sample Editor's waveform.
     Waveform,
@@ -131,7 +135,9 @@ pub enum MouseAction {
     /// Clears the selection, selects the track, and puts the start marker
     /// there. In the piano roll, clears the notes' selection.
     PlaceMarker,
-    /// Selects the time dragged over, on the tracks dragged over.
+    /// Selects the time dragged over, on the tracks dragged over: in the
+    /// Sample Editor, of the clip's own time, with its warp markers and
+    /// transients.
     SelectTime,
     /// Puts the start marker there, and the playhead with it.
     Locate,
@@ -215,21 +221,25 @@ pub enum MouseAction {
     /// as it plays: Live's Shift-drag of a clip's edge.
     Stretch,
     /// Adds a warp marker there, snapping to the grid, pinning the audio
-    /// that plays there.
+    /// that plays there: on a transient, at the transient.
     AddMarker,
     DeleteMarker,
     /// Moves the warp marker, or the selected ones with it, snapping to the
-    /// grid: the audio either side stretches.
+    /// grid: the audio either side stretches. On a transient, adds a marker
+    /// there and moves it.
     MoveMarker,
     MoveMarkerFree,
     /// Moves the audio under the warp marker, which stays where it is.
     MoveAudio,
+    /// Moves the transient to another moment of the file, between the
+    /// transients either side.
+    MoveTransient,
 }
 
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 34] = [
+    pub const ALL: [Target; 35] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -258,6 +268,7 @@ impl Target {
         Target::VelocityLane,
         Target::ControllerLane,
         Target::WarpMarker,
+        Target::Transient,
         Target::WaveformTop,
         Target::Waveform,
         Target::SoloButton,
@@ -301,6 +312,7 @@ impl Target {
             Target::VelocityLane => "velocity_lane",
             Target::ControllerLane => "controller_lane",
             Target::WarpMarker => "warp_marker",
+            Target::Transient => "transient",
             Target::WaveformTop => "waveform_top",
             Target::Waveform => "waveform",
         }
@@ -341,6 +353,7 @@ impl Target {
             Target::VelocityLane => "The velocity lane",
             Target::ControllerLane => "A controller's lane",
             Target::WarpMarker => "A warp marker",
+            Target::Transient => "A transient",
             Target::WaveformTop => "The waveform's top half",
             Target::Waveform => "The waveform's bottom half",
         }
@@ -424,8 +437,16 @@ impl Target {
                 &[A::Select, A::ToggleSelect, A::DeleteMarker, A::PlaceMarker]
             }
             (T::WarpMarker, Drag) => &[A::MoveMarker, A::MoveMarkerFree, A::MoveAudio],
+            (T::Transient, Click | DoubleClick) => &[A::AddMarker, A::PlaceMarker],
+            (T::Transient, Drag) => &[
+                A::MoveMarker,
+                A::MoveMarkerFree,
+                A::MoveTransient,
+                A::SelectTime,
+            ],
             (T::WaveformTop, Click | DoubleClick) => &[A::AddMarker, A::PlaceMarker],
             (T::Waveform, Click | DoubleClick) => &[A::PlaceMarker, A::AddMarker],
+            (T::WaveformTop | T::Waveform, Drag) => &[A::SelectTime],
             // The mixer's and the devices'.
             (T::SoloButton, Click) => &[A::ExclusiveSolo, A::AddSolo],
             (T::MixerControl | T::DeviceControl, Drag) => &[A::Coarse, A::Fine],
@@ -504,7 +525,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 53] = [
+    pub const ALL: [MouseAction; 54] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -558,6 +579,7 @@ impl MouseAction {
         MouseAction::MoveMarker,
         MouseAction::MoveMarkerFree,
         MouseAction::MoveAudio,
+        MouseAction::MoveTransient,
     ];
 
     /// Its name in mouse map files.
@@ -616,6 +638,7 @@ impl MouseAction {
             MouseAction::MoveMarker => "move_marker",
             MouseAction::MoveMarkerFree => "move_marker_free",
             MouseAction::MoveAudio => "move_audio",
+            MouseAction::MoveTransient => "move_transient",
         }
     }
 
@@ -675,6 +698,7 @@ impl MouseAction {
             MouseAction::MoveMarker => "Move the warp marker",
             MouseAction::MoveMarkerFree => "Move the warp marker off the grid",
             MouseAction::MoveAudio => "Move the audio under the warp marker",
+            MouseAction::MoveTransient => "Move the transient",
         }
     }
 
@@ -888,9 +912,17 @@ impl MouseMap {
         bind(T::WarpMarker, Drag, &[none], A::MoveMarker);
         bind(T::WarpMarker, Drag, &[alt], A::MoveMarkerFree);
         bind(T::WarpMarker, Drag, &[shift], A::MoveAudio);
-        bind(T::WaveformTop, Click, &[none], A::PlaceMarker);
+        // Its pseudo markers, on the transients.
+        bind(T::Transient, Click, &[none], A::PlaceMarker);
+        bind(T::Transient, DoubleClick, &[none], A::AddMarker);
+        bind(T::Transient, Drag, &[none], A::MoveMarker);
+        bind(T::Transient, Drag, &[alt], A::MoveMarkerFree);
+        bind(T::Transient, Drag, &[shift], A::MoveTransient);
+        for target in [T::WaveformTop, T::Waveform] {
+            bind(target, Click, &[none], A::PlaceMarker);
+            bind(target, Drag, &[none], A::SelectTime);
+        }
         bind(T::WaveformTop, DoubleClick, &[none], A::AddMarker);
-        bind(T::Waveform, Click, &[none], A::PlaceMarker);
         map
     }
 }

@@ -8,8 +8,9 @@ network's files aren't there. It's plain functions on audio, with no UI.
 
 The app analyses each audio file the open project plays in the
 background, and keeps what it finds in a cache, so a file is analysed only
-the first time ([In the app](#in-the-app)). Nothing reads the results yet:
-auto-warp and transients in the Sample Editor come next.
+the first time ([In the app](#in-the-app)). Warped clips take their
+transients from it ([app.md](app.md#the-sample-editor)), and auto-warp
+comes next.
 `musicable analyse` measures analysis against labelled files and against
 Live's auto-warp ([Measuring it](#measuring-it)).
 

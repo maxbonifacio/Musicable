@@ -68,7 +68,12 @@ const GROUPS: [(&str, &[Target]); 7] = [
     ),
     (
         "Sample Editor",
-        &[Target::WarpMarker, Target::WaveformTop, Target::Waveform],
+        &[
+            Target::WarpMarker,
+            Target::Transient,
+            Target::WaveformTop,
+            Target::Waveform,
+        ],
     ),
     (
         "Mixer and devices",

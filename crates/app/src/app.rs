@@ -675,6 +675,13 @@ impl App {
                 Ok(_) | Err(CommandError::NotNow(_)) => {}
                 Err(error) => self.messages.push(capital(&format!("{error}."))),
             },
+            Action::RunBatch { name, commands } => {
+                if let Err(failed) = self.session.run_batch(&name, &commands)
+                    && !matches!(failed.error, CommandError::NotNow(_))
+                {
+                    self.messages.push(capital(&format!("{}.", failed.error)));
+                }
+            }
             Action::DropFiles { files, track, at } => self.insert_audio(files, track, at),
             Action::LoadSample { device, file } => self.set_sample(device, &file),
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
@@ -1005,10 +1012,13 @@ impl App {
 
     /// Asks for the headers, the waveforms and the analyses of the
     /// project's audio files when the project has changed, and takes in
-    /// those found since.
+    /// those found since. Warped clips take the transients analysis found
+    /// in their files as it finds them, and when the project changes, so
+    /// those that undo brings back without them take them again.
     fn read_audio_files(&mut self, ctx: &egui::Context) {
         let revision = self.session.revision();
-        if self.files_found != Some(revision) {
+        let changed = self.files_found != Some(revision);
+        if changed {
             self.files_found = Some(revision);
             let folder = self.project_folder().map(Path::to_owned);
             self.audio_files
@@ -1019,7 +1029,11 @@ impl App {
         if self.audio_files.receive(self.session.editor_mut()) {
             ctx.request_repaint();
         }
-        if (self.analyses).receive(self.session.editor_mut(), &mut self.messages) {
+        let analysed = (self.analyses).receive(self.session.editor_mut(), &mut self.messages);
+        if analysed {
+            ctx.request_repaint();
+        }
+        if (changed || analysed) && self.session.take_transients() {
             ctx.request_repaint();
         }
     }
@@ -2029,6 +2043,8 @@ mod testing;
 mod theming;
 #[cfg(test)]
 mod undoing;
+#[cfg(test)]
+mod warping;
 
 #[cfg(test)]
 mod tests {

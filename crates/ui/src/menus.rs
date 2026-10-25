@@ -4,7 +4,7 @@
 use egui::{Button, Ui};
 use musicable_commands::{
     Args, Command, CommandId, Registry, arrange, automation, browser, controllers, edit, file,
-    locator, notes, options, track, transport, view, warp, workspace,
+    locator, notes, options, track, transient, transport, view, warp, workspace,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -82,6 +82,10 @@ const MENUS: [MenuSpec; 8] = [
             Some(warp::DELETE_MARKERS),
             Some(warp::NUDGE_LEFT),
             Some(warp::NUDGE_RIGHT),
+            None,
+            Some(transient::INSERT),
+            Some(transient::DELETE),
+            Some(transient::RESET),
         ],
     ),
     (

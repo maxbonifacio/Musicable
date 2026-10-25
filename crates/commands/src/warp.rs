@@ -19,6 +19,12 @@
 //! stretch of the file a clip plays, as Live does, so turning it on or off,
 //! or changing the clip's tempo, changes the clip's length, overwriting
 //! what it comes to cover, as trimming does.
+//!
+//! A warped clip takes its file's transients from analysis once: as it's
+//! warped, or, if the file hasn't been analysed yet, when
+//! [`take_transients`] finds its analysis. The [`transient`](crate::transient)
+//! commands change them, and Insert Warp Marker puts markers at those in
+//! the Sample Editor's time selection.
 
 use std::collections::BTreeSet;
 
@@ -27,13 +33,13 @@ use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent, ClipId, Offset, Timing, Warping};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Warp, tempo_in_name};
+use musicable_model::warp::{Onset, Onsets, Origin, Warp, tempo_in_name};
 
 use crate::arrange::{after_frames, clear};
 use crate::editor::{Editor, Focus};
 use crate::{
-    Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Transaction, Type,
-    Value, When, panel,
+    Args, Command, CommandError, CommandId, Context, Document, Param, Registry, Request,
+    Transaction, Type, Value, When, panel,
 };
 
 /// Shows an audio clip in the Sample Editor.
@@ -44,6 +50,9 @@ pub const SET_WARP: CommandId = CommandId::new("clip.set_warp");
 pub const SET_GAIN: CommandId = CommandId::new("clip.set_gain");
 /// Selects warp markers in the Sample Editor.
 pub const SELECT_MARKERS: CommandId = CommandId::new("warp.select_markers");
+/// Selects a stretch of the Sample Editor's clip, with the warp markers and
+/// the transients in it.
+pub const SELECT_TIME: CommandId = CommandId::new("warp.select_time");
 /// Adds warp markers, each pinning the audio that plays where it goes.
 pub const INSERT_MARKERS: CommandId = CommandId::new("warp.insert_markers");
 /// Moves warp markers, stretching the audio either side.
@@ -69,6 +78,8 @@ const CLIP: Param = Param::optional(
     "The audio clip: the one the Sample Editor shows, without it.",
 );
 const BEATS: Type = Type::List(&Type::Beats);
+/// Frames of a file.
+pub(crate) const FRAMES: Type = Type::List(&Type::Int);
 
 /// A number on its own in a file's name is its tempo if the file is this
 /// close to a whole number of beats at it, in seconds.
@@ -176,7 +187,7 @@ pub fn register(registry: &mut Registry) {
                 "toggle",
                 Type::Bool,
                 "Adds the markers to the selection, or takes away those already in it, \
-                 instead of selecting just them.",
+                 instead of selecting just them, which takes away the time selected.",
             ),
         ]),
         |ctx, args| {
@@ -187,15 +198,47 @@ pub fn register(registry: &mut Registry) {
             let (c, _, warp) = warped(project, clip)?;
             find_markers(warp, &markers)?;
             editor.open_in_sample_editor(c);
-            let selected = &mut editor.sample_editor.markers;
+            let shown = &mut editor.sample_editor;
+            // Selecting just them takes away the time selected too.
             if !toggle {
-                selected.clear();
+                shown.markers.clear();
+                shown.time = None;
             }
             for beat in markers {
-                if !toggle || !selected.remove(&beat) {
-                    selected.insert(beat);
+                if !toggle || !shown.markers.remove(&beat) {
+                    shown.markers.insert(beat);
                 }
             }
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SELECT_TIME, "Select Time in Sample Editor").with_params(&[
+            Param::required(
+                "start",
+                Type::Beats,
+                "Where the stretch starts, in the clip's own time.",
+            ),
+            Param::required(
+                "end",
+                Type::Beats,
+                "Where it ends. At the start, no time is selected, nor are any markers.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let clip = clip_arg(ctx, args)?;
+            let (start, end): (Beats, Beats) = (args.get("start")?, args.get("end")?);
+            let range = BeatRange::new(start.min(end), start.max(end));
+            let (project, editor) = ctx.document.parts();
+            let (c, _, warp) = warped(project, clip)?;
+            editor.open_in_sample_editor(c);
+            let shown = &mut editor.sample_editor;
+            shown.time = (!range.is_empty()).then_some(range);
+            shown.markers = (warp.markers.iter())
+                .map(|m| m.beat)
+                .filter(|&beat| !range.is_empty() && range.start <= beat && beat <= range.end)
+                .collect();
             Ok(Value::None)
         },
     );
@@ -206,23 +249,46 @@ pub fn register(registry: &mut Registry) {
                 Param::optional(
                     "at",
                     BEATS,
-                    "Where each goes, in the clip's own time: at the start marker, where the \
-                     waveform was clicked last, without them.",
+                    "Where each goes, in the clip's own time, pinning the audio that plays \
+                     there.",
+                ),
+                Param::optional(
+                    "frames",
+                    FRAMES,
+                    "Frames of the file to pin where they play, as on transients. Without \
+                     these or `at`, at the transients in the Sample Editor's time selection, \
+                     or else at the start marker, where the waveform was clicked last.",
                 ),
                 CLIP,
             ]),
         |ctx, args| {
             let clip = clip_arg(ctx, args)?;
             let at: Option<Vec<Beats>> = args.opt("at")?;
+            let frames: Option<Vec<i64>> = args.opt("frames")?;
             let project = ctx.document.project();
+            let editor = ctx.document.editor();
             let (c, a, warp) = warped(project, clip)?;
-            let start_marker = ctx.document.editor().start_marker;
-            let at = at.unwrap_or_else(|| vec![clip_position(c, a, start_marker)]);
-            let rate = ctx.document.editor().sample_rate_of(&a.file);
+            let rate = editor.sample_rate_of(&a.file);
+            let (at, frames) = match (at, frames) {
+                (None, None) => match selected_transients(project, editor) {
+                    Some((shown, frames)) if shown == clip && !frames.is_empty() => {
+                        (Vec::new(), frames)
+                    }
+                    _ => (vec![clip_position(c, a, editor.start_marker)], Vec::new()),
+                },
+                (at, frames) => (at.unwrap_or_default(), file_frames(frames)?),
+            };
             let mut new = warp.clone();
-            let added: Vec<Beats> = (at.into_iter())
-                .filter(|&beat| new.insert(beat, rate).is_some())
-                .collect();
+            let mut added: Vec<Beats> = Vec::new();
+            for frame in frames {
+                if let Some(i) = new.insert_at_frame(frame, rate) {
+                    added.push(new.markers[i].beat);
+                }
+            }
+            added.extend(
+                at.into_iter()
+                    .filter(|&beat| new.insert(beat, rate).is_some()),
+            );
             if !added.is_empty() {
                 ctx.document
                     .transact("Insert Warp Marker", |tx| change_warp(tx, clip, new));
@@ -470,16 +536,96 @@ pub(crate) fn delete_selected(ctx: &mut Context<'_>) {
     }
 }
 
-/// Selects all the Sample Editor's warp markers: what Select All does while
-/// it has the focus.
+/// Selects all the Sample Editor's warp markers, and the time the clip
+/// plays, with its transients: what Select All does while it has the
+/// focus.
 pub(crate) fn select_all(ctx: &mut Context<'_>) {
     let (project, editor) = ctx.document.parts();
     let Some(clip) = editor.sample_editor.clip else {
         return;
     };
-    if let Ok((_, _, warp)) = warped(project, clip) {
-        editor.sample_editor.markers = warp.markers.iter().map(|m| m.beat).collect();
+    if let Ok((c, a, warp)) = warped(project, clip) {
+        let shown = &mut editor.sample_editor;
+        shown.markers = warp.markers.iter().map(|m| m.beat).collect();
+        let start = clip_position(c, a, c.start);
+        shown.time = Some(BeatRange::new(start, start + c.length));
     }
+}
+
+/// The Sample Editor's clip and the frames of its transients in its time
+/// selection, in order, while it shows a warped clip with one.
+pub fn selected_transients(project: &Project, editor: &Editor) -> Option<(ClipId, Vec<u64>)> {
+    let shown = &editor.sample_editor;
+    let (clip, range) = (shown.clip?, shown.time?);
+    let (_, a, warp) = warped(project, clip).ok()?;
+    let rate = editor.sample_rate_of(&a.file);
+    let frame = |beat: Beats| warp.frame_at(beat.to_f64(), rate);
+    let (first, last) = (frame(range.start), frame(range.end));
+    let frames = (warp.transients())
+        .map(|o| o.frame)
+        .filter(|&f| first <= f as f64 && (f as f64) < last)
+        .collect();
+    Some((clip, frames))
+}
+
+/// The transients analysis found in `file`, for a clip to take, if the
+/// editor has its analysis.
+pub fn found_onsets(editor: &Editor, file: &str) -> Option<Onsets> {
+    let analysis = editor.analyses.get(file)?;
+    Some(Onsets::new(analysis.onsets.iter().map(|o| Onset {
+        frame: o.frame,
+        strength: o.strength.clamp(0.0, 1.0),
+        percussiveness: o.percussiveness.clamp(0.0, 1.0),
+        origin: Origin::Found,
+    })))
+}
+
+/// Gives each warped clip on the tracks that hasn't taken its transients
+/// yet those analysis found in its file, where the editor has its analysis.
+/// It's a change the project follows, not a step in the undo history: the
+/// app calls this as analyses come in and the project changes, so a clip
+/// warped before its file was analysed, or brought back by undo as it was
+/// then, takes them. Returns whether any did.
+pub fn take_transients(document: &mut Document) -> bool {
+    let editor = document.editor();
+    let taking: Vec<(ClipId, Warping)> = (document.project().tracks.iter())
+        .flat_map(|track| &track.clips)
+        .filter_map(|clip| {
+            let ClipContent::Audio(audio) = &clip.content else {
+                return None;
+            };
+            let warp = audio.warp.as_ref().filter(|w| w.onsets.is_none())?;
+            let warp = Warp {
+                onsets: Some(found_onsets(editor, &audio.file)?),
+                ..warp.clone()
+            };
+            let warping = Warping {
+                offset: audio.offset,
+                warp: Some(warp),
+            };
+            Some((clip.id, warping))
+        })
+        .collect();
+    if taking.is_empty() {
+        return false;
+    }
+    document.follow("Find Transients", |tx| {
+        for (clip, warping) in taking {
+            tx.set_clip_warping(clip, warping);
+        }
+    });
+    true
+}
+
+/// `frames`, as frames of a file: none without them.
+pub(crate) fn file_frames(frames: Option<Vec<i64>>) -> Result<Vec<u64>, CommandError> {
+    (frames.unwrap_or_default().into_iter())
+        .map(|frame| {
+            u64::try_from(frame).map_err(|_| {
+                CommandError::invalid(format!("frame {frame} is before the file's start"))
+            })
+        })
+        .collect()
 }
 
 /// The song positions the Sample Editor's selected markers play at, from
@@ -534,7 +680,7 @@ fn find_markers(warp: &Warp, beats: &[Beats]) -> Result<Vec<usize>, CommandError
 }
 
 /// Gives the warped clip `clip` the warp `warp`, keeping its timing.
-fn change_warp(tx: &mut Transaction<'_>, clip: ClipId, warp: Warp) {
+pub(crate) fn change_warp(tx: &mut Transaction<'_>, clip: ClipId, warp: Warp) {
     let Ok((_, a)) = audio(tx.project(), clip) else {
         return;
     };
@@ -562,7 +708,10 @@ fn set_warp(tx: &mut Transaction<'_>, clip: ClipId, on: bool) {
             // The file's frames the clip plays, at the file's own speed.
             let played = tempo.sample_at(c.end(), rate) - tempo.sample_at(c.start, rate);
             let bpm = first_tempo(tx.project(), tx.editor(), &c, &a);
-            let warp = Warp::new(first, Beats::ZERO, bpm);
+            let warp = Warp {
+                onsets: found_onsets(tx.editor(), &a.file),
+                ..Warp::new(first, Beats::ZERO, bpm)
+            };
             let end = warp.beat_at(first as f64 + played, rate);
             let timing = Timing {
                 start: c.start,
@@ -747,7 +896,7 @@ fn at_least_a_tick(length: Beats) -> Beats {
 
 /// The clip the `clip` argument names, or else the one the Sample Editor
 /// shows, if it's an audio clip on a track.
-fn clip_arg(ctx: &Context<'_>, args: &Args) -> Result<ClipId, CommandError> {
+pub(crate) fn clip_arg(ctx: &Context<'_>, args: &Args) -> Result<ClipId, CommandError> {
     let clip = match args.opt("clip")? {
         Some(clip) => clip,
         None => ctx
@@ -790,7 +939,7 @@ pub(crate) fn warped(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use musicable_model::TrackKind;
     use musicable_model::warp::WarpMarker;
 
@@ -806,7 +955,7 @@ mod tests {
     const LOOP: &str = "Drums 100 BPM.wav";
     const LOOP_FRAMES: u64 = 115_200;
     /// Frames to the beat at 100 BPM.
-    const AT_100: u64 = 28_800;
+    pub(crate) const AT_100: u64 = 28_800;
 
     fn beats(beats: f64) -> Beats {
         Beats::from_f64(beats)
@@ -901,6 +1050,123 @@ mod tests {
 
     fn list(beats: &[f64]) -> Vec<Beats> {
         beats.iter().map(|&b| Beats::from_f64(b)).collect()
+    }
+
+    /// Where analysis finds the loop's transients: on each of its beats at
+    /// 100 BPM, and halfway through the first.
+    pub(crate) const FOUND: [u64; 5] = [0, AT_100 / 2, AT_100, 2 * AT_100, 3 * AT_100];
+
+    /// Gives the editor the loop's analysis, with its transients at
+    /// [`FOUND`].
+    pub(crate) fn analysed(setup: &mut Setup) {
+        let onsets = FOUND.map(|frame| musicable_analysis::Onset {
+            frame,
+            strength: 0.5,
+            percussiveness: 1.0,
+        });
+        let analysis =
+            musicable_analysis::Analysis::with_onsets(RATE, LOOP_FRAMES, onsets.to_vec());
+        let analyses = &mut setup.document.editor_mut().analyses;
+        analyses.insert(LOOP.into(), std::sync::Arc::new(analysis));
+    }
+
+    /// The frames of the clip's transients in sight.
+    pub(crate) fn transients(setup: &Setup, clip: ClipId) -> Vec<u64> {
+        warp_of(setup, clip).transients().map(|o| o.frame).collect()
+    }
+
+    /// The song, its loop analysed, warped in the Sample Editor, with the
+    /// transients analysis found.
+    pub(crate) fn analysed_song() -> (Setup, ClipId) {
+        let (mut setup, _, clip) = song();
+        analysed(&mut setup);
+        open(&mut setup, clip);
+        setup.run(&SET_WARP);
+        setup.committed_names();
+        (setup, clip)
+    }
+
+    /// Arguments that select a stretch of the clip's own time.
+    pub(crate) fn time(start: f64, end: f64) -> Args {
+        Args::new()
+            .with("start", beats(start))
+            .with("end", beats(end))
+    }
+
+    #[test]
+    fn warped_clips_take_their_files_transients_from_analysis_once() {
+        let (setup, clip) = analysed_song();
+        assert_eq!(transients(&setup, clip), FOUND);
+        // Warped before its file's analysed, it takes them when the
+        // analysis comes, as a change the project follows.
+        let (mut setup, _, clip) = warped_song();
+        assert_eq!(warp_of(&setup, clip).onsets, None);
+        assert!(!take_transients(&mut setup.document), "no analysis yet");
+        analysed(&mut setup);
+        assert!(take_transients(&mut setup.document));
+        assert_eq!(transients(&setup, clip), FOUND);
+        assert_eq!(setup.committed_names(), ["Find Transients"]);
+        assert_eq!(setup.document.undo_name(), Some("Warp"));
+        assert!(!take_transients(&mut setup.document), "once");
+        // Undo and redo bring the clip back as Warp left it, and it takes
+        // them again.
+        setup.run(&edit::UNDO);
+        setup.run(&edit::REDO);
+        assert_eq!(warp_of(&setup, clip).onsets, None);
+        assert!(take_transients(&mut setup.document));
+        assert_eq!(transients(&setup, clip), FOUND);
+    }
+
+    #[test]
+    fn the_time_selected_picks_the_markers_and_transients_in_it() {
+        let (mut setup, clip) = analysed_song();
+        // From just before the clip's beat 1 to just after its beat 2.
+        setup.run_with(&SELECT_TIME, time(0.9, 2.1)).unwrap();
+        let picked = |setup: &Setup| {
+            let document = &setup.document;
+            selected_transients(document.project(), document.editor())
+        };
+        assert_eq!(picked(&setup), Some((clip, vec![AT_100, 2 * AT_100])));
+        // Insert Warp Marker puts markers on them, and selects them.
+        let inserted = setup.run_with(&INSERT_MARKERS, Args::new()).unwrap();
+        let on = |beats: &[i64]| beats.iter().map(|&b| Value::Beats(Beats::new(b))).collect();
+        assert_eq!(inserted, Value::List(on(&[1, 2])));
+        let at = |beat| (beat * AT_100, beat as f64);
+        assert_eq!(markers(&setup, clip), [at(0), at(1), at(2)]);
+        assert_eq!(selected(&setup), [1.0, 2.0]);
+        // Selecting time selects the markers in it, and an empty stretch
+        // selects nothing. A transient at its start is in it.
+        setup.run_with(&SELECT_TIME, time(0.5, 1.5)).unwrap();
+        assert_eq!(selected(&setup), [1.0]);
+        assert_eq!(picked(&setup), Some((clip, vec![AT_100 / 2, AT_100])));
+        setup.run_with(&SELECT_TIME, time(1.0, 1.0)).unwrap();
+        assert_eq!(setup.document.editor().sample_editor.time, None);
+        assert_eq!(selected(&setup), [] as [f64; 0]);
+        // Without a time selection, at the start marker. Song beat 7.5 is
+        // the clip's 3.5.
+        setup.document.editor_mut().start_marker = beats(7.5);
+        let inserted = setup.run_with(&INSERT_MARKERS, Args::new()).unwrap();
+        assert_eq!(inserted, Value::List(vec![Value::Beats(beats(3.5))]));
+        // On frames, wherever they play.
+        let frames = Args::new().with("frames", vec![(AT_100 / 2) as i64, 0]);
+        let inserted = setup.run_with(&INSERT_MARKERS, frames).unwrap();
+        assert_eq!(inserted, Value::List(vec![Value::Beats(beats(0.5))]));
+        // Select All selects the time the clip plays, so every transient,
+        // and every marker.
+        setup.run(&edit::SELECT_ALL);
+        assert_eq!(selected(&setup), [0.0, 0.5, 1.0, 2.0, 3.5]);
+        assert_eq!(picked(&setup), Some((clip, FOUND.to_vec())));
+        // Selecting markers takes away the time selected, unless it adds
+        // them to the selection.
+        setup.run_with(&SELECT_TIME, time(0.9, 2.1)).unwrap();
+        let first = || Args::new().with("markers", vec![beats(0.0)]);
+        setup
+            .run_with(&SELECT_MARKERS, first().with("toggle", true))
+            .unwrap();
+        assert_eq!(selected(&setup), [0.0, 1.0, 2.0]);
+        assert!(setup.document.editor().sample_editor.time.is_some());
+        setup.run_with(&SELECT_MARKERS, first()).unwrap();
+        assert_eq!(setup.document.editor().sample_editor.time, None);
     }
 
     #[test]
@@ -1265,6 +1531,8 @@ mod tests {
             (INSERT_MARKERS, "Ctrl+I"),
             (NUDGE_LEFT, "Left"),
             (NUDGE_RIGHT, "Right"),
+            (crate::transient::INSERT, "Ctrl+Shift+I"),
+            (crate::transient::DELETE, "Ctrl+Shift+Backspace"),
         ];
         for (id, chord) in keys {
             let chords: Vec<String> = (keymap.chords_in(&id, sample_editor))

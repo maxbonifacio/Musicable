@@ -136,6 +136,8 @@ version = 1
 "warp.insert_markers" = ["Ctrl+I"]
 "warp.nudge_left" = ["Left"]
 "warp.nudge_right" = ["Right"]
+"transient.insert" = ["Ctrl+Shift+I"]
+"transient.delete" = ["Ctrl+Shift+Backspace"]
 
 # The arrow keys step through the History panel's list: Up takes a step back,
 # as undo does, and Down makes the next one again, as redo does.

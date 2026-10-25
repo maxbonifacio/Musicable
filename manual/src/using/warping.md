@@ -50,6 +50,34 @@ Shift-dragging a marker moves the audio under it instead, so another moment
 of the file plays on that beat. [The Sample Editor](../window/sample-editor.md#the-mouse)
 has the rest of the gestures and the keys.
 
+## Transients
+
+Musicable finds the transients in the project's audio files, the moments
+where their sounds start, such as each drum hit, as it analyses them in the
+background. A warped clip shows its file's transients as ticks along the top
+of its waveform in the Sample Editor, and keeps them in the project, with
+the changes you make to them.
+
+Pointing at a transient in the waveform's top half shows a pseudo marker
+there, a faint warp marker. **Drag it** to make it a warp marker and move
+it, so the hit lands on another beat, or **double-click it** to pin the hit
+where it plays. To put markers on many hits at once, drag across the
+waveform to select a stretch of the clip and press **Ctrl+I**, which puts a
+warp marker on each transient in it.
+
+Analysis can miss a soft sound or find one too many in a long one, so the
+transients can be changed:
+
+- **Shift-drag a transient** to move it, between the transients either side.
+- **Ctrl+Shift+I** adds one at the start marker, where the waveform was
+  clicked last.
+- **Ctrl+Shift+Backspace** deletes those in the time selected.
+- **Reset Transients**, on the right-click menu, brings back the ones
+  analysis found, without yours.
+
+A clip warped before Musicable has analysed its file takes the transients
+once it has, and so does a clip in a project saved by an earlier version.
+
 ## Re-Pitch
 
 Re-Pitch, the one mode so far, plays the audio faster or slower to fit the
@@ -65,8 +93,8 @@ These come in later versions:
   pitch as its speed changes, and the clip's Transpose and Detune.
 - Warp putting markers on a file's beats, as Live's auto-warp does.
   Musicable already finds the tempo and the beats of the project's audio
-  files in the background, and the status bar says so while it does, but
-  Warp doesn't use them yet.
+  files in the background, with their transients, and the status bar says
+  so while it does, but Warp doesn't use the tempo and the beats yet.
 - Recordings that follow the tempo: a clip recorded into a song plays
   unwarped, at its own speed.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV

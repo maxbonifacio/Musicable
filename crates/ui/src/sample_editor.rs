@@ -2,8 +2,10 @@
 //! song's beats, as Live's Sample Editor shows it, with the clip's controls
 //! beside it: Warp, its mode, its tempo and its gain. A ruler over the
 //! waveform shows the song's bars and one under it the file's time, the
-//! warp markers' handles are along the waveform's top, and the lane of the
-//! clip's gain is under it all.
+//! warp markers' handles are along the waveform's top, with ticks under them
+//! where a warped clip's transients are, and the lane of the clip's gain is
+//! under it all. Near a transient, the top half shows a pseudo marker, as
+//! Live's does: dragging or double-clicking it makes it a warp marker.
 //!
 //! Like the piano roll, it's drawn with egui's painter, only what's in
 //! sight, and everything it does goes through commands. What it shows and
@@ -16,6 +18,7 @@
 //! the playhead and the grid are the same in both: a warped clip's markers
 //! sit on the beats they play at, and its audio stretches between them.
 
+mod menu;
 mod paint;
 #[cfg(test)]
 mod tests;
@@ -28,14 +31,15 @@ use egui::{
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
-    Args, CommandId, Editor, Focus, Modifiers, automation, transport, view as views, warp,
+    Args, CommandId, Editor, Focus, Modifiers, automation, transient, transport, view as views,
+    warp,
 };
 use musicable_model::Project;
 use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Onset, Origin, Warp, WarpMarker};
 
 use crate::arrangement::{distance_to_segment, simplified};
 use crate::mixer::decibels;
@@ -60,6 +64,8 @@ pub(crate) struct SampleEditor {
     /// Set when the user scrolls away from the playhead while it plays, so
     /// Follow doesn't scroll back until the playhead is in sight again.
     follow_paused: bool,
+    /// Where the context menu that's open was opened.
+    menu: Option<Spot>,
 }
 
 /// The parts of the Sample Editor that take the mouse.
@@ -79,7 +85,10 @@ enum Area {
 enum Hit {
     /// The warp marker at this place in the warp's markers.
     Marker(usize),
-    /// The waveform's top half, away from the markers.
+    /// The transient at this frame of the file, near the pointer in the
+    /// waveform's top half, away from the markers: its pseudo marker.
+    Transient(u64),
+    /// The waveform's top half, away from the markers and the transients.
     WaveTop,
     /// The waveform's bottom half.
     Wave,
@@ -92,6 +101,7 @@ impl Hit {
     fn target(self) -> Target {
         match self {
             Hit::Marker(_) => Target::WarpMarker,
+            Hit::Transient(_) => Target::Transient,
             Hit::WaveTop => Target::WaveformTop,
             Hit::Wave => Target::Waveform,
             Hit::Ruler => Target::Ruler,
@@ -116,6 +126,17 @@ enum Envelope {
         to: usize,
     },
     Lane,
+}
+
+/// Where a context menu was opened: what's there, the song position there,
+/// snapped to the grid, and the moment of the clip's own time and the frame
+/// of the file that play there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Spot {
+    hit: Hit,
+    at: Beats,
+    own: Beats,
+    frame: Option<u64>,
 }
 
 /// A drag in progress.
@@ -149,6 +170,14 @@ enum Plan {
     /// Moves the audio under the marker at this place, so this frame of the
     /// file plays there.
     Audio { marker: usize, frame: u64 },
+    /// Adds a warp marker at the transient at this frame, and moves it by
+    /// some beats: a pseudo marker dragged.
+    Pseudo { frame: u64, by: Beats },
+    /// Moves the transient at `frame` to the frame `to`.
+    Transient { frame: u64, to: u64 },
+    /// Selects the clip's own time that plays from song position `start` to
+    /// `end`. Drags ask for it as they go.
+    Time { start: Beats, end: Beats },
     /// Sets the points of the clip's gain curve, in its own time.
     Points(Vec<Point>),
     /// Scrolls and zooms. Drags ask for it as they go.
@@ -329,6 +358,47 @@ impl Scene<'_> {
         )
     }
 
+    /// Where the file's `frame`, fractional, plays across, as `audio`, the
+    /// clip's audio or what a drag would make it, plays it.
+    fn x_of_frame(&self, audio: &AudioClip, frame: f64) -> f32 {
+        let own = audio.own_time_of(frame, self.rate);
+        let at = self.clip.song_time_at(own, self.tempo(), self.rate);
+        self.layout.x_of_beats(at)
+    }
+
+    /// How long the file is, once the app has read it.
+    fn file_frames(&self) -> Option<u64> {
+        let file = self.editor().files.get(&self.audio.file);
+        file.map(|file| file.frames)
+            .or(self.peaks.map(|peaks| peaks.frames()))
+    }
+
+    /// The transients of `audio`'s warp, the clip's or what a drag would
+    /// make it, that play from `left` to `right` across, in order.
+    fn transients<'a>(
+        &self,
+        audio: &'a AudioClip,
+        left: f32,
+        right: f32,
+    ) -> impl Iterator<Item = &'a Onset> + use<'a> {
+        let onsets = audio.warp.as_ref().and_then(|warp| warp.onsets.as_ref());
+        let all = onsets.map_or(&[][..], |onsets| onsets.all());
+        // Later frames play further right: the markers keep their order.
+        let (first, last) = (self.frame_at(audio, left), self.frame_at(audio, right));
+        let start = all.partition_point(|o| (o.frame as f64) < first);
+        let end = all.partition_point(|o| (o.frame as f64) <= last).max(start);
+        all[start..end]
+            .iter()
+            .filter(|o| o.origin != Origin::Hidden)
+    }
+
+    /// The clip's own time selected, from where to where across.
+    fn time_selected(&self) -> Option<(f32, f32)> {
+        let time = self.editor().sample_editor.time?;
+        let x = |own: Beats| self.layout.x_of_beats(self.song_of(own));
+        Some((x(time.start), x(time.end)))
+    }
+
     /// `at`, snapped to the grid unless `free` or snapping is off.
     fn snap(&self, at: Beats, free: bool) -> Beats {
         if free {
@@ -397,8 +467,22 @@ impl Scene<'_> {
             .map(|(i, marker)| ((self.marker_x(marker) - pos.x).abs(), i))
             .filter(|&(distance, _)| distance <= reach)
             .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, i)) = near {
+            return Hit::Marker(i);
+        }
+        // Away from them, the nearest transient within reach.
+        let audio = self.audio;
+        let near = (self.transients(audio, pos.x - reach, pos.x + reach))
+            .map(|o| {
+                (
+                    (self.x_of_frame(audio, o.frame as f64) - pos.x).abs(),
+                    o.frame,
+                )
+            })
+            .filter(|&(distance, _)| distance <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
         match near {
-            Some((_, i)) => Hit::Marker(i),
+            Some((_, frame)) => Hit::Transient(frame),
             None => Hit::WaveTop,
         }
     }
@@ -558,6 +642,37 @@ impl Scene<'_> {
                 let frame = (frame.max(0.0) as u64).clamp(after, before.max(after));
                 (frame != marker.frame).then_some(Plan::Audio { marker: i, frame })
             }
+            (MouseAction::MoveMarker | MouseAction::MoveMarkerFree, Hit::Transient(frame)) => {
+                // A marker at the transient, moved as a marker is.
+                let mut warp = self.warp()?.clone();
+                let i = warp.insert_at_frame(frame, self.rate)?;
+                let grabbed = warp::song_position(self.clip, self.audio, warp.markers[i].beat);
+                let free = drag.action == MouseAction::MoveMarkerFree;
+                let by = self.snap(grabbed + moved, free) - grabbed;
+                let by = warp.markers_can_move(&[i], by);
+                (by != Beats::ZERO).then_some(Plan::Pseudo { frame, by })
+            }
+            (MouseAction::MoveTransient, Hit::Transient(frame)) => {
+                // It goes with the pointer, between the transients either
+                // side, in the file.
+                let (before, after) = self.warp()?.onsets.as_ref()?.room(frame)?;
+                let x = self.x_of_frame(self.audio, frame as f64) + drag.to.x - drag.from.x;
+                let to = self.frame_at(self.audio, x).round().max(0.0) as u64;
+                let low = before.map_or(0, |before| before + 1);
+                let end = self
+                    .file_frames()
+                    .map_or(u64::MAX, |frames| frames.saturating_sub(1));
+                let high = after.map_or(end, |after| (after - 1).min(end));
+                let to = to.clamp(low, high.max(low));
+                (to != frame).then_some(Plan::Transient { frame, to })
+            }
+            (MouseAction::SelectTime, Hit::WaveTop | Hit::Wave | Hit::Transient(_)) => {
+                let (start, end) = (self.snapped(drag.from.x), self.snapped(drag.to.x));
+                Some(Plan::Time {
+                    start: start.min(end),
+                    end: start.max(end),
+                })
+            }
             (
                 MouseAction::MovePoint | MouseAction::MovePointFree,
                 Hit::Lane(Envelope::Point(i)),
@@ -612,12 +727,17 @@ impl Scene<'_> {
     }
 
     /// The clip's audio as `plan` would leave its warp, for drawing while a
-    /// drag moves markers or the audio under them.
+    /// drag moves markers, the audio under them or transients.
     fn planned(&self, plan: Option<&Plan>) -> Option<AudioClip> {
         let mut warp = self.warp()?.clone();
         let moved = match plan? {
             Plan::Markers { markers, by } => warp.move_markers(markers, *by),
             &Plan::Audio { marker, frame } => warp.move_audio(marker, frame),
+            &Plan::Pseudo { frame, by } => (warp.insert_at_frame(frame, self.rate))
+                .is_some_and(|i| warp.move_markers(&[i], by)),
+            &Plan::Transient { frame, to } => {
+                (warp.onsets.as_mut()).is_some_and(|onsets| onsets.move_to(frame, to))
+            }
             _ => false,
         };
         moved.then(|| AudioClip {
@@ -665,6 +785,40 @@ fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
                 .with("frame", frame as i64)
                 .with("clip", scene.clip.id);
             run(actions, warp::MOVE_AUDIO, args);
+        }
+        &Plan::Pseudo { frame, by } => {
+            let Some(warp) = scene.warp() else {
+                return;
+            };
+            // Where Insert Warp Marker puts it, pinning the frame where it
+            // plays.
+            let beat = Beats::from_f64(warp.beat_at(frame as f64, scene.rate));
+            let clip = scene.clip.id;
+            let insert = Args::new()
+                .with("frames", vec![frame as i64])
+                .with("clip", clip);
+            let moving = Args::new()
+                .with("markers", vec![beat])
+                .with("by", by)
+                .with("clip", clip);
+            actions.push(Action::RunBatch {
+                name: "Insert Warp Marker".to_owned(),
+                commands: vec![(warp::INSERT_MARKERS, insert), (warp::MOVE_MARKERS, moving)],
+            });
+        }
+        &Plan::Transient { frame, to } => {
+            let args = Args::new()
+                .with("frame", frame as i64)
+                .with("to", to as i64)
+                .with("clip", scene.clip.id);
+            run(actions, transient::MOVE, args);
+        }
+        &Plan::Time { start, end } => {
+            let args = Args::new()
+                .with("start", scene.own_of(start))
+                .with("end", scene.own_of(end))
+                .with("clip", scene.clip.id);
+            run(actions, warp::SELECT_TIME, args);
         }
         Plan::Points(points) => set_points(actions, scene, points),
         Plan::Viewport(viewport) => set_viewport(actions, viewport),
@@ -787,17 +941,67 @@ impl SampleEditor {
         }
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene);
+        let pseudo = self.pseudo(&scene, plan.as_ref());
 
         let painter = ui.painter_at(rect);
         let layout = &scene.layout;
         paint::ruler(&painter.with_clip_rect(layout.ruler), &scene);
-        paint::wave(&painter.with_clip_rect(layout.wave), &scene, plan.as_ref());
+        let wave = painter.with_clip_rect(layout.wave);
+        paint::wave(&wave, &scene, plan.as_ref(), pseudo);
         paint::time(&painter.with_clip_rect(layout.time), &scene, plan.as_ref());
         paint::lane(&painter.with_clip_rect(layout.lane), &scene, plan.as_ref());
         paint::label(&painter.with_clip_rect(layout.label), &scene);
         paint::column(&painter.with_clip_rect(layout.controls), &scene);
         controls(ui, &scene, actions);
         name_for_screen_readers(ui, &scene, id);
+        if let Some((response, _)) = responses.iter().find(|(_, area)| *area == Area::Wave) {
+            self.context_menu(&scene, response, actions);
+        }
+    }
+
+    /// Where to show a pseudo marker, by the frame of the file: at the
+    /// transient under the pointer, or at the one a drag takes, until it
+    /// becomes a warp marker.
+    fn pseudo(&self, scene: &Scene<'_>, plan: Option<&Plan>) -> Option<u64> {
+        match (&self.drag, plan) {
+            (Some(_), Some(&Plan::Transient { to, .. })) => Some(to),
+            (Some(_), Some(Plan::Pseudo { .. })) => None,
+            (Some(drag), _) => match drag.hit {
+                Hit::Transient(frame) => Some(frame),
+                _ => None,
+            },
+            (None, _) => {
+                let pos = (scene.pointer).filter(|&pos| scene.layout.wave.contains(pos))?;
+                match scene.hit(Area::Wave, pos) {
+                    Hit::Transient(frame) => Some(frame),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Opens the waveform's context menu where it's secondary-clicked, as
+    /// its `response` says, and shows it while it's open.
+    fn context_menu(&mut self, scene: &Scene<'_>, response: &Response, actions: &mut Vec<Action>) {
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let frame = scene.frame_at(scene.audio, pos.x).round();
+            let spot = Spot {
+                hit: scene.hit(Area::Wave, pos),
+                at: scene.snapped(pos.x),
+                own: scene.own_of(scene.layout.beats_at(pos.x)),
+                frame: (frame >= 0.0).then_some(frame as u64),
+            };
+            self.menu = Some(spot);
+            focus(scene, actions);
+            menu::select_for(scene, spot, actions);
+        }
+        response.context_menu(|ui| {
+            if let Some(spot) = self.menu {
+                menu::show(ui, scene, spot, actions);
+            }
+        });
     }
 
     /// Handles the clicks and drags on `area`, whose response is
@@ -824,8 +1028,11 @@ impl SampleEditor {
             if matches!(drag.action, MouseAction::Draw | MouseAction::DrawFree) {
                 scene.draw(drag);
             }
-            // The scrolling changes as the drag goes.
-            if drag.action == MouseAction::ScrubZoom {
+            // The scrolling and the time selected change as the drag goes.
+            if matches!(
+                drag.action,
+                MouseAction::ScrubZoom | MouseAction::SelectTime
+            ) {
                 let plan = scene.plan(drag);
                 if plan != drag.sent
                     && let Some(plan) = &plan
@@ -981,7 +1188,10 @@ impl SampleEditor {
     fn cursor(&self, ui: &Ui, scene: &Scene<'_>) {
         let icon = |action: Option<MouseAction>| match action {
             Some(
-                MouseAction::MoveMarker | MouseAction::MoveMarkerFree | MouseAction::MoveAudio,
+                MouseAction::MoveMarker
+                | MouseAction::MoveMarkerFree
+                | MouseAction::MoveAudio
+                | MouseAction::MoveTransient,
             ) => Some(CursorIcon::ResizeHorizontal),
             Some(
                 MouseAction::MovePoint | MouseAction::MovePointFree | MouseAction::MoveSegment,
@@ -1026,7 +1236,7 @@ fn drag_stopped(scene: &Scene<'_>, drag: &Drag, actions: &mut Vec<Action>) {
     };
     match &plan {
         // Asked for as the drag went.
-        Plan::Viewport(_) => {
+        Plan::Viewport(_) | Plan::Time { .. } => {
             if drag.sent.as_ref() != Some(&plan) {
                 send(actions, scene, &plan);
             }
@@ -1058,6 +1268,13 @@ fn clicked(
         }
         (MouseAction::DeleteMarker, Hit::Marker(i)) => {
             run(actions, warp::DELETE_MARKERS, of(scene, &[i]));
+        }
+        (MouseAction::AddMarker, Hit::Transient(frame)) => {
+            // On the transient, pinning it where it plays.
+            let args = Args::new()
+                .with("frames", vec![frame as i64])
+                .with("clip", scene.clip.id);
+            run(actions, warp::INSERT_MARKERS, args);
         }
         (MouseAction::AddMarker, Hit::WaveTop | Hit::Wave) if warped => {
             let args = Args::new()

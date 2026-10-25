@@ -128,6 +128,12 @@
 |---|---|
 | Rename Track | `track.rename` |
 
+### Transient
+
+| Command | Id |
+|---|---|
+| Move Transient | `transient.move` |
+
 ### Transport
 
 | Command | Id |
@@ -154,4 +160,5 @@
 | Move Audio Under Warp Marker | `warp.move_audio` |
 | Move Warp Markers | `warp.move_markers` |
 | Select Warp Markers | `warp.select_markers` |
+| Select Time in Sample Editor | `warp.select_time` |
 | Set Clip Tempo | `warp.set_tempo` |

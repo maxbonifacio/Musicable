@@ -1,13 +1,15 @@
 //! Drawing the Sample Editor: the waveform against the song's beats, with
-//! the warp markers on it and their handles along its top, the ruler of the
-//! song's bars over it and the ruler of the file's time under it, the lane
-//! of the clip's gain under them, and the column of the clip's controls
-//! beside them. Only what's in sight is drawn.
+//! the warp markers on it and their handles along its top, the transients'
+//! ticks under them and the time selected, the ruler of the song's bars over
+//! it and the ruler of the file's time under it, the lane of the clip's gain
+//! under them, and the column of the clip's controls beside them. Only
+//! what's in sight is drawn.
 
-use egui::{Align2, FontId, Mesh, Painter, Rect, Shape, Stroke, pos2};
+use egui::{Align2, Color32, FontId, Mesh, Painter, Rect, Shape, Stroke, pos2};
 use musicable_commands::warp;
 use musicable_model::automation::Point;
 use musicable_model::clip::AudioClip;
+use musicable_model::warp::WarpMarker;
 
 use super::{Envelope, Plan, Scene};
 use crate::theme::Theme;
@@ -52,20 +54,6 @@ fn audio<'s>(scene: &'s Scene<'_>, planned: &'s Option<AudioClip>) -> &'s AudioC
     planned.as_ref().unwrap_or(scene.audio)
 }
 
-/// Where the file's `frame`, fractional, plays across, as `audio` plays it.
-fn x_of_frame(scene: &Scene<'_>, audio: &AudioClip, frame: f64) -> f32 {
-    let own = audio.own_time_of(frame, scene.rate);
-    let at = scene.clip.song_time_at(own, scene.tempo(), scene.rate);
-    scene.layout.x_of_beats(at)
-}
-
-/// How long the file is, once the app has read it.
-fn frames(scene: &Scene<'_>) -> Option<u64> {
-    let file = scene.editor().files.get(&scene.audio.file);
-    file.map(|file| file.frames)
-        .or(scene.peaks.map(|peaks| peaks.frames()))
-}
-
 /// What the Sample Editor shows in `rect` while it has no audio clip to
 /// show.
 pub(super) fn empty(painter: &Painter, rect: Rect, theme: &Theme) {
@@ -98,10 +86,11 @@ pub(super) fn ruler(painter: &Painter, scene: &Scene<'_>) {
 }
 
 /// The waveform as `plan` would leave the warp: in the clip's colour where
-/// the file is, as the arrangement draws it, over the grid, shaded where
-/// the clip doesn't play, with the warp markers, the start marker and the
-/// playhead.
-pub(super) fn wave(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
+/// the file is, as the arrangement draws it, over the grid, with the time
+/// selected, shaded where the clip doesn't play, with the warp markers, the
+/// transients, a pseudo marker at the file's frame `pseudo`, the start
+/// marker and the playhead.
+pub(super) fn wave(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>, pseudo: Option<u64>) {
     let theme = scene.theme;
     let layout = &scene.layout;
     let wave = layout.wave;
@@ -110,9 +99,9 @@ pub(super) fn wave(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     painter.rect_filled(wave, 0.0, theme.empty);
     // The file, from its first frame to its last.
     let (mut left, mut right) = (wave.left(), wave.right());
-    if let Some(frames) = frames(scene) {
-        left = x_of_frame(scene, audio, 0.0).max(left);
-        right = x_of_frame(scene, audio, frames as f64).min(right);
+    if let Some(frames) = scene.file_frames() {
+        left = scene.x_of_frame(audio, 0.0).max(left);
+        right = scene.x_of_frame(audio, frames as f64).min(right);
     }
     if left < right {
         let file = Rect::from_x_y_ranges(left..=right, wave.y_range());
@@ -121,9 +110,51 @@ pub(super) fn wave(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
     timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, wave);
     waveform(painter, scene, audio);
+    time_selected(painter, scene);
     outside_clip(painter, scene, wave);
-    markers(painter, scene, audio);
+    if audio.warp.is_some() {
+        painter.rect_filled(layout.handles, 0.0, theme.outside_clip);
+    }
+    transients(painter, scene, audio);
+    markers(painter, scene, audio, plan);
+    if let Some(frame) = pseudo {
+        let x = scene.x_of_frame(audio, frame as f64);
+        marker(painter, scene, x, theme.pseudo_marker);
+    }
     lines(painter, scene, wave);
+}
+
+/// Shades the clip's own time selected, under the markers' handles.
+fn time_selected(painter: &Painter, scene: &Scene<'_>) {
+    let Some((start, end)) = scene.time_selected() else {
+        return;
+    };
+    let layout = &scene.layout;
+    let wave = layout.wave;
+    let (left, right) = (start.max(wave.left()), end.min(wave.right()));
+    if left < right {
+        let shade = Rect::from_x_y_ranges(left..=right, layout.handles.bottom()..=wave.bottom());
+        painter.rect_filled(shade, 0.0, scene.theme.time_selection);
+    }
+}
+
+/// `audio`'s transients: a tick for each in sight, from the middle of the
+/// strip of the markers' handles to the waveform's top, but those too near
+/// the one before to tell apart.
+fn transients(painter: &Painter, scene: &Scene<'_>, audio: &AudioClip) {
+    let layout = &scene.layout;
+    let (handles, wave) = (layout.handles, layout.wave);
+    let top = handles.center().y;
+    let bottom = (handles.bottom() + 2.0).min(wave.bottom());
+    let stroke = Stroke::new(1.0, scene.theme.transient);
+    let mut last = f32::NEG_INFINITY;
+    for onset in scene.transients(audio, wave.left() - 1.0, wave.right() + 1.0) {
+        let x = painter.round_to_pixel_center(scene.x_of_frame(audio, onset.frame as f64));
+        if x - last >= 2.0 {
+            painter.vline(x, top..=bottom, stroke);
+            last = x;
+        }
+    }
 }
 
 /// The file's peaks, a column for each point, as `audio` plays them, at the
@@ -173,47 +204,63 @@ fn outside_clip(painter: &Painter, scene: &Scene<'_>, rect: Rect) {
     }
 }
 
-/// `audio`'s warp markers: a line down the waveform for each, with a
-/// handle on the strip along its top, brighter while it's selected.
-fn markers(painter: &Painter, scene: &Scene<'_>, audio: &AudioClip) {
+/// `audio`'s warp markers, as `plan` would leave them: a line down the
+/// waveform for each, with a handle on the strip along its top, brighter
+/// while it's selected.
+fn markers(painter: &Painter, scene: &Scene<'_>, audio: &AudioClip, plan: Option<&Plan>) {
     let Some(warp) = &audio.warp else {
         return;
     };
     let theme = scene.theme;
     let layout = &scene.layout;
     let handles = layout.handles;
-    painter.rect_filled(handles, 0.0, theme.outside_clip);
     let half = theme.sample_editor.handle / 2.0;
     // Moving markers or the audio under them keeps them in their order, so
-    // the selection is the clip's markers' at the same places.
-    let selected = |i: usize| scene.markers().get(i).is_some_and(|m| scene.selected(m));
+    // the selection is the clip's markers' at the same places. A pseudo
+    // marker dragged is a new marker, selected alone.
+    let pseudo = match plan {
+        Some(&Plan::Pseudo { frame, .. }) => Some(frame),
+        _ => None,
+    };
+    let selected = |i: usize, marker: &WarpMarker| match pseudo {
+        Some(frame) => marker.frame == frame,
+        None => scene.markers().get(i).is_some_and(|m| scene.selected(m)),
+    };
     for (i, marker) in warp.markers.iter().enumerate() {
         let x = layout.x_of(warp::song_position(scene.clip, audio, marker.beat));
         if x < handles.left() - half || x > handles.right() + half {
             continue;
         }
-        let colour = match selected(i) {
+        let colour = match selected(i, marker) {
             true => theme.warp_marker_selected,
             false => theme.warp_marker,
         };
-        let x = painter.round_to_pixel_center(x);
-        painter.vline(
-            x,
-            handles.bottom()..=layout.wave.bottom(),
-            Stroke::new(1.0, colour),
-        );
-        // A tag pointing down at the line.
-        let (top, bottom) = (handles.top() + 1.0, handles.bottom());
-        let shoulder = bottom - half.min(handles.height() / 2.0);
-        let tag = vec![
-            pos2(x - half, top),
-            pos2(x + half, top),
-            pos2(x + half, shoulder),
-            pos2(x, bottom),
-            pos2(x - half, shoulder),
-        ];
-        painter.add(Shape::convex_polygon(tag, colour, Stroke::NONE));
+        self::marker(painter, scene, x, colour);
     }
+}
+
+/// A warp marker at `x` in `colour`: a line down the waveform, and a tag on
+/// the strip along its top pointing down at it.
+fn marker(painter: &Painter, scene: &Scene<'_>, x: f32, colour: Color32) {
+    let layout = &scene.layout;
+    let handles = layout.handles;
+    let half = scene.theme.sample_editor.handle / 2.0;
+    let x = painter.round_to_pixel_center(x);
+    painter.vline(
+        x,
+        handles.bottom()..=layout.wave.bottom(),
+        Stroke::new(1.0, colour),
+    );
+    let (top, bottom) = (handles.top() + 1.0, handles.bottom());
+    let shoulder = bottom - half.min(handles.height() / 2.0);
+    let tag = vec![
+        pos2(x - half, top),
+        pos2(x + half, top),
+        pos2(x + half, shoulder),
+        pos2(x, bottom),
+        pos2(x - half, shoulder),
+    ];
+    painter.add(Shape::convex_polygon(tag, colour, Stroke::NONE));
 }
 
 /// The ruler under the waveform: the file's time, in steps that leave room
@@ -231,13 +278,12 @@ pub(super) fn time(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let rate = f64::from(scene.rate);
     let seconds = |x: f32| scene.frame_at(audio, x) / rate;
     let (first, last) = (seconds(time.left()).max(0.0), seconds(time.right()));
-    let last = frames(scene).map_or(last, |frames| last.min(frames as f64 / rate));
+    let last = (scene.file_frames()).map_or(last, |frames| last.min(frames as f64 / rate));
     if last.is_nan() || last <= first {
         return;
     }
     // From how far apart the seconds are across what's in sight.
-    let per_second = (x_of_frame(scene, audio, last * rate)
-        - x_of_frame(scene, audio, first * rate))
+    let per_second = (scene.x_of_frame(audio, last * rate) - scene.x_of_frame(audio, first * rate))
         / (last - first) as f32;
     let room = f64::from(theme.label_spacing / per_second.max(f32::EPSILON));
     let step = TIME_STEPS
@@ -250,7 +296,7 @@ pub(super) fn time(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let mut n = (first / step).ceil() as i64;
     while (n as f64) * step <= last {
         let at = n as f64 * step;
-        let x = painter.round_to_pixel_center(x_of_frame(scene, audio, at * rate));
+        let x = painter.round_to_pixel_center(scene.x_of_frame(audio, at * rate));
         painter.vline(x, time.top()..=time.top() + time.height() / 3.0, tick);
         // Where the audio's squeezed, labels that would crowd are left out.
         if x >= label_end {

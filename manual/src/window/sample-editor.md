@@ -32,6 +32,11 @@ do in it can be undone, and a whole drag is one step in the undo history.
 - **Warp markers** are lines down the waveform with handles along its top,
   brighter while they're selected. While a drag lasts, the waveform shows
   where the audio will play.
+- **Transients**, where the sounds in a warped clip's file start, are ticks
+  along the top of the waveform, under the markers' handles, once Musicable
+  has analysed the file. Near one, the waveform's top half shows a faint
+  pseudo marker ([Transients](../using/warping.md#transients)).
+- **The time selected**, a stretch of the clip dragged across, is shaded.
 - **The ruler of the file's time**, under the waveform, counts the file's
   minutes and seconds from its first frame, where they play: closer
   together where a warped clip plays its audio faster.
@@ -51,8 +56,13 @@ changes it ([The mouse](../customising/mouse.md)):
 | | Drag; Alt-drag | Moves the selected markers, on the grid; off it. The audio either side stretches to fill the beats up to the next markers |
 | | Shift-drag | Moves the audio under the marker, which stays on its beat |
 | | Double-click | Deletes the marker |
+| A transient's pseudo marker | Drag; Alt-drag | Adds a warp marker at the transient and moves it, on the grid; off it |
+| | Shift-drag | Moves the transient, between the transients either side |
+| | Double-click | Adds a warp marker at the transient, pinning it where it plays |
 | The waveform's top half | Double-click | Adds a warp marker on the line before the pointer, pinning the audio that plays there |
-| The waveform | Click | Clears the selected markers and puts the start marker there |
+| The waveform | Click | Clears the selected markers and time, and puts the start marker there |
+| | Drag | Selects the clip's time dragged across, on the grid, with the warp markers in it and its transients |
+| | Right-click | Opens a menu of the marker and transient commands, for what was clicked |
 | The gain lane | Click; double-click | Puts the start marker there; adds a point there |
 | | Drag; Alt-drag | Draws a value for each step of the grid crossed; draws freely, off the grid, as it does with Snap to Grid off |
 | The gain lane's line | Click; drag | Adds a point on the line; moves that stretch of the line, with its points, up or down |
@@ -70,13 +80,15 @@ act on the clip's warp markers:
 
 | Keys | What they do |
 |---|---|
-| Ctrl+I | Inserts a warp marker at the start marker |
+| Ctrl+I | Inserts a warp marker at each transient in the time selected, or else at the start marker |
 | Left, Right | Nudge the selected markers by the grid |
 | Delete, Backspace | Delete the selected markers |
-| Ctrl+A | Selects all the markers |
+| Ctrl+A | Selects all the markers, and all the clip's time |
+| Ctrl+Shift+I | Inserts a transient at the start marker |
+| Ctrl+Shift+Backspace | Deletes the transients in the time selected |
 
-The Clip menu has Warp, Double and Halve Clip Tempo, and the marker
-commands, for the clip the Sample Editor shows. Hiding the Sample Editor
-gives the arrangement the focus.
+The Clip menu has Warp, Double and Halve Clip Tempo, and the marker and
+transient commands, for the clip the Sample Editor shows. Hiding the
+Sample Editor gives the arrangement the focus.
 [Default keys](../reference/keys.md#in-the-sample-editor-panel) lists every
 key that works in the Sample Editor.

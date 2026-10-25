@@ -80,6 +80,8 @@ impl Theme {
 
             warp_marker: rgb(170, 130, 20),
             warp_marker_selected: rgb(220, 160, 0),
+            transient: gray(120),
+            pseudo_marker: gray(95),
 
             widgets: Widgets::light(),
             ..Self::dark()

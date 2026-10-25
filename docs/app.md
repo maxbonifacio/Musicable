@@ -377,24 +377,34 @@ what it shows, and what the mouse and the keys do in it, and
 [Warping](../manual/src/using/warping.md) what warping does. Everything it
 does runs a command ([commands.md](commands.md#warping) and
 [automation](commands.md#automation) for the gain lane), and a drag runs
-one when it ends, so it's one step to undo. While a drag lasts, it draws
-the waveform as the drag would leave it, from a copy of the clip's warp
-that the drag changes (`crates/ui/src/sample_editor.rs`), and the rulers,
-the markers and the waveform are drawn in `sample_editor/paint.rs`. Its
-waveform comes from the same peaks as the arrangement's, read along the
-clip's warp, so the two agree. Its keys are the Sample Editor panel's own
-in the default keymap, as the piano roll's are, and hiding it gives the
-arrangement the focus. Clip Editor and Switch Devices and Clip Editor show
-the piano roll or the Sample Editor, whichever fits the clip selected or
-opened last (`Editor::clip_editor`).
+one when it ends, so it's one step to undo: dragging a transient's pseudo
+marker runs Insert Warp Marker and Move Warp Markers as one batch
+(`Action::RunBatch`). While a drag lasts, it draws the waveform as the drag
+would leave it, from a copy of the clip's warp that the drag changes
+(`crates/ui/src/sample_editor.rs`), and the rulers, the markers, the
+transients and the waveform are drawn in `sample_editor/paint.rs`; its
+context menu is `sample_editor/menu.rs`. It finds the transients in sight
+by their frames, which rise across with the warp's markers, so it only
+looks at those near the pointer or on screen. A warped clip's transients
+come from analysis: the app gives each warped clip that has none yet those
+of its file as analyses arrive and the project changes
+(`warp::take_transients`), as a change the project follows rather than a
+step to undo. Its waveform comes from the same peaks as the arrangement's,
+read along the clip's warp, so the two agree. Its keys are the Sample
+Editor panel's own in the default keymap, as the piano roll's are, and
+hiding it gives the arrangement the focus. Clip Editor and Switch Devices
+and Clip Editor show the piano roll or the Sample Editor, whichever fits
+the clip selected or opened last (`Editor::clip_editor`).
 
 **For Tier 2's extensions and profiles.** What the Sample Editor shows, its
-selected markers and its zoom are the `Editor`'s (`editor::SampleEditor`);
-its colours and sizes are in the `Theme` (`theme.sample_editor`, and the
-`warp_marker`, `warp_marker_selected` and `outside_clip` colours); its
-gestures are the `MouseMap`'s targets `WarpMarker`, `WaveformTop` and
-`Waveform`, and its gain lane's are the automation lanes' targets; and its
-panel's id is `musicable_ui::SAMPLE_EDITOR`.
+selected markers and time, and its zoom are the `Editor`'s
+(`editor::SampleEditor`); its colours and sizes are in the `Theme`
+(`theme.sample_editor`, and the `warp_marker`, `warp_marker_selected`,
+`transient`, `pseudo_marker`, `time_selection` and `outside_clip`
+colours); its gestures are the `MouseMap`'s targets `WarpMarker`,
+`Transient`, `WaveformTop` and `Waveform`, and its gain lane's are the
+automation lanes' targets; and its panel's id is
+`musicable_ui::SAMPLE_EDITOR`.
 
 ## The History panel
 
