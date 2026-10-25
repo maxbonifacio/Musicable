@@ -2,8 +2,8 @@
 //! positions and times.
 
 use egui::{
-    Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Rect, Response, Role, Sense, Shape,
-    Stroke, StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Painter, Rect, Response, Role,
+    Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use musicable_model::time::{Beats, TempoMap};
 
@@ -217,6 +217,24 @@ pub(crate) fn paint_toggle(
             painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
         }
     }
+}
+
+/// A small triangle pointing down, after a name drawn at `name`, that says
+/// a click on the name opens a menu, as a lane's name beside it does.
+pub(crate) fn drop_down_mark(painter: &Painter, theme: &Theme, name: Rect) {
+    let size = theme.small_text * 0.5;
+    let left = name.right() + theme.padding;
+    let top = name.center().y - size / 4.0;
+    let triangle = vec![
+        pos2(left, top),
+        pos2(left + size, top),
+        pos2(left + size / 2.0, top + size / 2.0),
+    ];
+    painter.add(Shape::convex_polygon(
+        triangle,
+        theme.ruler_text,
+        Stroke::NONE,
+    ));
 }
 
 /// A box over the window that asks for a name: `title` over a field with

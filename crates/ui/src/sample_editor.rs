@@ -1,11 +1,14 @@
 //! The Sample Editor: the audio clip it shows, its waveform against the
 //! song's beats, as Live's Sample Editor shows it, with the clip's controls
-//! beside it: Warp, its mode, its tempo and its gain. A ruler over the
-//! waveform shows the song's bars and one under it the file's time, the
-//! warp markers' handles are along the waveform's top, with ticks under them
-//! where a warped clip's transients are, and the lane of the clip's gain is
-//! under it all. Near a transient, the top half shows a pseudo marker, as
-//! Live's does: dragging or double-clicking it makes it a warp marker.
+//! beside it: Warp, its mode and the mode's own settings, its tempo, its
+//! transpose and detune, and its gain. A ruler over the waveform shows the
+//! song's bars and one under it the file's time, the warp markers' handles
+//! are along the waveform's top, with ticks under them where a warped
+//! clip's transients are, and under it all a lane shows the curve of one of
+//! the clip's parameters: its gain, or one of its warp's settings, as the
+//! lane's name beside it chooses. Near a transient, the top half shows a
+//! pseudo marker, as Live's does: dragging or double-clicking it makes it a
+//! warp marker.
 //!
 //! Like the piano roll, it's drawn with egui's painter, only what's in
 //! sight, and everything it does goes through commands. What it shows and
@@ -26,23 +29,25 @@ mod tests;
 use std::collections::BTreeMap;
 
 use egui::{
-    Button, CursorIcon, DragValue, Event, Id, MouseWheelUnit, Pos2, Rect, Response, RichText, Role,
-    Sense, Ui, UiBuilder, WidgetInfo, pos2,
+    Button, ComboBox, CursorIcon, DragValue, Event, Id, MouseWheelUnit, Pos2, Rect, Response,
+    RichText, Role, ScrollArea, Sense, Ui, UiBuilder, WidgetInfo, pos2,
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, auto_warp, automation, transient, transport,
-    view as views, warp,
+    view as views, warp, warp_mode,
 };
 use musicable_model::Project;
 use musicable_model::automation::Point;
 use musicable_model::clip::{AudioClip, Clip, ClipContent};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::time::{Beats, TempoMap};
-use musicable_model::warp::{Onset, Origin, Warp, WarpMarker};
+use musicable_model::warp::{
+    Onset, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+};
 
 use crate::arrangement::{distance_to_segment, simplified};
-use crate::mixer::decibels;
+use crate::mixer::{decibels, name_menu};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -69,14 +74,14 @@ pub(crate) struct SampleEditor {
 }
 
 /// The parts of the Sample Editor that take the mouse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Area {
     /// The ruler of the song's bars, over the waveform.
     Ruler,
     Wave,
     /// The ruler of the file's time, under the waveform.
     Time,
-    /// The lane of the clip's gain.
+    /// The lane of the curve of one of the clip's parameters.
     Lane,
 }
 
@@ -112,15 +117,17 @@ impl Hit {
     }
 }
 
-/// A part of the gain lane.
+/// A part of the lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Envelope {
     /// The point at this place in the curve's points.
     Point(usize),
     /// Near the line through the points at these places, next to each
     /// other: or the same point twice, for the level line before the first
-    /// point or after the last. A lane without points has a level line at
-    /// the clip's gain, with no points to move.
+    /// point or after the last, or, for a parameter in steps, the level
+    /// line from a point to the next, which holds its value. A lane without
+    /// points has a level line at the parameter's own value, with no points
+    /// to move.
     Line {
         from: usize,
         to: usize,
@@ -154,7 +161,7 @@ struct Drag {
     viewport: Viewport,
     /// What the drag last asked for, for those that ask while they last.
     sent: Option<Plan>,
-    /// What a drag that draws on the gain lane drew so far: a value for
+    /// What a drag that draws on the lane drew so far: a value for
     /// each step of the grid it crossed, by the song position the step
     /// starts at, or drawn freely, a value for each place the pointer was.
     drawn: BTreeMap<Beats, f64>,
@@ -178,7 +185,7 @@ enum Plan {
     /// Selects the clip's own time that plays from song position `start` to
     /// `end`. Drags ask for it as they go.
     Time { start: Beats, end: Beats },
-    /// Sets the points of the clip's gain curve, in its own time.
+    /// Sets the points of the curve the lane shows, in the clip's own time.
     Points(Vec<Point>),
     /// Scrolls and zooms. Drags ask for it as they go.
     Viewport(Viewport),
@@ -188,11 +195,11 @@ enum Plan {
 #[derive(Debug, Clone)]
 struct Layout {
     /// The column of the clip's controls, beside the rulers and the
-    /// waveform, and the gain lane's name, beside the lane.
+    /// waveform, and the lane's name, beside the lane.
     controls: Rect,
     label: Rect,
     /// The ruler of the song's bars, the waveform, the strip along its top
-    /// with the markers' handles, the ruler of the file's time and the gain
+    /// with the markers' handles, the ruler of the file's time and the
     /// lane, top to bottom.
     ruler: Rect,
     wave: Rect,
@@ -242,16 +249,16 @@ impl Layout {
         self.viewport.beats_at(x - self.wave.left())
     }
 
-    /// The y coordinates the gain lane's line goes between, from silence to
-    /// the loudest: clear of the lane's edges, so the points at either end
-    /// show whole.
+    /// The y coordinates the lane's line goes between, from the
+    /// parameter's least to its most: clear of the lane's edges, so the
+    /// points at either end show whole.
     fn travel(&self, theme: &Theme) -> (f32, f32) {
         let lane = self.lane;
         let margin = (theme.point + 2.0).min(lane.height() / 2.0);
         (lane.bottom() - margin, lane.top() + margin)
     }
 
-    /// The y coordinate `unit` of the way up the gain lane's travel.
+    /// The y coordinate `unit` of the way up the lane's travel.
     fn y_of(&self, theme: &Theme, unit: f64) -> f32 {
         let (bottom, top) = self.travel(theme);
         bottom + (top - bottom) * unit as f32
@@ -316,19 +323,82 @@ impl Scene<'_> {
         self.editor().sample_editor.markers.contains(&marker.beat)
     }
 
-    /// The clip's gain, as automation names it.
+    /// The clip parameter whose curve the lane shows: the one chosen, or
+    /// Gain while the clip isn't warped, as the others are its warp's.
+    fn lane(&self) -> ClipParam {
+        match self.warp() {
+            Some(_) => self.editor().sample_editor.lane,
+            None => ClipParam::Gain,
+        }
+    }
+
+    /// The parameter the lane shows, as automation names it.
     fn param(&self) -> ParamAddress {
-        ParamAddress::Clip(self.clip.id, ClipParam::Gain)
+        ParamAddress::Clip(self.clip.id, self.lane())
     }
 
     fn spec(&self) -> ParamSpec {
-        ClipParam::Gain.spec()
+        self.lane().spec()
     }
 
-    /// The gain curve's points, in the clip's own time.
+    /// Whether the clip's mode plays the parameter the lane shows.
+    fn lane_plays(&self) -> bool {
+        self.lane().plays_in(self.warp().map(|warp| warp.mode))
+    }
+
+    /// The curve's points, in the clip's own time.
     fn curve(&self) -> &[Point] {
-        let lane = self.audio.lane(ClipParam::Gain);
+        let lane = self.audio.lane(self.lane());
         lane.map_or(&[], |lane| &lane.points[..])
+    }
+
+    /// The parameter's own value, where it has no curve: the clip's gain,
+    /// or its warp's setting.
+    fn level(&self) -> f64 {
+        let setting = self.warp().and_then(|warp| warp.param(self.lane()));
+        setting.unwrap_or(f64::from(self.audio.gain))
+    }
+
+    /// `value`, to the nearest step for a parameter in steps.
+    fn in_steps(&self, value: f64) -> f64 {
+        match self.lane().stepped() {
+            true => value.round(),
+            false => value,
+        }
+    }
+
+    /// The value the lane's name shows under it: what a drag on the lane,
+    /// `drag`, which would do `plan`, moves a point or a line to or draws,
+    /// or else the value of the point or the line under the pointer, or at
+    /// its height.
+    fn readout(&self, drag: Option<&Drag>, plan: Option<&Plan>) -> Option<f64> {
+        let planned = |i: usize| match plan {
+            Some(Plan::Points(points)) => points.get(i).map(|p| p.value),
+            _ => None,
+        };
+        let curve = self.curve();
+        let Some(drag) = drag else {
+            let pos = (self.pointer).filter(|&pos| self.layout.lane.contains(pos))?;
+            return Some(match self.envelope_part(pos) {
+                Envelope::Point(i) => curve.get(i)?.value,
+                Envelope::Line { .. } => self.line_value(self.own_of(self.layout.beats_at(pos.x))),
+                Envelope::Lane => self.value_at(pos.y),
+            });
+        };
+        match (drag.area, drag.action, drag.hit) {
+            (
+                Area::Lane,
+                MouseAction::MovePoint | MouseAction::MovePointFree,
+                Hit::Lane(Envelope::Point(i)),
+            ) => planned(i).or(curve.get(i).map(|p| p.value)),
+            (Area::Lane, MouseAction::MoveSegment, Hit::Lane(Envelope::Line { from, .. })) => {
+                planned(from).or(Some(curve.get(from).map_or(self.level(), |p| p.value)))
+            }
+            (Area::Lane, MouseAction::Draw | MouseAction::DrawFree, _) => {
+                Some(self.value_at(drag.to.y))
+            }
+            _ => None,
+        }
     }
 
     /// The song position, in fractional beats, where `own`, a moment of the
@@ -413,21 +483,21 @@ impl Scene<'_> {
         self.snap(self.layout.beats_at(x), false).max(Beats::ZERO)
     }
 
-    /// The gain lane's value at `y`.
+    /// The lane's value at `y`.
     fn value_at(&self, y: f32) -> f64 {
         let spec = self.spec();
         let unit = self.layout.unit_at(self.theme, y);
-        spec.scale.from_unit(unit, spec.min, spec.max)
+        self.in_steps(spec.scale.from_unit(unit, spec.min, spec.max))
     }
 
-    /// Where `value` is drawn on the gain lane.
+    /// Where `value` is drawn on the lane.
     fn y_of(&self, value: f64) -> f32 {
         let spec = self.spec();
         let unit = spec.scale.to_unit(value, spec.min, spec.max);
         self.layout.y_of(self.theme, unit)
     }
 
-    /// Where `point`, of the gain curve, is drawn.
+    /// Where `point`, of the curve, is drawn.
     fn point_at(&self, point: &Point) -> Pos2 {
         pos2(
             self.layout.x_of_beats(self.song_of(point.at)),
@@ -435,11 +505,11 @@ impl Scene<'_> {
         )
     }
 
-    /// The gain curve's value at `own`, in the clip's own time, or else the
-    /// clip's gain.
+    /// The curve's value at `own`, in the clip's own time, or else the
+    /// parameter's own value.
     fn line_value(&self, own: Beats) -> f64 {
-        let lane = self.audio.lane(ClipParam::Gain);
-        lane.map_or(f64::from(self.audio.gain), |lane| lane.value_at(own))
+        let lane = self.audio.lane(self.lane());
+        lane.map_or(self.level(), |lane| lane.value_at(own))
     }
 
     /// What's under `pos` in `area`.
@@ -487,14 +557,14 @@ impl Scene<'_> {
         }
     }
 
-    /// What's under `pos` on the gain lane: one of its points, the line
+    /// What's under `pos` on the lane: one of its points, the line
     /// through them, or neither.
     fn envelope_part(&self, pos: Pos2) -> Envelope {
         let layout = &self.layout;
         let grab = self.theme.point_grab;
         let points = self.curve();
         let Some(end) = points.len().checked_sub(1) else {
-            let level = self.y_of(f64::from(self.audio.gain));
+            let level = self.y_of(self.level());
             return match (level - pos.y).abs() <= grab {
                 true => Envelope::Line { from: 0, to: 0 },
                 false => Envelope::Lane,
@@ -509,9 +579,13 @@ impl Scene<'_> {
             return Envelope::Point(i);
         }
         // The lines between the points, and the level lines before the
-        // first and after the last.
+        // first and after the last. In steps, each point's value holds
+        // until the next, and the jumps between aren't lines to move.
         let mut lines = vec![(pos2(layout.lane.left(), at[0].y), at[0], 0, 0)];
-        lines.extend((0..end).map(|i| (at[i], at[i + 1], i, i + 1)));
+        lines.extend((0..end).map(|i| match self.lane().stepped() {
+            true => (at[i], pos2(at[i + 1].x, at[i].y), i, i),
+            false => (at[i], at[i + 1], i, i + 1),
+        }));
         lines.push((at[end], pos2(layout.lane.right(), at[end].y), end, end));
         lines
             .into_iter()
@@ -526,8 +600,8 @@ impl Scene<'_> {
         drag.action == MouseAction::Draw && self.editor().grid.snap
     }
 
-    /// Draws on the gain lane from where the pointer last drew to where it
-    /// is now.
+    /// Draws on the lane from where the pointer last drew to where it is
+    /// now.
     fn draw(&self, drag: &mut Drag) {
         let layout = &self.layout;
         let (from, to) = (drag.last.unwrap_or(drag.to), drag.to);
@@ -569,9 +643,9 @@ impl Scene<'_> {
         drag.last = Some(to);
     }
 
-    /// The gain curve once what `drag` drew takes the place of what was
-    /// there, in the clip's own time: a step at either end of it, from the
-    /// line as it was to what was drawn and back.
+    /// The curve once what `drag` drew takes the place of what was there,
+    /// in the clip's own time: a step at either end of it, from the line as
+    /// it was to what was drawn and back.
     fn drawn_points(&self, drag: &Drag) -> Option<Vec<Point>> {
         let steps = self.draws_steps(drag);
         let (&start, _) = drag.drawn.first_key_value()?;
@@ -584,13 +658,8 @@ impl Scene<'_> {
         let own = |at: Beats| self.own_of(at);
         let (start_own, end_own) = (own(start), own(end));
         let old = self.curve();
-        let scale = self.spec().scale;
-        let lane = self.audio.lane(ClipParam::Gain);
-        let gain = f64::from(self.audio.gain);
-        let before = lane.map_or(gain, |lane| {
-            musicable_model::automation::value_before(&lane.points, start_own, scale)
-                .unwrap_or(gain)
-        });
+        let lane = self.audio.lane(self.lane());
+        let before = lane.map_or(self.level(), |lane| lane.value_before(start_own));
         let after = self.line_value(end_own);
         let mut points: Vec<Point> = old.iter().filter(|p| p.at < start_own).copied().collect();
         points.push(Point::new(start_own, before));
@@ -692,8 +761,9 @@ impl Scene<'_> {
                 let spec = self.spec();
                 let unit = spec.scale.to_unit(point.value, spec.min, spec.max)
                     + layout.units_in(self.theme, drag.from.y - drag.to.y);
+                let value = self.in_steps(spec.scale.from_unit(unit, spec.min, spec.max));
                 let mut points = old.to_vec();
-                points[i] = Point::new(at, spec.scale.from_unit(unit, spec.min, spec.max));
+                points[i] = Point::new(at, value);
                 (points != old).then_some(Plan::Points(points))
             }
             (MouseAction::MoveSegment, Hit::Lane(Envelope::Line { from, to })) => {
@@ -703,7 +773,7 @@ impl Scene<'_> {
                 let mut points = old.to_vec();
                 for point in points.get_mut(from..=to)? {
                     let unit = spec.scale.to_unit(point.value, spec.min, spec.max) + up;
-                    point.value = spec.scale.from_unit(unit, spec.min, spec.max);
+                    point.value = self.in_steps(spec.scale.from_unit(unit, spec.min, spec.max));
                 }
                 (points != old).then_some(Plan::Points(points))
             }
@@ -825,8 +895,8 @@ fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
     }
 }
 
-/// Asks the app to give the clip's gain curve `points`, or to clear it
-/// without them, which keeps the gain it had at the playhead.
+/// Asks the app to give the curve the lane shows `points`, or to clear it
+/// without them, which keeps the value it had at the playhead.
 fn set_points(actions: &mut Vec<Action>, scene: &Scene<'_>, points: &[Point]) {
     let param = scene.param();
     if points.is_empty() {
@@ -848,6 +918,18 @@ fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport) {
         .with("zoom", viewport.zoom)
         .with("width", viewport.width);
     run(actions, views::SET_SAMPLE_EDITOR_VIEWPORT, args);
+}
+
+/// How the lane names `value` of `param`: "-6.0 dB", "+3.5 st", "1/8".
+fn value_text(param: ClipParam, value: f64) -> String {
+    match param {
+        ClipParam::Gain => decibels(value as f32),
+        ClipParam::Transpose => format!("{value:+.1} st"),
+        ClipParam::Detune => format!("{value:+.0} ct"),
+        ClipParam::TransientEnvelope => format!("{value:.0}"),
+        ClipParam::Preserve => Preserve::at_step(value).name().to_owned(),
+        ClipParam::TransientLoop => TransientLoop::at_step(value).name().to_owned(),
+    }
 }
 
 /// A gain in decibels, for the gain field: silence at the floor.
@@ -913,20 +995,26 @@ impl SampleEditor {
         };
         let mut viewport = scene.layout.viewport;
         let id = ui.scope_id().with("sample editor");
+        // The lane is named for what it shows: "Gain Lane".
+        let lane = format!("{} Lane", scene.spec().name);
         let areas = [
             (scene.layout.ruler, Area::Ruler, "Sample Editor Ruler"),
             (scene.layout.wave, Area::Wave, "Sample Editor"),
             (scene.layout.time, Area::Time, "File Time"),
-            (scene.layout.lane, Area::Lane, "Gain Lane"),
+            (scene.layout.lane, Area::Lane, lane.as_str()),
         ];
         let responses: Vec<(Response, Area)> = areas
             .into_iter()
             .map(|(rect, area, name)| {
-                let response = ui.interact(rect, id.with(name), Sense::click_and_drag());
+                let response = ui.interact(rect, id.with(area), Sense::click_and_drag());
                 response.widget_info(|| WidgetInfo::labeled(Role::Canvas, true, name));
                 (response, area)
             })
             .collect();
+        // While the clip's warped, a click on the lane's name chooses what
+        // it shows.
+        let chooser = (scene.warp().is_some())
+            .then(|| ui.interact(scene.layout.label, id.with("lane"), Sense::click()));
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.drag = None;
         }
@@ -950,7 +1038,12 @@ impl SampleEditor {
         paint::wave(&wave, &scene, plan.as_ref(), pseudo);
         paint::time(&painter.with_clip_rect(layout.time), &scene, plan.as_ref());
         paint::lane(&painter.with_clip_rect(layout.lane), &scene, plan.as_ref());
-        paint::label(&painter.with_clip_rect(layout.label), &scene);
+        let label = painter.with_clip_rect(layout.label);
+        let readout = scene.readout(self.drag.as_ref(), plan.as_ref());
+        paint::label(&label, &scene, chooser.as_ref(), readout);
+        if let Some(chooser) = &chooser {
+            menu::lanes(chooser, &scene, actions);
+        }
         paint::column(&painter.with_clip_rect(layout.controls), &scene);
         controls(ui, &scene, actions);
         name_for_screen_readers(ui, &scene, id);
@@ -1330,17 +1423,51 @@ fn clicked(
     true
 }
 
-/// The clip's controls, in the column beside the waveform: Warp, its mode
-/// and its tempo, with Live's ×2 and ÷2, and its gain. An unwarped clip's
-/// tempo is the one Warp would warp it at, greyed.
+/// The clip's controls, in the column beside the waveform, as Live's: Warp
+/// and its mode, the mode's own settings, its tempo, with Live's ×2 and ÷2,
+/// its transpose and detune, and its gain. An unwarped clip's tempo is the
+/// one Warp would warp it at, greyed, and so are Re-Pitch's transpose and
+/// detune, as its pitch follows its speed. Where the column is too short
+/// for them all, it scrolls.
 fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
     let theme = scene.theme;
     let column = scene.layout.controls.shrink(theme.padding);
-    let clip = scene.clip.id;
     ui.scope_builder(UiBuilder::new().max_rect(column), |ui| {
         ui.spacing_mut().item_spacing.y = theme.padding;
+        // Under the clip's name.
         ui.add_space(theme.sample_editor.ruler);
-        let warped = scene.warp().is_some();
+        ScrollArea::vertical()
+            .id_salt("sample editor controls")
+            .show(ui, |ui| {
+                warp_and_mode(ui, scene, actions);
+                match scene.warp() {
+                    Some(warp) => {
+                        if warp.mode == WarpMode::Slice {
+                            slice(ui, scene, warp, actions);
+                        }
+                        tempo(ui, scene, warp, actions);
+                        pitch(ui, scene, warp, actions);
+                    }
+                    None => {
+                        let (project, editor) = (scene.project(), scene.editor());
+                        let mut bpm =
+                            auto_warp::tempo_guess(project, editor, scene.clip, scene.audio);
+                        let field = DragValue::new(&mut bpm).fixed_decimals(2).suffix(" BPM");
+                        ui.add_enabled(false, field).on_disabled_hover_text(
+                            "The tempo Warp warps the clip at: its file's, as found",
+                        );
+                    }
+                }
+                gain(ui, scene, actions);
+            });
+    });
+}
+
+/// Warp, and while the clip's warped, the menu of its modes.
+fn warp_and_mode(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let warped = scene.warp().is_some();
+    ui.horizontal(|ui| {
         let hint = "Whether the clip follows the song's tempo";
         let warp_button = ui
             .add(Button::new("Warp").selected(warped))
@@ -1349,81 +1476,242 @@ fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
             let args = Args::new().with("on", !warped).with("clip", clip);
             run(actions, warp::SET_WARP, args);
         }
-        if let Some(warp) = scene.warp() {
-            ui.label(RichText::new(format!("Mode: {}", warp.mode.name())).size(theme.small_text));
-            let mut bpm = warp.clip_tempo(scene.rate);
-            ui.horizontal(|ui| {
-                let field = ui
-                    .add(
-                        DragValue::new(&mut bpm)
-                            .speed(0.1)
-                            .range(Warp::MIN_TEMPO..=Warp::MAX_TEMPO)
-                            .fixed_decimals(2)
-                            .suffix(" BPM")
-                            .update_while_editing(false),
-                    )
-                    .on_hover_text("The clip's tempo: drag, or click and type");
-                // One drag is one step in the undo history.
-                if field.drag_started() {
-                    actions.push(Action::BeginGesture);
-                }
-                if field.changed() {
-                    let args = Args::new().with("bpm", bpm).with("clip", clip);
-                    run(actions, warp::SET_TEMPO, args);
-                }
-                if field.drag_stopped() {
-                    actions.push(Action::EndGesture);
-                }
-            });
-            ui.horizontal(|ui| {
-                let halve = ui.small_button("\u{f7}2").on_hover_text("Halve the tempo");
-                if halve.clicked() {
-                    actions.push(Action::Run(warp::HALVE_TEMPO));
-                }
-                let double = ui.small_button("\u{d7}2").on_hover_text("Double the tempo");
-                if double.clicked() {
-                    actions.push(Action::Run(warp::DOUBLE_TEMPO));
-                }
-            });
-        } else {
-            let (project, editor) = (scene.project(), scene.editor());
-            let mut bpm = auto_warp::tempo_guess(project, editor, scene.clip, scene.audio);
-            let field = DragValue::new(&mut bpm).fixed_decimals(2).suffix(" BPM");
-            ui.add_enabled(false, field)
-                .on_disabled_hover_text("The tempo Warp warps the clip at: its file's, as found");
+        let Some(warp) = scene.warp() else {
+            return;
+        };
+        let hint = "How the audio between the markers plays: Re-Pitch resamples it, so its \
+                    pitch follows its speed, as on a turntable, and Slice cuts it into \
+                    slices at its transients, each played at the file's own speed, for drums \
+                    and other percussive loops";
+        let (shown, modes) = (RichText::new(warp.mode.name()), &WarpMode::ALL);
+        if let Some(mode) = menu(
+            ui,
+            "Warp Mode",
+            shown,
+            modes,
+            warp.mode,
+            WarpMode::name,
+            hint,
+        ) {
+            let args = Args::new().with("mode", mode.key()).with("clip", clip);
+            run(actions, warp_mode::SET_MODE, args);
         }
-        let mut db = gain_to_db(scene.audio.gain);
-        let max = 20.0 * ParamSpec::CLIP_GAIN_MAX.log10();
-        ui.horizontal(|ui| {
-            ui.label("Gain");
-            let field = ui
-                .add(
-                    DragValue::new(&mut db)
-                        .speed(0.2)
-                        .range(GAIN_FLOOR..=max)
-                        .custom_formatter(|db, _| decibels(db_to_gain(db) as f32))
-                        .custom_parser(|text| {
-                            let text = text.trim().trim_end_matches("dB").trim();
-                            match text {
-                                "-inf" => Some(GAIN_FLOOR),
-                                text => text.parse().ok(),
-                            }
-                        })
-                        .update_while_editing(false),
-                )
-                .on_hover_text("The clip's gain, where its curve doesn't say otherwise");
-            if field.drag_started() {
-                actions.push(Action::BeginGesture);
-            }
-            if field.changed() {
-                let args = Args::new().with("gain", db_to_gain(db)).with("clip", clip);
-                run(actions, warp::SET_GAIN, args);
-            }
-            if field.drag_stopped() {
-                actions.push(Action::EndGesture);
-            }
+    });
+}
+
+/// Slice's own settings: where it cuts the audio, what a slice plays where
+/// its audio runs out, and how much each slice fades.
+fn slice(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let settings = warp.slice;
+    let small = |text: String| RichText::new(text).size(scene.theme.small_text);
+    let preserve = settings.preserve;
+    let shown = small(format!("Preserve: {}", preserve.name()));
+    let hint = "Where Slice cuts the audio: at its transients, or on a grid of notes from the \
+                clip's 1.1.1";
+    let (options, name) = (&Preserve::ALL, Preserve::name);
+    if let Some(picked) = menu(ui, "Preserve", shown, options, preserve, name, hint) {
+        let args = Args::new()
+            .with("preserve", picked.key())
+            .with("clip", clip);
+        run(actions, warp_mode::SET_PRESERVE, args);
+    }
+    let looping = settings.transient_loop;
+    let shown = small(format!("Loop: {}", looping.name()));
+    let hint = "Transient Loop Mode: what a slice plays where its audio runs out before the \
+                next starts, as where the song plays the file slower than its own speed";
+    let (options, name) = (&TransientLoop::ALL, TransientLoop::name);
+    if let Some(picked) = menu(
+        ui,
+        "Transient Loop Mode",
+        shown,
+        options,
+        looping,
+        name,
+        hint,
+    ) {
+        let args = Args::new().with("mode", picked.key()).with("clip", clip);
+        run(actions, warp_mode::SET_TRANSIENT_LOOP, args);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Envelope");
+        let mut envelope = settings.envelope;
+        let field = ui
+            .add(
+                DragValue::new(&mut envelope)
+                    .speed(0.5)
+                    .range(0.0..=SliceSettings::ENVELOPE_MAX)
+                    .fixed_decimals(0)
+                    .update_while_editing(false),
+            )
+            .on_hover_text(
+                "Transient Envelope: how much each slice fades as it plays, from 0, a very \
+                 quick decay, to 100, no fade",
+            );
+        name_field(&field, "Transient Envelope", envelope);
+        edited(&field, actions, warp_mode::SET_TRANSIENT_ENVELOPE, || {
+            Args::new().with("envelope", envelope).with("clip", clip)
         });
     });
+}
+
+/// The clip's tempo, to drag or type, with ÷2 and ×2.
+fn tempo(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let mut bpm = warp.clip_tempo(scene.rate);
+    let field = ui
+        .add(
+            DragValue::new(&mut bpm)
+                .speed(0.1)
+                .range(Warp::MIN_TEMPO..=Warp::MAX_TEMPO)
+                .fixed_decimals(2)
+                .suffix(" BPM")
+                .update_while_editing(false),
+        )
+        .on_hover_text("The clip's tempo: drag, or click and type");
+    name_field(&field, "Clip Tempo", bpm);
+    edited(&field, actions, warp::SET_TEMPO, || {
+        Args::new().with("bpm", bpm).with("clip", clip)
+    });
+    ui.horizontal(|ui| {
+        let halve = ui.small_button("\u{f7}2").on_hover_text("Halve the tempo");
+        if halve.clicked() {
+            actions.push(Action::Run(warp::HALVE_TEMPO));
+        }
+        let double = ui.small_button("\u{d7}2").on_hover_text("Double the tempo");
+        if double.clicked() {
+            actions.push(Action::Run(warp::DOUBLE_TEMPO));
+        }
+    });
+}
+
+/// The clip's transpose, in semitones, and its detune, in cents: greyed in
+/// Re-Pitch, whose pitch follows its speed.
+fn pitch(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let transposes = warp.mode.transposes();
+    let greyed = "Re-Pitch's pitch follows its speed: the other modes transpose";
+    ui.horizontal(|ui| {
+        let fields = [
+            (
+                ("Transpose", "st", warp_mode::SET_TRANSPOSE, "semitones"),
+                warp.transpose,
+                Warp::TRANSPOSE_MAX,
+            ),
+            (
+                ("Detune", "ct", warp_mode::SET_DETUNE, "cents"),
+                warp.detune,
+                Warp::DETUNE_MAX,
+            ),
+        ];
+        for ((name, unit, id, arg), value, max) in fields {
+            let mut value = i64::from(value);
+            let max = i64::from(max);
+            let field = DragValue::new(&mut value)
+                .speed(0.1)
+                .range(-max..=max)
+                .custom_formatter(|value, _| match value > 0.0 {
+                    true => format!("+{value} {unit}"),
+                    false => format!("{value} {unit}"),
+                })
+                .custom_parser(|text| text.trim().trim_end_matches(unit).trim().parse().ok())
+                .update_while_editing(false);
+            let hint = format!(
+                "{name}: how far the audio's pitch moves, in {arg}, where its curve doesn't \
+                 say otherwise"
+            );
+            let field = ui
+                .add_enabled(transposes, field)
+                .on_hover_text(hint)
+                .on_disabled_hover_text(greyed);
+            name_field(&field, name, value as f64);
+            edited(&field, actions, id, || {
+                Args::new().with(arg, value).with("clip", clip)
+            });
+        }
+    });
+}
+
+/// The clip's gain, in decibels, to drag or type.
+fn gain(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
+    let clip = scene.clip.id;
+    let mut db = gain_to_db(scene.audio.gain);
+    let max = 20.0 * ParamSpec::CLIP_GAIN_MAX.log10();
+    ui.horizontal(|ui| {
+        let name = ui.label("Gain");
+        let field = ui
+            .add(
+                DragValue::new(&mut db)
+                    .speed(0.2)
+                    .range(GAIN_FLOOR..=max)
+                    .custom_formatter(|db, _| decibels(db_to_gain(db) as f32))
+                    .custom_parser(|text| {
+                        let text = text.trim().trim_end_matches("dB").trim();
+                        match text {
+                            "-inf" => Some(GAIN_FLOOR),
+                            text => text.parse().ok(),
+                        }
+                    })
+                    .update_while_editing(false),
+            )
+            .on_hover_text("The clip's gain, where its curve doesn't say otherwise")
+            .labelled_by(name.id);
+        edited(&field, actions, warp::SET_GAIN, || {
+            Args::new().with("gain", db_to_gain(db)).with("clip", clip)
+        });
+    });
+}
+
+/// A menu of `options`, with what `name_of` calls each, showing `shown`
+/// and with `hint` on it, and named `name` for screen readers. Returns the
+/// option picked, if it isn't `current`.
+fn menu<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    name: &str,
+    shown: RichText,
+    options: &[T],
+    current: T,
+    name_of: impl Fn(T) -> &'static str,
+    hint: &str,
+) -> Option<T> {
+    let mut picked = None;
+    let menu = ComboBox::from_id_salt(name)
+        .width(ui.available_width())
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for &option in options {
+                let item = ui.selectable_label(option == current, name_of(option));
+                if item.clicked() && option != current {
+                    picked = Some(option);
+                }
+            }
+        });
+    name_menu(&menu.response, name.to_owned(), name_of(current));
+    menu.response.on_hover_text(hint);
+    picked
+}
+
+/// Names the field `field`, which shows `value`, for screen readers.
+fn name_field(field: &Response, name: &str, value: f64) {
+    let enabled = field.enabled();
+    field.widget_info(|| WidgetInfo {
+        label: Some(name.to_owned()),
+        ..WidgetInfo::drag_value(enabled, value)
+    });
+}
+
+/// Asks for the command `id`, with the arguments `args` gives, if `field`
+/// changed, with each drag of it one step in the undo history.
+fn edited(field: &Response, actions: &mut Vec<Action>, id: CommandId, args: impl FnOnce() -> Args) {
+    if field.drag_started() {
+        actions.push(Action::BeginGesture);
+    }
+    if field.changed() {
+        run(actions, id, args());
+    }
+    if field.drag_stopped() {
+        actions.push(Action::EndGesture);
+    }
 }
 
 /// Names what's in sight for screen readers, and for the tests, which find

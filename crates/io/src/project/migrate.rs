@@ -29,6 +29,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     workspace,
     warping,
     transients,
+    slicing,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -224,24 +225,52 @@ fn unwarped(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
 }
 
 /// Version 12 added the transients a warped clip keeps. Version 11 warped
-/// clips have none yet, so they take them from analysis, on tracks and in
-/// takes.
+/// clips have none yet, so they take them from analysis.
 fn transients(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    each_warp(file, &mut |warp, path| {
+        add(warp, path, "onsets", Value::Null)
+    })
+}
+
+/// Version 13 added the Slice mode, with its settings, and the transpose and
+/// detune of every mode but Re-Pitch. Version 12 warped clips play Re-Pitch,
+/// so they're untransposed, and Slice's settings are Live's.
+fn slicing(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    each_warp(file, &mut |warp, path| {
+        add(warp, path, "transpose", json!(0))?;
+        add(warp, path, "detune", json!(0))?;
+        let slice =
+            json!({"preserve": "transients", "transient_loop": "forward", "envelope": 100.0});
+        add(warp, path, "slice", slice)
+    })
+}
+
+/// A change to a warp in a file, given the warp and its path.
+type WarpChange<'a> = dyn FnMut(&mut Map<String, Value>, &str) -> Result<(), Invalid> + 'a;
+
+/// Calls `change` with the warp of each warped audio clip, on tracks and in
+/// takes, and its path.
+fn each_warp(file: &mut Map<String, Value>, change: &mut WarpChange<'_>) -> Result<(), Invalid> {
     let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
     for (i, track) in tracks.into_iter().flatten().enumerate() {
         let path = format!("tracks[{i}]");
-        no_onsets(track.get_mut("clips"), &format!("{path}.clips"))?;
+        warps_in(track.get_mut("clips"), &format!("{path}.clips"), change)?;
         let takes = track.get_mut("takes").and_then(Value::as_array_mut);
         for (j, take) in takes.into_iter().flatten().enumerate() {
-            no_onsets(take.get_mut("clips"), &format!("{path}.takes[{j}].clips"))?;
+            let path = format!("{path}.takes[{j}].clips");
+            warps_in(take.get_mut("clips"), &path, change)?;
         }
     }
     Ok(())
 }
 
-/// Gives the warp of each warped audio clip in `clips`, a list at `path`,
-/// no transients yet.
-fn no_onsets(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+/// Calls `change` with the warp of each warped audio clip in `clips`, a
+/// list at `path`.
+fn warps_in(
+    clips: Option<&mut Value>,
+    path: &str,
+    change: &mut WarpChange<'_>,
+) -> Result<(), Invalid> {
     let clips = clips.and_then(Value::as_array_mut);
     for (k, clip) in clips.into_iter().flatten().enumerate() {
         let warp = clip
@@ -250,8 +279,7 @@ fn no_onsets(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
             .and_then(|a| a.get_mut("warp"))
             .and_then(Value::as_object_mut);
         if let Some(warp) = warp {
-            let path = format!("{path}[{k}].content.audio.warp");
-            add(warp, &path, "onsets", Value::Null)?;
+            change(warp, &format!("{path}[{k}].content.audio.warp"))?;
         }
     }
     Ok(())
@@ -559,6 +587,41 @@ mod tests {
             run(&STEPS[..11], &mut file, 11).unwrap_err().path,
             "tracks[0].clips[0].content.audio.warp.onsets",
             "transients in a version 11 file"
+        );
+    }
+
+    #[test]
+    fn version_12_warped_clips_play_re_pitch_untransposed() {
+        let warped = || json!({"content": {"audio": {"warp": {"mode": "re_pitch"}}}});
+        let unwarped = json!({"content": {"audio": {"warp": null}}});
+        let mut file = json!({
+            "version": 12,
+            "tracks": [
+                {"clips": [warped(), unwarped.clone()], "takes": [{"clips": [warped()]}]},
+            ],
+        });
+        run(&STEPS[..12], &mut file, 12).unwrap();
+        let sliced = json!({
+            "content": {"audio": {"warp": {
+                "mode": "re_pitch",
+                "transpose": 0,
+                "detune": 0,
+                "slice": {"preserve": "transients", "transient_loop": "forward", "envelope": 100.0},
+            }}},
+        });
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], sliced);
+        assert_eq!(tracks[0]["clips"][1], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], sliced);
+        assert_eq!(file["version"], json!(13));
+        let mut file = json!({
+            "version": 12,
+            "tracks": [{"takes": [{"clips": [{"content": {"audio": {"warp": {"detune": 3}}}}]}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..12], &mut file, 12).unwrap_err().path,
+            "tracks[0].takes[0].clips[0].content.audio.warp.detune",
+            "a detune in a version 12 file"
         );
     }
 

@@ -1316,8 +1316,8 @@ impl Transaction<'_> {
     ///
     /// A clip's parameter has its curve in the clip, in the clip's own
     /// time, which can start before zero: its points are tidied with
-    /// [`automation::tidy_anywhere`] instead, and kept in the parameter's
-    /// range.
+    /// [`automation::tidy_anywhere`] instead, kept in the parameter's
+    /// range, and rounded to whole steps for a stepped one.
     pub fn set_lane_points(&mut self, param: ParamAddress, mut points: Vec<automation::Point>) {
         if let ParamAddress::Clip(clip, clip_param) = param {
             self.set_clip_lane(clip, clip_param, points);
@@ -1352,6 +1352,9 @@ impl Transaction<'_> {
         let spec = param.spec();
         for point in &mut points {
             point.value = spec.clamp(point.value);
+            if param.stepped() {
+                point.value = point.value.round();
+            }
         }
         let Some((_, audio)) = audio_mut(self.project, clip) else {
             return;
@@ -1415,7 +1418,28 @@ impl Transaction<'_> {
                 }
             }
             ParamAddress::Clip(clip, ClipParam::Gain) => self.set_clip_gain(clip, narrow),
+            ParamAddress::Clip(clip, param) => self.set_warp_param(clip, param, value),
         }
+    }
+
+    /// Sets the setting of the warped audio clip `clip`'s warp that the
+    /// clip parameter `param` is, kept in its range and to its steps (see
+    /// [`Warp::set_param`](musicable_model::warp::Warp::set_param)). A clip
+    /// that isn't warped is left alone.
+    fn set_warp_param(&mut self, clip: ClipId, param: ClipParam, value: f64) {
+        let Some((_, audio)) = audio_mut(self.project, clip) else {
+            return;
+        };
+        let Some(warp) = &audio.warp else {
+            return;
+        };
+        let mut warp = warp.clone();
+        warp.set_param(param, value);
+        let warping = Warping {
+            offset: audio.offset,
+            warp: Some(warp),
+        };
+        self.set_clip_warping(clip, warping);
     }
 
     /// Sets the parameter at `param` by hand, as a control does: automation

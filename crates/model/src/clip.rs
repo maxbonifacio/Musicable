@@ -378,16 +378,40 @@ pub struct ClipLane {
     /// At least one, in order of time, as an automation lane's are: two at
     /// the same time make a step, and the value moves in a straight line in
     /// the parameter's scale between points (see
-    /// [`Lane`](automation::Lane)). They can be before the clip's own time
+    /// [`Lane`](automation::Lane)). A stepped parameter's (see
+    /// [`ClipParam::stepped`]) are whole numbers, and it holds each point's
+    /// value until the next instead. They can be before the clip's own time
     /// starts, as the file can be.
     pub points: Vec<automation::Point>,
 }
 
 impl ClipLane {
-    /// The curve's value at `at` in the clip's own time.
+    /// The curve's value at `at` in the clip's own time: at a step, the
+    /// value after it.
     pub fn value_at(&self, at: Beats) -> f64 {
-        let scale = self.param.spec().scale;
-        automation::value_at(&self.points, at, scale).unwrap_or(self.param.spec().default)
+        let spec = self.param.spec();
+        let value = match self.param.stepped() {
+            true => self.held(self.points.partition_point(|p| p.at <= at)),
+            false => automation::value_at(&self.points, at, spec.scale),
+        };
+        value.unwrap_or(spec.default)
+    }
+
+    /// The curve's value as it comes up to `at`: at a step, the value
+    /// before it, as at a stepped parameter's point.
+    pub fn value_before(&self, at: Beats) -> f64 {
+        let spec = self.param.spec();
+        let value = match self.param.stepped() {
+            true => self.held(self.points.partition_point(|p| p.at < at)),
+            false => automation::value_before(&self.points, at, spec.scale),
+        };
+        value.unwrap_or(spec.default)
+    }
+
+    /// A stepped parameter's value with the points before `after` up to
+    /// it: the last of them's, or the first point's before them all.
+    fn held(&self, after: usize) -> Option<f64> {
+        self.points.get(after.saturating_sub(1)).map(|p| p.value)
     }
 }
 
@@ -950,6 +974,29 @@ mod tests {
         assert_eq!(lane.value_at(Beats::new(3)), 1.0);
         audio.set_lane(ClipParam::Gain, Vec::new());
         assert!(audio.automation.is_empty());
+    }
+
+    #[test]
+    fn a_stepped_parameter_holds_each_point_until_the_next() {
+        let mut audio = AudioClip::new("loop.wav");
+        let point = |beat, value| automation::Point::new(Beats::new(beat), value);
+        // Sixteenths, the transients from beat 2, and bars from beat 4.
+        let points = vec![point(0, 5.0), point(2, 0.0), point(4, 1.0)];
+        audio.set_lane(ClipParam::Preserve, points);
+        let lane = audio.lane(ClipParam::Preserve).unwrap();
+        let at = |beats: f64| lane.value_at(Beats::from_f64(beats));
+        assert_eq!(
+            [at(-1.0), at(0.0), at(1.9), at(2.0), at(3.9)],
+            [5.0, 5.0, 5.0, 0.0, 0.0]
+        );
+        assert_eq!(at(4.0), 1.0);
+        let before = |beats: i64| lane.value_before(Beats::new(beats));
+        assert_eq!([before(2), before(4), before(5)], [5.0, 0.0, 1.0]);
+        // A smooth one moves between them.
+        audio.set_lane(ClipParam::Transpose, vec![point(0, 0.0), point(2, 12.0)]);
+        let lane = audio.lane(ClipParam::Transpose).unwrap();
+        assert_eq!(lane.value_at(Beats::new(1)), 6.0);
+        assert_eq!(lane.value_before(Beats::new(2)), 12.0);
     }
 
     #[test]

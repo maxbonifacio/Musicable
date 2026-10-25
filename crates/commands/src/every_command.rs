@@ -34,7 +34,9 @@ use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
+use musicable_model::warp::{
+    Onset, Onsets, Origin, Preserve, TransientLoop, Warp, WarpMarker, WarpMode,
+};
 use musicable_model::{
     Chain, ClipType, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Take, Track, TrackId,
     TrackKind,
@@ -46,7 +48,7 @@ use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
     controllers, device, edit, file, history, json, locator, mixer, notes, options, rewarp, take,
-    track, transient, transport, view, warp, workspace,
+    track, transient, transport, view, warp, warp_mode, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -1239,6 +1241,55 @@ fn examples() -> Vec<Example> {
                 .ok()?;
             Some(Args::new())
         }),
+        edits(warp_mode::SET_MODE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let mode = match warp.mode {
+                WarpMode::RePitch => WarpMode::Slice,
+                WarpMode::Slice => WarpMode::RePitch,
+            };
+            Some(Args::new().with("clip", clip).with("mode", mode.key()))
+        }),
+        edits(warp_mode::SET_TRANSPOSE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let semitones: i64 = if warp.transpose == 7 { -5 } else { 7 };
+            Some(Args::new().with("clip", clip).with("semitones", semitones))
+        }),
+        edits(warp_mode::SET_DETUNE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let cents: i64 = if warp.detune == 25 { -10 } else { 25 };
+            Some(Args::new().with("clip", clip).with("cents", cents))
+        }),
+        edits(warp_mode::SET_PRESERVE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let preserve = match warp.slice.preserve {
+                Preserve::Sixteenth => Preserve::Transients,
+                _ => Preserve::Sixteenth,
+            };
+            Some(
+                Args::new()
+                    .with("clip", clip)
+                    .with("preserve", preserve.key()),
+            )
+        }),
+        edits(warp_mode::SET_TRANSIENT_LOOP, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let next = (warp.slice.transient_loop.step() + 1) % TransientLoop::ALL.len();
+            let mode = TransientLoop::ALL[next].key();
+            Some(Args::new().with("clip", clip).with("mode", mode))
+        }),
+        edits(warp_mode::SET_TRANSIENT_ENVELOPE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let envelope = if warp.slice.envelope == 50.0 {
+                80.0
+            } else {
+                50.0
+            };
+            Some(Args::new().with("clip", clip).with("envelope", envelope))
+        }),
+        leaves(warp_mode::SHOW_LANE, |s| {
+            let clip = find_clip(s, is_audio)?.id;
+            Some(Args::new().with("clip", clip).with("param", "preserve"))
+        }),
         edits(rewarp::FROM_HERE, marker_frame),
         edits(rewarp::FROM_HERE_AT_SONG_TEMPO, marker_frame),
         edits(rewarp::FROM_HERE_STRAIGHT, marker_frame),
@@ -1380,6 +1431,18 @@ fn find_marker(s: &Rig, keep: impl Fn(&Warp) -> bool) -> Option<(ClipId, Beats)>
             warp: Some(warp), ..
         }) if keep(warp) => warp.markers.iter().map(|m| (clip.id, m.beat)).collect(),
         _ => Vec::new(),
+    });
+    pick(s, found)
+}
+
+/// A warped clip on a track, and its warp.
+fn find_warp(s: &Rig) -> Option<(ClipId, Warp)> {
+    let clips = project(s).tracks.iter().flat_map(|t| &t.clips);
+    let found = clips.filter_map(|clip| match &clip.content {
+        ClipContent::Audio(AudioClip {
+            warp: Some(warp), ..
+        }) => Some((clip.id, warp.clone())),
+        _ => None,
     });
     pick(s, found)
 }
@@ -1635,6 +1698,8 @@ fn fixture() -> Project {
     let point = |at, value| musicable_model::automation::Point::new(Beats::new(at), value);
     let swell = swell.map(|(at, value)| point(at, value));
     groove.set_lane(ClipParam::Gain, swell.to_vec());
+    // Slice's sixteenths, then its transients from beat 2.
+    groove.set_lane(ClipParam::Preserve, vec![point(0, 5.0), point(2, 0.0)]);
     let clips = [
         (audio, "Faded", range(0, 8), ClipContent::Audio(faded)),
         (

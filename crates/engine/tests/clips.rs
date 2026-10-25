@@ -1,6 +1,6 @@
 //! Clips: audio clips loaded whole and streaming from the disk thread,
-//! resampled, fading and crossfading, warped, and MIDI clips whose notes,
-//! with their expression, play a test instrument. A project of them plays the same with
+//! resampled, fading and crossfading, warped, sliced, and MIDI clips whose
+//! notes, with their expression, play a test instrument. A project of them plays the same with
 //! the parallel renderer as with the reference renderer, looping, locating
 //! and in blocks of any size. Audio clips play what the song position says,
 //! however the playhead got there. Streams don't allocate on the audio
@@ -19,7 +19,7 @@ use musicable_engine::{
 use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip, Offset, Point};
 use musicable_model::param::ClipParam;
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Onset, Onsets, Origin, TransientLoop, Warp, WarpMarker, WarpMode};
 use musicable_model::{DeviceKind, Project, TestTone, TrackId, TrackKind};
 
 #[global_allocator]
@@ -132,11 +132,13 @@ fn audio_clip(
     project.track_mut(track).unwrap().clips.push(clip);
 }
 
-/// Three audio tracks: on the first, a clip loaded whole crossfading into
+/// Four audio tracks: on the first, a clip loaded whole crossfading into
 /// one that streams, on the second, a test tone under two clips of files at
-/// other sample rates, one streaming, and on the third, a warped clip that
+/// other sample rates, one streaming, on the third, a warped clip that
 /// streams, its file playing at twice the song's speed, then at it, then at
-/// a third of it, as its gain rises.
+/// a third of it, as its gain rises, and on the fourth, a clip in Slice, at
+/// three quarters of its speed, so its slices' audio runs out, and its
+/// slices from its beat 1 on three semitones up.
 fn audio_tracks(project: &mut Project, files: &mut Files) {
     let drums = project.add_track("Drums", TrackKind::Audio);
     let kick = File {
@@ -216,6 +218,33 @@ fn audio_tracks(project: &mut Project, files: &mut Files) {
         a.set_lane(
             ClipParam::Gain,
             vec![point(beats(1, 4), 0.2), point(beats(5, 4), 1.0)],
+        );
+    });
+
+    // Loaded whole: `Files::loaded` follows the warp, which slices don't.
+    let sliced = project.add_track("Beats", TrackKind::Audio);
+    let span = (beats(1, 2), beats(4, 1));
+    audio_clip(project, files, sliced, span, breaks, Load::Whole, |a| {
+        let onsets = [3_000, 9_000, 18_000, 24_000, 39_000, 45_000, 60_000];
+        let onsets = onsets.map(|frame| Onset {
+            frame,
+            strength: 1.0,
+            percussiveness: 1.0,
+            origin: Origin::Found,
+        });
+        let mut warp = Warp {
+            mode: WarpMode::Slice,
+            onsets: Some(Onsets::new(onsets)),
+            ..Warp::new(0, Beats::ZERO, 160.0)
+        };
+        warp.slice.transient_loop = TransientLoop::BackAndForth;
+        warp.slice.envelope = 80.0;
+        a.warp = Some(warp);
+        a.offset = Offset::Beats(beats(1, 4));
+        let point = musicable_model::automation::Point::new;
+        a.set_lane(
+            ClipParam::Transpose,
+            vec![point(beats(1, 1), 0.0), point(beats(1, 1), 3.0)],
         );
     });
 }
@@ -342,9 +371,9 @@ fn clips_play_the_same_with_the_parallel_renderer() {
     );
     let played = session(&project, &whole, Box::new(ReferenceRenderer));
     assert!(same(&played, &expected), "loaded whole");
-    // And the notes and the warped clip play: without them, it's another
-    // song.
-    for name in ["Keys", "Groove"] {
+    // And the notes and the warped and sliced clips play: without them, it's
+    // another song.
+    for name in ["Keys", "Groove", "Beats"] {
         let mut unplayed = project.clone();
         let track = unplayed.tracks.iter_mut().find(|t| t.name == name).unwrap();
         track.clips.clear();

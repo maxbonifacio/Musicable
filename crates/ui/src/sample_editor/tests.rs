@@ -106,12 +106,23 @@ impl State {
         markers.iter().map(|beat| beat.to_f64()).collect()
     }
 
-    /// The clip's gain curve, as (beat of its own time, value).
-    fn curve(&self) -> Vec<(f64, f64)> {
+    /// The clip's curve of `param`, as (beat of its own time, value).
+    fn curve_of(&self, param: ClipParam) -> Vec<(f64, f64)> {
         let (_, audio) = self.clip();
-        let lane = audio.lane(ClipParam::Gain);
+        let lane = audio.lane(param);
         let points = lane.map_or(&[][..], |lane| &lane.points[..]);
         points.iter().map(|p| (p.at.to_f64(), p.value)).collect()
+    }
+
+    /// The clip's gain curve.
+    fn curve(&self) -> Vec<(f64, f64)> {
+        self.curve_of(ClipParam::Gain)
+    }
+
+    /// The clip's warp.
+    fn warp(&self) -> &Warp {
+        let (_, audio) = self.clip();
+        audio.warp.as_ref().expect("a warped clip")
     }
 }
 
@@ -159,6 +170,16 @@ fn with_transients(markers: &[(u64, f64)], frames: &[u64]) -> (Project, ClipId) 
         origin: Origin::Found,
     });
     audio.warp.as_mut().expect("a warped clip").onsets = Some(Onsets::new(found));
+    (project, clip)
+}
+
+/// The [`project`], with Loop warped with `markers` in Slice.
+fn sliced(markers: &[(u64, f64)]) -> (Project, ClipId) {
+    let (mut project, clip) = project(markers);
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        panic!("Loop is an audio clip");
+    };
+    audio.warp.as_mut().expect("a warped clip").mode = WarpMode::Slice;
     (project, clip)
 }
 
@@ -305,15 +326,28 @@ fn in_bottom(harness: &Harness<'_, State>, at: f64) -> Pos2 {
     pos2(x_of(harness, at), wave.bottom() - wave.height() / 4.0)
 }
 
-/// On the gain lane at `at`, where it shows the clip's `gain`.
-fn on_lane(harness: &Harness<'_, State>, at: f64, gain: f64) -> Pos2 {
-    let lane = harness.get_by_label("Gain Lane").rect();
+/// On the lane, while it shows `param`, at `at`, where it shows `value`.
+fn on_lane_of(harness: &Harness<'_, State>, param: ClipParam, at: f64, value: f64) -> Pos2 {
+    let spec = param.spec();
+    let lane = harness.get_by_label(&format!("{} Lane", spec.name)).rect();
     let theme = Theme::default();
     let margin = theme.point + 2.0;
-    let spec = ClipParam::Gain.spec();
-    let unit = spec.scale.to_unit(gain, spec.min, spec.max) as f32;
+    let unit = spec.scale.to_unit(value, spec.min, spec.max) as f32;
     let (bottom, top) = (lane.bottom() - margin, lane.top() + margin);
     pos2(x_of(harness, at), bottom + (top - bottom) * unit)
+}
+
+/// On the gain lane at `at`, where it shows the clip's `gain`.
+fn on_lane(harness: &Harness<'_, State>, at: f64, gain: f64) -> Pos2 {
+    on_lane_of(harness, ClipParam::Gain, at, gain)
+}
+
+/// Picks `option` from the menu named `menu`.
+fn pick(harness: &mut Harness<'_, State>, menu: &str, option: &str) {
+    harness.get_by_role_and_label(Role::ComboBox, menu).click();
+    harness.run();
+    harness.get_by_role_and_label(Role::Button, option).click();
+    harness.run();
 }
 
 fn press(harness: &mut Harness<'_, State>, at: Pos2, pressed: bool, mods: Modifiers) {
@@ -804,5 +838,148 @@ fn the_wheel_scrolls_and_zooms() {
     wheel(&mut harness, over, vec2(0.0, 100.0), Modifiers::COMMAND);
     let zoomed = harness.state().editor().sample_editor.viewport;
     assert!(zoomed.zoom > viewport.zoom, "{zoomed:?}");
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_mode_menu_and_slice_s_settings_set_the_clip_s_warp() {
+    let (project, clip) = project(&[(0, 0.0)]);
+    let mut harness = harness(project, Some(clip));
+    let mode = harness.get_by_role_and_label(Role::ComboBox, "Warp Mode");
+    assert_eq!(mode.value().as_deref(), Some("Re-Pitch"));
+    // Re-Pitch's pitch follows its speed: its transpose and detune are
+    // greyed, and it has no settings of its own.
+    for name in ["Transpose", "Detune"] {
+        let field = harness.get_by_label(name);
+        assert!(field.accesskit_node().is_disabled(), "{name}");
+    }
+    let preserve = harness.query_by_role_and_label(Role::ComboBox, "Preserve");
+    assert!(preserve.is_none());
+    pick(&mut harness, "Warp Mode", "Slice");
+    assert_eq!(harness.state().warp().mode, WarpMode::Slice);
+    assert_eq!(harness.state().document.undo_name(), Some("Set Warp Mode"));
+    // Slice's settings show, and its transpose and detune play.
+    let menus = [
+        ("Preserve", "Transients", "1/8"),
+        ("Transient Loop Mode", "Forward", "Back-and-Forth"),
+    ];
+    for (menu, shown, option) in menus {
+        let chooser = harness.get_by_role_and_label(Role::ComboBox, menu);
+        assert_eq!(chooser.value().as_deref(), Some(shown));
+        pick(&mut harness, menu, option);
+        let chooser = harness.get_by_role_and_label(Role::ComboBox, menu);
+        assert_eq!(chooser.value().as_deref(), Some(option));
+    }
+    let fields = [
+        ("Transient Envelope", 40.0),
+        ("Transpose", -7.0),
+        ("Detune", 12.0),
+    ];
+    for (name, value) in fields {
+        let field = harness.get_by_label(name);
+        assert!(!field.accesskit_node().is_disabled(), "{name}");
+        field.set_value_accesskit(value);
+        harness.run();
+    }
+    let warp = harness.state().warp();
+    let settings = SliceSettings {
+        preserve: Preserve::Eighth,
+        transient_loop: TransientLoop::BackAndForth,
+        envelope: 40.0,
+    };
+    assert_eq!(warp.slice, settings);
+    assert_eq!((warp.transpose, warp.detune), (-7, 12));
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Set Clip Detune")
+    );
+    // Back in Re-Pitch, they're kept for when Slice plays again.
+    pick(&mut harness, "Warp Mode", "Re-Pitch");
+    let warp = harness.state().warp();
+    assert_eq!((warp.mode, warp.slice), (WarpMode::RePitch, settings));
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
+    let (project, clip) = sliced(&[(0, 0.0)]);
+    let mut harness = harness(project, Some(clip));
+    let chooser = harness.get_by_role_and_label(Role::ComboBox, "Lane");
+    assert_eq!(chooser.value().as_deref(), Some("Gain"));
+    chooser.click();
+    harness.run();
+    // Slice plays all of them.
+    for param in ClipParam::ALL {
+        harness.get_by_role_and_label(Role::Button, &param.spec().name);
+    }
+    harness
+        .get_by_role_and_label(Role::Button, "Transpose")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().editor().sample_editor.lane,
+        ClipParam::Transpose
+    );
+    assert!(harness.query_by_label("Gain Lane").is_none());
+    // Choosing isn't a change to undo.
+    assert_eq!(harness.state().document.undo_name(), None);
+    // Clicking the line at the clip's transpose adds a point on it, and
+    // dragging the point up moves the pitch up.
+    let at = on_lane_of(&harness, ClipParam::Transpose, 6.0, 0.0);
+    click(&mut harness, at, Modifiers::NONE);
+    let transpose = harness.state().curve_of(ClipParam::Transpose);
+    assert_eq!(transpose, [(2.0, 0.0)]);
+    drag(&mut harness, at, at - vec2(0.0, 11.0), Modifiers::NONE);
+    let transpose = harness.state().curve_of(ClipParam::Transpose);
+    assert!(
+        transpose.len() == 1 && transpose[0].1 > 12.0,
+        "{transpose:?}"
+    );
+    assert!(harness.state().curve().is_empty());
+    // On a lane of steps, drawing draws whole ones.
+    pick(&mut harness, "Lane", "Preserve");
+    let from = on_lane_of(&harness, ClipParam::Preserve, 9.0, 3.4);
+    drag(&mut harness, from, from + vec2(100.0, 0.0), Modifiers::NONE);
+    let preserve = harness.state().curve_of(ClipParam::Preserve);
+    assert!(preserve.len() > 2, "{preserve:?}");
+    assert!(
+        preserve.iter().all(|&(_, value)| value == value.round()),
+        "{preserve:?}"
+    );
+    assert!(
+        preserve.iter().any(|&(_, value)| value == 3.0),
+        "{preserve:?}"
+    );
+    // Unwarped, the clip plays its gain alone, and the lane shows it.
+    harness.get_by_label("Warp").click();
+    harness.run();
+    harness.get_by_label("Gain Lane");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::ComboBox, "Lane")
+            .is_none()
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_lane_of_steps_holds_each_point_until_the_next() {
+    let (mut project, clip) = sliced(&[(0, 0.0)]);
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        panic!("Loop is an audio clip");
+    };
+    // Sixteenths from the clip's start, and the transients from its third
+    // beat.
+    let points = vec![Point::new(Beats::ZERO, 5.0), Point::new(Beats::new(2), 0.0)];
+    audio.set_lane(ClipParam::Preserve, points);
+    let mut harness = harness(project, Some(clip));
+    pick(&mut harness, "Lane", "Preserve");
+    // Halfway between the points, the line holds the first one's value: a
+    // drag there moves that point alone, a step at a time.
+    let from = on_lane_of(&harness, ClipParam::Preserve, 5.0, 5.0);
+    let to = on_lane_of(&harness, ClipParam::Preserve, 5.0, 3.2);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let preserve = harness.state().curve_of(ClipParam::Preserve);
+    assert_eq!(preserve, [(0.0, 3.0), (2.0, 0.0)]);
     assert!(harness.state().errors.is_empty());
 }

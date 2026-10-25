@@ -525,9 +525,11 @@ its `offset` gives, whatever the tempo. A warped clip follows the tempo:
 its warp's markers pin frames of the file to beats of the clip's own time,
 which starts at its `offset`, and `Placed::pieces` cuts the song's frames
 into pieces that each play the file at one speed, from a tempo change or a
-marker to the next. In Re-Pitch, the only mode so far, a piece is resampled
-at its speed, so the audio's pitch follows it; one at the file's own speed,
-at the device's rate, plays sample for sample.
+marker to the next. In Re-Pitch, a piece is resampled at its speed, so the
+audio's pitch follows it; one at the file's own speed, at the device's
+rate, plays sample for sample. In Slice, the file is cut into slices, each
+played at the file's own speed, or as transposed, from where its start
+lands (`clips/slice.rs`), as Live's Beats plays them (see **Slice** below).
 
 - Mono files play in both channels, and files with more than two channels
   play their first two.
@@ -547,6 +549,52 @@ at the device's rate, plays sample for sample.
 - A clip's gain follows its Gain curve where it has one, worked out for
   each frame in the clip's own time: the file's seconds for an unwarped
   clip and beats for a warped one, so the curve stays with the audio.
+- Each piece plays as one or more `Run`s: stretches of song frames that
+  read the file at one speed from one place, faded one way. A Re-Pitch
+  piece is one run, and a Slice piece the runs of its slices, which can
+  overlap. A run reads sample for sample where it moves a frame of the file
+  a frame, forwards or backwards, rounding with `nearest` (halfway down, so
+  positions worked out two ways round the same), and resampled otherwise.
+
+**Slice.** A clip in Slice keeps its slices (`slice::Slices`), worked out
+as the graph compiles, and plays each from the song frame its start lands
+on.
+
+- Slices start at the clip's transients in sight and the file's start, or
+  on a grid of notes in the clip's own time from its 1.1.1, as Preserve
+  says. A clip whose audio isn't analysed yet is cut on sixteenths. A bar
+  is as long as the song's signature at the clip's start makes it, so a
+  change of signature recompiles the graph. With a Preserve curve, each
+  grid cuts, and the transients do, where the curve holds them.
+- A slice reads its stretch of the file at the file's own speed, times its
+  transpose and detune, from the first song frame on or after its start
+  until the next slice's. It reads Transpose, Detune, Transient Loop Mode
+  and Transient Envelope from the clip's curves where it starts, or else
+  from the warp, so automation moves them a slice at a time.
+- Each slice fades in over 2 ms just before its start, as the one before
+  fades out: equal-gain raised cosines, at most half as long as the slice
+  before, so the transient lands at full level, with no click. Where two
+  slices meet seamlessly, with no envelope, the same pitch and reading the
+  same frames, as at the file's own speed, there's no crossfade, so the
+  clip plays the file sample for sample, as Re-Pitch would.
+- A slice runs out once it would read half a frame or more past its audio
+  before the next starts, as where the song plays it slower. Transient Loop
+  Mode fills the gap: Off fades out over up to 2 ms as the audio ends;
+  Forward loops from the middle of the slice, or from half a second before
+  its end where that's later, crossfading over 2 ms at each seam; and
+  Back-and-Forth turns on the slice's last frame and on the loop's start,
+  so it never reads the next slice's audio. A loop shorter than four seams
+  plays as Off.
+- Below 100, Transient Envelope fades each slice from its start, by e over
+  its length times 10^((envelope − 60) / 20), and no quicker than in a
+  millisecond.
+- The last slice fades out where the file's end lands, unless it plays
+  through to it.
+- A stream holds from the earliest frame the slices read at the block's
+  start, or come back to as they loop, and with the loop's set of chunks
+  free, from where the next slice starts reading, which can be further on
+  than a stream keeps ahead. A read that finds its chunks in memory doesn't
+  hint the stream, so two slices crossfading don't pull it back and forth.
 
 **Audio files** reach the graph as `media::Source`s, one for each clip, in a
 `media::Media`: `compile_with_media(project, meters, media)`. The engine

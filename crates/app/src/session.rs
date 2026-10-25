@@ -1006,8 +1006,12 @@ impl Session {
                     }));
                 };
                 match edit {
-                    // Only the last map counts.
-                    Edit::Tempo { to, .. } => {
+                    // Only the last map counts. Clips in Slice are cut on
+                    // grids of bars as they're compiled.
+                    Edit::Tempo { from, to } => {
+                        if from.signatures() != to.signatures() {
+                            recompile = true;
+                        }
                         self.engine.tempo = to.clone();
                         tempo = Some(to);
                     }

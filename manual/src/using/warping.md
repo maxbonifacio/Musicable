@@ -61,7 +61,8 @@ song's tempo where the clip starts.
 The clip keeps the stretch of the file it plays, as in Live, so it gets
 longer or shorter if the tempo it starts at isn't the song's, covering what
 it grows into on its track, as trimming does. Turning Warp off does the
-same the other way, and forgets the clip's markers.
+same the other way, and forgets the clip's markers and its mode and
+settings: turned on again, it starts in Re-Pitch.
 
 ## The clip's tempo
 
@@ -167,19 +168,82 @@ where the tempo changed while it was played. **Recordings follow the
 tempo**, on the Behaviour page of the Settings window, switches that off,
 for recordings that play at their own speed.
 
-## Re-Pitch
+## Modes
 
-Re-Pitch, the one mode so far, plays the audio faster or slower to fit the
-beats, so its pitch follows its speed, as a record's does on a turntable:
-twice as fast is an octave up. It's how Live's Re-Pitch mode plays, and it
-sounds the same while the song plays and in an export.
+The clip's mode, the menu after **Warp** in the Sample Editor, says how its
+audio plays between the warp markers. Changing it keeps the markers, and the
+clip keeps each mode's settings while it plays in another, as in Live. Both
+modes sound the same while the song plays and in an export.
+
+### Re-Pitch
+
+Re-Pitch plays the audio faster or slower to fit the beats, so its pitch
+follows its speed, as a record's does on a turntable: twice as fast is an
+octave up. It's how Live's Re-Pitch mode plays. As its pitch is its speed's,
+its Transpose and Detune are greyed out.
+
+### Slice
+
+Slice is for drums and other percussive loops, as Live's Beats mode is. It
+cuts the audio into slices, at its transients, and plays each slice at the
+file's own speed from where its start lands on the beats, so each hit keeps
+its sound and its pitch at any tempo. Where the song plays the file faster
+than its own speed, each slice is cut short where the next starts, with a
+fade of two milliseconds so the cut doesn't click. Where it plays slower, a
+slice's audio runs out before the next one starts, and Loop says what fills
+the gap. At the file's own speed, with no transpose and no envelope, Slice
+plays the file sample for sample.
+
+Its settings are under the mode in the Sample Editor:
+
+- **Preserve** says where Slice cuts the audio: at its **Transients**, or on
+  a grid of notes from the clip's 1.1.1, whatever the audio: **1 Bar**, as
+  long as a bar of the song's time signature where the clip starts, **1/2**,
+  **1/4**, **1/8**, **1/16** or **1/32**. Until Musicable has analysed the
+  file, Transients cuts on a grid of sixteenths.
+- **Loop**, Live's Transient Loop Mode, says what a slice plays once its
+  audio runs out: **Off**, silence until the next slice, **Forward**, the
+  end of the slice over and over, or **Back-and-Forth**, the end of the
+  slice backwards and forwards. The end it loops is the slice's second
+  half, or its last half second in a longer slice.
+- **Envelope**, Live's Transient Envelope, fades each slice as it plays.
+  At 100 it doesn't fade, and the lower it is, the quicker each slice fades
+  for its length: at 60, a slice has faded to about a third by where the
+  next one starts, and at 0 it's a click. A lower envelope tightens a
+  loop played slower, where the slices' loops fill the gaps.
+
+## Transpose and Detune
+
+**Transpose**, from -48 to +48 semitones (st), and **Detune**, from -50 to
++50 cents (ct), move the audio's pitch in every mode but Re-Pitch. Slice
+plays each slice faster or slower to move its pitch, resampled, so a slice
+an octave up plays twice as fast, for half as long. Drag them in the Sample
+Editor, or click them and type.
+
+## Curves in the clip
+
+Every setting of a warped clip but its mode can follow a curve, as Live's
+clip envelopes can move its volume and transpose: its gain, its Transpose
+and Detune, and Slice's Envelope, Preserve and Loop. The lane under the
+Sample Editor's waveform shows one of the curves at a time: click its name,
+beside it, to choose which. A curve is part of the clip, in the clip's own
+time, so it moves, copies and splits with the clip and stays with its
+audio.
+
+Where a setting has a curve, the curve gives its value all through the
+clip: the first point's value before the first point, and the last's after
+the last. The gain follows its curve smoothly, and Slice reads the others
+where each slice starts, so a change in the middle of a slice waits for the
+next one. Preserve and Loop are steps: each point holds its value until the
+next, and a curve of Preserve says how the audio is cut from each point on.
 
 ## Not yet
 
 These come in later versions:
 
-- The other modes, Slice, Granular and Spectral, which keep the audio's
-  pitch as its speed changes, and the clip's Transpose and Detune.
+- The other modes, Granular and Spectral, which keep the audio's pitch as
+  its speed changes without slicing it, for sounds other than drums, and
+  Spectral's Formants, which keep a voice's character as it's transposed.
 - Quantize Settings, for moving hits part of the way to the grid, or to a
   grid of their own: Quantize goes all the way, to the grid the panel shows.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV

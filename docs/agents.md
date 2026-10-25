@@ -59,10 +59,10 @@ change to them. The others read what the window shows.
 | `run_command` | `id`, `args`? | Its `result`, such as a new track's id, and `undo`, the name of the step it made, if it made one |
 | `run_commands` | `name`, `commands`: each an `id` and `args`? | Each one's result, in `results`, and `undo`: they're one step, called `name` |
 | `get_project` | nothing | The file and whether it's saved, the tempo map, the time signatures, the loop, the metronome and punch switches, the tracks with their mixer settings, devices, clips and takes, the master, the locators, and which parameters are automated |
-| `get_clip` | `clip` | Where it is, and its notes with their expression and its controllers' curves, in the clip's own time, or its audio file, with its warp markers and gain curve if it has them |
+| `get_clip` | `clip` | Where it is, and its notes with their expression and its controllers' curves, in the clip's own time, or its audio file, with its warp (its markers, mode, transpose, detune and Slice's settings) and its curves, by parameter, if it has them |
 | `get_device` | `device` | What it is and where, and each parameter's number, name, value, range, default and unit |
 | `get_automation` | `param`, such as `track 3 volume` | Its points, in beats and the parameter's units, and whether it's overridden |
-| `get_editor` | nothing | What's selected, the selected track, which panel has the focus, the start marker, the grid, what's in sight, the piano roll's clip and selected notes, and the Sample Editor's clip and selected warp markers |
+| `get_editor` | nothing | What's selected, the selected track, which panel has the focus, the start marker, the grid, what's in sight, the piano roll's clip and selected notes, and the Sample Editor's clip, selected warp markers and the parameter its lane shows |
 | `get_history` | nothing | Each step's name, oldest first, how many are done, and what Undo and Redo would change |
 
 What the tools give back is JSON, as text. A call that fails, such as one

@@ -11,7 +11,7 @@ use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::warp::{Origin, Warp};
+use musicable_model::warp::{Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMode};
 use musicable_model::{
     AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
     TestTone, TrackId, TrackKind,
@@ -1506,6 +1506,61 @@ fn warped_clips_transients_rise_with_values_from_0_to_1() {
 }
 
 #[test]
+fn warped_clips_transpose_and_slice_within_their_ranges() {
+    let file = edited_warp(|a| {
+        let warp = &mut a["warp"];
+        warp["mode"] = json!("slice");
+        (warp["transpose"], warp["detune"]) = (json!(-48), json!(50));
+        warp["slice"] =
+            json!({"preserve": "1/32", "transient_loop": "back_and_forth", "envelope": 0.0});
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    let warp = audio.warp.as_ref().unwrap();
+    assert_eq!(warp.mode, WarpMode::Slice);
+    assert_eq!((warp.transpose, warp.detune), (-48, 50));
+    let slice = SliceSettings {
+        preserve: Preserve::ThirtySecond,
+        transient_loop: TransientLoop::BackAndForth,
+        envelope: 0.0,
+    };
+    assert_eq!(warp.slice, slice);
+    let warp = format!("{AUDIO}.warp");
+    for (field, value, message) in [
+        ("transpose", json!(49), "must be from -48 to 48"),
+        ("transpose", json!(-49), "must be from -48 to 48"),
+        ("detune", json!(51), "must be from -50 to 50"),
+        ("detune", json!(0.5), "invalid type"),
+    ] {
+        refused(
+            &edited_warp(|a| a["warp"][field] = value),
+            &format!("{warp}.{field}"),
+            message,
+        );
+    }
+    for envelope in [-1.0, 100.5] {
+        refused(
+            &edited_warp(|a| a["warp"]["slice"]["envelope"] = json!(envelope)),
+            &format!("{warp}.slice.envelope"),
+            "must be from 0 to 100",
+        );
+    }
+    refused(
+        &edited_warp(|a| a["warp"]["slice"]["preserve"] = json!("1/64")),
+        &format!("{warp}.slice.preserve"),
+        "unknown variant `1/64`",
+    );
+    refused(
+        &edited_warp(|a| {
+            a["warp"].as_object_mut().unwrap().remove("slice");
+        }),
+        &warp,
+        "missing field `slice`",
+    );
+}
+
+#[test]
 fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
     let gain = |points| json!([{"param": "gain", "points": points}]);
     let lanes = format!("{AUDIO}.automation");
@@ -1560,6 +1615,35 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         &format!("{lanes}[0].points[2][0]"),
         "makes three points at one place",
     );
+    // The warp's parameters, in their ranges, and the steps whole.
+    let curve = |param: &str, value: f64| json!([{"param": param, "points": [[0, value]]}]);
+    for (param, value) in [
+        ("transpose", -48.0),
+        ("detune", 50.0),
+        ("transient_envelope", 12.5),
+        ("preserve", 6.0),
+        ("transient_loop", 2.0),
+    ] {
+        let file = edited_audio(|a| a["automation"] = curve(param, value));
+        let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+            panic!("an audio clip");
+        };
+        assert_eq!(audio.automation[0].param.key(), param);
+    }
+    for (param, value, message) in [
+        ("transpose", 48.5, "must be from -48 to 48"),
+        ("detune", -51.0, "must be from -50 to 50"),
+        ("transient_envelope", 101.0, "must be from 0 to 100"),
+        ("preserve", 7.0, "must be from 0 to 6"),
+        ("preserve", 2.5, "must be a whole number"),
+        ("transient_loop", 0.5, "must be a whole number"),
+    ] {
+        refused(
+            &edited_audio(|a| a["automation"] = curve(param, value)),
+            &format!("{lanes}[0].points[0][1]"),
+            message,
+        );
+    }
 }
 
 #[test]
