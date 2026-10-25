@@ -5,28 +5,28 @@
 # Getting started
 
 - [Installing Musicable](getting-started/installing.md)
-- [Setting up audio]()
-- [A first song]()
+- [Setting up audio](getting-started/audio.md)
+- [A first song](getting-started/first-song.md)
 
 # Using Musicable
 
 - [Concepts]()
-- [The window]()
-  - [The arrangement]()
-  - [The piano roll]()
-  - [The mixer]()
-  - [The devices panel]()
-  - [The browser]()
-  - [The History panel]()
-  - [The command palette]()
-- [Recording and comping]()
+- [The window](window/index.md)
+  - [The arrangement](window/arrangement.md)
+  - [The piano roll](window/piano-roll.md)
+  - [The mixer](window/mixer.md)
+  - [The devices panel](window/devices-panel.md)
+  - [The browser](window/browser.md)
+  - [The History panel](window/history.md)
+  - [The command palette](window/command-palette.md)
+- [Recording and comping](using/recording.md)
 - [Editing clips]()
 - [Editing notes and MPE]()
 - [Mixing]()
-- [Automation]()
-- [Plugins]()
-- [Exporting audio]()
-- [Projects and files]()
+- [Automation](using/automation.md)
+- [Plugins](using/plugins.md)
+- [Exporting audio](using/exporting.md)
+- [Projects and files](using/projects.md)
 
 # Built-in devices
 
@@ -42,19 +42,19 @@
 
 # Customising
 
-- [Keys]()
-- [The mouse]()
-- [Themes]()
-- [Workspaces]()
-- [Profiles]()
-- [Settings]()
+- [Keys](customising/keys.md)
+- [The mouse](customising/mouse.md)
+- [Themes](customising/themes.md)
+- [Workspaces](customising/workspaces.md)
+- [Profiles](customising/profiles.md)
+- [Settings](customising/settings.md)
 
 # Reference
 
 - [Every command](reference/commands.md)
 - [Default keys](reference/keys.md)
 - [The command line](reference/command-line.md)
-- [Troubleshooting]()
+- [Troubleshooting](reference/troubleshooting.md)
 - [Glossary]()
 
 ---

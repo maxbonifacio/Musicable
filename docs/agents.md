@@ -12,11 +12,11 @@ account can open.
 Nothing listens for agents until you let them in. **Options > Agents...**
 opens the Settings window's Agents page, where **Let agents control
 Musicable** switches it on, and back off. The app keeps the switch in
-[settings.toml](app.md#settings-and-your-keymap) (`[agents] enabled =
-true`), so it's on at the next start too. The page says how it's going:
-off, listening with no agent connected, the agents connected, or why it
-can't listen, such as another Musicable listening already with the same
-config folder.
+[settings.toml](../manual/src/customising/settings.md#the-settings-file)
+(`[agents] enabled = true`), so it's on at the next start too. The page says
+how it's going: off, listening with no agent connected, the agents
+connected, or why it can't listen, such as another Musicable listening
+already with the same config folder.
 
 While an agent is connected, the status bar says so, with its last change:
 "Agent: Move Notes", or "Agent connected" before it makes one. Clicking it

@@ -6,7 +6,8 @@ It's compiled into a graph of nodes, which a real-time engine plays through
 the audio device, with a parallel scheduler that matches a single-threaded
 reference renderer bit for bit. This page is the map. The detail is in
 [engine.md](engine.md), [audio.md](audio.md), [commands.md](commands.md),
-[project-format.md](project-format.md) and [app.md](app.md).
+[project-format.md](project-format.md) and [app.md](app.md), and [the
+manual](../manual/src/introduction.md) says how to use Musicable.
 
 ## Crates
 

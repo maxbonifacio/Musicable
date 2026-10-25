@@ -3,8 +3,9 @@
 How Musicable hosts plugins, CLAP and VST3, in `crates/plugins`, and how
 the app puts them on tracks, in `crates/app`. ARA 2 comes after, on top of
 VST3.
-[app.md](app.md#plugins) says how plugins look and work in the app's
-window.
+[Plugins](../manual/src/using/plugins.md) in the manual says how plugins
+look and work in the app's window, and [app.md](app.md#plugins) how the
+app is built around them.
 
 Most of what follows holds for both formats, in CLAP's words. [VST3](#vst3)
 says what's different there.

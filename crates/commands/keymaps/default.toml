@@ -2,8 +2,9 @@
 # so the keys feel familiar to Live users.
 #
 # To change your own shortcuts, don't edit this file: put the changes in your
-# keymap file, which Musicable reads on top of this one. docs/commands.md has
-# the format and every command.
+# keymap file, which Musicable reads on top of this one. The manual's Keys
+# page (manual/src/customising/keys.md) has the format, and its Every command
+# page lists the commands.
 
 format = "musicable-keymap"
 version = 1

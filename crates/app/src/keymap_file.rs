@@ -1,6 +1,6 @@
 //! The user's keymap file: their changes to the default keys, made on the
-//! Settings window's Keys page or by editing the file. `docs/commands.md`
-//! describes the file.
+//! Settings window's Keys page or by editing the file. The manual's Keys
+//! page (`manual/src/customising/keys.md`) describes the file.
 
 use std::fs;
 use std::io;
