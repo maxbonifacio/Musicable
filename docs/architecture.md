@@ -6,8 +6,9 @@ It's compiled into a graph of nodes, which a real-time engine plays through
 the audio device, with a parallel scheduler that matches a single-threaded
 reference renderer bit for bit. This page is the map. The detail is in
 [engine.md](engine.md), [audio.md](audio.md), [commands.md](commands.md),
-[project-format.md](project-format.md) and [app.md](app.md), and [the
-manual](../manual/src/introduction.md) says how to use Musicable.
+[project-format.md](project-format.md), [analysis.md](analysis.md) and
+[app.md](app.md), and [the manual](../manual/src/introduction.md) says how
+to use Musicable.
 
 ## Crates
 
@@ -20,6 +21,7 @@ manual](../manual/src/introduction.md) says how to use Musicable.
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
 | `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
+| `analysis` | `io` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network with a classic tracker checking it ([analysis.md](analysis.md)) |
 | `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `mcp` | `model`, `commands` | Agents controlling Musicable over MCP: the tools, the server the window answers through, the local pipe, and the `musicable mcp` bridge ([agents.md](agents.md)) |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |

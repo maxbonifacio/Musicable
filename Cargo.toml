@@ -18,6 +18,7 @@ musicable-io = { path = "crates/io" }
 musicable-library = { path = "crates/library" }
 musicable-ui = { path = "crates/ui" }
 musicable-mcp = { path = "crates/mcp" }
+musicable-analysis = { path = "crates/analysis" }
 rtrb = "0.4"
 base64 = "0.22"
 # Decodes FLAC frames; finding them is ours (io::audio).
@@ -47,6 +48,19 @@ memchr = "2.8"
 rmcp = { version = "3.7", default-features = false, features = ["client", "server"] }
 # The MCP server's runtime, on a thread of its own, and the bridge's.
 tokio = { version = "1.54", features = ["io-std", "io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
+# The analysis's spectral flux, which finds onsets and the tempo.
+realfft = "3.5"
+# The Beat This! beat and downbeat network, on the pure-Rust rten runtime.
+# Its model files aren't committed: scripts/fetch-models.sh fetches them.
+beat-this = { version = "1.1", default-features = false }
+# What beat-this runs on, for running it on threads of the analysis's own.
+rten = "0.24"
+rten-tensor = "0.24"
+rayon = "1.11"
+anyhow = "1.0"
+# Reads Live Sets, which are gzipped XML, for scoring analysis against
+# Live's auto-warp.
+flate2 = "1.1"
 # Dev-only: property tests and benchmarks.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
@@ -59,3 +73,27 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(musicable_rtsan)"] }
 
 [workspace.lints.clippy]
 all = "warn"
+
+# The Beat This! network takes minutes for a few seconds of audio when its
+# runtime is built unoptimised, so it builds optimised in tests and debug
+# builds too.
+[profile.dev.package.beat-this]
+opt-level = 3
+[profile.dev.package.rten]
+opt-level = 3
+[profile.dev.package.rten-base]
+opt-level = 3
+[profile.dev.package.rten-gemm]
+opt-level = 3
+[profile.dev.package.rten-onnx]
+opt-level = 3
+[profile.dev.package.rten-simd]
+opt-level = 3
+[profile.dev.package.rten-tensor]
+opt-level = 3
+[profile.dev.package.rten-vecmath]
+opt-level = 3
+[profile.dev.package.rubato]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3

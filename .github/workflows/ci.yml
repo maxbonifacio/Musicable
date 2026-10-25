@@ -31,6 +31,16 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The Beat This! models, which the analysis tests need and the
+      # repository leaves out: fetched by the script, checked against its
+      # pinned hashes, and kept until the script changes. Without them, the
+      # tests that use them fail here, where they'd skip on a PC.
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('scripts/fetch-models.sh') }}
+      - run: sh scripts/fetch-models.sh
+        shell: bash
       # A debug build, so the engine's allocation checker is on: the
       # equivalence tests, the real-time checks, the file round trips and the
       # Tier 0 demo all run with it, and the ASIO host's tests play a fake

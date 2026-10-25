@@ -20,6 +20,7 @@ musicable-library.workspace = true
 musicable-ui.workspace = true
 musicable-audio.workspace = true
 musicable-mcp.workspace = true
+musicable-analysis.workspace = true
 eframe.workspace = true
 # The main window, which a workspace puts where it was: eframe's own winit,
 # and egui's way of maximizing a window that's still hidden.

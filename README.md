@@ -44,6 +44,7 @@ Windows is the first-class platform for now. macOS and Linux build in CI.
 | `crates/test-plugins` | Plugins that test the plugin hosting. Not shipped. |
 | `crates/io` | Project files and audio/MIDI import and export. See [docs/project-format.md](docs/project-format.md). |
 | `crates/library` | The browser's library of samples and presets: indexing, searching, and file work in the background. |
+| `crates/analysis` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats. See [docs/analysis.md](docs/analysis.md). |
 | `crates/ui` | User interface, drawn with egui. Talks to the model through commands. See [docs/app.md](docs/app.md). |
 | `crates/mcp` | Lets agents, such as Claude Code, control Musicable over MCP through its commands. See [docs/agents.md](docs/agents.md). |
 | `crates/app` | The `musicable` app: its window, the audio output, and the session that runs commands and keeps the engine in step with the project. |
@@ -54,6 +55,7 @@ directly. Cargo dependencies enforce this.
 ## Building
 
 ```sh
+scripts/fetch-models.sh                                 # the beat tracker's model files, once (fetch-models.ps1 in PowerShell)
 cargo build
 cargo test --workspace
 cargo run --release -p musicable-app                    # the app; File > New Demo Project plays the demo
