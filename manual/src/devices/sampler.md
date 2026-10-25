@@ -4,7 +4,9 @@ Plays a sample at each note's pitch. **Load Sample...** picks a WAV, AIFF
 or FLAC file for it, or drag a sample from the browser onto it. The devices
 panel shows the file's name beside the sampler's: right-click the name to
 remove the sample. If the file is in the project's folder, the project
-keeps where it is in the folder, so the folder can move.
+keeps where it is in the folder, so the folder can move. A file that can't
+be read leaves the sampler silent, and the status bar says why. Loading and
+removing a sample are steps in the undo history.
 
 A note plays the sample from **Start** to **End**, higher or lower by the
 note's distance from the **Root**, plus **Transpose** and **Detune** and

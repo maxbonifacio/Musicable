@@ -19,14 +19,14 @@
   - [The browser](window/browser.md)
   - [The History panel](window/history.md)
   - [The command palette](window/command-palette.md)
-- [Recording and comping]()
+- [Recording and comping](using/recording.md)
 - [Editing clips]()
 - [Editing notes and MPE]()
 - [Mixing]()
-- [Automation]()
-- [Plugins]()
-- [Exporting audio]()
-- [Projects and files]()
+- [Automation](using/automation.md)
+- [Plugins](using/plugins.md)
+- [Exporting audio](using/exporting.md)
+- [Projects and files](using/projects.md)
 
 # Built-in devices
 
