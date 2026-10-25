@@ -42,12 +42,12 @@
 
 # Customising
 
-- [Keys]()
-- [The mouse]()
-- [Themes]()
-- [Workspaces]()
-- [Profiles]()
-- [Settings]()
+- [Keys](customising/keys.md)
+- [The mouse](customising/mouse.md)
+- [Themes](customising/themes.md)
+- [Workspaces](customising/workspaces.md)
+- [Profiles](customising/profiles.md)
+- [Settings](customising/settings.md)
 
 # Reference
 
