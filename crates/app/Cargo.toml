@@ -35,6 +35,8 @@ toml.workspace = true
 skrifa = "0.44"
 # What egui, wgpu and the app log, which goes to the log file.
 log = "0.4"
+# The render cache's keys.
+siphasher.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }
@@ -45,12 +47,18 @@ musicable-test-plugins = { path = "../test-plugins" }
 rmcp.workspace = true
 tokio.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# How much of the disk is free, which the render cache leaves some of.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # The main window's HWND, which plugin windows stay in front of.
 raw-window-handle = "0.6"
+# And how much of the disk is free, for the render cache.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",

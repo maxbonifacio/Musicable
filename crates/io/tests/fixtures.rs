@@ -24,7 +24,8 @@ use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
-    Onset, Onsets, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+    Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
+    WarpMarker, WarpMode,
 };
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
@@ -49,6 +50,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("warping", warping()),
         ("transients", transients()),
         ("slicing", slicing()),
+        ("spectral", spectral()),
     ]
 }
 
@@ -940,6 +942,52 @@ fn slicing() -> Project {
     let moving = project.new_clip("Moving", beats(36, 40), ClipContent::Audio(moving));
     clips.extend([lowest, kept, moving]);
     project.track_mut(drums).unwrap().clips = clips;
+    project
+}
+
+/// Spectral, from version 14: a mix and a vocal in Spectral with Formants
+/// at both ends and between, transposed, a clip in Slice keeping its own
+/// Formants, and a curve for Formants.
+fn spectral() -> Project {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let warped = |file, warp: Warp| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = Offset::Beats(Beats::ZERO);
+        audio.warp = Some(warp);
+        audio
+    };
+    let spectral = |formants| Warp {
+        mode: WarpMode::Spectral,
+        spectral: SpectralSettings { formants },
+        ..Warp::new(0, Beats::ZERO, 96.0)
+    };
+    let mix = warped("Mixes/Song.wav", spectral(SpectralSettings::FORMANTS_MAX));
+    let mix = project.new_clip("Song", beats(0, 16), ClipContent::Audio(mix));
+    let mut up = spectral(0.0);
+    (up.transpose, up.detune) = (5, -12);
+    let up = project.new_clip(
+        "Up",
+        beats(16, 20),
+        ClipContent::Audio(warped("Vox.wav", up)),
+    );
+    let mut kept = spectral(62.5);
+    kept.mode = WarpMode::Slice;
+    let kept = project.new_clip(
+        "Kept",
+        beats(20, 24),
+        ClipContent::Audio(warped("Vox.wav", kept)),
+    );
+    let mut moving = warped("Vox.wav", spectral(50.0));
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    moving.set_lane(
+        ClipParam::Formants,
+        vec![point(0, 0.0), point(2, 25.0), point(4, 100.0)],
+    );
+    moving.set_lane(ClipParam::Transpose, vec![point(0, -5.0), point(4, 5.0)]);
+    let moving = project.new_clip("Moving", beats(24, 28), ClipContent::Audio(moving));
+    project.track_mut(vocal).unwrap().clips = vec![mix, up, kept, moving];
     project
 }
 

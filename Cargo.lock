@@ -2111,6 +2111,7 @@ dependencies = [
  "eframe",
  "egui-winit",
  "egui_kittest",
+ "libc",
  "log",
  "musicable-analysis",
  "musicable-audio",
@@ -2128,6 +2129,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "siphasher",
  "skrifa",
  "tokio",
  "toml",
@@ -2164,9 +2166,11 @@ version = "0.2.0"
 dependencies = [
  "criterion",
  "musicable-model",
+ "musicable-stretch",
  "num_cpus",
  "proptest",
  "rtrb",
+ "siphasher",
 ]
 
 [[package]]
@@ -2223,6 +2227,13 @@ dependencies = [
  "serde",
  "serde_json",
  "vst3",
+]
+
+[[package]]
+name = "musicable-stretch"
+version = "0.2.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

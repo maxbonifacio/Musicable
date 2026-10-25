@@ -1,7 +1,8 @@
 //! Exports, as the export window starts them: the project rendered offline,
 //! on a thread of its own, to files. An exported mixdown is what the app
 //! plays live, to the sample, with a latent plugin, a built-in device,
-//! automation, and audio files at another rate; each stem is its track
+//! automation, audio files at another rate and a clip in Spectral, which
+//! the export waits for the segments of; each stem is its track
 //! soloed, and with solo on the mix is as heard. The tail renders a
 //! release and leaves the quiet end off, normalising takes the peak to full
 //! scale, and FLAC and 16-bit files hold the same samples, rounded. A
@@ -22,11 +23,12 @@ use musicable_commands::{Editor, Keymap, transport};
 use musicable_engine::{EngineConfig, rt};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav, write_aiff};
 use musicable_model::automation::{Lane, Point};
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Warping};
 use musicable_model::native::{NativeDevice, NativeKind, compressor};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::{Warp, WarpMode};
 use musicable_model::{Chain, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
 use musicable_plugins::PluginInfo;
 use musicable_plugins::scan;
@@ -96,8 +98,9 @@ fn plugins(dir: &Path, test: &str) -> (Library, Vec<PluginInfo>) {
 /// Four beats at 120 BPM, two seconds: drums from a WAV file through the
 /// compressor, their fader automated, a bass line from an AIFF file at
 /// 44.1 kHz through Test Gain with latency and its gain automated, chords
-/// on a test instrument, and a test tone, panned and muted. The audio files
-/// go into `dir`.
+/// on a test instrument, a test tone, panned and muted, and the drums again
+/// in Spectral, faster and five semitones down. The audio files go into
+/// `dir`.
 fn song(dir: &Path) -> Project {
     let drums = signal(2, 60_000, 48_000);
     let path = dir.join("Audio/Drums.wav");
@@ -173,6 +176,19 @@ fn song(dir: &Path) -> Project {
     });
     track.pan = -0.5;
     track.muted = true;
+
+    let voice = p.add_track("Voice", TrackKind::Audio);
+    let mut audio = AudioClip::new("Audio/Drums.wav");
+    let mut warp = Warp::new(0, Beats::ZERO, 100.0);
+    warp.mode = WarpMode::Spectral;
+    warp.transpose = -5;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio.gain = 0.5;
+    audio_clip(&mut p, voice, beats(1, 1), beats(3, 1), audio);
     p
 }
 
@@ -362,6 +378,7 @@ fn stems_are_their_tracks_soloed_and_with_solo_on_the_mix_is_as_heard() {
             "Song 02 Bass.wav",
             "Song 03 Keys.wav",
             "Song 04 Tone.wav",
+            "Song 05 Voice.wav",
         ]
     );
     let length = 96_000;

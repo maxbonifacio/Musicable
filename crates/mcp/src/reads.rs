@@ -371,6 +371,9 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
                             "transient_loop": slice.transient_loop.key(),
                             "envelope": json::to_json(&Value::Number(slice.envelope)),
                         },
+                        "spectral": {
+                            "formants": json::to_json(&Value::Number(warp.spectral.formants)),
+                        },
                     });
                 }
                 (offset, _) => entry["offset_frames"] = offset.frames().unwrap_or(0).into(),

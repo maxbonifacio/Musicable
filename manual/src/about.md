@@ -20,6 +20,39 @@ as published by the Free Software Foundation, either version 3 of the
 License or, at your option, any later version, like Musicable itself. It
 comes with no warranty.
 
+## Software in Musicable
+
+Musicable's Spectral warp mode stretches audio with [Signalsmith
+Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) and
+[Signalsmith Linear](https://github.com/Signalsmith-Audio/linear), which
+Musicable includes under the MIT licence:
+
+> Signalsmith Stretch: Copyright (c) 2022 Geraint Luff / Signalsmith Audio
+> Ltd.
+>
+> Signalsmith Linear: Copyright (c) 2025 Signalsmith Audio
+>
+> Permission is hereby granted, free of charge, to any person obtaining a
+> copy of this software and associated documentation files (the
+> "Software"), to deal in the Software without restriction, including
+> without limitation the rights to use, copy, modify, merge, publish,
+> distribute, sublicense, and/or sell copies of the Software, and to permit
+> persons to whom the Software is furnished to do so, subject to the
+> following conditions:
+>
+> The above copyright notice and this permission notice shall be included
+> in all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+> THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+> FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+> DEALINGS IN THE SOFTWARE.
+
+## Trademarks
+
 ASIO and VST are trademarks of Steinberg Media Technologies GmbH, Ableton and
 Live are trademarks of Ableton AG, and Melodyne is a trademark of Celemony
 Software GmbH. Musicable is an independent project and isn't affiliated with

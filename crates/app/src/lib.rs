@@ -24,6 +24,7 @@ mod plugins;
 mod profiles;
 mod profiles_page;
 mod recorder;
+mod renders;
 mod session;
 mod settings;
 mod settings_window;

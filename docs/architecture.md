@@ -16,7 +16,8 @@ to use Musicable.
 |---|---|---|
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
 | `commands` | `model`, `analysis` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
-| `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
+| `engine` | `model`, `stretch` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
+| `stretch` | nothing | Signalsmith Stretch, the time-stretch Spectral renders with: its C++, built with the `cc` crate, behind bindings written by hand |
 | `audio` | `engine` | Device output: our own WASAPI backend and ASIO host on Windows; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
@@ -326,10 +327,11 @@ says what's there.
   ([engine.md](engine.md#clips)), while the Sample Editor edits the markers
   ([app.md](app.md#the-sample-editor)). Re-Pitch and Slice carry no state
   but the resampler's, so they start at any song position at once, as every
-  node must. A stretch that carries state from frame to frame, as a phase
-  vocoder does for Spectral, can't, so it would play from stretched
-  segments rendered ahead, on the disk thread that streams files now.
-  Tempo, beats and transients come
+  node must. Spectral's stretcher carries state from frame to frame, so it
+  can't: a clip in Spectral plays segments rendered ahead on the library's
+  background queue and kept in the render cache
+  ([app.md](app.md#the-render-cache)), and a live stretch until they're
+  ready. Tempo, beats and transients come
   from analysing the file, on the library's background queue
   (`musicable_library::Queue`), and the project keeps what playback reads,
   such as the onsets a slicing mode plays from.
@@ -506,8 +508,9 @@ says what's there.
   [`tier1_demo.rs`](../crates/app/tests/tier1_demo.rs)), whose songs play
   the same with both renderers. CI runs it on Windows, macOS and Linux.
 - The RTSan workflow (`.github/workflows/rtsan.yml`) runs the engine's and
-  the plugins' tests with RealtimeSanitizer on Linux when they change, for
-  what the allocation checker can't see, such as plugins' C and C++ code
+  the plugins' tests with RealtimeSanitizer on Linux when they or the
+  stretcher change, for what the allocation checker can't see, such as
+  plugins' and the stretcher's C and C++ code
   ([engine.md](engine.md#how-its-checked)).
 - `musicable null-test [PROJECT]` plays a project with both renderers and
   compares them, on whatever machine it runs on, without its plugins

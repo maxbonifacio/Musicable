@@ -2,17 +2,19 @@
 //! Sample Editor's controls for them.
 //!
 //! The commands here set the warp mode of an audio clip, the transpose and
-//! detune every mode but Re-Pitch moves its pitch by, and Slice's own
-//! settings: the clip their `clip` argument names, or else the one the
-//! Sample Editor shows. A clip keeps each mode's settings while another
-//! plays, as Live does, so setting one in another mode is kept for when it
-//! plays. Each setting is one of the clip's parameters too (see
+//! detune every mode but Re-Pitch moves its pitch by, and Slice's and
+//! Spectral's own settings: the clip their `clip` argument names, or else
+//! the one the Sample Editor shows. A clip keeps each mode's settings while
+//! another plays, as Live does, so setting one in another mode is kept for
+//! when it plays. Each setting is one of the clip's parameters too (see
 //! [`ClipParam`]), with a curve in the clip that the Sample Editor's lane
 //! shows: [`SHOW_LANE`] picks which.
 
 use musicable_model::clip::ClipId;
 use musicable_model::param::ClipParam;
-use musicable_model::warp::{Preserve, SliceSettings, TransientLoop, Warp, WarpMode};
+use musicable_model::warp::{
+    Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
+};
 
 use crate::warp::{CLIP, audio, change_warp, clip_arg, warped};
 use crate::{Command, CommandError, CommandId, Context, Param, Registry, Type, Value};
@@ -29,18 +31,22 @@ pub const SET_PRESERVE: CommandId = CommandId::new("warp.set_preserve");
 pub const SET_TRANSIENT_LOOP: CommandId = CommandId::new("warp.set_transient_loop");
 /// Sets how much each of Slice's slices fades as it plays.
 pub const SET_TRANSIENT_ENVELOPE: CommandId = CommandId::new("warp.set_transient_envelope");
+/// Sets how far Spectral keeps a warped clip's formants in place as it
+/// transposes.
+pub const SET_FORMANTS: CommandId = CommandId::new("warp.set_formants");
 /// Shows the curve of one of the clip's parameters in the Sample Editor's
 /// lane.
 pub const SHOW_LANE: CommandId = CommandId::new("clip.show_lane");
 
 /// The keys of the modes, as [`SET_MODE`] takes them.
-const MODES: &str = "re_pitch or slice";
+const MODES: &str = "re_pitch, slice or spectral";
 /// The keys of the places Slice cuts at, as [`SET_PRESERVE`] takes them.
 const PRESERVES: &str = "transients, bar, 1/2, 1/4, 1/8, 1/16 or 1/32";
 /// The keys of the transient loop modes.
 const LOOPS: &str = "off, forward or back_and_forth";
 /// The keys of the clip's parameters, as [`SHOW_LANE`] takes them.
-const PARAMS: &str = "gain, transpose, detune, transient_envelope, preserve or transient_loop";
+const PARAMS: &str =
+    "gain, transpose, detune, transient_envelope, preserve, transient_loop or formants";
 
 /// Registers the commands for the warp modes' settings.
 pub fn register(registry: &mut Registry) {
@@ -50,8 +56,9 @@ pub fn register(registry: &mut Registry) {
                 "mode",
                 Type::Text,
                 "How the audio between the markers plays: re_pitch, resampled so its pitch \
-                 follows its speed, or slice, cut into slices at its transients, each played \
-                 at the file's own speed.",
+                 follows its speed, slice, cut into slices at its transients, each played \
+                 at the file's own speed, or spectral, stretched in the frequency domain, \
+                 keeping its pitch.",
             ),
             CLIP,
         ]),
@@ -162,12 +169,33 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_FORMANTS, "Set Formants").with_params(&[
+            Param::required(
+                "formants",
+                Type::Number,
+                "How far Spectral keeps the formants, which give a voice its character, in \
+                 place as it transposes, from 0, moving with the pitch, to 100, staying \
+                 where they were.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let formants: f64 = args.get("formants")?;
+            if !(0.0..=SpectralSettings::FORMANTS_MAX).contains(&formants) {
+                return Err(CommandError::invalid("Formants go from 0 to 100"));
+            }
+            set(ctx, args, "Set Formants", |warp| {
+                warp.spectral.formants = formants
+            })
+        },
+    );
+    registry.add(
         Command::new(SHOW_LANE, "Show Clip Lane").with_params(&[
             Param::required(
                 "param",
                 Type::Text,
                 "The parameter whose curve the Sample Editor's lane shows: gain, transpose, \
-                 detune, transient_envelope, preserve or transient_loop.",
+                 detune, transient_envelope, preserve, transient_loop or formants.",
             ),
             CLIP,
         ]),
@@ -235,13 +263,14 @@ mod tests {
     #[test]
     fn each_setting_is_a_step_and_undo_takes_it_back() {
         let (mut setup, clip) = analysed_song();
-        let runs: [(CommandId, &str, Value); 6] = [
+        let runs: [(CommandId, &str, Value); 7] = [
             (SET_MODE, "mode", "slice".into()),
             (SET_TRANSPOSE, "semitones", (-7_i64).into()),
             (SET_DETUNE, "cents", 12_i64.into()),
             (SET_PRESERVE, "preserve", "1/8".into()),
             (SET_TRANSIENT_LOOP, "mode", "back_and_forth".into()),
             (SET_TRANSIENT_ENVELOPE, "envelope", 40.0.into()),
+            (SET_FORMANTS, "formants", 25.0.into()),
         ];
         for (command, name, value) in runs.clone() {
             let args = Args::new().with(name, value).with("clip", clip);
@@ -258,6 +287,7 @@ mod tests {
                 envelope: 40.0,
             }
         );
+        assert_eq!(warp.spectral, SpectralSettings { formants: 25.0 });
         assert_eq!(
             setup.committed_names(),
             [
@@ -267,6 +297,7 @@ mod tests {
                 "Set Slice Preserve",
                 "Set Transient Loop Mode",
                 "Set Transient Envelope",
+                "Set Formants",
             ]
         );
         // The same again changes nothing, and leaves no step.
@@ -277,6 +308,8 @@ mod tests {
         }
         assert!(setup.committed_names().is_empty());
         setup.run(&edit::UNDO);
+        assert_eq!(warp_of(&setup, clip).spectral.formants, 100.0);
+        setup.run(&edit::UNDO);
         assert_eq!(warp_of(&setup, clip).slice.envelope, 100.0);
         let markers = warp_of(&setup, clip).markers;
         assert_eq!(markers, warp.markers, "the markers stay as they were");
@@ -285,7 +318,7 @@ mod tests {
     #[test]
     fn settings_out_of_range_or_unknown_are_refused() {
         let (mut setup, clip) = analysed_song();
-        let wrong: [(CommandId, &str, Value); 8] = [
+        let wrong: [(CommandId, &str, Value); 10] = [
             (SET_MODE, "mode", "complex".into()),
             (SET_TRANSPOSE, "semitones", 49_i64.into()),
             (SET_TRANSPOSE, "semitones", (-300_i64).into()),
@@ -293,6 +326,8 @@ mod tests {
             (SET_PRESERVE, "preserve", "1/3".into()),
             (SET_TRANSIENT_LOOP, "mode", "backwards".into()),
             (SET_TRANSIENT_ENVELOPE, "envelope", 100.5.into()),
+            (SET_FORMANTS, "formants", (-1.0).into()),
+            (SET_FORMANTS, "formants", 101.0.into()),
             (SHOW_LANE, "param", "volume".into()),
         ];
         for (command, name, value) in wrong {
@@ -343,12 +378,14 @@ mod tests {
             tx.set_param_value(param(ClipParam::Preserve), 2.2);
             tx.set_param_value(param(ClipParam::TransientLoop), -1.0);
             tx.set_param_value(param(ClipParam::TransientEnvelope), 250.0);
+            tx.set_param_value(param(ClipParam::Formants), -3.0);
         });
         let warp = warp_of(&setup, clip);
         assert_eq!(warp.transpose, 5);
         assert_eq!(warp.slice.preserve, Preserve::Half);
         assert_eq!(warp.slice.transient_loop, TransientLoop::Off);
         assert_eq!(warp.slice.envelope, 100.0);
+        assert_eq!(warp.spectral.formants, 0.0);
         // Clearing a curve leaves the setting at the value it had at the
         // playhead.
         let args = Args::new()
