@@ -1,0 +1,18 @@
+# The Musicable manual, built with mdBook (https://rust-lang.github.io/mdBook/).
+# `mdbook serve manual` shows it at http://localhost:3000 as you edit it.
+# CONTRIBUTING.md#the-manual says what goes in it.
+
+[book]
+title = "The Musicable manual"
+authors = ["The Musicable contributors"]
+description = "How to make music with Musicable, an open-source DAW."
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/Musicable/"
+git-repository-url = "https://github.com/maxbonifacio/Musicable"
+edit-url-template = "https://github.com/maxbonifacio/Musicable/edit/main/manual/{path}"
+# Chapters keep their names, not numbers, as chapters come and go.
+no-section-label = true
+additional-css = ["musicable.css"]

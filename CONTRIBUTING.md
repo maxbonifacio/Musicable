@@ -64,6 +64,39 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## The manual
+
+[The manual](manual) is for people making music with Musicable, and
+[docs](docs) for people working on it. It's an
+[mdBook](https://rust-lang.github.io/mdBook/), which CI publishes to
+<https://maxbonifacio.github.io/Musicable/> from main.
+
+- **A change people can see changes the manual in the same pull request**:
+  a command, a control, a gesture, a menu, a setting, an option of the
+  `musicable` command line. Write for someone making music: what to do,
+  what happens, and the keys, without the code's names for things.
+- **Planned chapters** are greyed out: in `manual/src/SUMMARY.md` they're
+  links without a page, such as `[Mixing]()`. The first change to what one
+  covers writes its page and links it.
+- **Some pages are made from the code**: every command with its default
+  keys, and the built-in devices' controls, in `manual/src/generated`.
+  Don't edit them, as a test checks they're what the code makes. After
+  changing a command, a default key or a device's parameters, make them
+  again and commit them:
+
+  ```sh
+  MUSICABLE_BLESS=1 cargo test -p musicable-ui --lib manual
+  ```
+
+  A new built-in device needs a page of its own in `manual/src/devices`,
+  listed in `SUMMARY.md`, that includes its table. The test says which
+  table no page shows.
+- Write keys as Windows has them, such as Ctrl+S, and give the default
+  ones. The clean-room rule covers the manual too: compare with other DAWs
+  where it helps, but don't copy text from their manuals.
+- To see the manual as you write it, install mdBook, the version in
+  `.github/workflows/manual.yml`, and run `mdbook serve manual --open`.
+
 ## Commands
 
 Every command needs an example in

@@ -333,7 +333,7 @@ pub(crate) fn label(command: &Command) -> String {
     format!("{}: {}", capitalized(area_of(&command.id)), command.title)
 }
 
-fn capitalized(text: &str) -> String {
+pub(crate) fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars
         .next()

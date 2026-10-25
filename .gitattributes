@@ -1,2 +1,4 @@
 # Project files are compared byte for byte in tests, so keep them LF everywhere.
 *.musicable text eol=lf
+# So are the manual's pages made from the code.
+manual/src/generated/** text eol=lf

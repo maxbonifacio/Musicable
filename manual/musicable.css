@@ -1,0 +1,4 @@
+/* A gap between tables that follow each other, as on the device pages. */
+table {
+    margin-block: 1em;
+}
