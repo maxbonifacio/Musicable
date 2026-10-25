@@ -195,6 +195,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         messages: &[],
                         agent: None,
                         analysing: None,
+                        rendering: None,
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),

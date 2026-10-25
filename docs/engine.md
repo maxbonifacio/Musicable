@@ -530,6 +530,9 @@ audio's pitch follows it; one at the file's own speed, at the device's
 rate, plays sample for sample. In Slice, the file is cut into slices, each
 played at the file's own speed, or as transposed, from where its start
 lands (`clips/slice.rs`), as Live's Beats plays them (see **Slice** below).
+In Spectral, it plays segments of the file stretched ahead of time by
+Signalsmith Stretch (`clips/spectral.rs`), as Live's Complex stretches
+them (see **Spectral** below).
 
 - Mono files play in both channels, and files with more than two channels
   play their first two.
@@ -595,6 +598,79 @@ on.
   free, from where the next slice starts reading, which can be further on
   than a stream keeps ahead. A read that finds its chunks in memory doesn't
   hint the stream, so two slices crossfading don't pull it back and forth.
+
+**Spectral.** A clip in Spectral plays audio rendered ahead. Its stretcher,
+Signalsmith Stretch (`musicable-stretch`, [architecture.md](architecture.md#crates)),
+remembers what it played, so run live from wherever playback started, it
+would render a song position differently each time. `spectral::Plan::new`
+plans the clip for the song's tempo map as the graph builds, and
+`Media::insert_renders` gives the graph its `Renders`: the plan, and a
+`Rendered` slot for each of its segments, which the app fills as they
+render ([app.md](app.md#the-render-cache)).
+
+- A plan cuts the file every 4 to 8 seconds: on the strongest transient
+  from 4 to 8 seconds after the last cut, the one nearest 6 seconds among
+  equals, or else on a lattice 2 seconds apart, so an edit moves few cuts.
+  Cuts closer in the song than two crossfades merge. It plans only the
+  segments the clip plays, and as far beyond as the resampler reaches.
+- Segments are in grid frames, the song's frames at the file's rate. The
+  player resamples them to the device's rate, as it resamples files, so a
+  new device rate renders nothing again, and plays them under the clip's
+  gain and fades.
+- Each segment renders from a fresh stretcher, with a fixed seed, so it
+  renders the same every time on the same build (`spectral::render`). It
+  seeks into the file a block and an interval before its first call's
+  input, drops a block of output while the stretcher settles, and then
+  makes an interval of output a call, about 30 ms. A call's input runs on
+  from the last call's to where the song has the file once the stretcher's
+  latencies are allowed for: up to frame ⌊position(T + output latency) +
+  input latency⌋ for a call whose output ends on grid frame T.
+- Each call takes its pitch from where its output is heard: Transpose,
+  Detune and Formants, from the clip's curves or else its warp, so drawn
+  automation renders into the segments. Formants sets the stretcher's
+  formant factor to the pitch ratio to the power of 1 − formants / 100,
+  with its pitch compensation on. The stretcher measures the formants as on
+  a voice at 250 Hz (`FORMANT_BASE` in `crates/stretch/src/lib.rs`), as
+  Signalsmith Stretch's own guess at a voice's pitch comes to almost
+  nothing for some voices, which then come out far quieter.
+- A segment's key (`SegmentPlan::key`) hashes all its render depends on:
+  the plan's and the stretcher's versions, the seed, the rate, the
+  channels, its length, where it reads from and how fast, and each call's
+  input and pitch. It leaves out where the segment is in the song, so a
+  copy of the clip a whole number of frames on, at the same tempo, plays
+  the same audio. Frame positions round with 10⁻⁴ of a frame of slack, so
+  the copy's arithmetic comes out the same.
+- Two segments crossfade over the 5 ms before the cut between them, with
+  equal-gain raised cosines, so the attack after the cut plays at full
+  level.
+- As playback enters a segment, the player decides how it plays: rendered,
+  where its slot is filled and the plan is fresh, which `Plan::is_fresh`
+  says by comparing the song's tempo changes up to the clip's end with the
+  plan's, and else live. A locate or the loop's jump decides afresh.
+- The live stretch is one stretcher, made as the graph is prepared, that
+  runs up to an interval ahead of playback and reads its input as the
+  render would, from the file in memory or streaming. Where the next
+  segment is ready, the player hands over to it at the cut, through the
+  same crossfade.
+- When the song's tempo changes, the transport keeps the beat, so the
+  playhead's frame moves. The player moves what it was playing by the grid
+  frames the playhead moved, so it plays on without a break: segments it
+  was playing rendered crossfade out over 5 ms as the live stretch comes
+  up, and the live stretch reads on to where the new tempo has the file.
+  The app plans the clip again for the new tempo and renders the new
+  segments.
+- In a graph swap, `adopt` takes over the old player's live stretch and
+  how it was playing each segment both plans have, and crossfades out of
+  the old plan's segments that the new one hasn't. It keeps those until
+  the new player is dropped, off the audio thread.
+- Where the song plays the file at its own speed wherever the clip plays,
+  and nothing transposes, the plan has no segments (`Plan::is_passthrough`),
+  and the clip plays the file as Re-Pitch does, sample for sample at the
+  file's rate.
+- Playing, the live stretch included, neither locks nor allocates: the
+  stretcher sizes its buffers as it's configured, and the RTSan job runs
+  the engine's Spectral tests, for what the allocation checker can't see in
+  its C++ ([How it's checked](#how-its-checked)).
 
 **Audio files** reach the graph as `media::Source`s, one for each clip, in a
 `media::Media`: `compile_with_media(project, meters, media)`. The engine

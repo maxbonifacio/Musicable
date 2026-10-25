@@ -26,6 +26,7 @@ use std::time::Duration;
 use musicable_model::DeviceId;
 use musicable_model::clip::ClipId;
 
+use crate::clips::spectral::Renders;
 use crate::devices::Sample;
 use crate::rt;
 
@@ -123,6 +124,38 @@ impl fmt::Debug for AudioData {
     }
 }
 
+/// Reads audio in memory as a file is read: for rendering from a file
+/// loaded whole.
+#[derive(Debug, Clone)]
+pub struct DataReader(pub Arc<AudioData>);
+
+impl AudioReader for DataReader {
+    fn channels(&self) -> usize {
+        self.0.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.0.sample_rate()
+    }
+
+    fn frames(&self) -> u64 {
+        self.0.frames()
+    }
+
+    fn read(&mut self, start: u64, out: &mut [f32]) -> io::Result<usize> {
+        let channels = self.0.channels();
+        let start = start.min(self.0.frames()) as usize;
+        let frames = (out.len() / channels).min(self.0.frames() as usize - start);
+        for (c, samples) in self.0.channels.iter().enumerate() {
+            let samples = &samples[start..start + frames];
+            for (frame, &sample) in samples.iter().enumerate() {
+                out[frame * channels + c] = sample;
+            }
+        }
+        Ok(frames)
+    }
+}
+
 /// Where a clip player reads a file's audio from.
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -155,12 +188,14 @@ impl Source {
     }
 }
 
-/// The audio each audio clip plays, by clip, and the sample each sampler
-/// plays, by device. A clip without a source, such as one whose file is
-/// missing, is silent, and so is a sampler without a sample.
+/// The audio each audio clip plays, by clip, with what a clip in Spectral
+/// renders, and the sample each sampler plays, by device. A clip without a
+/// source, such as one whose file is missing, is silent, and so is a
+/// sampler without a sample.
 #[derive(Debug, Clone, Default)]
 pub struct Media {
     sources: HashMap<ClipId, Source>,
+    renders: HashMap<ClipId, Renders>,
     samples: HashMap<DeviceId, Arc<Sample>>,
 }
 
@@ -175,6 +210,16 @@ impl Media {
 
     pub fn get(&self, clip: ClipId) -> Option<&Source> {
         self.sources.get(&clip)
+    }
+
+    /// Gives `clip`, in Spectral, `renders` to play: its plan for the song's
+    /// tempo, with its segments as they're rendered.
+    pub fn insert_renders(&mut self, clip: ClipId, renders: Renders) {
+        self.renders.insert(clip, renders);
+    }
+
+    pub fn renders(&self, clip: ClipId) -> Option<&Renders> {
+        self.renders.get(&clip)
     }
 
     /// Gives sampler `device` `sample` to play.

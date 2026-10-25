@@ -14,7 +14,8 @@ use musicable_model::param::ClipParam;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
-    Onset, Onsets, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+    Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
+    WarpMarker, WarpMode,
 };
 use musicable_model::{
     AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
@@ -200,7 +201,7 @@ impl Random {
 
     /// A warp of one marker or a few, rising in frames and in ticks, at any
     /// tempo it allows, with a few transients or none yet, in any mode, with
-    /// any transpose, detune and slice settings.
+    /// any transpose, detune, slice and spectral settings.
     fn warp(&mut self) -> Warp {
         let tempo = match self.below(3) {
             0 => self.pick(&[Warp::MIN_TEMPO, Warp::MAX_TEMPO, 120.0]),
@@ -238,6 +239,7 @@ impl Random {
         let transpose = self.below(2 * transpose as u64 + 1) as i8 - transpose;
         let detune = self.below(2 * detune as u64 + 1) as i8 - detune;
         let envelope = f64::from(self.within(0.0, SliceSettings::ENVELOPE_MAX as f32));
+        let formants = f64::from(self.within(0.0, SpectralSettings::FORMANTS_MAX as f32));
         Warp {
             mode: self.pick(&WarpMode::ALL),
             markers,
@@ -249,6 +251,7 @@ impl Random {
                 transient_loop: self.pick(&TransientLoop::ALL),
                 envelope,
             },
+            spectral: SpectralSettings { formants },
             ..Warp::new(0, Beats::ZERO, tempo)
         }
     }

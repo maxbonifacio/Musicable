@@ -30,6 +30,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     warping,
     transients,
     slicing,
+    spectral,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -242,6 +243,14 @@ fn slicing(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         let slice =
             json!({"preserve": "transients", "transient_loop": "forward", "envelope": 100.0});
         add(warp, path, "slice", slice)
+    })
+}
+
+/// Version 14 added the Spectral mode, with its Formants. Version 13 warped
+/// clips keep their formants in place, should they turn Spectral.
+fn spectral(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    each_warp(file, &mut |warp, path| {
+        add(warp, path, "spectral", json!({"formants": 100.0}))
     })
 }
 
@@ -622,6 +631,36 @@ mod tests {
             run(&STEPS[..12], &mut file, 12).unwrap_err().path,
             "tracks[0].takes[0].clips[0].content.audio.warp.detune",
             "a detune in a version 12 file"
+        );
+    }
+
+    #[test]
+    fn version_13_warped_clips_keep_their_formants() {
+        let warped = || json!({"content": {"audio": {"warp": {"mode": "slice"}}}});
+        let unwarped = json!({"content": {"audio": {"warp": null}}});
+        let mut file = json!({
+            "version": 13,
+            "tracks": [
+                {"clips": [warped(), unwarped.clone()], "takes": [{"clips": [warped()]}]},
+            ],
+        });
+        run(&STEPS[..13], &mut file, 13).unwrap();
+        let kept = json!({
+            "content": {"audio": {"warp": {"mode": "slice", "spectral": {"formants": 100.0}}}},
+        });
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], kept);
+        assert_eq!(tracks[0]["clips"][1], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], kept);
+        assert_eq!(file["version"], json!(14));
+        let mut file = json!({
+            "version": 13,
+            "tracks": [{"clips": [{"content": {"audio": {"warp": {"spectral": {}}}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..13], &mut file, 13).unwrap_err().path,
+            "tracks[0].clips[0].content.audio.warp.spectral",
+            "Spectral's settings in a version 13 file"
         );
     }
 

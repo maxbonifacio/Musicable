@@ -1,8 +1,9 @@
 //! Clips through the app: a saved project whose audio clips play WAV, AIFF
-//! and FLAC files from its folder, one of them long enough to stream and
-//! one warped, and whose MIDI clip plays a test instrument. It finds its
-//! files, loops, and plays the same with every renderer, before and after
-//! saving, as `musicable null-test` checks it.
+//! and FLAC files from its folder, one of them long enough to stream, one
+//! warped, and one in Spectral, which plays segments of the file that
+//! streams rendered ahead, and whose MIDI clip plays a test instrument. It
+//! finds its files, loops, and plays the same with every renderer, before
+//! and after saving, as `musicable null-test` checks it.
 
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -16,7 +17,7 @@ use musicable_model::automation;
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Point, Warping};
 use musicable_model::param::ClipParam;
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::warp::{Warp, WarpMarker};
+use musicable_model::warp::{Warp, WarpMarker, WarpMode};
 use musicable_model::{DeviceKind, Project, TrackId, TrackKind};
 
 #[global_allocator]
@@ -92,8 +93,8 @@ fn audio_clip(project: &mut Project, track: TrackId, from: Beats, to: Beats, aud
 }
 
 /// Four beats that loop: drums crossfading into a stream from near the end
-/// of a long file, a bass line and strings, and chords on a test
-/// instrument.
+/// of a long file, a bass line and strings, the long file again in
+/// Spectral, and chords on a test instrument.
 fn song() -> Project {
     let mut p = Project::new();
     p.looping = true;
@@ -141,6 +142,21 @@ fn song() -> Project {
         beats(4, 1),
         AudioClip::new("Audio/Strings.flac"),
     );
+    // In Spectral, warped at 90 BPM, so it plays faster than the file, three
+    // semitones up, with its formants halfway between moving with the pitch
+    // and staying in place.
+    let voice = p.add_track("Voice", TrackKind::Audio);
+    let mut audio = AudioClip::new("Audio/Long.wav");
+    let mut warp = Warp::new(LONG as u64 - 300_000, Beats::ZERO, 90.0);
+    warp.mode = WarpMode::Spectral;
+    warp.transpose = 3;
+    warp.spectral.formants = 50.0;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio_clip(&mut p, voice, beats(1, 1), beats(3, 1), audio);
 
     let keys = p.add_track("Keys", TrackKind::Midi);
     let mut chords = MidiClip::default();
@@ -192,6 +208,16 @@ fn a_saved_project_with_clips_plays_the_same_with_every_renderer() {
         assert!(player.stats().position < 4 * 24_000, "it loops");
     }
     assert!(players[0].peak() > 0.5, "peak {}", players[0].peak());
+    // The clip in Spectral plays, heard on its own.
+    let mut voice = saved.clone();
+    for track in &mut voice.tracks {
+        track.solo = track.name == "Voice";
+    }
+    let mut voice = Player::new(voice, Some(&folder), &Render::App, CONFIG);
+    for _ in 0..2 * 48_000 / CONFIG.max_block {
+        voice.render(CONFIG.max_block);
+    }
+    assert!(voice.peak() > 0.2, "peak {}", voice.peak());
 
     // With a file missing, its clips are silent, and it says so.
     fs::remove_file(folder.join("Audio/Bass.aif")).unwrap();

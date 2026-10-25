@@ -83,6 +83,9 @@ pub struct View<'a> {
     /// What the status bar says while the project's audio files are being
     /// analysed for warping, such as "Analysing Drums.wav".
     pub analysing: Option<&'a str>,
+    /// What the status bar says while clips in Spectral render ahead, such
+    /// as "Rendering 12 segments".
+    pub rendering: Option<&'a str>,
     /// The plugins installed, and how the project's are doing.
     pub plugins: Plugins<'a>,
     /// Musicable's own devices that play, which the browser lists: the
@@ -1573,6 +1576,13 @@ fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {
                 ui.separator();
                 ui.label(RichText::new(analysing).weak())
                     .on_hover_text("Finding the tempo and the beats of the project's audio files");
+            }
+            if let Some(rendering) = view.rendering {
+                ui.separator();
+                ui.label(RichText::new(rendering).weak()).on_hover_text(
+                    "Stretching clips in Spectral ahead of playback. Until a segment is ready, its \
+                     clip plays a live preview.",
+                );
             }
         });
     });

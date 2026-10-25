@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 13,
+  "version": 14,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -424,11 +424,12 @@ A **warp**:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable, or `"slice"`, cut into slices that each play at the file's own speed from where they land, as `slice` says. |
+| `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable, `"slice"`, cut into slices that each play at the file's own speed from where they land, as `slice` says, or `"spectral"`, stretched in the frequency domain, keeping its pitch, as `spectral` says. |
 | `tempo` | float | The clip's tempo while it has one marker, in quarter notes a minute of the file, from 5 to 999. With more markers, they say how fast the file plays, and `tempo` waits for all but one of them to go. |
 | `transpose` | whole number | How far every mode but Re-Pitch moves the audio's pitch, in semitones, from −48 to 48, where the clip's curves don't say otherwise. |
 | `detune` | whole number | And in cents, from −50 to 50. |
 | `slice` | slice settings | How the Slice mode cuts the audio and plays the slices. The clip keeps them while it plays in another mode. |
+| `spectral` | spectral settings | How the Spectral mode treats the audio's formants. The clip keeps them while it plays in another mode. |
 | `markers` | array of markers | At least one, in order: both their frames and their positions rise. |
 | `onsets` | array of transients or `null` | The file's transients, where the sounds in it start, in order: their frames rise. `null` until the clip takes them from analysis of its file, which it does once, so they're the clip's own from then on, and a better analyser never moves them. |
 
@@ -445,6 +446,12 @@ The **slice settings**, as Live's Beats mode has them:
 | `preserve` | string | Where the audio is cut: `"transients"`, at each of the clip's transients in sight, or on a grid of sixteenth notes while it has none; or on a grid of notes in the clip's own time, from its position 0, whatever the audio: `"bar"`, a bar of the meter where the clip starts, `"1/2"`, `"1/4"`, `"1/8"`, `"1/16"` or `"1/32"`. |
 | `transient_loop` | string | What a slice plays once its audio runs out before the next slice starts, as it does where the file plays slower than its own speed: `"off"`, silence, `"forward"`, the second half of the slice over and over, or `"back_and_forth"`, the second half backwards and forwards. |
 | `envelope` | float | Transient Envelope: how much each slice fades as it plays, from 0, a very quick decay, to 100, no fade. |
+
+The **spectral settings**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `formants` | float | Formants: how far the formants, the peaks in the outline of the spectrum that give a voice its character, stay in place as Spectral transposes the audio, from 0, moving with the pitch as a record's do played faster, to 100, staying where they were, so a voice transposed sounds like the same voice. |
 
 A **transient** is an array `[frame, strength, percussiveness, origin]`, a
 line each, as a file can have thousands: the frame of the file its attack
@@ -474,9 +481,11 @@ plays, in place of the parameter's own value:
 | `"transient_envelope"` | The slice settings' `envelope`: 0 to 100. | Slice. |
 | `"preserve"` | The slice settings' `preserve`, in steps: a whole number from 0, `"transients"`, to 6, `"1/32"`, in the order the table above lists them. | Slice. |
 | `"transient_loop"` | The slice settings' `transient_loop`, in steps: 0 `"off"`, 1 `"forward"` or 2 `"back_and_forth"`. | Slice. |
+| `"formants"` | The spectral settings' `formants`: 0 to 100. | Spectral. |
 
 In Slice, each slice reads the curves where it starts, and keeps those
-values while it plays.
+values while it plays. In Spectral, the curves move the pitch and the
+formants as the audio plays, and are rendered with it.
 
 The curves are in the clip's own time, so they move, copy and split with
 it. A warped clip's own time is in beats, as a MIDI clip's is. An unwarped
@@ -860,6 +869,7 @@ Signal flows from tracks to buses without loops:
 | 11 | 2026-10-25 | Warping: audio clips that follow the tempo, with markers and a mode, Re-Pitch so far, and curves for an audio clip's own parameters, starting with its gain. Version 10 audio clips are unwarped and have no curves. |
 | 12 | 2026-10-25 | Transients: the onsets a warped clip keeps, found by analysis and changed by the user. Version 11 warped clips have none yet, so they take them from analysis. |
 | 13 | 2026-10-25 | Slice: the warp mode that cuts audio into slices, with its settings, the transpose and detune of every mode but Re-Pitch, and curves for them. Version 12 warped clips play Re-Pitch, untransposed, and Slice's settings are Live's. |
+| 14 | 2026-10-25 | Spectral: the warp mode that stretches audio in the frequency domain, keeping its pitch, with its Formants, and a curve for them. Version 13 warped clips keep their formants in place. |
 
 ## Changing the format
 

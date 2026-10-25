@@ -4,6 +4,7 @@
 //! however often the graph is rebuilt.
 
 mod slice;
+pub mod spectral;
 
 use std::collections::BTreeMap;
 use std::f64::consts::FRAC_PI_2;
@@ -15,6 +16,7 @@ use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::{Segment, WarpMode};
 
 use self::slice::{Shape, Slices, Song};
+use self::spectral::{Plan, Player, Renders};
 use crate::media::{CHUNK, Source};
 use crate::resample::Resampler;
 use crate::{AudioMut, EngineConfig, Inputs, Node, NoteEvent, NoteId, Notes, ProcessContext};
@@ -41,8 +43,10 @@ const SAME_SPEED: f64 = 1e-9;
 /// In Re-Pitch, the file is resampled at the speed it plays at, so its pitch
 /// follows, as on a turntable. In Slice, it's cut into slices, each played
 /// at the file's own speed, or as transposed, from where its start lands
-/// (see `clips/slice.rs`). A file that plays at the device's sample rate
-/// plays sample for sample, and anything else is resampled (see
+/// (see `clips/slice.rs`). In Spectral, it plays the segments rendered from
+/// its file ahead of time, and a live stretch of it where they aren't
+/// rendered yet (see [`spectral`]). A file that plays at the device's
+/// sample rate plays sample for sample, and anything else is resampled (see
 /// `resample.rs`). Mono files play in both channels, and files with more
 /// than two play their first two.
 ///
@@ -72,6 +76,9 @@ pub struct AudioClips {
     weights: Vec<f32>,
     /// The gain on each frame of one read, where it moves.
     gains: Vec<f32>,
+    /// A block of a clip in Spectral, a channel after another, before its
+    /// gain: for each of two, the most frames in a block.
+    rendered: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -88,6 +95,8 @@ struct Placed {
     time: Time,
     /// In Slice, with a source, its slices.
     slices: Option<Slices>,
+    /// In Spectral, with a source, its player.
+    spectral: Option<Box<Player>>,
     source: Option<Source>,
     /// For an unwarped file that isn't at the device's rate, once prepared.
     resampler: Option<Resampler>,
@@ -328,6 +337,9 @@ impl Placed {
     /// loops. Where nothing plays, as between two slices, it's where the
     /// next slice starts reading.
     fn read_start(&self, tempo: &TempoMap, rate: u32, frame: i64) -> i64 {
+        if let Some(player) = self.stretched(tempo) {
+            return player.read_start(tempo, frame);
+        }
         let mut start = None;
         self.runs(tempo, rate, frame, frame + 1, |_, run| {
             let (at, reach) = match self.reading(&run) {
@@ -356,6 +368,12 @@ impl Placed {
             .as_ref()?
             .next_read(&self.song(tempo, rate), frame)?;
         Some(at.floor() as i64 - Resampler::most_reach(WIDEST) as i64 + 1)
+    }
+
+    /// In Spectral, its player, unless it plays the file as Re-Pitch would
+    /// at `tempo`.
+    fn stretched(&self, tempo: &TempoMap) -> Option<&Player> {
+        self.spectral.as_deref().filter(|p| !p.plays_as_is(tempo))
     }
 
     /// The clip's gain on song frame `frame` of `piece`, before its fades.
@@ -408,8 +426,23 @@ impl AudioClips {
     }
 
     /// Adds `clip`, playing `source`, in a song whose tempo map is `tempo`.
-    /// MIDI clips are ignored.
+    /// MIDI clips are ignored. A clip in Spectral plays its live stretch
+    /// throughout, as nothing renders its segments: see
+    /// [`add_rendered`](Self::add_rendered).
     pub fn add(&mut self, clip: &Clip, source: Option<Source>, tempo: &TempoMap) {
+        self.add_rendered(clip, source, None, tempo);
+    }
+
+    /// Adds `clip`, playing `source`, as [`add`](Self::add) does, and in
+    /// Spectral, playing `renders`, its plan and its segments as they're
+    /// rendered, made for `source` and `tempo`.
+    pub fn add_rendered(
+        &mut self,
+        clip: &Clip,
+        source: Option<Source>,
+        renders: Option<Renders>,
+        tempo: &TempoMap,
+    ) {
         let ClipContent::Audio(audio) = &clip.content else {
             return;
         };
@@ -436,6 +469,16 @@ impl AudioClips {
             }
             _ => None,
         };
+        let spectral = match (&audio.warp, &source) {
+            (Some(warp), Some(source)) if warp.mode == WarpMode::Spectral => renders
+                .or_else(|| {
+                    let (channels, rate) = (source.channels(), source.sample_rate());
+                    let plan = Plan::new(clip, tempo, channels, rate, source.frames())?;
+                    Some(Renders::new(plan))
+                })
+                .map(|renders| Box::new(Player::new(renders))),
+            _ => None,
+        };
         self.clips.push(Placed {
             id: clip.id,
             start: clip.start,
@@ -446,6 +489,7 @@ impl AudioClips {
             gain_curve,
             time,
             slices,
+            spectral,
             source,
             resampler: None,
             after_loop: None,
@@ -518,6 +562,10 @@ impl AudioClips {
             fade_in: (start, tempo.frame_at(clip.fade_in, rate)),
             fade_out: (tempo.frame_at(clip.fade_out, rate), end),
         };
+        if clip.stretched(tempo).is_some() {
+            self.play_stretched(i, ctx, from, to, fades, output);
+            return;
+        }
         let mut reader = Reader {
             source,
             channels: source.channels().min(2),
@@ -607,6 +655,45 @@ impl AudioClips {
                 }
             }
         });
+    }
+}
+
+impl AudioClips {
+    /// Adds clip `i`'s frames from song frame `from` up to `to` in this
+    /// block to `output`, in Spectral, faded by `fades`.
+    fn play_stretched(
+        &mut self,
+        i: usize,
+        ctx: &ProcessContext<'_>,
+        from: i64,
+        to: i64,
+        fades: Fades,
+        output: &mut AudioMut<'_>,
+    ) {
+        let Some(mut player) = self.clips[i].spectral.take() else {
+            return;
+        };
+        let clip = &self.clips[i];
+        if let Some(source) = &clip.source {
+            let frames = (to - from) as usize;
+            let rendered = &mut self.rendered[..2 * frames];
+            player.play(ctx, source, clip.after_loop, from, to, rendered);
+            let first = ctx.transport.position as i64;
+            let steady = clip.gain_curve.is_none() && fades.flat(from, to);
+            clip.pieces(ctx.tempo, ctx.sample_rate, from, to, |piece| {
+                for n in piece.from.max(from)..piece.to.min(to) {
+                    let gain = match steady {
+                        true => clip.gain,
+                        false => clip.gain_at(&piece, n) * fades.at(n),
+                    };
+                    let (at, k) = ((n - first) as usize, (n - from) as usize);
+                    for c in 0..output.channels() {
+                        output.channel_mut(c)[at] += rendered[c.min(1) * frames + k] * gain;
+                    }
+                }
+            });
+        }
+        self.clips[i].spectral = Some(player);
     }
 }
 
@@ -753,6 +840,9 @@ impl Node for AudioClips {
                     .map(|rate| Resampler::new(rate, config.sample_rate)),
                 Time::Warped { .. } => None,
             };
+            if let Some(player) = &mut clip.spectral {
+                player.prepare(config);
+            }
             reach = reach.max(match (&clip.time, &clip.resampler) {
                 (_, Some(r)) => r.reach(),
                 (Time::Warped { segments, .. }, None) if !segments.is_empty() => {
@@ -771,6 +861,23 @@ impl Node for AudioClips {
         self.input = vec![0.0; 2 * self.room];
         self.weights = vec![0.0; 2 * reach];
         self.gains = vec![0.0; self.room];
+        let stretched = self.clips.iter().any(|c| c.spectral.is_some());
+        self.rendered = vec![0.0; if stretched { 2 * config.max_block } else { 0 }];
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        let Some(previous) = previous.downcast_mut::<AudioClips>() else {
+            return;
+        };
+        for clip in &mut self.clips {
+            let Some(player) = clip.spectral.as_deref_mut() else {
+                continue;
+            };
+            let old = previous.clips.iter_mut().find(|c| c.id == clip.id);
+            if let Some(old) = old.and_then(|c| c.spectral.as_deref_mut()) {
+                player.adopt(old);
+            }
+        }
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {

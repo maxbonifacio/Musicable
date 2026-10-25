@@ -188,5 +188,6 @@ fn plays_in(param: ClipParam) -> &'static str {
         ClipParam::TransientEnvelope | ClipParam::Preserve | ClipParam::TransientLoop => {
             "Plays in Slice"
         }
+        ClipParam::Formants => "Plays in Spectral",
     }
 }

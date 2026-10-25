@@ -24,7 +24,7 @@ use crate::mouse_file::UserMouse;
 use crate::mouse_page;
 use crate::profiles::Profiles;
 use crate::profiles_page::{self, ProfilesPage};
-use crate::settings::{ProfileSettings, Settings};
+use crate::settings::{ProfileSettings, RenderCacheSettings, Settings};
 use crate::theme_file::UserTheme;
 
 /// The device to play through, and how.
@@ -43,6 +43,8 @@ pub const APPEARANCE: &str = "appearance";
 pub const WORKSPACES: &str = "workspaces";
 /// How the browser previews samples, and where presets go.
 pub const BROWSER: &str = "browser";
+/// How much the render cache keeps.
+pub const FILES: &str = "files";
 /// The user's profiles.
 pub const PROFILES: &str = "profiles";
 /// Whether agents, such as Claude Code, can control Musicable.
@@ -64,7 +66,7 @@ struct Page {
 }
 
 /// The pages, in the order the window lists them. A new page goes here.
-const PAGES: [Page; 10] = [
+const PAGES: [Page; 11] = [
     Page {
         id: AUDIO,
         title: "Audio",
@@ -128,6 +130,12 @@ const PAGES: [Page; 10] = [
         show: |_, ui, cx, _| browser(ui, cx),
     },
     Page {
+        id: FILES,
+        title: "Files",
+        scrolls: false,
+        show: |pages, ui, cx, _| pages.files.show(ui, cx),
+    },
+    Page {
         id: PROFILES,
         title: "Profiles",
         scrolls: false,
@@ -182,6 +190,10 @@ pub enum Asked {
     DefaultPresetsFolder,
     /// Show the workspaces folder in the system's file manager.
     OpenWorkspacesFolder,
+    /// The render cache holds this much from now on.
+    RenderCache(RenderCacheSettings),
+    /// Show the render cache's folder in the system's file manager.
+    OpenRenderCacheFolder,
     /// Let agents control Musicable from now on, or stop letting them.
     Agents(bool),
 }
@@ -211,6 +223,9 @@ pub struct Cx<'a> {
     pub presets_folder: Option<&'a Path>,
     /// Where the workspaces' files go, if there's a config folder.
     pub workspaces_folder: Option<&'a Path>,
+    /// Where the render cache keeps what it renders, if there's a cache
+    /// folder.
+    pub render_folder: Option<&'a Path>,
     pub agents: Agents<'a>,
 }
 
@@ -233,6 +248,7 @@ pub struct Agents<'a> {
 struct Pages {
     audio: AudioPage,
     recording: RecordingPage,
+    files: FilesPage,
     appearance: AppearancePage,
     profiles: ProfilesPage,
 }
@@ -475,6 +491,101 @@ impl RecordingPage {
             ui.label(format!("late ({ms:.2} ms)."));
         });
         set
+    }
+}
+
+/// What the Files page keeps.
+#[derive(Default)]
+struct FilesPage {
+    /// The render cache's limits as the user drags one, until they let go.
+    drag: Option<RenderCacheSettings>,
+}
+
+impl FilesPage {
+    /// How much the render cache keeps, and where.
+    fn show(&mut self, ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
+        let mut asked = None;
+        let saved = cx.settings.render_cache;
+        let mut limits = self.drag.unwrap_or(saved);
+        ui.label(RichText::new("Render cache").strong());
+        ui.label(
+            "Clips in Spectral play their audio stretched ahead of time. The render cache keeps \
+             it, so it's ready the next time any project plays it.",
+        );
+        let field = |ui: &mut Ui, value: &mut u32, name: &str, hover: &str| {
+            let field = ui
+                .add(
+                    DragValue::new(value)
+                        .range(1..=RenderCacheSettings::MAX_GB)
+                        .suffix(" GB")
+                        // A typed size applies on Enter, not at each digit.
+                        .update_while_editing(false),
+                )
+                .on_hover_text(hover);
+            let shown = f64::from(*value);
+            field.widget_info(|| WidgetInfo {
+                value: Some(shown),
+                ..WidgetInfo::labeled(Role::SpinButton, true, name)
+            });
+            field
+        };
+        let mut changed = false;
+        let mut dragging = false;
+        ui.horizontal(|ui| {
+            ui.label("Holds up to");
+            let size = field(
+                ui,
+                &mut limits.max_size_gb,
+                "Render Cache Size",
+                "The most the render cache holds. Past it, what was used longest ago goes first.",
+            );
+            ui.label("and leaves at least");
+            let free = field(
+                ui,
+                &mut limits.min_free_gb,
+                "Render Cache Free Space",
+                "How much of its disk the render cache always leaves free, letting go of what \
+                 was used longest ago to keep it so.",
+            );
+            ui.label("of the disk free.");
+            for field in [size, free] {
+                dragging |= field.dragged();
+                changed |= field.changed() || field.drag_stopped();
+            }
+        });
+        if dragging {
+            self.drag = Some(limits);
+        } else if changed {
+            self.drag = None;
+            if limits != saved {
+                asked = Some(Asked::RenderCache(limits));
+            }
+        }
+        match cx.render_folder {
+            Some(folder) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("It keeps it in");
+                    ui.add(
+                        Label::new(RichText::new(folder.display().to_string()).monospace())
+                            .selectable(true),
+                    );
+                });
+                if ui
+                    .button("Show Folder")
+                    .on_hover_text("Opens the render cache's folder in the file manager")
+                    .clicked()
+                {
+                    asked = Some(Asked::OpenRenderCacheFolder);
+                }
+            }
+            None => {
+                ui.label(
+                    "Musicable found no folder for the render cache, so it keeps what it renders \
+                     until it closes.",
+                );
+            }
+        }
+        asked
     }
 }
 

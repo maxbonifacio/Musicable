@@ -11,7 +11,9 @@ use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
-use musicable_model::warp::{Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMode};
+use musicable_model::warp::{
+    Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
+};
 use musicable_model::{
     AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
     TestTone, TrackId, TrackKind,
@@ -1561,6 +1563,40 @@ fn warped_clips_transpose_and_slice_within_their_ranges() {
 }
 
 #[test]
+fn warped_clips_formants_are_within_their_range() {
+    let file = edited_warp(|a| {
+        a["warp"]["mode"] = json!("spectral");
+        a["warp"]["spectral"] = json!({"formants": 37.5});
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    let warp = audio.warp.as_ref().unwrap();
+    assert_eq!(warp.mode, WarpMode::Spectral);
+    assert_eq!(warp.spectral, SpectralSettings { formants: 37.5 });
+    let warp = format!("{AUDIO}.warp");
+    for formants in [-1.0, 100.5] {
+        refused(
+            &edited_warp(|a| a["warp"]["spectral"]["formants"] = json!(formants)),
+            &format!("{warp}.spectral.formants"),
+            "must be from 0 to 100",
+        );
+    }
+    refused(
+        &edited_warp(|a| a["warp"]["spectral"]["envelope"] = json!(128)),
+        &format!("{warp}.spectral.envelope"),
+        "unknown field `envelope`",
+    );
+    refused(
+        &edited_warp(|a| {
+            a["warp"].as_object_mut().unwrap().remove("spectral");
+        }),
+        &warp,
+        "missing field `spectral`",
+    );
+}
+
+#[test]
 fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
     let gain = |points| json!([{"param": "gain", "points": points}]);
     let lanes = format!("{AUDIO}.automation");
@@ -1623,6 +1659,7 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("transient_envelope", 12.5),
         ("preserve", 6.0),
         ("transient_loop", 2.0),
+        ("formants", 0.0),
     ] {
         let file = edited_audio(|a| a["automation"] = curve(param, value));
         let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
@@ -1637,6 +1674,7 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("preserve", 7.0, "must be from 0 to 6"),
         ("preserve", 2.5, "must be a whole number"),
         ("transient_loop", 0.5, "must be a whole number"),
+        ("formants", 100.5, "must be from 0 to 100"),
     ] {
         refused(
             &edited_audio(|a| a["automation"] = curve(param, value)),

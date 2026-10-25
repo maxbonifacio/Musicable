@@ -5,7 +5,7 @@
 
 use crate::clip::{ClipContent, ClipId};
 use crate::native::ParamInfo;
-use crate::warp::{Preserve, SliceSettings, TransientLoop, Warp, WarpMode};
+use crate::warp::{Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode};
 use crate::{Chain, DeviceId, DeviceKind, Project, SendId};
 
 /// A parameter anywhere in the project: one address that automation,
@@ -47,17 +47,20 @@ pub enum ClipParam {
     /// Slice's Transient Loop Mode, in steps: the place of a
     /// [`TransientLoop`](crate::warp::TransientLoop) in its list.
     TransientLoop,
+    /// Spectral's Formants, from 0 to 100.
+    Formants,
 }
 
 impl ClipParam {
     /// Every one, in order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Gain,
         Self::Transpose,
         Self::Detune,
         Self::TransientEnvelope,
         Self::Preserve,
         Self::TransientLoop,
+        Self::Formants,
     ];
 
     /// What it is.
@@ -99,6 +102,12 @@ impl ClipParam {
                 let default = TransientLoop::default().step();
                 steps("Transient Loop Mode", TransientLoop::ALL.len(), default)
             }
+            Self::Formants => linear(
+                "Formants",
+                0.0,
+                SpectralSettings::FORMANTS_MAX,
+                SpectralSettings::FORMANTS_MAX,
+            ),
         }
     }
 
@@ -109,8 +118,8 @@ impl ClipParam {
     }
 
     /// Whether it plays in `mode`: Gain in every one and while the clip is
-    /// unwarped, Transpose and Detune in every mode but Re-Pitch, and
-    /// Slice's own in Slice.
+    /// unwarped, Transpose and Detune in every mode but Re-Pitch, and each
+    /// mode's own in it.
     pub fn plays_in(self, mode: Option<WarpMode>) -> bool {
         match self {
             Self::Gain => true,
@@ -118,6 +127,7 @@ impl ClipParam {
             Self::TransientEnvelope | Self::Preserve | Self::TransientLoop => {
                 mode == Some(WarpMode::Slice)
             }
+            Self::Formants => mode == Some(WarpMode::Spectral),
         }
     }
 
@@ -130,6 +140,7 @@ impl ClipParam {
             Self::TransientEnvelope => "transient_envelope",
             Self::Preserve => "preserve",
             Self::TransientLoop => "transient_loop",
+            Self::Formants => "formants",
         }
     }
 

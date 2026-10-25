@@ -19,6 +19,7 @@ musicable-library = { path = "crates/library" }
 musicable-ui = { path = "crates/ui" }
 musicable-mcp = { path = "crates/mcp" }
 musicable-analysis = { path = "crates/analysis" }
+musicable-stretch = { path = "crates/stretch" }
 rtrb = "0.4"
 base64 = "0.22"
 # Decodes FLAC frames; finding them is ours (io::audio).
@@ -64,6 +65,8 @@ flate2 = "1.1"
 # Names the analysis cache's entries: SipHash, whose hashes stay the same
 # from one Rust release to the next, as std's needn't.
 siphasher = "1.0"
+# Builds Signalsmith Stretch's C++ for musicable-stretch.
+cc = "1.2"
 # Dev-only: property tests and benchmarks.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }

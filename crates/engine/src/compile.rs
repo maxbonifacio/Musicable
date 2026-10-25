@@ -698,7 +698,8 @@ fn clip_player(track: &Track, media: &Media, tempo: &TempoMap) -> Option<Box<dyn
         TrackKind::Audio => {
             let mut player = AudioClips::new();
             for clip in clips {
-                player.add(clip, media.get(clip.id).cloned(), tempo);
+                let (source, renders) = (media.get(clip.id), media.renders(clip.id));
+                player.add_rendered(clip, source.cloned(), renders.cloned(), tempo);
             }
             Some(Box::new(player))
         }
