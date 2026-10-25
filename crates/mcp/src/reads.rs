@@ -376,6 +376,11 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
                             "formants": json::to_json(&Value::Number(warp.spectral.formants)),
                             "envelope": json::to_json(&Value::Number(warp.spectral.envelope)),
                         },
+                        "granular": {
+                            "follow_pitch": warp.granular.follow_pitch,
+                            "grain_size": json::to_json(&Value::Number(warp.granular.grain_size)),
+                            "fluctuation": json::to_json(&Value::Number(warp.granular.fluctuation)),
+                        },
                     });
                 }
                 (offset, _) => entry["offset_frames"] = offset.frames().unwrap_or(0).into(),

@@ -41,7 +41,7 @@ use std::sync::{Arc, OnceLock};
 
 use musicable_model::clip::{AudioClip, Clip, ClipContent};
 use musicable_model::param::ClipParam;
-use musicable_model::time::{Beats, TempoChange, TempoMap};
+use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::{Segment, SpectralSettings, Warp, WarpMode, pitch_ratio};
 use musicable_stretch::{Sizes, Stretch};
 use siphasher::sip::SipHasher13;
@@ -90,10 +90,10 @@ fn margin() -> i64 {
 /// that. Grid frames are the song's frames at the file's sample rate,
 /// which segments render at.
 #[derive(Debug, Clone)]
-struct Map {
-    shift: f64,
-    segments: Vec<Segment>,
-    rate: u32,
+pub(super) struct Map {
+    pub(super) shift: f64,
+    pub(super) segments: Vec<Segment>,
+    pub(super) rate: u32,
 }
 
 impl Map {
@@ -114,7 +114,7 @@ impl Map {
     }
 
     /// The file's position, fractional, at `own` of the clip's own time.
-    fn frame_of(&self, own: f64) -> f64 {
+    pub(super) fn frame_of(&self, own: f64) -> f64 {
         self.segment(own).frame_at(own)
     }
 
@@ -127,7 +127,7 @@ impl Map {
     }
 
     /// The moment of the clip's own time that the file's `frame` plays at.
-    fn own_of(&self, frame: f64) -> f64 {
+    pub(super) fn own_of(&self, frame: f64) -> f64 {
         let after = self.segments[1..].partition_point(|s| s.frame as f64 <= frame);
         self.segments[after].beat_at(frame)
     }
@@ -154,7 +154,7 @@ impl Map {
     /// Whether the file plays at its own speed from `from` to `to` in the
     /// song, at `tempo`: every warp segment and tempo over them plays a
     /// frame of the file on each grid frame.
-    fn plays_as_is(&self, tempo: &TempoMap, from: Beats, to: Beats) -> bool {
+    pub(super) fn plays_as_is(&self, tempo: &TempoMap, from: Beats, to: Beats) -> bool {
         let (mut own, until) = (from.to_f64() + self.shift, to.to_f64() + self.shift);
         let rate = 60.0 * f64::from(self.rate);
         while own < until {
@@ -179,20 +179,20 @@ impl Map {
 /// One of the settings a clip's pitch is rendered with, over the clip's
 /// own time: its curve, where it has one, or else its warp's value.
 #[derive(Debug)]
-enum Value {
+pub(super) enum Value {
     Fixed(f64),
     Curve(Curve),
 }
 
 impl Value {
-    fn new(audio: &AudioClip, param: ClipParam, otherwise: f64) -> Self {
+    pub(super) fn new(audio: &AudioClip, param: ClipParam, otherwise: f64) -> Self {
         let curve = audio
             .lane(param)
             .and_then(|lane| Curve::new(&lane.points, param.spec().scale));
         curve.map_or(Self::Fixed(otherwise), Self::Curve)
     }
 
-    fn at(&self, own: f64) -> f64 {
+    pub(super) fn at(&self, own: f64) -> f64 {
         match self {
             Self::Fixed(value) => *value,
             Self::Curve(curve) => curve.value_at(own),
@@ -200,7 +200,7 @@ impl Value {
     }
 
     /// Whether it's 0 all through.
-    fn is_zero(&self) -> bool {
+    pub(super) fn is_zero(&self) -> bool {
         match self {
             Self::Fixed(value) => *value == 0.0,
             Self::Curve(curve) => curve.points.iter().all(|p| p.1 == 0.0),
@@ -375,11 +375,7 @@ impl Plan {
     /// Whether the segments play at `tempo`: whether it places the song's
     /// beats as the plan's tempo did, up to the clip's end.
     pub fn is_fresh(&self, tempo: &TempoMap) -> bool {
-        fn upto(map: &TempoMap, until: Beats) -> &[TempoChange] {
-            let tempos = map.tempos();
-            &tempos[..tempos.partition_point(|c| c.at <= until)]
-        }
-        upto(&self.tempo, self.until) == upto(tempo, self.until)
+        super::same_tempo(&self.tempo, tempo, self.until)
     }
 
     /// The segments of a file `frames` long that play between grid frames
@@ -1640,7 +1636,7 @@ mod tests {
     ) -> AudioClips {
         let mut clips = AudioClips::new();
         let source = Some(Source::Whole(data.clone()));
-        clips.add_rendered(clip, source, Some(renders.clone()), tempo);
+        clips.add_rendered(clip, source, Some(renders.clone()), None, tempo);
         clips
     }
 

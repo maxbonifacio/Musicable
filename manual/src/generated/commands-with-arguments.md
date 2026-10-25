@@ -168,7 +168,10 @@
 | Set Clip Detune | `warp.set_detune` |
 | Set 1.1.1 Here | `warp.set_downbeat` |
 | Set Spectral Envelope | `warp.set_envelope` |
+| Set Fluctuation | `warp.set_fluctuation` |
+| Set Follow Pitch | `warp.set_follow_pitch` |
 | Set Formants | `warp.set_formants` |
+| Set Grain Size | `warp.set_grain_size` |
 | Set High Quality | `warp.set_high_quality` |
 | Set Warp Mode | `warp.set_mode` |
 | Set Slice Preserve | `warp.set_preserve` |

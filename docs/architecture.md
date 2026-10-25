@@ -22,7 +22,7 @@ to use Musicable.
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
 | `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
-| `analysis` | `io` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network with a classic tracker checking it ([analysis.md](analysis.md)) |
+| `analysis` | `io` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network with a classic tracker checking it, and the pitch marks Granular fits its grains to ([analysis.md](analysis.md)) |
 | `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
 | `mcp` | `model`, `commands` | Agents controlling Musicable over MCP: the tools, the server the window answers through, the local pipe, and the `musicable mcp` bridge ([agents.md](agents.md)) |
 | `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
@@ -322,12 +322,13 @@ says what's there.
 - **Warping and time-stretch.** Warping has started: format 11 gives
   `AudioClip` a warp, markers pinning frames of the file to beats of the
   clip's own time, and the clip player reads the file through them in
-  Re-Pitch mode, resampling each piece at the speed it plays at, and in
-  Slice, cutting it into slices that each play from where they land
+  Re-Pitch mode, resampling each piece at the speed it plays at, in
+  Slice, cutting it into slices that each play from where they land, and
+  in Granular, playing it as short grains placed as the graph compiles
   ([engine.md](engine.md#clips)), while the Sample Editor edits the markers
-  ([app.md](app.md#the-sample-editor)). Re-Pitch and Slice carry no state
-  but the resampler's, so they start at any song position at once, as every
-  node must. Spectral's stretcher carries state from frame to frame, so it
+  ([app.md](app.md#the-sample-editor)). Re-Pitch, Slice and Granular carry
+  no state but the resampler's, so they start at any song position at
+  once, as every node must. Spectral's stretcher carries state from frame to frame, so it
   can't: a clip in Spectral plays segments rendered ahead on the library's
   background queue and kept in the render cache
   ([app.md](app.md#the-render-cache)), and a live stretch until they're

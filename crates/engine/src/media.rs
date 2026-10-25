@@ -26,6 +26,7 @@ use std::time::Duration;
 use musicable_model::DeviceId;
 use musicable_model::clip::ClipId;
 
+use crate::clips::granular::PitchMarks;
 use crate::clips::spectral::Renders;
 use crate::devices::Sample;
 use crate::rt;
@@ -189,13 +190,15 @@ impl Source {
 }
 
 /// The audio each audio clip plays, by clip, with what a clip in Spectral
-/// renders, and the sample each sampler plays, by device. A clip without a
-/// source, such as one whose file is missing, is silent, and so is a
-/// sampler without a sample.
+/// renders and the pitch marks a clip in Granular fits its grains to, and
+/// the sample each sampler plays, by device. A clip without a source, such
+/// as one whose file is missing, is silent, and so is a sampler without a
+/// sample.
 #[derive(Debug, Clone, Default)]
 pub struct Media {
     sources: HashMap<ClipId, Source>,
     renders: HashMap<ClipId, Renders>,
+    marks: HashMap<ClipId, Arc<PitchMarks>>,
     samples: HashMap<DeviceId, Arc<Sample>>,
 }
 
@@ -222,6 +225,16 @@ impl Media {
         self.renders.get(&clip)
     }
 
+    /// Gives `clip`, in Granular, its file's pitch `marks` to fit its
+    /// grains to with Follow pitch on.
+    pub fn insert_marks(&mut self, clip: ClipId, marks: Arc<PitchMarks>) {
+        self.marks.insert(clip, marks);
+    }
+
+    pub fn marks(&self, clip: ClipId) -> Option<&Arc<PitchMarks>> {
+        self.marks.get(&clip)
+    }
+
     /// Gives sampler `device` `sample` to play.
     pub fn insert_sample(&mut self, device: DeviceId, sample: Arc<Sample>) {
         self.samples.insert(device, sample);
@@ -246,7 +259,8 @@ impl Media {
 pub const CHUNK: u64 = 8192;
 
 /// How much of a file a stream keeps in memory from where its clip reads
-/// next, in seconds of the file.
+/// next, in seconds of the file, beyond how far apart its reads can be at
+/// once (see [`Streamer::stream_spread`]).
 const AHEAD_SECONDS: f64 = 1.0;
 /// And from where the clip reads after the loop jumps back.
 const LOOP_SECONDS: f64 = 0.4;
@@ -272,11 +286,15 @@ const READING: u64 = 3;
 /// and [reads](Stream::read) on the audio thread, copying from chunks that
 /// are loaded. A chunk that isn't is silent and counts as
 /// [missed](Stream::missed), unless the stream waits for the disk, as it
-/// does when rendering offline.
+/// does when rendering offline, and the chunk is one the disk thread loads:
+/// one in the windows from where the player hinted it reads.
 pub struct Stream {
     channels: usize,
     sample_rate: u32,
     frames: u64,
+    /// How far apart its clip's reads can be at once, in seconds of the
+    /// file: each window is that much longer.
+    spread: f64,
     /// The chunks from where the clip reads next.
     ahead: Box<[Slot]>,
     /// The chunks from where it reads after the loop jumps back.
@@ -318,9 +336,17 @@ impl Slot {
 }
 
 impl Stream {
-    fn new(channels: usize, sample_rate: u32, frames: u64, wait: bool, disk: Arc<Disk>) -> Self {
-        let chunks =
-            |seconds: f64| (seconds * f64::from(sample_rate) / CHUNK as f64).ceil() as usize;
+    fn new(
+        channels: usize,
+        sample_rate: u32,
+        frames: u64,
+        spread: f64,
+        wait: bool,
+        disk: Arc<Disk>,
+    ) -> Self {
+        let chunks = |seconds: f64| {
+            ((seconds + spread) * f64::from(sample_rate) / CHUNK as f64).ceil() as usize
+        };
         let slots = |count: usize| {
             (0..count)
                 .map(|_| Slot::new(channels * CHUNK as usize))
@@ -330,6 +356,7 @@ impl Stream {
             channels,
             sample_rate,
             frames,
+            spread,
             // A read can start anywhere in the first chunk, so the second
             // chunk past the window's length still counts.
             ahead: slots(chunks(AHEAD_SECONDS) + 1),
@@ -353,6 +380,12 @@ impl Stream {
 
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// How far apart its clip's reads can be at once, in seconds of the
+    /// file, as [`Streamer::stream_spread`] was told.
+    pub fn spread(&self) -> f64 {
+        self.spread
     }
 
     /// Reads that found their chunk not loaded and played silence.
@@ -441,8 +474,14 @@ impl Stream {
     }
 
     /// Hands `chunk`'s data to `copy`, from whichever set of slots holds it,
-    /// and returns whether one did. Waits for it to load if the stream waits.
+    /// and returns whether one did. Waits for it to load if the stream waits
+    /// and the disk thread loads it. A chunk it doesn't is missed there and
+    /// then, whatever the slots hold, so the same reads miss every time.
     fn with_chunk(&self, chunk: u64, mut copy: impl FnMut(&[f32])) -> bool {
+        if self.wait && !self.loads(chunk) {
+            self.missed.fetch_add(1, Relaxed);
+            return false;
+        }
         let ready = chunk << 2 | READY;
         loop {
             for slots in [&self.ahead, &self.after_loop] {
@@ -467,6 +506,22 @@ impl Stream {
             }
             rt::allowed(thread::yield_now);
         }
+    }
+
+    /// Whether the disk thread loads `chunk`, as it's in a window from where
+    /// the player hinted it reads.
+    fn loads(&self, chunk: u64) -> bool {
+        let windows = [
+            (&self.ahead, &self.next),
+            (&self.after_loop, &self.loop_next),
+        ];
+        windows.into_iter().any(|(slots, hint)| {
+            let first = match hint.load(Relaxed) {
+                NOWHERE => return false,
+                hint => hint / CHUNK,
+            };
+            (first..first + slots.len() as u64).contains(&chunk)
+        })
     }
 
     /// Loads the chunk of each window `depth` chunks in, if it isn't loaded,
@@ -625,10 +680,19 @@ impl Streamer {
     /// A stream of `reader`'s audio. The disk thread starts loading the
     /// file's start once the stream's player first hints where it reads.
     pub fn stream(&self, reader: Box<dyn AudioReader>) -> Arc<Stream> {
+        self.stream_spread(reader, 0.0)
+    }
+
+    /// Like [`stream`](Self::stream), for a clip whose reads at once can be
+    /// as far as `spread` seconds of the file apart, such as one in
+    /// Granular, whose grains overlap: it keeps that much more of the file
+    /// in memory from where the clip reads next.
+    pub fn stream_spread(&self, reader: Box<dyn AudioReader>, spread: f64) -> Arc<Stream> {
         let stream = Arc::new(Stream::new(
             reader.channels().max(1),
             reader.sample_rate().max(1),
             reader.frames(),
+            spread.max(0.0),
             self.wait,
             self.disk.clone(),
         ));
@@ -781,6 +845,29 @@ mod tests {
         // The loop's start is there too.
         assert!(stream.read(0, &mut [&mut out]));
         assert_eq!(out[99], 99.0);
+    }
+
+    #[test]
+    fn waiting_streams_miss_at_once_what_the_disk_thread_wont_load() {
+        let streamer = Streamer::spawn(true);
+        let stream = streamer.stream(ramp(1_000_000));
+        let mut out = vec![1.0; 100];
+        // Before the first hint, and five seconds on from it.
+        assert!(!stream.read(0, &mut [&mut out]));
+        stream.hint(0, None);
+        assert!(!stream.read(240_000, &mut [&mut out]));
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(stream.missed(), 2);
+        // A stream for reads up to six seconds apart has it.
+        let wide = streamer.stream_spread(ramp(1_000_000), 6.0);
+        assert_eq!(wide.spread(), 6.0);
+        wide.hint(0, Some(500_000));
+        assert!(wide.read(240_000, &mut [&mut out]));
+        assert_eq!(out[0], 240_000.0);
+        // And so does the window after the loop.
+        assert!(wide.read(740_000, &mut [&mut out]));
+        assert_eq!(out[0], 740_000.0);
+        assert_eq!(wide.missed(), 0);
     }
 
     #[test]

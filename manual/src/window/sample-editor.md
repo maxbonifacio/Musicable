@@ -18,12 +18,17 @@ do in it can be undone, and a whole drag is one step in the undo history.
   - **Warp** turns warping on or off: whether the clip follows the song's
     tempo.
   - **The mode**, the menu beside it, is how a warped clip's audio plays
-    between its markers: Re-Pitch, Slice or Spectral
+    between its markers: Re-Pitch, Slice, Granular or Spectral
     ([Modes](../using/warping.md#modes)).
   - **Slice's settings**, under the mode while it's Slice: **Preserve**,
     where it cuts the audio, **Loop**, what a slice plays once its audio
     runs out, and **Envelope**, how much each slice fades
     ([Slice](../using/warping.md#slice)).
+  - **Granular's settings**, under the mode while it's Granular: **Follow
+    pitch**, which fits the grains to the audio's pitch, as Live's Tones
+    does, **Grain Size**, from 5 to 500 ms, how long each grain is, and
+    while Follow pitch is off, **Fluctuation**, from 0 to 100%, how far the
+    grains stray ([Granular](../using/warping.md#granular)).
   - **Spectral's settings**, under the mode while it's Spectral: **High
     quality**, which renders the clip with Rubber Band, as Live's Complex
     Pro does, **Formants**, from 0 to 100%, how far a transposed voice

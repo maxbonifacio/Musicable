@@ -14,8 +14,8 @@ use musicable_model::param::ClipParam;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
-    Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
-    WarpMarker, WarpMode,
+    GranularSettings, Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings,
+    TransientLoop, Warp, WarpMarker, WarpMode,
 };
 use musicable_model::{
     AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
@@ -201,7 +201,7 @@ impl Random {
 
     /// A warp of one marker or a few, rising in frames and in ticks, at any
     /// tempo it allows, with a few transients or none yet, in any mode, with
-    /// any transpose, detune, slice and spectral settings.
+    /// any transpose, detune, slice, granular and spectral settings.
     fn warp(&mut self) -> Warp {
         let tempo = match self.below(3) {
             0 => self.pick(&[Warp::MIN_TEMPO, Warp::MAX_TEMPO, 120.0]),
@@ -245,6 +245,12 @@ impl Random {
             SpectralSettings::ENVELOPE_MAX,
         );
         let spectral_envelope = f64::from(self.within(least as f32, most as f32));
+        let (least, most) = (
+            GranularSettings::GRAIN_SIZE_MIN,
+            GranularSettings::GRAIN_SIZE_MAX,
+        );
+        let grain_size = f64::from(self.within(least as f32, most as f32));
+        let fluctuation = f64::from(self.within(0.0, GranularSettings::FLUCTUATION_MAX as f32));
         Warp {
             mode: self.pick(&WarpMode::ALL),
             markers,
@@ -255,6 +261,11 @@ impl Random {
                 preserve: self.pick(&Preserve::ALL),
                 transient_loop: self.pick(&TransientLoop::ALL),
                 envelope,
+            },
+            granular: GranularSettings {
+                follow_pitch: self.one_in(2),
+                grain_size,
+                fluctuation,
             },
             spectral: SpectralSettings {
                 high_quality: self.one_in(2),

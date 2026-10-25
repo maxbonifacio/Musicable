@@ -171,9 +171,10 @@ them ([The Tier 1 demo](#the-tier-1-demo)).
 Audio clips play their files from the project file's folder, as in the app
 (see [Audio files](#audio-files)). Clips that stream wait for the disk here
 instead of missing what it hasn't read yet, so every run plays them the
-same however fast it renders, and clips in Spectral wait for their
+same however fast it renders, clips in Spectral wait for their
 segments to render, as an export's do ([The render
-cache](#the-render-cache)). Files that can't be read are listed before the
+cache](#the-render-cache)), and clips in Granular that follow the pitch
+find their files' pitch marks ([Audio files](#audio-files)). Files that can't be read are listed before the
 results, and their clips are silent in every run.
 
 On a 4-core cloud VM:
@@ -817,6 +818,20 @@ the files the project's audio clips play (`crates/app/src/media.rs`):
 - A graph rebuilt for an edit gets the files and streams the old one has,
   so nothing is read again and the clips that stream play on. Opening a
   project reads its files again, so it plays them as they are now.
+- A clip in Granular streams with room for as far apart as its grains read
+  (`granular::stream_spread`, [engine.md](engine.md#clips)). One whose
+  grains come to read further apart than its stream holds, as they get
+  longer or are transposed further, gets a new stream with the graph
+  rebuilt for the edit.
+- A clip in Granular that follows the pitch gets the pitch marks analysis
+  found in its file ([analysis.md](analysis.md#pitch-marks)). As analyses
+  land, the session gives the pool their marks (`Session::take_pitch_marks`,
+  `MediaPool::keep_marks`), by the file's name as the clips give it, and
+  builds a new graph where such a clip plays a file whose marks are new;
+  until then, its grains keep to the lattice. An offline session finds the
+  marks itself as its graph builds, so an export follows the pitch whether
+  or not the file was analysed. The marks aren't saved in the project: the
+  analysis cache keeps them.
 
 **Headers and waveforms.** A thread of the app's own
 (`crates/app/src/audio_files.rs`) reads the header and the waveform of

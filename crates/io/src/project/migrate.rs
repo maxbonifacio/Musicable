@@ -32,6 +32,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     slicing,
     spectral,
     high_quality,
+    granular,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -268,6 +269,16 @@ fn high_quality(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         let path = format!("{path}.spectral");
         add(spectral, &path, "high_quality", json!(false))?;
         add(spectral, &path, "envelope", json!(128.0))
+    })
+}
+
+/// Version 16 added the Granular mode, with its Follow pitch, Grain Size
+/// and Fluctuation. Version 15 warped clips follow the audio's pitch with
+/// 30 ms grains, should they turn Granular.
+fn granular(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    each_warp(file, &mut |warp, path| {
+        let granular = json!({"follow_pitch": true, "grain_size": 30.0, "fluctuation": 25.0});
+        add(warp, path, "granular", granular)
     })
 }
 
@@ -707,6 +718,36 @@ mod tests {
             run(&STEPS[..14], &mut file, 14).unwrap_err().path,
             "tracks[0].clips[0].content.audio.warp.spectral.envelope",
             "Spectral's Envelope in a version 14 file"
+        );
+    }
+
+    #[test]
+    fn version_15_warped_clips_follow_the_pitch_should_they_turn_granular() {
+        let warped = || json!({"content": {"audio": {"warp": {"mode": "spectral"}}}});
+        let unwarped = json!({"content": {"audio": {"warp": null}}});
+        let mut file = json!({
+            "version": 15,
+            "tracks": [
+                {"clips": [warped(), unwarped.clone()], "takes": [{"clips": [warped()]}]},
+            ],
+        });
+        run(&STEPS[..15], &mut file, 15).unwrap();
+        let granular = json!({"follow_pitch": true, "grain_size": 30.0, "fluctuation": 25.0});
+        let kept =
+            json!({"content": {"audio": {"warp": {"mode": "spectral", "granular": granular}}}});
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], kept);
+        assert_eq!(tracks[0]["clips"][1], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], kept);
+        assert_eq!(file["version"], json!(16));
+        let mut file = json!({
+            "version": 15,
+            "tracks": [{"clips": [{"content": {"audio": {"warp": {"granular": {}}}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..15], &mut file, 15).unwrap_err().path,
+            "tracks[0].clips[0].content.audio.warp.granular",
+            "Granular's settings in a version 15 file"
         );
     }
 

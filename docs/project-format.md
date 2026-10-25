@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 15,
+  "version": 16,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -424,11 +424,12 @@ A **warp**:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable, `"slice"`, cut into slices that each play at the file's own speed from where they land, as `slice` says, or `"spectral"`, stretched in the frequency domain, keeping its pitch, as `spectral` says. |
+| `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable, `"slice"`, cut into slices that each play at the file's own speed from where they land, as `slice` says, `"granular"`, played as short overlapping grains, each at the file's own speed from where it lands, as `granular` says, or `"spectral"`, stretched in the frequency domain, keeping its pitch, as `spectral` says. |
 | `tempo` | float | The clip's tempo while it has one marker, in quarter notes a minute of the file, from 5 to 999. With more markers, they say how fast the file plays, and `tempo` waits for all but one of them to go. |
 | `transpose` | whole number | How far every mode but Re-Pitch moves the audio's pitch, in semitones, from −48 to 48, where the clip's curves don't say otherwise. |
 | `detune` | whole number | And in cents, from −50 to 50. |
 | `slice` | slice settings | How the Slice mode cuts the audio and plays the slices. The clip keeps them while it plays in another mode. |
+| `granular` | granular settings | How the Granular mode cuts the audio into grains. The clip keeps them while it plays in another mode. |
 | `spectral` | spectral settings | Which stretcher the Spectral mode renders the audio with, and how it treats its formants. The clip keeps them while it plays in another mode. |
 | `markers` | array of markers | At least one, in order: both their frames and their positions rise. |
 | `onsets` | array of transients or `null` | The file's transients, where the sounds in it start, in order: their frames rise. `null` until the clip takes them from analysis of its file, which it does once, so they're the clip's own from then on, and a better analyser never moves them. |
@@ -446,6 +447,15 @@ The **slice settings**, as Live's Beats mode has them:
 | `preserve` | string | Where the audio is cut: `"transients"`, at each of the clip's transients in sight, or on a grid of sixteenth notes while it has none; or on a grid of notes in the clip's own time, from its position 0, whatever the audio: `"bar"`, a bar of the meter where the clip starts, `"1/2"`, `"1/4"`, `"1/8"`, `"1/16"` or `"1/32"`. |
 | `transient_loop` | string | What a slice plays once its audio runs out before the next slice starts, as it does where the file plays slower than its own speed: `"off"`, silence, `"forward"`, the second half of the slice over and over, or `"back_and_forth"`, the second half backwards and forwards. |
 | `envelope` | float | Transient Envelope: how much each slice fades as it plays, from 0, a very quick decay, to 100, no fade. |
+
+The **granular settings**, as Live's Tones mode has them with
+`follow_pitch` on and its Texture mode with it off:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `follow_pitch` | boolean | Follow pitch: `true` fits the grains to the audio's pitch where analysis of the file found one, for lines with one note at a time, such as voices and bass lines, and `false` cuts them on a steady grid, spread by `fluctuation`, for pads and textures. |
+| `grain_size` | float | Grain Size: how long each grain is, in milliseconds, from 5 to 500, on a logarithmic scale. With `follow_pitch` on, it's a whole number of the audio's periods, within a period of this, and two at least. |
+| `fluctuation` | float | Fluctuation, while `follow_pitch` is off: how far each grain strays from where and when it would play, as a percentage of its length, from 0, a steady grid, to 100. The spread is the same every time the clip plays. |
 
 The **spectral settings**:
 
@@ -483,11 +493,13 @@ plays, in place of the parameter's own value:
 | `"transient_envelope"` | The slice settings' `envelope`: 0 to 100. | Slice. |
 | `"preserve"` | The slice settings' `preserve`, in steps: a whole number from 0, `"transients"`, to 6, `"1/32"`, in the order the table above lists them. | Slice. |
 | `"transient_loop"` | The slice settings' `transient_loop`, in steps: 0 `"off"`, 1 `"forward"` or 2 `"back_and_forth"`. | Slice. |
+| `"grain_size"` | The granular settings' `grain_size`: 5 to 500 milliseconds, on a logarithmic scale. | Granular. |
+| `"fluctuation"` | The granular settings' `fluctuation`: 0 to 100. | Granular, while `follow_pitch` is off. |
 | `"formants"` | The spectral settings' `formants`: 0 to 100. | Spectral. |
 | `"envelope"` | The spectral settings' `envelope`: 8 to 512, on a logarithmic scale. | Spectral, while `high_quality` is on. |
 
 In Slice, each slice reads the curves where it starts, and keeps those
-values while it plays. In Spectral, the curves move the pitch and the
+values while it plays, and in Granular each grain does. In Spectral, the curves move the pitch and the
 formants, and with High quality the envelope, as the audio plays, and are
 rendered with it.
 
@@ -875,6 +887,7 @@ Signal flows from tracks to buses without loops:
 | 13 | 2026-10-25 | Slice: the warp mode that cuts audio into slices, with its settings, the transpose and detune of every mode but Re-Pitch, and curves for them. Version 12 warped clips play Re-Pitch, untransposed, and Slice's settings are Live's. |
 | 14 | 2026-10-25 | Spectral: the warp mode that stretches audio in the frequency domain, keeping its pitch, with its Formants, and a curve for them. Version 13 warped clips keep their formants in place. |
 | 15 | 2026-10-25 | Spectral's High quality, rendering with Rubber Band, with its Envelope, and a curve for it. Version 14 warped clips render with Signalsmith Stretch, with the envelope at 128. |
+| 16 | 2026-10-25 | Granular: the warp mode that plays audio as short overlapping grains, with its Follow pitch, Grain Size and Fluctuation, and curves for the last two. Version 15 warped clips follow the pitch, with 30 ms grains and a fluctuation of 25. |
 
 ## Changing the format
 
