@@ -10,10 +10,12 @@ use musicable_model::clip::{
     AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Offset, Point,
 };
 use musicable_model::native::{NativeDevice, NativeKind};
-use musicable_model::param::{ClipParam, ParamSpec};
+use musicable_model::param::ClipParam;
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
+use musicable_model::warp::{
+    Onset, Onsets, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+};
 use musicable_model::{
     AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
     TrackId, TrackKind,
@@ -197,7 +199,8 @@ impl Random {
     }
 
     /// A warp of one marker or a few, rising in frames and in ticks, at any
-    /// tempo it allows, with a few transients or none yet.
+    /// tempo it allows, with a few transients or none yet, in any mode, with
+    /// any transpose, detune and slice settings.
     fn warp(&mut self) -> Warp {
         let tempo = match self.below(3) {
             0 => self.pick(&[Warp::MIN_TEMPO, Warp::MAX_TEMPO, 120.0]),
@@ -231,22 +234,36 @@ impl Random {
             }
             Onsets::new(onsets)
         });
+        let (transpose, detune) = (Warp::TRANSPOSE_MAX, Warp::DETUNE_MAX);
+        let transpose = self.below(2 * transpose as u64 + 1) as i8 - transpose;
+        let detune = self.below(2 * detune as u64 + 1) as i8 - detune;
+        let envelope = f64::from(self.within(0.0, SliceSettings::ENVELOPE_MAX as f32));
         Warp {
+            mode: self.pick(&WarpMode::ALL),
             markers,
             onsets,
+            transpose,
+            detune,
+            slice: SliceSettings {
+                preserve: self.pick(&Preserve::ALL),
+                transient_loop: self.pick(&TransientLoop::ALL),
+                envelope,
+            },
             ..Warp::new(0, Beats::ZERO, tempo)
         }
     }
 
     /// A curve's points, in order, with at most two at one place, before
-    /// zero or after it, with values from 0 to `max`.
-    fn points(&mut self, max: f64) -> Vec<automation::Point> {
+    /// zero or after it, with values from `min` to `max`, whole numbers if
+    /// `stepped`.
+    fn points(&mut self, min: f64, max: f64, stepped: bool) -> Vec<automation::Point> {
         let mut at = self.signed_ticks().min(MAX_TICKS - 100);
         let mut points: Vec<automation::Point> = Vec::new();
         for _ in 0..=self.below(4) {
             let value = match self.below(3) {
-                0 => self.pick(&[0.0, 1.0, max]),
-                _ => self.below(1_001) as f64 / 1_000.0 * max,
+                0 => self.pick(&[min, max, min.max(0.0).min(max)]),
+                _ if stepped => min + self.below((max - min) as u64 + 1) as f64,
+                _ => min + self.below(1_001) as f64 / 1_000.0 * (max - min),
             };
             points.push(automation::Point::new(Beats::from_ticks(at), value));
             let step =
@@ -285,9 +302,12 @@ impl Random {
                     warp,
                     automation: Vec::new(),
                 };
-                if self.one_in(2) {
-                    let points = self.points(ParamSpec::CLIP_GAIN_MAX);
-                    audio.set_lane(ClipParam::Gain, points);
+                for param in ClipParam::ALL {
+                    if self.one_in(2) {
+                        let spec = param.spec();
+                        let points = self.points(spec.min, spec.max, param.stepped());
+                        audio.set_lane(param, points);
+                    }
                 }
                 ClipContent::Audio(audio)
             }

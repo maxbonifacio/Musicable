@@ -23,7 +23,9 @@ use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::warp::{Onset, Onsets, Origin, Warp, WarpMarker};
+use musicable_model::warp::{
+    Onset, Onsets, Origin, Preserve, SliceSettings, TransientLoop, Warp, WarpMarker, WarpMode,
+};
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
     TestTone, Track, TrackId, TrackKind,
@@ -46,6 +48,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("workspace", workspace()),
         ("warping", warping()),
         ("transients", transients()),
+        ("slicing", slicing()),
     ]
 }
 
@@ -865,6 +868,78 @@ fn transients() -> Project {
     let track = project.track_mut(drums).unwrap();
     track.clips = vec![looped, waiting];
     track.takes = vec![take];
+    project
+}
+
+/// Slice, from version 13: loops in Slice, cut at their transients with
+/// each loop mode, and on each grid of notes, with Transient Envelope at
+/// both ends; transposes and detunes at their ends, kept by a clip in
+/// Re-Pitch too; and a curve for each of Slice's parameters, with steps.
+fn slicing() -> Project {
+    let mut project = Project::new();
+    let drums = project.add_track("Drums", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let warped = |warp: Warp| {
+        let mut audio = AudioClip::new("Loops/Break 120 BPM.wav");
+        audio.offset = Offset::Beats(Beats::ZERO);
+        audio.warp = Some(warp);
+        audio
+    };
+    let slice = |preserve, transient_loop, envelope| Warp {
+        mode: WarpMode::Slice,
+        slice: SliceSettings {
+            preserve,
+            transient_loop,
+            envelope,
+        },
+        ..Warp::new(0, Beats::ZERO, 120.0)
+    };
+    let mut clips = Vec::new();
+    let loops = [
+        TransientLoop::Off,
+        TransientLoop::Forward,
+        TransientLoop::BackAndForth,
+    ];
+    for (k, &preserve) in Preserve::ALL.iter().enumerate() {
+        let looping = loops[k % loops.len()];
+        let envelope = [0.0, 37.5, SliceSettings::ENVELOPE_MAX][k % 3];
+        let audio = warped(slice(preserve, looping, envelope));
+        let at = 4 * k as i64;
+        clips.push(project.new_clip("Break", beats(at, at + 4), ClipContent::Audio(audio)));
+    }
+    let mut lowest = slice(Preserve::Transients, TransientLoop::Forward, 100.0);
+    (lowest.transpose, lowest.detune) = (-Warp::TRANSPOSE_MAX, -Warp::DETUNE_MAX);
+    let lowest = project.new_clip("Low", beats(28, 32), ClipContent::Audio(warped(lowest)));
+    let mut kept = Warp::new(0, Beats::ZERO, 120.0);
+    (kept.transpose, kept.detune) = (Warp::TRANSPOSE_MAX, Warp::DETUNE_MAX);
+    kept.slice.preserve = Preserve::Sixteenth;
+    let kept = project.new_clip("Kept", beats(32, 36), ClipContent::Audio(warped(kept)));
+    let mut moving = warped(slice(Preserve::Eighth, TransientLoop::Off, 50.0));
+    let at = |beat: i64| Beats::new(beat);
+    let point = |at, value| automation::Point::new(at, value);
+    moving.set_lane(
+        ClipParam::Transpose,
+        vec![point(at(0), -48.0), point(at(2), 12.5), point(at(4), 48.0)],
+    );
+    moving.set_lane(
+        ClipParam::Detune,
+        vec![point(Beats::from_ratio(-1, 2), -50.0), point(at(1), 50.0)],
+    );
+    moving.set_lane(
+        ClipParam::TransientEnvelope,
+        vec![point(at(0), 0.0), point(at(4), 100.0)],
+    );
+    moving.set_lane(
+        ClipParam::Preserve,
+        vec![point(at(0), 0.0), point(at(2), 0.0), point(at(2), 6.0)],
+    );
+    moving.set_lane(
+        ClipParam::TransientLoop,
+        vec![point(at(1), 2.0), point(at(1), 1.0), point(at(3), 0.0)],
+    );
+    let moving = project.new_clip("Moving", beats(36, 40), ClipContent::Audio(moving));
+    clips.extend([lowest, kept, moving]);
+    project.track_mut(drums).unwrap().clips = clips;
     project
 }
 

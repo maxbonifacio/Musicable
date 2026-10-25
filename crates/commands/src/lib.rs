@@ -50,6 +50,7 @@ pub mod transient;
 pub mod transport;
 pub mod view;
 pub mod warp;
+pub mod warp_mode;
 pub mod workspace;
 
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
@@ -607,6 +608,7 @@ pub fn register_all(registry: &mut Registry) {
     notes::register(registry);
     controllers::register(registry);
     warp::register(registry);
+    warp_mode::register(registry);
     rewarp::register(registry);
     transient::register(registry);
     automation::register(registry);

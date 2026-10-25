@@ -5,6 +5,7 @@
 
 use crate::clip::{ClipContent, ClipId};
 use crate::native::ParamInfo;
+use crate::warp::{Preserve, SliceSettings, TransientLoop, Warp, WarpMode};
 use crate::{Chain, DeviceId, DeviceKind, Project, SendId};
 
 /// A parameter anywhere in the project: one address that automation,
@@ -27,19 +28,50 @@ pub enum ParamAddress {
     Clip(ClipId, ClipParam),
 }
 
-/// One of an audio clip's own parameters.
+/// One of an audio clip's own parameters. All but Gain belong to its warp,
+/// and play while it's warped in a mode that has them (see
+/// [`plays_in`](Self::plays_in)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ClipParam {
     /// The clip's gain, as linear gain: 1.0 is unity.
     Gain,
+    /// The warp's transpose, in semitones.
+    Transpose,
+    /// The warp's detune, in cents.
+    Detune,
+    /// Slice's Transient Envelope, from 0 to 100.
+    TransientEnvelope,
+    /// Slice's Preserve, in steps: the place of a
+    /// [`Preserve`](crate::warp::Preserve) in its list.
+    Preserve,
+    /// Slice's Transient Loop Mode, in steps: the place of a
+    /// [`TransientLoop`](crate::warp::TransientLoop) in its list.
+    TransientLoop,
 }
 
 impl ClipParam {
     /// Every one, in order.
-    pub const ALL: [Self; 1] = [Self::Gain];
+    pub const ALL: [Self; 6] = [
+        Self::Gain,
+        Self::Transpose,
+        Self::Detune,
+        Self::TransientEnvelope,
+        Self::Preserve,
+        Self::TransientLoop,
+    ];
 
     /// What it is.
     pub fn spec(self) -> ParamSpec {
+        let linear = |name: &str, min: f64, max: f64, default: f64| ParamSpec {
+            name: name.into(),
+            min,
+            max,
+            default,
+            scale: Scale::Linear,
+        };
+        let steps = |name: &str, count: usize, default: usize| {
+            linear(name, 0.0, (count - 1) as f64, default as f64)
+        };
         match self {
             Self::Gain => ParamSpec {
                 name: "Gain".into(),
@@ -48,6 +80,44 @@ impl ClipParam {
                 default: 1.0,
                 scale: Scale::Fader,
             },
+            Self::Transpose => {
+                let max = f64::from(Warp::TRANSPOSE_MAX);
+                linear("Transpose", -max, max, 0.0)
+            }
+            Self::Detune => {
+                let max = f64::from(Warp::DETUNE_MAX);
+                linear("Detune", -max, max, 0.0)
+            }
+            Self::TransientEnvelope => linear(
+                "Transient Envelope",
+                0.0,
+                SliceSettings::ENVELOPE_MAX,
+                SliceSettings::ENVELOPE_MAX,
+            ),
+            Self::Preserve => steps("Preserve", Preserve::ALL.len(), 0),
+            Self::TransientLoop => {
+                let default = TransientLoop::default().step();
+                steps("Transient Loop Mode", TransientLoop::ALL.len(), default)
+            }
+        }
+    }
+
+    /// Whether its values are steps, whole numbers that its curve jumps
+    /// between rather than moving smoothly.
+    pub fn stepped(self) -> bool {
+        matches!(self, Self::Preserve | Self::TransientLoop)
+    }
+
+    /// Whether it plays in `mode`: Gain in every one and while the clip is
+    /// unwarped, Transpose and Detune in every mode but Re-Pitch, and
+    /// Slice's own in Slice.
+    pub fn plays_in(self, mode: Option<WarpMode>) -> bool {
+        match self {
+            Self::Gain => true,
+            Self::Transpose | Self::Detune => mode.is_some_and(WarpMode::transposes),
+            Self::TransientEnvelope | Self::Preserve | Self::TransientLoop => {
+                mode == Some(WarpMode::Slice)
+            }
         }
     }
 
@@ -55,6 +125,11 @@ impl ClipParam {
     pub fn key(self) -> &'static str {
         match self {
             Self::Gain => "gain",
+            Self::Transpose => "transpose",
+            Self::Detune => "detune",
+            Self::TransientEnvelope => "transient_envelope",
+            Self::Preserve => "preserve",
+            Self::TransientLoop => "transient_loop",
         }
     }
 
@@ -330,10 +405,15 @@ impl Project {
                 .flat_map(|t| &t.sends)
                 .find(|s| s.id == send)
                 .map(|s| f64::from(s.level)),
-            ParamAddress::Clip(clip, ClipParam::Gain) => match &self.find_clip(clip)?.1.content {
-                ClipContent::Audio(audio) => Some(f64::from(audio.gain)),
-                ClipContent::Midi(_) => None,
-            },
+            ParamAddress::Clip(clip, param) => {
+                let ClipContent::Audio(audio) = &self.find_clip(clip)?.1.content else {
+                    return None;
+                };
+                match param {
+                    ClipParam::Gain => Some(f64::from(audio.gain)),
+                    _ => audio.warp.as_ref()?.param(param),
+                }
+            }
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {
@@ -420,5 +500,54 @@ mod tests {
         assert_eq!((spec.name.as_str(), spec.max), ("Send to Verb", 1.0));
         assert_eq!(p.param_spec(ParamAddress::Device(gain_id, 1)), None);
         assert!(!p.has_param(ParamAddress::Device(gain_id, 1)));
+    }
+
+    #[test]
+    fn a_clip_s_warp_parameters_are_its_warp_s_settings() {
+        use crate::clip::{AudioClip, Offset};
+        use crate::time::{BeatRange, Beats};
+        use crate::warp::{Preserve, TransientLoop, Warp};
+
+        for param in ClipParam::ALL {
+            assert_eq!(ClipParam::from_key(param.key()), Some(param));
+            let spec = param.spec();
+            assert!(spec.min <= spec.default && spec.default <= spec.max);
+            if param.stepped() {
+                assert_eq!(spec.min.fract() + spec.max.fract(), 0.0, "{param:?}");
+            }
+        }
+        let steps = |param: ClipParam| param.spec().max as usize + 1;
+        assert_eq!(steps(ClipParam::Preserve), Preserve::ALL.len());
+        assert_eq!(steps(ClipParam::TransientLoop), TransientLoop::ALL.len());
+        assert!(ClipParam::Gain.plays_in(None));
+        assert!(!ClipParam::Transpose.plays_in(Some(WarpMode::RePitch)));
+        assert!(ClipParam::Detune.plays_in(Some(WarpMode::Slice)));
+        assert!(!ClipParam::Preserve.plays_in(None));
+
+        let mut p = Project::new();
+        let drums = p.add_track("Drums", TrackKind::Audio);
+        let mut audio = AudioClip::new("loop.wav");
+        audio.offset = Offset::Beats(Beats::ZERO);
+        let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+        (warp.transpose, warp.detune) = (-12, 25);
+        warp.slice.envelope = 40.0;
+        warp.slice.preserve = Preserve::Eighth;
+        warp.slice.transient_loop = TransientLoop::BackAndForth;
+        audio.warp = Some(warp);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(4));
+        let warped = p.new_clip("Loop", range, ClipContent::Audio(audio.clone()));
+        let unwarped = p.new_clip("Loop", range, ClipContent::Audio(AudioClip::new("a.wav")));
+        let (warped_id, unwarped_id) = (warped.id, unwarped.id);
+        p.track_mut(drums).unwrap().clips = vec![warped, unwarped];
+        let value = |clip, param| p.param_value(ParamAddress::Clip(clip, param));
+        assert_eq!(value(warped_id, ClipParam::Transpose), Some(-12.0));
+        assert_eq!(value(warped_id, ClipParam::Detune), Some(25.0));
+        assert_eq!(value(warped_id, ClipParam::TransientEnvelope), Some(40.0));
+        assert_eq!(value(warped_id, ClipParam::Preserve), Some(4.0));
+        assert_eq!(value(warped_id, ClipParam::TransientLoop), Some(2.0));
+        assert_eq!(value(unwarped_id, ClipParam::Gain), Some(1.0));
+        assert_eq!(value(unwarped_id, ClipParam::Transpose), None);
+        let spec = p.param_spec(ParamAddress::Clip(warped_id, ClipParam::TransientLoop));
+        assert_eq!(spec.unwrap().name, "Transient Loop Mode");
     }
 }

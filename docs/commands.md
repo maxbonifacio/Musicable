@@ -351,7 +351,9 @@ file's loop data's (`AudioFile::tempo`) or name's where that's near it at
 any octave, or either alone before the file's analysed, or else the song's
 where the clip starts, read at the octave nearest the song's. The Sample
 Editor shows that tempo, greyed out, while the clip is unwarped. Turning
-Warp off forgets the markers. The clip's gain curve stays with its audio both ways. A change
+Warp off forgets the markers, the mode and its settings, and turning it on
+starts in Re-Pitch with Live's settings. The clip's curves stay with its
+audio both ways. A change
 that would take the clip's tempo out of range, bring two markers onto one
 tick or, with `keep_end`, put the clip's start before the song's is an
 error that changes nothing.
@@ -394,6 +396,34 @@ Warp From Here and its variants keep the stretch of the file the clip
 plays, so its end moves. With one marker left, they set the warp's tempo;
 with more, they add a marker where the file ends, or a beat after the last
 one if the file's length isn't known.
+
+### Warp modes
+
+These set a warped clip's mode, and the settings its modes play it with,
+for the Sample Editor's controls, scripts and agents
+(`crates/commands/src/warp_mode.rs`). Like the warping commands, each
+takes the clip as `clip`, or the one the Sample Editor shows without it,
+and an unwarped clip is an error but for Show Clip Lane. A clip keeps each
+mode's settings while another plays, as Live does, and each change is one
+transaction; the value a setting has already is none.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `warp.set_mode` | Set Warp Mode | `mode`, `clip`? | Sets how the audio between the markers plays: `re_pitch`, resampled so its pitch follows its speed, or `slice`, cut into slices, each played at the file's own speed |
+| `warp.set_transpose` | Set Clip Transpose | `semitones`, `clip`? | Sets how far every mode but Re-Pitch moves the audio's pitch, from -48 to 48 semitones |
+| `warp.set_detune` | Set Clip Detune | `cents`, `clip`? | And by cents, from -50 to 50 |
+| `warp.set_preserve` | Set Slice Preserve | `preserve`, `clip`? | Sets where Slice cuts the audio: `transients`, or on a grid of `bar`, `1/2`, `1/4`, `1/8`, `1/16` or `1/32` from the clip's 1.1.1 |
+| `warp.set_transient_loop` | Set Transient Loop Mode | `mode`, `clip`? | Sets what a slice plays once its audio runs out before the next starts: `off`, `forward` or `back_and_forth` |
+| `warp.set_transient_envelope` | Set Transient Envelope | `envelope`, `clip`? | Sets how much each slice fades as it plays, from 0, a very quick decay, to 100, no fade |
+| `clip.show_lane` | Show Clip Lane | `param`, `clip`? | Shows the clip in the Sample Editor, with the curve of its parameter `param` in the lane: `gain`, `transpose`, `detune`, `transient_envelope`, `preserve` or `transient_loop`. It isn't a step to undo |
+
+Each of these settings but the mode is one of the clip's parameters too
+(`ClipParam`, with Gain), so the automation commands give it a curve in
+the clip ([Automation](#automation)), and setting its value
+(`Transaction::set_param_value`) sets the warp's setting, kept in range and
+to whole semitones, cents and steps (`Warp::set_param`). The parameters
+play in the modes `ClipParam::plays_in` says, and the clip keeps the others'
+curves for the modes that play them.
 
 ### Transients
 
@@ -572,10 +602,14 @@ in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 Automation moves a parameter through points over the song
 ([project-format.md](project-format.md#lane)). Each command names
 its parameter with an argument of type `param`, a `ParamAddress`, which
-scripts write as text: "track 3 volume", "master pan", "send 2" or
-"device 4 param 17" (`param_text`). A built-in device's parameter is its
-number in its kind's table, a plugin's its id in the plugin, and a test
-device's is 0.
+scripts write as text: "track 3 volume", "master pan", "send 2",
+"device 4 param 17" or "clip 5 transpose" (`param_text`). A built-in
+device's parameter is its number in its kind's table, a plugin's its id in
+the plugin, and a test device's is 0. An audio clip's are its gain and its
+warp's settings, by their keys as Show Clip Lane takes them
+([Warp modes](#warp-modes)): their curves are in the clip, in its own
+time, where the Sample Editor's lane shows them, and an unwarped clip plays
+only its gain's.
 
 | Command | Title | Arguments | What it does | Default key | Live |
 |---|---|---|---|---|---|
@@ -589,9 +623,10 @@ device's is 0.
 | `automation.re_enable` | Re-Enable Automation | `param` | Has a parameter follow its automation again after someone moved it by hand, or every overridden one without `param` | none | Re-Enable Automation, Back to Arrangement |
 
 Values are kept within the parameter's range where the project knows it,
-as it does for the mixer's, the built-in devices' and the test devices'
-parameters, and a switch's, a choice's, a note's or a count's are rounded
-to whole numbers; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
+as it does for the mixer's, the built-in devices', the clips' and the test
+devices' parameters, and a switch's, a choice's, a note's, a count's or a
+clip's Preserve's and Transient Loop Mode's are rounded to whole numbers,
+as their steps; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
 gestures run these, and a drag of a point or a stretch of line, or a drag
 that draws, runs Edit Automation once, when it ends
 ([app.md](app.md#the-arrangement)).
@@ -800,8 +835,9 @@ for the behaviour settings.
   controller). The grid is the arrangement's, at the piano roll's zoom.
 - **The Sample Editor** (`editor::SampleEditor`): the audio clip it shows,
   its selected warp markers, by their positions in the clip's own time,
-  and its own viewport, song positions across as the piano roll's are.
-  Its grid is the arrangement's too, at its zoom.
+  its own viewport, song positions across as the piano roll's are, and
+  which of the clip's parameters its lane shows (`ClipParam`). Its grid is
+  the arrangement's too, at its zoom.
 - **The clip editor** (`Editor::clip_editor`): the panel of the editor
   that fits the clip selected or opened last, the piano roll's or the
   Sample Editor's, which Clip Editor and Switch Devices and Clip Editor

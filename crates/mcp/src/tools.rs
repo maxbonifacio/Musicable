@@ -156,7 +156,8 @@ pub fn list() -> Vec<Tool> {
             "Get Clip",
             "Reads one clip: where it is, and its notes, with their expression, and its \
              controllers' curves, in the clip's own time, or its audio file, with its warp \
-             markers and gain curve if it has them.",
+             (its markers, mode, transpose, detune and Slice's settings) and its curves, by \
+             parameter, if it has them.",
             object(json!({ "clip": id_number("The clip's id.") }), &["clip"]),
         ),
         read(

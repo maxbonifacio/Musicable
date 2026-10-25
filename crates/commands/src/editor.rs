@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use musicable_analysis::Analysis;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Project, TrackId};
 use serde::{Deserialize, Serialize};
@@ -439,10 +439,14 @@ pub struct SampleEditor {
     /// The zoom and the scrolling sideways, in song positions, as the
     /// arrangement's.
     pub viewport: Viewport,
+    /// The clip parameter whose curve the lane under the waveform shows and
+    /// edits.
+    pub lane: ClipParam,
 }
 
 impl Default for SampleEditor {
-    /// Four bars of 4/4 across a thousand points, from the song's start.
+    /// Four bars of 4/4 across a thousand points, from the song's start,
+    /// with the clip's gain in the lane.
     fn default() -> Self {
         Self {
             clip: None,
@@ -452,6 +456,7 @@ impl Default for SampleEditor {
                 zoom: 62.5,
                 ..Viewport::default()
             },
+            lane: ClipParam::Gain,
         }
     }
 }

@@ -32,6 +32,7 @@
 | Rename Clip | `clip.rename` |
 | Set Fades | `clip.set_fades` |
 | Set Clip Gain | `clip.set_gain` |
+| Show Clip Lane | `clip.show_lane` |
 | Split Clips | `clip.split` |
 | Trim Clip | `clip.trim` |
 
@@ -164,6 +165,12 @@
 | Move Warp Markers | `warp.move_markers` |
 | Select Warp Markers | `warp.select_markers` |
 | Select Time in Sample Editor | `warp.select_time` |
+| Set Clip Detune | `warp.set_detune` |
 | Set 1.1.1 Here | `warp.set_downbeat` |
+| Set Warp Mode | `warp.set_mode` |
+| Set Slice Preserve | `warp.set_preserve` |
 | Set Clip Tempo | `warp.set_tempo` |
+| Set Transient Envelope | `warp.set_transient_envelope` |
+| Set Transient Loop Mode | `warp.set_transient_loop` |
+| Set Clip Transpose | `warp.set_transpose` |
 | Warp at Song Tempo From Here | `warp.song_tempo_from_here` |

@@ -11,7 +11,7 @@ use musicable_model::automation::Lane;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, Offset, Point};
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, Unit};
-use musicable_model::param::{ClipParam, ParamAddress};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Master, Monitor, PluginFormat, Track, TrackKind,
@@ -358,21 +358,35 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
                     let markers: Vec<Json> = (warp.markers.iter())
                         .map(|m| json!({ "frame": m.frame, "beat": beats(m.beat) }))
                         .collect();
+                    let slice = &warp.slice;
                     entry["offset"] = beats(offset);
                     entry["warp"] = json!({
-                        "mode": warp.mode.name(),
+                        "mode": warp.mode.key(),
                         "tempo": json::to_json(&Value::Number(warp.clip_tempo(rate))),
                         "markers": markers,
+                        "transpose": warp.transpose,
+                        "detune": warp.detune,
+                        "slice": {
+                            "preserve": slice.preserve.key(),
+                            "transient_loop": slice.transient_loop.key(),
+                            "envelope": json::to_json(&Value::Number(slice.envelope)),
+                        },
                     });
                 }
                 (offset, _) => entry["offset_frames"] = offset.frames().unwrap_or(0).into(),
             }
             entry["gain"] = short(audio.gain);
-            if let Some(lane) = audio.lane(ClipParam::Gain) {
-                let points: Vec<Json> = (lane.points.iter())
-                    .map(|p| json!({ "at": beats(p.at), "value": json::to_json(&Value::Number(p.value)) }))
-                    .collect();
-                entry["gain_curve"] = points.into();
+            // Each curve in the clip's own time, by its parameter's key.
+            let curves: Map<String, Json> = (audio.automation.iter())
+                .map(|lane| {
+                    let points: Vec<Json> = (lane.points.iter())
+                        .map(|p| json!({ "at": beats(p.at), "value": json::to_json(&Value::Number(p.value)) }))
+                        .collect();
+                    (lane.param.key().to_owned(), points.into())
+                })
+                .collect();
+            if !curves.is_empty() {
+                entry["curves"] = curves.into();
             }
             entry["fade_in"] = beats(audio.fade_in);
             entry["fade_out"] = beats(audio.fade_out);
@@ -628,6 +642,7 @@ pub(crate) fn editor(window: &impl Window) -> Json {
         "sample_editor": {
             "clip": sample.clip.map(|clip| clip.0),
             "markers": sample.markers.iter().map(|&beat| beats(beat)).collect::<Vec<_>>(),
+            "lane": sample.lane.key(),
         },
     })
 }

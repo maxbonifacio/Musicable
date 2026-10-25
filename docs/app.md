@@ -375,9 +375,10 @@ setting.
 [The Sample Editor](../manual/src/window/sample-editor.md) in the manual says
 what it shows, and what the mouse and the keys do in it, and
 [Warping](../manual/src/using/warping.md) what warping does. Everything it
-does runs a command ([commands.md](commands.md#warping) and
-[automation](commands.md#automation) for the gain lane), and a drag runs
-one when it ends, so it's one step to undo: dragging a transient's pseudo
+does runs a command ([commands.md](commands.md#warping),
+[warp modes](commands.md#warp-modes) for its controls and
+[automation](commands.md#automation) for its lane), and a drag runs one
+when it ends, so it's one step to undo: dragging a transient's pseudo
 marker runs Insert Warp Marker and Move Warp Markers as one batch
 (`Action::RunBatch`). While a drag lasts, it draws the waveform as the drag
 would leave it, from a copy of the clip's warp that the drag changes
@@ -402,13 +403,25 @@ hiding it gives the arrangement the focus. Clip Editor and Switch Devices
 and Clip Editor show the piano roll or the Sample Editor, whichever fits
 the clip selected or opened last (`Editor::clip_editor`).
 
+Its column of controls (`controls`) shows the mode's own settings under
+the mode, as Live's does, and scrolls where the panel is too short for
+them all. Its lane shows the curve of the parameter `Scene::lane` gives:
+the one the editor's `SampleEditor::lane` names, or Gain while the clip is
+unwarped. A click on the lane's name opens the menu of them
+(`menu::lanes`), those the clip's mode plays first, and the lane of one
+the mode doesn't play is greyed. A parameter in steps, such as Preserve,
+is drawn as holds, its hold lines are what a drag moves, and its values
+are rounded to steps as they're drawn. Under the lane's name is the value
+under the pointer, or the one a drag moves a point to or draws
+(`Scene::readout`).
+
 **For Tier 2's extensions and profiles.** What the Sample Editor shows, its
 selected markers and time, and its zoom are the `Editor`'s
 (`editor::SampleEditor`); its colours and sizes are in the `Theme`
 (`theme.sample_editor`, and the `warp_marker`, `warp_marker_selected`,
 `transient`, `pseudo_marker`, `time_selection` and `outside_clip`
 colours); its gestures are the `MouseMap`'s targets `WarpMarker`,
-`Transient`, `WaveformTop` and `Waveform`, and its gain lane's are the
+`Transient`, `WaveformTop` and `Waveform`, and its lane's are the
 automation lanes' targets; and its panel's id is
 `musicable_ui::SAMPLE_EDITOR`.
 
