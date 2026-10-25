@@ -15,7 +15,7 @@ to use Musicable.
 | Crate | Depends on | Holds |
 |---|---|---|
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
-| `commands` | `model` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
+| `commands` | `model`, `analysis` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
 | `audio` | `engine` | Device output: our own WASAPI backend and ASIO host on Windows; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
@@ -42,7 +42,8 @@ compiler, a node and the UI, in that order.
 | Workers (`musicable-worker-1` and up) | Their share of each block the parallel renderer shares | The same, on Windows only |
 | Disk (`musicable-disk`) | Reading the audio files that stream, ahead of the clips that play them. A second one streams long previews | Normal |
 | Audio files (`musicable-audio-files`) | Reading the headers and the waveforms of the project's audio files, for the arrangement | Normal |
-| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders and reading the headers of the files found, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)) | Below normal, and scans in the system's background mode on Windows and macOS |
+| Files (`musicable-files-1` and up) | The browser's file work: reading the library's index, scanning its folders and reading the headers of the files found, finding presets, opening previews and drawing their waveforms ([app.md](app.md#behind-the-browser)). Analysing the project's audio files ([analysis.md](analysis.md#in-the-app)) | Below normal, and scans and analysis in the system's background mode on Windows and macOS |
+| Network (`rten-0` and up, once a file needs it) | The Beat This! network's work for the analysis that's running, as many threads as there are Files threads | Below normal |
 | Recorder (`musicable-recorder`) | Writing what the armed tracks record, from the inputs' buffers, placed by the engine's timeline | Normal |
 | Inputs (`musicable-input`, on Windows) | Capturing each WASAPI input, lined up with the output | MMCSS "Pro Audio" |
 | Agents (`musicable-agents`, while agents are let in) | The MCP server, with Tokio: the pipe, each agent's connection, and checking their calls, which the main thread answers ([agents.md](agents.md#how-its-built)) | Normal |

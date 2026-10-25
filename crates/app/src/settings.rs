@@ -81,6 +81,8 @@ pub const KEYMAP_FILE: &str = "keymap.toml";
 pub const MOUSE_FILE: &str = "mouse.toml";
 /// The folder of the user's theme files, in the config folder.
 pub const THEMES_FOLDER: &str = "themes";
+/// The analysis cache's folder, in the cache folder.
+pub const ANALYSIS_FOLDER: &str = "analysis";
 
 /// The folder for the settings, the user's keymap, mouse map and themes:
 /// `%APPDATA%\Musicable` on Windows, `~/Library/Application
@@ -101,6 +103,29 @@ pub fn config_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
             .or_else(|| var("HOME").map(|home| Path::new(&home).join(".config")))
+            .map(|dir| dir.join("musicable"))
+    }
+}
+
+/// The folder for what Musicable can work out again, such as what analysis
+/// found in audio files: `%LOCALAPPDATA%\Musicable\Cache` on Windows,
+/// `~/Library/Caches/Musicable` on macOS, and `$XDG_CACHE_HOME/musicable`
+/// or `~/.cache/musicable` elsewhere. The `MUSICABLE_CACHE_DIR` environment
+/// variable picks another. `None` when the system doesn't say where.
+pub fn cache_dir() -> Option<PathBuf> {
+    let var = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    if let Some(dir) = var("MUSICABLE_CACHE_DIR") {
+        return Some(dir.into());
+    }
+    if cfg!(windows) {
+        var("LOCALAPPDATA").map(|dir| Path::new(&dir).join("Musicable").join("Cache"))
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|home| Path::new(&home).join("Library/Caches/Musicable"))
+    } else {
+        var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .or_else(|| var("HOME").map(|home| Path::new(&home).join(".cache")))
             .map(|dir| dir.join("musicable"))
     }
 }

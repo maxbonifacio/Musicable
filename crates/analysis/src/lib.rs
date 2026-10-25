@@ -13,6 +13,7 @@
 
 mod audio;
 mod beats;
+pub mod cache;
 pub mod evaluate;
 mod flux;
 #[cfg(test)]
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 pub use audio::{Audio, File, Samples};
 pub use beats::{Steady, f_measure};
+pub use cache::{Cache, Found};
 pub use network::{BEAT_FILE, MEL_FILE, MODELS_VARIABLE, Network, NetworkError, models_folder};
 pub use onsets::Onset;
 pub use tempo::{Candidate, FASTEST, SLOWEST};
@@ -143,12 +145,15 @@ impl Analysis {
 #[derive(Debug)]
 pub enum AnalysisError {
     Audio(AudioError),
+    /// The step said to stop, as when the app closes.
+    Stopped,
 }
 
 impl fmt::Display for AnalysisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Audio(error) => write!(f, "{error}"),
+            Self::Stopped => f.write_str("stopped"),
         }
     }
 }
@@ -157,6 +162,7 @@ impl std::error::Error for AnalysisError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Audio(error) => Some(error),
+            Self::Stopped => None,
         }
     }
 }
@@ -168,14 +174,21 @@ impl From<AudioError> for AnalysisError {
 }
 
 /// Analyses `audio`, with `network` if there's one, calling `step` between
-/// the pieces of the work, as a job that keeps pace with the engine does.
-/// If the network fails, the classic tracker's beats stand alone, and
-/// `failed` says why.
+/// the pieces of the work, as a job that keeps pace with the engine does:
+/// it says whether to go on. If the network fails, the classic tracker's
+/// beats stand alone, and `failed` says why.
 pub fn analyse(
     audio: &mut dyn Audio,
     network: Option<&mut Network>,
-    step: &mut dyn FnMut(),
+    step: &mut dyn FnMut() -> bool,
 ) -> Result<(Analysis, Option<NetworkError>), AnalysisError> {
+    let mut step = || {
+        if step() {
+            Ok(())
+        } else {
+            Err(AnalysisError::Stopped)
+        }
+    };
     let sample_rate = audio.sample_rate();
     let frames = audio.frames();
     // The first pass: the flux and the network, chunk by chunk.
@@ -204,7 +217,7 @@ pub fn analyse(
             listening = None;
         }
         at += read as u64;
-        step();
+        step()?;
     }
     let flux = spectrum.finish();
     let heard = match listening.map(|stream| stream.finish()) {
@@ -215,10 +228,12 @@ pub fn analyse(
         }
         _ => None,
     };
-    step();
+    // A network stopped by its stop flag, as the app closing stops it, has
+    // failed: the step, which says the same, stops here.
+    step()?;
     // The second pass: each onset to the sample.
     let onsets = onsets::refine(audio, &flux, &onsets::peaks(&flux))?;
-    step();
+    step()?;
     let tempi = tempo::candidates(&flux);
     let rate = f64::from(sample_rate);
     let mut analysis = Analysis {
@@ -508,7 +523,7 @@ mod tests {
             samples,
             sample_rate: SAMPLE_RATE,
         };
-        analyse(&mut audio, None, &mut || {}).unwrap().0
+        analyse(&mut audio, None, &mut || true).unwrap().0
     }
 
     #[test]
@@ -591,6 +606,40 @@ mod tests {
     }
 
     #[test]
+    fn an_analysis_stops_when_its_step_says_to() {
+        let song = synth(10.0, &Groove::steady(120.0));
+        let mut audio = Samples {
+            samples: &song.audio,
+            sample_rate: SAMPLE_RATE,
+        };
+        let mut steps = 0;
+        let result = analyse(&mut audio, None, &mut || {
+            steps += 1;
+            steps < 3
+        });
+        assert!(matches!(result, Err(AnalysisError::Stopped)), "{result:?}");
+        assert_eq!(steps, 3);
+    }
+
+    #[test]
+    fn a_stopped_network_fails_and_the_classic_beats_stand() {
+        let Some(folder) = network::tests::models() else {
+            return;
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut network = Network::load(&folder, 1, || {}, stop).unwrap();
+        let song = synth(10.0, &Groove::steady(120.0));
+        let mut audio = Samples {
+            samples: &song.audio,
+            sample_rate: SAMPLE_RATE,
+        };
+        let (analysis, failed) = analyse(&mut audio, Some(&mut network), &mut || true).unwrap();
+        assert!(failed.is_some_and(|error| error.0.contains("stopped")));
+        assert_eq!(analysis.tracker, Tracker::Classic);
+        assert!(analysis.pulse);
+    }
+
+    #[test]
     fn downbeats_the_network_missed_are_filled_in() {
         let beats: Vec<u64> = (0..20).map(|i| i * 100).collect();
         // Found at beats 5 and 13, with a bar missed between.
@@ -617,7 +666,7 @@ mod tests {
             samples: &song.audio,
             sample_rate: SAMPLE_RATE,
         };
-        let (analysis, failed) = analyse(&mut audio, Some(&mut network), &mut || {}).unwrap();
+        let (analysis, failed) = analyse(&mut audio, Some(&mut network), &mut || true).unwrap();
         assert_eq!(failed, None);
         assert_eq!(analysis.tracker, Tracker::Network);
         let rate = f64::from(SAMPLE_RATE);

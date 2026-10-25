@@ -194,6 +194,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         keymap_file: KeymapStatus::default(),
                         messages: &[],
                         agent: None,
+                        analysing: None,
                         plugins: Plugins::default(),
                         native: &[],
                         library: crate::Library::default(),

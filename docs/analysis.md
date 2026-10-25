@@ -6,9 +6,12 @@ pulse at all. It finds beats with the Beat This! network, and checks them
 with a classic tracker, which finds them alone in Fast analysis or when the
 network's files aren't there. It's plain functions on audio, with no UI.
 
-So far only `musicable analyse` runs it, to measure it against labelled
-files and against Live's auto-warp ([Measuring it](#measuring-it)). The
-app's background jobs, the cache and auto-warp come next.
+The app analyses each audio file the open project plays in the
+background, and keeps what it finds in a cache, so a file is analysed only
+the first time ([In the app](#in-the-app)). Nothing reads the results yet:
+auto-warp and transients in the Sample Editor come next.
+`musicable analyse` measures analysis against labelled files and against
+Live's auto-warp ([Measuring it](#measuring-it)).
 
 ## What it finds
 
@@ -139,6 +142,60 @@ authors to license them, or train the network again on data we may use.
 A song of two minutes takes about 10 s on four cores, in a debug build:
 the workspace builds the network's crates optimised in debug builds too,
 without which it takes minutes.
+
+## In the app
+
+`analyses.rs` in the app asks for the analysis of every audio file the
+open project's clips play, as `audio_files.rs` asks for their headers and
+waveforms: when a project opens, and when the project changes, for the
+files not asked for yet. What's found goes into the editor's `analyses`,
+by the path the clips give, where commands and the UI read it. A file that
+can't be read or analysed is left out, and the log says why.
+
+The files are analysed one at a time, on the library's queue, as jobs that
+can wait: each analyses the first file waiting, then adds a job for the
+next, so previews, waveforms and scans go between them. While the engine
+plays, the queue runs one such job, and while it records, they rest as long
+as they work, as scans do ([app.md](app.md#behind-the-browser)). While any
+file is waiting or being analysed, the status bar says "Analysing" and its
+name, or how many there are.
+
+The network loads the first time a file needs it, from the folder
+`models_folder` finds, and stays loaded. It runs on as many threads as the
+queue has, which lower their priority to the queue's as they start. Closing
+the app sets a stop flag, which the job's step and the network check before
+each piece of their work, so closing never waits for a long file. If the
+network doesn't load, the status bar says so once, and analysis goes on
+without it.
+
+### The cache
+
+The cache is the folder `analysis` in the cache folder:
+`%LOCALAPPDATA%\Musicable\Cache` on Windows, `~/Library/Caches/Musicable`
+on macOS, and `$XDG_CACHE_HOME/musicable` or `~/.cache/musicable`
+elsewhere, or the folder `MUSICABLE_CACHE_DIR` names. Nothing goes beside
+the audio files. In it:
+
+| Folder | Holds |
+|---|---|
+| `files` | An entry for each file analysed, named by a hash of its path: its path, size and modification time, and the hash of its sound |
+| `sounds` | Each sound's analysis as JSON, named by a hash of its sound: its samples mixed to one channel, its sample rate and its length |
+
+`Cache::find` looks for a file by its path first, and if the file's size
+and modification time are as its entry says, takes its analysis without
+reading the file. Otherwise it reads the file to hash its sound, and finds
+the analysis by that, so a file that's moved, copied, or saved again with
+the same sound keeps its analysis, and its entry is written for next time.
+An analysis by another `VERSION`, or by the classic tracker alone when the
+network is there, doesn't count: the file is analysed again, and the new
+analysis replaces it. The hashes are SipHash-1-3, which stays the same from
+one Rust release to the next, as std's hasher needn't.
+
+Each file is written beside its place and renamed into it, so a reader
+never sees half of one, and two Musicables writing the same entry leave it
+whole. A damaged entry is no entry. An analysis is tens of kilobytes for a
+minute of music, and nothing removes old ones yet: deleting the folder is
+safe.
 
 ## Measuring it
 

@@ -2,6 +2,7 @@
 //! commands that drive it, and the window the `musicable` binary opens.
 //! `docs/app.md` describes it.
 
+mod analyses;
 mod app;
 mod appearance_page;
 mod audio_files;
@@ -36,7 +37,7 @@ pub use plugin_scan::{PLUGINS_FILE, SCAN_PLUGIN};
 pub use plugins::PLUGIN_SETTLING;
 pub use recorder::Recording;
 pub use session::Session;
-pub use settings::{AudioSettings, Settings, SettingsError, config_dir};
+pub use settings::{AudioSettings, Settings, SettingsError, cache_dir, config_dir};
 
 use musicable_commands::Registry;
 use musicable_engine::{

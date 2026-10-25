@@ -2101,6 +2101,7 @@ dependencies = [
  "rten-tensor",
  "serde",
  "serde_json",
+ "siphasher",
 ]
 
 [[package]]
@@ -2148,6 +2149,7 @@ dependencies = [
 name = "musicable-commands"
 version = "0.2.0"
 dependencies = [
+ "musicable-analysis",
  "musicable-io",
  "musicable-model",
  "proptest",

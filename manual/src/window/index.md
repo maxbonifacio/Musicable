@@ -154,6 +154,10 @@ The status bar shows errors and notices until they're dismissed, and:
 - while an agent is connected, its last change, such as "Agent: Move Notes":
   click it for the Agents page ([The command
   line](../reference/command-line.md#agents));
+- while Musicable finds the tempo and the beats of the project's audio
+  files, "Analysing" and the file's name, or how many files there are. It
+  does this in the background, once for each file
+  ([Warping](../using/warping.md#not-yet));
 - the project's name, with "(not saved)" while it has changes. The window's
   title marks them with a `*`.
 

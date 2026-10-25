@@ -743,7 +743,8 @@ fn analyse(args: impl Iterator<Item = OsString>) -> ExitCode {
         match musicable_analysis::models_folder() {
             Some(folder) => {
                 let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-                match musicable_analysis::Network::load(&folder, threads, || {}) {
+                match musicable_analysis::Network::load(&folder, threads, || {}, Default::default())
+                {
                     Ok(loaded) => network = Some(loaded),
                     Err(error) => {
                         eprintln!("The Beat This! network didn't load: {error}");
@@ -770,7 +771,7 @@ fn analyse(args: impl Iterator<Item = OsString>) -> ExitCode {
         let result = musicable_analysis::File::open(path)
             .map_err(|error| error.to_string())
             .and_then(|mut file| {
-                musicable_analysis::analyse(&mut file, network.as_mut(), &mut || {})
+                musicable_analysis::analyse(&mut file, network.as_mut(), &mut || true)
                     .map_err(|error| error.to_string())
             });
         let (analysis, network_failed) = match result {

@@ -61,6 +61,9 @@ anyhow = "1.0"
 # Reads Live Sets, which are gzipped XML, for scoring analysis against
 # Live's auto-warp.
 flate2 = "1.1"
+# Names the analysis cache's entries: SipHash, whose hashes stay the same
+# from one Rust release to the next, as std's needn't.
+siphasher = "1.0"
 # Dev-only: property tests and benchmarks.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }

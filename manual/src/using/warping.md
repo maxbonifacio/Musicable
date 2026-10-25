@@ -13,9 +13,9 @@ Warp starts the clip with one warp marker, at its start, and a tempo for its
 audio: the tempo the file's loop data gives, as in a WAV file made for loops,
 or else a tempo in its name, such as "Drums 120 BPM.wav", or a number in its
 name that the file is a whole number of beats long at, as in
-"Bass_Am_128.wav", or else the song's tempo where the clip starts. Musicable
-doesn't find a file's tempo from its audio yet, so a file without loop data
-or a tempo in its name may need its tempo set by hand.
+"Bass_Am_128.wav", or else the song's tempo where the clip starts. Warp
+doesn't use the tempo Musicable finds in a file's audio yet, so a file
+without loop data or a tempo in its name may need its tempo set by hand.
 
 The clip keeps the stretch of the file it plays, as in Live, so it gets
 longer or shorter if the tempo it starts at isn't the song's, covering what
@@ -63,8 +63,10 @@ These come in later versions:
 
 - The other modes, Slice, Granular and Spectral, which keep the audio's
   pitch as its speed changes, and the clip's Transpose and Detune.
-- Finding a file's tempo and beats from its audio, so Warp puts markers on
-  them, as Live's auto-warp does.
+- Warp putting markers on a file's beats, as Live's auto-warp does.
+  Musicable already finds the tempo and the beats of the project's audio
+  files in the background, and the status bar says so while it does, but
+  Warp doesn't use them yet.
 - Recordings that follow the tempo: a clip recorded into a song plays
   unwarped, at its own speed.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV

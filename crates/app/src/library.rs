@@ -821,6 +821,12 @@ impl Library {
         &self.index
     }
 
+    /// The queue its file work runs on, which other work in the background
+    /// shares: `None` for a library that does nothing.
+    pub fn queue(&self) -> Option<&Arc<Queue>> {
+        self.queue.as_ref()
+    }
+
     /// Whether the index file has been read.
     pub fn is_loaded(&self) -> bool {
         self.loaded

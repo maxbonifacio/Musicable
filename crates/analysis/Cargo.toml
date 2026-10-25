@@ -16,9 +16,8 @@ realfft.workspace = true
 rten.workspace = true
 rten-tensor.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+siphasher.workspace = true
 
 [lints]
 workspace = true

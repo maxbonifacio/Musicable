@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use beat_this::{BeatStream, BeatThis, Tensor};
 use rten::{NodeId, RunOptions, ThreadPool, ValueView};
@@ -50,15 +51,18 @@ pub struct Network {
 impl Network {
     /// Loads the model files from `folder`, to run on `threads` threads of
     /// its own, each of which runs `start` first, as to lower its priority.
+    /// Once `stop` is set, as when the app closes, each run of a model fails
+    /// before it starts, so a long sound's analysis stops soon.
     pub fn load(
         folder: &Path,
         threads: usize,
         start: impl Fn() + Sync,
+        stop: Arc<AtomicBool>,
     ) -> Result<Self, NetworkError> {
         let pool = Arc::new(ThreadPool::with_num_threads(threads.max(1)));
         pool.run(|| rayon::broadcast(|_| start()));
-        let mel = Model::load(&folder.join(MEL_FILE), pool.clone())?;
-        let beat = Model::load(&folder.join(BEAT_FILE), pool)?;
+        let mel = Model::load(&folder.join(MEL_FILE), pool.clone(), stop.clone())?;
+        let beat = Model::load(&folder.join(BEAT_FILE), pool, stop)?;
         Ok(Self {
             tracker: BeatThis::from_models(mel, beat),
         })
@@ -106,10 +110,15 @@ pub(crate) struct Model {
     inputs: HashMap<String, NodeId>,
     outputs: Vec<(NodeId, String)>,
     pool: Arc<ThreadPool>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Model {
-    fn load(path: &Path, pool: Arc<ThreadPool>) -> Result<Self, NetworkError> {
+    fn load(
+        path: &Path,
+        pool: Arc<ThreadPool>,
+        stop: Arc<AtomicBool>,
+    ) -> Result<Self, NetworkError> {
         let model = rten::Model::load_file(path)
             .map_err(|error| NetworkError(format!("{}: {error}", path.display())))?;
         let name = |id: NodeId| Some(model.node_info(id)?.name()?.to_owned());
@@ -124,12 +133,14 @@ impl Model {
             inputs,
             outputs,
             pool,
+            stop,
         })
     }
 }
 
 impl beat_this::Model for Model {
     fn run(&mut self, inputs: &[(&str, &Tensor)]) -> anyhow::Result<HashMap<String, Tensor>> {
+        anyhow::ensure!(!self.stop.load(Relaxed), "stopped");
         let inputs = (inputs.iter())
             .map(|(name, tensor)| {
                 let id = (self.inputs.get(*name))
@@ -162,24 +173,31 @@ impl beat_this::Model for Model {
 pub(crate) mod tests {
     use super::*;
 
-    /// The network, if the models are there. In CI, they must be: the
+    /// The models' folder, if they're there. In CI, they must be: the
     /// workflow fetches them. Elsewhere a test that needs them skips,
     /// saying so.
-    pub(crate) fn network() -> Option<Network> {
-        let Some(folder) = models_folder() else {
+    pub(crate) fn models() -> Option<PathBuf> {
+        let folder = models_folder();
+        if folder.is_none() {
             assert!(
                 std::env::var_os("CI").is_none(),
                 "the Beat This! models are missing: run scripts/fetch-models.sh"
             );
             eprintln!("skipped: no Beat This! models (scripts/fetch-models.sh fetches them)");
-            return None;
-        };
-        Some(Network::load(&folder, 2, || {}).expect("the models load"))
+        }
+        folder
+    }
+
+    /// The network, if the models are there, as [`models`] says.
+    pub(crate) fn network() -> Option<Network> {
+        let folder = models()?;
+        Some(Network::load(&folder, 2, || {}, Arc::default()).expect("the models load"))
     }
 
     #[test]
     fn a_folder_without_the_models_is_no_models_folder() {
-        let error = Network::load(Path::new("no such folder"), 1, || {}).unwrap_err();
+        let error =
+            Network::load(Path::new("no such folder"), 1, || {}, Arc::default()).unwrap_err();
         assert!(error.0.contains(MEL_FILE), "{error}");
     }
 }

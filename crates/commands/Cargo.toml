@@ -7,6 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# What analysis found in the audio files clips play, which warping reads.
+musicable-analysis.workspace = true
 musicable-model.workspace = true
 serde.workspace = true
 # Arguments and results as JSON, and parameters as JSON Schema, for scripts
