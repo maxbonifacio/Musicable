@@ -261,8 +261,10 @@ mod sys {
     /// and only from this computer: the pipe's first, if `first`, which
     /// fails if the pipe is there already.
     fn create(address: &Address, first: bool) -> io::Result<NamedPipeServer> {
-        // Full access for the user, and none for anyone else.
-        let sddl = HSTRING::from(format!("D:P(A;;GA;;;{})", address.user));
+        // The user as its owner, which the bridge checks: an administrator's
+        // elevated Musicable would make the Administrators group its owner
+        // otherwise. Full access for the user, and none for anyone else.
+        let sddl = HSTRING::from(format!("O:{0}D:P(A;;GA;;;{0})", address.user));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: the descriptor is LocalFree'd below.
         unsafe {
