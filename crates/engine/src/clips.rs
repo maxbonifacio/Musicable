@@ -3,6 +3,7 @@
 //! else, so a position always renders the same, however the blocks fall and
 //! however often the graph is rebuilt.
 
+pub mod granular;
 mod slice;
 pub mod spectral;
 
@@ -12,9 +13,10 @@ use std::f64::consts::FRAC_PI_2;
 use musicable_model::automation::Point;
 use musicable_model::clip::{self, Clip, ClipContent, ClipId, Controller, Dimension, Offset};
 use musicable_model::param::{ClipParam, Scale};
-use musicable_model::time::{Beats, TempoMap};
+use musicable_model::time::{Beats, TempoChange, TempoMap};
 use musicable_model::warp::{Segment, WarpMode};
 
+use self::granular::{Grains, PitchMarks};
 use self::slice::{Shape, Slices, Song};
 use self::spectral::{Plan, Player, Renders};
 use crate::media::{CHUNK, Source};
@@ -32,6 +34,21 @@ const WIDEST: f64 = 8.0;
 /// 48 kHz.
 const SAME_SPEED: f64 = 1e-9;
 
+/// How far on from where a clip in Granular plays its stream is told it
+/// reads, in seconds: a grain about to start can read from before where
+/// those playing read.
+const GRAINS_AHEAD_SECONDS: f64 = 0.1;
+
+/// Whether tempo maps `a` and `b` place the song's beats the same up to
+/// `until`.
+fn same_tempo(a: &TempoMap, b: &TempoMap, until: Beats) -> bool {
+    fn upto(map: &TempoMap, until: Beats) -> &[TempoChange] {
+        let tempos = map.tempos();
+        &tempos[..tempos.partition_point(|c| c.at <= until)]
+    }
+    upto(a, until) == upto(b, until)
+}
+
 /// Plays a track's audio clips, added to what comes into it, such as the
 /// track's test tone.
 ///
@@ -43,8 +60,10 @@ const SAME_SPEED: f64 = 1e-9;
 /// In Re-Pitch, the file is resampled at the speed it plays at, so its pitch
 /// follows, as on a turntable. In Slice, it's cut into slices, each played
 /// at the file's own speed, or as transposed, from where its start lands
-/// (see `clips/slice.rs`). In Spectral, it plays the segments rendered from
-/// its file ahead of time, and a live stretch of it where they aren't
+/// (see `clips/slice.rs`). In Granular, it plays as short overlapping
+/// grains, each at the file's own speed, or as transposed, from where it
+/// lands (see [`granular`]). In Spectral, it plays the segments rendered
+/// from its file ahead of time, and a live stretch of it where they aren't
 /// rendered yet (see [`spectral`]). A file that plays at the device's
 /// sample rate plays sample for sample, and anything else is resampled (see
 /// `resample.rs`). Mono files play in both channels, and files with more
@@ -95,6 +114,8 @@ struct Placed {
     time: Time,
     /// In Slice, with a source, its slices.
     slices: Option<Slices>,
+    /// In Granular, with a source, its grains.
+    grains: Option<Grains>,
     /// In Spectral, with a source, its player.
     spectral: Option<Box<Player>>,
     source: Option<Source>,
@@ -160,7 +181,7 @@ impl Piece {
 
 /// A run of song frames over which a clip reads its file at one speed from
 /// one place, faded one way: a piece, in Re-Pitch, or a stretch of a slice
-/// in a piece, in Slice.
+/// in a piece, in Slice, or of a grain, in Granular.
 #[derive(Debug, Clone, Copy)]
 struct Run {
     /// The song frames it covers, from `from` up to `to`.
@@ -278,8 +299,9 @@ impl Placed {
 
     /// Calls `each` with the runs that cover the song's frames from `from`
     /// up to `to`, each with the piece it's in, as [`pieces`](Self::pieces)
-    /// places them: a run for each piece, or in Slice, the runs of the
-    /// slices that play in each piece, which can overlap.
+    /// places them: a run for each piece, or in Slice and Granular, the
+    /// runs of the slices or grains that play in each piece, which can
+    /// overlap.
     fn runs(
         &self,
         tempo: &TempoMap,
@@ -293,17 +315,18 @@ impl Placed {
             if run.from >= run.to {
                 return;
             }
-            match &self.slices {
-                None => each(&piece, run),
-                Some(slices) => {
-                    let song = self.song(tempo, rate);
-                    slices.runs(&song, run.from, run.to, |run| each(&piece, run));
+            let song = self.song(tempo, rate);
+            match (&self.slices, self.granular(tempo)) {
+                (Some(slices), _) => slices.runs(&song, run.from, run.to, |run| each(&piece, run)),
+                (None, Some(grains)) => {
+                    grains.runs(&song, run.from, run.to, |run| each(&piece, run));
                 }
+                (None, None) => each(&piece, run),
             }
         });
     }
 
-    /// Where a clip in Slice plays, at `tempo` and `rate`.
+    /// Where a clip in Slice or Granular plays, at `tempo` and `rate`.
     fn song<'a>(&self, tempo: &'a TempoMap, rate: u32) -> Song<'a> {
         let shift = match &self.time {
             Time::Warped { shift, .. } => shift.to_f64(),
@@ -334,20 +357,27 @@ impl Placed {
 
     /// Where the clip's first read for song frame `frame` starts in its
     /// file: the earliest any run there reads, or comes back to as it
-    /// loops. Where nothing plays, as between two slices, it's where the
-    /// next slice starts reading.
+    /// loops, and in Granular, any grain that starts soon after. Where
+    /// nothing plays, as between two slices, it's where the next slice
+    /// starts reading.
     fn read_start(&self, tempo: &TempoMap, rate: u32, frame: i64) -> i64 {
         if let Some(player) = self.stretched(tempo) {
             return player.read_start(tempo, frame);
         }
+        let until = match self.granular(tempo) {
+            Some(_) => frame + (GRAINS_AHEAD_SECONDS * f64::from(rate)).ceil() as i64,
+            None => frame + 1,
+        };
         let mut start = None;
-        self.runs(tempo, rate, frame, frame + 1, |_, run| {
+        self.runs(tempo, rate, frame, until, |_, run| {
+            // Its earliest read: on its first frame, or its last, backwards.
+            let first = if run.step < 0.0 { run.to - 1 } else { run.from };
             let (at, reach) = match self.reading(&run) {
                 Reading::Copy { by, backwards } => match backwards {
-                    false => ((frame + by) as f64, 0),
-                    true => ((by - frame) as f64, 0),
+                    false => ((first + by) as f64, 0),
+                    true => ((by - first) as f64, 0),
                 },
-                Reading::Resample(r) => (run.position(frame), r.reach() as i64 - 1),
+                Reading::Resample(r) => (run.position(first), r.reach() as i64 - 1),
             };
             let at = at.min(run.back_to.unwrap_or(f64::INFINITY));
             let first = at.floor() as i64 - reach;
@@ -374,6 +404,12 @@ impl Placed {
     /// at `tempo`.
     fn stretched(&self, tempo: &TempoMap) -> Option<&Player> {
         self.spectral.as_deref().filter(|p| !p.plays_as_is(tempo))
+    }
+
+    /// In Granular, its grains, unless it plays the file as Re-Pitch would
+    /// at `tempo`.
+    fn granular(&self, tempo: &TempoMap) -> Option<&Grains> {
+        self.grains.as_ref().filter(|g| !g.plays_as_is(tempo))
     }
 
     /// The clip's gain on song frame `frame` of `piece`, before its fades.
@@ -427,20 +463,23 @@ impl AudioClips {
 
     /// Adds `clip`, playing `source`, in a song whose tempo map is `tempo`.
     /// MIDI clips are ignored. A clip in Spectral plays its live stretch
-    /// throughout, as nothing renders its segments: see
+    /// throughout, as nothing renders its segments, and one in Granular
+    /// keeps its grains to the lattice, as it has no pitch marks: see
     /// [`add_rendered`](Self::add_rendered).
     pub fn add(&mut self, clip: &Clip, source: Option<Source>, tempo: &TempoMap) {
-        self.add_rendered(clip, source, None, tempo);
+        self.add_rendered(clip, source, None, None, tempo);
     }
 
     /// Adds `clip`, playing `source`, as [`add`](Self::add) does, and in
     /// Spectral, playing `renders`, its plan and its segments as they're
-    /// rendered, made for `source` and `tempo`.
+    /// rendered, made for `source` and `tempo`, and in Granular, fitting
+    /// its grains to its file's pitch `marks` with Follow pitch on.
     pub fn add_rendered(
         &mut self,
         clip: &Clip,
         source: Option<Source>,
         renders: Option<Renders>,
+        marks: Option<&PitchMarks>,
         tempo: &TempoMap,
     ) {
         let ClipContent::Audio(audio) = &clip.content else {
@@ -469,6 +508,12 @@ impl AudioClips {
             }
             _ => None,
         };
+        let grains = match (&audio.warp, &source) {
+            (Some(warp), Some(source)) if warp.mode == WarpMode::Granular => {
+                Grains::new(clip, marks, source.sample_rate(), tempo)
+            }
+            _ => None,
+        };
         let spectral = match (&audio.warp, &source) {
             (Some(warp), Some(source)) if warp.mode == WarpMode::Spectral => renders
                 .or_else(|| {
@@ -489,6 +534,7 @@ impl AudioClips {
             gain_curve,
             time,
             slices,
+            grains,
             spectral,
             source,
             resampler: None,

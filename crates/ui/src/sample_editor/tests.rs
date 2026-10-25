@@ -984,6 +984,61 @@ fn high_quality_shows_spectral_s_envelope() {
 }
 
 #[test]
+fn granular_shows_fluctuation_while_follow_pitch_is_off() {
+    let (project, clip) = project(&[(0, 0.0)]);
+    let mut harness = harness(project, Some(clip));
+    pick(&mut harness, "Warp Mode", "Granular");
+    // On, as a clip starts, the grains follow the pitch, so they don't
+    // stray.
+    let toggle = harness.get_by_role_and_label(Role::CheckBox, "Follow pitch");
+    assert_eq!(toggle.accesskit_node().toggled(), Some(Toggled::True));
+    let no_fluctuation = |harness: &Harness<'_, State>| {
+        (harness.query_by_role_and_label(Role::SpinButton, "Fluctuation")).is_none()
+    };
+    assert!(no_fluctuation(&harness));
+    let size = harness.get_by_role_and_label(Role::SpinButton, "Grain Size");
+    assert_eq!(size.accesskit_node().numeric_value(), Some(30.0));
+    size.set_value_accesskit(80.0);
+    harness.run();
+    assert_eq!(harness.state().warp().granular.grain_size, 80.0);
+    assert_eq!(harness.state().document.undo_name(), Some("Set Grain Size"));
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Follow pitch")
+        .click();
+    harness.run();
+    assert!(!harness.state().warp().granular.follow_pitch);
+    let fluctuation = harness.get_by_role_and_label(Role::SpinButton, "Fluctuation");
+    assert_eq!(fluctuation.accesskit_node().numeric_value(), Some(25.0));
+    fluctuation.set_value_accesskit(70.0);
+    harness.run();
+    assert_eq!(harness.state().warp().granular.fluctuation, 70.0);
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Set Fluctuation")
+    );
+    // Its lane plays now.
+    pick(&mut harness, "Lane", "Fluctuation");
+    assert_eq!(
+        harness.state().editor().sample_editor.lane,
+        ClipParam::Fluctuation
+    );
+    // In another mode, they're kept for when Granular plays again.
+    pick(&mut harness, "Warp Mode", "Spectral");
+    assert!(harness.query_by_label("Grain Size").is_none());
+    assert!(no_fluctuation(&harness));
+    let granular = harness.state().warp().granular;
+    assert_eq!(
+        (
+            granular.follow_pitch,
+            granular.grain_size,
+            granular.fluctuation
+        ),
+        (false, 80.0, 70.0)
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
     let (project, clip) = sliced(&[(0, 0.0)]);
     let mut harness = harness(project, Some(clip));

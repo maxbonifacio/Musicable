@@ -88,16 +88,16 @@ pub(super) struct Song<'a> {
 
 impl Song<'_> {
     /// The song frame, fractional, where `own` in the clip's own time plays.
-    fn frame_of(&self, own: f64) -> f64 {
+    pub(super) fn frame_of(&self, own: f64) -> f64 {
         let at = own - self.shift;
         let tick = Beats::from_f64(at);
         let rest = (at - tick.to_f64()) * 60.0 * f64::from(self.rate) / self.tempo.bpm_at(tick);
         self.tempo.sample_at(tick, self.rate) + rest
     }
 
-    /// The clip's own time on song frame `frame`.
-    fn own_at(&self, frame: i64) -> f64 {
-        self.tempo.beats_at(frame as f64, self.rate) + self.shift
+    /// The clip's own time on song frame `frame`, fractional.
+    pub(super) fn own_at(&self, frame: f64) -> f64 {
+        self.tempo.beats_at(frame, self.rate) + self.shift
     }
 
     /// How long the crossfades are, in song frames.
@@ -271,7 +271,7 @@ impl Slices {
     /// The slice that plays on song frame `frame`, from its first frame
     /// until the next slice's, or the first slice, before them all.
     fn slice_on(&self, song: &Song<'_>, frame: i64) -> usize {
-        let own = song.own_at(frame);
+        let own = song.own_at(frame as f64);
         let starts = &self.slices[..self.count()];
         let mut k = starts.partition_point(|s| s.own <= own).saturating_sub(1);
         // As the frames fall, which can differ from the beats by a hair.
@@ -611,7 +611,7 @@ pub(super) struct Shape {
 
 impl Shape {
     /// The same, faded by `ramp` too.
-    fn with(mut self, ramp: Ramp) -> Self {
+    pub(super) fn with(mut self, ramp: Ramp) -> Self {
         if let Some(slot) = self.ramps.iter_mut().find(|r| r.is_none()) {
             *slot = Some(ramp);
         }
@@ -652,14 +652,14 @@ impl Decay {
 /// after a fall, and silence after a fall. Rising and falling over the same
 /// frames, two add up to one.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Ramp {
+pub(super) struct Ramp {
     start: f64,
     length: f64,
     rising: bool,
 }
 
 impl Ramp {
-    fn rising(start: f64, length: f64) -> Self {
+    pub(super) fn rising(start: f64, length: f64) -> Self {
         Self {
             start,
             length,
@@ -667,7 +667,7 @@ impl Ramp {
         }
     }
 
-    fn falling(start: f64, length: f64) -> Self {
+    pub(super) fn falling(start: f64, length: f64) -> Self {
         Self {
             start,
             length,

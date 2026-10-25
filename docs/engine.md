@@ -530,10 +530,12 @@ audio's pitch follows it; one at the file's own speed, at the device's
 rate, plays sample for sample. In Slice, the file is cut into slices, each
 played at the file's own speed, or as transposed, from where its start
 lands (`clips/slice.rs`), as Live's Beats plays them (see **Slice** below).
-In Spectral, it plays segments of the file stretched ahead of time by
-Signalsmith Stretch, or with High quality on, Rubber Band
-(`clips/spectral.rs`), as Live's Complex and Complex Pro stretch them (see
-**Spectral** below).
+In Granular, it plays as short overlapping grains, each at the file's own
+speed, or as transposed, from where it lands (`clips/granular.rs`), as
+Live's Tones and Texture play them (see **Granular** below). In Spectral,
+it plays segments of the file stretched ahead of time by Signalsmith
+Stretch, or with High quality on, Rubber Band (`clips/spectral.rs`), as
+Live's Complex and Complex Pro stretch them (see **Spectral** below).
 
 - Mono files play in both channels, and files with more than two channels
   play their first two.
@@ -555,8 +557,8 @@ Signalsmith Stretch, or with High quality on, Rubber Band
   clip and beats for a warped one, so the curve stays with the audio.
 - Each piece plays as one or more `Run`s: stretches of song frames that
   read the file at one speed from one place, faded one way. A Re-Pitch
-  piece is one run, and a Slice piece the runs of its slices, which can
-  overlap. A run reads sample for sample where it moves a frame of the file
+  piece is one run, a Slice piece the runs of its slices, which can
+  overlap, and a Granular piece the runs of its grains, two at a time. A run reads sample for sample where it moves a frame of the file
   a frame, forwards or backwards, rounding with `nearest` (halfway down, so
   positions worked out two ways round the same), and resampled otherwise.
 
@@ -599,6 +601,51 @@ on.
   free, from where the next slice starts reading, which can be further on
   than a stream keeps ahead. A read that finds its chunks in memory doesn't
   hint the stream, so two slices crossfading don't pull it back and forth.
+
+**Granular.** A clip in Granular keeps its grains (`granular::Grains`),
+placed as the graph compiles, for the song's tempo map, on grid frames, and
+kept as centres in the clip's own time, where they stay.
+
+- The grains are centred on a lattice half the Grain Size apart, from the
+  clip's own time 0, so splitting or moving a clip leaves its grains where
+  they were. With a Grain Size curve, each step is half the size where it
+  starts. The lattice runs on past the clip's ends, so the grains that play
+  there have their neighbours either side.
+- Each grain reads the file from where the warp has the song at its
+  centre, at the file's own speed times its transpose and detune, read from
+  the clip's curves at its centre or else the warp, resampled as any run
+  is. It rises through a raised cosine from the grain before's centre to
+  its own and falls to the next's, so two grains play on every frame and
+  their gains sum to one.
+- With Follow pitch off, Fluctuation moves each grain's centre up to
+  0.4 × fluctuation of the way to its nearer neighbour, and where it reads
+  up to fluctuation × half its size either way, drawn by SplitMix64 from its
+  place on the lattice and a fixed seed, so it's the same every time and in
+  every copy, and a split doesn't change it.
+- With Follow pitch on, where the graph has the file's pitch marks
+  (`granular::PitchMarks`, from [analysis](analysis.md#pitch-marks), which
+  `Media::insert_marks` gives it), each run of marks has a chain of grains,
+  walked from its first mark: each a whole number N of periods on from the
+  one before, N = max(1, round(half the Grain Size / period)), reading from
+  the mark nearest where the warp has the song at its centre, as TD-PSOLA
+  does, so the periods of the grains that overlap line up. Chains keep two
+  grains beyond the clip's ends, and the lattice grains within half a step
+  of a chain's span give way to it, with no two grains closer than 0.5 ms
+  where they meet. Elsewhere, and until the app has the marks, the grains
+  keep to the lattice, unspread.
+- Where the song plays the file at its own speed wherever the clip plays,
+  and nothing transposes, the clip plays the file as Re-Pitch does, sample
+  for sample at the file's rate.
+- When the tempo changes, the grains keep their places in the clip's own
+  time, so they move with its beats, until the app compiles the graph again
+  for the new tempo, as it does for Spectral.
+- A stream holds from the earliest frame its grains read in the next tenth
+  of a second, so a grain about to start can read before those playing.
+  Grains read further apart the longer they are and the further their
+  speed is from the warp's, so a clip in Granular gets a stream that holds
+  as much more of the file as its grains read apart at once, in steps of
+  twice as far (`granular::stream_spread`): none to 0.5 s, and 16 s for
+  half-second grains four octaves up with Fluctuation at 100.
 
 **Spectral.** A clip in Spectral plays audio rendered ahead. Its
 stretcher, Signalsmith Stretch, or Rubber Band with High quality on
@@ -707,15 +754,19 @@ and gives the engine an `AudioReader` for each (see
 - `Source::Stream` is a file streaming from disk (`Stream`). A `Streamer`
   runs the disk thread. Each stream keeps two sets of chunks of 8,192
   frames in memory: about a second of the file from where its clip reads
-  next, and 0.4 s from where it reads after the loop jumps back. Every
+  next, and 0.4 s from where it reads after the loop jumps back, each the
+  longer by how far apart its clip's reads can be at once
+  (`Streamer::stream_spread`), which is 0 but in Granular. Every
   block, playing or not, the player says where that is (`Stream::hint`), and
   the disk thread loads the most urgent chunks of every stream first.
 - Reading a stream copies from chunks that are loaded, taking each with a
   compare-and-swap: no locks, no allocation, no I/O. A chunk that isn't
   loaded yet plays silence and counts in `Stream::missed`.
 - With `Streamer::spawn(true)`, reads wait for the disk instead, for
-  rendering offline, as the null test does and exporting will: a render is
-  then the same however fast the disk is.
+  rendering offline, as the null test and exports do: a render is then the
+  same however fast the disk is. A chunk outside both sets, which the disk
+  thread won't load, is missed there and then rather than waited for, so a
+  render can't hang, and misses it the same every time.
 - A file that fails to read plays silence where it failed, and
   `Stream::failed` says so.
 - A stream follows one clip, so two clips of the same long file get one

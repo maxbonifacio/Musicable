@@ -28,7 +28,7 @@ use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::library::{Library, LibraryLink, ToEngine};
-use crate::media::MediaPool;
+use crate::media::{MediaPool, follows_pitch};
 use crate::plugins::{Change, Plugins};
 use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report};
 
@@ -515,6 +515,32 @@ impl Session {
             self.sync();
         }
         took
+    }
+
+    /// Gives the graphs the pitch marks analysis found in the project's
+    /// audio files, where the editor has the analyses, for clips in
+    /// Granular to fit their grains to with Follow pitch on, and compiles a
+    /// new graph where such a clip plays a file whose marks are new.
+    /// Returns whether it did.
+    pub fn take_pitch_marks(&mut self) -> bool {
+        let mut new = BTreeSet::new();
+        for (file, analysis) in &self.document.editor().analyses {
+            if self.engine.media.keep_marks(file, &analysis.pitch) {
+                new.insert(file.as_str());
+            }
+        }
+        let mut clips = self.document.project().tracks.iter();
+        let rebuild = clips.any(|track| {
+            track.clips.iter().any(|clip| match &clip.content {
+                ClipContent::Audio(audio) => follows_pitch(audio) && new.contains(&*audio.file),
+                ClipContent::Midi(_) => false,
+            })
+        });
+        if rebuild {
+            self.rebuild();
+            self.engine.flush();
+        }
+        rebuild
     }
 
     /// Auto-warps the audio files dropped before they'd been analysed whose
@@ -1009,10 +1035,11 @@ impl Session {
                 };
                 match edit {
                     // Only the last map counts. Clips in Slice are cut on
-                    // grids of bars as they're compiled, and those in
-                    // Spectral render for the song's tempo.
+                    // grids of bars as they're compiled, those in Spectral
+                    // render for the song's tempo, and those in Granular
+                    // place their grains for it.
                     Edit::Tempo { from, to } => {
-                        let renders = plays_spectral(self.document.project());
+                        let renders = plays_for_the_tempo(self.document.project());
                         if from.signatures() != to.signatures() || renders {
                             recompile = true;
                         }
@@ -1149,14 +1176,12 @@ impl Session {
 }
 
 /// Whether any of `project`'s clips plays in Spectral, which renders for
-/// the song's tempo.
-fn plays_spectral(project: &Project) -> bool {
+/// the song's tempo, or in Granular, which places its grains for it.
+fn plays_for_the_tempo(project: &Project) -> bool {
     let mut clips = project.tracks.iter().flat_map(|track| &track.clips);
     clips.any(|clip| match &clip.content {
-        ClipContent::Audio(audio) => audio
-            .warp
-            .as_ref()
-            .is_some_and(|w| w.mode == WarpMode::Spectral),
+        ClipContent::Audio(audio) => (audio.warp.as_ref())
+            .is_some_and(|w| matches!(w.mode, WarpMode::Spectral | WarpMode::Granular)),
         ClipContent::Midi(_) => false,
     })
 }

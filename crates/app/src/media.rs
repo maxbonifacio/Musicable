@@ -1,7 +1,8 @@
 //! The audio files the open project's clips and samplers play: found from
 //! the project's folder, read with `musicable-io`'s decoders, and handed to
 //! the engine whole or streaming, with the segments that clips in Spectral
-//! play from the render cache.
+//! play from the render cache, and the pitch marks that clips in Granular
+//! fit their grains to.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -9,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use musicable_engine::clips::granular::{self, PitchMarks};
 use musicable_engine::clips::spectral::Plan;
 use musicable_engine::devices::Sample;
 use musicable_engine::media::{AudioData, AudioReader, Media, Source, Stream, Streamer};
 use musicable_io::audio::Decoder;
 use musicable_model::Project;
-use musicable_model::clip::{ClipContent, ClipId};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId};
 use musicable_model::time::Beats;
+use musicable_model::warp::WarpMode;
 
 use crate::renders::{self, FileKey, FileRef, RenderCache};
 
@@ -51,13 +54,20 @@ impl AudioReader for FileReader {
 /// Each graph the session builds gets its [`Media`] from here, on the
 /// compiler's thread. A file that a graph has already isn't read again, and
 /// a clip that streams keeps its stream, so rebuilding the graph for an edit
-/// doesn't interrupt the clips that play. What no graph holds any more is
+/// doesn't interrupt the clips that play, unless a clip in Granular comes
+/// to read further apart than its stream holds, as its grains get longer
+/// or are transposed further: it gets a stream that holds more of the
+/// file. What no graph holds any more is
 /// let go, and opening a project reads its files again. A sampler's sample
 /// loads whole, however long it is, as the sampler reads anywhere in it.
 ///
 /// A clip in Spectral gets the segments it plays from the render cache,
 /// which renders the ones it doesn't have yet in the background, or, where
 /// streams wait for the disk, as for an export, before the graph is built.
+/// A clip in Granular that follows the pitch gets the pitch marks analysis
+/// found in its file, as the session [keeps](Self::keep_marks) them, or,
+/// where streams wait for the disk, those it finds itself as the graph is
+/// built.
 pub(crate) struct MediaPool {
     /// Whether streams wait for the disk, and graphs for their clips'
     /// segments: see [`Streamer::spawn`].
@@ -67,8 +77,10 @@ pub(crate) struct MediaPool {
     streamer: OnceLock<Streamer>,
     files: Mutex<Files>,
     renders: Arc<RenderCache>,
+    /// The pitch marks of the files, by their names as the clips give them.
+    marks: Mutex<HashMap<String, Arc<PitchMarks>>>,
     /// Set as the session goes: segments that a graph waits for stop
-    /// rendering, as nothing will play it.
+    /// rendering, as nothing will play it, and so does finding pitch marks.
     stop: AtomicBool,
 }
 
@@ -88,8 +100,14 @@ struct Files {
 
 impl Files {
     /// The source a graph already has for `clip`, playing `path`, and its
-    /// file's key.
-    fn cached(&self, clip: ClipId, path: &Path) -> Option<(Source, FileKey)> {
+    /// file's key: a stream if it holds reads as far apart as `spread` says
+    /// they are, given the file's sample rate, in seconds of the file.
+    fn cached(
+        &self,
+        clip: ClipId,
+        path: &Path,
+        spread: impl Fn(u32) -> f64,
+    ) -> Option<(Source, FileKey)> {
         if let Some((data, key)) = self.whole.get(path)
             && let Some(data) = data.upgrade()
         {
@@ -98,6 +116,7 @@ impl Files {
         match self.streams.get(&clip) {
             Some((streamed, stream, key)) if streamed == path => stream
                 .upgrade()
+                .filter(|stream| stream.spread() >= spread(stream.sample_rate()))
                 .map(|stream| (Source::Stream(stream), *key)),
             _ => None,
         }
@@ -129,13 +148,15 @@ impl MediaPool {
             streamer: OnceLock::new(),
             files: Mutex::default(),
             renders,
+            marks: Mutex::default(),
             stop: AtomicBool::new(false),
         }
     }
 
     /// The audio of `project`'s audio clips, with the segments of those in
-    /// Spectral, and its samplers' samples, whose relative paths start
-    /// from `folder`. Clips and samplers whose files can't be read have
+    /// Spectral and the pitch marks of those in Granular that follow the
+    /// pitch, and its samplers' samples, whose relative paths start from
+    /// `folder`. Clips and samplers whose files can't be read have
     /// none, and the problem is reported. The segments still to render do,
     /// those after `playhead` first.
     pub(crate) fn media(&self, project: &Project, folder: Option<&Path>, playhead: Beats) -> Media {
@@ -157,8 +178,17 @@ impl MediaPool {
             let Some(path) = self.find(&audio.file, folder, "audio file") else {
                 continue;
             };
-            match self.source(clip.id, &path) {
+            let marks = match follows_pitch(audio) {
+                true => self.marks_of(&audio.file, &path),
+                false => None,
+            };
+            let spread =
+                |rate| granular::stream_spread(clip, marks.as_deref(), rate, &project.tempo);
+            match self.source(clip.id, &path, spread) {
                 Ok((source, key)) => {
+                    if let Some(marks) = marks {
+                        media.insert_marks(clip.id, marks);
+                    }
                     let (channels, rate) = (source.channels(), source.sample_rate());
                     let plan = Plan::new(clip, &project.tempo, channels, rate, source.frames());
                     if let Some(plan) = plan {
@@ -213,6 +243,49 @@ impl MediaPool {
         self.stop.store(true, Relaxed);
     }
 
+    /// Keeps the pitch marks analysis `found` in the file the clips call
+    /// `file`, for the graphs built from now on. Returns whether they're
+    /// new: marks kept already stay as they are.
+    pub(crate) fn keep_marks(&self, file: &str, found: &musicable_analysis::PitchMarks) -> bool {
+        let mut marks = self.marks();
+        if marks.contains_key(file) {
+            return false;
+        }
+        let runs = found.runs.iter().map(|run| run.marks()).collect();
+        marks.insert(file.to_owned(), Arc::new(PitchMarks::new(runs)));
+        true
+    }
+
+    /// The pitch marks of the file the clips call `file`, at `path`: those
+    /// kept, or where graphs wait, as offline, those found in it now, which
+    /// are kept. `None` until analysis has found them, and if finding them
+    /// failed.
+    fn marks_of(&self, file: &str, path: &Path) -> Option<Arc<PitchMarks>> {
+        if let Some(marks) = self.marks().get(file) {
+            return Some(marks.clone());
+        }
+        if !self.wait {
+            return None;
+        }
+        let step = &mut || !self.stop.load(Relaxed);
+        let found = musicable_analysis::File::open(path)
+            .map_err(musicable_analysis::AnalysisError::from)
+            .and_then(|mut audio| musicable_analysis::pitch_marks(&mut audio, step));
+        match found {
+            Ok(found) => {
+                self.keep_marks(file, &found);
+                self.marks().get(file).cloned()
+            }
+            Err(error) => {
+                log::warn!(
+                    "couldn't find the pitch marks of {}: {error}",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
     /// Where the file a project names `file` is: relative paths start from
     /// `folder`. A project that isn't saved has no folder, so a relative
     /// path leads nowhere, and the problem with the `what`, such as "audio
@@ -234,11 +307,17 @@ impl MediaPool {
     }
 
     /// The audio `clip` plays from the file at `path`, and the file's key:
-    /// what a graph has already, or the file loaded whole or streaming. The
-    /// lock isn't held while the file is read, so the app can ask for
-    /// problems meanwhile.
-    fn source(&self, clip: ClipId, path: &Path) -> io::Result<(Source, FileKey)> {
-        if let Some(cached) = self.files().cached(clip, path) {
+    /// what a graph has already, or the file loaded whole or streaming, for
+    /// reads as far apart as `spread` says they are, given the file's sample
+    /// rate, in seconds of the file. The lock isn't held while the file is
+    /// read, so the app can ask for problems meanwhile.
+    fn source(
+        &self,
+        clip: ClipId,
+        path: &Path,
+        spread: impl Fn(u32) -> f64,
+    ) -> io::Result<(Source, FileKey)> {
+        if let Some(cached) = self.files().cached(clip, path, &spread) {
             return Ok(cached);
         }
         let key = FileKey::of(path)?;
@@ -250,7 +329,8 @@ impl MediaPool {
             Ok((Source::Whole(data), key))
         } else {
             let streamer = self.streamer.get_or_init(|| Streamer::spawn(self.wait));
-            let stream = streamer.stream(Box::new(reader));
+            let spread = spread(reader.sample_rate());
+            let stream = streamer.stream_spread(Box::new(reader), spread);
             let streaming = (path.to_owned(), Arc::downgrade(&stream), key);
             self.files().streams.insert(clip, streaming);
             Ok((Source::Stream(stream), key))
@@ -293,17 +373,29 @@ impl MediaPool {
         std::mem::take(&mut files.problems)
     }
 
-    /// Forgets the files read and the problems reported, for a newly opened
-    /// project: its files are read again, as they are now, even those a
-    /// graph still plays, and their problems are reported again.
+    /// Forgets the files read, the problems reported and the pitch marks
+    /// kept, for a newly opened project: its files are read again, as they
+    /// are now, even those a graph still plays, and their problems are
+    /// reported again.
     pub(crate) fn forget(&self) {
         *self.files() = Files::default();
+        self.marks().clear();
     }
 
     fn files(&self) -> MutexGuard<'_, Files> {
         // Nothing that holds the lock leaves the files half changed.
         self.files.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn marks(&self) -> MutexGuard<'_, HashMap<String, Arc<PitchMarks>>> {
+        self.marks.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Whether `audio` plays in Granular, following the pitch.
+pub(crate) fn follows_pitch(audio: &AudioClip) -> bool {
+    let warp = audio.warp.as_ref();
+    warp.is_some_and(|w| w.mode == WarpMode::Granular && w.granular.follow_pitch)
 }
 
 #[cfg(test)]
@@ -480,6 +572,133 @@ mod tests {
         let mut shared = slots(&playing).into_iter().zip(slots(&exported));
         assert!(shared.all(|(a, b)| Arc::ptr_eq(&a, &b) && a.is_ready()));
         assert_eq!(live.take_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn clips_in_granular_that_follow_the_pitch_get_their_files_pitch_marks() {
+        let folder = folder("granular");
+        // A second of a tone with a pitch, of 150 Hz: 320 frames a period.
+        let tone: Vec<f32> = (0..48_000)
+            .map(|i| {
+                let phase = std::f64::consts::TAU * 150.0 * f64::from(i) / 48_000.0;
+                let harmonics = [1.0, 0.5, 0.25].into_iter().enumerate();
+                let sum: f64 = harmonics
+                    .map(|(h, a)| a * (phase * (h + 1) as f64).sin())
+                    .sum();
+                (0.4 * sum) as f32
+            })
+            .collect();
+        save_wav(
+            &folder.join("voice.wav"),
+            48_000,
+            SampleFormat::Int16,
+            &[&tone],
+        )
+        .unwrap();
+        let mut project = project(&["voice.wav", "voice.wav", "voice.wav"]);
+        // The first two in Granular, following the pitch and not; the third
+        // plays its file as it is.
+        for (clip, follow_pitch) in project.tracks[0].clips.iter_mut().zip([true, false]) {
+            let ClipContent::Audio(audio) = &mut clip.content else {
+                unreachable!("an audio clip");
+            };
+            let mut warp = Warp::new(0, Beats::ZERO, 100.0);
+            warp.mode = WarpMode::Granular;
+            warp.granular.follow_pitch = follow_pitch;
+            let warping = Warping {
+                offset: Offset::Beats(Beats::ZERO),
+                warp: Some(warp),
+            };
+            assert!(audio.set_warping(warping));
+        }
+        let [tones, texture, plain] = ids(&project)[..] else {
+            panic!("three clips");
+        };
+
+        // Played live, the clip has none until analysis has found them, and
+        // the graphs built once they're kept do.
+        let live = MediaPool::new(false);
+        let media = live.media(&project, Some(&folder), Beats::ZERO);
+        assert!(media.marks(tones).is_none());
+        let found = musicable_analysis::PitchMarks {
+            runs: vec![musicable_analysis::PitchRun {
+                start: 64,
+                periods: vec![320 * 64; 9],
+            }],
+        };
+        assert!(live.keep_marks("voice.wav", &found));
+        assert!(!live.keep_marks("voice.wav", &found), "kept already");
+        let media = live.media(&project, Some(&folder), Beats::ZERO);
+        let marks: Vec<f64> = (0..10).map(|i| 1.0 + 320.0 * f64::from(i)).collect();
+        assert_eq!(media.marks(tones).unwrap().runs(), [marks]);
+        assert!(media.marks(texture).is_none() && media.marks(plain).is_none());
+        // Opened again, a project's files are analysed again.
+        live.forget();
+        let media = live.media(&project, Some(&folder), Beats::ZERO);
+        assert!(media.marks(tones).is_none());
+
+        // Waiting, as for an export, a graph finds them itself, a period
+        // apart, and the next has the same.
+        let export = MediaPool::new(true);
+        let media = export.media(&project, Some(&folder), Beats::ZERO);
+        let marks = media.marks(tones).expect("the marks");
+        let [run] = marks.runs() else {
+            panic!("one run: {:?}", marks.runs().len());
+        };
+        let period = (run[run.len() - 1] - run[0]) / (run.len() - 1) as f64;
+        assert!((period / 320.0 - 1.0).abs() < 0.002, "a period of {period}");
+        assert!(run.len() > 140, "{} marks", run.len());
+        let again = export.media(&project, Some(&folder), Beats::ZERO);
+        assert!(Arc::ptr_eq(marks, again.marks(tones).unwrap()));
+        assert!(media.marks(texture).is_none() && media.marks(plain).is_none());
+        assert_eq!(export.take_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn clips_in_granular_stream_as_much_of_the_file_as_their_grains_read() {
+        let folder = folder("granular-streams");
+        write(&folder.join("long.wav"), 480_000);
+        let mut project = project(&["long.wav"]);
+        let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+            unreachable!("an audio clip");
+        };
+        let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+        warp.mode = WarpMode::Granular;
+        warp.granular.follow_pitch = false;
+        let warping = Warping {
+            offset: Offset::Beats(Beats::ZERO),
+            warp: Some(warp),
+        };
+        assert!(audio.set_warping(warping));
+        let clip = ids(&project)[0];
+        let mut pool = MediaPool::new(true);
+        pool.load_whole = 100;
+        let stream = |media: &Media| match media.get(clip) {
+            Some(Source::Stream(stream)) => stream.clone(),
+            _ => panic!("the file streams"),
+        };
+        let set = |project: &mut Project, transpose: i8, grain_size: f64| {
+            let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+                unreachable!("an audio clip");
+            };
+            let warp = audio.warp.as_mut().unwrap();
+            (warp.transpose, warp.granular.grain_size) = (transpose, grain_size);
+        };
+        // Short grains read close together, as other clips do.
+        let media = pool.media(&project, Some(&folder), Beats::ZERO);
+        let short = stream(&media);
+        assert_eq!(short.spread(), 0.0);
+        // Long ones four octaves up read up to 16 seconds apart, so the
+        // rebuilt graph gets a stream that holds that much more.
+        set(&mut project, 48, 500.0);
+        let media = pool.media(&project, Some(&folder), Beats::ZERO);
+        let long = stream(&media);
+        assert_eq!(long.spread(), 16.0);
+        // Nearer again, the clip keeps it.
+        set(&mut project, 24, 250.0);
+        let again = pool.media(&project, Some(&folder), Beats::ZERO);
+        assert!(Arc::ptr_eq(&long, &stream(&again)));
+        assert_eq!(pool.take_problems(), Vec::<String>::new());
     }
 
     #[test]

@@ -1,17 +1,17 @@
 # Analysis
 
 The `analysis` crate finds what warping needs to know about a sound: where
-its sounds start, its tempo, its beats and downbeats, and whether it has a
-pulse at all. It finds beats with the Beat This! network, and checks them
+its sounds start, its tempo, its beats and downbeats, whether it has a
+pulse at all, and where each period of its pitch starts. It finds beats with the Beat This! network, and checks them
 with a classic tracker, which finds them alone in Fast analysis or when the
 network's files aren't there. It's plain functions on audio, with no UI.
 
 The app analyses each audio file the open project plays in the
 background, and keeps what it finds in a cache, so a file is analysed only
 the first time ([In the app](#in-the-app)). Warped clips take their
-transients from it ([app.md](app.md#the-sample-editor)), and auto-warp
-warps the files dropped into the song by it
-([commands.md](commands.md#auto-warp)).
+transients from it ([app.md](app.md#the-sample-editor)), clips in Granular
+their pitch marks ([app.md](app.md#audio-files)), and auto-warp warps the
+files dropped into the song by it ([commands.md](commands.md#auto-warp)).
 `musicable analyse` measures analysis against labelled files and against
 Live's auto-warp ([Measuring it](#measuring-it)).
 
@@ -19,8 +19,9 @@ Live's auto-warp ([Measuring it](#measuring-it)).
 
 `analyse` reads a sound twice, start to end, 16,384 frames at a time, so a
 long file is never in memory at once. The first pass works out the spectral
-flux and feeds the network as it goes. The second finds each onset to the
-sample. The `Analysis` it returns holds:
+flux and feeds the network and the pitch tracker as it goes. The second
+finds each onset to the sample, and then the stretches with a pitch are
+read again to mark their periods. The `Analysis` it returns holds:
 
 | Field | What it is |
 |---|---|
@@ -32,9 +33,10 @@ sample. The `Analysis` it returns holds:
 | `breaks` | How often the beat slips by part of a beat, where the tracker lost it and found it again off the beat |
 | `pulse`, `events`, `riser`, `sync` | Whether it has a beat that goes on. Without one: how many separate strong events it has, 1 for a one-shot; whether it builds to a peak; and the frame that should land on the grid, the first strong attack or a riser's peak |
 | `loop` | For a loop at a steady tempo that starts on a beat and lasts whole bars, up to 32: how many bars, and the exact tempo its length gives |
+| `pitch` | Where each period of its pitch starts, in each stretch with one (`PitchMarks`): runs of marks, kept in 64ths of a frame as the first and the period to each next ([Pitch marks](#pitch-marks)) |
 
 `VERSION` goes up when what it finds changes, so the cache can analyse a
-sound again.
+sound again: 2 added the pitch marks.
 
 ## Onsets
 
@@ -144,6 +146,38 @@ authors to license them, or train the network again on data we may use.
 A song of two minutes takes about 10 s on four cores, in a debug build:
 the workspace builds the network's crates optimised in debug builds too,
 without which it takes minutes.
+
+## Pitch marks
+
+Pitch marks are where each period of a sound's pitch starts, for Granular
+to fit its grains to with Follow pitch on, as Live's Tones does
+(`pitch.rs`; `pitch_marks` finds them alone, as `analyse` does).
+
+- The pitch is tracked on 10 ms frames by YIN (de Cheveigné and Kawahara,
+  2002), on the sound mixed to one channel, low-passed and decimated by a
+  whole number to about 11 kHz as its samples come, in the first pass, so
+  the track is the same however they're split. It looks for periods from
+  30 Hz, below a five-string bass's low B, to 1,500 Hz, above a soprano's
+  high C: the first dip of YIN's difference below 0.15, or else its
+  deepest, refined with a parabola.
+- A frame has a pitch where its deepest dip is below 0.25 and it's no
+  quieter than 40 dB below the loudest frame, nor than -70 dBFS; a frame
+  without one between two with nearly the same period counts too. Each
+  period is the middle of its own and its neighbours'. Frames with a pitch
+  make stretches, three frames long at least, broken where the period
+  changes by a factor of 1.2 or more from one frame to the next.
+- Each stretch is then marked at the sound's own rate, reading the file
+  around it again. The first mark is the loudest sample of its first
+  period. Each next one is where the period after the last mark best
+  matches the period before it, as a normalised correlation, looked for
+  5% of a period either side of where the period before puts it, two
+  frames at least, and refined with a parabola, so every mark falls at the
+  same point of its period, through vibrato and glides. A run stops where
+  the best match is below 0.7, or the period strays more than a quarter
+  from the tracked pitch's, and marking starts again after it. A run has
+  four marks at least.
+- Marks are kept in 64ths of a frame (`SUBFRAMES`), as a run's first mark
+  and the step to each next, so a minute of a voice is a few kilobytes.
 
 ## In the app
 

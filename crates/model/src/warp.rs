@@ -15,11 +15,13 @@
 //! markers plays: Re-Pitch resamples it, so its pitch follows its speed, as
 //! on a turntable, Slice cuts it into slices at its transients, or on a
 //! grid of notes, and plays each at the file's own speed from where it
-//! lands, as Live's Beats does, and Spectral stretches it in the frequency
-//! domain, keeping its pitch, as Live's Complex does, or Complex Pro with
-//! High quality on. Every mode but Re-Pitch moves the audio's pitch by the
-//! warp's transpose and detune, and keeps its own settings in the warp
-//! while another mode plays.
+//! lands, as Live's Beats does, Granular plays it as short overlapping
+//! grains, as Live's Tones does with Follow pitch on and Texture with it
+//! off, and Spectral stretches it in the frequency domain, keeping its
+//! pitch, as Live's Complex does, or Complex Pro with High quality on.
+//! Every mode but Re-Pitch moves the audio's pitch by the warp's transpose
+//! and detune, and keeps its own settings in the warp while another mode
+//! plays.
 //!
 //! A warp also keeps its file's transients, the [`Onsets`]: where the
 //! sounds in it start, as analysis found them and the user changed them.
@@ -55,6 +57,8 @@ pub struct Warp {
     pub detune: i8,
     /// How Slice cuts the audio and plays the slices.
     pub slice: SliceSettings,
+    /// How Granular cuts the audio into grains.
+    pub granular: GranularSettings,
     /// Which stretcher Spectral renders with, and how it treats the audio's
     /// formants.
     pub spectral: SpectralSettings,
@@ -79,6 +83,12 @@ pub enum WarpMode {
     /// lands, so a hit keeps its sound at any tempo: for drums and other
     /// percussive loops. See [`SliceSettings`].
     Slice,
+    /// Played as short overlapping grains, each at the file's own speed
+    /// from where it lands, so it keeps its pitch at any speed: for lines
+    /// with one note at a time, such as voices and bass lines, with Follow
+    /// pitch on, and pads and textures with it off. See
+    /// [`GranularSettings`].
+    Granular,
     /// Stretched in the frequency domain, so it keeps its pitch at any
     /// speed: for full mixes, chords, voices and anything else with more
     /// than one note at once. It plays audio rendered ahead, as its
@@ -88,13 +98,14 @@ pub enum WarpMode {
 
 impl WarpMode {
     /// Every mode, in the order the Sample Editor lists them.
-    pub const ALL: [Self; 3] = [Self::RePitch, Self::Slice, Self::Spectral];
+    pub const ALL: [Self; 4] = [Self::RePitch, Self::Slice, Self::Granular, Self::Spectral];
 
     /// What the Sample Editor calls it.
     pub fn name(self) -> &'static str {
         match self {
             Self::RePitch => "Re-Pitch",
             Self::Slice => "Slice",
+            Self::Granular => "Granular",
             Self::Spectral => "Spectral",
         }
     }
@@ -104,6 +115,7 @@ impl WarpMode {
         match self {
             Self::RePitch => "re_pitch",
             Self::Slice => "slice",
+            Self::Granular => "granular",
             Self::Spectral => "spectral",
         }
     }
@@ -157,6 +169,56 @@ impl Default for SliceSettings {
             preserve: Preserve::Transients,
             transient_loop: TransientLoop::Forward,
             envelope: Self::ENVELOPE_MAX,
+        }
+    }
+}
+
+/// How Granular cuts a clip's audio into grains, as Live's Tones does with
+/// Follow pitch on and Texture with it off. A clip keeps them while another
+/// mode plays.
+///
+/// Each grain plays the file at its own speed, or faster or slower by the
+/// transpose, from where the song has got to in the file, rising as the
+/// grain before it falls, so the grains overlap two at a time. Where the
+/// song plays the file slower than its own speed, the grains go over some
+/// of the audio again, and where faster, they leave some out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GranularSettings {
+    /// Whether the grains follow the audio's pitch, as Live's Tones does:
+    /// where analysis found a pitch, each grain is a whole number of its
+    /// periods long and starts where one does, so a line with one note at a
+    /// time keeps its sound. Off, the grains are cut on a steady grid,
+    /// spread by [`fluctuation`](Self::fluctuation), as Live's Texture
+    /// cuts pads and noise.
+    pub follow_pitch: bool,
+    /// How long each grain is, in milliseconds, from
+    /// [`GRAIN_SIZE_MIN`](Self::GRAIN_SIZE_MIN) to
+    /// [`GRAIN_SIZE_MAX`](Self::GRAIN_SIZE_MAX): with Follow pitch on, a
+    /// whole number of periods, within a period of this, and two at least.
+    pub grain_size: f64,
+    /// While Follow pitch is off, how far each grain strays from where and
+    /// when it would play, as a share of its length, from 0, a steady grid,
+    /// to [`FLUCTUATION_MAX`](Self::FLUCTUATION_MAX). The spread is seeded,
+    /// so it's the same every time.
+    pub fluctuation: f64,
+}
+
+impl GranularSettings {
+    pub const GRAIN_SIZE_MIN: f64 = 5.0;
+    pub const GRAIN_SIZE_MAX: f64 = 500.0;
+    pub const GRAIN_SIZE_DEFAULT: f64 = 30.0;
+    pub const FLUCTUATION_MAX: f64 = 100.0;
+    pub const FLUCTUATION_DEFAULT: f64 = 25.0;
+}
+
+impl Default for GranularSettings {
+    /// Following the pitch, with 30 ms grains, and a spread of 25% for when
+    /// it doesn't, as Live's Texture's Flux starts.
+    fn default() -> Self {
+        Self {
+            follow_pitch: true,
+            grain_size: Self::GRAIN_SIZE_DEFAULT,
+            fluctuation: Self::FLUCTUATION_DEFAULT,
         }
     }
 }
@@ -608,16 +670,19 @@ impl Warp {
             transpose: 0,
             detune: 0,
             slice: SliceSettings::default(),
+            granular: GranularSettings::default(),
             spectral: SpectralSettings::default(),
         }
     }
 
     /// Whether the warp keeps its rules: a marker or more, their frames and
     /// beats rising, a tempo in range, transients that keep theirs, and a
-    /// transpose, detune, Transient Envelope, Formants and Envelope in
-    /// range.
+    /// transpose, detune, Transient Envelope, Grain Size, Fluctuation,
+    /// Formants and Envelope in range.
     pub fn is_valid(&self) -> bool {
         let envelope = 0.0..=SliceSettings::ENVELOPE_MAX;
+        let grain_size = GranularSettings::GRAIN_SIZE_MIN..=GranularSettings::GRAIN_SIZE_MAX;
+        let fluctuation = 0.0..=GranularSettings::FLUCTUATION_MAX;
         let formants = 0.0..=SpectralSettings::FORMANTS_MAX;
         let spectral_envelope = SpectralSettings::ENVELOPE_MIN..=SpectralSettings::ENVELOPE_MAX;
         !self.markers.is_empty()
@@ -630,6 +695,8 @@ impl Warp {
             && self.transpose.unsigned_abs() <= Self::TRANSPOSE_MAX.unsigned_abs()
             && self.detune.unsigned_abs() <= Self::DETUNE_MAX.unsigned_abs()
             && envelope.contains(&self.slice.envelope)
+            && grain_size.contains(&self.granular.grain_size)
+            && fluctuation.contains(&self.granular.fluctuation)
             && formants.contains(&self.spectral.formants)
             && spectral_envelope.contains(&self.spectral.envelope)
     }
@@ -644,6 +711,8 @@ impl Warp {
             ClipParam::TransientEnvelope => Some(self.slice.envelope),
             ClipParam::Preserve => Some(self.slice.preserve.step() as f64),
             ClipParam::TransientLoop => Some(self.slice.transient_loop.step() as f64),
+            ClipParam::GrainSize => Some(self.granular.grain_size),
+            ClipParam::Fluctuation => Some(self.granular.fluctuation),
             ClipParam::Formants => Some(self.spectral.formants),
             ClipParam::Envelope => Some(self.spectral.envelope),
         }
@@ -664,6 +733,8 @@ impl Warp {
             ClipParam::TransientEnvelope => self.slice.envelope = value,
             ClipParam::Preserve => self.slice.preserve = Preserve::at_step(value),
             ClipParam::TransientLoop => self.slice.transient_loop = TransientLoop::at_step(value),
+            ClipParam::GrainSize => self.granular.grain_size = value,
+            ClipParam::Fluctuation => self.granular.fluctuation = value,
             ClipParam::Formants => self.spectral.formants = value,
             ClipParam::Envelope => self.spectral.envelope = value,
         }
@@ -1272,6 +1343,8 @@ mod tests {
             assert_eq!(WarpMode::from_key(mode.key()), Some(mode));
         }
         assert!(!WarpMode::RePitch.transposes() && WarpMode::Slice.transposes());
+        assert!(WarpMode::Granular.transposes() && !WarpMode::Granular.renders());
+        assert_eq!(WarpMode::from_key("granular"), Some(WarpMode::Granular));
         for (i, preserve) in Preserve::ALL.into_iter().enumerate() {
             assert_eq!(Preserve::from_key(preserve.key()), Some(preserve));
             assert_eq!(preserve.step(), i);
@@ -1298,12 +1371,15 @@ mod tests {
     }
 
     #[test]
-    fn a_warp_s_transpose_detune_envelopes_and_formants_stay_in_range() {
+    fn a_warp_s_transpose_detune_envelopes_grains_and_formants_stay_in_range() {
         let warp = Warp::new(0, Beats::ZERO, 120.0);
         assert_eq!((warp.transpose, warp.detune), (0, 0));
         assert_eq!(warp.slice, SliceSettings::default());
         assert_eq!(warp.slice.transient_loop, TransientLoop::Forward);
         assert_eq!(warp.slice.envelope, SliceSettings::ENVELOPE_MAX);
+        assert!(warp.granular.follow_pitch);
+        assert_eq!(warp.granular.grain_size, 30.0);
+        assert_eq!(warp.granular.fluctuation, 25.0);
         assert!(!warp.spectral.high_quality);
         assert_eq!(warp.spectral.formants, SpectralSettings::FORMANTS_MAX);
         assert_eq!(warp.spectral.envelope, 128.0);
@@ -1313,6 +1389,11 @@ mod tests {
             slice: SliceSettings {
                 envelope: 0.0,
                 ..warp.slice
+            },
+            granular: GranularSettings {
+                follow_pitch: false,
+                grain_size: GranularSettings::GRAIN_SIZE_MAX,
+                fluctuation: GranularSettings::FLUCTUATION_MAX,
             },
             spectral: SpectralSettings {
                 high_quality: true,
@@ -1330,6 +1411,15 @@ mod tests {
             },
             ..warp.clone()
         };
+        let grains = |grain_size, fluctuation| Warp {
+            granular: GranularSettings {
+                grain_size,
+                fluctuation,
+                ..warp.granular
+            },
+            ..warp.clone()
+        };
+        assert!(grains(GranularSettings::GRAIN_SIZE_MIN, 0.0).is_valid());
         let formants = |formants| Warp {
             spectral: SpectralSettings {
                 formants,
@@ -1356,6 +1446,12 @@ mod tests {
             envelope(100.5),
             envelope(-0.5),
             envelope(f64::NAN),
+            grains(4.9, 0.0),
+            grains(501.0, 0.0),
+            grains(f64::NAN, 0.0),
+            grains(30.0, -1.0),
+            grains(30.0, 100.5),
+            grains(30.0, f64::NAN),
             formants(-1.0),
             formants(f64::NAN),
             spectral_envelope(7.5),
@@ -1375,6 +1471,8 @@ mod tests {
             (ClipParam::TransientEnvelope, 37.5),
             (ClipParam::Preserve, 4.6),
             (ClipParam::TransientLoop, 9.0),
+            (ClipParam::GrainSize, 1.0),
+            (ClipParam::Fluctuation, 62.5),
             (ClipParam::Formants, 62.5),
             (ClipParam::Envelope, 1000.0),
             (ClipParam::Gain, 0.5),
@@ -1386,6 +1484,8 @@ mod tests {
         assert_eq!(warp.slice.envelope, 37.5);
         assert_eq!(warp.slice.preserve, Preserve::Sixteenth);
         assert_eq!(warp.slice.transient_loop, TransientLoop::BackAndForth);
+        assert_eq!(warp.granular.grain_size, GranularSettings::GRAIN_SIZE_MIN);
+        assert_eq!(warp.granular.fluctuation, 62.5);
         assert_eq!(warp.spectral.formants, 62.5);
         assert_eq!(warp.spectral.envelope, SpectralSettings::ENVELOPE_MAX);
         assert!(warp.is_valid());
@@ -1399,6 +1499,8 @@ mod tests {
                 Some(37.5),
                 Some(5.0),
                 Some(2.0),
+                Some(5.0),
+                Some(62.5),
                 Some(62.5),
                 Some(512.0),
             ]

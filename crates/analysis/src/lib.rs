@@ -4,12 +4,13 @@
 //! analysis. Plain functions on audio, with no UI: the app runs them on
 //! the library's background queue and keeps their results in a cache.
 //!
-//! [`analyse`] reads a file twice, start to end, so a long one never has
-//! to be in memory: once for the spectral flux and the network, and once
-//! more to find each onset to the sample. From what they find it works out
-//! what auto-warp asks of a sound: whether it has a pulse, whether its
-//! tempo is steady, whether it's a loop of whole bars, and where a sound
-//! without a pulse syncs.
+//! [`analyse`] reads a file start to end once, so a long one never has to
+//! be in memory, for the spectral flux, the network and the pitch, and
+//! then around what that found: each onset, to find it to the sample, and
+//! each stretch with a pitch, to mark its periods. From what they find it
+//! works out what auto-warp asks of a sound: whether it has a pulse,
+//! whether its tempo is steady, whether it's a loop of whole bars, and
+//! where a sound without a pulse syncs. Granular plays the pitch marks.
 
 mod audio;
 mod beats;
@@ -20,6 +21,7 @@ mod flux;
 mod groove;
 mod network;
 mod onsets;
+mod pitch;
 mod tempo;
 
 use std::fmt;
@@ -32,13 +34,14 @@ pub use beats::{Steady, f_measure};
 pub use cache::{Cache, Found};
 pub use network::{BEAT_FILE, MEL_FILE, MODELS_VARIABLE, Network, NetworkError, models_folder};
 pub use onsets::Onset;
+pub use pitch::{PitchMarks, PitchRun, SUBFRAMES, pitch_marks};
 pub use tempo::{Candidate, FASTEST, SLOWEST};
 
 use audio::CHUNK;
 
 /// The analysis's version. A result kept from an older one is analysed
 /// again.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The network's beats move to an onset this near them, and the classic
 /// tracker's, on 10 ms frames, to one within three frames.
@@ -116,6 +119,8 @@ pub struct Analysis {
     /// number of bars long: how many, and the tempo they give exactly.
     #[serde(rename = "loop")]
     pub looped: Option<Loop>,
+    /// Where each period of its pitch starts, where it has one.
+    pub pitch: PitchMarks,
 }
 
 /// The tracker the beats come from.
@@ -156,6 +161,7 @@ impl Analysis {
             sync: None,
             riser: false,
             looped: None,
+            pitch: PitchMarks::default(),
         }
     }
 
@@ -222,8 +228,9 @@ pub fn analyse(
     };
     let sample_rate = audio.sample_rate();
     let frames = audio.frames();
-    // The first pass: the flux and the network, chunk by chunk.
+    // The first pass: the flux, the network and the pitch, chunk by chunk.
     let mut spectrum = flux::Spectrum::new(sample_rate);
+    let mut tracker = pitch::Tracker::new(sample_rate);
     let mut failed = None;
     let mut listening = match network.map(|n| n.listen(sample_rate)) {
         Some(Ok(stream)) => Some(stream),
@@ -241,6 +248,7 @@ pub fn analyse(
             break;
         }
         spectrum.push(&chunk[..read]);
+        tracker.push(&chunk[..read]);
         if let Some(stream) = &mut listening
             && let Err(error) = stream.push(&chunk[..read])
         {
@@ -262,13 +270,16 @@ pub fn analyse(
     // A network stopped by its stop flag, as the app closing stops it, has
     // failed: the step, which says the same, stops here.
     step()?;
-    // The second pass: each onset to the sample.
+    // The second pass: each onset to the sample, and the marks of each
+    // stretch with a pitch.
     let onsets = onsets::refine(audio, &flux, &onsets::peaks(&flux))?;
     step()?;
+    let pitch = pitch::mark(audio, &tracker.finish(), &mut step)?;
     let tempi = tempo::candidates(&flux);
     let rate = f64::from(sample_rate);
     let mut analysis = Analysis {
         tempi,
+        pitch,
         ..Analysis::with_onsets(sample_rate, frames, onsets)
     };
     let mut classic_moved = 0;
@@ -531,6 +542,8 @@ fn looped(analysis: &Analysis) -> Option<Loop> {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::TAU;
+
     use super::*;
     use crate::groove::{Groove, SAMPLE_RATE, kick, synth};
 
@@ -618,7 +631,28 @@ mod tests {
             let analysis = analysed(samples);
             assert!(analysis.onsets.is_empty() && analysis.beats.is_empty());
             assert!(!analysis.pulse && analysis.sync.is_none() && analysis.looped.is_none());
+            assert!(analysis.pitch.runs.is_empty());
         }
+    }
+
+    #[test]
+    fn a_pitched_sound_has_the_marks_pitch_marks_finds_alone() {
+        let rate = f64::from(SAMPLE_RATE);
+        let samples: Vec<f32> = (0..SAMPLE_RATE as usize)
+            .map(|i| {
+                let phase = 196.0 * i as f64 / rate;
+                let harmonics = (1..=12).map(|h| (TAU * h as f64 * phase).sin() / h as f64);
+                (0.3 * harmonics.sum::<f64>()) as f32
+            })
+            .collect();
+        let analysis = analysed(&samples);
+        let mut audio = Samples {
+            samples: &samples,
+            sample_rate: SAMPLE_RATE,
+        };
+        let alone = pitch_marks(&mut audio, &mut || true).unwrap();
+        assert_eq!(alone.runs.len(), 1);
+        assert_eq!(analysis.pitch, alone);
     }
 
     #[test]
