@@ -11,8 +11,9 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::{AudioFile, Selection};
 use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
 use musicable_model::automation::Lane;
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing};
+use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing, Warping};
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::Warp;
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use super::*;
@@ -504,6 +505,58 @@ fn edges_trim_and_handles_fade() {
 }
 
 #[test]
+fn shift_dragging_a_warped_clip_s_edge_stretches_it() {
+    let (mut project, ids) = project();
+    // Kick and Line warped at 120 BPM, as the song is.
+    for track in [ids.drums, ids.bass] {
+        let clip = &mut project.track_mut(track).unwrap().clips[0];
+        let ClipContent::Audio(audio) = &mut clip.content else {
+            panic!("an audio clip");
+        };
+        let warping = Warping {
+            offset: Offset::Beats(Beats::ZERO),
+            warp: Some(Warp::new(0, Beats::ZERO, 120.0)),
+        };
+        assert!(audio.set_warping(warping));
+    }
+    let mut harness = harness(project);
+    let tempo = |harness: &Harness<'_, State>, id: ClipId| {
+        let ClipContent::Audio(audio) = clip(harness, id).1.content else {
+            panic!("an audio clip");
+        };
+        audio.warp.unwrap().clip_tempo(48_000)
+    };
+    // Its end four beats later: the same audio over twelve beats.
+    let rect = harness.get_by_label("Clip Kick").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = pos2(x_of(&harness, 12.0) - 2.0, from.y);
+    drag(&mut harness, from, to, Modifiers::SHIFT);
+    let kick = clip(&harness, ids.kick).1;
+    assert_eq!(kick.range(), BeatRange::new(Beats::ZERO, Beats::new(12)));
+    assert!((tempo(&harness, ids.kick) - 180.0).abs() < 1e-6);
+    assert_eq!(harness.state().document.undo_name(), Some("Set Clip Tempo"));
+    // From its start, its end stays.
+    let rect = harness.get_by_label("Clip Line").rect();
+    let from = pos2(rect.left() + 2.0, rect.center().y);
+    let to = pos2(x_of(&harness, 14.0) + 2.0, from.y);
+    drag(&mut harness, from, to, Modifiers::SHIFT);
+    let line = clip(&harness, ids.line).1;
+    assert_eq!(line.range(), BeatRange::new(Beats::new(14), Beats::new(24)));
+    assert!((tempo(&harness, ids.line) - 150.0).abs() < 1e-6);
+    // A clip that isn't warped trims.
+    let rect = harness.get_by_label("Clip Chords").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = from - vec2(width(&harness, 2.0), 0.0);
+    drag(&mut harness, from, to, Modifiers::SHIFT);
+    let chords = clip(&harness, ids.chords).1;
+    assert_eq!(
+        chords.range(),
+        BeatRange::new(Beats::new(8), Beats::new(14))
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn a_trims_ghost_stops_where_the_audio_does() {
     let (mut project, ids) = project();
     // Line plays bass.wav from a second in, from beat 18.
@@ -626,7 +679,7 @@ fn locators_move_and_a_double_click_renames_them() {
 }
 
 #[test]
-fn a_double_click_opens_a_midi_clip_in_the_piano_roll() {
+fn a_double_click_opens_a_clip_in_its_editor() {
     let (project, ids) = project();
     let mut harness = harness(project);
     let double_click = |harness: &mut Harness<'_, State>, at: Pos2| {
@@ -643,14 +696,23 @@ fn a_double_click_opens_a_midi_clip_in_the_piano_roll() {
         }
         harness.run();
     };
+    // An audio clip opens in the Sample Editor.
     let at = body(&harness, "Kick", 30.0);
     double_click(&mut harness, at);
-    assert!(harness.state().requests.is_empty());
+    let sample_editor = Request::ShowPanel(crate::SAMPLE_EDITOR);
+    assert_eq!(
+        harness.state().requests,
+        std::slice::from_ref(&sample_editor)
+    );
+    let editor = harness.state().editor();
+    assert_eq!(editor.sample_editor.clip, Some(ids.kick));
+    assert_eq!(editor.focus, musicable_commands::Focus::SAMPLE_EDITOR);
+    // A MIDI clip in the piano roll.
     let at = body(&harness, "Chords", 30.0);
     double_click(&mut harness, at);
     assert_eq!(
         harness.state().requests,
-        [Request::ShowPanel(crate::PIANO_ROLL)]
+        [sample_editor, Request::ShowPanel(crate::PIANO_ROLL)]
     );
     let editor = harness.state().editor();
     assert_eq!(editor.piano_roll.clip, Some(ids.chords));

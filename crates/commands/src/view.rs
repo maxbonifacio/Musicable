@@ -76,8 +76,7 @@ pub const SET_TRACK_HEIGHT: CommandId = CommandId::new("view.set_track_height");
 /// Sets the piano roll's zoom, scrolling and key height.
 pub const SET_PIANO_ROLL_VIEWPORT: CommandId = CommandId::new("view.set_piano_roll_viewport");
 /// Sets the Sample Editor's zoom and scrolling.
-pub const SET_SAMPLE_EDITOR_VIEWPORT: CommandId =
-    CommandId::new("view.set_sample_editor_viewport");
+pub const SET_SAMPLE_EDITOR_VIEWPORT: CommandId = CommandId::new("view.set_sample_editor_viewport");
 /// Gives a panel the focus, where the edit commands and the keys act.
 pub const SET_FOCUS: CommandId = CommandId::new("view.set_focus");
 

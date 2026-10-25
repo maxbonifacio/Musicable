@@ -18,7 +18,7 @@ const GESTURE_WIDTH: f32 = 140.0;
 const ACTION_WIDTH: f32 = 250.0;
 
 /// The places gestures start, in groups, in the order the page lists them.
-const GROUPS: [(&str, &[Target]); 6] = [
+const GROUPS: [(&str, &[Target]); 7] = [
     (
         "Arrangement",
         &[
@@ -65,6 +65,10 @@ const GROUPS: [(&str, &[Target]); 6] = [
             Target::VelocityLane,
             Target::ControllerLane,
         ],
+    ),
+    (
+        "Sample Editor",
+        &[Target::WarpMarker, Target::WaveformTop, Target::Waveform],
     ),
     (
         "Mixer and devices",

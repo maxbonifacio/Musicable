@@ -152,7 +152,10 @@ fn armed_tracks_record_takes_where_they_were_played() {
     let ClipContent::Audio(audio) = &clip.content else {
         panic!("{clip:?}");
     };
-    assert_eq!((audio.file.as_str(), audio.offset), (name.as_str(), Offset::Frames(0)));
+    assert_eq!(
+        (audio.file.as_str(), audio.offset),
+        (name.as_str(), Offset::Frames(0))
+    );
     let file = AudioFile {
         sample_rate: 48_000,
         frames: 48_000,

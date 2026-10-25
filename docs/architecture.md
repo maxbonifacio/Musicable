@@ -315,14 +315,17 @@ says what's there.
   hosts it, with a node that hands it each block through shared memory. A
   process for each plugin, one for a group of them, or none differ only in
   how many plugins share one.
-- **Warping and time-stretch.** A clip player plays its file at the file's
-  own speed, from the song position, resampled only for the file's sample
-  rate ([engine.md](engine.md#clips)). Warping adds warp markers to
-  `AudioClip`, in a new format version, and a player that reads the file
-  through them. A stretch that carries state from frame to frame, as a
-  phase vocoder does, can't start at any song position at once, as every
-  node must, so it would play from stretched segments rendered ahead, on
-  the disk thread that streams files now. Tempo, beats and transients come
+- **Warping and time-stretch.** Warping has started: format 11 gives
+  `AudioClip` a warp, markers pinning frames of the file to beats of the
+  clip's own time, and the clip player reads the file through them in
+  Re-Pitch mode, resampling each piece at the speed it plays at
+  ([engine.md](engine.md#clips)), while the Sample Editor edits the markers
+  ([app.md](app.md#the-sample-editor)). Re-Pitch carries no state but the
+  resampler's, so it starts at any song position at once, as every node
+  must. A stretch that carries state from frame to frame, as a phase
+  vocoder does for Spectral, can't, so it would play from stretched
+  segments rendered ahead, on the disk thread that streams files now.
+  Tempo, beats and transients come
   from analysing the file, on the library's background queue
   (`musicable_library::Queue`), and the project keeps what playback reads,
   such as the onsets a slicing mode plays from.

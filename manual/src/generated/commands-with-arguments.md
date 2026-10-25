@@ -28,8 +28,10 @@
 | Delete Clips | `clip.delete` |
 | Insert Audio | `clip.insert_audio` |
 | Move Clips | `clip.move` |
+| Open in Sample Editor | `clip.open` |
 | Rename Clip | `clip.rename` |
 | Set Fades | `clip.set_fades` |
+| Set Clip Gain | `clip.set_gain` |
 | Split Clips | `clip.split` |
 | Trim Clip | `clip.trim` |
 
@@ -141,5 +143,15 @@
 |---|---|
 | Set Focus | `view.set_focus` |
 | Set Piano Roll Viewport | `view.set_piano_roll_viewport` |
+| Set Sample Editor Viewport | `view.set_sample_editor_viewport` |
 | Set Track Height | `view.set_track_height` |
 | Set Viewport | `view.set_viewport` |
+
+### Warp
+
+| Command | Id |
+|---|---|
+| Move Audio Under Warp Marker | `warp.move_audio` |
+| Move Warp Markers | `warp.move_markers` |
+| Select Warp Markers | `warp.select_markers` |
+| Set Clip Tempo | `warp.set_tempo` |

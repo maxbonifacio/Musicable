@@ -9,8 +9,8 @@ use musicable_model::automation;
 use musicable_model::clip::{
     AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Offset, Point,
 };
-use musicable_model::param::{ClipParam, ParamSpec};
 use musicable_model::native::{NativeDevice, NativeKind};
+use musicable_model::param::{ClipParam, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{Warp, WarpMarker};
@@ -234,7 +234,8 @@ impl Random {
                 _ => self.below(1_001) as f64 / 1_000.0 * max,
             };
             points.push(automation::Point::new(Beats::from_ticks(at), value));
-            let step = points.len() >= 2 && points[points.len() - 2].at == points[points.len() - 1].at;
+            let step =
+                points.len() >= 2 && points[points.len() - 2].at == points[points.len() - 1].at;
             if step || !self.one_in(3) {
                 at = (at + 1 + self.below(Beats::new(2).ticks() as u64) as i64).min(MAX_TICKS);
             }

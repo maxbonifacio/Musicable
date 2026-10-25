@@ -256,7 +256,9 @@ impl When {
             When::ControllerCurve => controllers::shown(project, editor).is_some(),
             When::AutomationOverridden => project.automation.iter().any(|l| l.overridden),
             When::SampleEditorClip => sample.clip.is_some(),
-            When::WarpedClip => sample.clip.is_some_and(|id| warp::warped(project, id).is_ok()),
+            When::WarpedClip => sample
+                .clip
+                .is_some_and(|id| warp::warped(project, id).is_ok()),
         }
     }
 }

@@ -2,8 +2,9 @@
 
 Musicable's window has the menu bar and the transport bar along its top,
 the status bar along its foot, and panels in between: the arrangement in
-the middle, with the mixer, the devices panel and the piano roll under it,
-and the browser and the History panel on the left once you show them.
+the middle, with the mixer, the devices panel, the piano roll and the
+Sample Editor under it, and the browser and the History panel on the left
+once you show them.
 
 ## The menu bar
 
@@ -47,8 +48,15 @@ The transport bar's parts can be hidden, moved and resized
   ([The devices panel](devices-panel.md)). **View > Devices** (Ctrl+Alt+L)
   hides or shows it.
 - **The piano roll** is in a tab beside the devices panel. Double-clicking
-  a MIDI clip, or **View > Piano Roll** (Ctrl+Alt+3), shows it, and F12
-  switches between the two ([The piano roll](piano-roll.md)).
+  a MIDI clip, or **View > Piano Roll**, shows it
+  ([The piano roll](piano-roll.md)).
+- **The Sample Editor** is in a tab beside them. Double-clicking an audio
+  clip, or **View > Sample Editor**, shows it
+  ([The Sample Editor](sample-editor.md)). **View > Clip Editor**
+  (Ctrl+Alt+3) shows or hides whichever of the piano roll and the Sample
+  Editor fits the clip selected or opened last, as Live's clip view does,
+  and **View > Switch Devices and Clip Editor** (F12) switches between it
+  and the devices.
 - **The browser** is a panel on the left with the samples, the devices and
   the presets, hidden until Add Device, **Browser > Search in Browser**
   (Ctrl+F) or **View > Browser** (Ctrl+Alt+B) shows it
@@ -70,11 +78,11 @@ The transport bar's parts can be hidden, moved and resized
 - **A tab's ×** hides its panel, as the View menu's command does, and the
   panel keeps its place: the View menu shows it there again, in front of the
   tabs beside it. The arrangement stays.
-- **The devices and the piano roll follow the selection**: selecting the
-  clip the piano roll shows brings it forward, selecting another track
-  brings the devices forward, and so does adding a device, however it's
-  added, which also scrolls the panel to it. Neither comes back from hidden
-  by itself.
+- **The devices and the clip editors follow the selection**: selecting a
+  MIDI clip brings the piano roll forward, and an audio clip the Sample
+  Editor; selecting another track brings the devices forward, and so does
+  adding a device, however it's added, which also scrolls the panel to it.
+  None of them comes back from hidden by itself.
 
 Devices and presets dragged from the browser go in the devices panel's
 chain wherever the panel is.
@@ -92,7 +100,9 @@ The keys and the edit commands act where the focus is. Copy and Delete take
 the notes selected in the piano roll while it has the focus, the clips, time
 or tracks selected in the arrangement while the arrangement or the mixer has
 it, and nothing in the devices panel, the browser and the History panel.
-The piano roll takes the focus once it shows a clip. A panel's own keys,
+Delete and Select All act on the Sample Editor's warp markers while it has
+the focus. The piano roll and the Sample Editor take the focus once they
+show a clip. A panel's own keys,
 such as the piano roll's arrow keys, work while it has the focus, and the
 menus and the command palette show the keys that work there. When the panel
 with the focus is hidden or goes behind another tab, the arrangement takes

@@ -1,7 +1,7 @@
 # The app
 
-`musicable` opens a window with the arrangement, the piano roll, the mixer,
-the devices panel and the browser. It plays a project through the audio
+`musicable` opens a window with the arrangement, the piano roll, the Sample
+Editor, the mixer, the devices panel and the browser. It plays a project through the audio
 device with the parallel scheduler, records audio and MIDI into takes,
 plays CLAP and VST3 plugins and eight devices of its own, runs the commands
 from keys, menus, the command palette and the mouse, and opens, saves and
@@ -214,8 +214,8 @@ the views' parts. Behind them:
 
 ### The panels
 
-The arrangement, the mixer, the devices panel, the piano roll, the browser
-and the History panel are docked panels, laid out in splits and tabs
+The arrangement, the mixer, the devices panel, the piano roll, the Sample
+Editor, the browser and the History panel are docked panels, laid out in splits and tabs
 ([egui_tiles](https://docs.rs/egui_tiles), `crates/ui/src/dock.rs`). The
 shell's panel registry (`crates/ui/src/panels.rs`) holds each with its id,
 such as `musicable_ui::MIXER` and `PIANO_ROLL`, its title, its place and
@@ -280,8 +280,8 @@ playhead is drawn where the sound is: the engine's position less the
 latency of the plugins and the audio device
 ([engine.md](engine.md#delay-compensation)).
 
-**Themes and mouse maps.** The arrangement, the piano roll and the mixer
-draw every colour and size from a `musicable_ui::Theme`, and look up what
+**Themes and mouse maps.** The arrangement, the piano roll, the Sample
+Editor and the mixer draw every colour and size from a `musicable_ui::Theme`, and look up what
 each gesture does, from where it starts and the modifiers held, in a
 `MouseMap`. `MouseMap::live()` is what they do at first, as the manual's
 tables give it. `Shell::set_theme` and `set_mouse_map` change them: the app
@@ -369,6 +369,32 @@ the `MouseMap`'s targets `Note`, `NoteEdge`, `NoteGrid`, `DrawNote`,
 shows is the editor's too (`PianoRoll::lane`); its panel's id is
 `musicable_ui::PIANO_ROLL`; and what middle C is called is a behaviour
 setting.
+
+## The Sample Editor
+
+[The Sample Editor](../manual/src/window/sample-editor.md) in the manual says
+what it shows, and what the mouse and the keys do in it, and
+[Warping](../manual/src/using/warping.md) what warping does. Everything it
+does runs a command ([commands.md](commands.md#warping) and
+[automation](commands.md#automation) for the gain lane), and a drag runs
+one when it ends, so it's one step to undo. While a drag lasts, it draws
+the waveform as the drag would leave it, from a copy of the clip's warp
+that the drag changes (`crates/ui/src/sample_editor.rs`), and the rulers,
+the markers and the waveform are drawn in `sample_editor/paint.rs`. Its
+waveform comes from the same peaks as the arrangement's, read along the
+clip's warp, so the two agree. Its keys are the Sample Editor panel's own
+in the default keymap, as the piano roll's are, and hiding it gives the
+arrangement the focus. Clip Editor and Switch Devices and Clip Editor show
+the piano roll or the Sample Editor, whichever fits the clip selected or
+opened last (`Editor::clip_editor`).
+
+**For Tier 2's extensions and profiles.** What the Sample Editor shows, its
+selected markers and its zoom are the `Editor`'s (`editor::SampleEditor`);
+its colours and sizes are in the `Theme` (`theme.sample_editor`, and the
+`warp_marker`, `warp_marker_selected` and `outside_clip` colours); its
+gestures are the `MouseMap`'s targets `WarpMarker`, `WaveformTop` and
+`Waveform`, and its gain lane's are the automation lanes' targets; and its
+panel's id is `musicable_ui::SAMPLE_EDITOR`.
 
 ## The History panel
 

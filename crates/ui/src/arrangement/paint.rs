@@ -543,7 +543,7 @@ fn ghosts(painter: &Painter, scene: &Scene<'_>, plan: &Plan) {
                 }
             }
         }
-        Plan::Trim { clip, side, at } => {
+        Plan::Trim { clip, side, at } | Plan::Stretch { clip, side, at, .. } => {
             let Some((index, clip)) = find(project, *clip) else {
                 return;
             };

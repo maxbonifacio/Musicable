@@ -213,7 +213,10 @@ fn audio_tracks(project: &mut Project, files: &mut Files) {
         a.offset = Offset::Beats(beats(1, 8));
         a.fade_out = beats(1, 4);
         let point = musicable_model::automation::Point::new;
-        a.set_lane(ClipParam::Gain, vec![point(beats(1, 4), 0.2), point(beats(5, 4), 1.0)]);
+        a.set_lane(
+            ClipParam::Gain,
+            vec![point(beats(1, 4), 0.2), point(beats(5, 4), 1.0)],
+        );
     });
 }
 

@@ -23,8 +23,8 @@ mod tests;
 use std::collections::BTreeMap;
 
 use egui::{
-    Button, CursorIcon, DragValue, Event, Id, MouseWheelUnit, Pos2, Rect, Response, RichText,
-    Role, Sense, Ui, UiBuilder, WidgetInfo, pos2,
+    Button, CursorIcon, DragValue, Event, Id, MouseWheelUnit, Pos2, Rect, Response, RichText, Role,
+    Sense, Ui, UiBuilder, WidgetInfo, pos2,
 };
 use musicable_commands::editor::Viewport;
 use musicable_commands::{
@@ -111,7 +111,10 @@ enum Envelope {
     /// other: or the same point twice, for the level line before the first
     /// point or after the last. A lane without points has a level line at
     /// the clip's gain, with no points to move.
-    Line { from: usize, to: usize },
+    Line {
+        from: usize,
+        to: usize,
+    },
     Lane,
 }
 
@@ -320,7 +323,10 @@ impl Scene<'_> {
     /// what a drag would make it, plays at `x`.
     fn frame_at(&self, audio: &AudioClip, x: f32) -> f64 {
         let at = self.layout.beats_at(x);
-        audio.frame_at(self.clip.own_time_at(at, self.tempo(), self.rate), self.rate)
+        audio.frame_at(
+            self.clip.own_time_at(at, self.tempo(), self.rate),
+            self.rate,
+        )
     }
 
     /// `at`, snapped to the grid unless `free` or snapping is off.
@@ -353,7 +359,10 @@ impl Scene<'_> {
 
     /// Where `point`, of the gain curve, is drawn.
     fn point_at(&self, point: &Point) -> Pos2 {
-        pos2(self.layout.x_of_beats(self.song_of(point.at)), self.y_of(point.value))
+        pos2(
+            self.layout.x_of_beats(self.song_of(point.at)),
+            self.y_of(point.value),
+        )
     }
 
     /// The gain curve's value at `own`, in the clip's own time, or else the
@@ -536,9 +545,16 @@ impl Scene<'_> {
                 let warp = self.warp()?;
                 let marker = *warp.markers.get(i)?;
                 let beats = f64::from(drag.to.x - drag.from.x) / layout.viewport.zoom;
-                let frame = warp.frame_at(marker.beat.to_f64() - beats, self.rate).round();
-                let after = i.checked_sub(1).map_or(0, |before| warp.markers[before].frame + 1);
-                let before = warp.markers.get(i + 1).map_or(u64::MAX, |next| next.frame - 1);
+                let frame = warp
+                    .frame_at(marker.beat.to_f64() - beats, self.rate)
+                    .round();
+                let after = i
+                    .checked_sub(1)
+                    .map_or(0, |before| warp.markers[before].frame + 1);
+                let before = warp
+                    .markers
+                    .get(i + 1)
+                    .map_or(u64::MAX, |next| next.frame - 1);
                 let frame = (frame.max(0.0) as u64).clamp(after, before.max(after));
                 (frame != marker.frame).then_some(Plan::Audio { marker: i, frame })
             }
@@ -620,7 +636,11 @@ fn run(actions: &mut Vec<Action>, id: CommandId, args: Args) {
 /// markers at `markers` in its warp, by their beats.
 fn of(scene: &Scene<'_>, markers: &[usize]) -> Args {
     let all = scene.markers();
-    let beats: Vec<Beats> = markers.iter().filter_map(|&i| all.get(i)).map(|m| m.beat).collect();
+    let beats: Vec<Beats> = markers
+        .iter()
+        .filter_map(|&i| all.get(i))
+        .map(|m| m.beat)
+        .collect();
     Args::new()
         .with("markers", beats)
         .with("clip", scene.clip.id)
@@ -630,7 +650,11 @@ fn of(scene: &Scene<'_>, markers: &[usize]) -> Args {
 fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
     match plan {
         Plan::Markers { markers, by } => {
-            run(actions, warp::MOVE_MARKERS, of(scene, markers).with("by", *by));
+            run(
+                actions,
+                warp::MOVE_MARKERS,
+                of(scene, markers).with("by", *by),
+            );
         }
         &Plan::Audio { marker, frame } => {
             let Some(at) = scene.markers().get(marker) else {
@@ -956,12 +980,12 @@ impl SampleEditor {
     /// Shows what a press there would do: markers and points move.
     fn cursor(&self, ui: &Ui, scene: &Scene<'_>) {
         let icon = |action: Option<MouseAction>| match action {
-            Some(MouseAction::MoveMarker | MouseAction::MoveMarkerFree | MouseAction::MoveAudio) => {
-                Some(CursorIcon::ResizeHorizontal)
-            }
-            Some(MouseAction::MovePoint | MouseAction::MovePointFree | MouseAction::MoveSegment) => {
-                Some(CursorIcon::Grab)
-            }
+            Some(
+                MouseAction::MoveMarker | MouseAction::MoveMarkerFree | MouseAction::MoveAudio,
+            ) => Some(CursorIcon::ResizeHorizontal),
+            Some(
+                MouseAction::MovePoint | MouseAction::MovePointFree | MouseAction::MoveSegment,
+            ) => Some(CursorIcon::Grab),
             Some(MouseAction::Draw | MouseAction::DrawFree) => Some(CursorIcon::Crosshair),
             _ => None,
         };
@@ -1053,7 +1077,11 @@ fn clicked(
             if warped {
                 run(actions, warp::SELECT_MARKERS, of(scene, &[]));
             }
-            run(actions, transport::SET_START_MARKER, Args::new().with("at", at));
+            run(
+                actions,
+                transport::SET_START_MARKER,
+                Args::new().with("at", at),
+            );
         }
         (MouseAction::Locate, _) => {
             run(actions, transport::LOCATE, Args::new().with("at", at));
@@ -1096,7 +1124,9 @@ fn controls(ui: &mut Ui, scene: &Scene<'_>, actions: &mut Vec<Action>) {
         ui.add_space(theme.sample_editor.ruler);
         let warped = scene.warp().is_some();
         let hint = "Whether the clip follows the song's tempo";
-        let warp_button = ui.add(Button::new("Warp").selected(warped)).on_hover_text(hint);
+        let warp_button = ui
+            .add(Button::new("Warp").selected(warped))
+            .on_hover_text(hint);
         if warp_button.clicked() {
             let args = Args::new().with("on", !warped).with("clip", clip);
             run(actions, warp::SET_WARP, args);
@@ -1180,7 +1210,8 @@ fn name_for_screen_readers(ui: &Ui, scene: &Scene<'_>, id: Id) {
     let size = scene.theme.sample_editor.handle;
     for (i, marker) in scene.markers().iter().enumerate() {
         let x = scene.marker_x(marker);
-        let handle = Rect::from_x_y_ranges(x - size / 2.0..=x + size / 2.0, layout.handles.y_range());
+        let handle =
+            Rect::from_x_y_ranges(x - size / 2.0..=x + size / 2.0, layout.handles.y_range());
         let rect = handle.intersect(layout.wave);
         if !rect.is_positive() {
             continue;

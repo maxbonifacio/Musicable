@@ -3,7 +3,7 @@
 The mouse does what it does in Live at first. The Settings window's
 **Mouse** page changes what each gesture does, from where it starts: in the
 arrangement, the ruler and the loop, takes and automation, the piano roll,
-the mixer and devices, and for the wheel.
+the Sample Editor, the mixer and devices, and for the wheel.
 
 ## The Mouse page
 
@@ -19,7 +19,8 @@ modifiers that have no action of their own there do.
 
 The changes go to your mouse map file at once. [The
 arrangement](../window/arrangement.md#the-mouse), [the piano
-roll](../window/piano-roll.md#the-mouse) and [the
+roll](../window/piano-roll.md#the-mouse), [the Sample
+Editor](../window/sample-editor.md#the-mouse) and [the
 mixer](../window/mixer.md#moving-the-controls) say what the gestures do at
 first.
 

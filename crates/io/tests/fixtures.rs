@@ -764,7 +764,11 @@ fn warping() -> Project {
     let slowest = warped(
         "Pad.wav",
         Beats::new(-2),
-        Warp::new(MAX_TICKS as u64, Beats::from_ticks(MAX_TICKS), Warp::MIN_TEMPO),
+        Warp::new(
+            MAX_TICKS as u64,
+            Beats::from_ticks(MAX_TICKS),
+            Warp::MIN_TEMPO,
+        ),
     );
     let slowest = project.new_clip("Slowest", beats(8, 16), ClipContent::Audio(slowest));
     let fastest = warped(

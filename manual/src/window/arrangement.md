@@ -15,7 +15,9 @@ and a whole drag is one step in the undo history.
 - **Clips** show their name in a title bar, and under it an audio clip's
   waveform, with its fades and their handles, or a MIDI clip's notes. A clip
   takes the colour of its track's place in the list. Selected clips are
-  outlined. While a drag lasts, a ghost shows where the clips will go.
+  outlined. While a drag lasts, a ghost shows where the clips will go. A
+  warped audio clip's waveform is drawn where its audio plays, stretched
+  between its warp markers ([Warping](../using/warping.md)).
 - **Track headers** have the track's colour, its name, A, M, S and the arm
   button, and a meter, which can be hidden, moved and some resized
   ([Workspaces](../customising/workspaces.md#hiding-and-moving-parts)). A
@@ -60,9 +62,10 @@ changes it ([The mouse](../customising/mouse.md)):
 | | Drag; Ctrl-drag; Alt-drag | Moves the selected clips, also to other tracks of their kind; copies them; moves them off the grid |
 | | Double-click | Renames the clip |
 | A clip's body | Click | Selects the clip and puts the start marker there, so Ctrl+E splits it there |
-| | Double-click | Opens a MIDI clip in the piano roll |
+| | Double-click | Opens a MIDI clip in the piano roll, and an audio clip in the Sample Editor |
 | | Drag | Selects time, as on an empty lane |
 | A clip's start or end | Drag; Alt-drag | Trims the clip, on the grid; off it |
+| | Shift-drag | Stretches a warped clip, on the grid, changing its tempo so its audio fills it from the other edge; trims any other clip |
 | A fade handle | Drag | Makes the fade longer or shorter |
 | A lane | Click | Selects the track, or the master, and puts the start marker there |
 | | Drag | Selects the time dragged over, on the tracks dragged over, and on the master's lane too if it's dragged over |

@@ -187,7 +187,9 @@ impl Registry {
             show: |panels, ui, cx| {
                 framed(ui, |ui| {
                     let (view, theme, mouse) = (cx.view, cx.theme, cx.mouse);
-                    panels.sample_editor.show(ui, view, theme, mouse, cx.actions);
+                    panels
+                        .sample_editor
+                        .show(ui, view, theme, mouse, cx.actions);
                 });
             },
         });

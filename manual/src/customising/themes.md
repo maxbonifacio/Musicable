@@ -42,8 +42,8 @@ you save it. **Reload** reads it again, and its fonts.
 ## What the entries change
 
 - Most entries colour or size Musicable's views: the arrangement's, the
-  transport bar's, and those under `[mixer]`, `[devices]`, `[piano_roll]`
-  and `[browser]`.
+  transport bar's, and those under `[mixer]`, `[devices]`, `[piano_roll]`,
+  `[sample_editor]` and `[browser]`.
 - `[dock]` sizes the panels' tab bars (`tab_bar`), the gaps between panels
   (`gap`), the outline around the panel with the focus (`outline`, in the
   `focus` colour) and the least a panel's edge can be dragged to

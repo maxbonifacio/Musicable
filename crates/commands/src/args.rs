@@ -377,7 +377,10 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
         ["master", what] => fader(Chain::Master, what),
         ["send", send] => Some(ParamAddress::Send(SendId(id(send)?))),
         ["device", device, "param", n] => Some(ParamAddress::Device(DeviceId(id(device)?), id(n)?)),
-        ["clip", clip, what] => Some(ParamAddress::Clip(ClipId(id(clip)?), ClipParam::from_key(what)?)),
+        ["clip", clip, what] => Some(ParamAddress::Clip(
+            ClipId(id(clip)?),
+            ClipParam::from_key(what)?,
+        )),
         _ => None,
     }
 }

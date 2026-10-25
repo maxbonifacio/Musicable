@@ -212,7 +212,10 @@ impl Warp {
         }
         let frame = frame as u64;
         let fits = (index == 0 || self.markers[index - 1].frame < frame)
-            && self.markers.get(index).is_none_or(|next| frame < next.frame);
+            && self
+                .markers
+                .get(index)
+                .is_none_or(|next| frame < next.frame);
         if !fits {
             return None;
         }
@@ -496,7 +499,10 @@ mod tests {
     fn markers_move_together_as_far_as_their_neighbours_let_them() {
         let mut warp = two_tempos();
         assert_eq!(warp.markers_can_move(&[1], beats(5.0)), beats(1.0) - tick());
-        assert_eq!(warp.markers_can_move(&[1], beats(-5.0)), beats(-2.0) + tick());
+        assert_eq!(
+            warp.markers_can_move(&[1], beats(-5.0)),
+            beats(-2.0) + tick()
+        );
         assert_eq!(warp.markers_can_move(&[1, 2], beats(5.0)), beats(5.0));
         assert!(!warp.move_markers(&[1], beats(1.0)));
         assert!(warp.move_markers(&[1], beats(0.5)));
@@ -521,7 +527,10 @@ mod tests {
         assert_eq!(warp.markers[1], marker(60_000, 2.0));
         assert!(!warp.move_audio(1, 96_000), "onto the next marker's frame");
         assert!(!warp.move_audio(0, 60_000));
-        assert!(warp.move_audio(2, 1_000_000), "the last goes as far as it likes");
+        assert!(
+            warp.move_audio(2, 1_000_000),
+            "the last goes as far as it likes"
+        );
         assert!(!warp.move_audio(5, 10));
     }
 
@@ -577,7 +586,11 @@ mod tests {
         assert_eq!(bpm("Kick01.wav"), None);
         assert_eq!(bpm("Pad 2.wav"), None);
         assert_eq!(bpm("Take 3.wav"), None);
-        assert_eq!(bpm("C:\\Samples\\120\\Clap.wav"), None, "the folder's no clue");
+        assert_eq!(
+            bpm("C:\\Samples\\120\\Clap.wav"),
+            None,
+            "the folder's no clue"
+        );
         assert_eq!(bpm("Vocal 1.25.wav"), None);
         assert_eq!(bpm(""), None);
     }

@@ -1458,7 +1458,11 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
     let lanes = format!("{AUDIO}.automation");
     // Before the clip's own time starts is fine, and so is a step.
     let file = edited_audio(|a| {
-        a["automation"] = gain(json!([[-322_560, 0.0], [0, 1.0], [0, ParamSpec::CLIP_GAIN_MAX]]))
+        a["automation"] = gain(json!([
+            [-322_560, 0.0],
+            [0, 1.0],
+            [0, ParamSpec::CLIP_GAIN_MAX]
+        ]))
     });
     let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
         panic!("an audio clip");

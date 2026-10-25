@@ -1312,7 +1312,12 @@ impl Transaction<'_> {
 
     /// Sets the curve of the audio clip `clip`'s parameter `param`: see
     /// [`set_lane_points`](Self::set_lane_points).
-    fn set_clip_lane(&mut self, clip: ClipId, param: ClipParam, mut points: Vec<automation::Point>) {
+    fn set_clip_lane(
+        &mut self,
+        clip: ClipId,
+        param: ClipParam,
+        mut points: Vec<automation::Point>,
+    ) {
         automation::tidy_anywhere(&mut points);
         let spec = param.spec();
         for point in &mut points {
@@ -1321,7 +1326,10 @@ impl Transaction<'_> {
         let Some((_, audio)) = audio_mut(self.project, clip) else {
             return;
         };
-        let from = audio.lane(param).map(|l| l.points.clone()).unwrap_or_default();
+        let from = audio
+            .lane(param)
+            .map(|l| l.points.clone())
+            .unwrap_or_default();
         if from != points {
             audio.set_lane(param, points.clone());
             self.edits.push(Edit::LanePoints {

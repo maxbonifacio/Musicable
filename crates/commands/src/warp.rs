@@ -79,18 +79,12 @@ type Handler = fn(&mut Context<'_>);
 /// The commands that take no arguments, for keys, with their titles, when
 /// they apply and what they run.
 const COMMANDS: [(CommandId, &str, When, Handler); 4] = [
-    (
-        DOUBLE_TEMPO,
-        "Double Clip Tempo",
-        When::WarpedClip,
-        |ctx| scale_shown(ctx, "Double Clip Tempo", 2.0),
-    ),
-    (
-        HALVE_TEMPO,
-        "Halve Clip Tempo",
-        When::WarpedClip,
-        |ctx| scale_shown(ctx, "Halve Clip Tempo", 0.5),
-    ),
+    (DOUBLE_TEMPO, "Double Clip Tempo", When::WarpedClip, |ctx| {
+        scale_shown(ctx, "Double Clip Tempo", 2.0)
+    }),
+    (HALVE_TEMPO, "Halve Clip Tempo", When::WarpedClip, |ctx| {
+        scale_shown(ctx, "Halve Clip Tempo", 0.5)
+    }),
     (
         NUDGE_LEFT,
         "Nudge Warp Markers Left",
@@ -291,8 +285,9 @@ pub fn register(registry: &mut Registry) {
                     "frame {frame} isn't between the frames of the markers either side"
                 )));
             }
-            ctx.document
-                .transact("Move Audio Under Warp Marker", |tx| change_warp(tx, clip, new));
+            ctx.document.transact("Move Audio Under Warp Marker", |tx| {
+                change_warp(tx, clip, new)
+            });
             Ok(Value::None)
         },
     );
@@ -327,31 +322,46 @@ pub fn register(registry: &mut Registry) {
                 "The tempo of the file, in quarter notes a minute, from 5 to 999: from the \
                  first marker to the last, with more than one.",
             ),
+            Param::optional(
+                "keep_end",
+                Type::Bool,
+                "Keeps the clip's end where it is, so its start moves, as stretching it from \
+                 its start does: its start stays, without it.",
+            ),
             CLIP,
         ]),
         |ctx, args| {
             let clip = clip_arg(ctx, args)?;
             let bpm: f64 = args.get("bpm")?;
+            let keep_end = args.opt("keep_end")?.unwrap_or(false);
             if !(Warp::MIN_TEMPO..=Warp::MAX_TEMPO).contains(&bpm) {
                 return Err(CommandError::invalid("a clip's tempo goes from 5 to 999"));
             }
             let (_, a, warp) = warped(ctx.document.project(), clip)?;
             let rate = ctx.document.editor().sample_rate_of(&a.file);
             let factor = bpm / warp.clip_tempo(rate);
-            scale(ctx, "Set Clip Tempo", clip, factor)
+            scale(ctx, "Set Clip Tempo", clip, factor, keep_end)
         },
     );
 }
 
-/// Changes the clip's tempo by `factor`, as a transaction called `name`.
-/// The selected markers stay selected as they spread out.
-fn scale(ctx: &mut Context<'_>, name: &str, clip: ClipId, factor: f64) -> Result<Value, CommandError> {
+/// Changes the clip's tempo by `factor`, as a transaction called `name`,
+/// keeping its end where it is if `keep_end`, and else its start. The
+/// selected markers stay selected as they spread out.
+fn scale(
+    ctx: &mut Context<'_>,
+    name: &str,
+    clip: ClipId,
+    factor: f64,
+    keep_end: bool,
+) -> Result<Value, CommandError> {
     let (_, a, _) = warped(ctx.document.project(), clip)?;
     let about = a.offset.beats().unwrap_or(Beats::ZERO);
     let selection = shown_selection(ctx, clip, |beat| spread(beat, about, factor));
-    if !ctx.document.transact(name, |tx| scale_tempo(tx, clip, factor)) {
+    if !(ctx.document).transact(name, |tx| scale_tempo(tx, clip, factor, keep_end)) {
         return Err(CommandError::invalid(
-            "that would take the clip's tempo out of range, or two markers onto one tick",
+            "that would take the clip's tempo out of range, two markers onto one tick, or \
+             its start before the song's",
         ));
     }
     if let Some(selection) = selection {
@@ -365,7 +375,7 @@ fn scale(ctx: &mut Context<'_>, name: &str, clip: ClipId, factor: f64) -> Result
 fn scale_shown(ctx: &mut Context<'_>, name: &str, factor: f64) {
     if let Some(clip) = ctx.document.editor().sample_editor.clip {
         // Out of range, it stays as it is.
-        let _ = scale(ctx, name, clip, factor);
+        let _ = scale(ctx, name, clip, factor, false);
     }
 }
 
@@ -492,7 +502,9 @@ pub(crate) fn selected_range(project: &Project, editor: &Editor) -> Option<BeatR
 fn selected(ctx: &Context<'_>) -> Option<(ClipId, Vec<Beats>)> {
     let editor = ctx.document.editor();
     let shown = &editor.sample_editor;
-    let clip = shown.clip.filter(|_| editor.focus == Focus::SAMPLE_EDITOR)?;
+    let clip = shown
+        .clip
+        .filter(|_| editor.focus == Focus::SAMPLE_EDITOR)?;
     (!shown.markers.is_empty()).then(|| (clip, shown.markers.iter().copied().collect()))
 }
 
@@ -614,10 +626,11 @@ fn set_warp(tx: &mut Transaction<'_>, clip: ClipId, on: bool) {
 /// Makes the warped clip `clip`'s tempo `factor` times what it is, keeping
 /// the frame of its file that plays at its start, and the stretch of the
 /// file it plays: its markers spread out from its start by `factor`, and so
-/// do its curves, so they stay with its audio. Returns `false`, changing
-/// nothing, if that takes its tempo out of range or brings two markers onto
-/// one tick (see [`Warp::scale`]).
-fn scale_tempo(tx: &mut Transaction<'_>, clip: ClipId, factor: f64) -> bool {
+/// do its curves, so they stay with its audio. Its start stays where it is,
+/// or its end if `keep_end`. Returns `false`, changing nothing, if that
+/// takes its tempo out of range, brings two markers onto one tick (see
+/// [`Warp::scale`]) or puts its start before the song's.
+fn scale_tempo(tx: &mut Transaction<'_>, clip: ClipId, factor: f64, keep_end: bool) -> bool {
     let Ok((c, a, warp)) = warped(tx.project(), clip) else {
         return false;
     };
@@ -632,8 +645,17 @@ fn scale_tempo(tx: &mut Transaction<'_>, clip: ClipId, factor: f64) -> bool {
     }
     let last = warp.frame_at((offset + c.length).to_f64(), rate);
     let end = Beats::from_f64(new.beat_at(last, rate));
+    let length = at_least_a_tick(end - offset);
+    let start = match keep_end {
+        true => c.end() - length,
+        false => c.start,
+    };
+    if start < Beats::ZERO {
+        return false;
+    }
     let timing = Timing {
-        length: at_least_a_tick(end - offset),
+        start,
+        length,
         ..c.timing()
     };
     let curves: Vec<(ClipParam, Vec<Point>)> = (a.automation.iter())
@@ -827,7 +849,9 @@ mod tests {
     }
 
     fn open(setup: &mut Setup, clip: ClipId) {
-        setup.run_with(&OPEN, Args::new().with("clip", clip)).unwrap();
+        setup
+            .run_with(&OPEN, Args::new().with("clip", clip))
+            .unwrap();
     }
 
     /// Each clip on `track`, as (name, start, end) in beats, in order.
@@ -924,7 +948,9 @@ mod tests {
             length: beats(2.4),
             offset: Offset::Frames(AT_100),
         };
-        setup.document.transact("Trim", |tx| tx.set_clip_timing(clip, timing));
+        setup
+            .document
+            .transact("Trim", |tx| tx.set_clip_timing(clip, timing));
         open(&mut setup, clip);
         setup.run(&SET_WARP);
         assert_eq!(markers(&setup, clip), [(AT_100, 0.0)]);
@@ -945,7 +971,9 @@ mod tests {
             offset: Offset::Beats(Beats::ZERO),
             warp: Some(warp),
         };
-        setup.document.transact("Later", |tx| tx.set_clip_warping(clip, warping));
+        setup
+            .document
+            .transact("Later", |tx| tx.set_clip_warping(clip, warping));
         setup.run(&SET_WARP);
         // The three beats of the file it played at 100 BPM are 3.6 at 120.
         assert_eq!(audio_of(&setup, clip).offset, Offset::Frames(0));
@@ -998,7 +1026,9 @@ mod tests {
         // halfway through the loop.
         let gain = ParamAddress::Clip(clip, ClipParam::Gain);
         let points = vec![Point::new(Beats::ZERO, 0.5), Point::new(beats(1.2), 1.0)];
-        setup.document.transact("Curve", |tx| tx.set_lane_points(gain, points));
+        setup
+            .document
+            .transact("Curve", |tx| tx.set_lane_points(gain, points));
         open(&mut setup, clip);
         setup.run(&SET_WARP);
         // Warped, it's in beats: halfway is beat 2 at 100 BPM.
@@ -1019,7 +1049,10 @@ mod tests {
         setup.run(&DOUBLE_TEMPO);
         assert_eq!(warp_of(&setup, clip).tempo, 200.0);
         let after = row("After", 12.0, 13.0);
-        assert_eq!(clips(&setup, drums), [row("Loop", 4.0, 12.0), after.clone()]);
+        assert_eq!(
+            clips(&setup, drums),
+            [row("Loop", 4.0, 12.0), after.clone()]
+        );
         setup.run(&HALVE_TEMPO);
         assert_eq!(warp_of(&setup, clip).tempo, 100.0);
         assert_eq!(clips(&setup, drums), [row("Loop", 4.0, 8.0), after]);
@@ -1047,6 +1080,26 @@ mod tests {
         let tempo = warp_of(&setup, clip).clip_tempo(RATE);
         assert!((tempo - 999.0).abs() < 1e-3, "{tempo}");
         assert_eq!(setup.committed_names(), ["Set Clip Tempo"]);
+    }
+
+    #[test]
+    fn stretching_from_the_start_keeps_the_end() {
+        let (mut setup, drums, clip) = warped_song();
+        let keeping_the_end = |bpm: f64| Args::new().with("bpm", bpm).with("keep_end", true);
+        // At 50 BPM, the loop's four beats play over two, ending where they
+        // did, from the same frame of the file.
+        setup.run_with(&SET_TEMPO, keeping_the_end(50.0)).unwrap();
+        let after = row("After", 9.0, 13.0);
+        assert_eq!(clips(&setup, drums), [row("Loop", 6.0, 8.0), after.clone()]);
+        assert_eq!(audio_of(&setup, clip).offset, Offset::Beats(Beats::ZERO));
+        // Not from before the song's start.
+        assert!(setup.run_with(&SET_TEMPO, keeping_the_end(250.0)).is_err());
+        setup.run_with(&SET_TEMPO, keeping_the_end(150.0)).unwrap();
+        assert_eq!(clips(&setup, drums), [row("Loop", 2.0, 8.0), after]);
+        assert_eq!(
+            setup.committed_names(),
+            ["Set Clip Tempo", "Set Clip Tempo"]
+        );
     }
 
     #[test]
@@ -1114,7 +1167,9 @@ mod tests {
             let markers = Args::new().with("markers", list(beats));
             markers.with("toggle", true)
         };
-        setup.run_with(&SELECT_MARKERS, toggle(&[2.0, 0.0])).unwrap();
+        setup
+            .run_with(&SELECT_MARKERS, toggle(&[2.0, 0.0]))
+            .unwrap();
         assert_eq!(selected(&setup), [0.0, 1.0, 3.0]);
         assert!(setup.applies(&DELETE_MARKERS));
         setup.run(&edit::DELETE);
@@ -1139,7 +1194,10 @@ mod tests {
         // Picking a beat with no marker is a mistake.
         let missing = Args::new().with("markers", list(&[0.5]));
         let error = setup.run_with(&SELECT_MARKERS, missing).unwrap_err();
-        assert!(error.to_string().contains("no warp marker at beat 0.5"), "{error}");
+        assert!(
+            error.to_string().contains("no warp marker at beat 0.5"),
+            "{error}"
+        );
     }
 
     #[test]

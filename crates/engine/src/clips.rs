@@ -97,7 +97,10 @@ enum Time {
     /// Warped: the clip's own time is the song's beats plus `shift`, and
     /// each segment plays at its own speed, from its marker. A clip
     /// without a source has none.
-    Warped { shift: Beats, segments: Vec<Segment> },
+    Warped {
+        shift: Beats,
+        segments: Vec<Segment>,
+    },
 }
 
 /// A run of song frames over which a clip reads its file at one speed: all
@@ -135,7 +138,9 @@ impl Piece {
 #[derive(Debug, Clone, Copy)]
 enum Reading {
     /// Sample for sample: song frame `n` plays the file's frame `n + by`.
-    Copy { by: i64 },
+    Copy {
+        by: i64,
+    },
     Resample(Resampler),
 }
 
@@ -167,13 +172,17 @@ impl Placed {
         // count as after it, as `TempoMap::beats_at` counts them.
         let after = |at: Beats| tempo.sample_at(at, rate).ceil() as i64;
         let tempos = tempo.tempos();
-        let mut t = tempos.partition_point(|c| after(c.at) <= from).saturating_sub(1);
+        let mut t = tempos
+            .partition_point(|c| after(c.at) <= from)
+            .saturating_sub(1);
         let mut s = segments[1..].partition_point(|g| after(g.beat - shift) <= from);
         let mut frame = from;
         while frame < to {
             let (change, segment) = (tempos[t], segments[s]);
             let tempo_to = tempos.get(t + 1).map_or(i64::MAX, |c| after(c.at));
-            let segment_to = segments.get(s + 1).map_or(i64::MAX, |g| after(g.beat - shift));
+            let segment_to = segments
+                .get(s + 1)
+                .map_or(i64::MAX, |g| after(g.beat - shift));
             // The first segment plays the file before its marker too.
             let segment_from = if s == 0 {
                 i64::MIN
@@ -410,7 +419,9 @@ impl AudioClips {
                             let input = &input[c.min(channels - 1) * frames..][..frames];
                             let out = &mut output.channel_mut(c)[at..at + frames];
                             match steady {
-                                Some(g) => out.iter_mut().zip(input).for_each(|(o, &x)| *o += x * g),
+                                Some(g) => {
+                                    out.iter_mut().zip(input).for_each(|(o, &x)| *o += x * g)
+                                }
                                 None => {
                                     let samples = out.iter_mut().zip(input).zip(gains.iter());
                                     samples.for_each(|((o, &x), &g)| *o += x * g);
@@ -1813,7 +1824,10 @@ mod tests {
                 Reading::Resample(r) => format!("resample {:.3}", r.step()),
             });
         });
-        assert_eq!(readings, ["resample 2.000", "copy -33000", "resample 0.333"]);
+        assert_eq!(
+            readings,
+            ["resample 2.000", "copy -33000", "resample 0.333"]
+        );
     }
 
     #[test]
@@ -1835,7 +1849,10 @@ mod tests {
         assert_eq!(plays(&player, &tempo, 96_000), (72_000.0, 0.5));
         // Sample for sample until the change, then at half speed.
         let [left, _] = audio_at(&tempo, player, 0, 100_000, 64);
-        assert_eq!(left[..48_000], (0..48_000).map(|i| i as f32).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            left[..48_000],
+            (0..48_000).map(|i| i as f32).collect::<Vec<_>>()[..]
+        );
         for (i, &s) in left.iter().enumerate().skip(48_100).step_by(997) {
             let expected = 48_000.0 + (i - 48_000) as f32 / 2.0;
             assert!((s - expected).abs() < 0.5, "frame {i}: {s}");
@@ -1903,7 +1920,12 @@ mod tests {
         take.gain = 0.5;
         take.set_lane(ClipParam::Gain, rising.clone());
         let clip = audio_clip(0.0, 3.0, take);
-        let [out, _] = audio(AudioClips::new().with_clip(&clip, Some(dc())), 0, 48_000, 64);
+        let [out, _] = audio(
+            AudioClips::new().with_clip(&clip, Some(dc())),
+            0,
+            48_000,
+            64,
+        );
         assert_eq!(out[0], halfway);
         assert_eq!(out[24_000..], [1.0; 24_000]);
         // Warped, it's in beats: at 60 BPM, a beat of the clip's own time
@@ -1912,7 +1934,12 @@ mod tests {
         let mut loop_ = AudioClip::new("dc.wav");
         loop_.set_lane(ClipParam::Gain, rising);
         let clip = warp(audio_clip(0.0, 3.0, loop_), &[(0, 0.0)], 60.0, 0.0);
-        let [out, _] = audio(AudioClips::new().with_clip(&clip, Some(dc())), 0, 72_000, 64);
+        let [out, _] = audio(
+            AudioClips::new().with_clip(&clip, Some(dc())),
+            0,
+            72_000,
+            64,
+        );
         assert_eq!(out[0], 0.0);
         assert!((out[12_000] - halfway).abs() < 1e-6, "{}", out[12_000]);
         assert!(out[24_000..].iter().all(|&s| (s - 1.0).abs() < 1e-6));

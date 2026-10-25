@@ -10,10 +10,10 @@ use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Steps,
-    Value, arrange, controllers, edit, locator, notes, options, take, track, transport, view,
+    Value, arrange, controllers, edit, locator, notes, options, take, track, transport, view, warp,
     workspace,
 };
-use musicable_model::clip::ClipId;
+use musicable_model::clip::{ClipContent, ClipId};
 use musicable_model::native::NativeKind;
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, DeviceId, Project, TrackId};
@@ -327,9 +327,9 @@ enum WorkspaceBox {
     Delete,
 }
 
-/// What the tabs of the devices and the piano roll follow: selecting the
-/// MIDI clip the piano roll shows brings it forward, and selecting another
-/// track the devices.
+/// What the tabs of the devices and the clip editors follow: selecting the
+/// clip the piano roll or the Sample Editor shows brings it forward, and
+/// selecting another track the devices.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Followed {
     /// The editor that fits the clip selected or opened last, the clip it
@@ -1485,6 +1485,11 @@ fn take_keys(
 pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
     let project = view.project;
     let editor = view.editor;
+    let shown = (editor.sample_editor.clip).and_then(|id| project.find_clip(id));
+    let warped = shown.is_some_and(|(_, clip)| match &clip.content {
+        ClipContent::Audio(audio) => audio.is_warped(),
+        ClipContent::Midi(_) => false,
+    });
     let toggles = [
         (transport::RECORD, view.playback.record),
         (transport::TOGGLE_PUNCH_IN, project.punch_in),
@@ -1496,6 +1501,7 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         (view::TRIPLET_GRID, editor.grid.triplet),
         (view::FIXED_GRID, editor.grid.fixed.is_some()),
         (notes::TOGGLE_DRAW, editor.piano_roll.draw),
+        (warp::SET_WARP, warped),
         (
             controllers::SHOW_VELOCITIES,
             editor.piano_roll.lane == Lane::Velocity,
@@ -1913,10 +1919,15 @@ mod tests {
             tab,
             egui::pos2(lanes.right() - 10.0, lanes.center().y),
         );
-        let devices = tabs(&[DEVICES, PIANO_ROLL], DEVICES);
+        let devices = tabs(&[DEVICES, PIANO_ROLL, SAMPLE_EDITOR], DEVICES);
         let beside = across(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]);
         let browser = tabs(&[BROWSER, HISTORY], BROWSER);
-        let hidden = vec![BROWSER.into(), PIANO_ROLL.into(), HISTORY.into()];
+        let hidden = vec![
+            BROWSER.into(),
+            PIANO_ROLL.into(),
+            SAMPLE_EDITOR.into(),
+            HISTORY.into(),
+        ];
         let expected = WindowLayout {
             hidden: hidden.clone(),
             layout: across(vec![browser.clone(), down(vec![beside, devices])]),
@@ -1935,7 +1946,7 @@ mod tests {
                 browser,
                 down(vec![
                     Layout::panel(ARRANGEMENT),
-                    tabs(&[DEVICES, PIANO_ROLL, MIXER], MIXER),
+                    tabs(&[DEVICES, PIANO_ROLL, SAMPLE_EDITOR, MIXER], MIXER),
                 ]),
             ]),
             ..WindowLayout::default()
@@ -2003,7 +2014,7 @@ mod tests {
         assert!(harness.query_by_label("Mixer panel").is_none());
         assert_eq!(
             layout(&harness).hidden,
-            [BROWSER, MIXER, PIANO_ROLL, HISTORY]
+            [BROWSER, MIXER, PIANO_ROLL, SAMPLE_EDITOR, HISTORY]
         );
         // The arrangement's tab has no close button.
         let tab = harness.get_by_label("Arrangement panel").rect();
@@ -2042,7 +2053,10 @@ mod tests {
         };
         select(&mut harness, keys, &[id]);
         assert!(!harness.state().shell.panel_shown(PIANO_ROLL));
-        harness.state_mut().shell.switch_devices_clip_editor(PIANO_ROLL);
+        harness
+            .state_mut()
+            .shell
+            .switch_devices_clip_editor(PIANO_ROLL);
         select(&mut harness, drums, &[]);
         assert!(harness.state().shell.panel_shown(DEVICES));
         select(&mut harness, keys, &[id]);
@@ -2072,7 +2086,10 @@ mod tests {
         assert!(!in_sight(&harness));
 
         // Behind the piano roll, the devices come forward, scrolled to it.
-        harness.state_mut().shell.switch_devices_clip_editor(PIANO_ROLL);
+        harness
+            .state_mut()
+            .shell
+            .switch_devices_clip_editor(PIANO_ROLL);
         harness.run();
         assert!(!harness.state().shell.panel_shown(DEVICES));
         harness.state_mut().shell.show_device(synth);
@@ -2092,12 +2109,15 @@ mod tests {
     fn workspaces_lay_the_panels_out() {
         let mut harness = harness(Project::new());
         let window = WindowLayout {
-            hidden: vec![MIXER.into(), HISTORY.into()],
+            hidden: vec![MIXER.into(), SAMPLE_EDITOR.into(), HISTORY.into()],
             layout: across(vec![
                 down(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]),
                 Layout {
                     size: Some(300),
-                    ..tabs(&[BROWSER, DEVICES, PIANO_ROLL, HISTORY], DEVICES)
+                    ..tabs(
+                        &[BROWSER, DEVICES, PIANO_ROLL, SAMPLE_EDITOR, HISTORY],
+                        DEVICES,
+                    )
                 },
             ]),
             ..WindowLayout::default()
@@ -2132,13 +2152,19 @@ mod tests {
         let ticked = |harness: &egui_kittest::Harness<'_, crate::testing::State>, label| {
             harness.get_by_label(label).accesskit_node().toggled()
         };
+        let piano_roll: Vec<_> = (harness.get_all_by_label("Piano Roll"))
+            .filter_map(|node| node.accesskit_node().toggled())
+            .collect();
+        assert_eq!(piano_roll, [Toggled::True]);
+        // The clip editor is the piano roll until an audio clip is shown.
         assert_eq!(
-            ticked(&harness, "Piano Roll Ctrl+Alt+3"),
+            ticked(&harness, "Clip Editor Ctrl+Alt+3"),
             Some(Toggled::True)
         );
+        assert_eq!(ticked(&harness, "Sample Editor"), Some(Toggled::False));
         assert_eq!(ticked(&harness, "Devices Ctrl+Alt+L"), Some(Toggled::False));
         harness
-            .get_by_label("Switch Devices and Piano Roll F12")
+            .get_by_label("Switch Devices and Clip Editor F12")
             .click();
         harness.run();
         assert_eq!(

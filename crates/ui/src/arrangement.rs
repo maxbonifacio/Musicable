@@ -43,6 +43,7 @@ use musicable_model::automation::Point;
 use musicable_model::clip::{Clip, ClipContent, ClipId};
 use musicable_model::param::{ParamAddress, ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::Warp;
 use musicable_model::{Chain, DeviceKind, LocatorId, Project, TakeId, TrackId, TrackKind};
 
 use crate::browser::{Destination, Dragged};
@@ -298,6 +299,14 @@ enum Plan {
         clip: ClipId,
         side: Side,
         at: Beats,
+    },
+    /// Stretches a warped clip, so its edge goes to `at`, at the tempo
+    /// that gives it.
+    Stretch {
+        clip: ClipId,
+        side: Side,
+        at: Beats,
+        bpm: f64,
     },
     Fade {
         clip: ClipId,
@@ -1285,6 +1294,75 @@ impl Scene<'_> {
     }
 
     /// What `drag` would do if it ended now.
+    /// `at`, for the clip `c`'s `side`, kept where the clip is never
+    /// narrower than the room to grab its edges, and starts in the song.
+    fn room(&self, c: &Clip, side: Side, at: Beats) -> Beats {
+        let viewport = self.layout.viewport;
+        let least = viewport
+            .beats_in(self.theme.edge_grab)
+            .max(Beats::from_ticks(1));
+        match side {
+            Side::Start => at.min(c.end() - least).max(Beats::ZERO),
+            Side::End => at.max(c.start + least),
+        }
+    }
+
+    /// Trimming the clip `clip`'s `side` by `moved`, on the grid unless
+    /// `free`, as far as trimming takes it: an audio clip stops where its
+    /// file does.
+    fn trim(&self, clip: ClipId, side: Side, moved: Beats, free: bool) -> Option<Plan> {
+        let project = self.project();
+        let (_, c) = find(project, clip)?;
+        let edge = match side {
+            Side::Start => c.start,
+            Side::End => c.end(),
+        };
+        let at = self.room(c, side, self.snap(edge + moved, free));
+        let editor = self.editor();
+        let at = match side {
+            Side::Start => arrange::trimmed(project, editor, c, Some(at), None)?.start,
+            Side::End => arrange::trimmed(project, editor, c, None, Some(at))?.end(),
+        };
+        (at != edge).then_some(Plan::Trim { clip, side, at })
+    }
+
+    /// Stretching the warped clip `clip`'s `side` by `moved`, on the grid:
+    /// its tempo changes so the audio it plays fills it, as far as its
+    /// tempo's range goes. A clip that isn't warped trims instead.
+    fn stretch(&self, clip: ClipId, side: Side, moved: Beats) -> Option<Plan> {
+        let (_, c) = find(self.project(), clip)?;
+        let warped = match &c.content {
+            ClipContent::Audio(audio) => audio.warp.as_ref().map(|warp| (audio, warp)),
+            ClipContent::Midi(_) => None,
+        };
+        let Some((audio, warp)) = warped else {
+            return self.trim(clip, side, moved, false);
+        };
+        let edge = match side {
+            Side::Start => c.start,
+            Side::End => c.end(),
+        };
+        let at = self.room(c, side, self.snap(edge + moved, false));
+        let length = match side {
+            Side::Start => c.end() - at,
+            Side::End => at - c.start,
+        };
+        let tempo = warp.clip_tempo(self.editor().sample_rate_of(&audio.file));
+        let factor = length.to_f64() / c.length.to_f64();
+        let bpm = (tempo * factor).clamp(Warp::MIN_TEMPO, Warp::MAX_TEMPO);
+        let length = Beats::from_f64(c.length.to_f64() * bpm / tempo);
+        let at = match side {
+            Side::Start => c.end() - length,
+            Side::End => c.start + length,
+        };
+        (at != edge).then_some(Plan::Stretch {
+            clip,
+            side,
+            at,
+            bpm,
+        })
+    }
+
     fn plan(&self, drag: &Drag) -> Option<Plan> {
         let project = self.project();
         let layout = &self.layout;
@@ -1330,31 +1408,15 @@ impl Scene<'_> {
                     part: Part::Edge(side),
                     ..
                 },
-            ) => {
-                let (_, c) = find(project, clip)?;
-                let edge = match side {
-                    Side::Start => c.start,
-                    Side::End => c.end(),
-                };
-                let at = self.snap(edge + moved, drag.action == MouseAction::TrimFree);
-                // A clip is never narrower than the room to grab its edges.
-                let least = layout
-                    .viewport
-                    .beats_in(self.theme.edge_grab)
-                    .max(Beats::from_ticks(1));
-                let at = match side {
-                    Side::Start => at.min(c.end() - least).max(Beats::ZERO),
-                    Side::End => at.max(c.start + least),
-                };
-                // As far as trimming takes it: an audio clip stops where its
-                // file does.
-                let editor = self.editor();
-                let at = match side {
-                    Side::Start => arrange::trimmed(project, editor, c, Some(at), None)?.start,
-                    Side::End => arrange::trimmed(project, editor, c, None, Some(at))?.end(),
-                };
-                (at != edge).then_some(Plan::Trim { clip, side, at })
-            }
+            ) => self.trim(clip, side, moved, drag.action == MouseAction::TrimFree),
+            (
+                MouseAction::Stretch,
+                Hit::Clip {
+                    clip,
+                    part: Part::Edge(side),
+                    ..
+                },
+            ) => self.stretch(clip, side, moved),
             (
                 MouseAction::Fade,
                 Hit::Clip {
@@ -1613,6 +1675,15 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
                 arrange::TRIM,
                 Args::new().with("clip", *clip).with(edge, *at),
             );
+        }
+        Plan::Stretch {
+            clip, side, bpm, ..
+        } => {
+            let args = Args::new()
+                .with("bpm", *bpm)
+                .with("keep_end", *side == Side::Start)
+                .with("clip", *clip);
+            run(actions, warp::SET_TEMPO, args);
         }
         Plan::Fade { clip, side, length } => {
             let fade = match side {
@@ -2362,9 +2433,15 @@ impl Arrangement {
     /// Shows what a press there would do: the edges trim, title bars move.
     fn cursor(&self, ui: &Ui, scene: &Scene<'_>, plan: Option<&Plan>) {
         let icon = |hit: Hit, action: Option<MouseAction>| match (hit, action) {
-            (_, Some(MouseAction::Trim | MouseAction::TrimFree | MouseAction::Fade)) => {
-                Some(CursorIcon::ResizeHorizontal)
-            }
+            (
+                _,
+                Some(
+                    MouseAction::Trim
+                    | MouseAction::TrimFree
+                    | MouseAction::Stretch
+                    | MouseAction::Fade,
+                ),
+            ) => Some(CursorIcon::ResizeHorizontal),
             (_, Some(MouseAction::ResizeLoop)) => Some(CursorIcon::ResizeHorizontal),
             (_, Some(MouseAction::ResizeTrack)) => Some(CursorIcon::ResizeVertical),
             (_, Some(MouseAction::Copy)) => Some(CursorIcon::Copy),

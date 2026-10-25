@@ -150,7 +150,8 @@ impl Clip {
             Offset::Beats(offset) => (offset + (at - self.start)).to_f64(),
             Offset::Frames(offset) => {
                 let rate = f64::from(sample_rate);
-                let since = tempo.sample_at(at, sample_rate) - tempo.sample_at(self.start, sample_rate);
+                let since =
+                    tempo.sample_at(at, sample_rate) - tempo.sample_at(self.start, sample_rate);
                 (offset as f64 + since) / rate
             }
         }

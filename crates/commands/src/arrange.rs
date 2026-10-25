@@ -660,7 +660,9 @@ fn timing_over(
         ClipContent::Audio(audio) => {
             let rate = editor.sample_rate_of(&audio.file);
             if let Some(file) = editor.files.get(&audio.file) {
-                range.end = range.end.min(file_end(tempo, rate, clip, audio, file.frames));
+                range.end = range
+                    .end
+                    .min(file_end(tempo, rate, clip, audio, file.frames));
             }
             rate
         }

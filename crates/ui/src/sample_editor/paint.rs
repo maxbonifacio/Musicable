@@ -197,7 +197,11 @@ fn markers(painter: &Painter, scene: &Scene<'_>, audio: &AudioClip) {
             false => theme.warp_marker,
         };
         let x = painter.round_to_pixel_center(x);
-        painter.vline(x, handles.bottom()..=layout.wave.bottom(), Stroke::new(1.0, colour));
+        painter.vline(
+            x,
+            handles.bottom()..=layout.wave.bottom(),
+            Stroke::new(1.0, colour),
+        );
         // A tag pointing down at the line.
         let (top, bottom) = (handles.top() + 1.0, handles.bottom());
         let shoulder = bottom - half.min(handles.height() / 2.0);
@@ -228,7 +232,7 @@ pub(super) fn time(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let seconds = |x: f32| scene.frame_at(audio, x) / rate;
     let (first, last) = (seconds(time.left()).max(0.0), seconds(time.right()));
     let last = frames(scene).map_or(last, |frames| last.min(frames as f64 / rate));
-    if !(last > first) {
+    if last.is_nan() || last <= first {
         return;
     }
     // From how far apart the seconds are across what's in sight.
@@ -252,7 +256,13 @@ pub(super) fn time(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         if x >= label_end {
             let pos = pos2(x + theme.padding / 2.0, time.bottom());
             let label = time_label(at, step);
-            let drawn = painter.text(pos, Align2::LEFT_BOTTOM, label, font.clone(), theme.ruler_text);
+            let drawn = painter.text(
+                pos,
+                Align2::LEFT_BOTTOM,
+                label,
+                font.clone(),
+                theme.ruler_text,
+            );
             label_end = drawn.right() + theme.padding;
         }
         n += 1;
