@@ -1,0 +1,695 @@
+//! The tools as agents use them: over an in-memory connection, and through
+//! the bridge and a real pipe, with a window answering their calls on the
+//! test's thread, as the app's window does.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+use musicable_commands::{
+    Context, Document, Editor, Keymap, NoLibrary, Registry, Request, Steps, Transport,
+};
+use musicable_model::Project;
+use musicable_model::time::Beats;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
+};
+use rmcp::service::RunningService;
+use rmcp::{RoleClient, ServiceExt};
+use serde_json::{Value as Json, json};
+use tokio::io::duplex;
+use tokio::runtime::Runtime;
+
+use crate::bridge::{self, Bridge};
+use crate::pipe::Address;
+use crate::tools::{self, Agents, Link, Tools};
+use crate::{Call, Host, Reply, Run, Window, answer, host};
+
+/// A transport that plays along, and does nothing else.
+#[derive(Default)]
+struct StubTransport {
+    playing: bool,
+    recording: bool,
+    playhead: Beats,
+}
+
+impl Transport for StubTransport {
+    fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    fn play(&mut self) {
+        self.playing = true;
+    }
+
+    fn stop(&mut self) {
+        self.playing = false;
+        self.recording = false;
+    }
+
+    fn locate(&mut self, at: Beats) {
+        self.playhead = at;
+    }
+
+    fn playhead(&self) -> Beats {
+        self.playhead
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+    }
+}
+
+/// A window of a document, which runs agents' commands as the app's does,
+/// and keeps what they ask the app for.
+struct TestWindow {
+    commands: Registry,
+    keymap: Keymap,
+    document: Document,
+    transport: StubTransport,
+    requests: Vec<Request>,
+    /// The agents whose calls it ran, in turn.
+    agents: Vec<String>,
+}
+
+impl TestWindow {
+    fn new(project: Project) -> Self {
+        let mut commands = Registry::new();
+        musicable_commands::register_all(&mut commands);
+        Self {
+            commands,
+            keymap: Keymap::default_keymap(),
+            document: Document::new(project),
+            transport: StubTransport::default(),
+            requests: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+}
+
+impl Window for TestWindow {
+    fn commands(&self) -> &Registry {
+        &self.commands
+    }
+
+    fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    fn project(&self) -> &Project {
+        self.document.project()
+    }
+
+    fn editor(&self) -> &Editor {
+        self.document.editor()
+    }
+
+    fn history(&self) -> Steps<'_> {
+        self.document.steps()
+    }
+
+    fn file(&self) -> Option<&Path> {
+        None
+    }
+
+    fn is_modified(&self) -> bool {
+        self.document.is_modified()
+    }
+
+    fn run(&mut self, run: Run, reply: Reply) {
+        self.agents.push(reply.agent().to_owned());
+        let mut context = Context {
+            document: &mut self.document,
+            transport: &mut self.transport,
+            requests: &mut self.requests,
+            library: &mut NoLibrary,
+        };
+        match run {
+            Run::One(id, args) => {
+                let result = self.commands.run_with(&id, &args, &mut context);
+                let undo = made_step(&mut self.document);
+                reply.ran(result, undo.as_deref());
+            }
+            Run::Batch(name, commands) => {
+                let result = self.commands.run_batch(&name, &commands, &mut context);
+                let undo = made_step(&mut self.document);
+                reply.ran_batch(result, undo.as_deref());
+            }
+        }
+    }
+}
+
+/// The name of the step the commands just run made, if they made one.
+fn made_step(document: &mut Document) -> Option<String> {
+    let made = !document.take_committed().is_empty();
+    made.then(|| document.undo_name().map(str::to_owned))
+        .flatten()
+}
+
+/// An agent's client.
+type Client = RunningService<RoleClient, ClientConfig>;
+
+/// A client calling itself `name`.
+fn client_called(name: &str) -> ClientConfig {
+    ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new(name, "1.0"),
+    )
+}
+
+/// An agent connected to the tools, and the window that answers its calls.
+struct Rig {
+    runtime: Runtime,
+    client: Client,
+    calls: Receiver<Call>,
+    window: TestWindow,
+}
+
+impl Rig {
+    /// An agent connected to the tools over an in-memory stream, with a
+    /// window of `project`.
+    fn new(project: Project) -> Self {
+        let runtime = runtime();
+        let window = TestWindow::new(project);
+        let (sender, calls) = mpsc::channel();
+        let tools = Tools {
+            link: Arc::new(Link {
+                calls: sender,
+                wake: Arc::new(|| {}),
+                commands: tools::commands(&window.commands),
+            }),
+            connection: 1,
+            agents: Agents::default(),
+        };
+        let (server, client) = duplex(1 << 16);
+        runtime.spawn(host::serve(server, tools));
+        let client =
+            (runtime.block_on(client_called("tests").serve(client))).expect("the agent connects");
+        Self {
+            runtime,
+            client,
+            calls,
+            window,
+        }
+    }
+
+    /// Calls the tool `name` with `arguments`, answering the window's calls
+    /// meanwhile. Gives back the JSON the tool answered, or why it failed.
+    fn call(&mut self, name: &str, arguments: Json) -> Result<Json, String> {
+        let Rig {
+            runtime,
+            client,
+            calls,
+            window,
+        } = self;
+        let result = call(runtime, client, name, arguments, || {
+            while let Ok(call) = calls.try_recv() {
+                answer(call, window);
+            }
+        });
+        read(result)
+    }
+}
+
+fn runtime() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the runtime starts")
+}
+
+/// Calls the tool `name` with `arguments` through `client`, calling `pump`
+/// meanwhile, as a window's frames come.
+fn call(
+    runtime: &Runtime,
+    client: &Client,
+    name: &str,
+    arguments: Json,
+    mut pump: impl FnMut(),
+) -> CallToolResult {
+    let Json::Object(arguments) = arguments else {
+        panic!("a tool's arguments are an object");
+    };
+    let request = CallToolRequestParams::new(name.to_owned()).with_arguments(arguments);
+    runtime.block_on(async {
+        let mut call = pin!(client.call_tool(request));
+        for _ in 0..5000 {
+            match tokio::time::timeout(Duration::from_millis(2), call.as_mut()).await {
+                Ok(result) => return result.expect("the call gets an answer"),
+                Err(_) => pump(),
+            }
+        }
+        panic!("the call to {name} got no answer");
+    })
+}
+
+/// What a tool answered, as JSON, or why it failed.
+fn read(result: CallToolResult) -> Result<Json, String> {
+    let text = (result.content.first())
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.clone())
+        .expect("the result is text");
+    match result.is_error {
+        Some(true) => Err(text),
+        _ => Ok(serde_json::from_str(&text).expect("the result is JSON")),
+    }
+}
+
+fn ids(json: &Json) -> Vec<&str> {
+    let commands = json["commands"].as_array().expect("commands are a list");
+    commands.iter().map(|c| c["id"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn agents_see_the_tools_and_how_to_use_them() {
+    let rig = Rig::new(Project::new());
+    let tools = rig.runtime.block_on(rig.client.list_all_tools()).unwrap();
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        [
+            "list_commands",
+            "describe_command",
+            "run_command",
+            "run_commands",
+            "get_project",
+            "get_clip",
+            "get_device",
+            "get_automation",
+            "get_editor",
+            "get_history",
+        ]
+    );
+    let server = rig
+        .client
+        .peer_info()
+        .expect("the server introduced itself");
+    let info = server
+        .server_info
+        .as_ref()
+        .expect("the server named itself");
+    assert_eq!(info.name, "musicable");
+    let instructions = server.instructions.as_deref().unwrap_or_default();
+    assert!(instructions.contains("undo"), "{instructions}");
+}
+
+#[test]
+fn commands_are_listed_and_described() {
+    let mut rig = Rig::new(Project::new());
+    let all = rig.call("list_commands", json!({})).unwrap();
+    let all = ids(&all);
+    assert!(all.len() > 150, "{} commands", all.len());
+    // Those that only show a window, or ask the user, are the user's.
+    for theirs in [
+        "file.quit",
+        "options.settings",
+        "view.command_palette",
+        "edit.rename",
+    ] {
+        assert!(!all.contains(&theirs), "{theirs} is listed");
+    }
+
+    let tempo = rig
+        .call("list_commands", json!({"filter": "TEMPO"}))
+        .unwrap();
+    let set_tempo = (tempo["commands"].as_array().unwrap().iter())
+        .find(|command| command["id"] == "transport.set_tempo")
+        .expect("a filter finds commands by id");
+    assert_eq!(set_tempo["title"], "Set Tempo");
+    assert_eq!(
+        set_tempo["args"],
+        json!([
+            {"name": "bpm", "type": "a number"},
+            {"name": "at", "type": "a number of beats", "optional": true},
+        ])
+    );
+    // It needs an argument, so it doesn't say whether it applies without.
+    assert_eq!(set_tempo.get("applies"), None);
+
+    let copy = rig
+        .call("list_commands", json!({"filter": "edit.copy"}))
+        .unwrap();
+    assert_eq!(copy["commands"][0]["applies"], false);
+    assert_eq!(copy["commands"][0]["keys"], json!(["Ctrl+C"]));
+
+    let add = rig
+        .call("describe_command", json!({"id": "notes.add"}))
+        .unwrap();
+    assert_eq!(add["title"], "Add Note");
+    assert_eq!(add["input_schema"]["required"], json!(["start", "key"]));
+    assert_eq!(add["input_schema"]["properties"]["key"]["type"], "integer");
+    let save_as = rig
+        .call("describe_command", json!({"id": "file.save_as"}))
+        .unwrap();
+    assert_eq!(save_as["alone"], true);
+    assert_eq!(save_as["input_schema"]["required"], json!(["file"]));
+
+    assert_eq!(
+        rig.call("describe_command", json!({"id": "file.quit"})),
+        Err("Agents can't run file.quit: it's left to the user.".into())
+    );
+    assert_eq!(
+        rig.call("describe_command", json!({"id": "notes.dance"})),
+        Err("There's no command called notes.dance: list_commands lists them.".into())
+    );
+}
+
+#[test]
+fn commands_run_as_a_menu_runs_them_and_can_be_undone() {
+    let mut rig = Rig::new(Project::new());
+    let track = rig
+        .call("run_command", json!({"id": "track.new_midi_track"}))
+        .unwrap();
+    assert_eq!(track, json!({"result": 0, "undo": "New MIDI Track"}));
+    let clip = rig
+        .call(
+            "run_command",
+            json!({"id": "clip.insert_midi_clip", "args": {"track": 0, "start": 4, "end": 8}}),
+        )
+        .unwrap();
+    assert_eq!(clip, json!({"result": [0], "undo": "Insert MIDI Clip"}));
+    let note = rig
+        .call(
+            "run_command",
+            json!({"id": "notes.add", "args": {"clip": 0, "start": 0.5, "key": 36, "velocity": 0.8}}),
+        )
+        .unwrap();
+    assert_eq!(note, json!({"result": 0, "undo": "Add Note"}));
+    assert_eq!(rig.window.agents, ["tests", "tests", "tests"]);
+
+    // Changing only what's selected makes no step.
+    let selected = rig
+        .call(
+            "run_command",
+            json!({"id": "edit.select_clips", "args": {"clips": [0]}}),
+        )
+        .unwrap();
+    assert_eq!(selected, json!({"result": null}));
+
+    let history = rig.call("get_history", json!({})).unwrap();
+    assert_eq!(
+        history,
+        json!({
+            "steps": ["New MIDI Track", "Insert MIDI Clip", "Add Note"],
+            "done": 3,
+            "undo": "Add Note",
+            "redo": null,
+        })
+    );
+    let undo = rig.call("run_command", json!({"id": "edit.undo"})).unwrap();
+    assert_eq!(undo["result"], Json::Null);
+    let history = rig.call("get_history", json!({})).unwrap();
+    assert_eq!(history["done"], 2);
+    assert_eq!(history["redo"], "Add Note");
+    let clip = rig.call("get_clip", json!({"clip": 0})).unwrap();
+    assert_eq!(clip["notes"], json!([]));
+}
+
+#[test]
+fn a_batch_is_one_step_to_undo_or_none_at_all() {
+    let mut rig = Rig::new(Project::new());
+    let started = rig
+        .call(
+            "run_commands",
+            json!({"name": "Start a Beat", "commands": [
+                {"id": "transport.set_tempo", "args": {"bpm": 92}},
+                {"id": "track.new_midi_track"},
+                {"id": "locator.add", "args": {"at": 16, "name": "Chorus"}},
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(
+        started,
+        json!({"results": [null, 0, 0], "undo": "Start a Beat"})
+    );
+    let project = rig.call("get_project", json!({})).unwrap();
+    assert_eq!(project["tempo"], json!([{"at": 0, "bpm": 92.0}]));
+    assert_eq!(project["tracks"][0]["kind"], "midi");
+    assert_eq!(
+        project["locators"],
+        json!([{"id": 0, "name": "Chorus", "at": 16}])
+    );
+    let history = rig.call("get_history", json!({})).unwrap();
+    assert_eq!(history["steps"], json!(["Start a Beat"]));
+
+    // The second fails, so the first's change goes too.
+    assert_eq!(
+        rig.call(
+            "run_commands",
+            json!({"name": "Rename", "commands": [
+                {"id": "track.rename", "args": {"track": 0, "name": "Drums"}},
+                {"id": "locator.rename", "args": {"locator": 9, "name": "Verse"}},
+            ]}),
+        ),
+        Err("Command 2 failed: there's no locator 9. Nothing changed.".into())
+    );
+    let project = rig.call("get_project", json!({})).unwrap();
+    assert_eq!(project["tracks"][0]["name"], "MIDI 1");
+    let history = rig.call("get_history", json!({})).unwrap();
+    assert_eq!(history["steps"], json!(["Start a Beat"]));
+
+    // Commands that open, save or undo run on their own.
+    assert_eq!(
+        rig.call(
+            "run_commands",
+            json!({"name": "Undo Twice", "commands": [{"id": "edit.undo"}, {"id": "edit.undo"}]}),
+        ),
+        Err(
+            "Command 1 failed: edit.undo runs on its own, not among other commands. Nothing \
+             changed."
+                .into()
+        )
+    );
+}
+
+#[test]
+fn wrong_arguments_and_commands_that_dont_apply_say_why() {
+    let mut rig = Rig::new(Project::new());
+    assert_eq!(
+        rig.call("run_command", json!({"id": "edit.copy"})),
+        Err(
+            "edit.copy doesn't apply now. Without arguments it acts on the selection, which \
+             get_editor gives."
+                .into()
+        )
+    );
+    assert_eq!(
+        rig.call(
+            "run_command",
+            json!({"id": "clip.move", "args": {"clips": "all", "by": 1}})
+        ),
+        Err(
+            "The argument clips must be a list, each a clip: describe_command clip.move gives \
+             its arguments."
+                .into()
+        )
+    );
+    assert_eq!(
+        rig.call(
+            "run_command",
+            json!({"id": "locator.rename", "args": {"locator": 5, "name": "Verse"}})
+        ),
+        Err("There's no locator 5.".into())
+    );
+    assert_eq!(
+        rig.call("run_command", json!({"id": "file.save_as", "args": {}})),
+        Err(
+            "The argument file is missing: describe_command file.save_as gives its arguments."
+                .into()
+        )
+    );
+    assert_eq!(
+        rig.call("get_automation", json!({"param": "track 0 volume"})),
+        Err("There's no parameter track 0 volume.".into())
+    );
+    assert_eq!(
+        rig.call("get_clip", json!({"clip": 3})),
+        Err("There's no clip 3.".into())
+    );
+    // Only those whose arguments fit reached the window.
+    assert_eq!(rig.window.agents, ["tests", "tests"]);
+}
+
+#[test]
+fn reads_give_clips_devices_automation_and_the_editor() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_midi_track"},
+            {"id": "clip.insert_midi_clip", "args": {"track": 0, "start": 0, "end": 4}},
+            {"id": "notes.add", "args": {"clip": 0, "start": 1, "key": 60, "length": 0.5}},
+            {"id": "notes.add", "args": {"clip": 0, "start": 0, "key": 64, "velocity": 0.5}},
+            {"id": "device.add", "args": {"kind": "eq", "track": 0}},
+            {"id": "automation.add_point", "args": {"param": "track 0 volume", "at": 2, "value": 0.5}},
+            {"id": "track.rename", "args": {"track": 0, "name": "Keys"}},
+        ]}),
+    )
+    .unwrap();
+
+    let project = rig.call("get_project", json!({})).unwrap();
+    let track = &project["tracks"][0];
+    assert_eq!(track["name"], "Keys");
+    assert_eq!(track["gain"], 1.0);
+    assert_eq!(
+        track["devices"],
+        json!([{"id": 0, "name": "EQ", "kind": "eq"}])
+    );
+    assert_eq!(
+        track["clips"],
+        json!([{"id": 0, "name": "MIDI Clip", "start": 0, "length": 4, "kind": "midi", "notes": 2}])
+    );
+    assert_eq!(
+        project["automation"],
+        json!([{"param": "track 0 volume", "points": 1, "overridden": false}])
+    );
+    assert_eq!(project["end"], 4);
+
+    let clip = rig.call("get_clip", json!({"clip": 0})).unwrap();
+    assert_eq!(clip["track"], 0);
+    assert_eq!(clip["kind"], "midi");
+    // In order of time.
+    assert_eq!(
+        clip["notes"],
+        json!([
+            {"id": 1, "key": 64, "start": 0, "length": 0.125, "velocity": 0.5},
+            {"id": 0, "key": 60, "start": 1, "length": 0.5, "velocity": 0.787_401_56},
+        ])
+    );
+
+    let eq = rig.call("get_device", json!({"device": 0})).unwrap();
+    assert_eq!(eq["chain"], json!({"track": 0}));
+    let params = eq["params"].as_array().unwrap();
+    assert!(!params.is_empty());
+    for (number, param) in params.iter().enumerate() {
+        assert_eq!(param["param"], number);
+        assert!(param["name"].as_str().is_some_and(|name| !name.is_empty()));
+        assert!(param["value"].is_number() && param["shown"].is_string());
+    }
+
+    let lane = rig
+        .call("get_automation", json!({"param": "track 0 volume"}))
+        .unwrap();
+    assert_eq!(
+        lane,
+        json!({"param": "track 0 volume", "points": [{"at": 2, "value": 0.5}], "overridden": false})
+    );
+    let pan = rig
+        .call("get_automation", json!({"param": "track 0 pan"}))
+        .unwrap();
+    assert_eq!(pan["points"], json!([]));
+
+    rig.call(
+        "run_command",
+        json!({"id": "edit.select_clips", "args": {"clips": [0]}}),
+    )
+    .unwrap();
+    let editor = rig.call("get_editor", json!({})).unwrap();
+    assert_eq!(editor["selection"]["clips"], json!([0]));
+    assert_eq!(editor["selected_track"], json!({"track": 0}));
+    assert_eq!(editor["focus"], "arrangement");
+    assert_eq!(editor["piano_roll"]["clip"], 0);
+}
+
+#[test]
+fn a_call_the_agent_gave_up_on_runs_nothing() {
+    let mut window = TestWindow::new(Project::new());
+    let (reply, answer_waiting) = Reply::new("tests".into());
+    let id = musicable_commands::track::NEW_MIDI_TRACK;
+    let call = Call {
+        asked: crate::Asked::Run(Run::One(id, Default::default())),
+        reply,
+    };
+    drop(answer_waiting);
+    answer(call, &mut window);
+    assert!(window.document.project().tracks.is_empty());
+    assert!(window.agents.is_empty());
+}
+
+/// A folder of its own for a test, removed when it ends. Short, as a
+/// socket's path can't be long.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("mcp-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("the temporary folder is writable");
+        Self(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_bridge_reaches_musicable_through_the_pipe_whenever_it_listens() {
+    let dir = TempDir::new("bridge");
+    let address = Address::new(&dir.0).unwrap();
+    let mut window = TestWindow::new(Project::new());
+    let start = |window: &TestWindow| {
+        Host::start(address.clone(), &window.commands, || {}).expect("the host listens")
+    };
+    let host = start(&window);
+    // A second Musicable can't listen there too.
+    let taken = Host::start(address.clone(), &window.commands, || {});
+    let error = taken.err().expect("the address is taken");
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+
+    let runtime = runtime();
+    let (agent, bridged) = duplex(1 << 16);
+    let (input, output) = tokio::io::split(bridged);
+    let bridge = Bridge::new(Ok(address.clone()));
+    runtime.spawn(bridge::serve(bridge, input, output));
+    let client = (runtime.block_on(client_called("claude-code").serve(agent)))
+        .expect("the agent connects to the bridge");
+
+    let mut host = Some(host);
+    let run = |host: &Option<Host>, window: &mut TestWindow| {
+        let result = call(
+            &runtime,
+            &client,
+            "run_command",
+            json!({"id": "track.new_audio_track"}),
+            || {
+                for call in host.iter().flat_map(Host::calls) {
+                    answer(call, window);
+                }
+            },
+        );
+        read(result)
+    };
+    assert_eq!(
+        run(&host, &mut window),
+        Ok(json!({"result": 0, "undo": "New Audio Track"}))
+    );
+    // Musicable knows the agent by its client's name.
+    assert_eq!(host.as_ref().unwrap().agents(), ["claude-code"]);
+    assert_eq!(window.agents, ["claude-code"]);
+
+    // Once Musicable stops letting agents in, the tools say so.
+    host = None;
+    let not_running = run(&host, &mut window).unwrap_err();
+    assert!(
+        not_running.starts_with("Musicable isn't running"),
+        "{not_running}"
+    );
+    // And once it lets them in again, the bridge reaches it again.
+    host = Some(start(&window));
+    assert_eq!(
+        run(&host, &mut window),
+        Ok(json!({"result": 1, "undo": "New Audio Track"}))
+    );
+    assert_eq!(window.document.project().tracks.len(), 2);
+}

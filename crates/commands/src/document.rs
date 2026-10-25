@@ -32,6 +32,16 @@ pub struct Document {
     /// Transactions committed since the last [`take_committed`](Self::take_committed).
     committed: Vec<Committed>,
     history: History,
+    /// Where the batch in progress started, if one is.
+    batch: Option<BatchStart>,
+}
+
+/// Where a batch started: how many transactions had been committed, and
+/// the editor's state, which [`Document::cancel_batch`] goes back to.
+#[derive(Debug, Clone)]
+struct BatchStart {
+    committed: usize,
+    editor: Editor,
 }
 
 impl Document {
@@ -41,6 +51,7 @@ impl Document {
             editor: Editor::default(),
             committed: Vec::new(),
             history: History::default(),
+            batch: None,
         }
     }
 
@@ -177,6 +188,47 @@ impl Document {
 
     pub fn end_gesture(&mut self) {
         self.history.end_gesture();
+    }
+
+    /// Starts a batch: until [`end_batch`](Self::end_batch), every
+    /// transaction joins one step in the undo history called `name`,
+    /// whatever its own name, so one undo takes them all back. A batch that
+    /// changes nothing leaves no step, and what was undone before it can
+    /// still be redone. [`Registry::run_batch`](crate::Registry::run_batch)
+    /// runs commands in one.
+    pub fn begin_batch(&mut self, name: &str) {
+        self.batch = Some(BatchStart {
+            committed: self.committed.len(),
+            editor: self.editor.clone(),
+        });
+        self.history.begin_batch(name);
+    }
+
+    pub fn end_batch(&mut self) {
+        self.batch = None;
+        self.history.end_batch();
+    }
+
+    /// Ends the batch by taking back everything it changed, as if it had
+    /// never started: the project, the editor's state and the undo history
+    /// go back to how they were. What it committed is taken back too, so
+    /// whatever keeps itself in step with the project never sees it, as long
+    /// as it hasn't [taken](Self::take_committed) it yet.
+    pub fn cancel_batch(&mut self) {
+        let Some(start) = self.batch.take() else {
+            return;
+        };
+        let made = self
+            .committed
+            .split_off(start.committed.min(self.committed.len()));
+        let mut transaction = Transaction::new(&mut self.project, &self.editor);
+        for committed in made.iter().rev() {
+            for edit in committed.edits.iter().rev() {
+                transaction.apply(&edit.inverse());
+            }
+        }
+        self.editor = start.editor;
+        self.history.cancel_batch();
     }
 
     /// The transactions committed since the last call, oldest first, for

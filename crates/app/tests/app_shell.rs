@@ -73,9 +73,9 @@ fn file_commands_ask_the_app() {
         rig.session.take_requests(),
         [
             Request::Save,
-            Request::SaveAs,
+            Request::SaveAs(None),
             Request::NewDemo,
-            Request::Open
+            Request::Open(None)
         ]
     );
     assert_eq!(rig.session.take_requests(), []);

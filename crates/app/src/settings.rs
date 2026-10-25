@@ -36,6 +36,9 @@
 //! auto_preview = true
 //! preview_volume = -6
 //!
+//! [agents]
+//! enabled = true
+//!
 //! [recording]
 //! capture_minutes = 5
 //!
@@ -118,6 +121,7 @@ pub struct Settings {
     pub export: ExportSettings,
     pub browser: BrowserSettings,
     pub recording: RecordingSettings,
+    pub agents: AgentSettings,
 }
 
 /// How Musicable looks.
@@ -265,6 +269,16 @@ impl BrowserSettings {
             .clamp(MIN_PREVIEW_VOLUME, MAX_PREVIEW_VOLUME);
         10f32.powf(db as f32 / 20.0)
     }
+}
+
+/// Whether agents, such as Claude Code, can control Musicable: see
+/// `docs/agents.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// Whether Musicable listens for agents, on a pipe only the user's
+    /// account can open. Off until the user switches it on.
+    pub enabled: bool,
 }
 
 /// How Musicable records.
@@ -541,6 +555,7 @@ mod tests {
                     frames: 878,
                 }],
             },
+            agents: AgentSettings { enabled: true },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -561,6 +576,8 @@ mod tests {
         assert_eq!(settings.appearance.theme, "dark");
         assert_eq!(settings.workspaces.current, "Default");
         assert_eq!(settings.profiles.current, "Default");
+        // Agents can't control Musicable until the user lets them.
+        assert!(!settings.agents.enabled);
         assert_eq!(
             settings.audio.request(),
             StreamRequest {
@@ -687,6 +704,7 @@ mod tests {
             "[browser]",
             "[recording]",
             "[profiles]",
+            "[agents]",
         ] {
             assert!(!text.contains(left_out), "{text}");
         }

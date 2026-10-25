@@ -1,0 +1,280 @@
+//! The real `musicable mcp`, started as an agent's client starts it,
+//! speaking MCP over its standard input and output, and reaching a session
+//! through a real pipe, as it reaches the app: on each system CI runs on.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+use musicable_app::Session;
+use musicable_commands::{Editor, Keymap, Registry, Steps};
+use musicable_engine::{Engine, EngineConfig, EngineHandle, rt};
+use musicable_mcp::pipe::Address;
+use musicable_mcp::{Host, Reply, Run, Window};
+use musicable_model::Project;
+use serde_json::{Value as Json, json};
+
+#[global_allocator]
+static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
+
+const CONFIG: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 256,
+};
+
+/// A session answering agents' calls, as the app's window does.
+struct SessionWindow {
+    session: Session,
+}
+
+impl SessionWindow {
+    fn new(handle: EngineHandle) -> Self {
+        let session = Session::new(Project::new(), None, Keymap::default_keymap(), handle);
+        Self { session }
+    }
+
+    /// The name of the step the commands run since `revision` made.
+    fn step_since(&self, revision: u64, run: &Run) -> Option<&str> {
+        let made = self.session.revision() != revision && !run.steps_through_history();
+        made.then(|| self.session.undo_name()).flatten()
+    }
+}
+
+impl Window for SessionWindow {
+    fn commands(&self) -> &Registry {
+        self.session.commands()
+    }
+
+    fn keymap(&self) -> &Keymap {
+        self.session.keymap()
+    }
+
+    fn project(&self) -> &Project {
+        self.session.project()
+    }
+
+    fn editor(&self) -> &Editor {
+        self.session.editor()
+    }
+
+    fn history(&self) -> Steps<'_> {
+        self.session.history()
+    }
+
+    fn file(&self) -> Option<&Path> {
+        None
+    }
+
+    fn is_modified(&self) -> bool {
+        self.session.is_modified()
+    }
+
+    fn run(&mut self, run: Run, reply: Reply) {
+        let revision = self.session.revision();
+        match &run {
+            Run::One(id, args) => {
+                let result = self.session.run_with(id, args);
+                reply.ran(result, self.step_since(revision, &run));
+            }
+            Run::Batch(name, commands) => {
+                let result = self.session.run_batch(name, commands);
+                reply.ran_batch(result, self.step_since(revision, &run));
+            }
+        }
+    }
+}
+
+/// `musicable mcp`, started as an agent's client starts it, with its
+/// settings in a folder of its own.
+struct Bridge {
+    child: Child,
+    input: Option<ChildStdin>,
+    /// The lines it writes, as they come.
+    lines: Receiver<String>,
+    /// The id of the last request.
+    id: u64,
+}
+
+impl Bridge {
+    /// Starts `musicable mcp` with the config folder `dir`, and introduces
+    /// the client to it, as `claude-code`.
+    fn start(dir: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_musicable"))
+            .arg("mcp")
+            .env("MUSICABLE_CONFIG_DIR", dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("musicable mcp starts");
+        let output = child.stdout.take().unwrap();
+        let (sender, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let input = child.stdin.take();
+        let mut bridge = Self {
+            child,
+            input,
+            lines,
+            id: 0,
+        };
+        let client = json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "claude-code", "version": "2.0"},
+        });
+        let server = bridge.request("initialize", client, &mut || {});
+        assert_eq!(server["serverInfo"]["name"], "musicable", "{server}");
+        assert!(server["capabilities"]["tools"].is_object(), "{server}");
+        bridge.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        bridge
+    }
+
+    fn send(&mut self, message: Json) {
+        let input = self.input.as_mut().expect("its input is open");
+        writeln!(input, "{message}").unwrap();
+        input.flush().unwrap();
+    }
+
+    /// Sends the request `method` with `params`, calling `pump` while it
+    /// waits, as the window's frames come, and gives back the result.
+    fn request(&mut self, method: &str, params: Json, pump: &mut dyn FnMut()) -> Json {
+        self.id += 1;
+        let id = self.id;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let started = Instant::now();
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "{method} got no answer"
+            );
+            pump();
+            let line = match self.lines.recv_timeout(Duration::from_millis(2)) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => panic!("musicable mcp stopped"),
+            };
+            let message: Json = serde_json::from_str(&line).expect("it writes JSON-RPC lines");
+            if message["id"] == id {
+                assert!(message.get("error").is_none(), "{message}");
+                return message["result"].clone();
+            }
+        }
+    }
+
+    /// Calls the tool `name` with `arguments`, calling `pump` while it
+    /// waits. Gives back the JSON the tool answered, or why it failed.
+    fn call(
+        &mut self,
+        name: &str,
+        arguments: Json,
+        pump: &mut dyn FnMut(),
+    ) -> Result<Json, String> {
+        let params = json!({"name": name, "arguments": arguments});
+        let result = self.request("tools/call", params, pump);
+        let text = result["content"][0]["text"].as_str();
+        let text = text.expect("the tool answers in text").to_owned();
+        match result["isError"].as_bool() {
+            Some(true) => Err(text),
+            _ => Ok(serde_json::from_str(&text).expect("the answer is JSON")),
+        }
+    }
+
+    /// Closes its input, as a client going does, and waits for it to end.
+    fn close(mut self) -> bool {
+        self.input = None;
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.success();
+            }
+            assert!(started.elapsed() < Duration::from_secs(30), "it never ends");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A folder of its own for the test, removed when it ends.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("musicable-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_real_bridge_reaches_musicable_through_a_real_pipe() {
+    let dir = TempDir::new("mcp-bridge");
+    let mut bridge = Bridge::start(&dir.0);
+    let tools = bridge.request("tools/list", json!({}), &mut || {});
+    let names: Vec<_> = (tools["tools"].as_array().unwrap().iter())
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"run_command"), "{names:?}");
+    // Nothing listens yet.
+    let refused = bridge.call("get_project", json!({}), &mut || {});
+    let refused = refused.unwrap_err();
+    assert!(refused.starts_with("Musicable isn't running"), "{refused}");
+
+    // Once Musicable lets agents in, the bridge reaches it at the next
+    // call.
+    let (_engine, handle) = Engine::new(CONFIG);
+    let mut window = SessionWindow::new(handle);
+    let address = Address::new(&dir.0).unwrap();
+    let host = Host::start(address, window.session.commands(), || {}).unwrap();
+    let mut pump = || {
+        for call in host.calls() {
+            musicable_mcp::answer(call, &mut window);
+        }
+    };
+    let track = json!({"id": "track.new_midi_track"});
+    let made = bridge.call("run_command", track, &mut pump);
+    assert_eq!(made, Ok(json!({"result": 0, "undo": "New MIDI Track"})));
+    assert_eq!(host.agents(), ["claude-code"]);
+    let project = bridge.call("get_project", json!({}), &mut pump).unwrap();
+    assert_eq!(project["tracks"][0]["name"], "MIDI 1");
+    let undo = json!({"id": "edit.undo"});
+    let undone = bridge.call("run_command", undo, &mut pump);
+    assert_eq!(undone, Ok(json!({"result": null})));
+    let history = bridge.call("get_history", json!({}), &mut pump).unwrap();
+    assert_eq!(history["redo"], "New MIDI Track", "{history}");
+    drop(pump);
+    assert!(window.session.project().tracks.is_empty());
+
+    // Once it stops, the tools say so.
+    drop(host);
+    let refused = bridge.call("get_project", json!({}), &mut || {});
+    let refused = refused.unwrap_err();
+    assert!(refused.starts_with("Musicable isn't running"), "{refused}");
+    assert!(
+        bridge.close(),
+        "musicable mcp ends well once its client goes"
+    );
+}

@@ -17,6 +17,7 @@ musicable-plugins = { path = "crates/plugins" }
 musicable-io = { path = "crates/io" }
 musicable-library = { path = "crates/library" }
 musicable-ui = { path = "crates/ui" }
+musicable-mcp = { path = "crates/mcp" }
 rtrb = "0.4"
 base64 = "0.22"
 # Decodes FLAC frames; finding them is ours (io::audio).
@@ -41,6 +42,11 @@ rfd = "0.17"
 num_cpus = "1.17"
 # Finds a search's words in the browser's library.
 memchr = "2.8"
+# Lets agents control the app over MCP, the Model Context Protocol: the
+# official Rust SDK, its server in the app and its client in the bridge.
+rmcp = { version = "3.7", default-features = false, features = ["client", "server"] }
+# The MCP server's runtime, on a thread of its own, and the bridge's.
+tokio = { version = "1.54", features = ["io-std", "io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
 # Dev-only: property tests and benchmarks.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }

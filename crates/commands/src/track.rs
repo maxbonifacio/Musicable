@@ -20,28 +20,21 @@ pub const RENAME: CommandId = CommandId::new("track.rename");
 /// Deletes tracks: the selected ones, without arguments.
 pub const DELETE: CommandId = CommandId::new("track.delete");
 
-type Handler = fn(&mut Context<'_>);
-
-/// Every track command, with its title and what it runs.
-const COMMANDS: [(CommandId, &str, Handler); 4] = [
-    (NEW_AUDIO_TRACK, "New Audio Track", |ctx| {
-        new_track(ctx, TrackKind::Audio)
-    }),
-    (NEW_MIDI_TRACK, "New MIDI Track", |ctx| {
-        new_track(ctx, TrackKind::Midi)
-    }),
-    (NEW_RETURN_TRACK, "New Return Track", |ctx| {
-        new_track(ctx, TrackKind::Return)
-    }),
-    (NEW_GROUP_TRACK, "New Group Track", |ctx| {
-        new_track(ctx, TrackKind::Group)
-    }),
+/// The commands that add tracks, with their titles and the kind of track
+/// each adds.
+const NEW_TRACKS: [(CommandId, &str, TrackKind); 4] = [
+    (NEW_AUDIO_TRACK, "New Audio Track", TrackKind::Audio),
+    (NEW_MIDI_TRACK, "New MIDI Track", TrackKind::Midi),
+    (NEW_RETURN_TRACK, "New Return Track", TrackKind::Return),
+    (NEW_GROUP_TRACK, "New Group Track", TrackKind::Group),
 ];
 
-/// Registers the track commands.
+/// Registers the track commands. Those that add a track give back its id.
 pub fn register(registry: &mut Registry) {
-    for (id, title, run) in COMMANDS {
-        registry.register(id, title, run);
+    for (id, title, kind) in NEW_TRACKS {
+        registry.add(Command::new(id, title), move |ctx, _| {
+            Ok(new_track(ctx, kind).into())
+        });
     }
     registry.add(
         Command::new(RENAME, "Rename Track").with_params(&[
@@ -97,8 +90,8 @@ pub fn delete(document: &mut Document, tracks: &[TrackId]) {
 }
 
 /// Adds a track of `kind`, named after its kind and how many of them there
-/// are, such as "Audio 3".
-fn new_track(ctx: &mut Context<'_>, kind: TrackKind) {
+/// are, such as "Audio 3", and returns its id.
+fn new_track(ctx: &mut Context<'_>, kind: TrackKind) -> TrackId {
     let (title, word) = match kind {
         TrackKind::Audio => ("New Audio Track", "Audio"),
         TrackKind::Midi => ("New MIDI Track", "MIDI"),
@@ -112,8 +105,8 @@ fn new_track(ctx: &mut Context<'_>, kind: TrackKind) {
             .iter()
             .filter(|t| t.kind == kind)
             .count();
-        add_track(tx, format!("{word} {}", count + 1), kind);
-    });
+        add_track(tx, format!("{word} {}", count + 1), kind)
+    })
 }
 
 /// Adds a track of `kind` called `name`, and returns its id. Return tracks

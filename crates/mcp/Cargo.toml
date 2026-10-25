@@ -1,0 +1,31 @@
+[package]
+name = "musicable-mcp"
+description = "Lets agents such as Claude Code control Musicable over MCP: the server, the local pipe and the bridge."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+musicable-model.workspace = true
+musicable-commands.workspace = true
+rmcp.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The user's id, which a socket's other end must have.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The pipe's security: only the user's account can open it, and the bridge
+# checks the user's account made it.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true
