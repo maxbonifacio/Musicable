@@ -1563,17 +1563,22 @@ fn warped_clips_transpose_and_slice_within_their_ranges() {
 }
 
 #[test]
-fn warped_clips_formants_are_within_their_range() {
+fn warped_clips_formants_and_envelope_are_within_their_range() {
     let file = edited_warp(|a| {
         a["warp"]["mode"] = json!("spectral");
-        a["warp"]["spectral"] = json!({"formants": 37.5});
+        a["warp"]["spectral"] = json!({"high_quality": true, "formants": 37.5, "envelope": 64.5});
     });
     let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
         panic!("an audio clip");
     };
     let warp = audio.warp.as_ref().unwrap();
     assert_eq!(warp.mode, WarpMode::Spectral);
-    assert_eq!(warp.spectral, SpectralSettings { formants: 37.5 });
+    let spectral = SpectralSettings {
+        high_quality: true,
+        formants: 37.5,
+        envelope: 64.5,
+    };
+    assert_eq!(warp.spectral, spectral);
     let warp = format!("{AUDIO}.warp");
     for formants in [-1.0, 100.5] {
         refused(
@@ -1582,10 +1587,22 @@ fn warped_clips_formants_are_within_their_range() {
             "must be from 0 to 100",
         );
     }
+    for envelope in [7.5, 512.5] {
+        refused(
+            &edited_warp(|a| a["warp"]["spectral"]["envelope"] = json!(envelope)),
+            &format!("{warp}.spectral.envelope"),
+            "must be from 8 to 512",
+        );
+    }
     refused(
-        &edited_warp(|a| a["warp"]["spectral"]["envelope"] = json!(128)),
-        &format!("{warp}.spectral.envelope"),
-        "unknown field `envelope`",
+        &edited_warp(|a| a["warp"]["spectral"]["high_quality"] = json!("yes")),
+        &format!("{warp}.spectral.high_quality"),
+        "expected a boolean",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["spectral"]["window"] = json!(4096)),
+        &format!("{warp}.spectral.window"),
+        "unknown field `window`",
     );
     refused(
         &edited_warp(|a| {
@@ -1660,6 +1677,8 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("preserve", 6.0),
         ("transient_loop", 2.0),
         ("formants", 0.0),
+        ("envelope", 8.0),
+        ("envelope", 512.0),
     ] {
         let file = edited_audio(|a| a["automation"] = curve(param, value));
         let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
@@ -1675,6 +1694,7 @@ fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
         ("preserve", 2.5, "must be a whole number"),
         ("transient_loop", 0.5, "must be a whole number"),
         ("formants", 100.5, "must be from 0 to 100"),
+        ("envelope", 7.0, "must be from 8 to 512"),
     ] {
         refused(
             &edited_audio(|a| a["automation"] = curve(param, value)),

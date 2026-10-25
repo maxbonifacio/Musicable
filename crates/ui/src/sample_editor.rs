@@ -342,9 +342,9 @@ impl Scene<'_> {
         self.lane().spec()
     }
 
-    /// Whether the clip's mode plays the parameter the lane shows.
+    /// Whether the clip, in its mode, plays the parameter the lane shows.
     fn lane_plays(&self) -> bool {
-        self.lane().plays_in(self.warp().map(|warp| warp.mode))
+        self.lane().plays_in(self.warp())
     }
 
     /// The curve's points, in the clip's own time.
@@ -931,6 +931,7 @@ fn value_text(param: ClipParam, value: f64) -> String {
         ClipParam::Preserve => Preserve::at_step(value).name().to_owned(),
         ClipParam::TransientLoop => TransientLoop::at_step(value).name().to_owned(),
         ClipParam::Formants => format!("{value:.0}%"),
+        ClipParam::Envelope => format!("{value:.0}"),
     }
 }
 
@@ -1560,13 +1561,27 @@ fn slice(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>)
     });
 }
 
-/// Spectral's own setting: how far it keeps the formants in place as it
-/// transposes.
+/// Spectral's own settings: High quality, which renders with Rubber Band,
+/// how far it keeps the formants in place as it transposes, and, with High
+/// quality on, how fine the outline of the spectrum is that it keeps them
+/// by.
 fn spectral(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Action>) {
     let clip = scene.clip.id;
+    let settings = warp.spectral;
+    let mut high_quality = settings.high_quality;
+    let toggle = ui
+        .checkbox(&mut high_quality, "High quality")
+        .on_hover_text(
+            "Renders with Rubber Band, the best quality and slower to render, as Live's \
+             Complex Pro does, rather than Signalsmith Stretch, as Live's Complex does",
+        );
+    if toggle.changed() {
+        let args = Args::new().with("on", high_quality).with("clip", clip);
+        run(actions, warp_mode::SET_HIGH_QUALITY, args);
+    }
     ui.horizontal(|ui| {
         ui.label("Formants");
-        let mut formants = warp.spectral.formants;
+        let mut formants = settings.formants;
         let field = ui
             .add(
                 DragValue::new(&mut formants)
@@ -1584,6 +1599,30 @@ fn spectral(ui: &mut Ui, scene: &Scene<'_>, warp: &Warp, actions: &mut Vec<Actio
         name_field(&field, "Formants", formants);
         edited(&field, actions, warp_mode::SET_FORMANTS, || {
             Args::new().with("formants", formants).with("clip", clip)
+        });
+    });
+    if !settings.high_quality {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Envelope");
+        let mut envelope = settings.envelope;
+        let field = ui
+            .add(
+                DragValue::new(&mut envelope)
+                    .speed(1.0)
+                    .range(SpectralSettings::ENVELOPE_MIN..=SpectralSettings::ENVELOPE_MAX)
+                    .fixed_decimals(0)
+                    .update_while_editing(false),
+            )
+            .on_hover_text(
+                "How fine the outline of the spectrum is that the formants are kept by: 128 \
+                 suits most audio, lower suits high voices, whose harmonics are far apart, \
+                 and higher low ones",
+            );
+        name_field(&field, "Envelope", envelope);
+        edited(&field, actions, warp_mode::SET_ENVELOPE, || {
+            Args::new().with("envelope", envelope).with("clip", clip)
         });
     });
 }

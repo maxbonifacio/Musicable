@@ -94,7 +94,7 @@ fn audio_clip(project: &mut Project, track: TrackId, from: Beats, to: Beats, aud
 
 /// Four beats that loop: drums crossfading into a stream from near the end
 /// of a long file, a bass line and strings, the long file again in
-/// Spectral, and chords on a test instrument.
+/// Spectral, with High quality off and on, and chords on a test instrument.
 fn song() -> Project {
     let mut p = Project::new();
     p.looping = true;
@@ -157,6 +157,21 @@ fn song() -> Project {
     };
     assert!(audio.set_warping(warping));
     audio_clip(&mut p, voice, beats(1, 1), beats(3, 1), audio);
+    // And in High quality, rendered with Rubber Band, a tone down with its
+    // formants in place, by a finer envelope.
+    let choir = p.add_track("Choir", TrackKind::Audio);
+    let mut audio = AudioClip::new("Audio/Long.wav");
+    let mut warp = Warp::new(LONG as u64 - 300_000, Beats::ZERO, 110.0);
+    warp.mode = WarpMode::Spectral;
+    warp.transpose = -2;
+    warp.spectral.high_quality = true;
+    warp.spectral.envelope = 192.0;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    audio_clip(&mut p, choir, beats(2, 1), beats(4, 1), audio);
 
     let keys = p.add_track("Keys", TrackKind::Midi);
     let mut chords = MidiClip::default();
@@ -208,16 +223,18 @@ fn a_saved_project_with_clips_plays_the_same_with_every_renderer() {
         assert!(player.stats().position < 4 * 24_000, "it loops");
     }
     assert!(players[0].peak() > 0.5, "peak {}", players[0].peak());
-    // The clip in Spectral plays, heard on its own.
-    let mut voice = saved.clone();
-    for track in &mut voice.tracks {
-        track.solo = track.name == "Voice";
+    // The clips in Spectral play, heard on their own.
+    for name in ["Voice", "Choir"] {
+        let mut alone = saved.clone();
+        for track in &mut alone.tracks {
+            track.solo = track.name == name;
+        }
+        let mut alone = Player::new(alone, Some(&folder), &Render::App, CONFIG);
+        for _ in 0..2 * 48_000 / CONFIG.max_block {
+            alone.render(CONFIG.max_block);
+        }
+        assert!(alone.peak() > 0.2, "{name}: peak {}", alone.peak());
     }
-    let mut voice = Player::new(voice, Some(&folder), &Render::App, CONFIG);
-    for _ in 0..2 * 48_000 / CONFIG.max_block {
-        voice.render(CONFIG.max_block);
-    }
-    assert!(voice.peak() > 0.2, "peak {}", voice.peak());
 
     // With a file missing, its clips are silent, and it says so.
     fs::remove_file(folder.join("Audio/Bass.aif")).unwrap();

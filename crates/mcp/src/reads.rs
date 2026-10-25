@@ -372,7 +372,9 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
                             "envelope": json::to_json(&Value::Number(slice.envelope)),
                         },
                         "spectral": {
+                            "high_quality": warp.spectral.high_quality,
                             "formants": json::to_json(&Value::Number(warp.spectral.formants)),
+                            "envelope": json::to_json(&Value::Number(warp.spectral.envelope)),
                         },
                     });
                 }

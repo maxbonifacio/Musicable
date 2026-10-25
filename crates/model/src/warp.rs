@@ -16,9 +16,10 @@
 //! on a turntable, Slice cuts it into slices at its transients, or on a
 //! grid of notes, and plays each at the file's own speed from where it
 //! lands, as Live's Beats does, and Spectral stretches it in the frequency
-//! domain, keeping its pitch, as Live's Complex does. Every mode but
-//! Re-Pitch moves the audio's pitch by the warp's transpose and detune, and
-//! keeps its own settings in the warp while another mode plays.
+//! domain, keeping its pitch, as Live's Complex does, or Complex Pro with
+//! High quality on. Every mode but Re-Pitch moves the audio's pitch by the
+//! warp's transpose and detune, and keeps its own settings in the warp
+//! while another mode plays.
 //!
 //! A warp also keeps its file's transients, the [`Onsets`]: where the
 //! sounds in it start, as analysis found them and the user changed them.
@@ -54,7 +55,8 @@ pub struct Warp {
     pub detune: i8,
     /// How Slice cuts the audio and plays the slices.
     pub slice: SliceSettings,
-    /// How Spectral treats the audio's formants.
+    /// Which stretcher Spectral renders with, and how it treats the audio's
+    /// formants.
     pub spectral: SpectralSettings,
 }
 
@@ -80,7 +82,7 @@ pub enum WarpMode {
     /// Stretched in the frequency domain, so it keeps its pitch at any
     /// speed: for full mixes, chords, voices and anything else with more
     /// than one note at once. It plays audio rendered ahead, as its
-    /// stretcher remembers what it played. See [`SpectralSettings`].
+    /// stretchers remember what they played. See [`SpectralSettings`].
     Spectral,
 }
 
@@ -159,20 +161,35 @@ impl Default for SliceSettings {
     }
 }
 
-/// How Spectral treats a clip's formants, the peaks in the outline of its
-/// spectrum that give a voice its character, as it transposes. A clip keeps
-/// them while another mode plays.
+/// Which stretcher Spectral renders a clip's audio with, and how it treats
+/// its formants, the peaks in the outline of its spectrum that give a voice
+/// its character, as it transposes. A clip keeps them while another mode
+/// plays.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpectralSettings {
+    /// Whether it renders with Rubber Band's R3 engine, the best quality and
+    /// slower to render, as Live's Complex Pro, rather than Signalsmith
+    /// Stretch, as Live's Complex.
+    pub high_quality: bool,
     /// How far the formants stay where they were as the pitch moves, from 0,
     /// moving with it as a record's do played faster, to
     /// [`FORMANTS_MAX`](Self::FORMANTS_MAX), staying in place, so a voice
     /// transposed sounds like the same voice.
     pub formants: f64,
+    /// While High quality is on, how fine the outline of the spectrum is
+    /// that the formants are kept by, from
+    /// [`ENVELOPE_MIN`](Self::ENVELOPE_MIN) to
+    /// [`ENVELOPE_MAX`](Self::ENVELOPE_MAX): 128 suits most audio, lower
+    /// suits high voices, whose harmonics are far apart, and higher low
+    /// ones.
+    pub envelope: f64,
 }
 
 impl SpectralSettings {
     pub const FORMANTS_MAX: f64 = 100.0;
+    pub const ENVELOPE_MIN: f64 = 8.0;
+    pub const ENVELOPE_MAX: f64 = 512.0;
+    pub const ENVELOPE_DEFAULT: f64 = 128.0;
 
     /// How far the stretcher moves the formants from where they were, for
     /// a transpose of `ratio`: not at all, 1, with the formants all the way
@@ -183,10 +200,13 @@ impl SpectralSettings {
 }
 
 impl Default for SpectralSettings {
-    /// Formants kept in place, as Live's Complex Pro keeps them.
+    /// Signalsmith Stretch, the quicker to render, with formants kept in
+    /// place and the envelope as Live's Complex Pro has them.
     fn default() -> Self {
         Self {
+            high_quality: false,
             formants: Self::FORMANTS_MAX,
+            envelope: Self::ENVELOPE_DEFAULT,
         }
     }
 }
@@ -594,10 +614,12 @@ impl Warp {
 
     /// Whether the warp keeps its rules: a marker or more, their frames and
     /// beats rising, a tempo in range, transients that keep theirs, and a
-    /// transpose, detune, Transient Envelope and Formants in range.
+    /// transpose, detune, Transient Envelope, Formants and Envelope in
+    /// range.
     pub fn is_valid(&self) -> bool {
         let envelope = 0.0..=SliceSettings::ENVELOPE_MAX;
         let formants = 0.0..=SpectralSettings::FORMANTS_MAX;
+        let spectral_envelope = SpectralSettings::ENVELOPE_MIN..=SpectralSettings::ENVELOPE_MAX;
         !self.markers.is_empty()
             && self
                 .markers
@@ -609,6 +631,7 @@ impl Warp {
             && self.detune.unsigned_abs() <= Self::DETUNE_MAX.unsigned_abs()
             && envelope.contains(&self.slice.envelope)
             && formants.contains(&self.spectral.formants)
+            && spectral_envelope.contains(&self.spectral.envelope)
     }
 
     /// The value of the setting the clip parameter `param` is, as its
@@ -622,6 +645,7 @@ impl Warp {
             ClipParam::Preserve => Some(self.slice.preserve.step() as f64),
             ClipParam::TransientLoop => Some(self.slice.transient_loop.step() as f64),
             ClipParam::Formants => Some(self.spectral.formants),
+            ClipParam::Envelope => Some(self.spectral.envelope),
         }
     }
 
@@ -641,6 +665,7 @@ impl Warp {
             ClipParam::Preserve => self.slice.preserve = Preserve::at_step(value),
             ClipParam::TransientLoop => self.slice.transient_loop = TransientLoop::at_step(value),
             ClipParam::Formants => self.spectral.formants = value,
+            ClipParam::Envelope => self.spectral.envelope = value,
         }
     }
 
@@ -1273,24 +1298,31 @@ mod tests {
     }
 
     #[test]
-    fn a_warp_s_transpose_detune_envelope_and_formants_stay_in_range() {
+    fn a_warp_s_transpose_detune_envelopes_and_formants_stay_in_range() {
         let warp = Warp::new(0, Beats::ZERO, 120.0);
         assert_eq!((warp.transpose, warp.detune), (0, 0));
         assert_eq!(warp.slice, SliceSettings::default());
         assert_eq!(warp.slice.transient_loop, TransientLoop::Forward);
         assert_eq!(warp.slice.envelope, SliceSettings::ENVELOPE_MAX);
+        assert!(!warp.spectral.high_quality);
         assert_eq!(warp.spectral.formants, SpectralSettings::FORMANTS_MAX);
-        let ends = Warp {
+        assert_eq!(warp.spectral.envelope, 128.0);
+        let ends = |spectral_envelope| Warp {
             transpose: -Warp::TRANSPOSE_MAX,
             detune: Warp::DETUNE_MAX,
             slice: SliceSettings {
                 envelope: 0.0,
                 ..warp.slice
             },
-            spectral: SpectralSettings { formants: 0.0 },
+            spectral: SpectralSettings {
+                high_quality: true,
+                formants: 0.0,
+                envelope: spectral_envelope,
+            },
             ..warp.clone()
         };
-        assert!(ends.is_valid());
+        assert!(ends(SpectralSettings::ENVELOPE_MIN).is_valid());
+        assert!(ends(SpectralSettings::ENVELOPE_MAX).is_valid());
         let envelope = |envelope| Warp {
             slice: SliceSettings {
                 envelope,
@@ -1299,7 +1331,17 @@ mod tests {
             ..warp.clone()
         };
         let formants = |formants| Warp {
-            spectral: SpectralSettings { formants },
+            spectral: SpectralSettings {
+                formants,
+                ..warp.spectral
+            },
+            ..warp.clone()
+        };
+        let spectral_envelope = |envelope| Warp {
+            spectral: SpectralSettings {
+                envelope,
+                ..warp.spectral
+            },
             ..warp.clone()
         };
         for wrong in [
@@ -1316,6 +1358,9 @@ mod tests {
             envelope(f64::NAN),
             formants(-1.0),
             formants(f64::NAN),
+            spectral_envelope(7.5),
+            spectral_envelope(513.0),
+            spectral_envelope(f64::NAN),
         ] {
             assert!(!wrong.is_valid(), "{wrong:?}");
         }
@@ -1331,6 +1376,7 @@ mod tests {
             (ClipParam::Preserve, 4.6),
             (ClipParam::TransientLoop, 9.0),
             (ClipParam::Formants, 62.5),
+            (ClipParam::Envelope, 1000.0),
             (ClipParam::Gain, 0.5),
             (ClipParam::Transpose, f64::NAN),
         ] {
@@ -1341,6 +1387,7 @@ mod tests {
         assert_eq!(warp.slice.preserve, Preserve::Sixteenth);
         assert_eq!(warp.slice.transient_loop, TransientLoop::BackAndForth);
         assert_eq!(warp.spectral.formants, 62.5);
+        assert_eq!(warp.spectral.envelope, SpectralSettings::ENVELOPE_MAX);
         assert!(warp.is_valid());
         let values = ClipParam::ALL.map(|param| warp.param(param));
         assert_eq!(
@@ -1353,6 +1400,7 @@ mod tests {
                 Some(5.0),
                 Some(2.0),
                 Some(62.5),
+                Some(512.0),
             ]
         );
     }

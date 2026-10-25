@@ -1296,6 +1296,20 @@ fn examples() -> Vec<Example> {
             };
             Some(Args::new().with("clip", clip).with("formants", formants))
         }),
+        edits(warp_mode::SET_HIGH_QUALITY, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let on = !warp.spectral.high_quality;
+            Some(Args::new().with("clip", clip).with("on", on))
+        }),
+        edits(warp_mode::SET_ENVELOPE, |s| {
+            let (clip, warp) = find_warp(s)?;
+            let envelope = if warp.spectral.envelope == 64.0 {
+                256.0
+            } else {
+                64.0
+            };
+            Some(Args::new().with("clip", clip).with("envelope", envelope))
+        }),
         leaves(warp_mode::SHOW_LANE, |s| {
             let clip = find_clip(s, is_audio)?.id;
             Some(Args::new().with("clip", clip).with("param", "preserve"))

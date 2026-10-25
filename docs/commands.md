@@ -416,11 +416,13 @@ transaction; the value a setting has already is none.
 | `warp.set_transient_loop` | Set Transient Loop Mode | `mode`, `clip`? | Sets what a slice plays once its audio runs out before the next starts: `off`, `forward` or `back_and_forth` |
 | `warp.set_transient_envelope` | Set Transient Envelope | `envelope`, `clip`? | Sets how much each slice fades as it plays, from 0, a very quick decay, to 100, no fade |
 | `warp.set_formants` | Set Formants | `formants`, `clip`? | Sets how far Spectral keeps the formants in place as it transposes, from 0, moving with the pitch, to 100, staying where they were |
-| `clip.show_lane` | Show Clip Lane | `param`, `clip`? | Shows the clip in the Sample Editor, with the curve of its parameter `param` in the lane: `gain`, `transpose`, `detune`, `transient_envelope`, `preserve`, `transient_loop` or `formants`. It isn't a step to undo |
+| `warp.set_high_quality` | Set High Quality | `on`, `clip`? | Sets whether Spectral renders with Rubber Band's R3 engine, the best quality and slower to render, rather than Signalsmith Stretch |
+| `warp.set_envelope` | Set Spectral Envelope | `envelope`, `clip`? | Sets, while High quality is on, how fine the outline of the spectrum is that Spectral keeps the formants by, from 8 to 512 |
+| `clip.show_lane` | Show Clip Lane | `param`, `clip`? | Shows the clip in the Sample Editor, with the curve of its parameter `param` in the lane: `gain`, `transpose`, `detune`, `transient_envelope`, `preserve`, `transient_loop`, `formants` or `envelope`. It isn't a step to undo |
 
-Each of these settings but the mode is one of the clip's parameters too
-(`ClipParam`, with Gain), so the automation commands give it a curve in
-the clip ([Automation](#automation)), and setting its value
+Each of these settings but the mode and High quality is one of the clip's
+parameters too (`ClipParam`, with Gain), so the automation commands give it
+a curve in the clip ([Automation](#automation)), and setting its value
 (`Transaction::set_param_value`) sets the warp's setting, kept in range and
 to whole semitones, cents and steps (`Warp::set_param`). The parameters
 play in the modes `ClipParam::plays_in` says, and the clip keeps the others'

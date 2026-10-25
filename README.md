@@ -85,7 +85,10 @@ The Spectral warp mode stretches audio with [Signalsmith
 Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch),
 copyright © 2022 Geraint Luff / Signalsmith Audio Ltd., and [Signalsmith
 Linear](https://github.com/Signalsmith-Audio/linear), copyright © 2025
-Signalsmith Audio, which Musicable includes under the MIT license: see
+Signalsmith Audio, which Musicable includes under the MIT license, and with
+High quality on, with [Rubber Band Library](https://breakfastquay.com/rubberband/),
+copyright © 2007–2024 Particular Programs Ltd., which Musicable includes,
+changed, under the GNU General Public License, version 2 or later: see
 [crates/stretch/vendor](crates/stretch/vendor/README.md) and [About this
 manual](https://maxbonifacio.github.io/Musicable/about.html#software-in-musicable).
 
