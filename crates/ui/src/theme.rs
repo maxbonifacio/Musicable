@@ -190,6 +190,14 @@ pub struct Theme {
     #[serde(with = "values::colour")]
     pub area: Color32,
 
+    // The Sample Editor's colours. Its waveform is the arrangement's, and
+    // it's shaded where the clip doesn't play as the piano roll is.
+    /// The warp markers, and the selected ones.
+    #[serde(with = "values::colour")]
+    pub warp_marker: Color32,
+    #[serde(with = "values::colour")]
+    pub warp_marker_selected: Color32,
+
     // The arrangement's sizes, in points.
     /// The ruler over the tracks, and the strip at its top for the loop
     /// brace and the locators.
@@ -236,6 +244,7 @@ pub struct Theme {
     pub mixer: MixerSizes,
     pub devices: DeviceSizes,
     pub piano_roll: PianoRollSizes,
+    pub sample_editor: SampleEditorSizes,
     pub browser: BrowserSizes,
     pub dock: DockSizes,
     pub widgets: Widgets,
@@ -273,6 +282,24 @@ pub struct PianoRollSizes {
     /// How far a drag up or down a note goes to change its velocity from
     /// the softest to the hardest.
     pub velocity_drag: f32,
+}
+
+/// The Sample Editor's sizes, in points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SampleEditorSizes {
+    /// The Sample Editor panel's height until the user drags its edge.
+    pub panel: f32,
+    /// The column of the clip's controls, beside the waveform.
+    pub controls: f32,
+    /// The rulers over and under the waveform: the song's bars, and the
+    /// file's time.
+    pub ruler: f32,
+    /// The warp markers' handles, along the waveform's top.
+    pub handle: f32,
+    /// The lane of the clip's gain, under the waveform.
+    pub lane: f32,
+    /// How near a warp marker's line a press takes it.
+    pub marker_grab: f32,
 }
 
 /// The mixer's sizes, in points.
@@ -608,6 +635,9 @@ impl Theme {
             outside_clip: Color32::from_rgba_unmultiplied(0, 0, 0, 90),
             area: Color32::from_rgba_unmultiplied(150, 200, 255, 36),
 
+            warp_marker: Color32::from_rgb(200, 170, 70),
+            warp_marker_selected: Color32::from_rgb(255, 220, 110),
+
             ruler_height: 40.0,
             ruler_strip: 18.0,
             header_width: 190.0,
@@ -664,6 +694,14 @@ impl Theme {
                 lane: 60.0,
                 edge_grab: 4.0,
                 velocity_drag: 127.0,
+            },
+            sample_editor: SampleEditorSizes {
+                panel: 320.0,
+                controls: 150.0,
+                ruler: 20.0,
+                handle: 12.0,
+                lane: 60.0,
+                marker_grab: 4.0,
             },
             dock: DockSizes {
                 tab_bar: 22.0,

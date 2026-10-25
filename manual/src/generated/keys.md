@@ -9,7 +9,7 @@
 | O | Transport: Toggle Metronome |
 | Z | View: Zoom to Selection |
 | F9 | Transport: Record |
-| F12 | View: Switch Devices and Piano Roll |
+| F12 | View: Switch Devices and Clip Editor |
 | Space | Transport: Play/Stop |
 | Backspace | Edit: Delete |
 | Delete | Edit: Delete |
@@ -69,7 +69,7 @@
 | Ctrl+Alt+M | View: Mixer |
 | Ctrl+Alt+T | Track: New Return Track |
 | Ctrl+Alt+U | View: Show/Hide Take Lanes |
-| Ctrl+Alt+3 | View: Piano Roll |
+| Ctrl+Alt+3 | View: Clip Editor |
 
 ## In the History panel
 
@@ -92,3 +92,11 @@
 | Shift+Right | Notes: Lengthen Notes |
 | Ctrl+Up | Notes: Velocity Up |
 | Ctrl+Down | Notes: Velocity Down |
+
+## In the Sample Editor panel
+
+| Keys | Command |
+|---|---|
+| Left | Warp: Nudge Warp Markers Left |
+| Right | Warp: Nudge Warp Markers Right |
+| Ctrl+I | Warp: Insert Warp Marker |

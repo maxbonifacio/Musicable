@@ -3,12 +3,15 @@
 
 use musicable_io::project::{self, Invalid, LoadError, MAX_TICKS, SaveError, VERSION};
 use musicable_model::automation::{self, Lane};
-use musicable_model::clip::{AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Point};
+use musicable_model::clip::{
+    AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Offset, Point,
+};
 use musicable_model::mixer::Bus;
 use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
+use musicable_model::warp::Warp;
 use musicable_model::{
     AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
     TestTone, TrackId, TrackKind,
@@ -971,9 +974,9 @@ fn clip_values_must_have_the_right_type() {
         "unknown variant `video`",
     );
     refused(
-        &edited_audio(|a| a["offset"] = json!(-1)),
+        &edited_audio(|a| a["offset"] = json!(0.5)),
         &format!("{AUDIO}.offset"),
-        "expected u64",
+        "expected i64",
     );
     refused(
         &edited_notes(|n| n[0]["key"] = json!(256)),
@@ -1324,6 +1327,11 @@ fn audio_clips_name_a_file_and_their_fades_fit() {
         &format!("{AUDIO}.offset"),
         "or less",
     );
+    refused(
+        &edited_audio(|a| a["offset"] = json!(-1)),
+        &format!("{AUDIO}.offset"),
+        "must be 0 or more",
+    );
     // The clip is four beats long.
     let length = Beats::new(4).ticks();
     for (field, ticks) in [("fade_in", -1), ("fade_out", length + 1)] {
@@ -1351,8 +1359,154 @@ fn audio_clips_name_a_file_and_their_fades_fit() {
         panic!("an audio clip");
     };
     assert_eq!(audio.fade_in + audio.fade_out, Beats::from_ticks(length));
-    assert_eq!(audio.offset, MAX_TICKS as u64);
+    assert_eq!(audio.offset, Offset::Frames(MAX_TICKS as u64));
     assert_eq!(audio.file, "C:/Samples/Take.wav");
+}
+
+/// [`clips`]'s file with its audio clip warped: one marker pinning frame
+/// 1,000 to beat 0 of the clip's own time, at 120 BPM, playing from a
+/// quarter beat before it.
+fn warped() -> Value {
+    let mut project = clips();
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        unreachable!("an audio clip");
+    };
+    audio.warp = Some(Warp::new(1_000, Beats::ZERO, 120.0));
+    audio.offset = Offset::Beats(Beats::from_ratio(-1, 4));
+    edited_from(&project, |_| {})
+}
+
+/// [`warped`], changed by `edit`, which gets the audio clip's content.
+fn edited_warp(edit: impl FnOnce(&mut Value)) -> Value {
+    let mut file = warped();
+    edit(&mut file["tracks"][0]["clips"][0]["content"]["audio"]);
+    file
+}
+
+#[test]
+fn warped_clips_have_markers_in_order_and_a_tempo_in_range() {
+    let loaded = load(&warped()).unwrap();
+    let ClipContent::Audio(audio) = &loaded.tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    assert_eq!(audio.offset, Offset::Beats(Beats::from_ratio(-1, 4)));
+    assert_eq!(audio.warp, Some(Warp::new(1_000, Beats::ZERO, 120.0)));
+    let warp = format!("{AUDIO}.warp");
+    refused(
+        &edited_audio(|a| {
+            a.as_object_mut().unwrap().remove("warp");
+        }),
+        AUDIO,
+        "missing field `warp`",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["mode"] = json!("tape")),
+        &format!("{warp}.mode"),
+        "unknown variant `tape`",
+    );
+    for tempo in [4.9, 999.5] {
+        refused(
+            &edited_warp(|a| a["warp"]["tempo"] = json!(tempo)),
+            &format!("{warp}.tempo"),
+            "must be from 5 to 999",
+        );
+    }
+    refused(
+        &edited_warp(|a| a["warp"]["markers"] = json!([])),
+        &format!("{warp}.markers"),
+        "needs at least one marker",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["markers"] = json!([[MAX_TICKS + 1, 0]])),
+        &format!("{warp}.markers[0][0]"),
+        "or less",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["markers"] = json!([[0, MAX_TICKS + 1]])),
+        &format!("{warp}.markers[0][1]"),
+        "must be within",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["markers"] = json!([[1_000, 0], [1_000, 322_560]])),
+        &format!("{warp}.markers[1][0]"),
+        "must be after the frame of the marker before it",
+    );
+    refused(
+        &edited_warp(|a| a["warp"]["markers"] = json!([[1_000, 0], [2_000, -1]])),
+        &format!("{warp}.markers[1][1]"),
+        "must be after the position of the marker before it",
+    );
+    // Warped, the offset is a position, so it can be before zero but no
+    // further than a position goes.
+    refused(
+        &edited_warp(|a| a["offset"] = json!(-MAX_TICKS - 1)),
+        &format!("{AUDIO}.offset"),
+        "must be within",
+    );
+    // A clip's offset is of the kind its warp says.
+    let mut project = clips();
+    let ClipContent::Audio(audio) = &mut project.tracks[0].clips[0].content else {
+        unreachable!("an audio clip");
+    };
+    audio.warp = Some(Warp::new(0, Beats::ZERO, 120.0));
+    refused_saving(&project, &format!("{AUDIO}.offset"), "in ticks");
+}
+
+#[test]
+fn clips_curves_are_for_their_own_parameters_in_their_own_time() {
+    let gain = |points| json!([{"param": "gain", "points": points}]);
+    let lanes = format!("{AUDIO}.automation");
+    // Before the clip's own time starts is fine, and so is a step.
+    let file = edited_audio(|a| {
+        a["automation"] = gain(json!([
+            [-322_560, 0.0],
+            [0, 1.0],
+            [0, ParamSpec::CLIP_GAIN_MAX]
+        ]))
+    });
+    let ClipContent::Audio(audio) = &load(&file).unwrap().tracks[0].clips[0].content else {
+        panic!("an audio clip");
+    };
+    let lane = audio.lane(ClipParam::Gain).unwrap();
+    assert_eq!(lane.points.len(), 3);
+    assert_eq!(lane.points[0].at, Beats::new(-1));
+    refused(
+        &edited_audio(|a| a["automation"] = json!([{"param": "pitch", "points": [[0, 0.0]]}])),
+        &format!("{lanes}[0].param"),
+        "unknown variant `pitch`",
+    );
+    refused(
+        &edited_audio(|a| {
+            a["automation"] = json!([
+                {"param": "gain", "points": [[0, 1.0]]},
+                {"param": "gain", "points": [[0, 0.5]]},
+            ])
+        }),
+        &format!("{lanes}[1].param"),
+        "the clip moves gain twice",
+    );
+    refused(
+        &edited_audio(|a| a["automation"] = gain(json!([]))),
+        &format!("{lanes}[0].points"),
+        "needs at least one point",
+    );
+    for value in [-0.5, 16.0] {
+        refused(
+            &edited_audio(|a| a["automation"] = gain(json!([[0, value]]))),
+            &format!("{lanes}[0].points[0][1]"),
+            "must be from 0 to 15.84",
+        );
+    }
+    refused(
+        &edited_audio(|a| a["automation"] = gain(json!([[10, 1.0], [5, 1.0]]))),
+        &format!("{lanes}[0].points[1][0]"),
+        "must be at or after the point before it",
+    );
+    refused(
+        &edited_audio(|a| a["automation"] = gain(json!([[0, 1.0], [0, 0.5], [0, 0.0]]))),
+        &format!("{lanes}[0].points[2][0]"),
+        "makes three points at one place",
+    );
 }
 
 #[test]

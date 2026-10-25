@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use musicable_model::clip::{
-    AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, MidiClip, Point,
+    AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, MidiClip, Offset, Point,
 };
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Project, TakeId, Track, TrackId, TrackKind};
@@ -129,14 +129,24 @@ pub fn comped(project: &Project, editor: &Editor, track: &Track, clip: &Clip) ->
 /// from the same place in the song.
 fn lined_up(project: &Project, editor: &Editor, own: &Clip, take: &Clip) -> bool {
     match (&own.content, &take.content) {
-        (ClipContent::Audio(a), ClipContent::Audio(b)) => {
-            let tempo = &project.tempo;
-            let rate = editor.sample_rate_of(&b.file);
-            // The song's frame that the file's first frame plays on, by a
-            // clip.
-            let first = |c: &Clip, offset: u64| tempo.frame_at(c.start, rate) - offset as i64;
-            // A frame either way, as the clips' edges fall on ticks.
-            a.file == b.file && (first(own, a.offset) - first(take, b.offset)).abs() <= 1
+        (ClipContent::Audio(a), ClipContent::Audio(b)) if a.file == b.file => {
+            match (a.offset, b.offset) {
+                (Offset::Frames(a_offset), Offset::Frames(b_offset)) => {
+                    let tempo = &project.tempo;
+                    let rate = editor.sample_rate_of(&b.file);
+                    // The song's frame that the file's first frame plays on,
+                    // by a clip.
+                    let first =
+                        |c: &Clip, offset: u64| tempo.frame_at(c.start, rate) - offset as i64;
+                    // A frame either way, as the clips' edges fall on ticks.
+                    (first(own, a_offset) - first(take, b_offset)).abs() <= 1
+                }
+                // Warped alike, with their own times starting together.
+                (Offset::Beats(a_offset), Offset::Beats(b_offset)) => {
+                    own.start - a_offset == take.start - b_offset && a.warp == b.warp
+                }
+                _ => false,
+            }
         }
         (ClipContent::Midi(a), ClipContent::Midi(b)) => {
             own.start - a.offset == take.start - b.offset
@@ -313,7 +323,7 @@ fn clip_of(tx: &mut Transaction<'_>, name: &str, rate: u32, pass: &Pass) -> Opti
         return None;
     }
     let mut audio = AudioClip::new(pass.file.clone());
-    audio.offset = pass.offset + skip;
+    audio.offset = Offset::Frames(pass.offset + skip);
     Some(tx.new_clip(name, BeatRange::new(start, end), ClipContent::Audio(audio)))
 }
 
@@ -423,7 +433,7 @@ mod tests {
                 let ClipContent::Audio(audio) = &clip.content else {
                     panic!("an audio clip");
                 };
-                (clip.start, clip.end(), audio.offset)
+                (clip.start, clip.end(), audio.offset.frames().unwrap())
             })
             .collect();
         clips.sort();
@@ -517,7 +527,7 @@ mod tests {
         let ClipContent::Audio(audio) = &clip.content else {
             panic!("an audio clip");
         };
-        assert_eq!(audio.offset, 17);
+        assert_eq!(audio.offset, Offset::Frames(17));
     }
 
     #[test]
@@ -638,6 +648,7 @@ mod tests {
                 sample_rate: RATE,
                 channels: 1,
                 frames: BEAT,
+                tempo: None,
             },
         );
         let args = Args::new()

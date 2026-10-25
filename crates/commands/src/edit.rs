@@ -13,12 +13,13 @@
 //! They act where the [focus](crate::Focus) is: on the arrangement's
 //! selection while the arrangement or the mixer has it, and while the
 //! piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select All
-//! act on its notes instead (see [`notes`]). In the other panels they don't
-//! apply. Split acts on clips only.
+//! act on its notes instead (see [`notes`]). While the Sample Editor has
+//! it, Delete and Select All act on its warp markers (see [`warp`]). In the
+//! other panels they don't apply. Split acts on clips only.
 
 use std::collections::BTreeSet;
 
-use musicable_model::clip::{Clip, ClipId};
+use musicable_model::clip::{Clip, ClipContent, ClipId};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, Project, TrackId};
 
@@ -27,7 +28,7 @@ use crate::{
     Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction, Type,
     Value, When,
 };
-use crate::{arrange, notes};
+use crate::{arrange, notes, panel, warp};
 
 /// Takes back the last change to the project.
 pub const UNDO: CommandId = CommandId::new("edit.undo");
@@ -75,23 +76,23 @@ const COMMANDS: [(CommandId, &str, When, Handler); 10] = [
         ctx.document.redo();
     }),
     (CUT, "Cut", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::cut, cut)
+        by_focus(ctx, notes::cut, nothing, cut)
     }),
     (COPY, "Copy", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::copy, copy);
+        by_focus(ctx, notes::copy, nothing, copy);
     }),
     (PASTE, "Paste", When::CanPaste, |ctx| {
-        by_focus(ctx, notes::paste, paste);
+        by_focus(ctx, notes::paste, nothing, paste);
     }),
     (DUPLICATE, "Duplicate", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::duplicate, duplicate);
+        by_focus(ctx, notes::duplicate, nothing, duplicate);
     }),
     (DELETE, "Delete", When::SomethingSelected, |ctx| {
-        by_focus(ctx, notes::delete, delete);
+        by_focus(ctx, notes::delete, warp::delete_selected, delete);
     }),
     (SPLIT, "Split", When::ClipsOrTimeSelected, split),
     (SELECT_ALL, "Select All", When::CanSelectAll, |ctx| {
-        by_focus(ctx, notes::select_all, select_all);
+        by_focus(ctx, notes::select_all, warp::select_all, select_all);
     }),
     (
         SELECT_MASTER,
@@ -101,15 +102,20 @@ const COMMANDS: [(CommandId, &str, When, Handler); 10] = [
     ),
 ];
 
-/// Runs `notes` while the piano roll has the focus, or `arrangement` while
-/// the arrangement or the mixer has it.
-fn by_focus(ctx: &mut Context<'_>, notes: Handler, arrangement: Handler) {
+/// Runs `notes` while the piano roll has the focus, `markers` while the
+/// Sample Editor has it, or `arrangement` while the arrangement or the
+/// mixer has it.
+fn by_focus(ctx: &mut Context<'_>, notes: Handler, markers: Handler, arrangement: Handler) {
     match ctx.document.editor().focus.edits() {
         Edits::Notes => notes(ctx),
+        Edits::Markers => markers(ctx),
         Edits::Arrangement => arrangement(ctx),
         Edits::Nothing => {}
     }
 }
+
+/// What the clipboard commands do with the Sample Editor's markers.
+fn nothing(_: &mut Context<'_>) {}
 
 /// Registers the edit commands.
 pub fn register(registry: &mut Registry) {
@@ -225,7 +231,8 @@ pub fn register(registry: &mut Registry) {
 
 /// Selects `clips`, or toggles them in the selection, and makes the track
 /// of the last one the selected track. The piano roll shows the last MIDI
-/// clip still selected, as Live's clip view does.
+/// clip still selected, as Live's clip view does, and the Sample Editor the
+/// last audio clip.
 fn select_clips(
     (project, editor): (&Project, &mut Editor),
     clips: &[ClipId],
@@ -257,10 +264,27 @@ fn select_clips(
         .filter(|id| editor.selection.clips.contains(id))
         .copied()
         .collect();
+    // The editors that fit the clips show the last of each kind, and the
+    // piano roll's keys show the one that fits the last clip.
+    let (mut notes, mut audio) = (false, false);
+    let mut last = None;
     for (_, clip) in selected.into_iter().filter_map(|id| project.find_clip(id)) {
-        if editor.show_in_piano_roll(clip) {
+        let fits = match &clip.content {
+            ClipContent::Midi(_) => panel::PIANO_ROLL,
+            ClipContent::Audio(_) => panel::SAMPLE_EDITOR,
+        };
+        last.get_or_insert(fits);
+        match &clip.content {
+            ClipContent::Midi(_) if !notes => notes = editor.show_in_piano_roll(clip),
+            ClipContent::Audio(_) if !audio => audio = editor.show_in_sample_editor(clip),
+            _ => {}
+        }
+        if notes && audio {
             break;
         }
+    }
+    if let Some(last) = last {
+        editor.clip_editor = last;
     }
     Ok(())
 }

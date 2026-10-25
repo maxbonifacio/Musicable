@@ -46,6 +46,7 @@ mod testing;
 pub mod track;
 pub mod transport;
 pub mod view;
+pub mod warp;
 pub mod workspace;
 
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
@@ -157,8 +158,9 @@ impl Command {
 /// arguments needn't meet it.
 ///
 /// The edit commands act where the [focus](Editor::focus) is, so what's
-/// selected means the piano roll's notes while it has the focus, and the
-/// arrangement's clips, time or tracks while the arrangement has it.
+/// selected means the piano roll's notes while it has the focus, the Sample
+/// Editor's warp markers while it has it, and the arrangement's clips, time
+/// or tracks while the arrangement has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum When {
     #[default]
@@ -171,9 +173,12 @@ pub enum When {
     /// Something Copy can take is selected where the focus is: notes, or
     /// clips or time.
     CanCopy,
-    /// Something is selected where the focus is: notes, or clips, time or
-    /// tracks.
+    /// Something is selected where the focus is: notes, warp markers, or
+    /// clips, time or tracks.
     SomethingSelected,
+    /// Something Zoom to Selection can show is selected where the focus is:
+    /// notes, warp markers, or clips or time.
+    CanZoomToSelection,
     /// The panel with the focus has things to select: the arrangement's
     /// clips, or the piano roll's notes.
     CanSelectAll,
@@ -195,6 +200,12 @@ pub enum When {
     ControllerCurve,
     /// Someone overrode automation, which can be re-enabled.
     AutomationOverridden,
+    /// The Sample Editor shows an audio clip.
+    SampleEditorClip,
+    /// The Sample Editor shows a warped audio clip.
+    WarpedClip,
+    /// The Sample Editor has the focus, and warp markers selected.
+    MarkersSelected,
 }
 
 impl When {
@@ -203,15 +214,28 @@ impl When {
         let roll = &editor.piano_roll;
         let edits = editor.focus.edits();
         let notes = edits == Edits::Notes;
+        let markers = edits == Edits::Markers;
         let arranging = edits == Edits::Arrangement;
+        let sample = &editor.sample_editor;
         match self {
             When::Always => true,
             When::ClipsSelected => !selection.clips.is_empty(),
-            When::CanCopy | When::SomethingSelected | When::NotesSelected if notes => {
+            When::CanCopy
+            | When::SomethingSelected
+            | When::NotesSelected
+            | When::CanZoomToSelection
+                if notes =>
+            {
                 roll.clip.is_some() && !roll.notes.is_empty()
             }
             When::NotesSelected => false,
-            When::ClipsOrTimeSelected | When::CanCopy => {
+            When::SomethingSelected | When::MarkersSelected | When::CanZoomToSelection
+                if markers =>
+            {
+                sample.clip.is_some() && !sample.markers.is_empty()
+            }
+            When::MarkersSelected => false,
+            When::ClipsOrTimeSelected | When::CanCopy | When::CanZoomToSelection => {
                 arranging && (!selection.clips.is_empty() || selection.time.is_some())
             }
             When::SomethingSelected => arranging && !selection.is_empty(),
@@ -231,6 +255,10 @@ impl When {
             }),
             When::ControllerCurve => controllers::shown(project, editor).is_some(),
             When::AutomationOverridden => project.automation.iter().any(|l| l.overridden),
+            When::SampleEditorClip => sample.clip.is_some(),
+            When::WarpedClip => sample
+                .clip
+                .is_some_and(|id| warp::warped(project, id).is_ok()),
         }
     }
 }
@@ -280,9 +308,9 @@ pub enum Request {
     TogglePanel(&'static str),
     /// Show the panel with this id, such as the piano roll, if it's hidden.
     ShowPanel(&'static str),
-    /// Bring the piano roll in front of the devices, or the devices in
-    /// front of the piano roll.
-    SwitchDevicesPianoRoll,
+    /// Bring the panel with this id, the piano roll or the Sample Editor,
+    /// in front of the devices, or the devices in front of it.
+    SwitchDevicesClipEditor(&'static str),
     /// Bring the devices panel in front of the piano roll, unless it's
     /// hidden, with this device in sight: it was just added.
     ShowDevice(DeviceId),
@@ -548,6 +576,7 @@ pub fn register_all(registry: &mut Registry) {
     take::register(registry);
     notes::register(registry);
     controllers::register(registry);
+    warp::register(registry);
     automation::register(registry);
     view::register(registry);
     workspace::register(registry);

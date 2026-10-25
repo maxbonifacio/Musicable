@@ -1,6 +1,6 @@
 //! Clips: audio clips loaded whole and streaming from the disk thread,
-//! resampled, fading and crossfading, and MIDI clips whose notes, with their
-//! expression, play a test instrument. A project of them plays the same with
+//! resampled, fading and crossfading, warped, and MIDI clips whose notes,
+//! with their expression, play a test instrument. A project of them plays the same with
 //! the parallel renderer as with the reference renderer, looping, locating
 //! and in blocks of any size. Audio clips play what the song position says,
 //! however the playhead got there. Streams don't allocate on the audio
@@ -16,8 +16,10 @@ use musicable_engine::{
     AudioMut, Engine, EngineConfig, Event, Meters, ParallelOptions, ParallelRenderer,
     ReferenceRenderer, Renderer, TransportCommand, compile_with_media, rt,
 };
-use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip, Point};
+use musicable_model::clip::{AudioClip, Clip, ClipContent, MidiClip, Offset, Point};
+use musicable_model::param::ClipParam;
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{DeviceKind, Project, TestTone, TrackId, TrackKind};
 
 #[global_allocator]
@@ -130,9 +132,11 @@ fn audio_clip(
     project.track_mut(track).unwrap().clips.push(clip);
 }
 
-/// Two audio tracks: on the first, a clip loaded whole crossfading into one
-/// that streams, and on the second, a test tone under two clips of files at
-/// other sample rates, one streaming.
+/// Three audio tracks: on the first, a clip loaded whole crossfading into
+/// one that streams, on the second, a test tone under two clips of files at
+/// other sample rates, one streaming, and on the third, a warped clip that
+/// streams, its file playing at twice the song's speed, then at it, then at
+/// a third of it, as its gain rises.
 fn audio_tracks(project: &mut Project, files: &mut Files) {
     let drums = project.add_track("Drums", TrackKind::Audio);
     let kick = File {
@@ -158,7 +162,7 @@ fn audio_tracks(project: &mut Project, files: &mut Files) {
     };
     let span = (beats(3, 2), beats(6, 1));
     audio_clip(project, files, drums, span, take, Load::Stream, |a| {
-        a.offset = 1_000;
+        a.offset = Offset::Frames(1_000);
         a.gain = 0.8;
         a.fade_in = beats(1, 2);
         a.fade_out = beats(1, 4);
@@ -176,7 +180,7 @@ fn audio_tracks(project: &mut Project, files: &mut Files) {
     };
     let span = (beats(1, 1), beats(5, 1));
     audio_clip(project, files, pad, span, strings, Load::Stream, |a| {
-        a.offset = 500;
+        a.offset = Offset::Frames(500);
         a.gain = 0.5;
         a.fade_in = beats(1, 1);
     });
@@ -187,6 +191,33 @@ fn audio_tracks(project: &mut Project, files: &mut Files) {
     };
     let span = (beats(13, 4), beats(1, 2));
     audio_clip(project, files, pad, span, hit, Load::Whole, |_| {});
+
+    let groove = project.add_track("Groove", TrackKind::Audio);
+    let breaks = File {
+        channels: 2,
+        sample_rate: 48_000,
+        frames: 72_000,
+    };
+    let span = (beats(2, 1), beats(3, 1));
+    audio_clip(project, files, groove, span, breaks, Load::Stream, |a| {
+        let marker = |frame, beat| WarpMarker { frame, beat };
+        a.warp = Some(Warp {
+            markers: vec![
+                marker(0, beats(0, 1)),
+                marker(24_000, beats(1, 2)),
+                marker(48_000, beats(3, 2)),
+                marker(60_000, beats(3, 1)),
+            ],
+            ..Warp::new(0, Beats::ZERO, 120.0)
+        });
+        a.offset = Offset::Beats(beats(1, 8));
+        a.fade_out = beats(1, 4);
+        let point = musicable_model::automation::Point::new;
+        a.set_lane(
+            ClipParam::Gain,
+            vec![point(beats(1, 4), 0.2), point(beats(5, 4), 1.0)],
+        );
+    });
 }
 
 /// A MIDI track playing a test instrument: chords with per-note expression
@@ -311,11 +342,15 @@ fn clips_play_the_same_with_the_parallel_renderer() {
     );
     let played = session(&project, &whole, Box::new(ReferenceRenderer));
     assert!(same(&played, &expected), "loaded whole");
-    // And the notes play: without them, it's another song.
-    let mut unplayed = project.clone();
-    unplayed.tracks[2].clips.clear();
-    let played = session(&unplayed, &files, Box::new(ReferenceRenderer));
-    assert!(!same(&played, &expected), "without the notes");
+    // And the notes and the warped clip play: without them, it's another
+    // song.
+    for name in ["Keys", "Groove"] {
+        let mut unplayed = project.clone();
+        let track = unplayed.tracks.iter_mut().find(|t| t.name == name).unwrap();
+        track.clips.clear();
+        let played = session(&unplayed, &files, Box::new(ReferenceRenderer));
+        assert!(!same(&played, &expected), "without {name}");
+    }
 }
 
 /// Renders `frames` frames of `engine` into a vector, a channel after the
@@ -461,10 +496,21 @@ impl Files {
             if position >= end {
                 return true;
             }
-            let step = f64::from(file.sample_rate) / rate;
-            let into = position.saturating_sub(start) as f64 * step;
-            let first = (audio.offset + into as u64).saturating_sub(64);
-            stream.is_loaded(first, (frames as f64 * step) as u64 + 128)
+            // The file's frame on a song frame of the clip.
+            let file_frame = |song: u64| match (&audio.warp, audio.offset) {
+                (Some(warp), Offset::Beats(offset)) => {
+                    let own = offset.to_f64() + song as f64 / BEAT as f64 - clip.start.to_f64();
+                    warp.frame_at(own, file.sample_rate)
+                }
+                (_, offset) => {
+                    let step = f64::from(file.sample_rate) / rate;
+                    offset.frames().unwrap() as f64 + (song - start) as f64 * step
+                }
+            };
+            let from = position.max(start);
+            let first = (file_frame(from) - 64.0).max(0.0);
+            let last = file_frame(from + frames) + 64.0;
+            stream.is_loaded(first as u64, (last - first) as u64)
         })
     }
 }

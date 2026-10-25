@@ -926,6 +926,7 @@ fn close(track: &mut TrackTape) -> io::Result<()> {
             sample_rate: file.writer.sample_rate(),
             frames: file.writer.frames(),
             channels: usize::from(file.writer.channels()),
+            tempo: None,
         };
         file.writer.finish()?;
         track.files.push((file.name, audio));

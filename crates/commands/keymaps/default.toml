@@ -57,11 +57,12 @@ version = 1
 "view.toggle_browser" = ["Ctrl+Alt+B"]
 "browser.focus_search" = ["Ctrl+F"]
 
-# Live's keys for its clip view, which the piano roll stands in for: Live 12
-# shows and hides it with Ctrl+Alt+3, and switches between it and the device
-# view with F12 or Shift+Tab. Shift+Tab is left to move the keyboard focus
-# back, as it does everywhere else.
-"view.toggle_piano_roll" = ["Ctrl+Alt+3"]
+# Live's keys for its clip view, which the piano roll stands in for with a
+# MIDI clip and the Sample Editor with an audio clip: Live 12 shows and hides
+# it with Ctrl+Alt+3, and switches between it and the device view with F12 or
+# Shift+Tab. Shift+Tab is left to move the keyboard focus back, as it does
+# everywhere else.
+"view.toggle_clip_editor" = ["Ctrl+Alt+3"]
 "view.switch_devices_piano_roll" = ["F12"]
 
 # Live has no list of the undo history. Its key follows the other panels'.
@@ -127,6 +128,14 @@ version = 1
 "notes.lengthen" = ["Shift+Right"]
 "notes.velocity_up" = ["Ctrl+Up"]
 "notes.velocity_down" = ["Ctrl+Down"]
+
+# Live's keys for the warp markers in its sample editor, which the Sample
+# Editor stands in for: Ctrl+I adds one at the insert point, where the
+# waveform was clicked last, and the arrow keys move the selected ones.
+[panels.sample_editor]
+"warp.insert_markers" = ["Ctrl+I"]
+"warp.nudge_left" = ["Left"]
+"warp.nudge_right" = ["Right"]
 
 # The arrow keys step through the History panel's list: Up takes a step back,
 # as undo does, and Down makes the next one again, as redo does.

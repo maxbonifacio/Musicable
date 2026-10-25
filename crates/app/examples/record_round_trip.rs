@@ -582,9 +582,12 @@ fn record(
     let ClipContent::Audio(audio) = &clip.content else {
         return Err("the take isn't audio".to_owned());
     };
+    let Some(offset) = audio.offset.frames() else {
+        return Err("the take is warped".to_owned());
+    };
     let tempo = &studio.session.project().tempo;
     // The song's frame that the file's first frame plays on.
-    let first = tempo.frame_at(clip.start, rate) - audio.offset as i64;
+    let first = tempo.frame_at(clip.start, rate) - offset as i64;
     let recorded = tempo.frame_at(clip.end(), rate) - tempo.frame_at(clip.start, rate);
     println!(
         "The take: {} frames from song frame {}, in {}",

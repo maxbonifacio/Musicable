@@ -1,8 +1,8 @@
 //! Clips through the app: a saved project whose audio clips play WAV, AIFF
-//! and FLAC files from its folder, one of them long enough to stream, and
-//! whose MIDI clip plays a test instrument. It finds its files, loops, and
-//! plays the same with every renderer, before and after saving, as
-//! `musicable null-test` checks it.
+//! and FLAC files from its folder, one of them long enough to stream and
+//! one warped, and whose MIDI clip plays a test instrument. It finds its
+//! files, loops, and plays the same with every renderer, before and after
+//! saving, as `musicable null-test` checks it.
 
 use std::fs::{self, File};
 use std::io::BufWriter;
@@ -12,8 +12,11 @@ use musicable_app::null_test::{self, Player, Render};
 use musicable_engine::{EngineConfig, ParallelOptions, rt};
 use musicable_io::audio::{SampleFormat, save_wav, write_aiff};
 use musicable_io::project;
-use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Point};
+use musicable_model::automation;
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Point, Warping};
+use musicable_model::param::ClipParam;
 use musicable_model::time::{BeatRange, Beats};
+use musicable_model::warp::{Warp, WarpMarker};
 use musicable_model::{DeviceKind, Project, TrackId, TrackKind};
 
 #[global_allocator]
@@ -99,14 +102,36 @@ fn song() -> Project {
     let mut audio = AudioClip::new("Audio/Drums.wav");
     audio.fade_out = beats(1, 2);
     audio_clip(&mut p, drums, beats(0, 1), beats(2, 1), audio);
+    // Warped at 100 BPM, so it plays faster than the file, as it streams.
     let mut audio = AudioClip::new("Audio/Long.wav");
-    audio.offset = LONG as u64 - 100_000;
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(Warp::new(LONG as u64 - 100_000, Beats::ZERO, 100.0)),
+    };
+    assert!(audio.set_warping(warping));
     audio.fade_in = beats(1, 2);
     audio_clip(&mut p, drums, beats(3, 2), beats(4, 1), audio);
 
+    // Warped, with the file's first 15,000 frames over a beat and the rest
+    // at that speed, and a gain curve that rises over the first beat.
     let bass = p.add_track("Bass", TrackKind::Audio);
     let mut audio = AudioClip::new("Audio/Bass.aif");
     audio.gain = 0.7;
+    let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+    warp.markers.push(WarpMarker {
+        frame: 15_000,
+        beat: beats(1, 1),
+    });
+    let warping = Warping {
+        offset: Offset::Beats(Beats::ZERO),
+        warp: Some(warp),
+    };
+    assert!(audio.set_warping(warping));
+    let rise = vec![
+        automation::Point::new(Beats::ZERO, 0.5),
+        automation::Point::new(beats(1, 1), 1.0),
+    ];
+    audio.set_lane(ClipParam::Gain, rise);
     audio_clip(&mut p, bass, beats(1, 2), beats(3, 1), audio);
     let strings = p.add_track("Strings", TrackKind::Audio);
     audio_clip(

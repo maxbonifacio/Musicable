@@ -7,11 +7,12 @@
 
 use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{
-    Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId, Point, Timing,
+    AudioClip, Clip, ClipContent, ClipId, Controller, Dimension, Fades, MidiClip, Note, NoteId,
+    Point, Timing, Warping,
 };
 use musicable_model::mixer::Bus;
 use musicable_model::native::NativeKind;
-use musicable_model::param::ParamAddress;
+use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::PluginSettings;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
@@ -932,6 +933,48 @@ impl Transaction<'_> {
         }
     }
 
+    /// Sets whether an audio clip follows the tempo, and how: its offset
+    /// with its warp. Warping that doesn't keep its rules does nothing (see
+    /// [`AudioClip::set_warping`]), and so does a MIDI clip. Its timing and
+    /// the curves in its own time stay as they are: change them in the same
+    /// transaction, so the clip plays what it should.
+    pub fn set_clip_warping(&mut self, clip: ClipId, warping: Warping) {
+        let Some((track, audio)) = audio_mut(self.project, clip) else {
+            return;
+        };
+        let from = audio.warping();
+        if from != warping && audio.set_warping(warping.clone()) {
+            self.edits.push(Edit::ClipWarping {
+                track,
+                clip,
+                from,
+                to: warping,
+            });
+        }
+    }
+
+    /// Sets an audio clip's gain, as linear gain, from silence to +24 dB:
+    /// what it plays at where its curve doesn't say otherwise. Values that
+    /// aren't finite do nothing, and so does a MIDI clip.
+    pub fn set_clip_gain(&mut self, clip: ClipId, gain: f32) {
+        if !gain.is_finite() {
+            return;
+        }
+        let gain = gain.clamp(0.0, ParamSpec::CLIP_GAIN_MAX as f32);
+        let Some((track, audio)) = audio_mut(self.project, clip) else {
+            return;
+        };
+        if audio.gain != gain {
+            let from = std::mem::replace(&mut audio.gain, gain);
+            self.edits.push(Edit::ClipGain {
+                track,
+                clip,
+                from,
+                to: gain,
+            });
+        }
+    }
+
     /// An id for a new note in the MIDI clip with id `clip`, for
     /// [`add_note`](Self::add_note), or `None` if there's no MIDI clip on a
     /// track with that id. Taking an id isn't an edit, since ids are never
@@ -1221,8 +1264,13 @@ impl Transaction<'_> {
     }
 
     /// Removes the lane that automates `param`, and returns it. The
-    /// parameter keeps its own value from then on.
+    /// parameter keeps its own value from then on. A clip's parameter has
+    /// its curve in the clip, which goes, and nothing is returned.
     pub fn remove_lane(&mut self, param: ParamAddress) -> Option<Lane> {
+        if let ParamAddress::Clip(..) = param {
+            self.set_lane_points(param, Vec::new());
+            return None;
+        }
         let index = self.project.lane_index(param)?;
         let lane = self.project.automation.remove(index);
         self.edits.push(Edit::RemoveLane {
@@ -1235,7 +1283,16 @@ impl Transaction<'_> {
     /// Sets the points of the lane that automates `param`, tidied (see
     /// [`automation::tidy`]). A parameter without a lane gets one, if the
     /// project has the parameter, and a lane left without points goes.
+    ///
+    /// A clip's parameter has its curve in the clip, in the clip's own
+    /// time, which can start before zero: its points are tidied with
+    /// [`automation::tidy_anywhere`] instead, and kept in the parameter's
+    /// range.
     pub fn set_lane_points(&mut self, param: ParamAddress, mut points: Vec<automation::Point>) {
+        if let ParamAddress::Clip(clip, clip_param) = param {
+            self.set_clip_lane(clip, clip_param, points);
+            return;
+        }
         automation::tidy(&mut points);
         let Some(lane) = self.project.lane_mut(param) else {
             self.add_lane(usize::MAX, Lane::new(param, points));
@@ -1247,6 +1304,36 @@ impl Transaction<'_> {
             let from = std::mem::replace(&mut lane.points, points.clone());
             self.edits.push(Edit::LanePoints {
                 param,
+                from,
+                to: points,
+            });
+        }
+    }
+
+    /// Sets the curve of the audio clip `clip`'s parameter `param`: see
+    /// [`set_lane_points`](Self::set_lane_points).
+    fn set_clip_lane(
+        &mut self,
+        clip: ClipId,
+        param: ClipParam,
+        mut points: Vec<automation::Point>,
+    ) {
+        automation::tidy_anywhere(&mut points);
+        let spec = param.spec();
+        for point in &mut points {
+            point.value = spec.clamp(point.value);
+        }
+        let Some((_, audio)) = audio_mut(self.project, clip) else {
+            return;
+        };
+        let from = audio
+            .lane(param)
+            .map(|l| l.points.clone())
+            .unwrap_or_default();
+        if from != points {
+            audio.set_lane(param, points.clone());
+            self.edits.push(Edit::LanePoints {
+                param: ParamAddress::Clip(clip, param),
                 from,
                 to: points,
             });
@@ -1297,6 +1384,7 @@ impl Transaction<'_> {
                     self.set_plugin_param(device, n, Some(value));
                 }
             }
+            ParamAddress::Clip(clip, ClipParam::Gain) => self.set_clip_gain(clip, narrow),
         }
     }
 
@@ -1407,6 +1495,8 @@ impl Transaction<'_> {
             Edit::ClipTiming { clip, to, .. } => self.set_clip_timing(*clip, *to),
             Edit::ClipFades { clip, to, .. } => self.set_clip_fades(*clip, *to),
             Edit::ClipName { clip, to, .. } => self.set_clip_name(*clip, to),
+            Edit::ClipWarping { clip, to, .. } => self.set_clip_warping(*clip, to.clone()),
+            Edit::ClipGain { clip, to, .. } => self.set_clip_gain(*clip, *to),
             Edit::AddNote {
                 clip, index, note, ..
             } => self.add_note(*clip, *index, note.clone()),
@@ -1473,6 +1563,16 @@ fn fades_of(clip: &Clip) -> Option<Fades> {
 
 /// The notes of the MIDI clip with id `clip`, on one of the project's
 /// tracks, and the track's id.
+/// The audio clip with id `clip` on one of the project's tracks, and the
+/// track's id.
+fn audio_mut(project: &mut Project, clip: ClipId) -> Option<(TrackId, &mut AudioClip)> {
+    let track = project.find_clip(clip)?.0.id;
+    match &mut project.track_mut(track)?.clip_mut(clip)?.content {
+        ClipContent::Audio(audio) => Some((track, audio)),
+        ClipContent::Midi(_) => None,
+    }
+}
+
 fn midi_mut(project: &mut Project, clip: ClipId) -> Option<(TrackId, &mut MidiClip)> {
     let track = project.find_clip(clip)?.0.id;
     match &mut project.track_mut(track)?.clip_mut(clip)?.content {
@@ -1677,6 +1777,21 @@ pub enum Edit {
         from: String,
         to: String,
     },
+    /// The audio clip with id `clip` was warped or unwarped, or its warp
+    /// changed.
+    ClipWarping {
+        track: TrackId,
+        clip: ClipId,
+        from: Warping,
+        to: Warping,
+    },
+    /// The audio clip's gain changed, as linear gain.
+    ClipGain {
+        track: TrackId,
+        clip: ClipId,
+        from: f32,
+        to: f32,
+    },
     /// `note` went in at `index` in the notes of the MIDI clip with id
     /// `clip`, on the track with id `track`.
     AddNote {
@@ -1814,7 +1929,8 @@ pub enum Edit {
         index: usize,
         lane: Lane,
     },
-    /// The points of the lane that automates `param` changed.
+    /// The points of the lane that automates `param` changed. For a clip's
+    /// parameter, the curve in the clip, which no points means it hasn't.
     LanePoints {
         param: ParamAddress,
         from: Vec<automation::Point>,
@@ -1952,6 +2068,28 @@ impl Edit {
                 from,
                 to,
             } => Edit::ClipName {
+                track,
+                clip,
+                from: to,
+                to: from,
+            },
+            Edit::ClipWarping {
+                track,
+                clip,
+                from,
+                to,
+            } => Edit::ClipWarping {
+                track,
+                clip,
+                from: to,
+                to: from,
+            },
+            Edit::ClipGain {
+                track,
+                clip,
+                from,
+                to,
+            } => Edit::ClipGain {
                 track,
                 clip,
                 from: to,
@@ -2271,6 +2409,22 @@ impl Edit {
                 },
             ) if clip == other => to.clone_from(next),
             (
+                Edit::ClipWarping { clip, to, .. },
+                Edit::ClipWarping {
+                    clip: other,
+                    to: next,
+                    ..
+                },
+            ) if clip == other => to.clone_from(next),
+            (
+                Edit::ClipGain { clip, to, .. },
+                Edit::ClipGain {
+                    clip: other,
+                    to: next,
+                    ..
+                },
+            ) if clip == other => *to = *next,
+            (
                 Edit::NoteTiming { clip, note, to, .. },
                 Edit::NoteTiming {
                     clip: other,
@@ -2422,6 +2576,8 @@ impl Edit {
                 | Edit::ClipTiming { .. }
                 | Edit::ClipFades { .. }
                 | Edit::ClipName { .. }
+                | Edit::ClipWarping { .. }
+                | Edit::ClipGain { .. }
                 | Edit::AddNote { .. }
                 | Edit::RemoveNote { .. }
                 | Edit::NoteTiming { .. }
@@ -2493,6 +2649,8 @@ impl Edit {
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,
             Edit::ClipTiming { from, to, .. } => from == to,
             Edit::ClipFades { from, to, .. } => from == to,
+            Edit::ClipWarping { from, to, .. } => from == to,
+            Edit::ClipGain { from, to, .. } => from == to,
             Edit::NoteTiming { from, to, .. } => from == to,
             Edit::NoteKey { from, to, .. } => from == to,
             Edit::NoteVelocity { from, to, .. } => from == to,

@@ -44,6 +44,13 @@
 | Command | Keys | Id |
 |---|---|---|
 | Insert MIDI Clip | Ctrl+Shift+M | `clip.insert_midi_clip` |
+| Warp |  | `clip.set_warp` |
+| Double Clip Tempo |  | `warp.double_tempo` |
+| Halve Clip Tempo |  | `warp.halve_tempo` |
+| Insert Warp Marker | Ctrl+I in the Sample Editor panel | `warp.insert_markers` |
+| Delete Warp Markers |  | `warp.delete_markers` |
+| Nudge Warp Markers Left | Left in the Sample Editor panel | `warp.nudge_left` |
+| Nudge Warp Markers Right | Right in the Sample Editor panel | `warp.nudge_right` |
 
 ### Notes
 
@@ -111,8 +118,10 @@
 |---|---|---|
 | Mixer | Ctrl+Alt+M | `view.toggle_mixer` |
 | Devices | Ctrl+Alt+L | `view.toggle_devices` |
-| Piano Roll | Ctrl+Alt+3 | `view.toggle_piano_roll` |
-| Switch Devices and Piano Roll | F12 | `view.switch_devices_piano_roll` |
+| Piano Roll |  | `view.toggle_piano_roll` |
+| Sample Editor |  | `view.toggle_sample_editor` |
+| Clip Editor | Ctrl+Alt+3 | `view.toggle_clip_editor` |
+| Switch Devices and Clip Editor | F12 | `view.switch_devices_piano_roll` |
 | Browser | Ctrl+Alt+B | `view.toggle_browser` |
 | History | Ctrl+Alt+H | `view.toggle_history` |
 | Move Panel to New Window |  | `view.move_to_new_window` |

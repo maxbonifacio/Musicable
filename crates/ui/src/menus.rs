@@ -4,7 +4,7 @@
 use egui::{Button, Ui};
 use musicable_commands::{
     Args, Command, CommandId, Registry, arrange, automation, browser, controllers, edit, file,
-    locator, notes, options, track, transport, view, workspace,
+    locator, notes, options, track, transport, view, warp, workspace,
 };
 
 use crate::shell::{Action, View, toggled, with_keys};
@@ -68,7 +68,22 @@ const MENUS: [MenuSpec; 8] = [
             Some(track::DELETE),
         ],
     ),
-    ("Clip", "clip", &[Some(arrange::INSERT_MIDI_CLIP)]),
+    (
+        "Clip",
+        "clip",
+        &[
+            Some(arrange::INSERT_MIDI_CLIP),
+            None,
+            Some(warp::SET_WARP),
+            Some(warp::DOUBLE_TEMPO),
+            Some(warp::HALVE_TEMPO),
+            None,
+            Some(warp::INSERT_MARKERS),
+            Some(warp::DELETE_MARKERS),
+            Some(warp::NUDGE_LEFT),
+            Some(warp::NUDGE_RIGHT),
+        ],
+    ),
     (
         "Notes",
         "notes",
@@ -152,6 +167,8 @@ const LAST_MENUS: [MenuSpec; 4] = [
             Some(view::TOGGLE_MIXER),
             Some(view::TOGGLE_DEVICES),
             Some(view::TOGGLE_PIANO_ROLL),
+            Some(view::TOGGLE_SAMPLE_EDITOR),
+            Some(view::TOGGLE_CLIP_EDITOR),
             Some(view::SWITCH_DEVICES_PIANO_ROLL),
             Some(view::TOGGLE_BROWSER),
             Some(view::TOGGLE_HISTORY),

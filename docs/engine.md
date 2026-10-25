@@ -519,8 +519,15 @@ where the frame is in the song, never on how the playhead got there or how
 the blocks fall. So clips loop, locate and render the same, bit for bit, in
 both renderers.
 
-**Audio clips.** `AudioClips` plays each clip's file from the clip's
-`offset` in it, at the file's own speed, for the clip's length.
+**Audio clips.** `AudioClips` plays each clip's file for the clip's
+length. An unwarped clip plays it at the file's own speed, from the frame
+its `offset` gives, whatever the tempo. A warped clip follows the tempo:
+its warp's markers pin frames of the file to beats of the clip's own time,
+which starts at its `offset`, and `Placed::pieces` cuts the song's frames
+into pieces that each play the file at one speed, from a tempo change or a
+marker to the next. In Re-Pitch, the only mode so far, a piece is resampled
+at its speed, so the audio's pitch follows it; one at the file's own speed,
+at the device's rate, plays sample for sample.
 
 - Mono files play in both channels, and files with more than two channels
   play their first two.
@@ -533,7 +540,13 @@ both renderers.
   Kaiser-windowed sinc, 32 zero crossings each side, about 90 dB down by
   Nyquist, passing up to about 41% of the lower rate (18 kHz from 44.1 kHz).
   Every output frame's weights come from where it falls in the file alone.
-- Tier 1 doesn't warp: a clip plays at its file's speed whatever the tempo.
+  A warped piece that plays faster than the file widens the sinc to filter
+  what would alias, at most eight times
+  (`Resampler::with_step_widened_at_most`), so a piece's reach into the
+  file stays bounded however fast it plays.
+- A clip's gain follows its Gain curve where it has one, worked out for
+  each frame in the clip's own time: the file's seconds for an unwarped
+  clip and beats for a warped one, so the curve stays with the audio.
 
 **Audio files** reach the graph as `media::Source`s, one for each clip, in a
 `media::Media`: `compile_with_media(project, meters, media)`. The engine

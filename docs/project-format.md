@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 10,
+  "version": 11,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -90,7 +90,9 @@ workspace:
               "offset": 0,
               "gain": 1.0,
               "fade_in": 0,
-              "fade_out": 80640
+              "fade_out": 80640,
+              "warp": null,
+              "automation": []
             }
           }
         }
@@ -398,20 +400,54 @@ overlap, they crossfade.
 | `length` | whole number | How long it plays, in ticks: more than 0, and it ends within the position limit. |
 | `content` | object | What the clip plays, as an object with one field: `audio`, holding an audio clip, or `midi`, holding a MIDI clip. |
 
-An **audio clip** plays part of an audio file, WAV, AIFF or FLAC, at the
-file's own speed whatever the tempo, since there's no warping yet. A file
-at another sample rate than the audio device's is resampled.
+An **audio clip** plays part of an audio file, WAV, AIFF or FLAC.
+Unwarped, it plays at the file's own speed whatever the tempo. Warped, it
+follows the tempo: its warp's markers pin frames of the file to positions
+in the clip's own time, which runs with the song's beats as a MIDI clip's
+does, and the audio between two markers stretches to fill the time between
+them. A file at another sample rate than the audio device's is resampled.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `file` | string | The file's path: relative to the folder the project file is in, with `/` between names, or absolute. Not empty. |
-| `offset` | whole number | The frame of the file the clip starts playing from, up to 2⁵³ − 1. Where the clip runs on past the end of the file, it's silent. |
-| `gain` | float | Linear, like a track's `gain`. |
+| `offset` | whole number | Where the clip starts playing. Unwarped, the frame of the file, from 0 to 2⁵³ − 1. Warped, a position in the clip's own time, as a MIDI clip's `offset` is. Where the clip runs on past either end of the file, it's silent. |
+| `gain` | float | Linear, like a track's `gain`, where the clip's gain curve doesn't say otherwise. |
 | `fade_in` | whole number | How long the clip fades in from silence, from its start, in ticks: from 0 to the clip's length. |
 | `fade_out` | whole number | How long it fades out to silence, up to its end. Together with `fade_in`, at most the clip's length. |
+| `warp` | warp or `null` | How the clip follows the tempo, or `null` for a clip that's unwarped. |
+| `automation` | array of clip curves | The curves of the clip's own parameters, at most one for each, in the order the clip curve's table lists them. |
 
 Fades are equal-power quarter sines, so two clips whose fades overlap by
 the same length crossfade at constant power.
+
+A **warp**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | string | How the audio between markers plays: `"re_pitch"`, resampled at the speed it plays at, so its pitch follows its speed, as on a turntable. |
+| `tempo` | float | The clip's tempo while it has one marker, in quarter notes a minute of the file, from 5 to 999. With more markers, they say how fast the file plays, and `tempo` waits for all but one of them to go. |
+| `markers` | array of markers | At least one, in order: both their frames and their positions rise. |
+
+A **marker** is a pair `[frame, at]`: the frame of the file, from 0 to
+2⁵³ − 1, that plays at `at`, a position in the clip's own time. Between two
+markers the file plays at the speed that takes it from one to the next.
+Before the first marker and after the last, it plays at the speed beside
+it, and a clip with one marker plays at its `tempo` all through.
+
+A **clip curve** moves one of an audio clip's own parameters as the clip
+plays, in place of the parameter's own value:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `param` | string | The parameter: `"gain"`, the clip's `gain`, from 0 to 15.848931924611133 (+24 dB). |
+| `points` | array of points | As a lane's are (see Lane), but each `at` is a position in the clip's own time, and can be before 0. |
+
+The curves are in the clip's own time, so they move, copy and split with
+it. A warped clip's own time is in beats, as a MIDI clip's is. An unwarped
+clip's is its file's: a beat of it is a second of the file, from the file's
+first frame, so a curve stays with the audio whatever the tempo. Between two
+points the value moves on the parameter's scale, the fader's for the gain,
+as a lane's does.
 
 A **MIDI clip** plays notes, and moves MIDI controllers such as the sustain
 pedal:
@@ -785,6 +821,7 @@ Signal flows from tracks to buses without loops:
 | 8 | 2026-10-22 | Musicable's own devices: an EQ, a compressor, a gate, a delay, a reverb, a utility, a sampler and a synth. Version 7 files have none. |
 | 9 | 2026-10-22 | Automation: lanes that move channels' faders and pans, sends and device parameters as the song plays. Version 8 files have none. |
 | 10 | 2026-10-24 | The workspace a project was saved with. Version 9 files name none. |
+| 11 | 2026-10-25 | Warping: audio clips that follow the tempo, with markers and a mode, Re-Pitch so far, and curves for an audio clip's own parameters, starting with its gain. Version 10 audio clips are unwarped and have no curves. |
 
 ## Changing the format
 

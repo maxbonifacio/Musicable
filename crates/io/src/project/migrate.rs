@@ -27,6 +27,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     native,
     automation,
     workspace,
+    warping,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -185,6 +186,40 @@ fn automation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 /// name none.
 fn workspace(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     add(file, "", "workspace", Value::Null)
+}
+
+/// Version 11 added warping, and curves for an audio clip's own parameters,
+/// such as its gain. Version 10 audio clips play at their files' own speed
+/// and have no curves, on tracks and in takes.
+fn warping(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let path = format!("tracks[{i}]");
+        unwarped(track.get_mut("clips"), &format!("{path}.clips"))?;
+        let takes = track.get_mut("takes").and_then(Value::as_array_mut);
+        for (j, take) in takes.into_iter().flatten().enumerate() {
+            unwarped(take.get_mut("clips"), &format!("{path}.takes[{j}].clips"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Leaves each audio clip in `clips`, a list at `path`, unwarped and
+/// without curves.
+fn unwarped(clips: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let clips = clips.and_then(Value::as_array_mut);
+    for (k, clip) in clips.into_iter().flatten().enumerate() {
+        let audio = clip
+            .get_mut("content")
+            .and_then(|c| c.get_mut("audio"))
+            .and_then(Value::as_object_mut);
+        if let Some(audio) = audio {
+            let path = format!("{path}[{k}].content.audio");
+            add(audio, &path, "warp", Value::Null)?;
+            add(audio, &path, "automation", json!([]))?;
+        }
+    }
+    Ok(())
 }
 
 /// Adds a field the file's version didn't have to `object`, at `path`.
@@ -423,6 +458,41 @@ mod tests {
             run(&STEPS[..9], &mut file, 9).unwrap_err().path,
             "workspace",
             "a workspace in a version 9 file"
+        );
+    }
+
+    #[test]
+    fn version_10_audio_clips_are_unwarped() {
+        let audio = || json!({"content": {"audio": {"file": "Loop.wav"}}});
+        let midi = json!({"content": {"midi": {"notes": []}}});
+        let mut file = json!({
+            "version": 10,
+            "tracks": [
+                {"clips": [audio(), midi.clone()], "takes": [{"clips": [audio()]}]},
+                {"clips": [midi]},
+                "not a track",
+            ],
+        });
+        run(&STEPS[..10], &mut file, 10).unwrap();
+        let unwarped = json!({
+            "content": {"audio": {"file": "Loop.wav", "warp": null, "automation": []}},
+        });
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], unwarped);
+        assert_eq!(
+            tracks[1]["clips"][0],
+            json!({"content": {"midi": {"notes": []}}})
+        );
+        assert_eq!(file["version"], json!(11));
+        let mut file = json!({
+            "version": 10,
+            "tracks": [{"clips": [{"content": {"audio": {"warp": null}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..10], &mut file, 10).unwrap_err().path,
+            "tracks[0].clips[0].content.audio.warp",
+            "warping in a version 10 file"
         );
     }
 

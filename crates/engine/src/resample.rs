@@ -121,13 +121,28 @@ impl Resampler {
     /// sampler halves a sample's rate, for the copies of it that notes
     /// pitched up play.
     pub fn with_step(step: f64) -> Self {
-        let scale = step.recip().min(1.0);
+        Self::with_step_widened_at_most(step, f64::INFINITY)
+    }
+
+    /// Reads `step` file frames for each device frame, as
+    /// [`with_step`](Self::with_step) does, but with its sinc widened no
+    /// more than `widest` times however fast it reads, so its
+    /// [`reach`](Self::reach) stays within `HALF_WIDTH * widest` frames. Read
+    /// faster than that, it folds back what's between the two cutoffs.
+    pub fn with_step_widened_at_most(step: f64, widest: f64) -> Self {
+        let scale = step.recip().min(1.0).max(widest.recip());
         Self {
             kernel: Kernel::get(),
             step,
             scale,
             reach: (HALF_WIDTH as f64 / scale).ceil() as usize,
         }
+    }
+
+    /// The most frames each side of a position a resampler widened at most
+    /// `widest` times weighs.
+    pub fn most_reach(widest: f64) -> usize {
+        (HALF_WIDTH as f64 * widest.max(1.0)).ceil() as usize
     }
 
     pub fn step(&self) -> f64 {

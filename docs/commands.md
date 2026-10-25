@@ -2,8 +2,8 @@
 
 Every user action in Musicable is a named command, and key presses reach
 commands only through a keymap. Menus, the command palette and the mouse
-gestures of the arrangement and the piano roll run the same commands, and
-so do agents ([agents.md](agents.md)), and scripts will, so remapping a
+gestures of the arrangement, the piano roll and the Sample Editor run the
+same commands, and so do agents ([agents.md](agents.md)), and scripts will, so remapping a
 shortcut is just editing the keymap. This page covers
 the commands so far, the editor's state they read and change, the
 transactions they change the project through, undo and redo, how the app
@@ -79,8 +79,9 @@ key bound to one goes on to the window instead
 `run_with` returns `CommandError::NotNow`. A command given arguments runs
 whatever is selected, as they say what it works on. What's selected depends
 on the focus ([below](#the-editors-state)): the edit commands' conditions
-mean the piano roll's notes while it has the focus, and nothing while the
-devices panel or the browser has it.
+mean the piano roll's notes while it has the focus, the Sample Editor's
+warp markers while it has it, and nothing while the devices panel or the
+browser has it.
 
 ### Transport
 
@@ -151,10 +152,12 @@ selected clips, or else the time selection, or else the selected tracks.
 While the piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select
 All act on its notes instead, as they do in Live's MIDI note editor: Paste
 puts the notes at the start marker, in the clip the piano roll shows, and
-Duplicate puts a copy just after the selected notes. Split always acts on
-clips, and doesn't apply while the piano roll has the focus. The mixer
-shows the arrangement's tracks, so while it has the focus they act on the
-arrangement's selection, as Live's mixer does in its Arrangement View. The
+Duplicate puts a copy just after the selected notes. While the Sample
+Editor has it, Delete and Select All act on its warp markers, and Cut,
+Copy, Paste and Duplicate don't apply. Split always acts on clips, and
+doesn't apply while the piano roll or the Sample Editor has the focus. The
+mixer shows the arrangement's tracks, so while it has the focus they act on
+the arrangement's selection, as Live's mixer does in its Arrangement View. The
 devices panel, the browser and the History panel have nothing they take,
 so there they don't apply.
 
@@ -168,7 +171,7 @@ so there they don't apply.
 | `edit.duplicate` | Duplicate | Puts a copy of the selection just after it, and selects the copy | Ctrl+D | Ctrl+D |
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
-| `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip | Ctrl+A | Ctrl+A |
+| `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip, or every warp marker of the Sample Editor's | Ctrl+A | Ctrl+A |
 | `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header or its mixer strip does | none | Clicking the Main track |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 
@@ -182,8 +185,10 @@ And for the arrangement's clicks, scripts and agents:
 
 These give the arrangement the focus, unless the mixer has it, which edits
 the same selection. Selecting clips also shows the last
-MIDI clip selected in the piano roll, without giving it the focus, as
-selecting a clip in Live shows it in the clip view.
+MIDI clip selected in the piano roll, and the last audio clip in the Sample
+Editor, without giving them the focus, as selecting a clip in Live shows it
+in the clip view. The clip editor keys then show the editor that fits the
+last clip selected ([below](#options-and-view)).
 
 The Edit menu names the change, as in "Undo Tempo Up". Ctrl+Shift+Z is
 the other common key for redo. Clips that land where others are, by
@@ -228,7 +233,10 @@ clips before the start of the song stops at the start. `arrange::trimmed`
 says where a trim would leave a clip, which the arrangement's ghost shows
 while a drag lasts. Insert Audio needs each file's header read into
 the editor first ([below](#the-editors-state)): the app reads it when a file
-is dropped or imported.
+is dropped or imported. A warped audio clip's offset is in beats of its own
+time ([project-format.md](project-format.md#track)), so trimming, splitting
+and moving it keep its audio on the beats its warp markers put it on, at
+any tempo; an unwarped clip's offset is a frame of its file.
 
 ### Notes
 
@@ -304,6 +312,58 @@ stretch's end on, it holds what it did, with a point there if it needs one
 (`clip::redraw`). A drawn point that holds what came before is left out.
 Show Velocities and Clear Controller are in the Notes menu, and the lane's
 context menu has Clear Controller.
+
+### Warping
+
+These warp an audio clip, so it follows the tempo, edit its warp markers
+and set its gain, for the Sample Editor's gestures, scripts and agents
+(`crates/commands/src/warp.rs`). Each takes the clip as `clip`, or edits
+the one the Sample Editor shows without it. A marker pins a frame of the
+file to a position in the clip's own time, as the project file has them
+([project-format.md](project-format.md#track)): no two markers share a
+position, so the commands name markers by theirs. Each change is one
+transaction, so a drag is one step to undo.
+
+| Command | Title | Arguments | What it does |
+|---|---|---|---|
+| `clip.open` | Open in Sample Editor | `clip` | Shows an audio clip in the Sample Editor, gives it the focus, and shows the Sample Editor |
+| `clip.set_warp` | Warp | `on`?, `clip`? | Turns the clip's Warp on or off, or the other way from now without `on` |
+| `clip.set_gain` | Set Clip Gain | `gain`, `clip`? | Sets the clip's gain, linear, from 0 to about 15.85 (+24 dB), where its gain curve doesn't say otherwise |
+| `warp.select_markers` | Select Warp Markers | `markers`, `clip`?, `toggle`? | Selects the markers, or adds them to the selection or takes them away, and gives the Sample Editor the focus |
+| `warp.insert_markers` | Insert Warp Marker | `at`?, `clip`? | Adds a marker at each position, or at the start marker without them, pinning the audio that plays there, and selects them; gives back where they went |
+| `warp.move_markers` | Move Warp Markers | `markers`, `by`, `clip`? | Moves markers some beats later or earlier, stretching the audio either side, as far as they can go before the markers either side or a tempo out of range; gives back how far they went |
+| `warp.move_audio` | Move Audio Under Warp Marker | `marker`, `frame`, `clip`? | Has the file's frame `frame` play at the marker, which stays where it is; the frame must be between those of the markers either side |
+| `warp.delete_markers` | Delete Warp Markers | `markers`?, `clip`? | Deletes the markers, or the selected ones without them; a warped clip keeps its first if they're all of them |
+| `warp.set_tempo` | Set Clip Tempo | `bpm`, `keep_end`?, `clip`? | Sets the clip's tempo, from 5 to 999 BPM: its markers spread out or close up from its start, and its start stays where it is, or its end with `keep_end`, as the arrangement's Shift-drag of its start does |
+
+Warp keeps the stretch of the file a clip plays, as Live's does, so
+turning it on or off, or changing the clip's tempo, changes the clip's
+length, and what the clip comes to cover on its track is overwritten, as
+trimming does. Turning Warp on puts one marker at the clip's start, at the
+tempo the file's loop data gives (`AudioFile::tempo`), or else one in its
+name, or else the song's where the clip starts (`warp::first_tempo`),
+until analysis can find a file's tempo. Turning it off forgets the
+markers. The clip's gain curve stays with its audio both ways. A change
+that would take the clip's tempo out of range, bring two markers onto one
+tick or, with `keep_end`, put the clip's start before the song's is an
+error that changes nothing.
+
+And these act on the clip the Sample Editor shows, and its markers
+selected while it has the focus, with the keys of Live's Sample Editor.
+The Sample Editor's keys are its own ([below](#the-keymap-file)): they run
+these while it has the focus. The Clip menu has them too.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `warp.insert_markers` | Insert Warp Marker | Puts a marker at the start marker | Ctrl+I | Ctrl+I |
+| `warp.nudge_left` | Nudge Warp Markers Left | Moves the selected markers a step of the grid earlier | Left | Left |
+| `warp.nudge_right` | Nudge Warp Markers Right | A step of the grid later | Right | Right |
+| `warp.double_tempo` | Double Clip Tempo | Doubles the clip's tempo, so its audio plays half as fast, over twice the beats | none | ×2 |
+| `warp.halve_tempo` | Halve Clip Tempo | Halves it, so its audio plays twice as fast | none | ÷2 |
+
+The grid's step is the one the Sample Editor shows where the first
+selected marker is, at its zoom. Delete and Select All delete and select
+its markers while it has the focus ([Edit](#edit)).
 
 ### Locator
 
@@ -527,8 +587,10 @@ other. They push a `Request`, as the file commands do.
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
-| `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in a tab beside the devices | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
-| `view.switch_devices_piano_roll` | Switch Devices and Piano Roll | Brings the piano roll in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
+| `view.toggle_clip_editor` | Clip Editor | Shows or hides the editor that fits the clip selected or opened last: the piano roll, or the Sample Editor for an audio clip | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
+| `view.switch_devices_piano_roll` | Switch Devices and Clip Editor | Brings that editor in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
+| `view.toggle_piano_roll` | Piano Roll | Shows or hides the piano roll, in a tab beside the devices | none | none |
+| `view.toggle_sample_editor` | Sample Editor | Shows or hides the Sample Editor, in a tab beside the devices | none | none |
 | `view.toggle_browser` | Browser | Shows or hides the browser | Ctrl+Alt+B | Ctrl+Alt+B (Browser) |
 | `view.toggle_history` | History | Shows or hides the History panel, in a tab beside the browser | Ctrl+Alt+H | none |
 | `view.move_to_new_window` | Move Panel to New Window | Moves the panel with the focus to a new window of its own, as its tab's menu does; the arrangement and a window's last panel stay where they are | none | none |
@@ -536,7 +598,7 @@ other. They push a `Request`, as the file commands do.
 | `options.rescan_plugins` | Rescan Plugins | Scans for plugins again, trying the libraries left out as bad too | none | Rescan, in Preferences |
 | `view.zoom_in` | Zoom In | Zooms the view with the focus in, around the start marker | Equals, NumpadAdd | + |
 | `view.zoom_out` | Zoom Out | Zooms it out | Minus, NumpadSubtract | - |
-| `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement, or the selected notes in the piano roll | Z | Z |
+| `view.zoom_to_selection` | Zoom to Selection | Shows the selection across the arrangement, the selected notes in the piano roll, or the selected warp markers in the Sample Editor | Z | Z |
 | `view.toggle_follow` | Follow | Scrolls the arrangement to keep the playhead in sight, or stops | Ctrl+Shift+F | Ctrl+Shift+F |
 | `view.toggle_take_lanes` | Show/Hide Take Lanes | Shows the takes of the selected tracks, or of the track the panels show, in lanes under them, or hides them; `tracks` names other tracks | Ctrl+Alt+U | Ctrl+Alt+U |
 | `view.narrow_grid` | Narrow Grid | Brings the grid's lines closer | Ctrl+1 | Ctrl+1 |
@@ -548,11 +610,14 @@ other. They push a `Request`, as the file commands do.
 `view.set_viewport` (`start`, `zoom`, `top`, `width`) and
 `view.set_track_height` (`track`? or `master`?, `height`) carry the
 arrangement's scrolling, zooming and the heights of its tracks and of the
-master's row, and `view.set_piano_roll_viewport`
+master's row, `view.set_piano_roll_viewport`
 (`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
-roll's, with how tall its rows of keys are. `view.set_focus` gives a panel
-the focus (`panel`: `arrangement`, `mixer`, `devices`, `piano_roll`,
-`browser` or `history`), the piano roll only while it shows a clip. They and the take
+roll's, with how tall its rows of keys are, and
+`view.set_sample_editor_viewport` (`start`, `zoom`, `width`) the Sample
+Editor's. `view.set_focus` gives a panel the focus (`panel`:
+`arrangement`, `mixer`, `devices`, `piano_roll`, `sample_editor`,
+`browser` or `history`), the piano roll and the Sample Editor only while
+they show a clip. They and the take
 lanes change the editor's state, not the project, so undo leaves them
 alone. Live has no command palette. Ctrl+Shift+P is the usual key for one
 in other apps. Live 12 also switches between its clip view and its device
@@ -583,8 +648,8 @@ its other view, rather than windows of their own for its panels.
 
 ## The editor's state
 
-What the arrangement and the piano roll edit besides the project lives in
-an `Editor`, kept with the `Document` (`Document::editor` and
+What the arrangement, the piano roll and the Sample Editor edit besides
+the project lives in an `Editor`, kept with the `Document` (`Document::editor` and
 `editor_mut`), outside the widgets. Commands read and change it just as the
 UI does, and so will extensions and agents. It isn't saved with the
 project, undo leaves it alone, and opening a project starts a new one, but
@@ -614,15 +679,16 @@ for the behaviour settings.
   master's row, by their `Chain`.
 - **The focus** (`Focus`): the panel the keys and the edit commands act
   in, by its id (`crates/commands/src/panel.rs`): the arrangement, the
-  mixer, the devices, the piano roll, the browser or the history.
-  `Focus::edits` says what the edit commands act on there (`Edits`): the
-  arrangement's selection in the arrangement and the mixer, the notes in
-  the piano roll, and nothing in the others. The zoom acts on the piano
-  roll while it has the focus, and on the arrangement otherwise. Clicking
-  in a panel or on its tab gives it the focus
-  ([app.md](app.md#the-panels)), and so do the arrangement's and the piano
-  roll's selection commands. A panel's own keys work while it has it
-  ([below](#the-keymap-file)).
+  mixer, the devices, the piano roll, the Sample Editor, the browser or
+  the history. `Focus::edits` says what the edit commands act on there
+  (`Edits`): the arrangement's selection in the arrangement and the mixer,
+  the notes in the piano roll, the warp markers in the Sample Editor, and
+  nothing in the others. The zoom acts on the piano roll or the Sample
+  Editor while it has the focus, and on the arrangement otherwise.
+  Clicking in a panel or on its tab gives it the focus
+  ([app.md](app.md#the-panels)), and so do the selection commands of the
+  arrangement, the piano roll and the Sample Editor. A panel's own keys
+  work while it has it ([below](#the-keymap-file)).
 - **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
   selected notes, its own viewport (song positions across, as the
   arrangement's, so the start marker, the playhead and the grid line up,
@@ -630,14 +696,23 @@ for the behaviour settings.
   rows' height on screen, Draw Mode, what Cut and Copy took from it, and
   what the lane under the notes shows (`Lane`: the velocities, or a
   controller). The grid is the arrangement's, at the piano roll's zoom.
+- **The Sample Editor** (`editor::SampleEditor`): the audio clip it shows,
+  its selected warp markers, by their positions in the clip's own time,
+  and its own viewport, song positions across as the piano roll's are.
+  Its grid is the arrangement's too, at its zoom.
+- **The clip editor** (`Editor::clip_editor`): the panel of the editor
+  that fits the clip selected or opened last, the piano roll's or the
+  Sample Editor's, which Clip Editor and Switch Devices and Clip Editor
+  show.
 - **Behaviour** (`Behaviour`): how editing behaves where people's habits
   differ, kept as settings so profiles can follow other DAWs. So far:
   where Play/Stop plays from, and what middle C is called (`MiddleC`: C3 as
   in Live, C4, or C5).
 - **Audio files** (`AudioFile`): the sample rate, length and channels of
-  each file clips play, by the path the clips give. The app reads them
-  ([app.md](app.md#audio-files)). Trimming keeps an audio clip inside its
-  file, and positions inside a file count in the file's own frames.
+  each file clips play, by the path the clips give, and the tempo its loop
+  data gives, if it has any, which Warp starts a clip at. The app reads
+  them ([app.md](app.md#audio-files)). Trimming keeps an audio clip inside
+  its file, and positions inside a file count in the file's own frames.
 - **The clipboard**: the clips or time Cut and Copy took in the
   arrangement, for Paste.
 - **Take lanes**: the tracks whose takes show in lanes under them.

@@ -318,13 +318,14 @@ mod tests {
     use musicable_model::automation::{self, Lane};
     use musicable_model::clip::{
         AudioClip, ClipContent, ClipId, Controller, Expression, Fades, MidiClip, Note, NoteId,
-        Offset, Point, Timing,
+        Offset, Point, Timing, Warping,
     };
     use musicable_model::mixer::Bus;
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
-    use musicable_model::param::ParamAddress;
+    use musicable_model::param::{ClipParam, ParamAddress};
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
+    use musicable_model::warp::Warp;
     use musicable_model::{
         AudioInput, Chain, ClipType, DeviceId, DeviceKind, Input, LocatorId, Monitor, PluginFormat,
         Project, Send, SendId, TakeId, TrackId, TrackKind,
@@ -636,6 +637,24 @@ mod tests {
                 from: "Bass".into(),
                 to: "Lead".into(),
             },
+            Edit::ClipWarping {
+                track: audio,
+                clip: faded,
+                from: Warping {
+                    offset: Offset::Frames(0),
+                    warp: None,
+                },
+                to: Warping {
+                    offset: Offset::Beats(Beats::ZERO),
+                    warp: Some(Warp::new(0, Beats::ZERO, 95.0)),
+                },
+            },
+            Edit::ClipGain {
+                track: audio,
+                clip: faded,
+                from: 1.0,
+                to: 0.5,
+            },
             Edit::AddNote {
                 track: midi,
                 clip: bass,
@@ -750,6 +769,12 @@ mod tests {
                 from: fade(),
                 to: vec![point(0, 1.0), point(4, 0.25), point(8, 0.5)],
             },
+            // A clip's curve, from before its own time starts.
+            Edit::LanePoints {
+                param: ParamAddress::Clip(faded, ClipParam::Gain),
+                from: Vec::new(),
+                to: vec![point(-1, 0.5), point(2, 2.0)],
+            },
             Edit::LaneOverridden {
                 param: ParamAddress::Volume(Chain::Track(audio)),
                 from: false,
@@ -771,7 +796,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 54;
+    const KINDS: usize = 56;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -831,6 +856,8 @@ mod tests {
             Edit::RemoveLane { .. } => 51,
             Edit::LanePoints { .. } => 52,
             Edit::LaneOverridden { .. } => 53,
+            Edit::ClipWarping { .. } => 54,
+            Edit::ClipGain { .. } => 55,
         }
     }
 

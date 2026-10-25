@@ -1,16 +1,17 @@
-//! The view commands: what the window shows, the arrangement's and the
-//! piano roll's zoom and scrolling, the grid, and which of the two has the
-//! focus.
+//! The view commands: what the window shows, the zoom and scrolling of the
+//! arrangement, the piano roll and the Sample Editor, the grid, and which
+//! panel has the focus.
 //!
 //! Commands can't show a window, so the command palette and the mixer ask
 //! the app to, with a [`Request`]. The zoom, the scrolling and the grid are
 //! in the [`Editor`](crate::Editor). Zooming acts on the view with the focus:
-//! the arrangement, or the piano roll.
+//! the arrangement, the piano roll or the Sample Editor.
 
 use musicable_model::time::Beats;
 use musicable_model::{Chain, TrackId};
 
 use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
+use crate::panel;
 use crate::{
     Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When,
 };
@@ -25,13 +26,20 @@ pub const TOGGLE_DEVICES: CommandId = CommandId::new("view.toggle_devices");
 /// Shows or hides the browser, beside the arrangement.
 pub const TOGGLE_BROWSER: CommandId = CommandId::new("view.toggle_browser");
 /// Shows or hides the piano roll, in a tab beside the devices: Live's clip
-/// view.
+/// view for MIDI clips.
 pub const TOGGLE_PIANO_ROLL: CommandId = CommandId::new("view.toggle_piano_roll");
+/// Shows or hides the Sample Editor, in a tab beside the devices: Live's
+/// clip view for audio clips.
+pub const TOGGLE_SAMPLE_EDITOR: CommandId = CommandId::new("view.toggle_sample_editor");
+/// Shows or hides the editor that fits the clip selected or opened last:
+/// the piano roll, or the Sample Editor for an audio clip.
+pub const TOGGLE_CLIP_EDITOR: CommandId = CommandId::new("view.toggle_clip_editor");
 /// Shows or hides the History panel, which lists the steps of the undo
 /// history, in a tab beside the browser.
 pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
-/// Brings the piano roll in front of the devices, or the devices in front of
-/// the piano roll: Live's Toggle Between Device/Clip View.
+/// Brings the editor that fits the clip selected or opened last, the piano
+/// roll or the Sample Editor, in front of the devices, or the devices in
+/// front of it: Live's Toggle Between Device/Clip View.
 pub const SWITCH_DEVICES_PIANO_ROLL: CommandId = CommandId::new("view.switch_devices_piano_roll");
 /// Moves the panel with the focus to a new window of its own, as its tab's
 /// menu does. The arrangement stays in the main window.
@@ -44,8 +52,8 @@ pub const MOVE_TO_MAIN_WINDOW: CommandId = CommandId::new("view.move_to_main_win
 pub const ZOOM_IN: CommandId = CommandId::new("view.zoom_in");
 /// Zooms the arrangement out, or the piano roll, around the start marker.
 pub const ZOOM_OUT: CommandId = CommandId::new("view.zoom_out");
-/// Zooms the arrangement to show the selection across it, or the piano roll
-/// to show its selected notes.
+/// Zooms the arrangement to show the selection across it, the piano roll to
+/// show its selected notes, or the Sample Editor its selected warp markers.
 pub const ZOOM_TO_SELECTION: CommandId = CommandId::new("view.zoom_to_selection");
 /// Turns on or off scrolling the arrangement to keep the playhead in sight.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
@@ -67,6 +75,8 @@ pub const SET_VIEWPORT: CommandId = CommandId::new("view.set_viewport");
 pub const SET_TRACK_HEIGHT: CommandId = CommandId::new("view.set_track_height");
 /// Sets the piano roll's zoom, scrolling and key height.
 pub const SET_PIANO_ROLL_VIEWPORT: CommandId = CommandId::new("view.set_piano_roll_viewport");
+/// Sets the Sample Editor's zoom and scrolling.
+pub const SET_SAMPLE_EDITOR_VIEWPORT: CommandId = CommandId::new("view.set_sample_editor_viewport");
 /// Gives a panel the focus, where the edit commands and the keys act.
 pub const SET_FOCUS: CommandId = CommandId::new("view.set_focus");
 
@@ -81,7 +91,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 11] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -89,7 +99,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
     (
         ZOOM_TO_SELECTION,
         "Zoom to Selection",
-        When::CanCopy,
+        When::CanZoomToSelection,
         zoom_to_selection,
     ),
     (TOGGLE_FOLLOW, "Follow", When::Always, |ctx| {
@@ -111,6 +121,19 @@ const COMMANDS: [(CommandId, &str, When, Handler); 9] = [
         grid.snap = !grid.snap;
     }),
     (FIXED_GRID, "Fixed Grid", When::Always, fix_grid),
+    (TOGGLE_CLIP_EDITOR, "Clip Editor", When::Always, |ctx| {
+        let panel = ctx.document.editor().clip_editor;
+        ctx.requests.push(Request::TogglePanel(panel));
+    }),
+    (
+        SWITCH_DEVICES_PIANO_ROLL,
+        "Switch Devices and Clip Editor",
+        When::Always,
+        |ctx| {
+            let panel = ctx.document.editor().clip_editor;
+            ctx.requests.push(Request::SwitchDevicesClipEditor(panel));
+        },
+    ),
 ];
 
 /// The view commands that ask the app for something.
@@ -128,12 +151,12 @@ const REQUESTS: [(CommandId, &str, Request); 9] = [
         "Piano Roll",
         Request::TogglePanel("piano_roll"),
     ),
-    (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
     (
-        SWITCH_DEVICES_PIANO_ROLL,
-        "Switch Devices and Piano Roll",
-        Request::SwitchDevicesPianoRoll,
+        TOGGLE_SAMPLE_EDITOR,
+        "Sample Editor",
+        Request::TogglePanel(panel::SAMPLE_EDITOR),
     ),
+    (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
     (
         MOVE_TO_NEW_WINDOW,
         "Move Panel to New Window",
@@ -271,6 +294,33 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_SAMPLE_EDITOR_VIEWPORT, "Set Sample Editor Viewport").with_params(&[
+            Param::required("start", Type::Beats, "The song position at the left edge."),
+            Param::required("zoom", Type::Number, "How many points a beat takes."),
+            Param::required(
+                "width",
+                Type::Number,
+                "How wide the waveform is shown, in points.",
+            ),
+        ]),
+        |ctx, args| {
+            let zoom: f64 = args.get("zoom")?;
+            let width: f64 = args.get("width")?;
+            if zoom <= 0.0 || width < 0.0 {
+                return Err(CommandError::invalid(
+                    "the zoom and the width can't be negative",
+                ));
+            }
+            ctx.document.editor_mut().sample_editor.viewport = Viewport {
+                start: Beats::max(args.get("start")?, Beats::ZERO),
+                zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
+                top: 0.0,
+                width: width as f32,
+            };
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(SET_FOCUS, "Set Focus").with_params(&[Param::required(
             "panel",
             Type::Text,
@@ -283,6 +333,9 @@ pub fn register(registry: &mut Registry) {
                 .ok_or_else(|| CommandError::invalid(format!("there's no panel {id}")))?;
             if focus == Focus::PIANO_ROLL && editor.piano_roll.clip.is_none() {
                 return Err(CommandError::invalid("the piano roll shows no clip"));
+            }
+            if focus == Focus::SAMPLE_EDITOR && editor.sample_editor.clip.is_none() {
+                return Err(CommandError::invalid("the Sample Editor shows no clip"));
             }
             editor.focus = focus;
             Ok(Value::None)
@@ -329,6 +382,7 @@ fn zoom(ctx: &mut Context<'_>, factor: f64) {
     let start_marker = editor.start_marker;
     let viewport = match editor.focus {
         Focus::PIANO_ROLL => &mut editor.piano_roll.viewport,
+        Focus::SAMPLE_EDITOR => &mut editor.sample_editor.viewport,
         _ => &mut editor.viewport,
     };
     let at = match viewport.visible().contains(start_marker) {
@@ -344,6 +398,11 @@ fn zoom_to_selection(ctx: &mut Context<'_>) {
         Focus::PIANO_ROLL => {
             if let Some((range, low, high)) = crate::notes::selected_range(project, editor) {
                 editor.piano_roll.show_notes(range, low, high);
+            }
+        }
+        Focus::SAMPLE_EDITOR => {
+            if let Some(range) = crate::warp::selected_range(project, editor) {
+                editor.sample_editor.viewport.show(range);
             }
         }
         _ => {
@@ -533,7 +592,14 @@ mod tests {
         setup.run(&TOGGLE_DEVICES);
         setup.run(&TOGGLE_BROWSER);
         setup.run(&TOGGLE_PIANO_ROLL);
+        setup.run(&TOGGLE_SAMPLE_EDITOR);
         setup.run(&SWITCH_DEVICES_PIANO_ROLL);
+        setup.run(&TOGGLE_CLIP_EDITOR);
+        // The keys for the clip editor show the one that fits the clip
+        // selected last.
+        setup.document.editor_mut().clip_editor = panel::SAMPLE_EDITOR;
+        setup.run(&SWITCH_DEVICES_PIANO_ROLL);
+        setup.run(&TOGGLE_CLIP_EDITOR);
         setup.run(&MOVE_TO_NEW_WINDOW);
         setup.run(&MOVE_TO_MAIN_WINDOW);
         assert_eq!(
@@ -543,7 +609,11 @@ mod tests {
                 Request::TogglePanel("devices"),
                 Request::TogglePanel("browser"),
                 Request::TogglePanel("piano_roll"),
-                Request::SwitchDevicesPianoRoll,
+                Request::TogglePanel("sample_editor"),
+                Request::SwitchDevicesClipEditor("piano_roll"),
+                Request::TogglePanel("piano_roll"),
+                Request::SwitchDevicesClipEditor("sample_editor"),
+                Request::TogglePanel("sample_editor"),
                 Request::MoveToNewWindow,
                 Request::MoveToMainWindow,
             ]

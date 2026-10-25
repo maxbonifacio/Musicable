@@ -29,7 +29,7 @@ const HEADER: &str = "\
 
 /// The comments over the groups of entries that aren't in a section, by the
 /// first entry of each.
-const GROUPS: [(&str, &str); 5] = [
+const GROUPS: [(&str, &str); 6] = [
     (
         "mute",
         "Mute, solo, arm and the others while they're on, the meters, and warnings.",
@@ -40,17 +40,22 @@ const GROUPS: [(&str, &str); 5] = [
         "white_row",
         "The piano roll's colours. Its grid and playhead are the arrangement's.",
     ),
+    (
+        "warp_marker",
+        "The Sample Editor's colours. Its waveform is the arrangement's.",
+    ),
     ("ruler_height", "The arrangement's sizes."),
 ];
 
 /// The comments over the sections.
-const SECTIONS: [(&str, &str); 13] = [
+const SECTIONS: [(&str, &str); 14] = [
     ("mixer", "The mixer's sizes."),
     (
         "devices",
         "The devices panel's sizes, and the browser's width.",
     ),
     ("piano_roll", "The piano roll's sizes."),
+    ("sample_editor", "The Sample Editor's sizes."),
     ("browser", "The browser's sizes."),
     (
         "dock",

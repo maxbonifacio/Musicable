@@ -1,14 +1,18 @@
 //! Clips: what audio and MIDI tracks play.
 //!
 //! A clip sits on a track at a song position and plays for its length, both
-//! in beats. An audio clip plays part of an audio file, and a MIDI clip plays
-//! notes and moves MIDI controllers, such as the sustain pedal. Notes carry
-//! per-note expression, as MPE controllers send it, from the start, so
-//! recording it and playing it back loses nothing.
+//! in beats. An audio clip plays part of an audio file, at the file's own
+//! speed or warped to follow the tempo (see [`warp`](crate::warp)), and a
+//! MIDI clip plays notes and moves MIDI controllers, such as the sustain
+//! pedal. Notes carry per-note expression, as MPE controllers send it, from
+//! the start, so recording it and playing it back loses nothing.
 
 use std::collections::BTreeMap;
 
+use crate::automation;
+use crate::param::ClipParam;
 use crate::time::{BeatRange, Beats, TempoMap};
+use crate::warp::Warp;
 
 /// Stable identifier for a clip, unique within a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,15 +53,19 @@ impl Clip {
 
     /// Moves and trims the clip to `timing`. Returns `false`, changing
     /// nothing, if the timing doesn't fit the clip: a length that isn't more
-    /// than zero, an offset of the other kind from the clip's content, or a
-    /// length too short for an audio clip's fades. Shorten the fades first.
+    /// than zero, an offset of the other kind from the clip's content (in
+    /// frames for an unwarped audio clip, in beats for a warped one or a
+    /// MIDI clip), or a length too short for an audio clip's fades. Shorten
+    /// the fades first.
     pub fn set_timing(&mut self, timing: Timing) -> bool {
         if timing.length <= Beats::ZERO {
             return false;
         }
         match (&mut self.content, timing.offset) {
-            (ClipContent::Audio(audio), Offset::Frames(offset)) => {
-                if audio.fade_in + audio.fade_out > timing.length {
+            (ClipContent::Audio(audio), offset) => {
+                if audio.fade_in + audio.fade_out > timing.length
+                    || matches!(offset, Offset::Beats(_)) != audio.warp.is_some()
+                {
                     return false;
                 }
                 audio.offset = offset;
@@ -72,9 +80,11 @@ impl Clip {
 
     /// The timing that plays what the clip plays now, over `range`: the clip
     /// with its edges moved to the range's, its content staying where it is
-    /// in the song, as trimming and splitting need. Audio files play at
-    /// their own speed, so an audio clip's offset moves by the frames of its
-    /// file between the old start and the new, at the file's `sample_rate`.
+    /// in the song, as trimming and splitting need. A MIDI clip's offset
+    /// moves by the beats between the old start and the new, and so does a
+    /// warped audio clip's. An unwarped audio file plays at its own speed,
+    /// so its clip's offset moves by the frames of the file between them,
+    /// at the file's `sample_rate`.
     ///
     /// An audio clip can't start before the first frame of its file: the
     /// timing starts there at the earliest, and is `None` if that leaves
@@ -90,20 +100,37 @@ impl Clip {
                 let offset = midi.offset + (range.start - self.start);
                 (range.start, Offset::Beats(offset))
             }
-            ClipContent::Audio(audio) => {
-                let frames = |at: Beats| tempo.frame_at(at, sample_rate);
-                // The song's frame that the file's first frame plays on.
-                let first = frames(self.start) - audio.offset as i64;
-                let mut start = range.start;
-                if frames(start) < first {
-                    let at = tempo.beats_at(first as f64, sample_rate);
-                    start = Beats::from_f64(at).max(range.start);
-                    while frames(start) < first {
-                        start += Beats::from_ticks(1);
+            ClipContent::Audio(audio) => match (audio.offset, &audio.warp) {
+                (Offset::Beats(offset), Some(warp)) => {
+                    // Where the file's first frame plays, in the clip's own
+                    // time, and so in the song.
+                    let first = warp.beat_at(0.0, sample_rate);
+                    let song = self.start - offset;
+                    let mut start = range.start;
+                    if (start - song).to_f64() < first {
+                        start = range.start.max(song + Beats::from_f64(first));
+                        while (start - song).to_f64() < first {
+                            start += Beats::from_ticks(1);
+                        }
                     }
+                    (start, Offset::Beats(offset + (start - self.start)))
                 }
-                (start, Offset::Frames((frames(start) - first) as u64))
-            }
+                (offset, _) => {
+                    let offset = offset.frames().unwrap_or(0);
+                    let frames = |at: Beats| tempo.frame_at(at, sample_rate);
+                    // The song's frame that the file's first frame plays on.
+                    let first = frames(self.start) - offset as i64;
+                    let mut start = range.start;
+                    if frames(start) < first {
+                        let at = tempo.beats_at(first as f64, sample_rate);
+                        start = Beats::from_f64(at).max(range.start);
+                        while frames(start) < first {
+                            start += Beats::from_ticks(1);
+                        }
+                    }
+                    (start, Offset::Frames((frames(start) - first) as u64))
+                }
+            },
         };
         let length = range.end - start;
         (length > Beats::ZERO).then_some(Timing {
@@ -111,6 +138,37 @@ impl Clip {
             length,
             offset,
         })
+    }
+
+    /// Where `at`, a song position, falls in the clip's own time: in beats
+    /// for a MIDI clip or a warped audio clip, and for an unwarped audio
+    /// clip, in seconds of its file, with the tempo placing `at` and the
+    /// file at `sample_rate` (see [`AudioClip`]). Fractional, as a song
+    /// position between ticks can be.
+    pub fn own_time_at(&self, at: Beats, tempo: &TempoMap, sample_rate: u32) -> f64 {
+        match self.content.offset() {
+            Offset::Beats(offset) => (offset + (at - self.start)).to_f64(),
+            Offset::Frames(offset) => {
+                let rate = f64::from(sample_rate);
+                let since =
+                    tempo.sample_at(at, sample_rate) - tempo.sample_at(self.start, sample_rate);
+                (offset as f64 + since) / rate
+            }
+        }
+    }
+
+    /// The song position, in fractional beats, where `own`, a moment of the
+    /// clip's own time, plays: the inverse of
+    /// [`own_time_at`](Self::own_time_at).
+    pub fn song_time_at(&self, own: f64, tempo: &TempoMap, sample_rate: u32) -> f64 {
+        match self.content.offset() {
+            Offset::Beats(offset) => self.start.to_f64() + own - offset.to_f64(),
+            Offset::Frames(offset) => {
+                let rate = f64::from(sample_rate);
+                let sample = tempo.sample_at(self.start, sample_rate) + own * rate - offset as f64;
+                tempo.beats_at(sample, sample_rate)
+            }
+        }
     }
 }
 
@@ -134,11 +192,28 @@ impl Timing {
 }
 
 /// Where a clip's content starts playing at the clip's start: a frame of an
-/// audio clip's file, or a position in a MIDI clip's own time.
+/// unwarped audio clip's file, or a position in the own time of a MIDI clip
+/// or a warped audio clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Offset {
     Frames(u64),
     Beats(Beats),
+}
+
+impl Offset {
+    pub fn frames(self) -> Option<u64> {
+        match self {
+            Self::Frames(frames) => Some(frames),
+            Self::Beats(_) => None,
+        }
+    }
+
+    pub fn beats(self) -> Option<Beats> {
+        match self {
+            Self::Beats(beats) => Some(beats),
+            Self::Frames(_) => None,
+        }
+    }
 }
 
 /// What a clip plays. Audio tracks hold audio clips, and MIDI tracks MIDI
@@ -153,7 +228,7 @@ impl ClipContent {
     /// Where the content starts playing at the clip's start.
     pub fn offset(&self) -> Offset {
         match self {
-            Self::Audio(audio) => Offset::Frames(audio.offset),
+            Self::Audio(audio) => audio.offset,
             Self::Midi(midi) => Offset::Beats(midi.offset),
         }
     }
@@ -161,23 +236,37 @@ impl ClipContent {
 
 /// Part of an audio file.
 ///
-/// Tier 1 doesn't warp: the file plays at its own speed from `offset`,
-/// whatever the tempo, resampled if its sample rate isn't the device's. A
-/// clip that runs on past the end of the file is silent from there.
+/// Unwarped, the file plays at its own speed from the frame `offset` gives,
+/// whatever the tempo, resampled if its sample rate isn't the device's.
+/// Warped, it follows the tempo: its [`Warp`] pins frames of the file to
+/// beats of the clip's own time, and `offset` is the beat of that time the
+/// clip starts from, as a MIDI clip's is. A clip that runs on past either
+/// end of the file is silent there.
+///
+/// An unwarped clip's own time, which its [`automation`](Self::automation)
+/// is in, is the file's: a beat of it is a second of the file, from its
+/// first frame, so a curve stays with the audio however the tempo changes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioClip {
     /// The file's path: relative to the folder the project file is in, with
     /// `/` between names, or absolute.
     pub file: String,
-    /// The frame of the file the clip starts playing from.
-    pub offset: u64,
-    /// Linear gain, 1.0 = unity.
+    /// Where the clip starts playing: [`Offset::Frames`] while it's
+    /// unwarped, and [`Offset::Beats`] while it's warped.
+    pub offset: Offset,
+    /// Linear gain, 1.0 = unity: where its lane doesn't say otherwise.
     pub gain: f32,
     /// How long the clip takes to fade in from silence, from its start.
     pub fade_in: Beats,
     /// How long it takes to fade out to silence, up to its end. The fades
     /// fit in the clip together: `fade_in + fade_out` is at most its length.
     pub fade_out: Beats,
+    /// How the clip follows the tempo, while it's warped.
+    pub warp: Option<Warp>,
+    /// The curves of the clip's own parameters, such as its gain, in the
+    /// clip's own time: at most one for each parameter, in the order
+    /// [`ClipParam::ALL`] lists them.
+    pub automation: Vec<ClipLane>,
 }
 
 impl AudioClip {
@@ -188,15 +277,117 @@ impl AudioClip {
         }
     }
 
-    /// All of `file` from the start, at unity, without fades.
+    /// All of `file` from the start, at unity, unwarped and without fades.
     pub fn new(file: impl Into<String>) -> Self {
         Self {
             file: file.into(),
-            offset: 0,
+            offset: Offset::Frames(0),
             gain: 1.0,
             fade_in: Beats::ZERO,
             fade_out: Beats::ZERO,
+            warp: None,
+            automation: Vec::new(),
         }
+    }
+
+    pub fn is_warped(&self) -> bool {
+        self.warp.is_some()
+    }
+
+    /// Whether the clip follows the tempo, and how: its offset with its
+    /// warp, which change together.
+    pub fn warping(&self) -> Warping {
+        Warping {
+            offset: self.offset,
+            warp: self.warp.clone(),
+        }
+    }
+
+    /// Sets whether the clip follows the tempo, and how. Returns `false`,
+    /// changing nothing, if the warping doesn't keep its rules: an offset in
+    /// frames without a warp, or in beats with a warp that keeps its own
+    /// (see [`Warp::is_valid`]).
+    pub fn set_warping(&mut self, warping: Warping) -> bool {
+        let fits = match (warping.offset, &warping.warp) {
+            (Offset::Frames(_), None) => true,
+            (Offset::Beats(_), Some(warp)) => warp.is_valid(),
+            _ => false,
+        };
+        if fits {
+            self.offset = warping.offset;
+            self.warp = warping.warp;
+        }
+        fits
+    }
+
+    /// The frame of the file, fractional, at `at` in the clip's own time,
+    /// for a file at `sample_rate`.
+    pub fn frame_at(&self, at: f64, sample_rate: u32) -> f64 {
+        match &self.warp {
+            Some(warp) => warp.frame_at(at, sample_rate),
+            None => at * f64::from(sample_rate),
+        }
+    }
+
+    /// The moment of the clip's own time that the file's `frame` plays at:
+    /// the inverse of [`frame_at`](Self::frame_at).
+    pub fn own_time_of(&self, frame: f64, sample_rate: u32) -> f64 {
+        match &self.warp {
+            Some(warp) => warp.beat_at(frame, sample_rate),
+            None => frame / f64::from(sample_rate),
+        }
+    }
+
+    /// The curve of `param`, if the clip moves it.
+    pub fn lane(&self, param: ClipParam) -> Option<&ClipLane> {
+        self.automation.iter().find(|l| l.param == param)
+    }
+
+    /// Sets `param`'s curve to `points`, which must be in order of time.
+    /// No points stops the clip moving it.
+    pub fn set_lane(&mut self, param: ClipParam, points: Vec<automation::Point>) {
+        debug_assert!(points.is_sorted_by_key(|p| p.at), "points in order");
+        let index = self.automation.iter().position(|l| l.param == param);
+        match (index, points.is_empty()) {
+            (Some(index), true) => {
+                self.automation.remove(index);
+            }
+            (Some(index), false) => self.automation[index].points = points,
+            (None, true) => {}
+            (None, false) => {
+                let at = self.automation.partition_point(|l| l.param < param);
+                self.automation.insert(at, ClipLane { param, points });
+            }
+        }
+    }
+}
+
+/// Whether an audio clip follows the tempo, and how: its offset, in frames
+/// while it's unwarped and in beats while it's warped, with its warp.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Warping {
+    pub offset: Offset,
+    pub warp: Option<Warp>,
+}
+
+/// The curve of one of an audio clip's own parameters, in the clip's own
+/// time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipLane {
+    pub param: ClipParam,
+    /// At least one, in order of time, as an automation lane's are: two at
+    /// the same time make a step, and the value moves in a straight line in
+    /// the parameter's scale between points (see
+    /// [`Lane`](automation::Lane)). They can be before the clip's own time
+    /// starts, as the file can be.
+    pub points: Vec<automation::Point>,
+}
+
+impl ClipLane {
+    /// The curve's value at `at` in the clip's own time.
+    pub fn value_at(&self, at: Beats) -> f64 {
+        let scale = self.param.spec().scale;
+        automation::value_at(&self.points, at, scale).unwrap_or(self.param.spec().default)
     }
 }
 
@@ -608,10 +799,22 @@ mod tests {
             start: Beats::new(start),
             length: Beats::new(length),
             content: ClipContent::Audio(AudioClip {
-                offset,
+                offset: Offset::Frames(offset),
                 ..AudioClip::new("take.wav")
             }),
         }
+    }
+
+    /// `clip`, warped with one marker at `tempo`, pinning the frame its
+    /// start plays to beat `beat` of its own time, which it starts at.
+    fn warped(mut clip: Clip, beat: i64, tempo: f64) -> Clip {
+        let ClipContent::Audio(audio) = &mut clip.content else {
+            unreachable!("an audio clip")
+        };
+        let frame = audio.offset.frames().unwrap();
+        audio.warp = Some(Warp::new(frame, Beats::new(beat), tempo));
+        audio.offset = Offset::Beats(Beats::new(beat));
+        clip
     }
 
     #[test]
@@ -650,6 +853,103 @@ mod tests {
             assert!(!clip.set_timing(refused));
             assert_eq!(clip.timing(), timing);
         }
+        // A warped clip's offset is in beats.
+        let mut clip = warped(audio_clip(4, 4, 0), 0, 120.0);
+        assert!(!clip.set_timing(timing));
+        assert!(clip.set_timing(beats));
+        assert_eq!(clip.timing(), beats);
+    }
+
+    #[test]
+    fn warped_clips_trim_in_beats_but_not_before_their_files_start() {
+        let tempo = TempoMap::default();
+        // The file's frame 48,000 plays at the clip's start, beat 4 of the
+        // song, at 60 BPM: so its first frame is a beat of the clip's own
+        // time before, at beat 3.
+        let clip = warped(audio_clip(4, 4, 48_000), 0, 60.0);
+        let range = BeatRange::new(Beats::new(5), Beats::new(7));
+        let trimmed = clip.timing_over(range, &tempo, 48_000).unwrap();
+        assert_eq!(trimmed.range(), range);
+        assert_eq!(trimmed.offset, Offset::Beats(Beats::new(1)));
+        let earlier = BeatRange::new(Beats::new(1), Beats::new(8));
+        let extended = clip.timing_over(earlier, &tempo, 48_000).unwrap();
+        assert_eq!(extended.start, Beats::new(3));
+        assert_eq!(extended.offset, Offset::Beats(Beats::new(-1)));
+        let before = BeatRange::new(Beats::new(1), Beats::new(3));
+        assert_eq!(clip.timing_over(before, &tempo, 48_000), None);
+    }
+
+    #[test]
+    fn own_time_is_beats_when_warped_and_the_files_seconds_when_not() {
+        let tempo = TempoMap::default();
+        // A beat is half a second at 120 BPM.
+        let unwarped = audio_clip(4, 4, 24_000);
+        assert_eq!(unwarped.own_time_at(Beats::new(4), &tempo, 48_000), 0.5);
+        assert_eq!(unwarped.own_time_at(Beats::new(6), &tempo, 48_000), 1.5);
+        assert_eq!(unwarped.song_time_at(1.5, &tempo, 48_000), 6.0);
+        let ClipContent::Audio(audio) = &unwarped.content else {
+            unreachable!()
+        };
+        assert_eq!(audio.frame_at(1.5, 48_000), 72_000.0);
+        assert_eq!(audio.own_time_of(72_000.0, 48_000), 1.5);
+
+        let warped = warped(audio_clip(4, 4, 24_000), 2, 60.0);
+        assert_eq!(warped.own_time_at(Beats::new(5), &tempo, 48_000), 3.0);
+        assert_eq!(warped.song_time_at(3.0, &tempo, 48_000), 5.0);
+        let ClipContent::Audio(audio) = &warped.content else {
+            unreachable!()
+        };
+        // A beat of its own time is a second of the file at 60 BPM.
+        assert_eq!(audio.frame_at(3.0, 48_000), 72_000.0);
+    }
+
+    #[test]
+    fn warping_keeps_the_offset_in_step_with_the_warp() {
+        let mut audio = AudioClip::new("loop.wav");
+        let warp = Warp::new(0, Beats::ZERO, 120.0);
+        let warped = Warping {
+            offset: Offset::Beats(Beats::new(1)),
+            warp: Some(warp.clone()),
+        };
+        for refused in [
+            Warping {
+                offset: Offset::Frames(0),
+                warp: Some(warp.clone()),
+            },
+            Warping {
+                offset: Offset::Beats(Beats::ZERO),
+                warp: None,
+            },
+            Warping {
+                warp: Some(Warp {
+                    markers: Vec::new(),
+                    ..warp
+                }),
+                ..warped.clone()
+            },
+        ] {
+            assert!(!audio.set_warping(refused));
+            assert_eq!(audio.warping(), AudioClip::new("loop.wav").warping());
+        }
+        assert!(audio.set_warping(warped.clone()));
+        assert_eq!(audio.warping(), warped);
+        assert!(audio.is_warped());
+    }
+
+    #[test]
+    fn clips_keep_a_curve_for_each_of_their_parameters() {
+        let mut audio = AudioClip::new("take.wav");
+        let points = vec![
+            automation::Point::new(Beats::ZERO, 0.5),
+            automation::Point::new(Beats::new(2), 1.0),
+        ];
+        audio.set_lane(ClipParam::Gain, points.clone());
+        let lane = audio.lane(ClipParam::Gain).unwrap();
+        assert_eq!(lane.points, points);
+        assert_eq!(lane.value_at(Beats::new(-1)), 0.5);
+        assert_eq!(lane.value_at(Beats::new(3)), 1.0);
+        audio.set_lane(ClipParam::Gain, Vec::new());
+        assert!(audio.automation.is_empty());
     }
 
     #[test]
