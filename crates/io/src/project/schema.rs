@@ -268,7 +268,9 @@ struct SliceSettings {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpectralSettings {
+    high_quality: bool,
     formants: f64,
+    envelope: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -323,6 +325,7 @@ enum ClipParam {
     Preserve,
     TransientLoop,
     Formants,
+    Envelope,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1340,7 +1343,11 @@ impl From<&warp::Warp> for Warp {
             transient_loop,
             envelope,
         } = slice;
-        let warp::SpectralSettings { formants } = spectral;
+        let warp::SpectralSettings {
+            high_quality,
+            formants,
+            envelope: spectral_envelope,
+        } = spectral;
         Self {
             mode: match mode {
                 warp::WarpMode::RePitch => WarpMode::RePitch,
@@ -1368,7 +1375,9 @@ impl From<&warp::Warp> for Warp {
                 envelope: *envelope,
             },
             spectral: SpectralSettings {
+                high_quality: *high_quality,
                 formants: *formants,
+                envelope: *spectral_envelope,
             },
             markers: markers.iter().map(|m| (m.frame, m.beat.ticks())).collect(),
             onsets: onsets.as_ref().map(|onsets| {
@@ -1392,6 +1401,7 @@ impl From<&clip::ClipLane> for ClipLane {
                 param::ClipParam::Preserve => ClipParam::Preserve,
                 param::ClipParam::TransientLoop => ClipParam::TransientLoop,
                 param::ClipParam::Formants => ClipParam::Formants,
+                param::ClipParam::Envelope => ClipParam::Envelope,
             },
             points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
         }
@@ -1516,14 +1526,28 @@ impl Warp {
             },
             envelope: *envelope,
         };
-        let SpectralSettings { formants } = spectral;
+        let SpectralSettings {
+            high_quality,
+            formants,
+            envelope: spectral_envelope,
+        } = spectral;
         let most = warp::SpectralSettings::FORMANTS_MAX;
         if !(0.0..=most).contains(formants) {
             let message = format!("must be from 0 to {most}");
             return Err(Invalid::new(format!("{path}.spectral.formants"), message));
         }
+        let (least, most) = (
+            warp::SpectralSettings::ENVELOPE_MIN,
+            warp::SpectralSettings::ENVELOPE_MAX,
+        );
+        if !(least..=most).contains(spectral_envelope) {
+            let message = format!("must be from {least} to {most}");
+            return Err(Invalid::new(format!("{path}.spectral.envelope"), message));
+        }
         let spectral = warp::SpectralSettings {
+            high_quality: *high_quality,
             formants: *formants,
+            envelope: *spectral_envelope,
         };
         if markers.is_empty() {
             let message = "needs at least one marker: a warped clip has one";
@@ -1620,6 +1644,7 @@ impl ClipLane {
             ClipParam::Preserve => param::ClipParam::Preserve,
             ClipParam::TransientLoop => param::ClipParam::TransientLoop,
             ClipParam::Formants => param::ClipParam::Formants,
+            ClipParam::Envelope => param::ClipParam::Envelope,
         };
         let spec = param.spec();
         let (low, high) = (spec.min, spec.max);

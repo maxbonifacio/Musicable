@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 14,
+  "version": 15,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -429,7 +429,7 @@ A **warp**:
 | `transpose` | whole number | How far every mode but Re-Pitch moves the audio's pitch, in semitones, from −48 to 48, where the clip's curves don't say otherwise. |
 | `detune` | whole number | And in cents, from −50 to 50. |
 | `slice` | slice settings | How the Slice mode cuts the audio and plays the slices. The clip keeps them while it plays in another mode. |
-| `spectral` | spectral settings | How the Spectral mode treats the audio's formants. The clip keeps them while it plays in another mode. |
+| `spectral` | spectral settings | Which stretcher the Spectral mode renders the audio with, and how it treats its formants. The clip keeps them while it plays in another mode. |
 | `markers` | array of markers | At least one, in order: both their frames and their positions rise. |
 | `onsets` | array of transients or `null` | The file's transients, where the sounds in it start, in order: their frames rise. `null` until the clip takes them from analysis of its file, which it does once, so they're the clip's own from then on, and a better analyser never moves them. |
 
@@ -451,7 +451,9 @@ The **spectral settings**:
 
 | Field | Type | Meaning |
 |---|---|---|
+| `high_quality` | boolean | High quality: `true` renders with Rubber Band's R3 engine, the best quality and slower to render, as Live's Complex Pro, and `false` with Signalsmith Stretch, as Live's Complex. |
 | `formants` | float | Formants: how far the formants, the peaks in the outline of the spectrum that give a voice its character, stay in place as Spectral transposes the audio, from 0, moving with the pitch as a record's do played faster, to 100, staying where they were, so a voice transposed sounds like the same voice. |
+| `envelope` | float | Envelope, while `high_quality` is on: how fine the outline of the spectrum is that the formants are kept by, from 8 to 512. 128 suits most audio, lower suits high voices, whose harmonics are far apart, and higher low ones. |
 
 A **transient** is an array `[frame, strength, percussiveness, origin]`, a
 line each, as a file can have thousands: the frame of the file its attack
@@ -482,10 +484,12 @@ plays, in place of the parameter's own value:
 | `"preserve"` | The slice settings' `preserve`, in steps: a whole number from 0, `"transients"`, to 6, `"1/32"`, in the order the table above lists them. | Slice. |
 | `"transient_loop"` | The slice settings' `transient_loop`, in steps: 0 `"off"`, 1 `"forward"` or 2 `"back_and_forth"`. | Slice. |
 | `"formants"` | The spectral settings' `formants`: 0 to 100. | Spectral. |
+| `"envelope"` | The spectral settings' `envelope`: 8 to 512, on a logarithmic scale. | Spectral, while `high_quality` is on. |
 
 In Slice, each slice reads the curves where it starts, and keeps those
 values while it plays. In Spectral, the curves move the pitch and the
-formants as the audio plays, and are rendered with it.
+formants, and with High quality the envelope, as the audio plays, and are
+rendered with it.
 
 The curves are in the clip's own time, so they move, copy and split with
 it. A warped clip's own time is in beats, as a MIDI clip's is. An unwarped
@@ -870,6 +874,7 @@ Signal flows from tracks to buses without loops:
 | 12 | 2026-10-25 | Transients: the onsets a warped clip keeps, found by analysis and changed by the user. Version 11 warped clips have none yet, so they take them from analysis. |
 | 13 | 2026-10-25 | Slice: the warp mode that cuts audio into slices, with its settings, the transpose and detune of every mode but Re-Pitch, and curves for them. Version 12 warped clips play Re-Pitch, untransposed, and Slice's settings are Live's. |
 | 14 | 2026-10-25 | Spectral: the warp mode that stretches audio in the frequency domain, keeping its pitch, with its Formants, and a curve for them. Version 13 warped clips keep their formants in place. |
+| 15 | 2026-10-25 | Spectral's High quality, rendering with Rubber Band, with its Envelope, and a curve for it. Version 14 warped clips render with Signalsmith Stretch, with the envelope at 128. |
 
 ## Changing the format
 

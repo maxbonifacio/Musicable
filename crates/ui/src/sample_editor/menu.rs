@@ -143,18 +143,17 @@ fn in_time_selected(scene: &Scene<'_>, spot: Spot) -> bool {
 }
 
 /// The menu of the clip's parameters whose curves the lane can show, which
-/// a click on its name, `chooser`, opens: those the clip's mode plays, then
-/// the rest of its warp's, which the clip keeps for the modes that play
-/// them.
+/// a click on its name, `chooser`, opens: those the clip plays in its mode,
+/// then the rest of its warp's, which the clip keeps for the modes that
+/// play them.
 pub(super) fn lanes(chooser: &Response, scene: &Scene<'_>, actions: &mut Vec<Action>) {
     let shown = scene.lane();
     chooser.widget_info(|| WidgetInfo {
         current_text_value: Some(shown.spec().name),
         ..WidgetInfo::labeled(Role::ComboBox, true, "Lane")
     });
-    let mode = scene.warp().map(|warp| warp.mode);
     let (playing, rest): (Vec<ClipParam>, Vec<ClipParam>) =
-        (ClipParam::ALL.into_iter()).partition(|param| param.plays_in(mode));
+        (ClipParam::ALL.into_iter()).partition(|param| param.plays_in(scene.warp()));
     Popup::menu(chooser).show(|ui| {
         let mut item = |ui: &mut Ui, param: ClipParam| {
             let name = param.spec().name;
@@ -189,5 +188,6 @@ fn plays_in(param: ClipParam) -> &'static str {
             "Plays in Slice"
         }
         ClipParam::Formants => "Plays in Spectral",
+        ClipParam::Envelope => "Plays in Spectral, while High quality is on",
     }
 }

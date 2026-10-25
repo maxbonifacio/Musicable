@@ -51,6 +51,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("transients", transients()),
         ("slicing", slicing()),
         ("spectral", spectral()),
+        ("high-quality", high_quality()),
     ]
 }
 
@@ -960,7 +961,10 @@ fn spectral() -> Project {
     };
     let spectral = |formants| Warp {
         mode: WarpMode::Spectral,
-        spectral: SpectralSettings { formants },
+        spectral: SpectralSettings {
+            formants,
+            ..SpectralSettings::default()
+        },
         ..Warp::new(0, Beats::ZERO, 96.0)
     };
     let mix = warped("Mixes/Song.wav", spectral(SpectralSettings::FORMANTS_MAX));
@@ -988,6 +992,61 @@ fn spectral() -> Project {
     moving.set_lane(ClipParam::Transpose, vec![point(0, -5.0), point(4, 5.0)]);
     let moving = project.new_clip("Moving", beats(24, 28), ClipContent::Audio(moving));
     project.track_mut(vocal).unwrap().clips = vec![mix, up, kept, moving];
+    project
+}
+
+/// High quality, from version 15: a mix and vocals in Spectral with High
+/// quality on and Envelope at both ends and between, one with it off
+/// keeping its own Envelope, a clip in Slice keeping both, and a curve for
+/// Envelope.
+fn high_quality() -> Project {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let beats = |start, end| BeatRange::new(Beats::new(start), Beats::new(end));
+    let warped = |file, warp: Warp| {
+        let mut audio = AudioClip::new(file);
+        audio.offset = Offset::Beats(Beats::ZERO);
+        audio.warp = Some(warp);
+        ClipContent::Audio(audio)
+    };
+    let high_quality = |envelope| Warp {
+        mode: WarpMode::Spectral,
+        spectral: SpectralSettings {
+            high_quality: true,
+            envelope,
+            ..SpectralSettings::default()
+        },
+        ..Warp::new(0, Beats::ZERO, 96.0)
+    };
+    let mix = warped(
+        "Mixes/Song.wav",
+        high_quality(SpectralSettings::ENVELOPE_DEFAULT),
+    );
+    let mix = project.new_clip("Song", beats(0, 16), mix);
+    let mut high = high_quality(SpectralSettings::ENVELOPE_MIN);
+    (high.transpose, high.spectral.formants) = (7, 75.0);
+    let high = project.new_clip("High", beats(16, 20), warped("Vox.wav", high));
+    let mut low = high_quality(SpectralSettings::ENVELOPE_MAX);
+    low.transpose = -12;
+    let low = project.new_clip("Low", beats(20, 24), warped("Vox.wav", low));
+    let mut quick = high_quality(64.5);
+    quick.spectral.high_quality = false;
+    let quick = project.new_clip("Quick", beats(24, 28), warped("Vox.wav", quick));
+    let mut kept = high_quality(200.0);
+    kept.mode = WarpMode::Slice;
+    let kept = project.new_clip("Kept", beats(28, 32), warped("Vox.wav", kept));
+    let mut moving = AudioClip::new("Vox.wav");
+    moving.offset = Offset::Beats(Beats::ZERO);
+    moving.warp = Some(high_quality(SpectralSettings::ENVELOPE_DEFAULT));
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    moving.set_lane(
+        ClipParam::Envelope,
+        vec![point(0, 8.0), point(2, 128.0), point(4, 512.0)],
+    );
+    moving.set_lane(ClipParam::Formants, vec![point(0, 100.0), point(4, 0.0)]);
+    moving.set_lane(ClipParam::Transpose, vec![point(0, 0.0), point(4, 12.0)]);
+    let moving = project.new_clip("Moving", beats(32, 36), ClipContent::Audio(moving));
+    project.track_mut(vocal).unwrap().clips = vec![mix, high, low, quick, kept, moving];
     project
 }
 

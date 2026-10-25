@@ -938,6 +938,52 @@ fn spectral_s_formants_set_the_clip_s_warp() {
 }
 
 #[test]
+fn high_quality_shows_spectral_s_envelope() {
+    let (project, clip) = project(&[(0, 0.0)]);
+    let mut harness = harness(project, Some(clip));
+    pick(&mut harness, "Warp Mode", "Spectral");
+    // Off, as a clip starts, it renders with Signalsmith Stretch, which has
+    // no Envelope.
+    let toggle = harness.get_by_role_and_label(Role::CheckBox, "High quality");
+    assert_eq!(toggle.accesskit_node().toggled(), Some(Toggled::False));
+    assert!(harness.query_by_label("Envelope").is_none());
+    toggle.click();
+    harness.run();
+    assert!(harness.state().warp().spectral.high_quality);
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Set High Quality")
+    );
+    let envelope = harness.get_by_role_and_label(Role::SpinButton, "Envelope");
+    assert_eq!(envelope.accesskit_node().numeric_value(), Some(128.0));
+    envelope.set_value_accesskit(64.0);
+    harness.run();
+    assert_eq!(harness.state().warp().spectral.envelope, 64.0);
+    assert_eq!(
+        harness.state().document.undo_name(),
+        Some("Set Spectral Envelope")
+    );
+    // Its lane plays now, and the clip keeps it with High quality off.
+    pick(&mut harness, "Lane", "Envelope");
+    assert_eq!(
+        harness.state().editor().sample_editor.lane,
+        ClipParam::Envelope
+    );
+    harness
+        .get_by_role_and_label(Role::CheckBox, "High quality")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_by_role_and_label(Role::SpinButton, "Envelope")
+            .is_none()
+    );
+    let spectral = harness.state().warp().spectral;
+    assert_eq!((spectral.high_quality, spectral.envelope), (false, 64.0));
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
     let (project, clip) = sliced(&[(0, 0.0)]);
     let mut harness = harness(project, Some(clip));
@@ -945,7 +991,8 @@ fn the_lane_s_menu_shows_the_curve_of_each_of_the_clip_s_parameters() {
     assert_eq!(chooser.value().as_deref(), Some("Gain"));
     chooser.click();
     harness.run();
-    // They're all there: those Slice plays, then Spectral's Formants.
+    // They're all there: those Slice plays, then Spectral's Formants and
+    // Envelope.
     for param in ClipParam::ALL {
         harness.get_by_role_and_label(Role::Button, &param.spec().name);
     }

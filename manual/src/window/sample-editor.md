@@ -24,9 +24,12 @@ do in it can be undone, and a whole drag is one step in the undo history.
     where it cuts the audio, **Loop**, what a slice plays once its audio
     runs out, and **Envelope**, how much each slice fades
     ([Slice](../using/warping.md#slice)).
-  - **Spectral's setting**, under the mode while it's Spectral:
-    **Formants**, from 0 to 100%, how far a transposed voice keeps its
-    character ([Spectral](../using/warping.md#spectral)).
+  - **Spectral's settings**, under the mode while it's Spectral: **High
+    quality**, which renders the clip with Rubber Band, as Live's Complex
+    Pro does, **Formants**, from 0 to 100%, how far a transposed voice
+    keeps its character, and while High quality is on, **Envelope**, from 8
+    to 512, how finely it follows the outline of the spectrum it keeps them
+    by ([Spectral](../using/warping.md#spectral)).
   - **The tempo** of a warped clip's audio, in BPM. Drag it, or click it and
     type a tempo from 5 to 999, which applies on Enter. **÷2** and **×2**
     halve and double it, as Live's buttons do: doubling it plays the audio

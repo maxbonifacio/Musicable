@@ -531,8 +531,9 @@ rate, plays sample for sample. In Slice, the file is cut into slices, each
 played at the file's own speed, or as transposed, from where its start
 lands (`clips/slice.rs`), as Live's Beats plays them (see **Slice** below).
 In Spectral, it plays segments of the file stretched ahead of time by
-Signalsmith Stretch (`clips/spectral.rs`), as Live's Complex stretches
-them (see **Spectral** below).
+Signalsmith Stretch, or with High quality on, Rubber Band
+(`clips/spectral.rs`), as Live's Complex and Complex Pro stretch them (see
+**Spectral** below).
 
 - Mono files play in both channels, and files with more than two channels
   play their first two.
@@ -599,8 +600,9 @@ on.
   than a stream keeps ahead. A read that finds its chunks in memory doesn't
   hint the stream, so two slices crossfading don't pull it back and forth.
 
-**Spectral.** A clip in Spectral plays audio rendered ahead. Its stretcher,
-Signalsmith Stretch (`musicable-stretch`, [architecture.md](architecture.md#crates)),
+**Spectral.** A clip in Spectral plays audio rendered ahead. Its
+stretcher, Signalsmith Stretch, or Rubber Band with High quality on
+(`musicable-stretch`, [architecture.md](architecture.md#crates)),
 remembers what it played, so run live from wherever playback started, it
 would render a song position differently each time. `spectral::Plan::new`
 plans the clip for the song's tempo map as the graph builds, and
@@ -640,6 +642,27 @@ render ([app.md](app.md#the-render-cache)).
   copy of the clip a whole number of frames on, at the same tempo, plays
   the same audio. Frame positions round with 10⁻⁴ of a frame of slack, so
   the copy's arithmetic comes out the same.
+- With High quality on, each segment renders instead in one run of a fresh
+  Rubber Band stretcher on its R3 engine (`spectral/high_quality.rs`), over
+  the stretch of the file it plays and a quarter of a second of the file
+  either side. The run's key frames, where the warp's markers and the
+  song's tempo changes fall and at the segment's ends, put each frame of
+  the file out on the grid frame it plays on. A run renders offline, at one
+  setting, where Transpose, Detune, Formants and Envelope hold still over
+  it, and otherwise in real time, still ahead of playback, with the
+  settings taken every 256 frames of the file and each hop at those
+  nearest the frame it's centred on. It's given its input a hop at a time
+  (`RubberBand::wants`), as R3 works its ratio out once a call and looks
+  at its key frames as each call starts.
+- High quality's Formants set R3's formant scale to the pitch ratio to the
+  power of −formants / 100, or none where that's 1, and its Envelope
+  scales R3's formant envelope, its cepstral cutoff, by envelope / 128,
+  which is one of Musicable's changes to the library
+  (`crates/stretch/vendor/README.md` lists them). Its key hashes Rubber
+  Band's version, the run's span and output, its key frames and its
+  settings. R3 puts a stretched attack a little early, the more so the more
+  it stretches: about 3 ms at one and a half times as long, and 7 ms at
+  twice.
 - Two segments crossfade over the 5 ms before the cut between them, with
   equal-gain raised cosines, so the attack after the cut plays at full
   level.
@@ -647,11 +670,11 @@ render ([app.md](app.md#the-render-cache)).
   where its slot is filled and the plan is fresh, which `Plan::is_fresh`
   says by comparing the song's tempo changes up to the clip's end with the
   plan's, and else live. A locate or the loop's jump decides afresh.
-- The live stretch is one stretcher, made as the graph is prepared, that
-  runs up to an interval ahead of playback and reads its input as the
-  render would, from the file in memory or streaming. Where the next
-  segment is ready, the player hands over to it at the cut, through the
-  same crossfade.
+- The live stretch is one Signalsmith stretcher, with High quality on too,
+  made as the graph is prepared, that runs up to an interval ahead of
+  playback and reads its input as Signalsmith's render would, from the
+  file in memory or streaming. Where the next segment is ready, the
+  player hands over to it at the cut, through the same crossfade.
 - When the song's tempo changes, the transport keeps the beat, so the
   playhead's frame moves. The player moves what it was playing by the grid
   frames the playhead moved, so it plays on without a break: segments it
