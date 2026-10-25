@@ -240,6 +240,11 @@ impl Random {
         let detune = self.below(2 * detune as u64 + 1) as i8 - detune;
         let envelope = f64::from(self.within(0.0, SliceSettings::ENVELOPE_MAX as f32));
         let formants = f64::from(self.within(0.0, SpectralSettings::FORMANTS_MAX as f32));
+        let (least, most) = (
+            SpectralSettings::ENVELOPE_MIN,
+            SpectralSettings::ENVELOPE_MAX,
+        );
+        let spectral_envelope = f64::from(self.within(least as f32, most as f32));
         Warp {
             mode: self.pick(&WarpMode::ALL),
             markers,
@@ -251,7 +256,11 @@ impl Random {
                 transient_loop: self.pick(&TransientLoop::ALL),
                 envelope,
             },
-            spectral: SpectralSettings { formants },
+            spectral: SpectralSettings {
+                high_quality: self.one_in(2),
+                formants,
+                envelope: spectral_envelope,
+            },
             ..Warp::new(0, Beats::ZERO, tempo)
         }
     }

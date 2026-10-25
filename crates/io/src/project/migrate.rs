@@ -31,6 +31,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     transients,
     slicing,
     spectral,
+    high_quality,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -251,6 +252,22 @@ fn slicing(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 fn spectral(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     each_warp(file, &mut |warp, path| {
         add(warp, path, "spectral", json!({"formants": 100.0}))
+    })
+}
+
+/// Version 15 added Spectral's High quality, with its Envelope. Version 14
+/// warped clips keep rendering with Signalsmith Stretch, with the envelope
+/// as Live's Complex Pro has it, should High quality turn on.
+fn high_quality(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    each_warp(file, &mut |warp, path| {
+        // Settings that aren't there, or aren't an object, are the
+        // schema's to report.
+        let Some(spectral) = warp.get_mut("spectral").and_then(Value::as_object_mut) else {
+            return Ok(());
+        };
+        let path = format!("{path}.spectral");
+        add(spectral, &path, "high_quality", json!(false))?;
+        add(spectral, &path, "envelope", json!(128.0))
     })
 }
 
@@ -661,6 +678,35 @@ mod tests {
             run(&STEPS[..13], &mut file, 13).unwrap_err().path,
             "tracks[0].clips[0].content.audio.warp.spectral",
             "Spectral's settings in a version 13 file"
+        );
+    }
+
+    #[test]
+    fn version_14_warped_clips_render_with_signalsmith_stretch() {
+        let warped = || json!({"content": {"audio": {"warp": {"spectral": {"formants": 40.0}}}}});
+        let unwarped = json!({"content": {"audio": {"warp": null}}});
+        let mut file = json!({
+            "version": 14,
+            "tracks": [
+                {"clips": [warped(), unwarped.clone()], "takes": [{"clips": [warped()]}]},
+            ],
+        });
+        run(&STEPS[..14], &mut file, 14).unwrap();
+        let spectral = json!({"high_quality": false, "formants": 40.0, "envelope": 128.0});
+        let kept = json!({"content": {"audio": {"warp": {"spectral": spectral}}}});
+        let tracks = &file["tracks"];
+        assert_eq!(tracks[0]["clips"][0], kept);
+        assert_eq!(tracks[0]["clips"][1], unwarped);
+        assert_eq!(tracks[0]["takes"][0]["clips"][0], kept);
+        assert_eq!(file["version"], json!(15));
+        let mut file = json!({
+            "version": 14,
+            "tracks": [{"clips": [{"content": {"audio": {"warp": {"spectral": {"envelope": 64.0}}}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..14], &mut file, 14).unwrap_err().path,
+            "tracks[0].clips[0].content.audio.warp.spectral.envelope",
+            "Spectral's Envelope in a version 14 file"
         );
     }
 

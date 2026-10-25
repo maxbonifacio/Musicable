@@ -17,7 +17,7 @@ to use Musicable.
 | `model` | nothing | The project as plain data: tracks and their routing, the tempo map, the loop, musical time, and the built-in devices' parameter tables |
 | `commands` | `model`, `analysis` | The command registry, keymaps, and the `Document` whose transactions change the project, with their undo history |
 | `engine` | `model`, `stretch` | Graphs and nodes, the compiler, the engine, the reference and parallel renderers, clip players and streaming, the built-in devices' DSP, the real-time checker |
-| `stretch` | nothing | Signalsmith Stretch, the time-stretch Spectral renders with: its C++, built with the `cc` crate, behind bindings written by hand |
+| `stretch` | nothing | Signalsmith Stretch and Rubber Band Library, the time-stretches Spectral renders with: their C++, built with the `cc` crate, behind bindings written by hand |
 | `audio` | `engine` | Device output: our own WASAPI backend and ASIO host on Windows; cpal elsewhere |
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |

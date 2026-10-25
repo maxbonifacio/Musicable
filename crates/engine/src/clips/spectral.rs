@@ -25,9 +25,15 @@
 //! every segment, the clip plays live, without a dropout, until the new
 //! segments land.
 //!
+//! With High quality on, the segments render with Rubber Band's R3 engine
+//! instead, as Live's Complex Pro renders them: see [`high_quality`]. The
+//! live stretch is Signalsmith Stretch's either way, as R3 costs more.
+//!
 //! Where the song plays the file at its own speed wherever the clip plays,
 //! and nothing transposes, the clip plays the file as Re-Pitch does, sample
 //! for sample at the file's rate, with no stretcher and nothing to render.
+
+mod high_quality;
 
 use std::hash::Hasher;
 use std::io;
@@ -104,7 +110,11 @@ impl Map {
 
     /// The file's position, fractional, on grid frame `grid`.
     fn position(&self, tempo: &TempoMap, grid: f64) -> f64 {
-        let own = self.own_at(tempo, grid);
+        self.frame_of(self.own_at(tempo, grid))
+    }
+
+    /// The file's position, fractional, at `own` of the clip's own time.
+    fn frame_of(&self, own: f64) -> f64 {
         self.segment(own).frame_at(own)
     }
 
@@ -198,13 +208,14 @@ impl Value {
     }
 }
 
-/// A clip's Transpose, Detune and Formants, as its curves and its warp have
-/// them.
+/// A clip's Transpose, Detune, Formants and Envelope, as its curves and its
+/// warp have them.
 #[derive(Debug)]
 struct Pitches {
     transpose: Value,
     detune: Value,
     formants: Value,
+    envelope: Value,
 }
 
 impl Pitches {
@@ -213,6 +224,7 @@ impl Pitches {
             transpose: Value::new(audio, ClipParam::Transpose, f64::from(warp.transpose)),
             detune: Value::new(audio, ClipParam::Detune, f64::from(warp.detune)),
             formants: Value::new(audio, ClipParam::Formants, warp.spectral.formants),
+            envelope: Value::new(audio, ClipParam::Envelope, warp.spectral.envelope),
         }
     }
 
@@ -284,6 +296,8 @@ pub struct Plan {
     crossfade: usize,
     /// Whether the clip plays the file as it is: then it has no segments.
     passthrough: bool,
+    /// Whether its segments render with Rubber Band.
+    high_quality: bool,
     segments: Vec<SegmentPlan>,
 }
 
@@ -326,6 +340,7 @@ impl Plan {
             sizes: musicable_stretch::sizes(rate),
             crossfade: (CROSSFADE_SECONDS * f64::from(rate)).round() as usize,
             passthrough,
+            high_quality: warp.spectral.high_quality,
             segments: Vec::new(),
         };
         if !passthrough {
@@ -399,8 +414,26 @@ impl Plan {
     }
 
     /// The segment whose output starts on grid frame `start`, `frames`
-    /// long: a block of output to settle the stretcher, then its own.
+    /// long.
     fn segment(&self, start: i64, frames: usize) -> SegmentPlan {
+        let stretcher = match self.high_quality {
+            true => Stretcher::RubberBand(high_quality::Run::new(self, start, frames)),
+            false => Stretcher::Signalsmith(self.calls(start, frames)),
+        };
+        let mut segment = SegmentPlan {
+            key: 0,
+            start,
+            frames,
+            stretcher,
+        };
+        segment.key = segment.hash(self.map.rate, self.channels);
+        segment
+    }
+
+    /// How Signalsmith Stretch renders the segment whose output starts on
+    /// grid frame `start`, `frames` long: a block of output to settle the
+    /// stretcher, then its own.
+    fn calls(&self, start: i64, frames: usize) -> Calls {
         let (tempo, map, sizes) = (&self.tempo, &self.map, &self.sizes);
         let discard = sizes.block;
         let first = start - discard as i64;
@@ -416,17 +449,12 @@ impl Plan {
                 pitch: self.pitches.at(map.own_at(tempo, heard(call))),
             })
             .collect();
-        let mut segment = SegmentPlan {
-            key: 0,
-            start,
-            frames,
+        Calls {
             read_from: frontiers[0] - (sizes.block + sizes.interval) as i64,
             seek_rate: map.speed(tempo, heard(0)) as f32,
             discard,
             calls,
-        };
-        segment.key = segment.hash(map.rate, self.channels);
-        segment
+        }
     }
 }
 
@@ -467,8 +495,8 @@ fn cuts(warp: &Warp, frames: u64, rate: u32) -> Vec<u64> {
     cuts
 }
 
-/// One segment of a clip in Spectral: the grid frames it plays, and the
-/// calls to a fresh stretcher that render them.
+/// One segment of a clip in Spectral: the grid frames it plays, and how a
+/// fresh stretcher renders them.
 #[derive(Debug)]
 pub struct SegmentPlan {
     key: u64,
@@ -477,6 +505,21 @@ pub struct SegmentPlan {
     /// last.
     start: i64,
     frames: usize,
+    stretcher: Stretcher,
+}
+
+/// What renders a segment.
+#[derive(Debug)]
+enum Stretcher {
+    /// Signalsmith Stretch, in calls.
+    Signalsmith(Calls),
+    /// With High quality on, Rubber Band, in one run.
+    RubberBand(high_quality::Run),
+}
+
+/// The calls to a fresh Signalsmith stretcher that render a segment.
+#[derive(Debug)]
+struct Calls {
     /// Where in the file the stretcher's preroll starts: a block and an
     /// interval of the file before the first call's input.
     read_from: i64,
@@ -495,6 +538,22 @@ pub struct SegmentPlan {
 struct Call {
     input: u32,
     pitch: Pitch,
+}
+
+impl Calls {
+    fn hash(&self, hasher: &mut impl Hasher) {
+        hasher.write_u32(musicable_stretch::VERSION);
+        hasher.write_u32(SEED);
+        hasher.write_u64(self.discard as u64);
+        hasher.write_i64(self.read_from);
+        hasher.write_u32(self.seek_rate.to_bits());
+        for call in &self.calls {
+            hasher.write_u32(call.input);
+            hasher.write_u32(call.pitch.transpose.to_bits());
+            hasher.write_u32(call.pitch.formants.to_bits());
+            hasher.write_u8(u8::from(call.pitch.compensate));
+        }
+    }
 }
 
 impl SegmentPlan {
@@ -523,19 +582,18 @@ impl SegmentPlan {
     fn hash(&self, rate: u32, channels: usize) -> u64 {
         let mut hasher = SipHasher13::new();
         hasher.write_u32(VERSION);
-        hasher.write_u32(musicable_stretch::VERSION);
-        hasher.write_u32(SEED);
         hasher.write_u32(rate);
         hasher.write_u64(channels as u64);
-        hasher.write_u64(self.discard as u64);
         hasher.write_u64(self.frames as u64);
-        hasher.write_i64(self.read_from);
-        hasher.write_u32(self.seek_rate.to_bits());
-        for call in &self.calls {
-            hasher.write_u32(call.input);
-            hasher.write_u32(call.pitch.transpose.to_bits());
-            hasher.write_u32(call.pitch.formants.to_bits());
-            hasher.write_u8(u8::from(call.pitch.compensate));
+        match &self.stretcher {
+            Stretcher::Signalsmith(calls) => {
+                hasher.write_u8(0);
+                calls.hash(&mut hasher);
+            }
+            Stretcher::RubberBand(run) => {
+                hasher.write_u8(1);
+                run.hash(self.start, &mut hasher);
+            }
         }
         hasher.finish()
     }
@@ -583,20 +641,33 @@ pub fn render(
     segment: &SegmentPlan,
     reader: &mut dyn AudioReader,
 ) -> io::Result<AudioData> {
+    match &segment.stretcher {
+        Stretcher::Signalsmith(calls) => render_calls(plan, segment, calls, reader),
+        Stretcher::RubberBand(run) => run.render(plan, segment, reader),
+    }
+}
+
+/// Renders `segment` of `plan` with Signalsmith Stretch, in its `calls`.
+fn render_calls(
+    plan: &Plan,
+    segment: &SegmentPlan,
+    calls: &Calls,
+    reader: &mut dyn AudioReader,
+) -> io::Result<AudioData> {
     let (channels, sizes) = (plan.channels, plan.sizes);
     let keep = sizes.block + sizes.interval;
     let mut stretch = Stretch::new(channels, plan.map.rate, SEED);
     let mut input = Input::new(channels, keep);
-    let preroll = input.read(reader, segment.read_from, keep)?;
-    stretch.seek(&preroll[..channels], f64::from(segment.seek_rate));
-    let mut at = segment.read_from + keep as i64;
+    let preroll = input.read(reader, calls.read_from, keep)?;
+    stretch.seek(&preroll[..channels], f64::from(calls.seek_rate));
+    let mut at = calls.read_from + keep as i64;
     let mut output: Vec<Vec<f32>> = (0..channels)
         .map(|_| Vec::with_capacity(segment.frames + sizes.interval))
         .collect();
     let mut out = vec![vec![0.0; sizes.interval]; channels];
-    let mut skip = segment.discard;
+    let mut skip = calls.discard;
     let mut pitch = None;
-    for call in &segment.calls {
+    for call in &calls.calls {
         if pitch != Some(call.pitch) {
             call.pitch.apply(&mut stretch);
             pitch = Some(call.pitch);
@@ -1461,7 +1532,7 @@ mod tests {
     use musicable_model::automation::Point;
     use musicable_model::clip::{AudioClip, ClipId, Offset};
     use musicable_model::time::TimeSignature;
-    use musicable_model::warp::{Onset, Onsets, Origin};
+    use musicable_model::warp::{Onset, Onsets, Origin, WarpMarker};
 
     use super::*;
     use crate::clips::AudioClips;
@@ -1530,6 +1601,22 @@ mod tests {
 
     fn warp_of(clip: &mut Clip) -> &mut Warp {
         audio_of(clip).warp.as_mut().expect("a warped clip")
+    }
+
+    /// `clip`, rendering with Rubber Band if `high_quality`.
+    fn in_quality(mut clip: Clip, high_quality: bool) -> Clip {
+        warp_of(&mut clip).spectral.high_quality = high_quality;
+        clip
+    }
+
+    /// Whether each of `plan`'s segments renders with Rubber Band, and
+    /// offline.
+    fn runs(plan: &Plan) -> Vec<Option<bool>> {
+        let run = |segment: &SegmentPlan| match &segment.stretcher {
+            Stretcher::RubberBand(run) => Some(run.is_offline()),
+            Stretcher::Signalsmith(_) => None,
+        };
+        plan.segments().iter().map(run).collect()
     }
 
     fn plan(clip: &Clip, data: &AudioData, tempo: &TempoMap) -> Plan {
@@ -1728,20 +1815,31 @@ mod tests {
     fn segments_render_the_same_every_time() {
         let data = chord(RATE, 10.0);
         let tempo = song(120.0);
-        let clip = stretched(0, 0.0, 16.0, 100.0);
-        let plan = plan(&clip, &data, &tempo);
-        // 10 s of file at 1.2 times its speed: two segments.
-        assert_eq!(plan.segments().len(), 2);
-        let render = |k: usize| render(&plan, &plan.segments()[k], &mut DataReader(data.clone()));
-        for (k, segment) in plan.segments().iter().enumerate() {
-            let (first, again) = (render(k).unwrap(), render(k).unwrap());
-            assert_eq!(first, again, "segment {k}");
-            assert_eq!(first.frames(), segment.frames() as u64);
-            assert_eq!(first.channels(), 2);
+        let mut keys = Vec::new();
+        for high_quality in [false, true] {
+            let clip = in_quality(stretched(0, 0.0, 16.0, 100.0), high_quality);
+            let plan = plan(&clip, &data, &tempo);
+            // 10 s of file at 1.2 times its speed: two segments.
+            assert_eq!(plan.segments().len(), 2);
+            let expected = high_quality.then_some(true);
+            assert_eq!(runs(&plan), [expected; 2], "offline, at one pitch");
+            let render =
+                |k: usize| render(&plan, &plan.segments()[k], &mut DataReader(data.clone()));
+            for (k, segment) in plan.segments().iter().enumerate() {
+                let (first, again) = (render(k).unwrap(), render(k).unwrap());
+                assert_eq!(first, again, "segment {k}");
+                assert_eq!(first.frames(), segment.frames() as u64);
+                assert_eq!(first.channels(), 2);
+                assert!(level(first.channel(0)) > 0.1, "segment {k}");
+            }
+            let [a, b] = [&plan.segments()[0], &plan.segments()[1]];
+            assert_eq!(a.end() - b.start(), plan.crossfade as i64, "they crossfade");
+            assert_ne!(a.key(), b.key());
+            keys.extend([a.key(), b.key()]);
         }
-        let [a, b] = [&plan.segments()[0], &plan.segments()[1]];
-        assert_eq!(a.end() - b.start(), plan.crossfade as i64, "they crossfade");
-        assert_ne!(a.key(), b.key());
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 4, "each stretcher renders its own");
     }
 
     /// Where the energy of a burst in `signal` peaks, in frames.
@@ -1764,9 +1862,9 @@ mod tests {
             _ => 0.0,
         };
         let data = file(RATE, 8.0, burst, burst);
-        for bpm in [80.0, 125.0] {
+        for (bpm, high_quality) in [(80.0, false), (125.0, false), (80.0, true), (125.0, true)] {
             let tempo = song(bpm);
-            let clip = stretched(0, 0.0, 16.0, 100.0);
+            let clip = in_quality(stretched(0, 0.0, 16.0, 100.0), high_quality);
             let renders = rendered(&clip, &data, &tempo);
             let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 512);
             let [left, right] = rig.play(RATE as usize * 6);
@@ -1775,14 +1873,18 @@ mod tests {
             let expected = 2.0025 * 100.0 / bpm * f64::from(RATE);
             let landed = peak(&left[..(3.0 * 100.0 / bpm * f64::from(RATE)) as usize]);
             let off = (landed as f64 - expected).abs();
+            let quality = if high_quality { "High quality" } else { "" };
             assert!(
                 off < 0.002 * f64::from(RATE),
-                "{bpm} BPM: {landed} for {expected}"
+                "{bpm} BPM {quality}: {landed} for {expected}"
             );
             // The tone keeps its pitch.
             let tone = (3.5 * 100.0 / bpm * f64::from(RATE)) as usize;
             let heard = frequency(&left[tone..tone + RATE as usize / 2], RATE);
-            assert!((heard - 440.0).abs() < 3.0, "{bpm} BPM: {heard} Hz");
+            assert!(
+                (heard - 440.0).abs() < 3.0,
+                "{bpm} BPM {quality}: {heard} Hz"
+            );
             // Both channels alike, but for the stretcher's rounding: it
             // keeps their phases together, and works them out in turn.
             assert!(left.iter().zip(&right).all(|(l, r)| (l - r).abs() < 1e-3));
@@ -1793,19 +1895,22 @@ mod tests {
     fn transposing_moves_the_pitch_and_not_the_time() {
         let data = file(RATE, 6.0, sine(440.0), sine(440.0));
         let tempo = song(120.0);
-        for (semitones, formants) in [(5, 100.0), (-5, 100.0), (5, 0.0), (-5, 40.0)] {
-            let mut clip = stretched(0, 0.0, 8.0, 100.0);
-            warp_of(&mut clip).transpose = semitones;
-            warp_of(&mut clip).spectral.formants = formants;
-            let renders = rendered(&clip, &data, &tempo);
-            let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 512);
-            let [left, _] = rig.play(RATE as usize * 3);
-            let heard = frequency(&left[RATE as usize..2 * RATE as usize], RATE);
-            let expected = 440.0 * pitch_ratio(f64::from(semitones), 0.0);
-            assert!(
-                (heard - expected).abs() < 4.0,
-                "{semitones}: {heard} Hz for {expected}"
-            );
+        let cases = [(5, 100.0), (-5, 100.0), (5, 0.0), (-5, 40.0)];
+        for high_quality in [false, true] {
+            for (semitones, formants) in cases {
+                let mut clip = in_quality(stretched(0, 0.0, 8.0, 100.0), high_quality);
+                warp_of(&mut clip).transpose = semitones;
+                warp_of(&mut clip).spectral.formants = formants;
+                let renders = rendered(&clip, &data, &tempo);
+                let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 512);
+                let [left, _] = rig.play(RATE as usize * 3);
+                let heard = frequency(&left[RATE as usize..2 * RATE as usize], RATE);
+                let expected = 440.0 * pitch_ratio(f64::from(semitones), 0.0);
+                assert!(
+                    (heard - expected).abs() < 4.0,
+                    "{semitones} {high_quality}: {heard} Hz for {expected}"
+                );
+            }
         }
     }
 
@@ -1827,8 +1932,12 @@ mod tests {
         // with the pitch.
         let ratio = pitch_ratio(5.0, 0.0);
         let (stays, moves) = (5.0 * 150.0 * ratio, 7.0 * 150.0 * ratio);
-        for (formants, louder, softer) in [(100.0, stays, moves), (0.0, moves, stays)] {
-            let mut clip = stretched(0, 0.0, 6.0, 120.0);
+        let cases = [(100.0, stays, moves), (0.0, moves, stays)];
+        for (high_quality, (formants, louder, softer)) in [false, true]
+            .into_iter()
+            .flat_map(|high_quality| cases.map(|case| (high_quality, case)))
+        {
+            let mut clip = in_quality(stretched(0, 0.0, 6.0, 120.0), high_quality);
             warp_of(&mut clip).transpose = 5;
             warp_of(&mut clip).spectral.formants = formants;
             let renders = rendered(&clip, &data, &tempo);
@@ -1841,7 +1950,7 @@ mod tests {
             );
             assert!(
                 louder > 2.0 * softer,
-                "{formants}%: {louder} against {softer}"
+                "{formants}% {high_quality}: {louder} against {softer}"
             );
         }
     }
@@ -1850,17 +1959,152 @@ mod tests {
     fn a_transpose_curve_moves_the_pitch_as_it_plays() {
         let data = file(RATE, 6.0, sine(440.0), sine(440.0));
         let tempo = song(120.0);
-        let mut clip = stretched(0, 0.0, 8.0, 120.0);
-        let point = |beat: i64, value: f64| Point::new(Beats::new(beat), value);
-        // Up an octave from beat 4: in 4 beats at 120 BPM, 2 seconds.
-        let curve = vec![point(0, 0.0), point(4, 0.0), point(4, 12.0)];
-        audio_of(&mut clip).set_lane(ClipParam::Transpose, curve);
+        for high_quality in [false, true] {
+            let mut clip = in_quality(stretched(0, 0.0, 8.0, 120.0), high_quality);
+            let point = |beat: i64, value: f64| Point::new(Beats::new(beat), value);
+            // Up an octave from beat 4: in 4 beats at 120 BPM, 2 seconds.
+            let curve = vec![point(0, 0.0), point(4, 0.0), point(4, 12.0)];
+            audio_of(&mut clip).set_lane(ClipParam::Transpose, curve);
+            let renders = rendered(&clip, &data, &tempo);
+            // With High quality, it renders in real time, as the pitch
+            // moves.
+            let expected = high_quality.then_some(false);
+            assert_eq!(runs(&renders.plan), [expected], "{high_quality}");
+            let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 256);
+            let [left, _] = rig.play(RATE as usize * 4);
+            let second = RATE as usize;
+            let (before, after) = (
+                frequency(&left[second / 2..3 * second / 2], RATE),
+                frequency(&left[5 * second / 2..7 * second / 2], RATE),
+            );
+            assert!((before - 440.0).abs() < 3.0, "{high_quality}: {before}");
+            assert!((after - 880.0).abs() < 4.0, "{high_quality}: {after}");
+        }
+    }
+
+    #[test]
+    fn in_high_quality_the_file_keeps_to_its_markers_and_the_song_s_tempo() {
+        // Bursts a second apart, from 0.5 s.
+        let starts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5];
+        let burst = move |t: f64| match starts.iter().any(|&s| (s..s + 0.005).contains(&t)) {
+            true => (TAU * 3000.0 * t).sin(),
+            false => 0.0,
+        };
+        let data = file(RATE, 7.0, burst, burst);
+        // As fast as the song to 2 s of the file, on beat 4, and two thirds
+        // as fast after, as the song slows to 90 BPM from beat 12.
+        let mut clip = in_quality(stretched(0, 0.0, 16.0, 120.0), true);
+        let marker = |seconds: u64, beat: i64| WarpMarker {
+            frame: seconds * u64::from(RATE),
+            beat: Beats::new(beat),
+        };
+        warp_of(&mut clip).markers = vec![marker(0, 0), marker(2, 4), marker(4, 10)];
+        let mut tempo = song(120.0);
+        tempo.insert_tempo(Beats::new(12), 90.0);
         let renders = rendered(&clip, &data, &tempo);
-        let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 256);
-        let [left, _] = rig.play(RATE as usize * 4);
-        let second = RATE as usize;
-        assert!((frequency(&left[second / 2..3 * second / 2], RATE) - 440.0).abs() < 3.0);
-        assert!((frequency(&left[5 * second / 2..7 * second / 2], RATE) - 880.0).abs() < 4.0);
+        let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 512);
+        let [left, _] = rig.play(RATE as usize * 8);
+        // Where the file's second `file` plays in the song.
+        let heard_at = |file: f64| {
+            let own = match file <= 2.0 {
+                true => 2.0 * file,
+                false => 4.0 + 3.0 * (file - 2.0),
+            };
+            match own <= 12.0 {
+                true => own * 0.5,
+                false => 6.0 + (own - 12.0) * 60.0 / 90.0,
+            }
+        };
+        // Each burst starts there, but for Rubber Band putting a stretched
+        // attack early, more the more it stretches, with key frames or
+        // without: here by about 3 ms where the file plays half as long
+        // again, and 7 ms where it plays twice as long.
+        let stretches = [1.0, 1.0, 1.5, 1.5, 1.5, 2.0];
+        for (start, stretch) in starts.into_iter().zip(stretches) {
+            let expected = heard_at(start) * f64::from(RATE);
+            let around = (expected - 0.05 * f64::from(RATE)) as usize;
+            let window = &left[around..around + RATE as usize / 10];
+            let loudest = window.iter().fold(0.0, |most: f32, s| most.max(s.abs()));
+            let onset = around + window.iter().position(|s| s.abs() > 0.2 * loudest).unwrap();
+            let off = (onset as f64 - expected) / f64::from(RATE);
+            let early = 0.008 * (stretch - 1.0);
+            assert!(
+                (-early - 0.001..0.001).contains(&off),
+                "the burst at {start} s: {off:+.4} s off"
+            );
+        }
+    }
+
+    #[test]
+    fn in_high_quality_a_segment_renders_offline_where_its_settings_hold_still() {
+        let data = chord(RATE, 20.0);
+        let tempo = song(120.0);
+        let mut clip = in_quality(stretched(0, 0.0, 40.0, 100.0), true);
+        let point = |beat: i64, value: f64| Point::new(Beats::new(beat), value);
+        // Formants moving in the third of three segments, which start on
+        // beats 0, 10 and 20.
+        let moving = vec![point(24, 100.0), point(30, 0.0)];
+        audio_of(&mut clip).set_lane(ClipParam::Formants, moving);
+        let runs_of = |clip: &Clip| runs(&plan(clip, &data, &tempo));
+        // Untransposed, the formants stay where they are anyway.
+        assert_eq!(runs_of(&clip), [Some(true); 3]);
+        warp_of(&mut clip).transpose = 5;
+        assert_eq!(runs_of(&clip), [Some(true), Some(true), Some(false)]);
+        // The envelope moving in the first, where the formants are kept.
+        let mut enveloped = clip.clone();
+        audio_of(&mut enveloped).automation.clear();
+        let envelope = vec![point(4, 128.0), point(8, 64.0)];
+        audio_of(&mut enveloped).set_lane(ClipParam::Envelope, envelope);
+        assert_eq!(runs_of(&enveloped), [Some(false), Some(true), Some(true)]);
+        // With them moving with the pitch, the envelope changes nothing.
+        warp_of(&mut enveloped).spectral.formants = 0.0;
+        assert_eq!(runs_of(&enveloped), [Some(true); 3]);
+    }
+
+    #[test]
+    fn in_high_quality_the_envelope_renders_where_the_formants_are_kept() {
+        let data = chord(RATE, 4.0);
+        let tempo = song(120.0);
+        let clip = |transpose: i8, formants: f64, envelope: f64| {
+            let mut clip = in_quality(stretched(0, 0.0, 8.0, 100.0), true);
+            let warp = warp_of(&mut clip);
+            warp.transpose = transpose;
+            (warp.spectral.formants, warp.spectral.envelope) = (formants, envelope);
+            clip
+        };
+        let keys = |clip: &Clip| -> Vec<u64> {
+            let plan = plan(clip, &data, &tempo);
+            plan.segments().iter().map(SegmentPlan::key).collect()
+        };
+        let (own, finer) = (clip(5, 100.0, 128.0), clip(5, 100.0, 256.0));
+        assert_ne!(keys(&own), keys(&finer));
+        // Untransposed, or with the formants moving with the pitch, it
+        // changes nothing.
+        assert_eq!(keys(&clip(0, 100.0, 128.0)), keys(&clip(0, 100.0, 256.0)));
+        assert_eq!(keys(&clip(5, 0.0, 128.0)), keys(&clip(5, 0.0, 256.0)));
+        // And it reaches the stretcher.
+        let audio = |clip: &Clip| {
+            let renders = rendered(clip, &data, &tempo);
+            renders.slots[0].get().unwrap().clone()
+        };
+        assert_ne!(audio(&own), audio(&finer));
+    }
+
+    #[test]
+    fn in_high_quality_segments_meet_without_a_break() {
+        let data = chord(RATE, 20.0);
+        let tempo = song(120.0);
+        let clip = in_quality(stretched(0, 0.0, 40.0, 100.0), true);
+        let renders = rendered(&clip, &data, &tempo);
+        assert_eq!(renders.plan.segments().len(), 3);
+        let mut rig = Rig::new(player(&clip, &data, &renders, &tempo), &tempo, RATE, 512);
+        let [left, _] = rig.play(16 * RATE as usize);
+        // The chord's own level dips to about 0.09 over 10 ms: a dropout is
+        // silence.
+        for window in left[RATE as usize / 2..].chunks(480) {
+            assert!(level(window) > 0.05, "no dropout");
+        }
+        assert!(steepest(&left) < 0.1, "no clicks");
     }
 
     #[test]
@@ -1942,22 +2186,24 @@ mod tests {
     fn copies_at_the_same_tempo_render_the_same_segments() {
         let data = chord(RATE, 20.0);
         let tempo = song(120.0);
-        let keys = |start: f64| {
-            let clip = stretched(1, start, 32.0, 100.0);
-            let plan = plan(&clip, &data, &tempo);
-            let keys: Vec<u64> = plan.segments().iter().map(SegmentPlan::key).collect();
-            let starts: Vec<i64> = plan.segments().iter().map(SegmentPlan::start).collect();
-            (keys, starts)
-        };
-        let (here, at) = keys(0.0);
-        // A bar later, a whole number of frames on.
-        let (later, moved) = keys(4.0);
-        assert_eq!(here, later);
-        assert!(at.iter().zip(&moved).all(|(a, b)| b - a == 4 * 24_000));
-        // At another tempo, they render again.
-        let clip = stretched(1, 0.0, 32.0, 100.0);
-        let other = plan(&clip, &data, &song(121.0));
-        assert!(other.segments().iter().all(|s| !here.contains(&s.key())));
+        for high_quality in [false, true] {
+            let keys = |start: f64| {
+                let clip = in_quality(stretched(1, start, 32.0, 100.0), high_quality);
+                let plan = plan(&clip, &data, &tempo);
+                let keys: Vec<u64> = plan.segments().iter().map(SegmentPlan::key).collect();
+                let starts: Vec<i64> = plan.segments().iter().map(SegmentPlan::start).collect();
+                (keys, starts)
+            };
+            let (here, at) = keys(0.0);
+            // A bar later, a whole number of frames on.
+            let (later, moved) = keys(4.0);
+            assert_eq!(here, later, "{high_quality}");
+            assert!(at.iter().zip(&moved).all(|(a, b)| b - a == 4 * 24_000));
+            // At another tempo, they render again.
+            let clip = in_quality(stretched(1, 0.0, 32.0, 100.0), high_quality);
+            let other = plan(&clip, &data, &song(121.0));
+            assert!(other.segments().iter().all(|s| !here.contains(&s.key())));
+        }
     }
 
     #[test]

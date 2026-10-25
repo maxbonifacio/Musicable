@@ -51,6 +51,23 @@ Musicable includes under the MIT licence:
 > FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 > DEALINGS IN THE SOFTWARE.
 
+With High quality on, Spectral stretches audio with [Rubber Band
+Library](https://breakfastquay.com/rubberband/) 4.0.0, which Musicable
+includes, with four changes of its own, under the GNU General Public
+License, version 2 or later, which lets Musicable, under version 3 or
+later, include it:
+
+> Rubber Band Library: Copyright 2007-2024 Particular Programs Ltd.
+>
+> This program is free software; you can redistribute it and/or modify it
+> under the terms of the GNU General Public License as published by the
+> Free Software Foundation; either version 2 of the License, or (at your
+> option) any later version.
+
+[What Musicable changed in
+it](https://github.com/maxbonifacio/Musicable/blob/main/crates/stretch/vendor/README.md#rubber-band-library)
+is in its source code, with the library's own copy of the licence.
+
 ## Trademarks
 
 ASIO and VST are trademarks of Steinberg Media Technologies GmbH, Ableton and

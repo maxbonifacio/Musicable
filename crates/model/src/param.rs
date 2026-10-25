@@ -49,11 +49,13 @@ pub enum ClipParam {
     TransientLoop,
     /// Spectral's Formants, from 0 to 100.
     Formants,
+    /// Spectral's Envelope, while High quality is on, from 8 to 512.
+    Envelope,
 }
 
 impl ClipParam {
     /// Every one, in order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Gain,
         Self::Transpose,
         Self::Detune,
@@ -61,6 +63,7 @@ impl ClipParam {
         Self::Preserve,
         Self::TransientLoop,
         Self::Formants,
+        Self::Envelope,
     ];
 
     /// What it is.
@@ -108,6 +111,13 @@ impl ClipParam {
                 SpectralSettings::FORMANTS_MAX,
                 SpectralSettings::FORMANTS_MAX,
             ),
+            Self::Envelope => ParamSpec {
+                name: "Envelope".into(),
+                min: SpectralSettings::ENVELOPE_MIN,
+                max: SpectralSettings::ENVELOPE_MAX,
+                default: SpectralSettings::ENVELOPE_DEFAULT,
+                scale: Scale::Log,
+            },
         }
     }
 
@@ -117,10 +127,11 @@ impl ClipParam {
         matches!(self, Self::Preserve | Self::TransientLoop)
     }
 
-    /// Whether it plays in `mode`: Gain in every one and while the clip is
-    /// unwarped, Transpose and Detune in every mode but Re-Pitch, and each
-    /// mode's own in it.
-    pub fn plays_in(self, mode: Option<WarpMode>) -> bool {
+    /// Whether it plays in a clip warped as `warp`, or unwarped: Gain
+    /// always, Transpose and Detune in every mode but Re-Pitch, each mode's
+    /// own in it, and Envelope in Spectral while High quality is on.
+    pub fn plays_in(self, warp: Option<&Warp>) -> bool {
+        let mode = warp.map(|warp| warp.mode);
         match self {
             Self::Gain => true,
             Self::Transpose | Self::Detune => mode.is_some_and(WarpMode::transposes),
@@ -128,6 +139,9 @@ impl ClipParam {
                 mode == Some(WarpMode::Slice)
             }
             Self::Formants => mode == Some(WarpMode::Spectral),
+            Self::Envelope => {
+                warp.is_some_and(|w| w.mode == WarpMode::Spectral && w.spectral.high_quality)
+            }
         }
     }
 
@@ -141,6 +155,7 @@ impl ClipParam {
             Self::Preserve => "preserve",
             Self::TransientLoop => "transient_loop",
             Self::Formants => "formants",
+            Self::Envelope => "envelope",
         }
     }
 
@@ -530,10 +545,19 @@ mod tests {
         let steps = |param: ClipParam| param.spec().max as usize + 1;
         assert_eq!(steps(ClipParam::Preserve), Preserve::ALL.len());
         assert_eq!(steps(ClipParam::TransientLoop), TransientLoop::ALL.len());
+        let in_mode = |mode, high_quality| {
+            let mut warp = Warp::new(0, Beats::ZERO, 120.0);
+            (warp.mode, warp.spectral.high_quality) = (mode, high_quality);
+            warp
+        };
         assert!(ClipParam::Gain.plays_in(None));
-        assert!(!ClipParam::Transpose.plays_in(Some(WarpMode::RePitch)));
-        assert!(ClipParam::Detune.plays_in(Some(WarpMode::Slice)));
+        assert!(!ClipParam::Transpose.plays_in(Some(&in_mode(WarpMode::RePitch, false))));
+        assert!(ClipParam::Detune.plays_in(Some(&in_mode(WarpMode::Slice, false))));
         assert!(!ClipParam::Preserve.plays_in(None));
+        assert!(ClipParam::Formants.plays_in(Some(&in_mode(WarpMode::Spectral, false))));
+        assert!(!ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Spectral, false))));
+        assert!(ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Spectral, true))));
+        assert!(!ClipParam::Envelope.plays_in(Some(&in_mode(WarpMode::Slice, true))));
 
         let mut p = Project::new();
         let drums = p.add_track("Drums", TrackKind::Audio);

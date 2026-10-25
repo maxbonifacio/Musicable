@@ -167,7 +167,9 @@
 | Select Time in Sample Editor | `warp.select_time` |
 | Set Clip Detune | `warp.set_detune` |
 | Set 1.1.1 Here | `warp.set_downbeat` |
+| Set Spectral Envelope | `warp.set_envelope` |
 | Set Formants | `warp.set_formants` |
+| Set High Quality | `warp.set_high_quality` |
 | Set Warp Mode | `warp.set_mode` |
 | Set Slice Preserve | `warp.set_preserve` |
 | Set Clip Tempo | `warp.set_tempo` |

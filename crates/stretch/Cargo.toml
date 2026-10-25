@@ -1,6 +1,6 @@
 [package]
 name = "musicable-stretch"
-description = "Signalsmith Stretch, the time-stretch and pitch-shift that warped audio's Spectral mode renders with, behind hand-written bindings."
+description = "Signalsmith Stretch and Rubber Band Library, the time-stretches and pitch-shifts that warped audio's Spectral mode renders with, behind hand-written bindings."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

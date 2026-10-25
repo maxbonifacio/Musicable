@@ -34,6 +34,12 @@ pub const SET_TRANSIENT_ENVELOPE: CommandId = CommandId::new("warp.set_transient
 /// Sets how far Spectral keeps a warped clip's formants in place as it
 /// transposes.
 pub const SET_FORMANTS: CommandId = CommandId::new("warp.set_formants");
+/// Sets whether Spectral renders a warped clip's audio with Rubber Band, the
+/// best quality, rather than Signalsmith Stretch, the quicker to render.
+pub const SET_HIGH_QUALITY: CommandId = CommandId::new("warp.set_high_quality");
+/// Sets how fine the outline of the spectrum is that Spectral keeps a
+/// warped clip's formants by, while High quality is on.
+pub const SET_ENVELOPE: CommandId = CommandId::new("warp.set_envelope");
 /// Shows the curve of one of the clip's parameters in the Sample Editor's
 /// lane.
 pub const SHOW_LANE: CommandId = CommandId::new("clip.show_lane");
@@ -46,7 +52,7 @@ const PRESERVES: &str = "transients, bar, 1/2, 1/4, 1/8, 1/16 or 1/32";
 const LOOPS: &str = "off, forward or back_and_forth";
 /// The keys of the clip's parameters, as [`SHOW_LANE`] takes them.
 const PARAMS: &str =
-    "gain, transpose, detune, transient_envelope, preserve, transient_loop or formants";
+    "gain, transpose, detune, transient_envelope, preserve, transient_loop, formants or envelope";
 
 /// Registers the commands for the warp modes' settings.
 pub fn register(registry: &mut Registry) {
@@ -190,12 +196,52 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_HIGH_QUALITY, "Set High Quality").with_params(&[
+            Param::required(
+                "on",
+                Type::Bool,
+                "Whether Spectral renders with Rubber Band, the best quality and slower to \
+                 render, as Live's Complex Pro, rather than Signalsmith Stretch, as Live's \
+                 Complex.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let on: bool = args.get("on")?;
+            set(ctx, args, "Set High Quality", |warp| {
+                warp.spectral.high_quality = on
+            })
+        },
+    );
+    registry.add(
+        Command::new(SET_ENVELOPE, "Set Spectral Envelope").with_params(&[
+            Param::required(
+                "envelope",
+                Type::Number,
+                "While High quality is on, how fine the outline of the spectrum is that \
+                 Spectral keeps the formants by, from 8 to 512: 128 suits most audio, lower \
+                 suits high voices and higher low ones.",
+            ),
+            CLIP,
+        ]),
+        |ctx, args| {
+            let envelope: f64 = args.get("envelope")?;
+            let range = SpectralSettings::ENVELOPE_MIN..=SpectralSettings::ENVELOPE_MAX;
+            if !range.contains(&envelope) {
+                return Err(CommandError::invalid("an Envelope goes from 8 to 512"));
+            }
+            set(ctx, args, "Set Spectral Envelope", |warp| {
+                warp.spectral.envelope = envelope
+            })
+        },
+    );
+    registry.add(
         Command::new(SHOW_LANE, "Show Clip Lane").with_params(&[
             Param::required(
                 "param",
                 Type::Text,
                 "The parameter whose curve the Sample Editor's lane shows: gain, transpose, \
-                 detune, transient_envelope, preserve, transient_loop or formants.",
+                 detune, transient_envelope, preserve, transient_loop, formants or envelope.",
             ),
             CLIP,
         ]),
@@ -263,7 +309,7 @@ mod tests {
     #[test]
     fn each_setting_is_a_step_and_undo_takes_it_back() {
         let (mut setup, clip) = analysed_song();
-        let runs: [(CommandId, &str, Value); 7] = [
+        let runs: [(CommandId, &str, Value); 9] = [
             (SET_MODE, "mode", "slice".into()),
             (SET_TRANSPOSE, "semitones", (-7_i64).into()),
             (SET_DETUNE, "cents", 12_i64.into()),
@@ -271,6 +317,8 @@ mod tests {
             (SET_TRANSIENT_LOOP, "mode", "back_and_forth".into()),
             (SET_TRANSIENT_ENVELOPE, "envelope", 40.0.into()),
             (SET_FORMANTS, "formants", 25.0.into()),
+            (SET_HIGH_QUALITY, "on", true.into()),
+            (SET_ENVELOPE, "envelope", 64.0.into()),
         ];
         for (command, name, value) in runs.clone() {
             let args = Args::new().with(name, value).with("clip", clip);
@@ -287,7 +335,12 @@ mod tests {
                 envelope: 40.0,
             }
         );
-        assert_eq!(warp.spectral, SpectralSettings { formants: 25.0 });
+        let spectral = SpectralSettings {
+            high_quality: true,
+            formants: 25.0,
+            envelope: 64.0,
+        };
+        assert_eq!(warp.spectral, spectral);
         assert_eq!(
             setup.committed_names(),
             [
@@ -298,6 +351,8 @@ mod tests {
                 "Set Transient Loop Mode",
                 "Set Transient Envelope",
                 "Set Formants",
+                "Set High Quality",
+                "Set Spectral Envelope",
             ]
         );
         // The same again changes nothing, and leaves no step.
@@ -307,6 +362,10 @@ mod tests {
                 .unwrap();
         }
         assert!(setup.committed_names().is_empty());
+        setup.run(&edit::UNDO);
+        assert_eq!(warp_of(&setup, clip).spectral.envelope, 128.0);
+        setup.run(&edit::UNDO);
+        assert!(!warp_of(&setup, clip).spectral.high_quality);
         setup.run(&edit::UNDO);
         assert_eq!(warp_of(&setup, clip).spectral.formants, 100.0);
         setup.run(&edit::UNDO);
@@ -318,7 +377,7 @@ mod tests {
     #[test]
     fn settings_out_of_range_or_unknown_are_refused() {
         let (mut setup, clip) = analysed_song();
-        let wrong: [(CommandId, &str, Value); 10] = [
+        let wrong: [(CommandId, &str, Value); 13] = [
             (SET_MODE, "mode", "complex".into()),
             (SET_TRANSPOSE, "semitones", 49_i64.into()),
             (SET_TRANSPOSE, "semitones", (-300_i64).into()),
@@ -328,6 +387,9 @@ mod tests {
             (SET_TRANSIENT_ENVELOPE, "envelope", 100.5.into()),
             (SET_FORMANTS, "formants", (-1.0).into()),
             (SET_FORMANTS, "formants", 101.0.into()),
+            (SET_HIGH_QUALITY, "on", "yes".into()),
+            (SET_ENVELOPE, "envelope", 7.9.into()),
+            (SET_ENVELOPE, "envelope", 513.0.into()),
             (SHOW_LANE, "param", "volume".into()),
         ];
         for (command, name, value) in wrong {
@@ -379,6 +441,7 @@ mod tests {
             tx.set_param_value(param(ClipParam::TransientLoop), -1.0);
             tx.set_param_value(param(ClipParam::TransientEnvelope), 250.0);
             tx.set_param_value(param(ClipParam::Formants), -3.0);
+            tx.set_param_value(param(ClipParam::Envelope), 2.0);
         });
         let warp = warp_of(&setup, clip);
         assert_eq!(warp.transpose, 5);
@@ -386,6 +449,7 @@ mod tests {
         assert_eq!(warp.slice.transient_loop, TransientLoop::Off);
         assert_eq!(warp.slice.envelope, 100.0);
         assert_eq!(warp.spectral.formants, 0.0);
+        assert_eq!(warp.spectral.envelope, 8.0);
         // Clearing a curve leaves the setting at the value it had at the
         // playhead.
         let args = Args::new()

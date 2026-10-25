@@ -1,10 +1,12 @@
 //! Signalsmith Stretch: the time-stretch and pitch-shift that warped audio's
-//! Spectral mode renders with, and plays live while a render isn't ready.
+//! Spectral mode renders with, and plays live while a render isn't ready;
+//! and Rubber Band Library's R3 engine, which Spectral renders with while
+//! High quality is on ([`RubberBand`], in [`rubber_band`]).
 //!
-//! It's header-only C++ by Signalsmith Audio, under the MIT licence, built by
-//! `build.rs` with Musicable's C interface to it (`src/stretch.cpp`) and
-//! bound here by hand, so the build needs no LLVM. `vendor/README.md` says
-//! where it came from.
+//! Signalsmith Stretch is header-only C++ by Signalsmith Audio, under the
+//! MIT licence, built by `build.rs` with Musicable's C interface to it
+//! (`src/stretch.cpp`) and bound here by hand, so the build needs no LLVM.
+//! `vendor/README.md` says where it came from.
 //!
 //! A [`Stretch`] is a phase vocoder. Every [interval](Stretch::interval) of
 //! output, it analyses a [block](Stretch::block) of its input, moves the
@@ -25,6 +27,10 @@
 use std::ffi::c_int;
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
+
+pub mod rubber_band;
+
+pub use rubber_band::{RUBBER_BAND_VERSION, RubberBand};
 
 /// Changes when what a stretcher renders from the same calls may change: a
 /// new release of the vendored code, or a new preset. The render cache keys

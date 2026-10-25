@@ -229,9 +229,21 @@ character, and they stay where they are as a singer sings higher. At
 voice moved up a fourth sounds like the same voice singing higher; at
 **0%** they move with the pitch, as a record's do played faster, and the
 voice sounds smaller. Formants changes nothing while the clip isn't
-transposed. It keeps the formants closest for voices up to about 250 Hz,
-around B3: a higher voice keeps less of its character, and moved up a long
-way, can come out a few decibels quieter.
+transposed. Without High quality, it keeps the formants closest for voices
+up to about 250 Hz, around B3: a higher voice keeps less of its character,
+and moved up a long way, can come out a few decibels quieter.
+
+**High quality**, the checkbox above Formants, renders the clip with Rubber
+Band instead, as Live's Complex Pro mode does: the best sound, for voices
+and mixes above all, and several times slower to render. With it on,
+**Envelope** shows too, as Complex Pro has it: how finely Spectral follows
+the outline of the spectrum that it keeps the formants by, from 8 to 512.
+**128**, as it starts, suits most audio. A high voice, whose harmonics are
+far apart, can sound better lower, and a low one higher. Envelope changes
+nothing while the formants move with the pitch: with the clip not
+transposed, or Formants at 0%. In High quality, a hit in audio played
+slower comes out a little early, by about 3 ms where it plays half as long
+again, and 7 ms where it plays twice as long, as Rubber Band stretches it.
 
 Spectral's stretcher remembers what it has just played, so a clip in
 Spectral plays audio rendered ahead of time, in segments of 4 to 8 seconds
@@ -240,11 +252,13 @@ those the playhead plays next first, whenever the clip's mode, markers,
 tempo, pitch or curves change, or the song's tempo, and the status bar says
 how many segments are still to render. Until a segment is ready, the clip
 plays a live stretch, which sounds close to it, and moves over to the
-rendered audio with a short crossfade where the segment starts. When the
-song's tempo changes, the clip crossfades to the live stretch there and
-then, without a break, until the segments at the new tempo are ready. An
-export waits until every segment is rendered, so it's what the song plays
-once they are, to the sample.
+rendered audio with a short crossfade where the segment starts. The live
+stretch is Signalsmith Stretch's even with High quality on, so High quality
+is heard once the segments are ready, which takes longer. When the song's
+tempo changes, the clip crossfades to the live stretch there and then,
+without a break, until the segments at the new tempo are ready. An export
+waits until every segment is rendered, so it's what the song plays once
+they are, to the sample.
 
 What's rendered is kept in the render cache, in [the cache
 folder](../customising/settings.md#the-cache-folder), so the next time any
@@ -265,23 +279,24 @@ Formants says. Drag them in the Sample Editor, or click them and type.
 
 ## Curves in the clip
 
-Every setting of a warped clip but its mode can follow a curve, as Live's
-clip envelopes can move its volume and transpose: its gain, its Transpose
-and Detune, Slice's Envelope, Preserve and Loop, and Spectral's Formants.
-The lane under the Sample Editor's waveform shows one of the curves at a
-time: click its name, beside it, to choose which. A curve is part of the
-clip, in the clip's own time, so it moves, copies and splits with the clip
-and stays with its audio.
+Every setting of a warped clip but its mode and High quality can follow a
+curve, as Live's clip envelopes can move its volume and transpose: its
+gain, its Transpose and Detune, Slice's Envelope, Preserve and Loop, and
+Spectral's Formants and Envelope. The lane under the Sample Editor's
+waveform shows one of the curves at a time: click its name, beside it, to
+choose which. A curve is part of the clip, in the clip's own time, so it
+moves, copies and splits with the clip and stays with its audio.
 
 Where a setting has a curve, the curve gives its value all through the
 clip: the first point's value before the first point, and the last's after
 the last. The gain follows its curve smoothly, and Slice reads the others
 where each slice starts, so a change in the middle of a slice waits for the
-next one. Spectral renders the curves of Transpose, Detune and Formants
-into its segments, reading them every 30 milliseconds, so a curve redrawn
-renders again only the segments it crosses. Preserve and Loop are steps:
-each point holds its value until the next, and a curve of Preserve says how
-the audio is cut from each point on.
+next one. Spectral renders the curves of Transpose, Detune, Formants and
+Envelope into its segments, reading them every 30 milliseconds, or about
+every 5 with High quality, so a curve redrawn renders again only the
+segments it crosses. Preserve and Loop are steps: each point holds its
+value until the next, and a curve of Preserve says how the audio is cut
+from each point on.
 
 ## Not yet
 
@@ -289,8 +304,6 @@ These come in later versions:
 
 - Granular, which plays the audio in grains, for pads, textures and
   noise, as Live's Tones and Texture modes do.
-- Spectral's High quality, which renders with Rubber Band for the best
-  sound, as Live's Complex Pro mode does, more slowly.
 - Quantize Settings, for moving hits part of the way to the grid, or to a
   grid of their own: Quantize goes all the way, to the grid the panel shows.
 - The tempo in AIFF files' loop data, as Apple Loops have it: only WAV
