@@ -13,6 +13,10 @@ recording, editing and mixing. Live performance (Session View) comes later.
 > the demos, and [docs/architecture.md](docs/architecture.md) for how it
 > fits together and where Tier 2 starts.
 
+[The manual](https://maxbonifacio.github.io/Musicable/) is for people
+making music with Musicable. Its source is in [manual](manual), and
+[CONTRIBUTING.md](CONTRIBUTING.md#the-manual) says how it's kept.
+
 ## Goals
 
 - **Efficient multithreading.** The engine schedules work per plugin node, not

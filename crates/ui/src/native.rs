@@ -23,18 +23,24 @@ use crate::widgets::{Face, toggle};
 /// one.
 pub(crate) const ROWS: usize = 5;
 
-/// The parameters in each column, by their places in `params`: a group's,
-/// at most [`ROWS`] to a column, with the groups in the order they first
-/// come in the table. Tables only grow at the end, so a parameter added to
-/// an earlier group joins it there.
-fn columns(params: &[ParamInfo]) -> Vec<Vec<usize>> {
-    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+/// Each group's name and parameters, by their places in `params`, with the
+/// groups in the order they first come in the table. Tables only grow at
+/// the end, so a parameter added to an earlier group joins it there.
+pub(crate) fn groups(params: &[ParamInfo]) -> Vec<(&'static str, Vec<usize>)> {
+    let mut groups: Vec<(&'static str, Vec<usize>)> = Vec::new();
     for (index, info) in params.iter().enumerate() {
         match groups.iter_mut().find(|(group, _)| *group == info.group) {
             Some((_, members)) => members.push(index),
             None => groups.push((info.group, vec![index])),
         }
     }
+    groups
+}
+
+/// The parameters in each column, by their places in `params`: a group's,
+/// at most [`ROWS`] to a column, with the groups in [`groups`]' order.
+fn columns(params: &[ParamInfo]) -> Vec<Vec<usize>> {
+    let groups = groups(params);
     let columns = groups.iter().flat_map(|(_, members)| members.chunks(ROWS));
     columns.map(<[usize]>::to_vec).collect()
 }

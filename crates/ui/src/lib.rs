@@ -25,6 +25,8 @@ mod dock;
 mod ghost;
 mod history;
 mod keys;
+#[cfg(test)]
+mod manual;
 mod menus;
 mod mixer;
 mod mouse;
