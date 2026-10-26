@@ -57,6 +57,7 @@ struct SignalsmithStretch {
 		didSeek = false;
 		blockProcess = {};
 		freqEstimateWeighted = freqEstimateWeight = 0;
+		longVerticalSplitFilled = longVerticalSplitIndex = 0; // Changed for Musicable, 26 October 2026
 	}
 
 	// Configures using a default preset
@@ -91,6 +92,7 @@ struct SignalsmithStretch {
 
 		tmpProcessBuffer.resize(blockSamples + intervalSamples);
 		tmpPreRollBuffer.resize(outputLatency()*channels);
+		configureLongVerticalSplit(); // Changed for Musicable, 26 October 2026
 	}
 	// For querying the existing config
 	int blockSamples() const {
@@ -133,11 +135,18 @@ struct SignalsmithStretch {
 	void setFormantBase(Sample baseFreq=0) {
 		formantBaseFreq = baseFreq;
 	}
-	// Changed for Musicable, 26 October 2026: the lowest frequency (as a
-	// fraction of the sample rate) of the bands that the long vertical
-	// phase steps link. 0, as released, links them all.
-	void setLongVerticalFrom(Sample freq=0) {
-		longVerticalFrom = freq;
+	// Changed for Musicable, 26 October 2026: below `freq` (as a fraction
+	// of the sample rate), a long vertical phase step doesn't link two bands
+	// with a dip between them deeper than `depth` times the weaker one's
+	// energy, taking each band's energy as its lowest over the last `blocks`
+	// spectra. The two bands then hold two partials, and linking their
+	// phases split each into tones a band apart. 0, as released, links every
+	// band. Allocates.
+	void setLongVerticalSplit(Sample freq=0, Sample depth=0.25, int blocks=3) {
+		longVerticalSplitFreq = freq;
+		longVerticalSplitDepth = depth;
+		longVerticalSplitBlocks = std::max(1, blocks);
+		configureLongVerticalSplit();
 	}
 	
 	// Provide previous input ("pre-roll") to smoothly change the input location without interrupting the output.  This doesn't do any calculation, just copies intput to a buffer.
@@ -168,6 +177,7 @@ struct SignalsmithStretch {
 		}
 		didSeek = true;
 		seekTimeFactor = (playbackRate*stft.defaultInterval() > 1) ? 1/playbackRate : stft.defaultInterval();
+		longVerticalSplitFilled = longVerticalSplitIndex = 0; // Changed for Musicable, 26 October 2026
 	}
 	int seekLength() const {
 		return int(stft.blockSamples() + stft.defaultInterval());
@@ -641,11 +651,6 @@ private:
 		
 		Sample smoothingBins = Sample(stft.fftSamples())/stft.defaultInterval();
 		int longVerticalStep = static_cast<int>(std::round(smoothingBins));
-		// Changed for Musicable, 26 October 2026: long vertical steps only
-		// between bands from `longVerticalFrom` up. They link bands about
-		// as far apart as a low note's harmonics, and linking two harmonics'
-		// phases split each into tones a band apart.
-		int longVerticalBand = std::max(0, static_cast<int>(std::ceil(freqToBand(longVerticalFrom))));
 		timeFactor = std::max<Sample>(timeFactor, 1/maxCleanStretch);
 		bool randomTimeFactor = (timeFactor > maxCleanStretch);
 		std::uniform_real_distribution<Sample> timeFactorDist(maxCleanStretch*2*randomTimeFactor - timeFactor, timeFactor);
@@ -735,6 +740,7 @@ private:
 			size_t chunk = step;
 			int startB = int(bands*chunk/splitMainPrediction);
 			int endB = int(bands*(chunk + 1)/splitMainPrediction);
+			if (chunk == 0) findLongVerticalSplits(longVerticalStep); // Changed for Musicable, 26 October 2026
 			for (int b = startB; b < endB; ++b) {
 				// Find maximum-energy channel and calculate that
 				int maxChannel = 0;
@@ -764,7 +770,7 @@ private:
 					auto &downBin = bins[b - 1];
 					phase += _impl::mul(downBin.output, shortVerticalTwist);
 					
-					if (b >= longVerticalStep && b - longVerticalStep >= longVerticalBand) { // Changed for Musicable, 26 October 2026
+					if (b >= longVerticalStep && !longVerticalSplitAt(b - longVerticalStep)) { // Changed for Musicable, 26 October 2026
 						Complex longDownInput = getFractional<&Band::input>(maxChannel, mapPoint.inputBin - longVerticalStep*binTimeFactor);
 						Complex longVerticalTwist = _impl::mul<true>(prediction.input, longDownInput);
 
@@ -784,7 +790,7 @@ private:
 					auto &upBin = bins[b + 1];
 					phase += _impl::mul<true>(upBin.output, shortVerticalTwist);
 					
-					if (b < bands - longVerticalStep && b >= longVerticalBand) { // Changed for Musicable, 26 October 2026
+					if (b < bands - longVerticalStep && !longVerticalSplitAt(b)) { // Changed for Musicable, 26 October 2026
 						auto &longUpPrediction = predictions[b + longVerticalStep];
 						auto &longUpMapPoint = outputMap[b + longVerticalStep];
 
@@ -980,7 +986,59 @@ private:
 	
 	std::vector<Sample> formantMetric;
 	Sample formantBaseFreq = 0;
-	Sample longVerticalFrom = 0; // Changed for Musicable, 26 October 2026
+
+	// Changed for Musicable, 26 October 2026: which long vertical steps
+	// don't link their bands, as `setLongVerticalSplit()` says.
+	Sample longVerticalSplitFreq = 0, longVerticalSplitDepth = Sample(0.25);
+	int longVerticalSplitBlocks = 3;
+	int longVerticalSplitBands = 0; // the bands below `longVerticalSplitFreq`
+	int longVerticalSplitFilled = 0, longVerticalSplitIndex = 0;
+	std::vector<Sample> longVerticalSplitHistory; // each band's energy in the last blocks, block by block
+	std::vector<Sample> longVerticalSplitEnergy; // each band's lowest of those
+	std::vector<char> longVerticalSplit; // whether band b and band b + the step don't link
+	void configureLongVerticalSplit() {
+		longVerticalSplitBands = 0;
+		if (longVerticalSplitFreq > 0 && bands > 0) {
+			longVerticalSplitBands = std::min(bands, static_cast<int>(std::ceil(freqToBand(longVerticalSplitFreq))));
+		}
+		longVerticalSplitHistory.assign(size_t(longVerticalSplitBlocks)*longVerticalSplitBands, 0);
+		longVerticalSplitEnergy.assign(longVerticalSplitBands, 0);
+		longVerticalSplit.assign(longVerticalSplitBands, 0);
+		longVerticalSplitFilled = longVerticalSplitIndex = 0;
+	}
+	bool longVerticalSplitAt(int b) const {
+		return b < longVerticalSplitBands && longVerticalSplit[b];
+	}
+	void findLongVerticalSplits(int step) {
+		int splitBands = longVerticalSplitBands;
+		if (splitBands == 0) return;
+		Sample *frame = longVerticalSplitHistory.data() + size_t(longVerticalSplitIndex)*splitBands;
+		for (int b = 0; b < splitBands; ++b) {
+			Sample e = 0;
+			for (int c = 0; c < channels; ++c) e += predictionsForChannel(c)[b].energy;
+			frame[b] = e;
+		}
+		longVerticalSplitIndex = (longVerticalSplitIndex + 1)%longVerticalSplitBlocks;
+		longVerticalSplitFilled = std::min(longVerticalSplitFilled + 1, longVerticalSplitBlocks);
+		for (int b = 0; b < splitBands; ++b) {
+			Sample e = frame[b];
+			for (int block = 0; block < longVerticalSplitFilled; ++block) {
+				e = std::min(e, longVerticalSplitHistory[size_t(block)*splitBands + b]);
+			}
+			longVerticalSplitEnergy[b] = e;
+		}
+		for (int b = 0; b < splitBands; ++b) {
+			bool split = false;
+			if (step > 1 && b + step < splitBands) {
+				Sample ends = std::min(longVerticalSplitEnergy[b], longVerticalSplitEnergy[b + step]);
+				Sample dip = longVerticalSplitEnergy[b + 1];
+				for (int k = b + 2; k < b + step; ++k) dip = std::min(dip, longVerticalSplitEnergy[k]);
+				split = dip < longVerticalSplitDepth*ends;
+			}
+			longVerticalSplit[b] = split;
+		}
+	}
+
 	void updateFormants(size_t step) {
 		if (step-- == 0) {
 			for (auto &e : formantMetric) e = 0;

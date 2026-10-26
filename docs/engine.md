@@ -687,10 +687,14 @@ render ([app.md](app.md#the-render-cache)).
   Signalsmith Stretch's own guess at a voice's pitch comes to almost
   nothing for some voices, which then come out far quieter.
 - The stretcher links each band's phase to the bands four or five along,
-  31 to 36 Hz away, only from 1 kHz up (`LONG_STEPS_FROM`, a change Musicable
-  made to the vendored header): a low note's harmonics are about that far
-  apart, and linking two of them split each into tones a band apart, which
-  made a bass under 50 Hz sound split and beating.
+  31 to 36 Hz away, except below 1 kHz where the energy dips between them
+  to under a quarter of the weaker band's, over each band's lowest of the
+  last three spectra (`SPLIT_LONG_STEPS_BELOW`, a change Musicable made to
+  the vendored header). A low note's harmonics are about that far apart,
+  and linking two of them split each into tones a band apart, which made a
+  bass under 50 Hz sound split and beating. The dip tells two harmonics
+  apart from one sound spread over both bands, such as a click, and the
+  lowest of three spectra keeps a bass's dips through a drum hit over it.
 - A segment's key (`SegmentPlan::key`) hashes all its render depends on:
   the plan's and the stretcher's versions, the seed, the rate, the
   channels, its length, where it reads from and how fast, and each call's
