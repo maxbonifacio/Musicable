@@ -58,6 +58,8 @@ pub enum Type {
     Take,
     Param,
     List(&'static Type),
+    /// One of these words, as text.
+    Choice(&'static [&'static str]),
 }
 
 impl Type {
@@ -88,6 +90,9 @@ impl Type {
             Type::List(item) => {
                 matches!(value, Value::List(values) if values.iter().all(|v| item.accepts(v)))
             }
+            Type::Choice(choices) => {
+                matches!(value, Value::Text(text) if choices.contains(&text.as_str()))
+            }
         }
     }
 }
@@ -111,6 +116,11 @@ impl fmt::Display for Type {
                  \"device 4 param 17\"",
             ),
             Type::List(item) => write!(f, "a list, each {item}"),
+            Type::Choice(choices) => match choices {
+                [] => f.write_str("nothing"),
+                [only] => write!(f, "{only}"),
+                [first @ .., last] => write!(f, "one of {} or {last}", first.join(", ")),
+            },
         }
     }
 }

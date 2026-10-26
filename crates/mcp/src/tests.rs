@@ -5,8 +5,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use musicable_commands::{
@@ -18,14 +18,16 @@ use musicable_model::warp::Warp;
 use musicable_model::{Project, TrackKind};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
+    ProgressNotificationParam,
 };
-use rmcp::service::RunningService;
-use rmcp::{RoleClient, ServiceExt};
-use serde_json::{Value as Json, json};
+use rmcp::service::{NotificationContext, RunningService};
+use rmcp::{ClientHandler, RoleClient, ServiceExt};
+use serde_json::{Map, Value as Json, json};
 use tokio::io::duplex;
 use tokio::runtime::Runtime;
 
 use crate::bridge::{self, Bridge};
+use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
 use crate::{Call, Host, Reply, Run, Window, answer, host};
@@ -733,4 +735,153 @@ fn the_bridge_reaches_musicable_through_the_pipe_whenever_it_listens() {
         Ok(json!({"result": 1, "undo": "New Audio Track"}))
     );
     assert_eq!(window.document.project().tracks.len(), 2);
+}
+
+/// Tools the bridge runs itself, for the tests: `audio_echo` gives back its
+/// arguments, and `audio_wait` says how far it's got until it's cancelled,
+/// then says it stopped on `stopped`.
+struct BridgeTools {
+    stopped: Mutex<mpsc::Sender<()>>,
+}
+
+impl BridgeTools {
+    fn new() -> (Arc<Self>, Receiver<()>) {
+        let (stopped, said) = mpsc::channel();
+        let tools = Self {
+            stopped: Mutex::new(stopped),
+        };
+        (Arc::new(tools), said)
+    }
+}
+
+impl LocalTools for BridgeTools {
+    fn tools(&self) -> Vec<LocalTool> {
+        let tool = |name: &str, read_only| {
+            let Json::Object(schema) = json!({"type": "object"}) else {
+                unreachable!("it's an object");
+            };
+            LocalTool {
+                name: name.to_owned(),
+                title: name.to_owned(),
+                description: format!("{name}, for the tests."),
+                input_schema: schema.clone(),
+                output_schema: schema,
+                read_only,
+            }
+        };
+        vec![tool("audio_echo", true), tool("audio_wait", false)]
+    }
+
+    fn instructions(&self) -> String {
+        "The audio_ tools are the bridge's own.".to_owned()
+    }
+
+    fn call(
+        &self,
+        name: &str,
+        arguments: &Map<String, Json>,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(f64),
+    ) -> Result<Json, String> {
+        match name {
+            "audio_echo" => Ok(Json::Object(arguments.clone())),
+            _ => {
+                let mut done = 0.0;
+                while !cancelled() {
+                    progress(done);
+                    done = (done + 0.01f64).min(1.0);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = self.stopped.lock().unwrap().send(());
+                Err("Cancelled.".to_owned())
+            }
+        }
+    }
+}
+
+/// An agent's client that passes on the progress its calls report.
+struct Watching {
+    progress: tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>,
+}
+
+impl ClientHandler for Watching {
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        let _ = self.progress.send(params);
+    }
+
+    fn get_info(&self) -> ClientConfig {
+        client_called("watching")
+    }
+}
+
+#[test]
+fn the_bridge_runs_its_own_tools_with_musicable_closed() {
+    let dir = TempDir::new("own");
+    let (tools, _stopped) = BridgeTools::new();
+    // Nothing listens there.
+    let bridge = Bridge::with_local(Ok(Address::new(&dir.0).unwrap()), tools);
+    let runtime = runtime();
+    let (agent, bridged) = duplex(1 << 16);
+    let (input, output) = tokio::io::split(bridged);
+    runtime.spawn(bridge::serve(bridge, input, output));
+    let client = (runtime.block_on(client_called("claude-code").serve(agent)))
+        .expect("the agent connects to the bridge");
+
+    // They come after the app's tools, as read-only as they are.
+    let listed = runtime.block_on(client.list_all_tools()).unwrap();
+    let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
+    assert_eq!(names.len(), 12, "{names:?}");
+    assert_eq!(names[10..], ["audio_echo", "audio_wait"]);
+    let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
+    assert_eq!((read_only(10), read_only(11)), (Some(true), Some(false)));
+    assert!(listed[10].output_schema.is_some());
+    let server = client.peer_info().expect("the server introduced itself");
+    let instructions = server.instructions.as_deref().unwrap_or_default();
+    assert!(instructions.contains("undo"), "{instructions}");
+    assert!(
+        instructions.ends_with("The audio_ tools are the bridge's own."),
+        "{instructions}"
+    );
+
+    // They run with nothing on the pipe, and give back structured JSON.
+    let arguments = json!({"file": "/music/a.wav"});
+    let echoed = call(&runtime, &client, "audio_echo", arguments.clone(), || {});
+    assert_eq!(echoed.structured_content, Some(arguments.clone()));
+    assert_eq!(read(echoed), Ok(arguments));
+    // While the app's tools still ask for Musicable.
+    let refused = read(call(&runtime, &client, "get_project", json!({}), || {}));
+    let refused = refused.unwrap_err();
+    assert!(refused.starts_with("Musicable isn't running"), "{refused}");
+}
+
+#[test]
+fn a_tool_of_the_bridge_s_says_how_far_it_has_got_and_stops_when_cancelled() {
+    let (tools, stopped) = BridgeTools::new();
+    let bridge = Bridge::with_local(Err("Nowhere to listen.".to_owned()), tools);
+    let runtime = runtime();
+    let (agent, bridged) = duplex(1 << 16);
+    let (input, output) = tokio::io::split(bridged);
+    runtime.spawn(bridge::serve(bridge, input, output));
+    let (progress, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let client = (runtime.block_on(Watching { progress }.serve(agent)))
+        .expect("the agent connects to the bridge");
+
+    let request = CallToolRequestParams::new("audio_wait".to_owned());
+    let first = runtime.block_on(async {
+        let wait = client.call_tool_once(request);
+        tokio::select! {
+            _ = wait => panic!("the call ended before it was cancelled"),
+            first = reported.recv() => first.expect("it reports progress"),
+        }
+        // Leaving the call cancels it.
+    });
+    assert_eq!(first.total, Some(1.0));
+    assert!((0.0..=1.0).contains(&first.progress), "{first:?}");
+    stopped
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the tool stops once the call is cancelled");
 }

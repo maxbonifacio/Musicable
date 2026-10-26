@@ -61,12 +61,22 @@ answer once they have.";
 /// Who the server is, and that it has tools, as it says to each agent
 /// that connects.
 pub fn server_info() -> ServerConfig {
+    server_info_with("")
+}
+
+/// Who the server is, as [`server_info`] says, with `more` instructions
+/// after its own, if there are any.
+pub(crate) fn server_info_with(more: &str) -> ServerConfig {
     let capabilities = ServerCapabilities::builder().enable_tools().build();
     let musicable =
         Implementation::new("musicable", env!("CARGO_PKG_VERSION")).with_title("Musicable");
+    let instructions = match more.trim() {
+        "" => INSTRUCTIONS.to_owned(),
+        more => format!("{INSTRUCTIONS}\n\n{more}"),
+    };
     InitializeResult::new(capabilities)
         .with_server_info(musicable)
-        .with_instructions(INSTRUCTIONS)
+        .with_instructions(instructions)
 }
 
 /// The tools, as `tools/list` gives them.

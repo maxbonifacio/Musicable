@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use super::{AudioError, Encoding, Pcm, SampleFormat, Source, frames_of, invalid, unsupported};
+use super::{AudioError, Layout, Pcm, SampleFormat, Source, frames_of, invalid, unsupported};
 
 /// The AIFF-C version its FVER chunk names: May 23, 1990, 2:40 pm.
 const AIFC_VERSION: u32 = 0xA280_5140;
@@ -12,7 +12,7 @@ struct Common {
     channels: usize,
     frames: u64,
     sample_rate: u32,
-    encoding: Encoding,
+    layout: Layout,
 }
 
 /// Finds the format and the samples of an AIFF or AIFF-C file.
@@ -58,7 +58,7 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
         None if common.frames == 0 => (0, 0),
         None => return invalid("no SSND chunk"),
     };
-    let frame = (common.channels * common.encoding.bytes()) as u64;
+    let frame = (common.channels * common.layout.bytes()) as u64;
     let bytes = bytes.min(common.frames.saturating_mul(frame));
     Pcm::new(
         source,
@@ -66,7 +66,7 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<Pcm, AudioError> {
         bytes,
         common.channels,
         common.sample_rate,
-        common.encoding,
+        common.layout,
     )
 }
 
@@ -86,17 +86,17 @@ fn parse_common(body: &[u8], compressed: bool) -> Result<Common, AudioError> {
         false => *b"NONE",
     };
     let integer = |big: bool| match bits {
-        1..=8 => Ok(Encoding::I8),
-        9..=16 => Ok(Encoding::I16 { big }),
-        17..=24 => Ok(Encoding::I24 { big }),
-        25..=32 => Ok(Encoding::I32 { big }),
+        1..=8 => Ok(Layout::I8),
+        9..=16 => Ok(Layout::I16 { big }),
+        17..=24 => Ok(Layout::I24 { big }),
+        25..=32 => Ok(Layout::I32 { big }),
         _ => unsupported(format!("{bits}-bit AIFF samples")),
     };
-    let encoding = match &compression {
+    let layout = match &compression {
         b"NONE" | b"twos" => integer(true)?,
         b"sowt" => integer(false)?,
-        b"fl32" | b"FL32" => Encoding::F32 { big: true },
-        b"fl64" | b"FL64" => Encoding::F64 { big: true },
+        b"fl32" | b"FL32" => Layout::F32 { big: true },
+        b"fl64" | b"FL64" => Layout::F64 { big: true },
         other => {
             let name = String::from_utf8_lossy(other);
             return unsupported(format!("AIFF-C compression {name:?}"));
@@ -106,7 +106,7 @@ fn parse_common(body: &[u8], compressed: bool) -> Result<Common, AudioError> {
         channels,
         frames,
         sample_rate,
-        encoding,
+        layout,
     })
 }
 
@@ -153,7 +153,7 @@ pub(super) fn header(
     frames: u64,
 ) -> io::Result<Vec<u8>> {
     let size = format.bytes() as u64;
-    let float = format == SampleFormat::Float32;
+    let float = format.is_float();
     let data = u64::from(channels) * frames * size;
     let too_long = || io::Error::new(io::ErrorKind::InvalidInput, "too long for an AIFF file");
     let frame_count = u32::try_from(frames).map_err(|_| too_long())?;
@@ -166,7 +166,11 @@ pub(super) fn header(
     chunks.extend_from_slice(b"COMM");
     // The compression name is a Pascal string: a length byte, and padding
     // to an even length.
-    let name: &[u8] = if float { b"\x0832-bit float\0" } else { b"" };
+    let (compression, name): (&[u8; 4], &[u8]) = match format {
+        SampleFormat::Float32 => (b"fl32", b"\x0c32-bit float\0"),
+        SampleFormat::Float64 => (b"fl64", b"\x0c64-bit float\0"),
+        _ => (b"NONE", b""),
+    };
     let common = 18 + if float { 4 + name.len() } else { 0 };
     chunks.extend_from_slice(&(common as u32).to_be_bytes());
     chunks.extend_from_slice(&(channels as i16).to_be_bytes());
@@ -174,7 +178,7 @@ pub(super) fn header(
     chunks.extend_from_slice(&(size as i16 * 8).to_be_bytes());
     chunks.extend_from_slice(&rate_to_extended(sample_rate));
     if float {
-        chunks.extend_from_slice(b"fl32");
+        chunks.extend_from_slice(compression);
         chunks.extend_from_slice(name);
     }
     chunks.extend_from_slice(b"SSND");
@@ -207,7 +211,7 @@ pub(super) fn write(
     for i in 0..frames {
         for channel in channels {
             sample.clear();
-            format.encode(channel[i], &mut sample);
+            format.encode(f64::from(channel[i]), &mut sample);
             sample.reverse();
             bytes.extend_from_slice(&sample);
         }
@@ -296,11 +300,20 @@ mod tests {
 
     #[test]
     fn written_floats_are_aiff_c() {
-        let mut bytes = Vec::new();
-        write(&mut bytes, 48_000, SampleFormat::Float32, &[&[0.5, 0.25]]).unwrap();
-        assert_eq!(&bytes[8..12], b"AIFC");
-        let mut decoder = decode(bytes);
-        assert_eq!(decoder.info().format, Format::Aiff);
-        assert_eq!(decoder.read_all().unwrap()[0], [0.5, 0.25]);
+        for (format, compression) in [
+            (SampleFormat::Float32, b"fl32\x0c32-bit float\0"),
+            (SampleFormat::Float64, b"fl64\x0c64-bit float\0"),
+        ] {
+            let mut bytes = Vec::new();
+            write(&mut bytes, 48_000, format, &[&[0.5, 0.25]]).unwrap();
+            assert_eq!(&bytes[8..12], b"AIFC");
+            // After FVER and COMM's first 18 bytes.
+            assert_eq!(&bytes[50..68], compression);
+            assert_eq!(bytes.len(), HEADER + 2 * format.bytes());
+            let mut decoder = decode(bytes);
+            assert_eq!(decoder.info().format, Format::Aiff);
+            assert_eq!(decoder.encoding(), format.encoding());
+            assert_eq!(decoder.read_all().unwrap()[0], [0.5, 0.25]);
+        }
     }
 }

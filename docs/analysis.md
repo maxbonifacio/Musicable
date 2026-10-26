@@ -13,7 +13,8 @@ transients from it ([app.md](app.md#the-sample-editor)), clips in Granular
 their pitch marks ([app.md](app.md#audio-files)), and auto-warp warps the
 files dropped into the song by it ([commands.md](commands.md#auto-warp)).
 `musicable analyse` measures analysis against labelled files and against
-Live's auto-warp ([Measuring it](#measuring-it)).
+Live's auto-warp ([Measuring it](#measuring-it)). The crate measures
+loudness too, for the audio commands ([Loudness](#loudness)).
 
 ## What it finds
 
@@ -178,6 +179,38 @@ to fit its grains to with Follow pitch on, as Live's Tones does
   four marks at least.
 - Marks are kept in 64ths of a frame (`SUBFRAMES`), as a run's first mark
   and the step to each next, so a minute of a voice is a few kilobytes.
+
+## Loudness
+
+`loudness::Meter` measures loudness as ITU-R BS.1770-4 does and EBU R 128
+reports it, for `audio.loudness`, `audio.gain` and `audio.find`
+([agents.md](agents.md#the-audio-tools)). It takes samples as they come,
+so a long file is never in memory at once, and gives back `Levels`:
+
+| Field | What it is |
+|---|---|
+| `integrated_lufs` | The whole file's loudness, gated at -70 LUFS and then 10 LU below the loudness of what's left, over blocks of 0.4 s that start every 100 ms |
+| `range_lu` | The loudness range, as EBU Tech 3342 has it: from the 10th to the 95th percentile of the short-term loudness, gated at -70 LUFS and 20 LU below |
+| `momentary_max_lufs`, `short_term_max_lufs` | The loudest loudness over 0.4 s and over 3 s, sliding in steps of 10 ms, as a meter of files must to pass Tech 3341 |
+| `sample_peak_dbfs`, `true_peak_dbtp` | The loudest sample, and the loudest point between samples too, interpolated 4 times over below 96 kHz, twice from it and not at all from 192 kHz, with a Kaiser-windowed sinc of 24 taps |
+| `rms_dbfs`, `dc_offset`, `clipped_samples` | The RMS level of every sample, the mean of the channel furthest from 0, and the samples at full scale or beyond: an integer encoding's largest sample, with `with_full_scale` |
+| `blocks` | Each 10 ms block's K-weighted mean square and peak, if the meter keeps them (`keeping_blocks`), which `audio.find` finds stretches in |
+
+Loudness is the mean square of the K-weighted samples, summed over the
+channels. K-weighting is a high shelf and then a high-pass, made for each
+sample rate from the analogue filters BS.1770's coefficients for 48 kHz
+come from, as libebur128 makes them. Surrounds count 1.41 times, and the LFE
+not at all, in the order WAV files have them. Silence has no loudness and
+no levels, so they're `None`, and a file shorter than a gating block has
+levels but no loudness. The true peak, which takes longest to measure, can
+be left out (`without_true_peak`).
+
+The tests make EBU Tech 3341's and 3342's signals and check the meter
+against them, within their tolerances: steady tones, gating, surround
+channels, momentary and short-term loudness wherever the loudest window
+starts, loudness range, and true peaks between samples, up to the bursts
+of cases 20 to 23. The audio commands' tests check the command gives the
+same through files.
 
 ## In the app
 

@@ -2,5 +2,6 @@
 *.musicable text eol=lf
 # So are the manual's pages made from the code.
 manual/src/generated/** text eol=lf
+manual/src/generated-audio/** text eol=lf
 # Shell scripts run in CI's Git Bash on Windows too, which a CR would break.
 *.sh text eol=lf

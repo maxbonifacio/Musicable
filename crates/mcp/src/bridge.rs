@@ -4,20 +4,29 @@
 //! agent's client named itself. While no Musicable is running, or it
 //! doesn't let agents in, the tools say so, and the bridge tries again at
 //! the next call, so the agent needn't start over once the user lets it in.
+//!
+//! Its [local tools](LocalTools), the audio commands, it runs itself, on
+//! threads of its own, whether Musicable is running or not. They tell the
+//! agent how far they've got, if it asks, and stop when it cancels them.
 
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientConfig, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ClientConfig,
+    Implementation, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
+    ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RunningService, ServiceError};
 use rmcp::{ErrorData, Peer, RoleClient, RoleServer, ServerHandler, ServiceExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
+use crate::local::{LocalTools, NoLocalTools};
 use crate::pipe::{self, Address};
 use crate::tools::{self, failed};
 
@@ -27,9 +36,13 @@ const NOT_RUNNING: &str = "Musicable isn't running, or it doesn't let agents con
                            Musicable\" on the Agents page of its Settings window, then try \
                            again.";
 
+/// Local tools tell the agent how far they've got at most this often.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+
 /// Bridges an agent's client, on the standard input and output, to the
-/// Musicable whose settings are in `config_dir`, until the client goes.
-pub fn run(config_dir: Option<&Path>) -> io::Result<()> {
+/// Musicable whose settings are in `config_dir`, until the client goes,
+/// running the `local` tools itself.
+pub fn run(config_dir: Option<&Path>, local: Arc<dyn LocalTools>) -> io::Result<()> {
     let address = match config_dir {
         Some(dir) => Address::new(dir).map_err(|error| error.to_string()),
         None => Err(
@@ -42,7 +55,7 @@ pub fn run(config_dir: Option<&Path>) -> io::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(serve(
-        Bridge::new(address),
+        Bridge::with_local(address, local),
         tokio::io::stdin(),
         tokio::io::stdout(),
     ))
@@ -70,22 +83,50 @@ where
     Ok(())
 }
 
-/// The tools, passed on to Musicable.
+/// The tools, passed on to Musicable, and the local tools.
 #[derive(Clone)]
 pub struct Bridge {
     /// Where Musicable listens, or why there's nowhere.
     address: Result<Address, String>,
     /// The connection to Musicable, once there's one.
     app: Arc<Mutex<Option<RunningService<RoleClient, ClientConfig>>>>,
+    local: Arc<dyn LocalTools>,
+    /// The local tools, as `tools/list` gives them, and their names.
+    local_tools: Arc<Vec<Tool>>,
+    local_names: Arc<BTreeSet<String>>,
 }
 
 impl Bridge {
     /// A bridge to the Musicable listening at `address`, or one whose tools
     /// say why there's nowhere to listen.
     pub fn new(address: Result<Address, String>) -> Self {
+        Self::with_local(address, Arc::new(NoLocalTools))
+    }
+
+    /// A bridge as [`new`](Self::new) makes it, that runs the `local` tools
+    /// itself too.
+    pub fn with_local(address: Result<Address, String>, local: Arc<dyn LocalTools>) -> Self {
+        let local_tools: Vec<Tool> = (local.tools().into_iter())
+            .map(|tool| {
+                let annotations = ToolAnnotations::new()
+                    .read_only(tool.read_only)
+                    .open_world(false);
+                Tool::new(tool.name, tool.description, Arc::new(tool.input_schema))
+                    .with_title(tool.title)
+                    .with_raw_output_schema(Arc::new(tool.output_schema))
+                    .annotate(annotations)
+            })
+            .collect();
+        let local_names = local_tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
         Self {
             address,
             app: Arc::default(),
+            local,
+            local_tools: Arc::new(local_tools),
+            local_names: Arc::new(local_names),
         }
     }
 
@@ -112,11 +153,60 @@ impl Bridge {
             let _ = running.cancel().await;
         }
     }
+
+    /// Runs the local tool the call names, on a thread of its own, sending
+    /// its progress to the agent as it goes if the agent asked for it.
+    async fn call_local(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let local = Arc::clone(&self.local);
+        let name = request.name.to_string();
+        let arguments = request.arguments.unwrap_or_default();
+        let cancelled = context.ct.clone();
+        let (sender, mut progress) = tokio::sync::mpsc::unbounded_channel();
+        let notes = context.meta.get_progress_token().map(|token| {
+            let peer = context.peer.clone();
+            tokio::spawn(async move {
+                while let Some(done) = progress.recv().await {
+                    let note = ProgressNotificationParam::new(token.clone(), done).with_total(1.0);
+                    if peer.notify_progress(note).await.is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        let ran = tokio::task::spawn_blocking(move || {
+            let last = Cell::new(None::<Instant>);
+            let progress = |done: f64| {
+                let now = Instant::now();
+                if last.get().is_none_or(|at| now - at >= PROGRESS_EVERY) {
+                    last.set(Some(now));
+                    let _ = sender.send(done.clamp(0.0, 1.0));
+                }
+            };
+            local.call(&name, &arguments, &|| cancelled.is_cancelled(), &progress)
+        })
+        .await;
+        // The notes go before the answer.
+        if let Some(notes) = notes {
+            let _ = notes.await;
+        }
+        match ran {
+            Ok(Ok(json)) => CallToolResult::structured(json),
+            Ok(Err(why)) => failed(why),
+            Err(_) => failed(format!(
+                "{} stopped with an error of its own: please tell Musicable's developers.",
+                request.name
+            )),
+        }
+    }
 }
 
 impl ServerHandler for Bridge {
     fn get_info(&self) -> ServerConfig {
-        tools::server_info()
+        tools::server_info_with(&self.local.instructions())
     }
 
     async fn list_tools(
@@ -124,7 +214,9 @@ impl ServerHandler for Bridge {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools::list()))
+        let mut list = tools::list();
+        list.extend(self.local_tools.iter().cloned());
+        Ok(ListToolsResult::with_all_items(list))
     }
 
     async fn call_tool(
@@ -132,6 +224,9 @@ impl ServerHandler for Bridge {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if self.local_names.contains(request.name.as_ref()) {
+            return Ok(self.call_local(request, context).await.into());
+        }
         let agent = context.client_info();
         let app = match self.connect(agent.clone()).await {
             Ok(app) => app,

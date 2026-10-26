@@ -22,10 +22,10 @@ to use Musicable.
 | `plugins` | `engine`, `model` | CLAP and VST3 hosting: plugin instances and the nodes that process them, and scanning in a process of its own. ARA in Tier 2 |
 | `io` | `model` | Project files, and audio files: reading and writing WAV, AIFF and FLAC. MIDI files later |
 | `library` | `model`, `io` | The browser's library: the folders of samples indexed file by file, with room for analysis, searching them, presets, and the queue for file work in the background |
-| `analysis` | `io` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network with a classic tracker checking it, and the pitch marks Granular fits its grains to ([analysis.md](analysis.md)) |
+| `analysis` | `io` | Analysis of audio for warping: onsets, the tempo, and beats and downbeats, from the Beat This! network with a classic tracker checking it, and the pitch marks Granular fits its grains to; and loudness, for the audio commands ([analysis.md](analysis.md)) |
 | `ui` | `model`, `commands`, `library` | What the window shows, drawn with egui: the arrangement, the mixer, the browser, menus and dialogs, from a theme and a mouse map; a `View` in, `Action`s out |
-| `mcp` | `model`, `commands` | Agents controlling Musicable over MCP: the tools, the server the window answers through, the local pipe, and the `musicable mcp` bridge ([agents.md](agents.md)) |
-| `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings |
+| `mcp` | `model`, `commands` | Agents controlling Musicable over MCP: the tools, the server the window answers through, the local pipe, and the `musicable mcp` bridge, which runs the audio tools itself ([agents.md](agents.md)) |
+| `app` | all of them | The `musicable` binary: the window, the `Session`, the audio `Output`, the settings, and the audio commands that cut, convert and measure files (`toolkit`) |
 
 Cargo enforces the directions that matter. The engine knows nothing of
 commands or the UI, the UI can't reach the engine, and only `app` sees

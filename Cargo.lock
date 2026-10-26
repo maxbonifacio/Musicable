@@ -2127,6 +2127,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "rmcp",
+ "rubato",
  "serde",
  "serde_json",
  "siphasher",

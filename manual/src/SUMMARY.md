@@ -56,6 +56,7 @@
 - [Every command](reference/commands.md)
 - [Default keys](reference/keys.md)
 - [The command line](reference/command-line.md)
+- [Audio commands](reference/audio-commands.md)
 - [Troubleshooting](reference/troubleshooting.md)
 - [Glossary]()
 

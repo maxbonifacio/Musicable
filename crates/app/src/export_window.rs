@@ -240,10 +240,11 @@ impl ExportWindow {
                 });
             name_menu(&menu.response, "Format", format);
             let flac = settings.format == FileFormat::Flac;
+            // Exports write 16- and 24-bit integers and 32-bit floats only.
             let shown = match settings.sample_format() {
                 SampleFormat::Int16 => Bits::Int16,
                 SampleFormat::Int24 => Bits::Int24,
-                SampleFormat::Float32 => Bits::Float32,
+                _ => Bits::Float32,
             };
             let menu = ComboBox::from_id_salt("export_bits")
                 .selected_text(shown.name())
