@@ -19,6 +19,7 @@ pub mod evaluate;
 mod flux;
 #[cfg(test)]
 mod groove;
+pub mod loudness;
 mod network;
 mod onsets;
 mod pitch;

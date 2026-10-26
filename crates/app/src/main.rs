@@ -38,6 +38,8 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
                                           input and output: see docs/agents.md
        musicable api                      print the commands agents can run, with their
                                           arguments' JSON Schema, as JSON
+       musicable audio <command> FILE...  cut, convert or measure audio files, as agents'
+                                          audio tools do: see audio --help
        musicable analyse FILE...          analyse audio files as warping does, scoring their
                                           beats against labels: see analyse --help";
 
@@ -70,6 +72,10 @@ fn main() -> ExitCode {
         Some("analyse") => {
             attach_console();
             analyse(args)
+        }
+        Some("audio") => {
+            attach_console();
+            musicable_app::toolkit::command_line(args)
         }
         Some("-h" | "--help") => {
             attach_console();
@@ -172,9 +178,11 @@ fn scan_plugin(library: Option<OsString>) -> ExitCode {
 
 /// `musicable mcp`: lets the agent whose client started it control the
 /// Musicable that's running, over MCP on the standard input and output,
-/// until the client goes. See `docs/agents.md`.
+/// until the client goes, and use the audio commands, which it runs
+/// itself. See `docs/agents.md`.
 fn mcp() -> ExitCode {
-    match musicable_mcp::bridge::run(musicable_app::config_dir().as_deref()) {
+    let audio = Arc::new(musicable_app::toolkit::Tools);
+    match musicable_mcp::bridge::run(musicable_app::config_dir().as_deref(), audio) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("musicable mcp: {error}");
@@ -184,11 +192,12 @@ fn mcp() -> ExitCode {
 }
 
 /// `musicable api`: prints the commands agents can run, with their titles,
-/// their arguments' JSON Schema and their default keys, as JSON, without
-/// opening the app.
+/// their arguments' JSON Schema and their default keys, and the audio
+/// commands, as JSON, without opening the app.
 fn print_api() -> ExitCode {
     let commands = musicable_app::commands();
-    let catalogue = musicable_mcp::catalogue(&commands, &Keymap::default_keymap());
+    let mut catalogue = musicable_mcp::catalogue(&commands, &Keymap::default_keymap());
+    catalogue["audio_commands"] = musicable_app::toolkit::catalogue();
     match serde_json::to_string_pretty(&catalogue) {
         Ok(text) => {
             // A reader that stops early, such as `head`, isn't a failure.

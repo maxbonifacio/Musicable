@@ -54,6 +54,9 @@ realfft = "3.5"
 # The Beat This! beat and downbeat network, on the pure-Rust rten runtime.
 # Its model files aren't committed: scripts/fetch-models.sh fetches them.
 beat-this = { version = "1.1", default-features = false }
+# Changes audio files' sample rates in the audio toolkit: what beat-this
+# resamples with too.
+rubato = "3.0"
 # What beat-this runs on, for running it on threads of the analysis's own.
 rten = "0.24"
 rten-tensor = "0.24"

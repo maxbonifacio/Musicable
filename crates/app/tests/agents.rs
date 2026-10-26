@@ -1,6 +1,8 @@
 //! The real `musicable mcp`, started as an agent's client starts it,
 //! speaking MCP over its standard input and output, and reaching a session
 //! through a real pipe, as it reaches the app: on each system CI runs on.
+//! And the audio tools, which it runs itself, and `musicable audio`, which
+//! runs them in a shell.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -12,6 +14,7 @@ use std::time::{Duration, Instant};
 use musicable_app::Session;
 use musicable_commands::{Editor, Keymap, Registry, Steps};
 use musicable_engine::{Engine, EngineConfig, EngineHandle, rt};
+use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{Host, Reply, Run, Window};
 use musicable_model::Project;
@@ -276,5 +279,118 @@ fn the_real_bridge_reaches_musicable_through_a_real_pipe() {
     assert!(
         bridge.close(),
         "musicable mcp ends well once its client goes"
+    );
+}
+
+/// A tenth of a second of a stereo 16-bit 48 kHz tone at -6 dBFS, at
+/// `path`.
+fn tone(path: &Path) {
+    let samples: Vec<f32> = (0..4800)
+        .map(|i| 0.5 * (std::f32::consts::TAU * 441.0 * i as f32 / 48_000.0).sin())
+        .collect();
+    save_wav(path, 48_000, SampleFormat::Int16, &[&samples, &samples]).unwrap();
+}
+
+#[test]
+fn the_real_bridge_runs_the_audio_tools_with_musicable_closed() {
+    let dir = TempDir::new("mcp-audio");
+    let file = dir.0.join("tone.wav");
+    tone(&file);
+    let mut bridge = Bridge::start(&dir.0);
+    let tools = bridge.request("tools/list", json!({}), &mut || {});
+    let names: Vec<_> = (tools["tools"].as_array().unwrap().iter())
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    for name in ["audio_info", "audio_cut", "audio_loudness", "run_command"] {
+        assert!(names.contains(&name), "{names:?}");
+    }
+
+    // Nothing listens, and the audio tools run all the same.
+    let info = bridge.call("audio_info", json!({"files": [file]}), &mut || {});
+    let info = info.unwrap();
+    assert_eq!(info["files"][0]["frames"], 4800, "{info}");
+    assert_eq!(info["files"][0]["peak_dbfs"], -6.02, "{info}");
+    let out = dir.0.join("cut.flac");
+    let cut = json!({"file": file, "from": 0.025, "out": out});
+    let cut = bridge.call("audio_cut", cut, &mut || {}).unwrap();
+    assert_eq!(cut["exact"], true, "{cut}");
+    assert_eq!(cut["out"]["frames"], 3600, "{cut}");
+    assert_eq!(cut["out"]["format"], "flac", "{cut}");
+    let again = json!({"file": file, "out": out});
+    let refused = bridge.call("audio_cut", again, &mut || {}).unwrap_err();
+    assert!(
+        refused.ends_with("set overwrite to write over it."),
+        "{refused}"
+    );
+    let refused = bridge.call("get_project", json!({}), &mut || {});
+    let refused = refused.unwrap_err();
+    assert!(refused.starts_with("Musicable isn't running"), "{refused}");
+    assert!(bridge.close());
+}
+
+/// Runs `musicable audio` with `words` in the folder `dir`, and gives back
+/// its exit code and what it wrote to its output and to its errors.
+fn audio(dir: &Path, words: &[&str]) -> (Option<i32>, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_musicable"))
+        .arg("audio")
+        .args(words)
+        .current_dir(dir)
+        .output()
+        .expect("musicable audio runs");
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+    (
+        output.status.code(),
+        text(output.stdout),
+        text(output.stderr),
+    )
+}
+
+#[test]
+fn musicable_audio_answers_in_text_or_json_and_fails_as_shells_expect() {
+    let dir = TempDir::new("audio-command-line");
+    tone(&dir.0.join("tone.wav"));
+    let (code, out, errors) = audio(&dir.0, &["info", "tone.wav", "--json"]);
+    assert_eq!((code, errors.as_str()), (Some(0), ""));
+    let info: Json = serde_json::from_str(&out).unwrap();
+    // A whole path, though the file was named in the working folder.
+    let file = info["files"][0]["file"].as_str().unwrap();
+    assert!(
+        Path::new(file).is_absolute() && file.ends_with("tone.wav"),
+        "{file}"
+    );
+
+    let cut = ["cut", "tone.wav", "--length", "0.01", "--out", "cut.wav"];
+    let (code, out, errors) = audio(&dir.0, &cut);
+    assert_eq!((code, errors.as_str()), (Some(0), ""));
+    assert!(out.contains("\nexact: true\n"), "{out}");
+    // It won't write over what it wrote, and says why.
+    let (code, out, errors) = audio(&dir.0, &cut);
+    assert_eq!((code, out.as_str()), (Some(1), ""));
+    assert!(
+        errors.ends_with("set overwrite to write over it.\n"),
+        "{errors}"
+    );
+    let (code, out, errors) = audio(&dir.0, &[&cut[..], &["--json"]].concat());
+    assert_eq!((code, errors.as_str()), (Some(1), ""));
+    let error: Json = serde_json::from_str(&out).unwrap();
+    assert!(
+        error["error"].as_str().unwrap().contains("set overwrite"),
+        "{out}"
+    );
+    // A file it can't read fails the command, though it reads the rest.
+    let (code, out, _) = audio(&dir.0, &["info", "tone.wav", "missing.wav", "--json"]);
+    assert_eq!(code, Some(1));
+    let info: Json = serde_json::from_str(&out).unwrap();
+    assert_eq!(info["files"][0]["frames"], 4800, "{info}");
+    assert!(info["files"][1]["error"].is_string(), "{info}");
+
+    let (code, out, _) = audio(&dir.0, &["--help"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("loudness"), "{out}");
+    let (code, _, errors) = audio(&dir.0, &["louder", "tone.wav"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        errors.starts_with("There's no audio command called louder."),
+        "{errors}"
     );
 }

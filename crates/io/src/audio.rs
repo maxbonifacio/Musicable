@@ -2,7 +2,11 @@
 //!
 //! A [`Decoder`] reads any frame of a file on request, so a clip can play
 //! from anywhere in it and a stream can read ahead of the playhead in
-//! chunks. Samples come out as floats from −1.0 to 1.0, interleaved.
+//! chunks. Samples come out as floats from −1.0 to 1.0, interleaved: 32-bit
+//! floats, as playback takes them, or 64-bit ones, which hold every
+//! format's samples exactly, 32-bit integers and 64-bit floats too
+//! ([`Decoder::read_f64`]). [`Decoder::encoding`] says how the file stores
+//! them.
 //!
 //! Formats read:
 //!
@@ -15,11 +19,17 @@
 //! - FLAC: 8-, 12-, 16-, 20- and 24-bit, in blocks of any size. Reading
 //!   from anywhere in a file searches it for the frame to start from.
 //!
-//! [`write_wav`] and [`write_aiff`] write 16- and 24-bit integer and 32-bit
-//! float files, and a [`WavWriter`] writes a 32-bit float WAV file as its
-//! samples come, as a recording does. A [`Writer`] writes any of the three
-//! formats as the samples come, as an export does, with dither if asked:
-//! FLAC in 16- and 24-bit integers, with an encoder of our own.
+//! [`write_wav`] and [`write_aiff`] write 8-, 16-, 24- and 32-bit integer
+//! and 32- and 64-bit float files, and a [`WavWriter`] writes a 32-bit
+//! float WAV file as its samples come, as a recording does. A [`Writer`]
+//! writes any of the three formats as the samples come, as an export does,
+//! with dither if asked: FLAC in 8-, 16- and 24-bit integers, with an
+//! encoder of our own. Written from 64-bit floats a file's own samples,
+//! read with [`Decoder::read_f64`], come out exactly as they were, in a
+//! [`SampleFormat`] that [holds](SampleFormat::holds) its encoding.
+//!
+//! [`SamplesMd5`] hashes samples as a FLAC file's STREAMINFO does, so files
+//! of the same audio in different formats hash the same.
 
 mod aiff;
 mod flac;
@@ -51,6 +61,39 @@ impl Format {
             Self::Wav => "wav",
             Self::Aiff => "aif",
             Self::Flac => "flac",
+        }
+    }
+}
+
+/// How a file stores its samples, as [`Decoder::encoding`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// Integers of this many bits, from 4 to 32. WAV files store 8-bit
+    /// samples unsigned, which reads the same.
+    Int(u8),
+    Float32,
+    Float64,
+}
+
+impl Encoding {
+    /// Its name, such as `int24` or `float32`.
+    pub fn name(self) -> String {
+        match self {
+            Self::Int(bits) => format!("int{bits}"),
+            Self::Float32 => "float32".to_owned(),
+            Self::Float64 => "float64".to_owned(),
+        }
+    }
+
+    /// The narrowest sample format that holds its samples exactly.
+    pub fn format(self) -> SampleFormat {
+        match self {
+            Self::Int(..=8) => SampleFormat::Int8,
+            Self::Int(..=16) => SampleFormat::Int16,
+            Self::Int(..=24) => SampleFormat::Int24,
+            Self::Int(_) => SampleFormat::Int32,
+            Self::Float32 => SampleFormat::Float32,
+            Self::Float64 => SampleFormat::Float64,
         }
     }
 }
@@ -180,9 +223,27 @@ impl Decoder {
         self.tempo
     }
 
+    /// How the file stores its samples.
+    pub fn encoding(&self) -> Encoding {
+        match &self.inner {
+            Inner::Pcm(pcm) => pcm.layout.encoding(),
+            Inner::Flac(flac) => Encoding::Int(flac.bits()),
+        }
+    }
+
     /// Reads frames from frame `start` on into `out`, interleaved, as many
     /// as fit or as the file has left, and returns how many.
     pub fn read(&mut self, start: u64, out: &mut [f32]) -> Result<usize, AudioError> {
+        self.read_into(start, out)
+    }
+
+    /// Reads as [`read`](Self::read) does, into 64-bit floats, which hold
+    /// every sample exactly as the file has it.
+    pub fn read_f64(&mut self, start: u64, out: &mut [f64]) -> Result<usize, AudioError> {
+        self.read_into(start, out)
+    }
+
+    fn read_into<S: Sample>(&mut self, start: u64, out: &mut [S]) -> Result<usize, AudioError> {
         let channels = self.info.channels;
         let frames = (out.len() / channels).min(self.info.frames.saturating_sub(start) as usize);
         if frames == 0 {
@@ -242,9 +303,31 @@ fn read_up_to(source: &mut dyn Source, buffer: &mut [u8]) -> io::Result<usize> {
     Ok(done)
 }
 
-/// How a PCM file stores a sample.
+/// What samples are read as: 32-bit floats, as playback takes them, or
+/// 64-bit ones, which hold every format's exactly. Each sample is read as
+/// a 64-bit float first, which converts to the nearest 32-bit one: the
+/// same one reading it as a 32-bit float straight away gives.
+trait Sample: Copy {
+    fn from_f64(sample: f64) -> Self;
+}
+
+impl Sample for f32 {
+    #[inline]
+    fn from_f64(sample: f64) -> Self {
+        sample as f32
+    }
+}
+
+impl Sample for f64 {
+    #[inline]
+    fn from_f64(sample: f64) -> Self {
+        sample
+    }
+}
+
+/// How a PCM file lays out a sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Encoding {
+enum Layout {
     /// Unsigned 8-bit, as WAV has it.
     U8,
     /// Signed 8-bit, as AIFF has it.
@@ -266,7 +349,7 @@ enum Encoding {
     },
 }
 
-impl Encoding {
+impl Layout {
     fn bytes(self) -> usize {
         match self {
             Self::U8 | Self::I8 => 1,
@@ -277,7 +360,20 @@ impl Encoding {
         }
     }
 
-    fn decode(self, b: &[u8]) -> f32 {
+    fn encoding(self) -> Encoding {
+        match self {
+            Self::U8 | Self::I8 => Encoding::Int(8),
+            Self::I16 { .. } => Encoding::Int(16),
+            Self::I24 { .. } => Encoding::Int(24),
+            Self::I32 { .. } => Encoding::Int(32),
+            Self::F32 { .. } => Encoding::Float32,
+            Self::F64 { .. } => Encoding::Float64,
+        }
+    }
+
+    /// The sample in `b`, exactly: integers divided by a power of two.
+    #[inline]
+    fn decode(self, b: &[u8]) -> f64 {
         fn order<const N: usize>(b: &[u8], big: bool) -> [u8; N] {
             let mut bytes: [u8; N] = b[..N].try_into().expect("a whole sample");
             if big {
@@ -286,20 +382,18 @@ impl Encoding {
             bytes
         }
         match self {
-            Self::U8 => (f32::from(b[0]) - 128.0) / 128.0,
-            Self::I8 => f32::from(b[0] as i8) / 128.0,
-            Self::I16 { big } => f32::from(i16::from_le_bytes(order(b, big))) / 32_768.0,
+            Self::U8 => (f64::from(b[0]) - 128.0) / 128.0,
+            Self::I8 => f64::from(b[0] as i8) / 128.0,
+            Self::I16 { big } => f64::from(i16::from_le_bytes(order(b, big))) / 32_768.0,
             Self::I24 { big } => {
                 let [x, y, z] = order::<3>(b, big);
                 // Into the top three bytes, so the sign comes along.
                 let sample = i32::from_le_bytes([0, x, y, z]) >> 8;
-                sample as f32 / 8_388_608.0
+                f64::from(sample) / 8_388_608.0
             }
-            Self::I32 { big } => {
-                (f64::from(i32::from_le_bytes(order(b, big))) / 2_147_483_648.0) as f32
-            }
-            Self::F32 { big } => f32::from_le_bytes(order(b, big)),
-            Self::F64 { big } => f64::from_le_bytes(order(b, big)) as f32,
+            Self::I32 { big } => f64::from(i32::from_le_bytes(order(b, big))) / 2_147_483_648.0,
+            Self::F32 { big } => f64::from(f32::from_le_bytes(order(b, big))),
+            Self::F64 { big } => f64::from_le_bytes(order(b, big)),
         }
     }
 }
@@ -313,7 +407,7 @@ struct Pcm {
     frames: u64,
     channels: usize,
     sample_rate: u32,
-    encoding: Encoding,
+    layout: Layout,
     /// The byte offset the next read starts from, so reading straight on
     /// doesn't seek.
     position: Option<u64>,
@@ -329,13 +423,13 @@ impl Pcm {
         bytes: u64,
         channels: usize,
         sample_rate: u32,
-        encoding: Encoding,
+        layout: Layout,
     ) -> Result<Self, AudioError> {
         if channels == 0 {
             return invalid("no channels");
         }
         let length = source.seek(SeekFrom::End(0))?;
-        let frame = (channels * encoding.bytes()) as u64;
+        let frame = (channels * layout.bytes()) as u64;
         let available = length.saturating_sub(start) / frame;
         Ok(Self {
             source,
@@ -343,7 +437,7 @@ impl Pcm {
             frames: (bytes / frame).min(available),
             channels,
             sample_rate,
-            encoding,
+            layout,
             position: None,
             bytes: Vec::new(),
         })
@@ -358,8 +452,8 @@ impl Pcm {
         }
     }
 
-    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<(), AudioError> {
-        let size = self.encoding.bytes();
+    fn read<S: Sample>(&mut self, start: u64, out: &mut [S]) -> Result<(), AudioError> {
+        let size = self.layout.bytes();
         let offset = self.start + start * (self.channels * size) as u64;
         if self.position != Some(offset) {
             self.source.seek(SeekFrom::Start(offset))?;
@@ -369,44 +463,156 @@ impl Pcm {
         self.source.read_exact(&mut self.bytes)?;
         self.position = Some(offset + self.bytes.len() as u64);
         for (sample, bytes) in out.iter_mut().zip(self.bytes.chunks_exact(size)) {
-            *sample = self.encoding.decode(bytes);
+            *sample = S::from_f64(self.layout.decode(bytes));
         }
         Ok(())
     }
 }
 
 /// How [`write_wav`], [`write_aiff`] and a [`Writer`] store samples.
+/// Integers are rounded and clipped at full scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFormat {
-    /// 16-bit integers, rounded and clipped at full scale.
+    /// 8-bit integers: unsigned in WAV files, as WAV has them, and signed in
+    /// AIFF and FLAC files.
+    Int8,
     Int16,
-    /// 24-bit integers, rounded and clipped at full scale.
     Int24,
-    /// 32-bit floats, exactly.
+    /// 32-bit integers. FLAC files don't take them.
+    Int32,
+    /// 32-bit floats, which go over full scale rather than clip. FLAC files
+    /// don't take them.
     Float32,
+    /// 64-bit floats. FLAC files don't take them.
+    Float64,
 }
 
 impl SampleFormat {
-    fn bytes(self) -> usize {
+    /// Its name, as [`Encoding::name`] has it, such as `int24`.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Int16 => 2,
-            Self::Int24 => 3,
-            Self::Float32 => 4,
+            Self::Int8 => "int8",
+            Self::Int16 => "int16",
+            Self::Int24 => "int24",
+            Self::Int32 => "int32",
+            Self::Float32 => "float32",
+            Self::Float64 => "float64",
         }
     }
 
-    /// One sample, little-endian.
-    fn encode(self, sample: f32, out: &mut Vec<u8>) {
-        let int = |scale: f64| {
-            (f64::from(sample) * scale)
-                .round()
-                .clamp(-scale, scale - 1.0) as i32
-        };
+    /// The bits of each sample.
+    pub fn bits(self) -> u32 {
         match self {
-            Self::Int16 => out.extend_from_slice(&(int(32_768.0) as i16).to_le_bytes()),
-            Self::Int24 => out.extend_from_slice(&int(8_388_608.0).to_le_bytes()[..3]),
-            Self::Float32 => out.extend_from_slice(&sample.to_le_bytes()),
+            Self::Int8 => 8,
+            Self::Int16 => 16,
+            Self::Int24 => 24,
+            Self::Int32 | Self::Float32 => 32,
+            Self::Float64 => 64,
         }
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, Self::Float32 | Self::Float64)
+    }
+
+    /// The encoding of a file written in it.
+    pub fn encoding(self) -> Encoding {
+        match self {
+            Self::Float32 => Encoding::Float32,
+            Self::Float64 => Encoding::Float64,
+            int => Encoding::Int(int.bits() as u8),
+        }
+    }
+
+    /// Whether it holds every sample of `encoding` exactly: integers in
+    /// integers as wide or wider, or in floats with as many bits of
+    /// mantissa, and floats in floats as wide or wider.
+    pub fn holds(self, encoding: Encoding) -> bool {
+        match (self, encoding) {
+            (Self::Float64, _) => true,
+            (Self::Float32, Encoding::Float32) => true,
+            (Self::Float32, Encoding::Int(bits)) => bits <= 24,
+            (_, Encoding::Float32 | Encoding::Float64) => false,
+            (int, Encoding::Int(bits)) => u32::from(bits) <= int.bits(),
+        }
+    }
+
+    fn bytes(self) -> usize {
+        self.bits() as usize / 8
+    }
+
+    /// One sample, little-endian, 8-bit integers signed.
+    fn encode(self, sample: f64, out: &mut Vec<u8>) {
+        match self {
+            Self::Float32 => out.extend_from_slice(&(sample as f32).to_le_bytes()),
+            Self::Float64 => out.extend_from_slice(&sample.to_le_bytes()),
+            int => {
+                let bits = int.bits();
+                let integer = quantize(sample, bits, None);
+                out.extend_from_slice(&integer.to_le_bytes()[..bits as usize / 8]);
+            }
+        }
+    }
+}
+
+/// `sample` as a `bits`-bit integer: rounded, after dither from `dither` if
+/// it's there and the sample isn't silent, and clipped at full scale.
+fn quantize(sample: f64, bits: u32, dither: Option<&mut writer::Random>) -> i32 {
+    let scale = f64::from(1u32 << (bits - 1));
+    let mut scaled = sample * scale;
+    if let Some(random) = dither
+        && sample != 0.0
+    {
+        // The difference of two uniform numbers is triangular.
+        scaled += random.uniform() - random.uniform();
+    }
+    scaled.round().clamp(-scale, scale - 1.0) as i32
+}
+
+/// The MD5 of samples as a FLAC file's STREAMINFO keeps it: each sample a
+/// signed integer of its encoding's bits, little-endian in whole bytes, the
+/// channels interleaved. Files of the same audio in WAV, AIFF and FLAC hash
+/// the same. Floats, which FLAC doesn't hold, are hashed as their
+/// little-endian bytes.
+#[derive(Debug)]
+pub struct SamplesMd5 {
+    md5: md5::Md5,
+    encoding: Encoding,
+    bytes: Vec<u8>,
+}
+
+impl SamplesMd5 {
+    /// Hashes samples of `encoding`.
+    pub fn new(encoding: Encoding) -> Self {
+        Self {
+            md5: md5::Md5::new(),
+            encoding,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Adds `samples`, as [`Decoder::read_f64`] reads them.
+    pub fn update(&mut self, samples: &[f64]) {
+        self.bytes.clear();
+        for &sample in samples {
+            match self.encoding {
+                Encoding::Int(bits) => {
+                    let integer = quantize(sample, u32::from(bits), None);
+                    let bytes = usize::from(bits).div_ceil(8);
+                    self.bytes
+                        .extend_from_slice(&integer.to_le_bytes()[..bytes]);
+                }
+                Encoding::Float32 => self.bytes.extend_from_slice(&(sample as f32).to_le_bytes()),
+                Encoding::Float64 => self.bytes.extend_from_slice(&sample.to_le_bytes()),
+            }
+        }
+        self.md5.update(&self.bytes);
+    }
+
+    /// The hash, as 32 hexadecimal digits.
+    pub fn finish(self) -> String {
+        let digest = self.md5.finish();
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
@@ -479,23 +685,28 @@ mod tests {
         channels.iter().map(Vec::as_slice).collect()
     }
 
+    /// Every sample format.
+    pub(super) const FORMATS: [SampleFormat; 6] = [
+        SampleFormat::Int8,
+        SampleFormat::Int16,
+        SampleFormat::Int24,
+        SampleFormat::Int32,
+        SampleFormat::Float32,
+        SampleFormat::Float64,
+    ];
+
     /// The largest step `format` rounds to.
-    fn step(format: SampleFormat) -> f32 {
+    pub(super) fn step(format: SampleFormat) -> f32 {
         match format {
-            SampleFormat::Int16 => 1.0 / 32_768.0,
-            SampleFormat::Int24 => 1.0 / 8_388_608.0,
-            SampleFormat::Float32 => 0.0,
+            SampleFormat::Float32 | SampleFormat::Float64 => 0.0,
+            int => 1.0 / (1u64 << (int.bits() - 1)) as f32,
         }
     }
 
     #[test]
     fn written_files_read_back() {
         let signal = signal(3, 5000);
-        for format in [
-            SampleFormat::Int16,
-            SampleFormat::Int24,
-            SampleFormat::Float32,
-        ] {
+        for format in FORMATS {
             for aiff in [false, true] {
                 let mut bytes = Vec::new();
                 let write = if aiff { write_aiff } else { write_wav };
@@ -551,6 +762,104 @@ mod tests {
             back[0],
             [32_767.0 / 32_768.0, -1.0, 32_767.0 / 32_768.0, -1.0, 0.5]
         );
+    }
+
+    /// Samples on `format`'s steps, from full scale down, or floats that
+    /// narrower floats don't hold.
+    pub(super) fn exact_samples(format: SampleFormat) -> Vec<f64> {
+        match format {
+            SampleFormat::Float64 => vec![0.1, -1.0 / 3.0, 1e-300, 2.5, -7.25, 0.0],
+            SampleFormat::Float32 => [0.1f32, -1.0 / 3.0, 1e-30, 2.5, -7.25, 0.0]
+                .map(f64::from)
+                .to_vec(),
+            int => {
+                let scale = (1u64 << (int.bits() - 1)) as f64;
+                let odd = (scale / 3.0).floor();
+                [-scale, scale - 1.0, 1.0, -1.0, 0.0, odd, -odd]
+                    .map(|step| step / scale)
+                    .to_vec()
+            }
+        }
+    }
+
+    #[test]
+    fn samples_read_as_64_bit_floats_come_back_exactly() {
+        for format in FORMATS {
+            let left = exact_samples(format);
+            let right: Vec<f64> = left.iter().rev().copied().collect();
+            let samples: Vec<f64> = left
+                .iter()
+                .zip(&right)
+                .flat_map(|(l, r)| [*l, *r])
+                .collect();
+            for container in [Format::Wav, Format::Aiff, Format::Flac] {
+                let bits = format.bits();
+                if container == Format::Flac && (format.is_float() || bits > 24) {
+                    continue;
+                }
+                let out = Cursor::new(Vec::new());
+                let mut writer = Writer::new(out, container, format, 44_100, 2).unwrap();
+                writer.write_f64(&samples).unwrap();
+                let mut decoder = decode(writer.finish().unwrap().into_inner());
+                assert_eq!(decoder.encoding(), format.encoding(), "{container:?}");
+                let mut back = vec![0.0; samples.len()];
+                assert_eq!(decoder.read_f64(0, &mut back).unwrap(), left.len());
+                assert_eq!(back, samples, "{format:?} in {container:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn formats_hold_encodings_as_wide_or_narrower() {
+        assert_eq!(Encoding::Int(12).format(), SampleFormat::Int16);
+        assert_eq!(Encoding::Int(20).format(), SampleFormat::Int24);
+        assert_eq!(Encoding::Int(24).name(), "int24");
+        for format in FORMATS {
+            assert_eq!(format.encoding().format(), format);
+            assert_eq!(format.encoding().name(), format.name());
+            assert!(format.holds(format.encoding()));
+            assert!(SampleFormat::Float64.holds(format.encoding()));
+        }
+        assert!(SampleFormat::Float32.holds(Encoding::Int(24)));
+        assert!(!SampleFormat::Float32.holds(Encoding::Int(32)));
+        assert!(!SampleFormat::Float32.holds(Encoding::Float64));
+        assert!(SampleFormat::Int16.holds(Encoding::Int(12)));
+        assert!(!SampleFormat::Int16.holds(Encoding::Int(20)));
+        assert!(!SampleFormat::Int32.holds(Encoding::Float32));
+    }
+
+    #[test]
+    fn samples_hash_the_same_in_every_format_and_as_flac_has_it() {
+        let signal = signal(2, 3000);
+        let views = views(&signal);
+        let hash = |bytes: Vec<u8>| {
+            let mut decoder = decode(bytes);
+            let mut samples = vec![0.0; 2 * 3000];
+            decoder.read_f64(0, &mut samples).unwrap();
+            let mut md5 = SamplesMd5::new(decoder.encoding());
+            // In two pieces, which hash as one.
+            md5.update(&samples[..1001 * 2]);
+            md5.update(&samples[1001 * 2..]);
+            md5.finish()
+        };
+        let mut wav = Vec::new();
+        write_wav(&mut wav, 44_100, SampleFormat::Int16, &views).unwrap();
+        let mut aiff = Vec::new();
+        write_aiff(&mut aiff, 44_100, SampleFormat::Int16, &views).unwrap();
+        let out = Cursor::new(Vec::new());
+        let mut writer = Writer::new(out, Format::Flac, SampleFormat::Int16, 44_100, 2).unwrap();
+        let interleaved: Vec<f32> = (0..3000)
+            .flat_map(|i| [signal[0][i], signal[1][i]])
+            .collect();
+        writer.write(&interleaved).unwrap();
+        let flac = writer.finish().unwrap().into_inner();
+        // STREAMINFO's MD5, after the stream marker, a block header and 18
+        // bytes of STREAMINFO.
+        let streaminfo: String = flac[26..42].iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hash(wav), streaminfo);
+        assert_eq!(hash(aiff), streaminfo);
+        assert_eq!(hash(flac), streaminfo);
+        assert_eq!(streaminfo.len(), 32);
     }
 
     #[test]

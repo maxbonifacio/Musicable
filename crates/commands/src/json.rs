@@ -47,7 +47,9 @@ pub fn to_json(value: &Value) -> Json {
 pub fn from_json(ty: Type, json: &Json) -> Option<Value> {
     let value = match (ty, json) {
         (Type::Bool, Json::Bool(b)) => Value::Bool(*b),
-        (Type::Text | Type::Param, Json::String(text)) => Value::Text(text.clone()),
+        (Type::Text | Type::Param | Type::Choice(_), Json::String(text)) => {
+            Value::Text(text.clone())
+        }
         (Type::List(item), Json::Array(items)) => {
             let items: Option<Vec<Value>> = items.iter().map(|j| from_json(*item, j)).collect();
             Value::List(items?)
@@ -169,6 +171,7 @@ pub fn type_schema(ty: Type) -> Map<String, Json> {
         Type::Text | Type::Param => json!({"type": "string"}),
         Type::Track | Type::Clip | Type::Note | Type::Locator | Type::Device | Type::Take => id(),
         Type::List(item) => json!({"type": "array", "items": type_schema(*item)}),
+        Type::Choice(choices) => json!({"type": "string", "enum": choices}),
     };
     match schema {
         Json::Object(schema) => schema,
@@ -190,7 +193,7 @@ pub fn type_text(ty: Type) -> String {
         Type::Locator => "a locator's id".into(),
         Type::Device => "a device's id".into(),
         Type::Take => "a take's id".into(),
-        Type::Param => Type::Param.to_string(),
+        Type::Param | Type::Choice(_) => ty.to_string(),
         Type::List(item) => format!("a list, each {}", type_text(*item)),
     }
 }
@@ -241,6 +244,24 @@ mod tests {
         }
         assert_eq!(to_json(&Value::None), Json::Null);
         assert_eq!(to_json(&Value::Number(f64::NAN)), Json::Null);
+    }
+
+    #[test]
+    fn a_choice_is_one_of_its_words() {
+        const WHAT: Type = Type::Choice(&["loudest", "quietest", "silence"]);
+        assert_eq!(
+            from_json(WHAT, &json!("quietest")),
+            Some(Value::Text("quietest".into()))
+        );
+        assert_eq!(from_json(WHAT, &json!("loud")), None);
+        assert_eq!(from_json(WHAT, &json!(1)), None);
+        assert_eq!(WHAT.to_string(), "one of loudest, quietest or silence");
+        assert_eq!(type_text(WHAT), WHAT.to_string());
+        assert_eq!(
+            Json::Object(type_schema(WHAT)),
+            json!({"type": "string", "enum": ["loudest", "quietest", "silence"]})
+        );
+        assert_eq!(Type::Choice(&["int24"]).to_string(), "int24");
     }
 
     #[test]

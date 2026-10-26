@@ -14,7 +14,7 @@ use std::mem;
 use claxon::frame::{Block, FrameReader};
 use claxon::input::BufferedReader;
 
-use super::{AudioError, Format, Info, Source, invalid, read_up_to, unsupported};
+use super::{AudioError, Format, Info, Sample, Source, invalid, read_up_to, unsupported};
 
 /// The most bytes a frame header takes: the sync code and three bytes of
 /// fields, a coded number of up to seven bytes, a block size and a sample
@@ -309,11 +309,16 @@ impl Flac {
         }
     }
 
+    /// The bits of each sample.
+    pub(super) fn bits(&self) -> u8 {
+        self.stream.bits as u8
+    }
+
     /// Reads from sample `start` on into `out`, interleaved, until it's
     /// full.
-    pub(super) fn read(&mut self, start: u64, out: &mut [f32]) -> Result<(), AudioError> {
+    pub(super) fn read<S: Sample>(&mut self, start: u64, out: &mut [S]) -> Result<(), AudioError> {
         let channels = self.stream.channels;
-        let scale = 1.0 / (1u32 << (self.stream.bits - 1)) as f32;
+        let scale = 1.0 / f64::from(1u32 << (self.stream.bits - 1));
         let frames = out.len() / channels;
         let mut done = 0;
         while done < frames {
@@ -327,7 +332,7 @@ impl Flac {
             for c in 0..channels {
                 let samples = &block.channel(c as u32)[from..from + count];
                 for (i, &sample) in samples.iter().enumerate() {
-                    out[(done + i) * channels + c] = sample as f32 * scale;
+                    out[(done + i) * channels + c] = S::from_f64(f64::from(sample) * scale);
                 }
             }
             done += count;
@@ -627,7 +632,7 @@ pub(super) mod write {
 mod tests {
     use std::io::Cursor;
 
-    use super::super::Decoder;
+    use super::super::{Decoder, SamplesMd5};
     use super::write::{Blocks, flac, header};
     use super::*;
 
@@ -702,6 +707,20 @@ mod tests {
         assert_eq!(mono.info().frames, 5_000);
         assert_eq!(mono.info().sample_rate, 96_000);
         check(&mut mono, 0, 5_000, |_, i| ffmpeg_signal(0, i, 24));
+    }
+
+    #[test]
+    fn samples_hash_as_ffmpeg_s_streaminfo_says() {
+        for bytes in [STEREO_16, MONO_24] {
+            let mut decoder = Decoder::new(Box::new(Cursor::new(bytes.to_vec()))).unwrap();
+            let info = decoder.info();
+            let mut samples = vec![0.0; info.frames as usize * info.channels];
+            decoder.read_f64(0, &mut samples).unwrap();
+            let mut md5 = SamplesMd5::new(decoder.encoding());
+            md5.update(&samples);
+            let streaminfo: String = bytes[26..42].iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(md5.finish(), streaminfo);
+        }
     }
 
     #[test]

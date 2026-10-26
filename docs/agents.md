@@ -5,7 +5,8 @@ Context Protocol: list and run its commands, and read the project, while
 you watch each change happen in the window. Every change an agent makes is
 a step in the undo history, named as yours are, so you can undo it like
 your own. Agents connect from your computer only, through a pipe only your
-account can open.
+account can open. They also get [the audio tools](#the-audio-tools), which
+cut, convert and measure audio files, with or without Musicable running.
 
 ## Letting agents in
 
@@ -118,12 +119,57 @@ changes anything, and the error says which one failed and why
 [commands.md](commands.md#arguments-and-results)). Undo, Redo, Go to Step
 and the file commands run alone, never among others.
 
+## The audio tools
+
+`musicable mcp` also has a tool for each audio command, which works on
+audio files rather than the project: `audio_info`, `audio_cut`,
+`audio_join`, `audio_convert`, `audio_gain`, `audio_loudness` and
+`audio_find`. It runs them itself, so they work while Musicable is closed
+or doesn't let agents in, and they never touch the open project. People
+run the same commands as `musicable audio <command>`, and the
+[manual](../manual/src/reference/audio-commands.md) describes each one, on
+a page made from the code.
+
+- **One registry of their own.** Each is an `AudioCommand` in
+  [`crates/app/src/toolkit.rs`](../crates/app/src/toolkit.rs), beside the
+  project's commands rather than among them: they make no steps in the
+  undo history, have no keys, and need no window, engine or project. Each
+  has parameters, checked as the project commands' are, an example on
+  files the tests make, and the JSON Schema of what it gives back, which
+  its tool has as its output schema.
+- **Run by the bridge.** The bridge takes them as `LocalTools`
+  ([`crates/mcp/src/local.rs`](../crates/mcp/src/local.rs)), so the mcp
+  crate needn't know them, lists them after the app's tools, and runs each
+  call on a thread of its own. A call sends progress notifications, at
+  most four a second, if the agent's client asked for them, and stops when
+  the agent cancels it, leaving nothing written. The tools are annotated
+  as reading or writing files, and as working on this computer alone.
+- **What they give back** is structured content, and the same JSON as
+  text: the unit in each field's name (`peak_dbfs`, `integrated_lufs`),
+  `null` for silence, positions as seconds and frames, and each file a
+  command writes described as `audio_info` describes files. Lists hold 200
+  items at most. `audio_info` and `audio_loudness`, which take several
+  files, say why each one that failed did, and go on with the others.
+- **Paths are whole.** The bridge's working folder is wherever the agent's
+  client started it, so the tools refuse a relative path. `musicable
+  audio` takes paths in the folder it's run in.
+- **Files are safe.** A command never writes over a file without
+  `overwrite`, and never to a file it reads, even with it. It writes
+  `NAME.part`, and renames it once it's whole, so a file that's there is
+  whole; one that fails or is cancelled removes it. Cuts, joins and
+  conversions that only change the format or widen the samples copy them
+  exactly, read the new file back, and say whether it's `exact`.
+
+Loudness is measured as [analysis.md](analysis.md#loudness) describes.
+
 ## `musicable api`
 
 `musicable api` prints the commands agents can run as JSON, without
 opening the app: each one's id, title, the JSON Schema of its arguments,
-its default keys, and whether it runs alone. Scripts and agents can read
-it to find their way around without a running Musicable.
+its default keys, and whether it runs alone. Under `audio_commands` it
+lists the audio commands too: each one's id, title and tool, and the JSON
+Schemas of its arguments and of what it gives back. Scripts and agents can
+read it to find their way around without a running Musicable.
 
 ```json
 {
@@ -178,7 +224,8 @@ it to find their way around without a running Musicable.
   sees them while Musicable is closed, and passes calls on through the
   pipe, as the agent's client named itself. It connects as the client
   starts, so the status bar shows the agent at once, and again at a call
-  after Musicable has closed or stopped letting agents in.
+  after Musicable has closed or stopped letting agents in. The audio
+  tools' calls it runs itself.
 
 ### Testing
 
@@ -191,7 +238,16 @@ it to find their way around without a running Musicable.
   thread, as the app's does: listing, describing, running, batches, wrong
   arguments, reads, and a call the agent gave up on. It also runs the
   bridge through a real pipe, with Musicable starting, stopping and
-  starting again.
+  starting again, and calls a bridge's own tools with nothing on the pipe,
+  following their progress, and cancelling one.
+- [`crates/app/src/toolkit/tests.rs`](../crates/app/src/toolkit/tests.rs)
+  runs every audio command's example from the command line and as a tool,
+  checks both give the same, that it fits the output schema, and that the
+  files it wrote read back as it says. It checks cuts, joins and
+  conversions sample for sample in every format io reads, loudness and
+  true peak against EBU Tech 3341's cases, and each of the rules for
+  files, cancelling and failing part way. A command without an example
+  fails it.
 - [`crates/app/src/app/controlled_by_agents.rs`](../crates/app/src/app/controlled_by_agents.rs)
   drives the whole window with `egui_kittest`: it lets agents in on the
   Agents page, checks the status bar, runs, undoes and batches commands,
@@ -199,7 +255,9 @@ it to find their way around without a running Musicable.
   exports.
 - [`crates/app/tests/agents.rs`](../crates/app/tests/agents.rs) starts the
   real `musicable mcp`, as a client does, and speaks MCP with it, through
-  a real pipe to a session, on Windows, macOS and Linux in CI.
+  a real pipe to a session, and runs the audio tools with nothing
+  listening, on Windows, macOS and Linux in CI. It runs `musicable audio`
+  too, in text and in JSON, and checks its exit codes.
 
 ## Not done yet
 
@@ -207,3 +265,7 @@ it to find their way around without a running Musicable.
 - Agents hearing of your changes as they're made, rather than reading the
   project again.
 - Extensions, which will run in WebAssembly, on the same commands.
+- More audio tools: spectra, matching and comparing two files, and
+  warping a file as a clip would, for A/B tests of warping; then pitch,
+  pictures and test signals. And MP3 and AAC files, which io doesn't read
+  yet.

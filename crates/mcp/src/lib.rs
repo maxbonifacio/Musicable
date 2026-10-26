@@ -14,7 +14,8 @@
 //! Agents' clients start `musicable mcp`, the [`bridge`], which speaks MCP
 //! over its standard input and output and passes each tool call on to the
 //! Musicable that's running, through the pipe. While none is, or it doesn't
-//! let agents in, the tools say so.
+//! let agents in, the tools say so. The bridge runs [local tools](local)
+//! itself, the app's audio commands, which need no window.
 //!
 //! `docs/agents.md` describes the tools, and what they take and give back.
 
@@ -32,6 +33,7 @@ use tokio::sync::oneshot;
 
 pub mod bridge;
 mod host;
+pub mod local;
 pub mod pipe;
 mod reads;
 #[cfg(test)]

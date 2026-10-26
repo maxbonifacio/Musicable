@@ -37,6 +37,8 @@ skrifa = "0.44"
 log = "0.4"
 # The render cache's keys.
 siphasher.workspace = true
+# audio.convert's resampler.
+rubato.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }

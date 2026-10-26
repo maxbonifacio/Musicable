@@ -29,6 +29,7 @@ mod session;
 mod settings;
 mod settings_window;
 mod theme_file;
+pub mod toolkit;
 mod workspaces;
 
 pub use app::App;

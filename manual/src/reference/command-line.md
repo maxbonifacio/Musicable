@@ -9,9 +9,10 @@ project. These do more:
 | `musicable export PROJECT FILE` | Renders the project file PROJECT to the audio file FILE, as **File > Export Audio** does, faster than real time. |
 | `musicable keymap [FILE]` | Prints every command with its keys: the default keys, with the changes in the keymap file FILE if you give one, and any mistakes in that file. |
 | `musicable null-test [PROJECT]` | Plays PROJECT, or the demo, with Musicable's two renderers side by side, and checks that they play exactly the same. It's a check for developers. |
+| `musicable audio <command> FILE...` | Cuts, joins, converts or measures audio files, without opening the window: see [Audio commands](audio-commands.md). |
 | `musicable analyse FILE...` | Finds the tempo, beats and downbeats of audio files, as warping will, and scores them against beats you've marked, and against Live's: see [Analysing files](#analysing-files). |
-| `musicable mcp` | Connects an agent, such as Claude Code, to the Musicable that's running. The agent's app starts it: see [Agents](#agents). |
-| `musicable api` | Prints the commands agents can run, with their arguments, as JSON. |
+| `musicable mcp` | Connects an agent, such as Claude Code, to the Musicable that's running, and gives it the audio commands as tools. The agent's app starts it: see [Agents](#agents). |
+| `musicable api` | Prints the commands agents can run, with their arguments, and the audio commands, as JSON. |
 | `musicable --help` | Lists these. |
 
 On Windows, the program opens no console window of its own, so run these
@@ -92,3 +93,8 @@ own path in it, and a **Copy** button for it.
 Other agents' apps start `musicable mcp` the same way. It passes their
 calls on to the Musicable that's running, and only your account on your
 computer can connect to it.
+
+Agents also get the [audio commands](audio-commands.md) as tools, which
+cut, convert and measure audio files. `musicable mcp` runs those itself,
+so they work while Musicable is closed or doesn't let agents in, and they
+never change the project you have open.

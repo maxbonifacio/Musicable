@@ -3,7 +3,7 @@
 use std::io::{self, Seek, SeekFrom, Write};
 
 use super::flac_encoder::FlacEncoder;
-use super::{AudioError, Format, SampleFormat, aiff, unsupported, wav};
+use super::{AudioError, Format, SampleFormat, aiff, quantize, unsupported, wav};
 
 /// The random numbers TPDF dither starts from, whatever the file: the same
 /// samples always dither the same way.
@@ -14,6 +14,12 @@ const DITHER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 /// [`dither`](Self::with_dither), TPDF dither goes in first, except where
 /// the audio is silent. The file's header gets its length when it
 /// [finishes](Self::finish).
+///
+/// Samples come as 32-bit floats, as an export renders them, or as 64-bit
+/// ones ([`write_f64`](Self::write_f64)), which carry a file's samples
+/// exactly, as [`Decoder::read_f64`](super::Decoder::read_f64) reads them:
+/// written undithered in a [`SampleFormat`] that
+/// [holds](SampleFormat::holds) their encoding, they come out unchanged.
 ///
 /// WAV and AIFF files hold up to 4 GiB of samples.
 #[derive(Debug)]
@@ -39,7 +45,7 @@ enum Out<W: Write + Seek> {
 impl<W: Write + Seek> Writer<W> {
     /// Starts a `format` file of `channels` channels of `sample_format`
     /// samples at `sample_rate` at the start of `out`, writing its header.
-    /// FLAC files take integers only.
+    /// FLAC files take integers of up to 24 bits only.
     pub fn new(
         mut out: W,
         format: Format,
@@ -69,9 +75,13 @@ impl<W: Write + Seek> Writer<W> {
             }
             Format::Flac => {
                 let bits = match sample_format {
+                    SampleFormat::Int8 => 8,
                     SampleFormat::Int16 => 16,
                     SampleFormat::Int24 => 24,
-                    SampleFormat::Float32 => return unsupported("FLAC files of floats"),
+                    SampleFormat::Int32 => return unsupported("FLAC files of 32-bit integers"),
+                    SampleFormat::Float32 | SampleFormat::Float64 => {
+                        return unsupported("FLAC files of floats");
+                    }
                 };
                 Out::Flac(Box::new(FlacEncoder::new(
                     out,
@@ -133,13 +143,26 @@ impl<W: Write + Seek> Writer<W> {
     ///
     /// If `samples` isn't whole frames.
     pub fn write(&mut self, samples: &[f32]) -> io::Result<()> {
+        self.write_samples(samples.len(), |i| f64::from(samples[i]))
+    }
+
+    /// Writes `samples` as [`write`](Self::write) does, from 64-bit floats.
+    ///
+    /// # Panics
+    ///
+    /// If `samples` isn't whole frames.
+    pub fn write_f64(&mut self, samples: &[f64]) -> io::Result<()> {
+        self.write_samples(samples.len(), |i| samples[i])
+    }
+
+    /// Writes `count` samples, the `i`th of which `sample(i)` gives.
+    fn write_samples(&mut self, count: usize, sample: impl Fn(usize) -> f64) -> io::Result<()> {
         let channels = usize::from(self.channels);
         assert!(
-            samples.len().is_multiple_of(channels),
-            "{} samples aren't whole frames of {channels} channels",
-            samples.len()
+            count.is_multiple_of(channels),
+            "{count} samples aren't whole frames of {channels} channels",
         );
-        let frames = (samples.len() / channels) as u64;
+        let frames = (count / channels) as u64;
         if frames > self.room() {
             let format = match self.out {
                 Out::Wav(_) => "a WAV file",
@@ -151,25 +174,40 @@ impl<W: Write + Seek> Writer<W> {
                 format!("too long for {format}"),
             ));
         }
-        let bits = match self.sample_format {
-            SampleFormat::Int16 => 16,
-            SampleFormat::Int24 => 24,
-            SampleFormat::Float32 => 0,
-        };
-        let size = self.sample_format.bytes();
+        let format = self.sample_format;
+        let bits = format.bits();
+        let size = format.bytes();
+        let big = matches!(self.out, Out::Aiff(_));
         self.bytes.clear();
         self.integers.clear();
-        for &sample in samples {
-            if bits == 0 {
-                let bytes = match self.out {
-                    Out::Aiff(_) => sample.to_be_bytes(),
-                    _ => sample.to_le_bytes(),
-                };
-                self.bytes.extend_from_slice(&bytes);
-                continue;
+        for i in 0..count {
+            let sample = sample(i);
+            match format {
+                SampleFormat::Float32 => {
+                    let sample = sample as f32;
+                    let bytes = if big {
+                        sample.to_be_bytes()
+                    } else {
+                        sample.to_le_bytes()
+                    };
+                    self.bytes.extend_from_slice(&bytes);
+                    continue;
+                }
+                SampleFormat::Float64 => {
+                    let bytes = if big {
+                        sample.to_be_bytes()
+                    } else {
+                        sample.to_le_bytes()
+                    };
+                    self.bytes.extend_from_slice(&bytes);
+                    continue;
+                }
+                _ => {}
             }
             let integer = quantize(sample, bits, self.dither.as_mut());
             match self.out {
+                // WAV's 8-bit samples are unsigned.
+                Out::Wav(_) if bits == 8 => self.bytes.push((integer + 128) as u8),
                 Out::Wav(_) => self.bytes.extend_from_slice(&integer.to_le_bytes()[..size]),
                 Out::Aiff(_) => self
                     .bytes
@@ -220,23 +258,9 @@ impl<W: Write + Seek> Writer<W> {
     }
 }
 
-/// `sample` as a `bits`-bit integer: rounded, after dither from `dither` if
-/// it's there and the sample isn't silent, and clipped at full scale.
-fn quantize(sample: f32, bits: u32, dither: Option<&mut Random>) -> i32 {
-    let scale = f64::from(1u32 << (bits - 1));
-    let mut scaled = f64::from(sample) * scale;
-    if let Some(random) = dither
-        && sample != 0.0
-    {
-        // The difference of two uniform numbers is triangular.
-        scaled += random.uniform() - random.uniform();
-    }
-    scaled.round().clamp(-scale, scale - 1.0) as i32
-}
-
 /// Random numbers for dither: SplitMix64.
 #[derive(Debug, Clone)]
-struct Random(u64);
+pub(super) struct Random(u64);
 
 impl Random {
     fn next(&mut self) -> u64 {
@@ -248,7 +272,7 @@ impl Random {
     }
 
     /// From 0 up to 1.
-    fn uniform(&mut self) -> f64 {
+    pub(super) fn uniform(&mut self) -> f64 {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
@@ -257,7 +281,7 @@ impl Random {
 mod tests {
     use std::io::Cursor;
 
-    use super::super::tests::{decode, signal};
+    use super::super::tests::{FORMATS, decode, signal, step};
     use super::super::{Decoder, Info};
     use super::*;
 
@@ -298,24 +322,12 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
-    fn step(format: SampleFormat) -> f32 {
-        match format {
-            SampleFormat::Int16 => 1.0 / 32_768.0,
-            SampleFormat::Int24 => 1.0 / 8_388_608.0,
-            SampleFormat::Float32 => 0.0,
-        }
-    }
-
     #[test]
     fn written_files_read_back() {
         let signal = signal(2, 9001);
         for format in [Format::Wav, Format::Aiff, Format::Flac] {
-            for sample_format in [
-                SampleFormat::Int16,
-                SampleFormat::Int24,
-                SampleFormat::Float32,
-            ] {
-                if format == Format::Flac && sample_format == SampleFormat::Float32 {
+            for sample_format in FORMATS {
+                if format == Format::Flac && sample_format.bits() > 24 {
                     continue;
                 }
                 let bytes = write(format, sample_format, false, &signal);
@@ -330,11 +342,13 @@ mod tests {
                     }
                 );
                 let back = decoder.read_all().unwrap();
+                let step = step(sample_format);
                 for (c, channel) in back.iter().enumerate() {
                     for (i, &s) in channel.iter().enumerate() {
-                        let error = (s - signal[c][i]).abs();
+                        // Integers clip a step below full scale.
+                        let error = (s - signal[c][i].min(1.0 - step)).abs();
                         assert!(
-                            error <= step(sample_format) / 2.0 + f32::EPSILON,
+                            error <= step / 2.0 + f32::EPSILON,
                             "{format:?} {sample_format:?}: {error}"
                         );
                     }
@@ -347,11 +361,7 @@ mod tests {
     fn they_match_files_written_whole() {
         let signal = signal(3, 1001);
         let views: Vec<&[f32]> = signal.iter().map(Vec::as_slice).collect();
-        for sample_format in [
-            SampleFormat::Int16,
-            SampleFormat::Int24,
-            SampleFormat::Float32,
-        ] {
+        for sample_format in FORMATS {
             let mut whole = Vec::new();
             super::super::write_wav(&mut whole, 44_100, sample_format, &views).unwrap();
             assert_eq!(write(Format::Wav, sample_format, false, &signal), whole);
@@ -402,15 +412,24 @@ mod tests {
     }
 
     #[test]
-    fn flac_takes_integers_only() {
-        let writer = Writer::new(
-            Cursor::new(Vec::new()),
-            Format::Flac,
-            SampleFormat::Float32,
-            48_000,
-            2,
-        );
-        assert!(matches!(writer, Err(AudioError::Unsupported(_))));
+    fn flac_takes_integers_of_up_to_24_bits_only() {
+        for sample_format in FORMATS {
+            let writer = Writer::new(
+                Cursor::new(Vec::new()),
+                Format::Flac,
+                sample_format,
+                48_000,
+                2,
+            );
+            if sample_format.bits() > 24 {
+                assert!(
+                    matches!(writer, Err(AudioError::Unsupported(_))),
+                    "{sample_format:?}"
+                );
+            } else {
+                assert!(writer.is_ok(), "{sample_format:?}");
+            }
+        }
     }
 
     #[test]

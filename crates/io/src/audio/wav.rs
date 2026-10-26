@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use super::{AudioError, Encoding, Pcm, SampleFormat, Source, frames_of, invalid, unsupported};
+use super::{AudioError, Layout, Pcm, SampleFormat, Source, frames_of, invalid, unsupported};
 
 const PCM: u16 = 1;
 const FLOAT: u16 = 3;
@@ -30,7 +30,7 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<(Pcm, Option<f64>), Au
             }
             b"acid" => acid = read_acid(source.as_mut(), size)?,
             b"data" => {
-                let Some((channels, sample_rate, encoding)) = format else {
+                let Some((channels, sample_rate, layout)) = format else {
                     return invalid("the data chunk comes before the fmt chunk");
                 };
                 let start = source.stream_position()?;
@@ -52,7 +52,7 @@ pub(super) fn open(mut source: Box<dyn Source>) -> Result<(Pcm, Option<f64>), Au
                         source.seek(SeekFrom::Current(i64::from(size) + i64::from(size % 2)))?;
                     }
                 }
-                let pcm = Pcm::new(source, start, size, channels, sample_rate, encoding)?;
+                let pcm = Pcm::new(source, start, size, channels, sample_rate, layout)?;
                 let tempo = acid.and_then(|acid| acid.tempo(pcm.frames, sample_rate));
                 return Ok((pcm, tempo));
             }
@@ -119,8 +119,8 @@ fn read_acid(source: &mut dyn Source, size: u32) -> Result<Option<Acid>, AudioEr
     }))
 }
 
-/// The channels, sample rate and encoding a fmt chunk gives.
-fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Encoding), AudioError> {
+/// The channels, sample rate and layout a fmt chunk gives.
+fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Layout), AudioError> {
     if fmt.len() < 16 {
         return invalid("a short fmt chunk");
     }
@@ -136,17 +136,17 @@ fn parse_format(fmt: &[u8]) -> Result<(usize, u32, Encoding), AudioError> {
         // The subformat GUID starts with the format tag.
         tag = u16_at(24);
     }
-    let encoding = match (tag, bits) {
-        (PCM, 8) => Encoding::U8,
-        (PCM, 16) => Encoding::I16 { big: false },
-        (PCM, 24) => Encoding::I24 { big: false },
-        (PCM, 32) => Encoding::I32 { big: false },
-        (FLOAT, 32) => Encoding::F32 { big: false },
-        (FLOAT, 64) => Encoding::F64 { big: false },
+    let layout = match (tag, bits) {
+        (PCM, 8) => Layout::U8,
+        (PCM, 16) => Layout::I16 { big: false },
+        (PCM, 24) => Layout::I24 { big: false },
+        (PCM, 32) => Layout::I32 { big: false },
+        (FLOAT, 32) => Layout::F32 { big: false },
+        (FLOAT, 64) => Layout::F64 { big: false },
         (PCM | FLOAT, bits) => return unsupported(format!("{bits}-bit WAV samples")),
         (tag, _) => return unsupported(format!("WAV format {tag:#06x}")),
     };
-    Ok((channels, sample_rate, encoding))
+    Ok((channels, sample_rate, layout))
 }
 
 /// The most bytes of samples a WAV file holds, with room for its header
@@ -173,13 +173,23 @@ pub(super) fn write(
     header(&mut bytes, sample_rate, format, count as u16, frames as u64);
     for i in 0..frames {
         for channel in channels {
-            format.encode(channel[i], &mut bytes);
+            encode(format, f64::from(channel[i]), &mut bytes);
         }
     }
     if data % 2 == 1 {
         bytes.push(0);
     }
     out.write_all(&bytes)
+}
+
+/// One sample as a WAV file stores it: little-endian, and 8-bit integers
+/// unsigned.
+fn encode(format: SampleFormat, sample: f64, out: &mut Vec<u8>) {
+    format.encode(sample, out);
+    if format == SampleFormat::Int8 {
+        // Flipping the sign bit makes a signed byte unsigned.
+        *out.last_mut().expect("a sample") ^= 0x80;
+    }
 }
 
 /// The most bytes [`header`] writes.
@@ -198,7 +208,7 @@ pub(super) fn header(
     let block = u32::from(channels) * format.bytes() as u32;
     // Callers keep the samples within MAX_DATA.
     let data = (frames * u64::from(block)) as u32;
-    let float = format == SampleFormat::Float32;
+    let float = format.is_float();
     // Float files need a fact chunk with their length.
     let fact = if float { 12 } else { 0 };
     out.extend_from_slice(b"RIFF");
@@ -344,7 +354,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::super::tests::{decode, signal};
-    use super::super::{Decoder, Format};
+    use super::super::{Decoder, Encoding, Format};
     use super::*;
 
     /// A WAV file of `samples`, with a fmt chunk of `fmt`, and `extra`
@@ -436,6 +446,26 @@ mod tests {
         assert_eq!(
             decoder.read_all().unwrap()[0],
             [-1.0, 0.0, 127.0 / 128.0, -0.5]
+        );
+    }
+
+    #[test]
+    fn eight_bit_files_are_written_unsigned() {
+        let mut bytes = Vec::new();
+        write(
+            &mut bytes,
+            8000,
+            SampleFormat::Int8,
+            &[&[-1.0, 0.0, 0.5, 1.0]],
+        )
+        .unwrap();
+        // After a 44-byte header.
+        assert_eq!(bytes[44..], [0, 128, 192, 255]);
+        let mut decoder = decode(bytes);
+        assert_eq!(decoder.encoding(), Encoding::Int(8));
+        assert_eq!(
+            decoder.read_all().unwrap()[0],
+            [-1.0, 0.0, 0.5, 127.0 / 128.0]
         );
     }
 
