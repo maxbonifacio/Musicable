@@ -577,24 +577,31 @@ on.
   until the next slice's. It reads Transpose, Detune, Transient Loop Mode
   and Transient Envelope from the clip's curves where it starts, or else
   from the warp, so automation moves them a slice at a time.
-- Each slice fades in over 2 ms just before its start, as the one before
+- Each slice fades in over 10 ms just before its start, as the one before
   fades out: equal-gain raised cosines, at most half as long as the slice
-  before, so the transient lands at full level, with no click. Where two
-  slices meet seamlessly, with no envelope, the same pitch and reading the
-  same frames, as at the file's own speed, there's no crossfade, so the
-  clip plays the file sample for sample, as Re-Pitch would.
+  before, as it plays and of its audio, so the transient lands at full
+  level, with no click. Where two slices meet seamlessly, with no envelope,
+  the same pitch and reading the same frames, as at the file's own speed,
+  there's no crossfade, so the clip plays the file sample for sample, as
+  Re-Pitch would. A crossfade much shorter bends a low note sharply enough
+  to click: over 2 ms, a 50 Hz sine bends up to 26 times as sharply as its
+  own wave does, and over 10 ms less than 4 times.
 - A slice runs out once it would read half a frame or more past its audio
   before the next starts, as where the song plays it slower. Its audio then
   stops 5 ms short of the next slice's start (`GUARD_SECONDS`), or a quarter
   of the way back in a shorter slice, as a transient found a hair after its
   hit starts leaves the start of the hit there, which would click as the
-  audio ends and at every turn of a loop. Transient Loop
-  Mode fills the gap: Off fades out over up to 2 ms as the audio ends;
-  Forward loops from the middle of the slice, or from half a second before
-  its end where that's later, crossfading over 2 ms at each seam; and
-  Back-and-Forth turns on the slice's last frame and on the loop's start,
-  so it never reads the next slice's audio. A loop shorter than four seams
-  plays as Off.
+  audio ends and at every turn of a loop. Transient Loop Mode fills the gap:
+  Off fades out over up to 10 ms as the audio ends; Forward loops from the
+  middle of the slice, or from half a second before its end where that's
+  later, crossfading over 10 ms at each seam; and Back-and-Forth turns back
+  at the loop's end and its start, crossfading over 10 ms from the reading
+  one way to the reading the other, each crossfade centred half of one
+  before the slice's last frame, so it never reads the next slice's audio,
+  or half of one before the loop's start. Turning on the spot, as it first
+  did, kinked a low note, bending it 300 times as sharply as its own wave,
+  which clicked dully. A seam or turn is no longer than a quarter of the
+  loop each time through, and a loop shorter than 8 ms plays as Off.
 - Below 100, Transient Envelope fades each slice from its start, by e over
   its length times 10^((envelope − 60) / 20), and no quicker than in a
   millisecond.

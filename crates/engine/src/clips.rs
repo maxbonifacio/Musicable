@@ -2397,9 +2397,9 @@ mod tests {
         let player = AudioClips::new().with_clip(&clip, Some(counting(100_000, 48_000)));
         let [left, right] = audio_at(&song_at(240.0), player, 0, 60_000, 64);
         // Each slice plays 6,000 of the song's frames, and the next fades in
-        // over the last 2 ms of them, from just before its start, as this
+        // over the last 10 ms of them, from just before its start, as this
         // one fades out.
-        let (slice, fade) = (6_000, 96);
+        let (slice, fade) = (6_000, (slice::CROSSFADE_SECONDS * 48_000.0) as usize);
         for (n, (&l, &r)) in left.iter().zip(&right).enumerate().take(48_000) {
             let (k, into) = (n / slice, n % slice);
             let this = (k * EIGHTH + into) as f64;
@@ -2426,6 +2426,7 @@ mod tests {
         // second of its second half loops.
         let slice = 24_000;
         let guard = (slice::GUARD_SECONDS * 48_000.0) as usize;
+        let seam = (slice::CROSSFADE_SECONDS * 48_000.0) as usize;
         for transient_loop in TransientLoop::ALL {
             let mut clip = sliced(
                 audio_clip(0.0, 2.0, AudioClip::new("drums.wav")),
@@ -2442,14 +2443,14 @@ mod tests {
                 // Once through, at the file's own speed.
                 assert_eq!(at(5_000), (start + 5_000) as f32);
                 // Then a hundred frames into the gap, and a loop later: from
-                // the middle again, or back from its last frame, which it
-                // turns on a frame before the gap, then forward from the
-                // middle.
+                // the middle again, or back from where it turns, half a seam
+                // before its last frame, a frame before the gap, then forward
+                // from the middle.
                 let middle = (start + end) / 2;
                 let expected = match transient_loop {
                     TransientLoop::Off => [0, 0],
                     TransientLoop::Forward => [middle + 100, middle + 100],
-                    TransientLoop::BackAndForth => [end - 1 - 101, middle + 100],
+                    TransientLoop::BackAndForth => [end - 1 - seam - 101, middle + 100],
                 };
                 let into = end - start + 100;
                 for (into, expected) in [into, into + end - middle].into_iter().zip(expected) {
@@ -2471,7 +2472,8 @@ mod tests {
         // halfway: whatever fills the gap, nothing plays the 5 ms before the
         // next slice's start until it fades in, as a transient found a hair
         // late leaves the start of its hit there.
-        let (slice, fade, guard) = (24_000, 96, 240);
+        let (slice, guard) = (24_000, 240);
+        let fade = (slice::CROSSFADE_SECONDS * 48_000.0) as usize;
         for transient_loop in TransientLoop::ALL {
             let mut clip = sliced(
                 audio_clip(0.0, 2.0, AudioClip::new("drums.wav")),
@@ -2670,6 +2672,49 @@ mod tests {
     }
 
     #[test]
+    fn a_low_note_bends_smoothly_where_slices_turn_and_meet() {
+        // A 50 Hz sine, as a kick's tail or a bass, cut at uneven transients,
+        // from half the clip's speed to twice it: wherever a slice's loop
+        // turns or comes round, or a slice fades out or into the next, the
+        // wave bends no more than a few times as sharply as its own most, as
+        // over a 10 ms crossfade. Crossfades of 2 ms bent it 13 to 26 times
+        // as sharply, and a loop turning on the spot 300 times, which clicked.
+        let sine = |i: usize| (std::f64::consts::TAU * 50.0 * i as f64 / 48_000.0).sin() as f32;
+        let samples: Vec<f32> = (0..100_000).map(sine).collect();
+        let bend = |w: &[f32]| (w[2] - 2.0 * w[1] + w[0]).abs();
+        let sharpest = samples.windows(3).map(bend).fold(0.0, f32::max);
+        let source = Source::Whole(Arc::new(AudioData::new(48_000, vec![samples])));
+        let transients = [
+            3_000, 9_500, 12_000, 20_123, 26_000, 33_333, 40_000, 47_500, 55_000, 61_234, 70_000,
+            76_543, 84_000,
+        ];
+        for bpm in [60.0, 80.0, 90.0, 180.0, 240.0] {
+            for transient_loop in TransientLoop::ALL {
+                // Four beats of the clip's own time, ending before the file
+                // does.
+                let mut clip = sliced(
+                    audio_clip(0.0, 4.0, AudioClip::new("sine.wav")),
+                    120.0,
+                    Some(&transients),
+                );
+                warp_of(&mut clip).slice.transient_loop = transient_loop;
+                let tempo = song_at(bpm);
+                let frames = tempo.frame_at(beats(4.0), 48_000) as usize - 1;
+                let player = AudioClips::new().with_clip(&clip, Some(source.clone()));
+                let [out, _] = audio_at(&tempo, player, 0, frames, 512);
+                let (at, most) = (out.windows(3).enumerate())
+                    .map(|(i, w)| (i + 1, bend(w)))
+                    .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+                assert!(
+                    most < 6.0 * sharpest,
+                    "{bpm} BPM, {transient_loop:?}: bent {:.1} times as sharply on frame {at}",
+                    most / sharpest
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sliced_clips_play_the_same_however_the_blocks_fall() {
         // A loop at 120 BPM in a song that slows from 160 BPM to 90: its
         // slices cut short, then running out, with each loop mode, an
@@ -2759,7 +2804,8 @@ mod tests {
         assert_eq!(placed.read_start(&tempo, 48_000, 1_000), 1_000);
         let reach = Resampler::most_reach(WIDEST) as i64;
         let next = placed.next_read_start(&tempo, 48_000, 1_000);
-        assert_eq!(next, Some(96_000 - 96 - reach + 1));
+        let fade = (slice::CROSSFADE_SECONDS * 48_000.0) as i64;
+        assert_eq!(next, Some(96_000 - fade - reach + 1));
     }
 
     #[test]
@@ -2782,14 +2828,15 @@ mod tests {
         warp_of(&mut clip).slice.transient_loop = TransientLoop::Off;
         let player = play(&clip);
         let reach = Resampler::most_reach(WIDEST) as i64;
-        let next = (EIGHTH - 96) as i64 - reach + 1;
+        let fade = (slice::CROSSFADE_SECONDS * f64::from(rate)) as usize;
+        let next = (EIGHTH - fade) as i64 - reach + 1;
         assert_eq!(player.clips[0].read_start(&tempo, rate, 15_000), next);
         // Looping forward, it holds from the loop's start, before its seam:
         // halfway through its audio, which stops 5 ms short of slice 1.
         warp_of(&mut clip).slice.transient_loop = TransientLoop::Forward;
         let player = play(&clip);
         let guard = (slice::GUARD_SECONDS * f64::from(rate)) as usize;
-        let back_to = ((EIGHTH - guard) / 2 - 96) as i64;
+        let back_to = ((EIGHTH - guard) / 2 - fade) as i64;
         assert_eq!(player.clips[0].read_start(&tempo, rate, 15_000), back_to);
     }
 

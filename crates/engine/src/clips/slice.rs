@@ -8,17 +8,17 @@
 //! next slice starts. A slice the song plays faster than the file is cut
 //! short by the next, and one it plays slower runs out of audio first, and
 //! its [`TransientLoop`] fills the gap: silence, the second half of the
-//! slice over and over, or that half backwards and forwards. One that runs
-//! out stops a few milliseconds short of the next slice's start, so neither
-//! its end nor its loop plays the start of the next hit, which a transient
-//! found a hair late leaves there. Its Transient Envelope fades it as it
-//! plays.
+//! slice over and over, or that half backwards and forwards, crossfading
+//! at each seam and turn. One that runs out stops a few milliseconds short
+//! of the next slice's start, so neither its end nor its loop plays the
+//! start of the next hit, which a transient found a hair late leaves there.
+//! Its Transient Envelope fades it as it plays.
 //!
 //! Like the rest of the player, a slice's every frame comes from where the
 //! frame is in the song, so slices render the same however the blocks fall.
-//! Each slice fades in over a couple of milliseconds just before it starts,
-//! as the one before fades out, so its transient lands at full level, with
-//! no click at the cut. Where two slices meet seamlessly, as when the song
+//! Each slice fades in over a few milliseconds just before it starts, as
+//! the one before fades out, so its transient lands at full level, with no
+//! click at the cut. Where two slices meet seamlessly, as when the song
 //! plays the file at its own speed, the cut has no crossfade, so the clip
 //! plays the file sample for sample, as Re-Pitch would.
 //!
@@ -37,9 +37,18 @@ use musicable_model::warp::{Preserve, SliceSettings, TransientLoop, Warp, pitch_
 
 use super::{Run, SAME_SPEED, nearest};
 
-/// How long the crossfade into each slice is, and the seam of a loop: two
-/// milliseconds.
-const CROSSFADE_SECONDS: f64 = 0.002;
+/// How long the crossfade into each slice is, and each seam and turn of a
+/// loop: ten milliseconds, or less where a slice or its loop is short. A
+/// low note, such as a kick's tail or a bass, can't turn back or move on to
+/// another point of its wave much quicker without a dull click: a 50 Hz
+/// sine bends up to 26 times as sharply as its own wave does over a 2 ms
+/// crossfade, and 300 times turning on the spot, but less than 4 times
+/// over 10 ms.
+pub(super) const CROSSFADE_SECONDS: f64 = 0.01;
+
+/// The shortest loop a slice plays, each time through it, in the song's
+/// time: eight milliseconds. One shorter plays as Off.
+const SHORTEST_LOOP_SECONDS: f64 = 0.008;
 
 /// The longest stretch of the file a slice loops, from the middle of its
 /// audio to its end: half a second, which a stream keeps in memory.
@@ -59,7 +68,8 @@ const RUN_OUT: f64 = 0.5;
 /// milliseconds. A transient found a fraction of a millisecond after its
 /// hit starts leaves the start of the hit at the end of the slice before,
 /// which would click as that slice's audio ends, and at every turn of its
-/// loop. The next slice's fade in plays the last two milliseconds.
+/// loop. The next slice's fade in plays them, as it reads from before its
+/// start.
 pub(super) const GUARD_SECONDS: f64 = 0.005;
 
 /// A warped clip's slices, as Slice plays them.
@@ -115,6 +125,11 @@ impl Song<'_> {
     fn crossfade(&self) -> i64 {
         (CROSSFADE_SECONDS * f64::from(self.rate)).round() as i64
     }
+
+    /// How long the shortest loop a slice plays is, in song frames.
+    fn shortest_loop(&self) -> f64 {
+        SHORTEST_LOOP_SECONDS * f64::from(self.rate)
+    }
 }
 
 /// One slice as it plays in the song, at its tempo.
@@ -141,8 +156,10 @@ struct Timing {
     transient_loop: TransientLoop,
     /// How many song frames its envelope takes to fall by e, if it fades.
     decay: Option<f64>,
-    /// How long its crossfades and its loop's seams are, in song frames.
+    /// How long its crossfades are, and the shortest loop it plays, in song
+    /// frames.
     crossfade: f64,
+    shortest_loop: f64,
 }
 
 impl Timing {
@@ -346,13 +363,15 @@ impl Slices {
             transient_loop: slice.transient_loop,
             decay,
             crossfade: crossfade as f64,
+            shortest_loop: song.shortest_loop(),
         }
     }
 
     /// How many song frames slice `k` fades in over before it starts, as
     /// the one before fades out, with the slice before starting at `before`
     /// and `k` at `start`, fractional: none where the two meet seamlessly,
-    /// and else the crossfade, but no more than half the slice before.
+    /// and else the crossfade, but no more than half the slice before, as it
+    /// plays or of its audio, so the fade in reads none of its start.
     fn crossfade_into(&self, song: &Song<'_>, k: usize, before: f64, start: f64) -> i64 {
         let (last, this) = (&self.slices[k - 1], &self.slices[k]);
         let (last_first, first) = (first_on(before), first_on(start));
@@ -374,9 +393,10 @@ impl Slices {
             && last.pitch == this.pitch
             && !ran_out
             && reads_the_same;
+        let audio = ((this.frame - last.frame) / (2.0 * step)) as i64;
         match seamless {
             true => 0,
-            false => song.crossfade().min((first - last_first) / 2),
+            false => song.crossfade().min((first - last_first) / 2).min(audio),
         }
     }
 
@@ -459,20 +479,20 @@ impl Slices {
             return;
         };
         let (end, length) = (t.end, gap.length);
-        let seam = gap.seam;
+        let (seam, fade) = (gap.seam, gap.fade);
         match t.transient_loop {
             TransientLoop::Forward => {
                 // Once through, then from the loop's start over and over,
                 // each time round fading in over a seam just before it, as
                 // the time before fades out.
                 let back_to = Some(gap.start - seam);
-                let fade = Ramp::falling(t.frame_of(end - seam), t.crossfade);
+                let fade_out = Ramp::falling(t.frame_of(end - seam), fade);
                 run(
                     first,
                     first_on(t.frame_of(end)),
                     first,
                     forward,
-                    &[fade],
+                    &[fade_out],
                     back_to,
                 );
                 let lowest = t.position(a as f64);
@@ -485,8 +505,8 @@ impl Slices {
                     let anchor = first_on(t.frame_of(into));
                     let at = t.position(anchor as f64) - pass as f64 * length;
                     let ramps = [
-                        Ramp::rising(t.frame_of(into), t.crossfade),
-                        Ramp::falling(t.frame_of(out - seam), t.crossfade),
+                        Ramp::rising(t.frame_of(into), fade),
+                        Ramp::falling(t.frame_of(out - seam), fade),
                     ];
                     let until = first_on(t.frame_of(out));
                     run(anchor, until, anchor, (at, step), &ramps, back_to);
@@ -494,33 +514,42 @@ impl Slices {
             }
             TransientLoop::BackAndForth => {
                 // Once through, then back to the loop's start and forward
-                // again, over and over, turning on the last frame of its
-                // audio, so it never reads the next slice's, or past the
-                // file's end.
-                let turn = end - 1.0;
-                let back_to = Some(gap.start - 1.0);
+                // again, over and over. Each turn crossfades over a seam
+                // from the reading one way to the reading the other, so a
+                // low note bends round rather than kinking where it turns.
+                // It turns half a seam before the last frame of its audio,
+                // so it never reads the next slice's, or past the file's
+                // end, and half a seam before the loop's start.
+                let half_seam = seam / 2.0;
+                let turn = end - 1.0 - half_seam;
+                let back_to = Some(gap.start - 1.0 - seam);
+                let fade_out = Ramp::falling(t.frame_of(turn - half_seam), fade);
                 run(
                     first,
-                    first_on(t.frame_of(turn)),
+                    first_on(t.frame_of(turn + half_seam)),
                     first,
                     forward,
-                    &[],
+                    &[fade_out],
                     back_to,
                 );
                 let lowest = t.position(a as f64);
                 let highest = t.position((b - 1) as f64);
-                let first_half = ((lowest - turn) / length).floor().max(0.0) as i64;
-                let last_half = ((highest - turn) / length).floor() as i64;
+                let first_half = ((lowest - turn - half_seam) / length).floor().max(0.0) as i64;
+                let last_half = ((highest - turn + half_seam) / length).floor() as i64;
                 for half in first_half..=last_half {
                     let into = turn + half as f64 * length;
-                    let anchor = first_on(t.frame_of(into));
+                    let anchor = first_on(t.frame_of(into - half_seam));
                     let unlooped = t.position(anchor as f64);
                     let reading = match half % 2 {
                         0 => (2.0 * turn + half as f64 * length - unlooped, -step),
                         _ => (unlooped - (half + 1) as f64 * length, step),
                     };
-                    let until = first_on(t.frame_of(into + length));
-                    run(anchor, until, anchor, reading, &[], back_to);
+                    let ramps = [
+                        Ramp::rising(t.frame_of(into - half_seam), fade),
+                        Ramp::falling(t.frame_of(into + length - half_seam), fade),
+                    ];
+                    let until = first_on(t.frame_of(into + length + half_seam));
+                    run(anchor, until, anchor, reading, &ramps, back_to);
                 }
             }
             TransientLoop::Off => unreachable!("a gap to loop"),
@@ -529,7 +558,8 @@ impl Slices {
 
     /// The stretch of its audio the slice `timing` places loops where its
     /// audio runs out, if its Transient Loop Mode loops and the stretch is
-    /// long enough to: four seams at least.
+    /// long enough to, with seams and turns no longer than the crossfades,
+    /// and no more than a quarter of each time through it.
     fn gap(&self, timing: &Timing) -> Option<Gap> {
         let t = timing;
         if t.transient_loop == TransientLoop::Off {
@@ -537,12 +567,14 @@ impl Slices {
         }
         let middle = (t.from + t.end) / 2.0;
         let start = middle.max(t.end - LOOP_SECONDS * f64::from(self.file_rate));
-        let seam = t.crossfade * t.step;
         let length = t.end - start;
-        (length >= 4.0 * seam).then_some(Gap {
+        let through = length / t.step;
+        let fade = t.crossfade.min(through / 4.0);
+        (through >= t.shortest_loop).then_some(Gap {
             start,
             length,
-            seam,
+            fade,
+            seam: fade * t.step,
         })
     }
 
@@ -563,7 +595,9 @@ struct Gap {
     /// Where it starts in the file, and how long it is, in the file's frames.
     start: f64,
     length: f64,
-    /// How many of the file's frames each seam crossfades over.
+    /// How many song frames each seam and turn crossfades over, and how
+    /// many of the file's frames they read.
+    fade: f64,
     seam: f64,
 }
 
