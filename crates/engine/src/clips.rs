@@ -2422,9 +2422,10 @@ mod tests {
     #[test]
     fn slices_the_song_plays_slower_fill_the_gap_as_their_loop_mode_says() {
         // Eighths at 120 BPM in a song at 60: each slice's audio runs out
-        // halfway to the next, and a quarter of a second of its second half
-        // loops.
+        // halfway to the next, 5 ms short of it, and about a quarter of a
+        // second of its second half loops.
         let slice = 24_000;
+        let guard = (slice::GUARD_SECONDS * 48_000.0) as usize;
         for transient_loop in TransientLoop::ALL {
             let mut clip = sliced(
                 audio_clip(0.0, 2.0, AudioClip::new("drums.wav")),
@@ -2436,20 +2437,22 @@ mod tests {
             let [left, _] = audio_at(&song_at(60.0), player, 0, 96_000, 64);
             for k in 0..3 {
                 let at = |into: usize| left[k * slice + into];
-                let (start, end) = (k * EIGHTH, (k + 1) * EIGHTH);
+                let start = k * EIGHTH;
+                let (end, next) = (start + EIGHTH - guard, start + EIGHTH);
                 // Once through, at the file's own speed.
                 assert_eq!(at(5_000), (start + 5_000) as f32);
                 // Then a hundred frames into the gap, and a loop later: from
                 // the middle again, or back from its last frame, which it
                 // turns on a frame before the gap, then forward from the
                 // middle.
-                let middle = start + EIGHTH / 2;
+                let middle = (start + end) / 2;
                 let expected = match transient_loop {
                     TransientLoop::Off => [0, 0],
                     TransientLoop::Forward => [middle + 100, middle + 100],
                     TransientLoop::BackAndForth => [end - 1 - 101, middle + 100],
                 };
-                for (into, expected) in [12_100, 18_100].into_iter().zip(expected) {
+                let into = end - start + 100;
+                for (into, expected) in [into, into + end - middle].into_iter().zip(expected) {
                     let e = (at(into) - expected as f32).abs();
                     assert!(
                         e < 1e-2,
@@ -2457,7 +2460,36 @@ mod tests {
                     );
                 }
                 // The next slice starts at full level, as its transient lands.
-                assert_eq!(at(slice), end as f32);
+                assert_eq!(at(slice), next as f32);
+            }
+        }
+    }
+
+    #[test]
+    fn a_slice_that_runs_out_stops_short_of_the_next_hit() {
+        // Eighths at 120 BPM in a song at 60, each slice's audio running out
+        // halfway: whatever fills the gap, nothing plays the 5 ms before the
+        // next slice's start until it fades in, as a transient found a hair
+        // late leaves the start of its hit there.
+        let (slice, fade, guard) = (24_000, 96, 240);
+        for transient_loop in TransientLoop::ALL {
+            let mut clip = sliced(
+                audio_clip(0.0, 2.0, AudioClip::new("drums.wav")),
+                120.0,
+                Some(&eighths(8)),
+            );
+            warp_of(&mut clip).slice.transient_loop = transient_loop;
+            let player = AudioClips::new().with_clip(&clip, Some(counting(100_000, 48_000)));
+            let [left, _] = audio_at(&song_at(60.0), player, 0, 96_000, 64);
+            for k in 0..3 {
+                let stop = ((k + 1) * EIGHTH - guard) as f32;
+                let gap = &left[k * slice..(k + 1) * slice - fade];
+                let (at, most) = (gap.iter().enumerate())
+                    .fold((0, 0.0f32), |a, (i, &s)| if s > a.1 { (i, s) } else { a });
+                assert!(
+                    most < stop,
+                    "{transient_loop:?}, slice {k}: frame {most} of the file, {at} in"
+                );
             }
         }
     }
@@ -2752,10 +2784,12 @@ mod tests {
         let reach = Resampler::most_reach(WIDEST) as i64;
         let next = (EIGHTH - 96) as i64 - reach + 1;
         assert_eq!(player.clips[0].read_start(&tempo, rate, 15_000), next);
-        // Looping forward, it holds from the loop's start, before its seam.
+        // Looping forward, it holds from the loop's start, before its seam:
+        // halfway through its audio, which stops 5 ms short of slice 1.
         warp_of(&mut clip).slice.transient_loop = TransientLoop::Forward;
         let player = play(&clip);
-        let back_to = (EIGHTH / 2 - 96) as i64;
+        let guard = (slice::GUARD_SECONDS * f64::from(rate)) as usize;
+        let back_to = ((EIGHTH - guard) / 2 - 96) as i64;
         assert_eq!(player.clips[0].read_start(&tempo, rate, 15_000), back_to);
     }
 

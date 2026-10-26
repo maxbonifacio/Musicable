@@ -133,6 +133,12 @@ struct SignalsmithStretch {
 	void setFormantBase(Sample baseFreq=0) {
 		formantBaseFreq = baseFreq;
 	}
+	// Changed for Musicable, 26 October 2026: the lowest frequency (as a
+	// fraction of the sample rate) of the bands that the long vertical
+	// phase steps link. 0, as released, links them all.
+	void setLongVerticalFrom(Sample freq=0) {
+		longVerticalFrom = freq;
+	}
 	
 	// Provide previous input ("pre-roll") to smoothly change the input location without interrupting the output.  This doesn't do any calculation, just copies intput to a buffer.
 	// You should ideally feed it `seekLength()` frames of input, unless it's directly after a `.reset()` (in which case `.outputSeek()` might be a better choice)
@@ -635,6 +641,11 @@ private:
 		
 		Sample smoothingBins = Sample(stft.fftSamples())/stft.defaultInterval();
 		int longVerticalStep = static_cast<int>(std::round(smoothingBins));
+		// Changed for Musicable, 26 October 2026: long vertical steps only
+		// between bands from `longVerticalFrom` up. They link bands about
+		// as far apart as a low note's harmonics, and linking two harmonics'
+		// phases split each into tones a band apart.
+		int longVerticalBand = std::max(0, static_cast<int>(std::ceil(freqToBand(longVerticalFrom))));
 		timeFactor = std::max<Sample>(timeFactor, 1/maxCleanStretch);
 		bool randomTimeFactor = (timeFactor > maxCleanStretch);
 		std::uniform_real_distribution<Sample> timeFactorDist(maxCleanStretch*2*randomTimeFactor - timeFactor, timeFactor);
@@ -753,7 +764,7 @@ private:
 					auto &downBin = bins[b - 1];
 					phase += _impl::mul(downBin.output, shortVerticalTwist);
 					
-					if (b >= longVerticalStep) {
+					if (b >= longVerticalStep && b - longVerticalStep >= longVerticalBand) { // Changed for Musicable, 26 October 2026
 						Complex longDownInput = getFractional<&Band::input>(maxChannel, mapPoint.inputBin - longVerticalStep*binTimeFactor);
 						Complex longVerticalTwist = _impl::mul<true>(prediction.input, longDownInput);
 
@@ -773,7 +784,7 @@ private:
 					auto &upBin = bins[b + 1];
 					phase += _impl::mul<true>(upBin.output, shortVerticalTwist);
 					
-					if (b < bands - longVerticalStep) {
+					if (b < bands - longVerticalStep && b >= longVerticalBand) { // Changed for Musicable, 26 October 2026
 						auto &longUpPrediction = predictions[b + longVerticalStep];
 						auto &longUpMapPoint = outputMap[b + longVerticalStep];
 
@@ -969,6 +980,7 @@ private:
 	
 	std::vector<Sample> formantMetric;
 	Sample formantBaseFreq = 0;
+	Sample longVerticalFrom = 0; // Changed for Musicable, 26 October 2026
 	void updateFormants(size_t step) {
 		if (step-- == 0) {
 			for (auto &e : formantMetric) e = 0;

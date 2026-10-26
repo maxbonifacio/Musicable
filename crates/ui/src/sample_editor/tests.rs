@@ -862,7 +862,7 @@ fn the_mode_menu_and_slice_s_settings_set_the_clip_s_warp() {
     // Slice's settings show, and its transpose and detune play.
     let menus = [
         ("Preserve", "Transients", "1/8"),
-        ("Transient Loop Mode", "Forward", "Back-and-Forth"),
+        ("Transient Loop Mode", "Back-and-Forth", "Forward"),
     ];
     for (menu, shown, option) in menus {
         let chooser = harness.get_by_role_and_label(Role::ComboBox, menu);
@@ -885,7 +885,7 @@ fn the_mode_menu_and_slice_s_settings_set_the_clip_s_warp() {
     let warp = harness.state().warp();
     let settings = SliceSettings {
         preserve: Preserve::Eighth,
-        transient_loop: TransientLoop::BackAndForth,
+        transient_loop: TransientLoop::Forward,
         envelope: 40.0,
     };
     assert_eq!(warp.slice, settings);

@@ -8,8 +8,11 @@
 //! next slice starts. A slice the song plays faster than the file is cut
 //! short by the next, and one it plays slower runs out of audio first, and
 //! its [`TransientLoop`] fills the gap: silence, the second half of the
-//! slice over and over, or that half backwards and forwards. Its Transient
-//! Envelope fades it as it plays.
+//! slice over and over, or that half backwards and forwards. One that runs
+//! out stops a few milliseconds short of the next slice's start, so neither
+//! its end nor its loop plays the start of the next hit, which a transient
+//! found a hair late leaves there. Its Transient Envelope fades it as it
+//! plays.
 //!
 //! Like the rest of the player, a slice's every frame comes from where the
 //! frame is in the song, so slices render the same however the blocks fall.
@@ -50,6 +53,14 @@ const QUICKEST_DECAY_SECONDS: f64 = 0.001;
 /// so a slice the song plays at the file's own speed never has, however its
 /// positions round.
 const RUN_OUT: f64 = 0.5;
+
+/// How far short of the next slice's start a slice that runs out stops, in
+/// the file's time, and no more than a quarter of its audio: five
+/// milliseconds. A transient found a fraction of a millisecond after its
+/// hit starts leaves the start of the hit at the end of the slice before,
+/// which would click as that slice's audio ends, and at every turn of its
+/// loop. The next slice's fade in plays the last two milliseconds.
+pub(super) const GUARD_SECONDS: f64 = 0.005;
 
 /// A warped clip's slices, as Slice plays them.
 #[derive(Debug)]
@@ -120,7 +131,8 @@ struct Timing {
     fade_out: i64,
     /// The file's frames it moves on each song frame.
     step: f64,
-    /// Where its audio starts and ends in the file.
+    /// Where its audio starts and ends in the file: where the next slice
+    /// starts, or short of it for a slice that runs out.
     from: f64,
     end: f64,
     /// Whether its audio runs out before the next slice starts, and what
@@ -295,6 +307,12 @@ impl Slices {
         let (from, end) = (slice.frame, self.slices[k + 1].frame);
         let crossfade = song.crossfade();
         let runs_out = from + ((next - 1) as f64 - start) * step >= end + RUN_OUT;
+        // One that runs out stops short of the next slice's start, and the
+        // last plays to the file's end.
+        let end = match runs_out && k + 1 < self.count() {
+            true => end - (GUARD_SECONDS * f64::from(self.file_rate)).min((end - from) / 4.0),
+            false => end,
+        };
         let fade_in = match k {
             0 => 0,
             _ => self.crossfade_into(song, k, self.start(song, k - 1), start),

@@ -192,8 +192,10 @@ its sound and its pitch at any tempo. Where the song plays the file faster
 than its own speed, each slice is cut short where the next starts, with a
 fade of two milliseconds so the cut doesn't click. Where it plays slower, a
 slice's audio runs out before the next one starts, and Loop says what fills
-the gap. At the file's own speed, with no transpose and no envelope, Slice
-plays the file sample for sample.
+the gap. A slice that runs out stops five milliseconds short of the next
+one, so neither its end nor its loop plays the start of the next hit. At
+the file's own speed, with no transpose and no envelope, Slice plays the
+file sample for sample.
 
 Its settings are under the mode in the Sample Editor:
 
@@ -206,7 +208,8 @@ Its settings are under the mode in the Sample Editor:
   audio runs out: **Off**, silence until the next slice, **Forward**, the
   end of the slice over and over, or **Back-and-Forth**, the end of the
   slice backwards and forwards. The end it loops is the slice's second
-  half, or its last half second in a longer slice.
+  half, or its last half second in a longer slice. A clip starts on
+  Back-and-Forth, as Live's does.
 - **Envelope**, Live's Transient Envelope, fades each slice as it plays.
   At 100 it doesn't fade, and the lower it is, the quicker each slice fades
   for its length: at 60, a slice has faded to about a third by where the

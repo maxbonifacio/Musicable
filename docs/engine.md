@@ -584,7 +584,11 @@ on.
   same frames, as at the file's own speed, there's no crossfade, so the
   clip plays the file sample for sample, as Re-Pitch would.
 - A slice runs out once it would read half a frame or more past its audio
-  before the next starts, as where the song plays it slower. Transient Loop
+  before the next starts, as where the song plays it slower. Its audio then
+  stops 5 ms short of the next slice's start (`GUARD_SECONDS`), or a quarter
+  of the way back in a shorter slice, as a transient found a hair after its
+  hit starts leaves the start of the hit there, which would click as the
+  audio ends and at every turn of a loop. Transient Loop
   Mode fills the gap: Off fades out over up to 2 ms as the audio ends;
   Forward loops from the middle of the slice, or from half a second before
   its end where that's later, crossfading over 2 ms at each seam; and
@@ -682,6 +686,11 @@ render ([app.md](app.md#the-render-cache)).
   a voice at 250 Hz (`FORMANT_BASE` in `crates/stretch/src/lib.rs`), as
   Signalsmith Stretch's own guess at a voice's pitch comes to almost
   nothing for some voices, which then come out far quieter.
+- The stretcher links each band's phase to the bands four or five along,
+  31 to 36 Hz away, only from 1 kHz up (`LONG_STEPS_FROM`, a change Musicable
+  made to the vendored header): a low note's harmonics are about that far
+  apart, and linking two of them split each into tones a band apart, which
+  made a bass under 50 Hz sound split and beating.
 - A segment's key (`SegmentPlan::key`) hashes all its render depends on:
   the plan's and the stretcher's versions, the seed, the rate, the
   channels, its length, where it reads from and how fast, and each call's

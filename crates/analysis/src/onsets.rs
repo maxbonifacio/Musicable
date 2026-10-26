@@ -29,6 +29,10 @@ const BEFORE: f64 = 0.020;
 const AFTER: f64 = 0.030;
 const PAST: f64 = 0.015;
 const GAP: f64 = 0.002;
+/// The attack starts where its rise first reached this much of its size:
+/// at half, a hit over other sound came out up to 3 ms late, and a slice
+/// cut there left the start of the hit to the slice before.
+const START: f64 = 0.1;
 /// The envelope's release, and how long it settles before it's read.
 const RELEASE: f64 = 0.010;
 const SETTLE: f64 = 0.050;
@@ -150,9 +154,9 @@ pub(crate) fn refine(
                 (best, top) = (i, rise);
             }
         }
-        // Back to where the rise first reached half its size.
+        // Back to where the rise first reached a tenth of its size.
         let mut start = best;
-        while start > 0 && rises[start - 1] >= 0.5 * top {
+        while start > 0 && rises[start - 1] >= START * top {
             start -= 1;
         }
         let frame = (lo + start as i64).max(0);
@@ -334,6 +338,39 @@ mod tests {
         if let Some(swell) = swell {
             assert!(swell.percussiveness < 0.3, "{swell:?}");
         }
+    }
+
+    #[test]
+    fn an_attack_over_other_sound_is_found_where_it_starts() {
+        // A tone rising over 3 ms, over noise about 25 dB down: the onset is
+        // where its rise starts, not partway up, where a slice cut there
+        // would leave the start of the attack to the slice before.
+        let rate = f64::from(SAMPLE_RATE);
+        let mut noise = 12_345u32;
+        let mut samples: Vec<f32> = (0..2 * SAMPLE_RATE as usize)
+            .map(|_| {
+                noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (f64::from(noise) / f64::from(u32::MAX) - 0.5) as f32 * 0.1
+            })
+            .collect();
+        let start = 44_223;
+        for (k, sample) in samples[start..start + 20_000].iter_mut().enumerate() {
+            let t = k as f64 / rate;
+            let gain = (t / 0.003).min(1.0) * (-t / 0.4).exp();
+            let tone: f64 = (1..8)
+                .map(|h| (std::f64::consts::TAU * 220.0 * f64::from(h) * t).sin() / f64::from(h))
+                .sum();
+            *sample += (0.4 * gain * tone) as f32;
+        }
+        let onsets = onsets_of(&samples);
+        let onset = (onsets.iter())
+            .min_by_key(|o| o.frame.abs_diff(start as u64))
+            .unwrap();
+        let ms = (onset.frame as f64 - start as f64) / rate * 1000.0;
+        assert!(
+            (-2.0..=1.0).contains(&ms),
+            "found {ms:+.2} ms from its start"
+        );
     }
 
     #[test]

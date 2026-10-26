@@ -37,7 +37,8 @@ read again to mark their periods. The `Analysis` it returns holds:
 | `pitch` | Where each period of its pitch starts, in each stretch with one (`PitchMarks`): runs of marks, kept in 64ths of a frame as the first and the period to each next ([Pitch marks](#pitch-marks)) |
 
 `VERSION` goes up when what it finds changes, so the cache can analyse a
-sound again: 2 added the pitch marks.
+sound again: 2 added the pitch marks, and 3 moved each onset back to where
+its attack starts.
 
 ## Onsets
 
@@ -60,7 +61,9 @@ most: below 200 Hz, 200 Hz to 4 kHz, or above, split by cascaded one-pole
 filters. In that band, a peak envelope with a 10 ms release is read from
 20 ms before the frame to 30 ms after. The onset is where the envelope's
 rise over its loudest of 2 to 15 ms before is largest, moved back to where
-that rise first reached half its size. On the synthetic grooves in the
+that rise first reached a tenth of its size. Moved back only to half, a hit
+over other sound came out up to 3 ms late, and Slice, cutting there, left
+the start of the hit to the slice before. On the synthetic grooves in the
 tests, 99% of onsets land within a millisecond. Percussiveness is how soon
 the attack peaks, from 1 within 2 ms to 0 at 40 ms, scaled down for a rise
 of less than 9 dB.
