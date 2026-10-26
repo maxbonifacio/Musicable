@@ -384,7 +384,7 @@ mod tests {
             (SET_TRANSPOSE, "semitones", (-7_i64).into()),
             (SET_DETUNE, "cents", 12_i64.into()),
             (SET_PRESERVE, "preserve", "1/8".into()),
-            (SET_TRANSIENT_LOOP, "mode", "back_and_forth".into()),
+            (SET_TRANSIENT_LOOP, "mode", "forward".into()),
             (SET_TRANSIENT_ENVELOPE, "envelope", 40.0.into()),
             (SET_FOLLOW_PITCH, "on", false.into()),
             (SET_GRAIN_SIZE, "milliseconds", 65.0.into()),
@@ -404,7 +404,7 @@ mod tests {
             warp.slice,
             SliceSettings {
                 preserve: Preserve::Eighth,
-                transient_loop: TransientLoop::BackAndForth,
+                transient_loop: TransientLoop::Forward,
                 envelope: 40.0,
             }
         );

@@ -742,6 +742,14 @@ fn automation() -> Project {
     project
 }
 
+/// A warp as `Warp::new` makes one, but with Slice looping forward, as a
+/// new clip's did until 26 October 2026: every version's files hold that.
+fn warp(frame: u64, beat: Beats, tempo: f64) -> Warp {
+    let mut warp = Warp::new(frame, beat, tempo);
+    warp.slice.transient_loop = TransientLoop::Forward;
+    warp
+}
+
 /// Warping, from version 11: a loop warped with one marker at a tempo of
 /// its own; a vocal with markers that slow it down and speed it up, from
 /// before its own time's zero, starting before its first marker, with a
@@ -766,13 +774,13 @@ fn warping() -> Project {
     let breaks = warped(
         "Loops/Break 120 BPM.wav",
         Beats::ZERO,
-        Warp::new(0, Beats::ZERO, 120.0),
+        warp(0, Beats::ZERO, 120.0),
     );
     let breaks = project.new_clip("Break", beats(0, 8), ClipContent::Audio(breaks));
     let slowest = warped(
         "Pad.wav",
         Beats::new(-2),
-        Warp::new(
+        warp(
             MAX_TICKS as u64,
             Beats::from_ticks(MAX_TICKS),
             Warp::MIN_TEMPO,
@@ -782,7 +790,7 @@ fn warping() -> Project {
     let fastest = warped(
         "Hats.wav",
         Beats::from_ticks(-MAX_TICKS),
-        Warp::new(12_345, Beats::from_ticks(-MAX_TICKS), Warp::MAX_TEMPO),
+        warp(12_345, Beats::from_ticks(-MAX_TICKS), Warp::MAX_TEMPO),
     );
     let fastest = project.new_clip("Fastest", beats(16, 17), ClipContent::Audio(fastest));
     project.track_mut(drums).unwrap().clips = vec![breaks, slowest, fastest];
@@ -796,7 +804,7 @@ fn warping() -> Project {
                 marker(48_000, Beats::new(1)),
                 marker(60_000, Beats::from_ratio(10, 3)),
             ],
-            ..Warp::new(0, Beats::ZERO, 90.0)
+            ..warp(0, Beats::ZERO, 90.0)
         },
     );
     vocal.gain = 0.5;
@@ -818,7 +826,7 @@ fn warping() -> Project {
     );
     let take = project.new_clip("Vocal", beats(8, 12), ClipContent::Audio(take));
     let mut first = project.new_take("Take 1");
-    let looped = warped("Vocal.wav", Beats::new(1), Warp::new(0, Beats::ZERO, 64.5));
+    let looped = warped("Vocal.wav", Beats::new(1), warp(0, Beats::ZERO, 64.5));
     first
         .clips
         .push(project.new_clip("Vocal", beats(4, 12), ClipContent::Audio(looped)));
@@ -848,7 +856,7 @@ fn transients() -> Project {
         audio.offset = Offset::Beats(Beats::ZERO);
         audio.warp = Some(Warp {
             onsets,
-            ..Warp::new(0, Beats::ZERO, 120.0)
+            ..warp(0, Beats::ZERO, 120.0)
         });
         audio
     };
@@ -896,7 +904,7 @@ fn slicing() -> Project {
             transient_loop,
             envelope,
         },
-        ..Warp::new(0, Beats::ZERO, 120.0)
+        ..warp(0, Beats::ZERO, 120.0)
     };
     let mut clips = Vec::new();
     let loops = [
@@ -914,7 +922,7 @@ fn slicing() -> Project {
     let mut lowest = slice(Preserve::Transients, TransientLoop::Forward, 100.0);
     (lowest.transpose, lowest.detune) = (-Warp::TRANSPOSE_MAX, -Warp::DETUNE_MAX);
     let lowest = project.new_clip("Low", beats(28, 32), ClipContent::Audio(warped(lowest)));
-    let mut kept = Warp::new(0, Beats::ZERO, 120.0);
+    let mut kept = warp(0, Beats::ZERO, 120.0);
     (kept.transpose, kept.detune) = (Warp::TRANSPOSE_MAX, Warp::DETUNE_MAX);
     kept.slice.preserve = Preserve::Sixteenth;
     let kept = project.new_clip("Kept", beats(32, 36), ClipContent::Audio(warped(kept)));
@@ -966,7 +974,7 @@ fn spectral() -> Project {
             formants,
             ..SpectralSettings::default()
         },
-        ..Warp::new(0, Beats::ZERO, 96.0)
+        ..warp(0, Beats::ZERO, 96.0)
     };
     let mix = warped("Mixes/Song.wav", spectral(SpectralSettings::FORMANTS_MAX));
     let mix = project.new_clip("Song", beats(0, 16), ClipContent::Audio(mix));
@@ -1017,7 +1025,7 @@ fn high_quality() -> Project {
             envelope,
             ..SpectralSettings::default()
         },
-        ..Warp::new(0, Beats::ZERO, 96.0)
+        ..warp(0, Beats::ZERO, 96.0)
     };
     let mix = warped(
         "Mixes/Song.wav",
@@ -1072,7 +1080,7 @@ fn granular() -> Project {
             grain_size,
             fluctuation,
         },
-        ..Warp::new(0, Beats::ZERO, 96.0)
+        ..warp(0, Beats::ZERO, 96.0)
     };
     let vox = granular(true, GranularSettings::GRAIN_SIZE_DEFAULT, 25.0);
     let vox = project.new_clip(

@@ -10,7 +10,7 @@ bindgen.
 The time-stretch and pitch-shift that the Spectral warp mode renders with,
 by Geraint Luff and Signalsmith Audio Ltd, under the MIT licence: each
 folder has its `LICENSE.txt`. Both are header-only C++ libraries, copied
-here as they were released, unchanged:
+here as they were released, with one change to Stretch below:
 
 - `signalsmith-stretch/signalsmith-stretch.h`: Signalsmith Stretch 1.4.0,
   the release tagged `1.4.0` at
@@ -22,9 +22,26 @@ here as they were released, unchanged:
   the rest of the library, which these don't include, or its optional back
   ends, which Musicable doesn't turn on.
 
-To update them, copy the new releases' files over these, change the
-versions here, and bump `VERSION` in `../src/lib.rs`, so the render cache
-renders again with the new code.
+Musicable changed `signalsmith-stretch/signalsmith-stretch.h` on 26
+October 2026; each change is marked "Changed for Musicable, 26 October
+2026". As it makes each spectrum, Stretch links each band's phase to the
+bands either side and to the bands a block over an interval along, four or
+five with the default preset, 31 to 36 Hz away (its long vertical steps). A low
+note's harmonics are about that far apart, and linking two of them split
+each into tones a band apart: a bass on 41 Hz played at 0.8x kept about a
+quarter of its energy on its harmonics. `setLongVerticalSplit` leaves two
+bands below a frequency unlinked when the energy between them dips below a
+share of the weaker one's, taking each band's energy as its lowest over the
+last few spectra: the dip marks two harmonics, and one sound spread over
+both bands, such as a click, has none. `findLongVerticalSplits` works out
+which bands those are as each spectrum's main prediction starts. Musicable
+sets 1 kHz, a quarter and three spectra (`SPLIT_LONG_STEPS_BELOW` and the
+constants after it in `../src/lib.rs`); released, the steps link every
+band.
+
+To update them, copy the new releases' files over these, apply the change
+to Stretch again, change the versions here, and bump `VERSION` in
+`../src/lib.rs`, so the render cache renders again with the new code.
 
 ## Rubber Band Library
 

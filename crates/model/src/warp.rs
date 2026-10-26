@@ -163,11 +163,11 @@ impl SliceSettings {
 }
 
 impl Default for SliceSettings {
-    /// Live's: cut at the transients, loop forward, and no fade.
+    /// Live's: cut at the transients, loop back and forth, and no fade.
     fn default() -> Self {
         Self {
             preserve: Preserve::Transients,
-            transient_loop: TransientLoop::Forward,
+            transient_loop: TransientLoop::BackAndForth,
             envelope: Self::ENVELOPE_MAX,
         }
     }
@@ -1375,7 +1375,7 @@ mod tests {
         let warp = Warp::new(0, Beats::ZERO, 120.0);
         assert_eq!((warp.transpose, warp.detune), (0, 0));
         assert_eq!(warp.slice, SliceSettings::default());
-        assert_eq!(warp.slice.transient_loop, TransientLoop::Forward);
+        assert_eq!(warp.slice.transient_loop, TransientLoop::BackAndForth);
         assert_eq!(warp.slice.envelope, SliceSettings::ENVELOPE_MAX);
         assert!(warp.granular.follow_pitch);
         assert_eq!(warp.granular.grain_size, 30.0);

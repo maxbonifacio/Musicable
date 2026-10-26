@@ -33,9 +33,11 @@ pub mod rubber_band;
 pub use rubber_band::{RUBBER_BAND_VERSION, RubberBand};
 
 /// Changes when what a stretcher renders from the same calls may change: a
-/// new release of the vendored code, or a new preset. The render cache keys
-/// its segments with it, so they're rendered again.
-pub const VERSION: u32 = 1;
+/// new release of the vendored code, a change to it, or a new preset. The
+/// render cache keys its segments with it, so they're rendered again: 3
+/// leaves bands four or five apart below `SPLIT_LONG_STEPS_BELOW` unlinked
+/// when the energy dips between them.
+pub const VERSION: u32 = 3;
 
 /// The most channels a stretcher takes.
 pub const MAX_CHANNELS: usize = 8;
@@ -53,6 +55,37 @@ pub const MAX_CHANNELS: usize = 8;
 /// Hz, where the voice also came out 3 to 5 dB quieter. A lower pitch keeps
 /// more of a low voice's formants and leaves a high voice quieter still.
 const FORMANT_BASE: f64 = 250.0;
+
+/// Below this many Hz, the stretcher leaves two bands four or five apart,
+/// 31 to 36 Hz away, unlinked when the energy between them dips under
+/// `SPLIT_LONG_STEPS_DEPTH` times the weaker one's, taking each band's
+/// energy as its lowest over the last `SPLIT_LONG_STEPS_SPECTRA` spectra.
+/// As it makes each spectrum, the stretcher links each band's phase to the
+/// bands that far along, its long vertical steps. A low note's harmonics
+/// are about that far apart, and linking two of them split each into tones
+/// a band apart: a bass on 41 Hz played at 0.8x kept 27% of its energy on
+/// its harmonics, and a mix's bass on 44 Hz beat twice as much as in Live's
+/// Complex. A dip between two bands tells two harmonics apart from one
+/// sound spread over both, such as a click, which stays linked. Held notes
+/// from 30 to 65 Hz now keep 99.7% to 100% of their energy on their
+/// harmonics at 0.8x and 1.25x. Leaving every band below 1 kHz unlinked
+/// fixed the bass as well, but drums and mixes below 1 kHz then followed
+/// their source less closely.
+const SPLIT_LONG_STEPS_BELOW: f64 = 1000.0;
+
+/// How deep a dip leaves two bands unlinked, as a share of the weaker
+/// band's energy. At 48 kHz, a note of 30 Hz has its harmonics about four
+/// bands apart, with shallow dips between them: with a tenth, it kept only
+/// 84% of its energy on them at 0.8x.
+const SPLIT_LONG_STEPS_DEPTH: f32 = 0.25;
+
+/// Over how many spectra, 30 ms apart, each band's energy is its lowest. A
+/// drum hit over a bass fills the dips between the bass's harmonics for a
+/// spectrum or two, and with only the latest spectrum the steps linked them
+/// again at each hit: a bass on 30 Hz under drums, at 48 kHz, kept 65% of
+/// its energy on its harmonics at 0.8x, against 68% with three spectra and
+/// 77% in the source.
+const SPLIT_LONG_STEPS_SPECTRA: c_int = 3;
 
 mod ffi {
     use std::ffi::c_int;
@@ -82,6 +115,12 @@ mod ffi {
             compensate_pitch: c_int,
         );
         pub(crate) fn musicable_stretch_set_formant_base(stretch: *mut RawStretch, frequency: f32);
+        pub(crate) fn musicable_stretch_split_long_steps(
+            stretch: *mut RawStretch,
+            frequency: f32,
+            depth: f32,
+            spectra: c_int,
+        ) -> c_int;
         pub(crate) fn musicable_stretch_seek(
             stretch: *mut RawStretch,
             inputs: *const *const f32,
@@ -137,9 +176,20 @@ impl Stretch {
             unsafe { ffi::musicable_stretch_new(channels as c_int, sample_rate as f32, seed) };
         let raw = NonNull::new(raw).expect("no memory for a stretcher");
         let base = FORMANT_BASE / f64::from(sample_rate);
+        let split_below = SPLIT_LONG_STEPS_BELOW / f64::from(sample_rate);
         // SAFETY: `raw` is a live stretcher, and this its only user.
-        unsafe { ffi::musicable_stretch_set_formant_base(raw.as_ptr(), base as f32) };
-        Self { raw, channels }
+        let split = unsafe {
+            ffi::musicable_stretch_set_formant_base(raw.as_ptr(), base as f32);
+            ffi::musicable_stretch_split_long_steps(
+                raw.as_ptr(),
+                split_below as f32,
+                SPLIT_LONG_STEPS_DEPTH,
+                SPLIT_LONG_STEPS_SPECTRA,
+            )
+        };
+        let stretch = Self { raw, channels };
+        assert!(split != 0, "no memory for a stretcher");
+        stretch
     }
 
     pub fn channels(&self) -> usize {
@@ -507,6 +557,76 @@ mod tests {
         assert_eq!(output.len(), input.len() * 5 / 4);
         let heard = frequency(&output[RATE as usize / 2..]);
         assert!((heard - 440.0).abs() < 3.0, "{heard}");
+    }
+
+    /// A sawtooth on `frequency` at `rate`, with its harmonics up to 1 kHz.
+    fn saw(frequency: f64, rate: u32, frames: usize) -> Vec<f32> {
+        let harmonics = (1000.0 / frequency) as u32;
+        let sample = |n: usize| {
+            let t = n as f64 / f64::from(rate);
+            let harmonic = |k: u32| (TAU * frequency * f64::from(k) * t).sin() / f64::from(k);
+            (0.2 * (1..=harmonics).map(harmonic).sum::<f64>()) as f32
+        };
+        (0..frames).map(sample).collect()
+    }
+
+    /// The power of `signal`, at `rate`, at `frequency`, through a Hann
+    /// window.
+    fn power_at(signal: &[f32], rate: u32, frequency: f64) -> f64 {
+        let n = signal.len() as f64;
+        let turn = TAU * frequency / f64::from(rate);
+        let (mut re, mut im) = (0.0, 0.0);
+        for (i, &s) in signal.iter().enumerate() {
+            let hann = 0.5 - 0.5 * (TAU * i as f64 / n).cos();
+            let x = f64::from(s) * hann;
+            re += x * (turn * i as f64).cos();
+            im -= x * (turn * i as f64).sin();
+        }
+        re * re + im * im
+    }
+
+    /// Of the energy of `signal`, at `rate`, around each of the first four
+    /// harmonics of `frequency`, within 0.4 times `frequency`, how much is
+    /// within 1 Hz of it, which over a second holds all of a steady tone's.
+    fn on_harmonics(signal: &[f32], rate: u32, frequency: f64) -> f64 {
+        let reach = (0.4 * frequency) as i32;
+        let (mut on, mut around) = (0.0, 0.0);
+        for k in 1..=4 {
+            for offset in -reach..=reach {
+                let power = power_at(signal, rate, frequency * f64::from(k) + f64::from(offset));
+                around += power;
+                if offset.abs() <= 1 {
+                    on += power;
+                }
+            }
+        }
+        on / around
+    }
+
+    #[test]
+    fn a_low_note_played_slower_keeps_its_harmonics() {
+        // A bass on 41 Hz, E1, at 0.8x. Linking the phases of bands about as
+        // far apart as its harmonics split each into tones beside it, and
+        // left only 27% of its energy on them.
+        let input = saw(41.2, RATE, RATE as usize * 3);
+        let mut stretch = Stretch::new(1, RATE, 1);
+        let output = stretched(&mut stretch, &input, 512, 1.25);
+        let kept = on_harmonics(&output[RATE as usize..2 * RATE as usize], RATE, 41.2);
+        assert!(kept > 0.9, "{:.1}% on its harmonics", 100.0 * kept);
+    }
+
+    #[test]
+    fn a_note_with_its_harmonics_four_bands_apart_keeps_them() {
+        // A bass on 30 Hz at 48 kHz, at 0.8x: its harmonics come 3.84 bands
+        // apart, about as far as the long steps reach, with shallow dips
+        // between them. As released, it kept 51% of its energy on them, and
+        // leaving two bands unlinked only across a dip a tenth deep, 84%.
+        let rate = 48_000;
+        let input = saw(30.0, rate, rate as usize * 3);
+        let mut stretch = Stretch::new(1, rate, 1);
+        let output = stretched(&mut stretch, &input, 512, 1.25);
+        let kept = on_harmonics(&output[rate as usize..2 * rate as usize], rate, 30.0);
+        assert!(kept > 0.95, "{:.1}% on its harmonics", 100.0 * kept);
     }
 
     #[test]

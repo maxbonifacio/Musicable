@@ -42,7 +42,7 @@ use audio::CHUNK;
 
 /// The analysis's version. A result kept from an older one is analysed
 /// again.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The network's beats move to an onset this near them, and the classic
 /// tracker's, on 10 ms frames, to one within three frames.

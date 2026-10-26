@@ -67,6 +67,18 @@ void musicable_stretch_set_formant_base(musicable_stretch *stretch, float freque
     stretch->stretcher.setFormantBase(frequency);
 }
 
+// `frequency` is a fraction of the sample rate. The setter is Musicable's
+// change to the vendored header. Allocates, and says whether it could.
+int musicable_stretch_split_long_steps(musicable_stretch *stretch, float frequency, float depth,
+                                       int spectra) {
+    try {
+        stretch->stretcher.setLongVerticalSplit(frequency, depth, spectra);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 int musicable_stretch_seek(musicable_stretch *stretch, const float *const *inputs, int frames,
                            double rate) {
     try {
