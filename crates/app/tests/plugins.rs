@@ -3,8 +3,9 @@
 //! says it's installed, plays, and comes back from the project's file as it
 //! was saved. Changes made in its window are steps in the undo history, and
 //! the ones it makes on its own aren't, so redo carries on past them. Its
-//! parameters follow their automation until someone turns them by hand. A
-//! missing plugin lets the sound through and says why. Delay compensation
+//! parameters follow their automation until someone turns them by hand. Its
+//! own Bypass is its device's. A missing plugin lets the sound through and
+//! says why. Delay compensation
 //! lines a latent plugin up with a dry track to the sample, also after the
 //! plugin's latency changes. And the app's binary scans each library in a
 //! process of its own, so a library that crashes takes only that process
@@ -29,7 +30,7 @@ use musicable_plugins::scan::{self, Outcome};
 use musicable_plugins::{Instance, ParentWindow, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
 use musicable_test_plugins::vst3::VST3_GAIN_ID;
-use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, gui};
+use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, gui};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -515,6 +516,76 @@ fn follows_its_automation(format: PluginFormat) {
     near(rig.peaks(), half);
     rig.session.run(&automation::RE_ENABLE).unwrap();
     near(rig.peaks(), quarter);
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_plugins_own_bypass_is_its_devices() {
+    // Test Gain's Bypass is CLAP's: the VST3 one has none.
+    let plugins = TestPlugins::new(PluginFormat::Clap, "own-bypass");
+    let (song, device) = tone_with(|p| plugins.gain(p, with_param(GAIN, 0.25)));
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    let wet = times(TONE, 0.25);
+    near(rig.peaks(), wet);
+    let bypassed = |rig: &Rig| {
+        let (_, _, found) = rig.session.project().find_device(device.id).unwrap();
+        found.bypassed
+    };
+    let own = |rig: &Rig| rig.session.plugin(device.id).unwrap().param_value(BYPASS);
+
+    // Clicked in the plugin's window, its Bypass bypasses the device, as a
+    // step in the undo history. It isn't one of the plugin's settings.
+    let instance = rig.session.plugin(device.id).unwrap();
+    plugins.gui(instance, gui::BEGIN, BYPASS, 0.0);
+    plugins.gui(instance, gui::VALUE, BYPASS, 1.0);
+    plugins.gui(instance, gui::END, BYPASS, 0.0);
+    near(rig.peaks(), TONE);
+    assert!(bypassed(&rig));
+    assert_eq!(rig.session.undo_name(), Some("Bypass Test Gain"));
+    assert_eq!(rig.settings(device.id).param(BYPASS), None);
+
+    // Undone, the device comes back, and the plugin's Bypass turns off.
+    rig.session.run(&edit::UNDO).unwrap();
+    assert!(!bypassed(&rig));
+    assert_eq!(own(&rig), Some(0.0));
+    near(rig.peaks(), wet);
+
+    // Bypassing the device turns the plugin's Bypass on, once the device
+    // has faded out and the plugin has stopped.
+    let set = |bypassed: bool| {
+        Args::new()
+            .with("devices", vec![device.id])
+            .with("bypassed", bypassed)
+    };
+    rig.session.run_with(&device::SET_BYPASS, &set(true)).unwrap();
+    assert_eq!(own(&rig), Some(0.0));
+    near(rig.peaks(), TONE);
+    assert_eq!(own(&rig), Some(1.0));
+
+    // A project the device isn't bypassed in plays it, whatever the
+    // plugin's state says.
+    let mut saved = rig.session.saved_project();
+    saved.device_mut(device.id).unwrap().bypassed = false;
+    drop(rig);
+    let mut rig = Rig::new(saved, None);
+    rig.install(&plugins);
+    assert_eq!(own(&rig), Some(0.0));
+    near(rig.peaks(), wet);
+
+    // While a lane moves the device's Bypass, the plugin's stays off.
+    let args = Args::new()
+        .with("param", ParamAddress::Bypass(device.id))
+        .with("at", vec![Beats::ZERO])
+        .with("values", vec![1.0]);
+    rig.session
+        .run_with(&automation::SET_POINTS, &args)
+        .unwrap();
+    near(rig.peaks(), TONE);
+    assert_eq!(own(&rig), Some(0.0));
+    rig.session.run_with(&device::SET_BYPASS, &set(false)).unwrap();
+    near(rig.peaks(), wet);
     drop(rig);
     plugins.assert_alright();
 }

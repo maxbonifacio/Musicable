@@ -17,6 +17,7 @@ use clap_sys::events::{
 };
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use musicable_engine::nodes::Sum;
+use musicable_engine::switch::Switch;
 use musicable_engine::{
     AudioMut, AudioRef, Engine, EngineConfig, Event, Graph, Inputs, Node, NodeEvent, NodeEventKind,
     NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId, ProcessContext,
@@ -24,8 +25,8 @@ use musicable_engine::{
 };
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_test_plugins::testing::{self, Library};
-use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
+use musicable_test_plugins::testing::{self, Library, Lifecycle};
+use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
 
 use crate::clap::Instance;
 use crate::scan::{self, Outcome};
@@ -130,6 +131,11 @@ impl TestPlugins {
         unsafe { self.library.midi(instance.raw()) }
     }
 
+    fn lifecycle(&self, instance: &Instance) -> Lifecycle {
+        // SAFETY: as above.
+        unsafe { self.library.lifecycle(instance.raw()) }
+    }
+
     fn gain(&self) -> Instance {
         Instance::new(&self.path, GAIN_ID.to_str().unwrap(), None).unwrap()
     }
@@ -142,6 +148,8 @@ impl TestPlugins {
 /// What a block is played with.
 #[derive(Default)]
 pub(crate) struct Block<'a> {
+    /// The engine time of its first frame.
+    pub(crate) time: u64,
     pub(crate) transport: TransportState,
     pub(crate) tempo: TempoMap,
     pub(crate) events: &'a [NodeEvent],
@@ -160,7 +168,7 @@ pub(crate) fn play(node: &mut impl Node, input: &[f32], block: &Block<'_>) -> [V
     let ctx = ProcessContext {
         frames,
         sample_rate: CONFIG.sample_rate,
-        time: 0,
+        time: block.time,
         transport: block.transport,
         tempo: &block.tempo,
         events: block.events,
@@ -243,7 +251,7 @@ fn the_gain_plugin_describes_its_parameters() {
     let params = instance.params();
     assert_eq!(
         params.iter().map(|p| p.id).collect::<Vec<_>>(),
-        [GAIN, LATENCY]
+        [GAIN, LATENCY, BYPASS]
     );
     let gain = &params[0];
     assert_eq!(
@@ -259,6 +267,8 @@ fn the_gain_plugin_describes_its_parameters() {
     assert!(gain.automatable && gain.modulatable && gain.steps == 0);
     assert!(!gain.modulatable_per_note);
     assert!(params[1].steps == 48_000 && !params[1].automatable);
+    assert!(!params[0].bypass && !params[1].bypass);
+    assert!(params[2].bypass && params[2].steps == 1 && params[2].automatable);
     assert_eq!(instance.param_value(GAIN), Some(1.0));
     assert_eq!(instance.param_value(99), None);
     assert_eq!(
@@ -267,6 +277,7 @@ fn the_gain_plugin_describes_its_parameters() {
     );
     assert_eq!(instance.text_to_value(GAIN, "0.25"), Some(0.25));
     assert_eq!(instance.text_to_value(GAIN, "loud"), None);
+    assert_eq!(instance.value_to_text(BYPASS, 1.0).as_deref(), Some("On"));
     drop(instance);
     plugins.assert_alright();
 }
@@ -558,6 +569,163 @@ fn changes_in_the_plugins_window_come_back() {
         scaled(&input, 1.5)
     );
     drop((node, instance));
+    plugins.assert_alright();
+}
+
+/// Bypasses the device in a switch, as its lane or the project does, or
+/// brings it back.
+pub(crate) fn bypass(offset: usize, bypassed: bool) -> NodeEvent {
+    param(offset, Switch::BYPASS.0, if bypassed { 1.0 } else { 0.0 })
+}
+
+/// Plays `signal` through `node` in blocks of 256 frames, from engine time
+/// 0, with the events `events` gives each block. After each block,
+/// `between` gets its index. Returns the left channel.
+pub(crate) fn play_blocks(
+    node: &mut impl Node,
+    signal: &[f32],
+    mut events: impl FnMut(usize) -> Vec<NodeEvent>,
+    mut between: impl FnMut(usize),
+) -> Vec<f32> {
+    let mut out = Vec::with_capacity(signal.len());
+    for (i, input) in signal.chunks(256).enumerate() {
+        let events = events(i);
+        let block = Block {
+            time: (i * 256) as u64,
+            events: &events,
+            ..Block::default()
+        };
+        let [left, _] = play(node, input, &block);
+        out.extend(left);
+        between(i);
+    }
+    out
+}
+
+/// What a switch round a device 32 frames late plays as the device is
+/// bypassed at frame 256 and brought back at frame 1280: the device's
+/// output at gain `before`, a crossfade from 288 to 768 to `signal` 32
+/// frames late, and from 1312 to 1792 back to the device at gain `after`.
+pub(crate) fn bypassed_at_256_and_back_at_1280(signal: &[f32], before: f32, after: f32) -> Vec<f32> {
+    let late = |t: usize| if t < 32 { 0.0 } else { signal[t - 32] };
+    (0..signal.len())
+        .map(|t| {
+            let dry = late(t);
+            match t {
+                ..288 => dry * before,
+                288..768 => {
+                    let m = (t - 287) as f32 / 480.0;
+                    dry * before * (1.0 - m) + dry * m
+                }
+                768..1312 => dry,
+                1312..1792 => {
+                    let m = (1791 - t) as f32 / 480.0;
+                    dry * after * (1.0 - m) + dry * m
+                }
+                _ => dry * after,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_bypassed_plugin_stops_and_starts_afresh_as_it_comes_back() {
+    let plugins = TestPlugins::new("bypassed");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, 32.0);
+    instance.activate(CONFIG).unwrap();
+    instance.set_param(GAIN, 0.5);
+    let mut switch = Switch::new(Box::new(instance.node_source().node()), false);
+    switch.prepare(&CONFIG);
+    assert_eq!(switch.latency(), 32, "a bypassed plugin keeps its latency");
+    let signal = ramp(256 * 8);
+    let mut lifecycle = Vec::new();
+    let mut running = Vec::new();
+    assert!(!instance.is_running());
+    let events = |i| match i {
+        1 => vec![bypass(0, true)],
+        // Stopped, it takes the changes its parameters get.
+        4 => vec![param(0, GAIN, 2.0)],
+        5 => vec![bypass(0, false)],
+        _ => Vec::new(),
+    };
+    let out = play_blocks(&mut switch, &signal, events, |i| {
+        if i == 4 {
+            assert_eq!(instance.param_value(GAIN), Some(2.0));
+            // And the main thread's, and the changes in its window come
+            // back.
+            instance.set_param(GAIN, 0.25);
+            assert_eq!(instance.param_value(GAIN), Some(0.25));
+            plugins.gui(&instance, gui::VALUE, BYPASS, 1.0);
+            assert_eq!(
+                instance.poll(),
+                [PluginEvent::ParamChanged {
+                    param: BYPASS,
+                    value: 1.0
+                }]
+            );
+            plugins.gui(&instance, gui::VALUE, BYPASS, 0.0);
+            instance.poll();
+        }
+        lifecycle.push(plugins.lifecycle(&instance));
+        running.push(instance.is_running());
+    });
+    assert_close(&out, &bypassed_at_256_and_back_at_1280(&signal, 0.5, 0.25));
+    assert_eq!(running, [true, true, false, false, false, true, true, true]);
+    // It stops once the fade is over, and processes nothing until it comes
+    // back, then it starts afresh.
+    assert_eq!((lifecycle[1].stops, lifecycle[2].stops), (0, 1));
+    assert_eq!(lifecycle[2].blocks, lifecycle[4].blocks);
+    assert_eq!(
+        (lifecycle[4].starts, lifecycle[4].resets, lifecycle[5].starts, lifecycle[5].resets),
+        (1, 0, 2, 1)
+    );
+    assert_eq!(lifecycle[7].stops, 1);
+    drop((switch, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_deactivated_plugin_stops_and_still_takes_its_parameters() {
+    let plugins = TestPlugins::new("deactivated");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut playing = Switch::new(Box::new(instance.node_source().node()), false);
+    playing.prepare(&CONFIG);
+    let input = ramp(256);
+    play(&mut playing, &input, &Block::default());
+    // The graph for the project with it deactivated takes over.
+    let mut deactivated = Switch::deactivated(Box::new(instance.node_source().node()));
+    deactivated.prepare(&CONFIG);
+    deactivated.adopt(&mut playing);
+    assert_eq!(plugins.lifecycle(&instance).stops, 1);
+    let events = [param(0, GAIN, 0.5)];
+    let block = Block {
+        time: 256,
+        events: &events,
+        ..Block::default()
+    };
+    assert_eq!(play(&mut deactivated, &input, &block)[0], vec![0.0; 256]);
+    assert_eq!(instance.param_value(GAIN), Some(0.5));
+    // Active again, it starts afresh, at once.
+    let mut active = Switch::new(Box::new(instance.node_source().node()), false);
+    active.prepare(&CONFIG);
+    active.adopt(&mut deactivated);
+    let block = Block {
+        time: 512,
+        ..Block::default()
+    };
+    assert_eq!(play(&mut active, &input, &block)[0], scaled(&input, 0.5));
+    assert_eq!(
+        plugins.lifecycle(&instance),
+        Lifecycle {
+            starts: 2,
+            stops: 1,
+            resets: 1,
+            blocks: 2
+        }
+    );
+    drop((playing, deactivated, active, instance));
     plugins.assert_alright();
 }
 
@@ -1069,7 +1237,7 @@ fn plugins_see_the_transport() {
             jumps: 0,
         },
         tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
-        events: &[],
+        ..Block::default()
     };
     play(&mut node, &ramp(16), &block);
     let (flags, beats, tempo) = plugins.transport(&instance).unwrap();

@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use musicable_engine::switch::Switch;
 use musicable_engine::{
@@ -231,6 +232,7 @@ impl Node for Vst3Node {
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
         let shared = &self.shared;
+        shared.running.store(true, Ordering::Release);
         let Some(_busy) = shared.try_enter() else {
             output.clear();
             return;
@@ -240,6 +242,12 @@ impl Node for Vst3Node {
         if !run(shared, &mut self.resetting, ctx, inputs, output, audio) {
             output.clear();
         }
+    }
+
+    /// The plugin stays processing, as VST3 sees it, so the main thread
+    /// can hand it changes, and gets no blocks.
+    fn stop(&mut self) {
+        self.shared.running.store(false, Ordering::Release);
     }
 
     /// Hands the plugin the block's parameter changes, and the main

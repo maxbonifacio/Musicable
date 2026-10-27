@@ -945,6 +945,19 @@ impl Session {
                 Change::Param { param, value, .. } => self.document.follow(&name, |tx| {
                     tx.set_param_value(ParamAddress::Device(device, param), value);
                 }),
+                // The plugin's own Bypass is its device's: by hand, it
+                // overrides the device's Bypass lane, as the Bypass button
+                // does.
+                Change::Bypass { bypassed, by_hand } => {
+                    let verb = if bypassed { "Bypass" } else { "Bring Back" };
+                    let name = format!("{verb} {}", self.plugins.name(device).unwrap_or("Plugin"));
+                    let (param, value) = (ParamAddress::Bypass(device), f64::from(bypassed));
+                    if by_hand {
+                        self.document.transact(&name, |tx| tx.set_param_by_hand(param, value));
+                    } else {
+                        self.document.follow(&name, |tx| tx.set_param_value(param, value));
+                    }
+                }
                 Change::Settings {
                     settings,
                     by_hand: true,

@@ -249,6 +249,7 @@ impl Node for ClapNode {
             ..
         } = self;
         ended.clear();
+        shared.running.store(true, Ordering::Release);
         let Some(_busy) = shared.try_enter() else {
             output.clear();
             return;
@@ -269,6 +270,7 @@ impl Node for ClapNode {
     /// Stops the plugin processing, or has the next flush stop it, if the
     /// main thread has it.
     fn stop(&mut self) {
+        self.shared.running.store(false, Ordering::Release);
         if let Some(_busy) = self.shared.try_enter() {
             let _audio_thread = AudioThread::enter();
             stop_processing(&self.shared);

@@ -9,11 +9,12 @@ use std::thread;
 use std::time::Duration;
 
 use musicable_engine::nodes::Sum;
+use musicable_engine::switch::Switch;
 use musicable_engine::{AudioMut, Engine, Graph, Node, NodeKey, NoteEvent, NoteId, TransportState};
 use musicable_model::PluginFormat;
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_test_plugins::testing::{self, Library};
+use musicable_test_plugins::testing::{self, Library, Lifecycle};
 use musicable_test_plugins::vst3::{PEAK, VST3_GAIN_ID, VST3_SYNTH_ID, Vst3Transport};
 use musicable_test_plugins::{GAIN, LATENCY, LEVEL, gui};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
@@ -29,8 +30,8 @@ use super::Instance;
 use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
-    Block, CONFIG, Impulse, assert_close, controller, note, param, play, ramp, scaled, scan_path,
-    sine, temp_dir,
+    Block, CONFIG, Impulse, assert_close, bypass, bypassed_at_256_and_back_at_1280, controller,
+    note, param, play, play_blocks, ramp, scaled, scan_path, sine, temp_dir,
 };
 use crate::{ParentWindow, PluginEvent, Waker};
 
@@ -132,6 +133,11 @@ impl TestPlugins {
     fn restart(&self, instance: &Instance, flags: i32) {
         // SAFETY: as above.
         assert!(unsafe { self.library.vst3_restart(instance.raw_controller(), flags) });
+    }
+
+    fn lifecycle(&self, instance: &Instance) -> Lifecycle {
+        // SAFETY: as above.
+        unsafe { self.library.vst3_lifecycle(instance.raw_component()) }.unwrap()
     }
 }
 
@@ -240,6 +246,90 @@ fn the_gain_plugin_plays_its_input() {
     instance.deactivate().unwrap();
     assert_eq!(play(&mut node, &input, &Block::default())[0], vec![0.0; 64]);
     drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_bypassed_plugin_takes_its_changes_and_has_its_processing_restarted_coming_back() {
+    let plugins = TestPlugins::new("bypassed");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, latency(32));
+    instance.activate(CONFIG).unwrap();
+    // A gain of 0.5.
+    instance.set_param(GAIN, 0.25);
+    let mut switch = Switch::new(Box::new(instance.node_source().node()), false);
+    switch.prepare(&CONFIG);
+    assert_eq!(switch.latency(), 32, "a bypassed plugin keeps its latency");
+    let activated = plugins.lifecycle(&instance);
+    let signal = ramp(256 * 8);
+    let mut lifecycle = Vec::new();
+    let mut running = Vec::new();
+    let events = |i| match i {
+        1 => vec![bypass(0, true)],
+        // Stopped, it takes the changes its parameters get, in a block of
+        // no frames.
+        4 => vec![param(0, GAIN, 1.0)],
+        5 => vec![bypass(0, false)],
+        _ => Vec::new(),
+    };
+    let out = play_blocks(&mut switch, &signal, events, |i| {
+        if i == 4 {
+            assert_eq!(plugins.processor_value(&instance, GAIN), Some(1.0));
+            // A gain of 0.25, as it comes back.
+            instance.set_param(GAIN, 0.125);
+        }
+        lifecycle.push(plugins.lifecycle(&instance));
+        running.push(instance.is_running());
+    });
+    assert_eq!(running, [true, true, false, false, false, true, true, true]);
+    assert_close(&out, &bypassed_at_256_and_back_at_1280(&signal, 0.5, 0.25));
+    // It processes nothing while it's bypassed. VST3 has no reset: coming
+    // back, its processing goes off and on again.
+    assert_eq!(lifecycle[2].blocks, lifecycle[4].blocks);
+    let switched = |l: &Lifecycle| (l.starts - activated.starts, l.stops - activated.stops);
+    assert_eq!(switched(&lifecycle[4]), (0, 0));
+    assert_eq!(switched(&lifecycle[5]), (1, 1));
+    assert_eq!(switched(&lifecycle[7]), (1, 1));
+    drop((switch, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_deactivated_plugin_still_takes_its_changes() {
+    let plugins = TestPlugins::new("deactivated");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut playing = Switch::new(Box::new(instance.node_source().node()), false);
+    playing.prepare(&CONFIG);
+    let input = ramp(256);
+    play(&mut playing, &input, &Block::default());
+    let mut deactivated = Switch::deactivated(Box::new(instance.node_source().node()));
+    deactivated.prepare(&CONFIG);
+    deactivated.adopt(&mut playing);
+    let before = plugins.lifecycle(&instance);
+    let events = [param(0, GAIN, 0.25)];
+    let block = Block {
+        time: 256,
+        events: &events,
+        ..Block::default()
+    };
+    assert_eq!(play(&mut deactivated, &input, &block)[0], vec![0.0; 256]);
+    assert_eq!(plugins.processor_value(&instance, GAIN), Some(0.25));
+    assert_eq!(plugins.lifecycle(&instance), before);
+    let mut active = Switch::new(Box::new(instance.node_source().node()), false);
+    active.prepare(&CONFIG);
+    active.adopt(&mut deactivated);
+    let block = Block {
+        time: 512,
+        ..Block::default()
+    };
+    assert_eq!(play(&mut active, &input, &block)[0], scaled(&input, 0.5));
+    let after = plugins.lifecycle(&instance);
+    assert_eq!(
+        (after.starts - before.starts, after.stops - before.stops, after.blocks - before.blocks),
+        (1, 1, 1)
+    );
+    drop((playing, deactivated, active, instance));
     plugins.assert_alright();
 }
 
@@ -722,7 +812,7 @@ fn plugins_see_the_transport() {
             jumps: 0,
         },
         tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
-        events: &[],
+        ..Block::default()
     };
     play(&mut node, &ramp(16), &block);
     play(&mut node, &ramp(16), &block);

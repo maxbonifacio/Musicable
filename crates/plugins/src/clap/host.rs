@@ -59,6 +59,9 @@ pub(crate) struct Shared {
     lifecycle: AtomicU8,
     /// The plugin's latency, in frames, as it said when it last activated.
     latency: AtomicUsize,
+    /// Whether a node renders the plugin: from the first block a node plays
+    /// until the node stops, as its device is bypassed.
+    pub(crate) running: AtomicBool,
     /// Whoever holds it has `audio`.
     busy: BusyFlag,
     pub(crate) requests: Requests,
@@ -127,6 +130,7 @@ impl Shared {
             main_thread: thread_mark(),
             lifecycle: AtomicU8::new(INACTIVE),
             latency: AtomicUsize::new(0),
+            running: AtomicBool::new(false),
             busy: BusyFlag::default(),
             requests: Requests {
                 window_resize: AtomicU64::new(NO_RESIZE),

@@ -400,6 +400,13 @@ impl Instance {
         self.config.is_some()
     }
 
+    /// Whether a node renders the plugin: from the first block it plays
+    /// until it stops, as its device is bypassed. A stopped plugin isn't
+    /// processing, so the main thread flushes its parameter changes.
+    pub fn is_running(&self) -> bool {
+        self.shared.running.load(Ordering::Acquire)
+    }
+
     /// Activates the plugin for the engine's sample rate and block size, so
     /// its nodes can process it. An active plugin is deactivated first.
     pub fn activate(&mut self, config: EngineConfig) -> Result<(), Error> {
