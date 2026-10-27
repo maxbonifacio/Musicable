@@ -7,8 +7,27 @@
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler as _};
 
-/// The frames the resampler takes at a time.
+/// About how many frames the resampler takes at a time.
 const CHUNK: usize = 1024;
+
+/// The frames the resampler takes at a time from `from` Hz to `to` Hz:
+/// about CHUNK, and a whole number of pairs of its smallest blocks, so that
+/// its FFT blocks are an even number of frames at both rates. rubato
+/// centres its filter on frame `n / 2` of a block of `n` input frames, and
+/// counts its delay as half the output block, both rounded down, so an odd
+/// block puts the output half a frame early or late.
+fn chunk(from: u32, to: u32) -> usize {
+    let pair = 2 * (from / gcd(from, to)) as usize;
+    pair * CHUNK.div_ceil(pair)
+}
+
+/// The greatest common divisor of `a` and `b`.
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
 
 /// Resamples interleaved frames from one rate to another.
 pub(super) struct Resampler {
@@ -34,7 +53,7 @@ impl Resampler {
         let inner = Fft::<f64>::new(
             from as usize,
             to as usize,
-            CHUNK,
+            chunk(from, to),
             1,
             channels,
             FixedSync::Input,
@@ -147,8 +166,9 @@ mod tests {
         out
     }
 
-    /// A sine's amplitude in `samples` at `rate`, from its middle half.
-    fn amplitude(samples: &[f64], hz: f64, rate: f64) -> f64 {
+    /// The sine at `hz` in `samples` at `rate`, from their middle half: the
+    /// amplitudes of its sine and cosine parts.
+    fn sine(samples: &[f64], hz: f64, rate: f64) -> (f64, f64) {
         let (skip, take) = (samples.len() / 4, samples.len() / 2);
         let (mut sin, mut cos) = (0.0, 0.0);
         for (i, sample) in samples.iter().enumerate().skip(skip).take(take) {
@@ -156,7 +176,20 @@ mod tests {
             sin += sample * phase.sin();
             cos += sample * phase.cos();
         }
-        2.0 * sin.hypot(cos) / take as f64
+        (2.0 * sin / take as f64, 2.0 * cos / take as f64)
+    }
+
+    /// A sine's amplitude in `samples` at `rate`, from their middle half.
+    fn amplitude(samples: &[f64], hz: f64, rate: f64) -> f64 {
+        let (sin, cos) = sine(samples, hz, rate);
+        sin.hypot(cos)
+    }
+
+    /// How many frames early a sine that started at phase 0 is in
+    /// `samples` at `rate`.
+    fn lead(samples: &[f64], hz: f64, rate: f64) -> f64 {
+        let (sin, cos) = sine(samples, hz, rate);
+        cos.atan2(sin) * rate / (TAU * hz)
     }
 
     #[test]
@@ -187,6 +220,29 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_output_is_on_time_to_a_hundredth_of_a_frame() {
+        // Odd blocks put 44.1 to 48 kHz, 48 to 44.1 kHz, 44.1 to 96 kHz and
+        // 11,025 to 8000 Hz half a frame out; the others were right anyway.
+        for (from, to) in [
+            (44_100, 48_000),
+            (48_000, 44_100),
+            (44_100, 96_000),
+            (96_000, 44_100),
+            (8_000, 11_025),
+            (11_025, 8_000),
+            (44_100, 88_200),
+        ] {
+            let rate = f64::from(from);
+            let input: Vec<f64> = (0..from)
+                .map(|i| 0.5 * (TAU * 1000.0 * f64::from(i) / rate).sin())
+                .collect();
+            let out = resample(&input, 1, from, to, 4096);
+            let lead = lead(&out, 1000.0, f64::from(to));
+            assert!(lead.abs() < 0.01, "{from} to {to}: {lead} frames early");
         }
     }
 

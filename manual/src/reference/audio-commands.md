@@ -46,7 +46,8 @@ others when one fails, says why that one failed, and exits with 1.
   `.part` after it, and renames it once it's whole, so a file that's there
   is whole. Stopping a command leaves nothing behind.
 - `cut` and `join` copy samples exactly as the file stores them, and so
-  does `convert` when it only changes the format or widens the samples.
+  does `convert` when it only changes the format, widens the samples or
+  makes a mono file stereo.
   They read the new file back, and `exact` says whether every sample came
   out as it went in.
 

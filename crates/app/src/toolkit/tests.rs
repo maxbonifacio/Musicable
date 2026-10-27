@@ -13,7 +13,7 @@ use musicable_mcp::local::LocalTools;
 use serde_json::{Map, Value as Json, json};
 
 use super::cli::{self, Parsed};
-use super::{AudioCommand, CANCELLED, Job, Tools, commands, format_of};
+use super::{AudioCommand, CANCELLED, Job, Share, Source, Tools, commands, format_of, same_frames};
 
 /// A folder of its own for a test, removed when it ends.
 pub(super) struct Folder(pub(super) PathBuf);
@@ -1123,11 +1123,33 @@ fn conversions_resample_mix_down_and_dither() {
     let mono = convert(&["tone.wav", "--channels", "1", "--out", "mono.wav"]).unwrap();
     assert_eq!(mono["out"]["channels"], 1);
     assert_eq!(mono["out"]["peak_dbfs"], -6.02);
+    assert_eq!(
+        (mono["exact"].clone(), mono["dithered"].clone()),
+        (json!(false), json!(true))
+    );
     let stereo = convert(&["voice.aif", "--channels", "2", "--out", "stereo.aif"]).unwrap();
     let both = samples(&folder.path("stereo.aif"));
     let (frames, _) = both.as_chunks::<2>();
     assert!(frames.iter().all(|[left, right]| left == right));
     assert_eq!(stereo["out"]["audio_md5"].as_str().map(str::len), Some(32));
+    assert_eq!(stereo["exact"], true);
+    // Copying integers' one channel to two changes no sample either, so it
+    // doesn't dither: 100,000 frames, more than a chunk.
+    let one = exact_samples(SampleFormat::Int16, 50_000, 3);
+    write(
+        &folder.path("one.wav"),
+        SampleFormat::Int16,
+        44_100,
+        1,
+        &one,
+    );
+    let two = convert(&["one.wav", "--channels", "2", "--out", "two.wav"]).unwrap();
+    assert_eq!(
+        (two["exact"].clone(), two["dithered"].clone()),
+        (json!(true), json!(false))
+    );
+    let doubled: Vec<f64> = one.iter().flat_map(|&sample| [sample, sample]).collect();
+    assert!(samples(&folder.path("two.wav")) == doubled);
     assert!(
         convert(&["tone.wav", "--channels", "3", "--out", "three.wav"])
             .unwrap_err()
@@ -1152,6 +1174,32 @@ fn conversions_resample_mix_down_and_dither() {
         flac.starts_with("FLAC files hold integers of up to 24 bits"),
         "{flac}"
     );
+}
+
+#[test]
+fn a_mono_file_is_a_stereo_one_only_if_each_channel_is_a_copy() {
+    let folder = Folder::new("copies");
+    let job = Job::quiet(Some(&folder.0));
+    let file = |name: &str, channels: u16, samples: &[f64]| {
+        let path = folder.path(name);
+        write(&path, SampleFormat::Int16, 44_100, channels, samples);
+        Source::open(&path).unwrap()
+    };
+    let mut one = file("one.wav", 1, &[0.25, -0.5, 0.125]);
+    let copies = [0.25, 0.25, -0.5, -0.5, 0.125, 0.125];
+    let cases = [
+        (copies, true),
+        ([0.25, 0.25, -0.5, -0.5, 0.125, 0.0], false),
+        ([0.25, 0.25, 0.5, -0.5, 0.125, 0.125], false),
+    ];
+    for (i, (samples, same)) in cases.into_iter().enumerate() {
+        let mut two = file(&format!("two-{i}.wav"), 2, &samples);
+        let found = same_frames(&mut one, 0, &mut two, 0, 3, &[], &job, Share::ALL).unwrap();
+        assert_eq!(found, same, "{samples:?}");
+    }
+    // Nor is a stereo file a mono one.
+    let mut two = file("two.wav", 2, &copies);
+    assert!(!same_frames(&mut two, 0, &mut one, 0, 3, &[], &job, Share::ALL).unwrap());
 }
 
 #[test]

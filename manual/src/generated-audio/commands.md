@@ -6,7 +6,7 @@ The examples run in a folder, `/music`, of three files: `tone.wav`, 2 seconds of
 
 **Convert Audio File**: `musicable audio convert FILE [options]`, or the tool `audio_convert`.
 
-Writes a file again at another sample rate, in another encoding, with other channels or in another format, which out's extension says. Resampling keeps everything up to 20 kHz from 44.1 kHz, and integers too narrow for the samples are dithered. A conversion that changes only the format, or widens the samples, copies them exactly, which it reads back to check.
+Writes a file again at another sample rate, in another encoding, with other channels or in another format, which out's extension says. Resampling keeps everything up to 20 kHz from 44.1 kHz, and integers too narrow for the samples are dithered. A conversion that changes only the format, widens the samples or makes a mono file stereo copies them exactly, which it reads back to check.
 
 | Option | Argument | What it's for |
 |---|---|---|
@@ -25,7 +25,7 @@ It gives back:
 | `out` | The new file. Its fields are those `info` gives. |
 | `clipped_samples` | Samples beyond full scale, which integers clip, and floats keep. |
 | `dithered` | Whether the samples were dithered. |
-| `exact` | Whether the new file's samples read back as the file's, sample for sample: so when only the format changed, or the samples got wider. |
+| `exact` | Whether the new file's samples read back as the file's, sample for sample: so when only the format changed, the samples got wider, or a mono file's channel was copied to two. |
 
 For example,
 
@@ -46,7 +46,7 @@ out:
   seconds: 2.0
   peak_dbfs: -6.02
   acid_bpm: none
-  audio_md5: 244957538e57fb44fcaf0c0eb85f87aa
+  audio_md5: 3c97d96071dac9dd480730b912fae105
 clipped_samples: 0
 dithered: true
 exact: false

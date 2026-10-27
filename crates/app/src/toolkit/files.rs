@@ -430,8 +430,8 @@ fn convert() -> AudioCommand {
         about: "Writes a file again at another sample rate, in another encoding, with other \
                 channels or in another format, which out's extension says. Resampling keeps \
                 everything up to 20 kHz from 44.1 kHz, and integers too narrow for the samples \
-                are dithered. A conversion that changes only the format, or widens the \
-                samples, copies them exactly, which it reads back to check.",
+                are dithered. A conversion that changes only the format, widens the samples or \
+                makes a mono file stereo copies them exactly, which it reads back to check.",
         params: vec![
             FILE,
             OUT,
@@ -492,7 +492,8 @@ fn convert() -> AudioCommand {
                         "exact",
                         schema::boolean(
                             "Whether the new file's samples read back as the file's, sample for \
-                             sample: so when only the format changed, or the samples got wider.",
+                             sample: so when only the format changed, the samples got wider, or \
+                             a mono file's channel was copied to two.",
                         ),
                     ),
                 ],
@@ -545,8 +546,11 @@ fn run_convert(args: &Args, job: &Job) -> Result<Json, String> {
             )
         })?,
     };
-    let (resampling, mixing) = (rate != from_rate, channels != from_channels);
-    let unchanged = !resampling && !mixing && sample_format.holds(source.encoding);
+    let (resampling, remixing) = (rate != from_rate, channels != from_channels);
+    // Mixing down changes the samples, and copying a mono file's channel
+    // to two doesn't.
+    let mixing_down = channels < from_channels;
+    let unchanged = !resampling && !mixing_down && sample_format.holds(source.encoding);
     let dither = !unchanged && !sample_format.is_float() && opt(args, "dither")?.unwrap_or(true);
 
     let mut output = Output::create(&out, format, sample_format, rate, channels, dither)?;
@@ -556,7 +560,7 @@ fn run_convert(args: &Args, job: &Job) -> Result<Json, String> {
     };
     let mut mixed = Vec::new();
     source.each_chunk(0, frames, job, Share::ALL.between(0.0, 0.8), |samples| {
-        let samples = match mixing {
+        let samples = match remixing {
             true => {
                 remix(samples, from_channels, channels, &mut mixed);
                 &mixed

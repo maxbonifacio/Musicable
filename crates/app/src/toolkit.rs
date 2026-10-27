@@ -837,7 +837,8 @@ impl Drop for Output {
 
 /// Whether frames `from` on of `a` are frames `b_from` on of `b`, sample
 /// for sample, for `frames` frames, but for the frames in `skip`, which
-/// changed on purpose, as fades do: `(start, end)` of `a`'s frames.
+/// changed on purpose, as fades do: `(start, end)` of `a`'s frames. A mono
+/// `a` can be a `b` of more channels, each a copy of its one.
 #[allow(clippy::too_many_arguments)]
 fn same_frames(
     a: &mut Source,
@@ -849,11 +850,11 @@ fn same_frames(
     job: &Job,
     share: Share,
 ) -> Result<bool, String> {
-    if a.channels() != b.channels() || b_from + frames > b.frames() {
+    let (channels, copies) = (a.channels(), b.channels());
+    if (copies != channels && channels != 1) || b_from + frames > b.frames() {
         return Ok(false);
     }
-    let channels = a.channels();
-    let mut theirs = vec![0.0; CHUNK.min(frames as usize) * channels];
+    let mut theirs = vec![0.0; CHUNK.min(frames as usize) * copies];
     let mut at = 0;
     let mut same = true;
     a.each_chunk(from, from + frames, job, share, |ours| {
@@ -862,18 +863,18 @@ fn same_frames(
         while read < count {
             read += b.read(
                 b_from + at + read as u64,
-                &mut theirs[read * channels..ours.len()],
+                &mut theirs[read * copies..count * copies],
             )?;
         }
-        let pairs = ours
-            .chunks_exact(channels)
-            .zip(theirs.chunks_exact(channels));
+        let pairs = ours.chunks_exact(channels).zip(theirs.chunks_exact(copies));
         for (i, (x, y)) in pairs.enumerate() {
             let frame = from + at + i as u64;
             let skipped = skip
                 .iter()
                 .any(|&(start, end)| (start..end).contains(&frame));
-            if !skipped && x.iter().zip(y).any(|(x, y)| x.to_bits() != y.to_bits()) {
+            let differs = (y.iter().enumerate())
+                .any(|(channel, y)| x[channel % channels].to_bits() != y.to_bits());
+            if !skipped && differs {
                 same = false;
             }
         }
