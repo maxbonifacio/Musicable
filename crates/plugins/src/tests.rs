@@ -199,7 +199,7 @@ pub(crate) fn param(offset: usize, param: u32, value: f64) -> NodeEvent {
     NodeEvent {
         offset,
         kind: NodeEventKind::Param {
-            param: ParamId(param),
+            param: ParamId(param.into()),
             value,
         },
     }
@@ -214,7 +214,7 @@ pub(crate) fn modulation(
     NodeEvent {
         offset,
         kind: NodeEventKind::Modulation {
-            param: ParamId(param),
+            param: ParamId(param.into()),
             amount,
             note,
         },
@@ -575,7 +575,8 @@ fn changes_in_the_plugins_window_come_back() {
 /// Bypasses the device in a switch, as its lane or the project does, or
 /// brings it back.
 pub(crate) fn bypass(offset: usize, bypassed: bool) -> NodeEvent {
-    param(offset, Switch::BYPASS.0, if bypassed { 1.0 } else { 0.0 })
+    let bypass = u32::try_from(Switch::BYPASS.0).expect("a plugin's ids are 32 bits");
+    param(offset, bypass, if bypassed { 1.0 } else { 0.0 })
 }
 
 /// Plays `signal` through `node` in blocks of 256 frames, from engine time

@@ -19,7 +19,10 @@ use musicable_io::project::{self, EXTENSION, MAX_TICKS, VERSION};
 use musicable_model::automation::{self, Lane};
 use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Offset, Point};
 use musicable_model::mixer::Bus;
-use musicable_model::native::{NativeDevice, NativeKind, Unit, eq, sampler, synth, utility};
+use musicable_model::modulation::{ControlKind, Curve, ModulatorKind, Output, envelope, lfo};
+use musicable_model::native::{
+    NativeDevice, NativeKind, ParamInfo, Unit, eq, sampler, synth, utility,
+};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -54,6 +57,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("high-quality", high_quality()),
         ("granular", granular()),
         ("bypass", bypass()),
+        ("modulation", modulation()),
     ]
 }
 
@@ -1168,6 +1172,111 @@ fn bypass() -> Project {
     project
 }
 
+/// Modulators, from version 18. On a track, an LFO and an Envelope move
+/// its synth, its fader and each other through a routing with each curve,
+/// one scaled by the other and one with a lag. On the master, a Macro with
+/// a knob and both kinds of button reaches the track's LFO and a plugin, by
+/// an amount in the plugin's own units, through a bypassed routing. Lanes
+/// move the knob and the LFO's skew, and a modulator and a control were
+/// deleted.
+fn modulation() -> Project {
+    let mut project = Project::new();
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    let synth = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+    let synth_id = synth.id;
+    let plugin = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "com.example.filter".into(),
+        name: "Filter".into(),
+        instrument: false,
+        settings: PluginSettings::default(),
+    }));
+    let plugin_id = plugin.id;
+    project.track_mut(lead).unwrap().devices = vec![synth];
+    project.master.devices = vec![plugin];
+
+    let mut wobble = project.new_modulator(ModulatorKind::Lfo, "Wobble");
+    wobble.values[lfo::SHAPE] = 1.0;
+    wobble.values[lfo::SKEW] = 25.0;
+    wobble.values[lfo::SYNC] = 1.0;
+    wobble.values[lfo::NOTE] = 5.0;
+    wobble.values[lfo::PHASE] = 90.0;
+    wobble.values[lfo::START] = 1.0;
+    wobble.values[lfo::FADE_IN] = 250.0;
+    wobble.values[lfo::UNIPOLAR] = 1.0;
+    // Deleted.
+    project.new_modulator(ModulatorKind::Lfo, "LFO 2");
+    let mut pluck = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+    pluck.values[envelope::ATTACK] = 2.5;
+    pluck.values[envelope::DECAY] = 1_200.0;
+    pluck.values[envelope::SUSTAIN] = 0.0;
+    pluck.values[envelope::ONE_SHOT] = 1.0;
+    pluck.values[envelope::DECAY_CURVE] = 60.0;
+    pluck.values[envelope::RELEASE_CURVE] = -40.0;
+    pluck.values[envelope::NOTE_TRIGGER] = 2.0;
+    let (wobble_id, pluck_id) = (wobble.id, pluck.id);
+    let (wobble_out, pluck_out) = (Output::new(wobble_id, 0), Output::new(pluck_id, 0));
+    let synth_param = |n: usize| ParamAddress::Device(synth_id, n as u32);
+    let cutoff = project.new_routing(wobble_out, synth_param(synth::CUTOFF), 0.25);
+    let mut fader = project.new_routing(pluck_out, ParamAddress::Volume(Chain::Track(lead)), -0.5);
+    (fader.curve, fader.lag) = (Curve::Exponential, 20.0);
+    let mut resonance = project.new_routing(pluck_out, synth_param(synth::RESONANCE), 0.4);
+    (resonance.curve, resonance.scale) = (Curve::SCurve, Some(wobble_out));
+    let mut attack = project.new_routing(
+        wobble_out,
+        ParamAddress::Modulator(pluck_id, envelope::ATTACK as u32),
+        0.1,
+    );
+    attack.curve = Curve::Logarithmic;
+    let mut level = project.new_routing(wobble_out, synth_param(synth::OSC2_LEVEL), -1.0);
+    level.curve = Curve::Absolute;
+    let mut noise = project.new_routing(pluck_out, synth_param(synth::NOISE), 1.0);
+    noise.curve = Curve::Positive;
+    let track = project.track_mut(lead).unwrap();
+    track.modulation.modulators = vec![wobble, pluck];
+    track.modulation.routings = vec![cutoff, fader, resonance, attack, level, noise];
+
+    let mut macros = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+    macros.controls[0].name = "Brightness".into();
+    macros.controls[0].value = 0.5;
+    let mut toggle = macros.new_control(ControlKind::Toggle);
+    toggle.value = 1.0;
+    let toggle_out = Output::new(macros.id, toggle.id);
+    macros.controls.push(toggle);
+    let momentary = macros.new_control(ControlKind::Momentary);
+    let momentary_out = Output::new(macros.id, momentary.id);
+    macros.controls.push(momentary);
+    // Deleted.
+    macros.new_control(ControlKind::Knob);
+    let knob = Output::new(macros.id, macros.controls[0].id);
+    let macro_id = macros.id;
+    let mut rate = project.new_routing(
+        knob,
+        ParamAddress::Modulator(wobble_id, lfo::RATE as u32),
+        0.5,
+    );
+    rate.curve = Curve::Stepped(4);
+    let mut sweep = project.new_routing(toggle_out, ParamAddress::Device(plugin_id, 7), 12.5);
+    sweep.bypassed = true;
+    let mut pan = project.new_routing(momentary_out, ParamAddress::Pan(Chain::Master), 0.75);
+    (pan.curve, pan.scale) = (Curve::Negative, Some(knob));
+    project.master.modulation.modulators = vec![macros];
+    project.master.modulation.routings = vec![rate, sweep, pan];
+
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    project.automation = vec![
+        Lane::new(
+            ParamAddress::Modulator(macro_id, knob.n),
+            vec![point(0, 0.0), point(8, 1.0)],
+        ),
+        Lane::new(
+            ParamAddress::Modulator(wobble_id, lfo::SKEW as u32),
+            vec![point(0, 50.0), point(4, 10.0)],
+        ),
+    ];
+    project
+}
+
 fn signature(numerator: u8, denominator: u8) -> TimeSignature {
     TimeSignature::new(numerator, denominator).unwrap()
 }
@@ -1268,16 +1377,19 @@ fn the_documented_example_is_a_real_file() {
     assert_eq!(project::to_string(&project).unwrap(), example);
 }
 
-/// Each built-in device's parameters as `docs/project-format.md` lists
-/// them: a table for each kind, a row for each parameter.
-fn parameter_tables() -> String {
+/// The parameters of each kind of built-in device, or of modulator, as
+/// `docs/project-format.md` lists them: a table for each kind, a row for
+/// each parameter.
+fn parameter_tables<'a>(
+    kinds: impl IntoIterator<Item = (&'a str, &'a str, &'a [ParamInfo])>,
+) -> String {
     let mut text = String::new();
-    for kind in NativeKind::ALL {
-        text += &format!("**{}** (`\"{}\"`):\n\n", kind.name(), kind.key());
+    for (name, key, params) in kinds {
+        text += &format!("**{name}** (`\"{key}\"`):\n\n");
         text += "| # | Key | Control | Values | Default |\n|---|---|---|---|---|\n";
         // The first parameter with each list of choices.
         let mut listed: Vec<(&[&str], &str)> = Vec::new();
-        for (number, p) in kind.params().iter().enumerate() {
+        for (number, p) in params.iter().enumerate() {
             let range = format!("{} to {}", p.min, p.max);
             let values = match p.unit {
                 Unit::Switch => "0 off, 1 on".to_owned(),
@@ -1290,7 +1402,7 @@ fn parameter_tables() -> String {
                     }
                 },
                 Unit::Number if p.stepped => format!("{range}, whole"),
-                Unit::Number => range,
+                Unit::Number | Unit::Fraction => range,
                 Unit::Note => format!("{range}, a MIDI note"),
                 Unit::Gain => format!("{range}, linear gain"),
                 Unit::Pan => format!("{range}, left to right"),
@@ -1305,6 +1417,7 @@ fn parameter_tables() -> String {
                         Unit::Percent => "%",
                         Unit::Semitones => "semitones",
                         Unit::Cents => "cents",
+                        Unit::Degrees => "degrees",
                         _ => unreachable!(),
                     };
                     format!("{range} {word}")
@@ -1326,10 +1439,20 @@ fn parameter_tables() -> String {
 fn the_documented_parameters_are_the_tables() {
     let page = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/project-format.md");
     let page = fs::read_to_string(page).unwrap().replace("\r\n", "\n");
-    let tables = parameter_tables();
+    let devices = NativeKind::ALL.map(|kind| (kind.name(), kind.key(), kind.params()));
+    let tables = parameter_tables(devices);
     assert!(
         page.contains(&tables),
         "docs/project-format.md doesn't list the built-in devices' parameters as they \
          are. Put this in its place:\n\n{tables}"
     );
+    let shapes = [ModulatorKind::Lfo, ModulatorKind::Envelope];
+    let tables = parameter_tables(shapes.map(|kind| (kind.name(), kind.key(), kind.params())));
+    assert!(
+        page.contains(&tables),
+        "docs/project-format.md doesn't list the modulators' parameters as they are. Put \
+         this in its place:\n\n{tables}"
+    );
+    // A Macro's controls are its parameters.
+    assert!(ModulatorKind::Macro.params().is_empty());
 }

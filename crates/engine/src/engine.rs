@@ -92,8 +92,9 @@ pub struct Stats {
     /// Events applied later than the time they were sent for.
     pub events_late: u64,
     /// Events dropped because the engine was already holding as many as it
-    /// can, and notes a node played beyond the most a block takes (see
-    /// [`Notes::CAPACITY`](crate::Notes::CAPACITY)).
+    /// can, notes a node played beyond the most a block takes (see
+    /// [`Notes::CAPACITY`](crate::Notes::CAPACITY)), and modulation a node
+    /// sent beyond its ports' room ([`Controls::send`](crate::Controls::send)).
     pub events_dropped: u64,
     /// Parameter and note events whose node key wasn't in the running graph.
     pub events_unmatched: u64,
@@ -600,7 +601,7 @@ impl Engine {
                 midi: messages,
             };
             graph.feed_automation(&block);
-            let dropped = graph.play_notes(&block);
+            let dropped = graph.play_notes(&block) + graph.control(&block);
             if dropped > 0 {
                 self.counters.events_dropped.fetch_add(dropped, Relaxed);
             }

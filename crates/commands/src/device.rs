@@ -617,7 +617,7 @@ fn show_chain(editor: &mut Editor, chain: Chain) {
 /// The chain a new device goes in: the master's with `master`, else
 /// `track`'s, else the selected track's, which can be the master's. `what`
 /// names the device in the error without a track.
-fn chain(
+pub(crate) fn chain(
     ctx: &Context<'_>,
     track: Option<TrackId>,
     master: bool,

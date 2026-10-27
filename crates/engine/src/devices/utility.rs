@@ -41,6 +41,10 @@ impl Node for Utility {
         self.params.automate(param, automation)
     }
 
+    fn modulated(&mut self, param: ParamId) {
+        self.params.modulated(param);
+    }
+
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);

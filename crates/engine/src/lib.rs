@@ -32,6 +32,7 @@ pub mod graph;
 pub mod media;
 pub mod meter;
 pub mod midi;
+pub mod modulation;
 pub mod nodes;
 mod parallel;
 pub mod preview;
@@ -54,7 +55,7 @@ pub use engine::{Engine, EngineHandle, PreviewAt, QueueFull, Stats, SwapError};
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
 };
-pub use graph::{Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
+pub use graph::{Controls, Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
 pub use meter::{Level, Meter, Meters};
 pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
@@ -146,6 +147,29 @@ pub trait Node: Any + Send {
     /// here instead of with [`process`](Node::process), which gets the
     /// node's other events.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
+
+    /// Sends the modulation the node makes for the block about to render,
+    /// for a node that modulates other nodes' parameters
+    /// ([`Graph::modulate`]), such as a channel's
+    /// [`Modulation`](modulation::Modulation). The engine calls it on the
+    /// audio thread once the notes have played and before any node renders
+    /// the block, each node after the nodes that modulate it, so it must be
+    /// real-time safe too.
+    ///
+    /// `ctx.events` holds the node's events for the block, in order of
+    /// offset: its parameter changes, the notes sent to it, and the
+    /// modulation sent to it by the nodes that modulate it. They come here
+    /// instead of with [`process`](Node::process), which gets none.
+    fn control(&mut self, _ctx: &ProcessContext<'_>, _controls: &mut Controls<'_>) {}
+
+    /// Tells the node that something modulates its parameter `param` in its
+    /// graph ([`Graph::modulate`]), so the parameter keeps the modulation
+    /// the node it takes over from had for it ([`adopt`](Node::adopt)) until
+    /// the next comes. A parameter that nothing modulates any more ramps
+    /// its modulation away to nothing as the node takes over. Called off
+    /// the audio thread as the graph is built, before
+    /// [`prepare`](Node::prepare).
+    fn modulated(&mut self, _param: ParamId) {}
 
     /// The notes whose voices the node ended in the block it last rendered.
     /// An instrument's voice can ring on well after its note is let go, so

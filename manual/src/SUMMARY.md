@@ -26,6 +26,7 @@
 - [Editing notes and MPE]()
 - [Mixing]()
 - [Automation](using/automation.md)
+- [Modulation](using/modulation.md)
 - [Plugins](using/plugins.md)
 - [Exporting audio](using/exporting.md)
 - [Projects and files](using/projects.md)

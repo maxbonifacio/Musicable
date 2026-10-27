@@ -24,6 +24,12 @@
 //! Bypass says. A deactivated device's switch stays in the graph, so its
 //! plugin stops in step with it, but out of the signal, latency and all.
 //!
+//! Each channel with modulators, or with parameters that modulators move,
+//! has a [`Modulation`] node, which runs its modulators and modulates its
+//! parameters ([`Graph::modulate`]), taking in what the modulators of other
+//! channels add to them: see [`modulation`](crate::modulation). A MIDI
+//! track's node gets the track's notes.
+//!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
 //! song plays.
@@ -35,27 +41,33 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
+use musicable_model::modulation::{ModulatorKind, Routing, envelope, lfo};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::TempoMap;
 use musicable_model::{
-    AudioInput, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master, MidiInput,
-    Project, Track, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master,
+    MidiInput, Project, Track, TrackId, TrackKind,
 };
 
 use crate::clips::{AudioClips, MidiClips};
 use crate::media::Media;
 use crate::meter::Meters;
 use crate::midi::MidiMonitor;
+use crate::modulation::Modulation;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
 use crate::switch::Switch;
-use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
+use crate::{
+    Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, ParamId, PreparedGraph,
+};
 
 /// The keys [`compile`] gives model objects' nodes.
 ///
 /// A track's nodes have its id in the low 32 bits of the key and their role
 /// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 5 for
 /// the built-in slots after the devices, 7 for the output stage, 8 for a
-/// group's or a return's bus, 11 for an audio or MIDI track's clip player
-/// and 12 for a track's input monitor. The master's strip has the keys of a
+/// group's or a return's bus, 11 for an audio or MIDI track's clip player,
+/// 12 for a track's input monitor and 13 for its modulators' node. The
+/// master's strip has the keys of a
 /// track whose id is `u32::MAX`, which no track has. Sends and devices have
 /// their own ids in the low 32 bits, with role 9 for sends and 10 for
 /// devices, and so does the slot in front of a device, with role 6, so it
@@ -63,9 +75,10 @@ use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, 
 /// channel.
 pub mod keys {
     use musicable_model::param::ParamAddress;
-    use musicable_model::{Chain, DeviceId, SendId, TrackId};
+    use musicable_model::{Chain, DeviceId, Project, SendId, TrackId};
 
     use super::Slot;
+    use crate::modulation;
     use crate::nodes::Gain;
     use crate::switch::Switch;
     use crate::{NodeKey, ParamId};
@@ -146,6 +159,15 @@ pub mod keys {
         NodeKey(10 << 32 | u64::from(device.0))
     }
 
+    /// A channel's [`Modulation`](crate::modulation::Modulation): its
+    /// modulators, and what moves its parameters.
+    pub fn modulation(chain: Chain) -> NodeKey {
+        match chain {
+            Chain::Track(track) => track_key(13, track),
+            Chain::Master => track_key(13, MASTER_STRIP),
+        }
+    }
+
     /// The master's fader, a [`Gain`](crate::nodes::Gain).
     pub fn master_gain() -> NodeKey {
         track_gain(MASTER_STRIP)
@@ -162,13 +184,15 @@ pub mod keys {
         track_output(MASTER_STRIP)
     }
 
-    /// The node with the parameter at `address`, and the parameter: a
-    /// channel's fader's [`Gain::GAIN`] for its volume and [`Gain::PAN`] for
-    /// its pan, a send's [`Gain::GAIN`], a device's parameter `n` as
-    /// `ParamId(n)`, and its Bypass as its switch's [`Switch::BYPASS`]. A
-    /// clip's parameters have none: its clip player follows the curves the
-    /// clip keeps.
-    pub fn param(address: ParamAddress) -> Option<(NodeKey, ParamId)> {
+    /// The node with the parameter at `address` in `project`, and the
+    /// parameter: a channel's fader's [`Gain::GAIN`] for its volume and
+    /// [`Gain::PAN`] for its pan, a send's [`Gain::GAIN`], a device's
+    /// parameter `n` as `ParamId(n)`, its Bypass as its switch's
+    /// [`Switch::BYPASS`], and a modulator's parameter as its channel's
+    /// [`modulation::param_id`]. A clip's parameters have none: its clip
+    /// player follows the curves the clip keeps. Nor has a modulator the
+    /// project hasn't.
+    pub fn param(project: &Project, address: ParamAddress) -> Option<(NodeKey, ParamId)> {
         let fader = |chain| match chain {
             Chain::Track(track) => track_gain(track),
             Chain::Master => master_gain(),
@@ -178,10 +202,14 @@ pub mod keys {
             ParamAddress::Pan(chain) => (fader(chain), Gain::PAN),
             ParamAddress::Send(send) => (self::send(send), Gain::GAIN),
             // The switch's own id, which no plugin has.
-            ParamAddress::Device(_, n) if ParamId(n) == Switch::BYPASS => return None,
-            ParamAddress::Device(device, n) => (self::device(device), ParamId(n)),
+            ParamAddress::Device(_, n) if ParamId(n.into()) == Switch::BYPASS => return None,
+            ParamAddress::Device(device, n) => (self::device(device), ParamId(n.into())),
             ParamAddress::Bypass(device) => (self::device(device), Switch::BYPASS),
             ParamAddress::Clip(..) => return None,
+            ParamAddress::Modulator(modulator, n) => {
+                let (chain, ..) = project.find_modulator(modulator)?;
+                (self::modulation(chain), modulation::param_id(modulator, n))
+            }
         })
     }
 
@@ -637,7 +665,9 @@ fn build(
         };
         strip.feed(bus);
         for send in project.sends_of(track) {
-            let node = Gain::new(send.level).with_muted(silenced.send(send.id));
+            let node = Gain::new(send.level)
+                .with_max_gain(1.0)
+                .with_muted(silenced.send(send.id));
             let node = graph.add(keys::send(send.id), node);
             let tap = if send.pre_fader {
                 taps.pre_fader
@@ -671,11 +701,12 @@ fn build(
             .add_tap(*node)
             .expect("the stems' nodes were just added");
     }
+    modulate(project, &mut graph);
 
     // A parameter whose node isn't in the graph, such as a missing
     // plugin's, has nothing to automate.
     for lane in project.automation.iter().filter(|lane| !lane.overridden) {
-        let Some((key, param)) = keys::param(lane.param) else {
+        let Some((key, param)) = keys::param(project, lane.param) else {
             continue;
         };
         let scale = project.param_scale(lane.param);
@@ -688,6 +719,156 @@ fn build(
         }
     }
     graph
+}
+
+/// A channel's [`Modulation`] being built, and where its ports go, in
+/// order.
+struct Plan {
+    chain: Chain,
+    node: Modulation,
+    ports: Vec<Port>,
+}
+
+enum Port {
+    /// A parameter of the node with this key.
+    Param(NodeKey, ParamId),
+    /// A relay of this channel's node.
+    Relay(Chain, ParamId),
+}
+
+/// Gives each channel that has modulators, or parameters that modulators
+/// move, its [`Modulation`] node, with the routings that play
+/// ([`Project::routing_plays`]) and aren't bypassed. A routing to another
+/// channel's parameter goes through that channel's node, which relays it,
+/// and one to a parameter whose node isn't in the graph, such as a missing
+/// plugin's, moves nothing. A MIDI track's node gets the track's notes.
+fn modulate(project: &Project, graph: &mut Graph) {
+    let routings: Vec<(Chain, &Routing)> = (project.modulations())
+        .flat_map(|(chain, modulation)| modulation.routings.iter().map(move |r| (chain, r)))
+        .filter(|&(chain, r)| !r.bypassed && project.routing_plays(chain, r))
+        .collect();
+    let mut plans: Vec<Plan> = (project.modulations())
+        .filter(|&(chain, modulation)| {
+            let moved = |&(_, r): &(Chain, &Routing)| project.param_chain(r.to) == Some(chain);
+            !modulation.modulators.is_empty() || routings.iter().any(moved)
+        })
+        .map(|(chain, modulation)| Plan {
+            chain,
+            node: Modulation::new(&modulation.modulators),
+            ports: Vec::new(),
+        })
+        .collect();
+    let plan = |plans: &[Plan], chain: Chain| {
+        let at = plans.iter().position(|p| p.chain == chain);
+        at.expect("every channel with modulators or moved parameters has a plan")
+    };
+
+    let mut params: Vec<ParamAddress> = routings.iter().map(|(_, r)| r.to).collect();
+    params.sort_unstable();
+    params.dedup();
+    for param in params {
+        let chain = project
+            .param_chain(param)
+            .expect("a routing that plays has its parameter");
+        let at = plan(&plans, chain);
+        let target = match param {
+            ParamAddress::Modulator(modulator, n) => plans[at].node.add_param(modulator, n),
+            _ => keys::param(project, param)
+                .filter(|&(key, _)| graph.find(key).is_some())
+                .map(|(key, id)| {
+                    let port = plans[at].ports.len();
+                    plans[at].ports.push(Port::Param(key, id));
+                    plans[at].node.add_port(port)
+                }),
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        // The length of the range the routings' amounts are shares of: a
+        // plugin's parameters take theirs in its own units.
+        let span = project.param_spec(param).map_or(1.0, |spec| {
+            spec.scale.position(spec.max) - spec.scale.position(spec.min)
+        });
+        let mut owners: Vec<Chain> = (routings.iter())
+            .filter(|(_, r)| r.to == param)
+            .map(|&(owner, _)| owner)
+            .collect();
+        owners.dedup();
+        for owner in owners {
+            let from = plan(&plans, owner);
+            let target = match owner == chain {
+                true => target,
+                false => {
+                    let relay = plans[at].node.add_relay(target);
+                    let port = plans[from].ports.len();
+                    plans[from].ports.push(Port::Relay(chain, relay));
+                    plans[from].node.add_port(port)
+                }
+            };
+            for &(_, routing) in routings
+                .iter()
+                .filter(|&&(c, r)| c == owner && r.to == param)
+            {
+                let added = plans[from].node.add_routing(routing, span, target);
+                debug_assert!(added, "a routing that plays has its outputs");
+            }
+        }
+    }
+
+    // An Auto note trigger acts as Never where something else moves the
+    // modulator's trigger or gate.
+    for (chain, modulation) in project.modulations() {
+        for modulator in &modulation.modulators {
+            let trigger = match modulator.kind {
+                ModulatorKind::Macro => continue,
+                ModulatorKind::Lfo => lfo::TRIGGER,
+                ModulatorKind::Envelope => envelope::GATE,
+            };
+            let trigger = ParamAddress::Modulator(modulator.id, trigger as u32);
+            let routed = routings.iter().any(|(_, r)| r.to == trigger);
+            let automated =
+                (project.automation.iter()).any(|l| !l.overridden && l.param == trigger);
+            if routed || automated {
+                let at = plan(&plans, chain);
+                plans[at].node.move_trigger(modulator.id);
+            }
+        }
+    }
+
+    let mut nodes = Vec::with_capacity(plans.len());
+    let mut wiring = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let node = graph.add(keys::modulation(plan.chain), plan.node);
+        graph.control(node).expect("the node was just added");
+        nodes.push((plan.chain, node));
+        wiring.push((node, plan.ports));
+    }
+    let node_of = |chain: Chain| nodes.iter().find(|n| n.0 == chain).map(|n| n.1);
+    for (node, ports) in wiring {
+        for (n, port) in ports.into_iter().enumerate() {
+            let (to, param) = match port {
+                Port::Param(key, param) => (graph.find(key), param),
+                Port::Relay(chain, relay) => (node_of(chain), relay),
+            };
+            let to = to.expect("the ports go to nodes in the graph");
+            let port = graph.modulate(node, to, param);
+            let port =
+                port.expect("modulation flows from the master and groups to what feeds them");
+            debug_assert_eq!(port, n, "the ports are numbered in order");
+        }
+    }
+    for track in project.tracks.iter().filter(|t| t.kind == TrackKind::Midi) {
+        let node = node_of(Chain::Track(track.id));
+        let player = graph.find(keys::track_clips(track.id));
+        let monitor = graph.find(keys::track_input(track.id));
+        if let (Some(node), Some(player), Some(monitor)) = (node, player, monitor) {
+            for (from, to) in [(player, monitor), (monitor, node)] {
+                graph
+                    .send_notes(from, to)
+                    .expect("notes go from the clips through the monitor");
+            }
+        }
+    }
 }
 
 /// The native stage the model puts in `slot`: the channel's clip stage, in
@@ -996,11 +1177,14 @@ mod tests {
     use std::any::{Any, TypeId};
     use std::collections::BTreeSet;
 
+    use musicable_model::automation::{Lane, Point};
     use musicable_model::clip::ClipContent;
+    use musicable_model::modulation::{ModulatorId, Output};
     use musicable_model::time::{BeatRange, Beats};
     use musicable_model::{DeviceId, Monitor, SendId, TestTone, TrackId, TrackKind};
 
     use super::*;
+    use crate::modulation;
     use crate::nodes::{Delay, Impulse, Latent};
     use crate::{
         AudioMut, Block, Engine, Event, Inputs, MidiMessage, ProcessContext, ReferenceRenderer,
@@ -1959,5 +2143,125 @@ mod tests {
         handle.send(enabled(1.0)).unwrap();
         // The second beat.
         assert_eq!(play(&mut engine, 1)[..2], [0.25, 0.25]);
+    }
+
+    /// A project with two tones, each on a track.
+    fn two_tones() -> (Project, TrackId, TrackId) {
+        let mut p = Project::new();
+        let [drums, bass] = ["Drums", "Bass"].map(|name| {
+            let track = p.add_track(name, TrackKind::Audio);
+            p.track_mut(track).unwrap().tone = Some(TestTone {
+                frequency: 220.0,
+                level: 0.5,
+            });
+            track
+        });
+        (p, drums, bass)
+    }
+
+    /// Puts a Macro on `owner` with its knob at `knob`, pulling the fader
+    /// of the track with id `track` all the way down as it turns.
+    fn knob_on(p: &mut Project, owner: Chain, track: TrackId, knob: f64) -> ModulatorId {
+        let mut macros = p.new_modulator(ModulatorKind::Macro, "Macro 1");
+        macros.set(0, knob);
+        let volume = ParamAddress::Volume(Chain::Track(track));
+        let routing = p.new_routing(Output::new(macros.id, 0), volume, -1.0);
+        let id = macros.id;
+        let modulation = p.modulation_mut(owner).unwrap();
+        modulation.modulators.push(macros);
+        modulation.routings.push(routing);
+        id
+    }
+
+    /// Whether the project is silent from frame 32 on, once a fader has had
+    /// time to ramp.
+    fn silent(p: &Project) -> bool {
+        let out = render(compile(p).prepare(&CONFIG).unwrap(), 2048);
+        out[64..].iter().all(|&s| s == 0.0)
+    }
+
+    #[test]
+    fn modulators_move_parameters_through_their_channels_nodes() {
+        let (mut p, drums, bass) = two_tones();
+        assert!(!silent(&p));
+        // One on the drums, and one on the master that goes through the
+        // bass's node, which runs after the master's.
+        knob_on(&mut p, Chain::Track(drums), drums, 1.0);
+        knob_on(&mut p, Chain::Master, bass, 1.0);
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        for chain in [Chain::Track(drums), Chain::Track(bass), Chain::Master] {
+            assert!(graph.contains(keys::modulation(chain)), "{chain:?}");
+        }
+        assert!(silent(&p));
+        // A knob at 0 moves nothing.
+        let (mut p, drums, bass) = two_tones();
+        knob_on(&mut p, Chain::Track(drums), drums, 1.0);
+        knob_on(&mut p, Chain::Master, bass, 0.0);
+        assert!(!silent(&p));
+    }
+
+    #[test]
+    fn routings_bypassed_or_out_of_reach_move_nothing() {
+        let (mut p, drums, bass) = two_tones();
+        p.track_mut(bass).unwrap().muted = true;
+        let group = p.add_track("Group", TrackKind::Group);
+        p.track_mut(drums).unwrap().output = Bus::Group(group);
+        knob_on(&mut p, Chain::Track(group), drums, 1.0);
+        assert!(silent(&p));
+        let bypassed = |p: &mut Project, bypassed: bool| {
+            let routings = &mut p.track_mut(group).unwrap().modulation.routings;
+            routings[0].bypassed = bypassed;
+        };
+        bypassed(&mut p, true);
+        assert!(!silent(&p));
+        // Once the drums leave the group, its knob no longer reaches them.
+        bypassed(&mut p, false);
+        p.track_mut(drums).unwrap().output = Bus::Master;
+        assert!(!silent(&p));
+        // The group keeps its node for its knob, and the drums, with
+        // nothing moving them, have none.
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert!(graph.contains(keys::modulation(Chain::Track(group))));
+        assert!(!graph.contains(keys::modulation(Chain::Track(drums))));
+    }
+
+    #[test]
+    fn lanes_and_parameter_events_move_modulators() {
+        let (mut p, drums, bass) = two_tones();
+        p.track_mut(bass).unwrap().muted = true;
+        let knob = knob_on(&mut p, Chain::Track(drums), drums, 0.0);
+        let param = ParamAddress::Modulator(knob, 0);
+        assert_eq!(
+            keys::param(&p, param),
+            Some((
+                keys::modulation(Chain::Track(drums)),
+                modulation::param_id(knob, 0)
+            ))
+        );
+        assert!(!silent(&p));
+        // A lane turns the knob all the way from the start of the song.
+        let points = vec![Point::new(Beats::ZERO, 1.0)];
+        p.automation.push(Lane::new(param, points));
+        assert!(silent(&p));
+        // So does a parameter event, to a knob without a lane.
+        p.automation.clear();
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle
+            .swap_graph(compile(&p).prepare(&CONFIG).unwrap())
+            .unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        assert!(play(&mut engine, 1000).iter().any(|&s| s != 0.0));
+        let (node, param) = keys::param(&p, param).unwrap();
+        handle
+            .send(Event::Param {
+                node,
+                param,
+                value: 1.0,
+            })
+            .unwrap();
+        play(&mut engine, 64);
+        assert!(play(&mut engine, 1000).iter().all(|&s| s == 0.0));
     }
 }

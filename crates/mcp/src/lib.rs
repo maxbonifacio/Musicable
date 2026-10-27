@@ -26,6 +26,7 @@ use musicable_commands::{
     history, json,
 };
 use musicable_model::clip::ClipId;
+use musicable_model::modulation::ModulatorId;
 use musicable_model::param::{ParamAddress, ParamSpec};
 use musicable_model::{DeviceId, Project};
 use serde_json::{Map, Value as Json};
@@ -61,6 +62,7 @@ enum Asked {
     Project,
     Clip(ClipId),
     Device(DeviceId),
+    Modulator(ModulatorId),
     /// A parameter's automation.
     Automation(ParamAddress),
     Editor,
@@ -235,6 +237,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Project => Ok(reads::project(window)),
         Asked::Clip(clip) => reads::clip(window, clip),
         Asked::Device(device) => reads::device(window, device),
+        Asked::Modulator(modulator) => reads::modulator(window, modulator),
         Asked::Automation(param) => reads::automation(window, param),
         Asked::Editor => Ok(reads::editor(window)),
         Asked::History => Ok(reads::history(window)),

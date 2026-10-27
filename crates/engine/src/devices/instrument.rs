@@ -13,10 +13,11 @@
 use std::f64::consts::PI;
 
 use musicable_model::clip::Controller;
-use musicable_model::native::ParamInfo;
+use musicable_model::native::{ParamInfo, Scale};
 
 use super::{Span, Values};
 use crate::ProcessContext;
+use crate::automation::modulated;
 use crate::event::{NodeEvent, NoteId};
 
 /// The most voices an instrument plays at once: the top of its `voices`.
@@ -137,31 +138,28 @@ impl Playing {
             offset,
             min: info[param].min as f32,
             max: info[param].max as f32,
+            scale: info[param].scale,
         }
     }
 }
 
 /// One parameter's values over a span for one voice: the device's, with
-/// the voice's own modulation added and kept in the range, as
-/// [`Param`](super::Param) keeps the device's.
+/// the voice's own modulation added along the parameter's scale and kept in
+/// the range, as [`Param`](crate::automation::Param) keeps the device's.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Lane<'a> {
     frames: &'a [f32],
     offset: f32,
     min: f32,
     max: f32,
+    scale: Scale,
 }
 
 impl Lane<'_> {
     /// The value on frame `i` of the span.
     #[inline]
     pub(crate) fn at(&self, i: usize) -> f32 {
-        let base = self.frames[i];
-        if self.offset == 0.0 {
-            base
-        } else {
-            (base + self.offset).clamp(self.min.min(base), self.max.max(base))
-        }
+        modulated(self.frames[i], self.min, self.max, self.scale, self.offset)
     }
 }
 
@@ -653,7 +651,7 @@ pub(crate) mod tests {
         NodeEvent {
             offset: at,
             kind: NodeEventKind::Modulation {
-                param: ParamId(param as u32),
+                param: ParamId(param as u64),
                 amount,
                 note: Some(NoteId(note)),
             },

@@ -1,6 +1,6 @@
 //! The engine sounds the same with the parallel renderer as with the
 //! reference renderer, sample for sample, through parameter changes,
-//! transport and tempo changes, and graph swaps.
+//! modulation, transport and tempo changes, and graph swaps.
 
 use musicable_engine::compile::keys;
 use musicable_engine::nodes::{Gain, Sine};
@@ -8,8 +8,10 @@ use musicable_engine::{
     AudioMut, Engine, EngineConfig, Event, ParallelOptions, ParallelRenderer, ReferenceRenderer,
     Renderer, TransportCommand, compile, rt,
 };
+use musicable_model::modulation::{ModulatorKind, Output, lfo};
+use musicable_model::param::ParamAddress;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
-use musicable_model::{Project, TestTone, TrackKind};
+use musicable_model::{Chain, Project, TestTone, TrackKind};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -22,7 +24,8 @@ const CONFIG: EngineConfig = EngineConfig {
 /// Device callback sizes, in turn.
 const CALLBACKS: [usize; 5] = [441, 64, 970, 128, 7];
 
-/// `tracks` tracks with a test tone each, and the metronome on.
+/// `tracks` tracks with a test tone each, the metronome on, and an LFO on
+/// the master panning every other track.
 fn project(tracks: u32) -> Project {
     let mut p = Project::new();
     p.metronome = true;
@@ -34,6 +37,20 @@ fn project(tracks: u32) -> Project {
             frequency: 110.0 * f64::from(i + 1),
             level: 0.5,
         });
+    }
+    let mut lfo = p.new_modulator(ModulatorKind::Lfo, "LFO 1");
+    lfo.set(lfo::RATE as u32, 5.0);
+    let from = Output::new(lfo.id, 0);
+    p.master.modulation.modulators.push(lfo);
+    let panned: Vec<Chain> = p
+        .tracks
+        .iter()
+        .step_by(2)
+        .map(|t| Chain::Track(t.id))
+        .collect();
+    for track in panned {
+        let routing = p.new_routing(from, ParamAddress::Pan(track), 0.5);
+        p.master.modulation.routings.push(routing);
     }
     p
 }

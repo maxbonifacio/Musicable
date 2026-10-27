@@ -1,6 +1,6 @@
 //! What the read tools give back, as JSON: the commands, the project, a
-//! clip, a device, a lane of automation, the editor's state and the undo
-//! history. Positions and lengths are numbers of beats, gains are linear,
+//! clip, a device, a modulator, a lane of automation, the editor's state
+//! and the undo history. Positions and lengths are numbers of beats, gains are linear,
 //! and ids are whole numbers, as commands take them.
 
 use musicable_commands::editor::Lane as PianoRollLane;
@@ -10,11 +10,12 @@ use musicable_commands::{
 use musicable_model::automation::Lane;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, Offset, Point};
 use musicable_model::mixer::Bus;
-use musicable_model::native::{NativeDevice, Unit};
+use musicable_model::modulation::{Curve, Modulation, ModulatorId};
+use musicable_model::native::{NativeDevice, ParamInfo, Unit};
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
 use musicable_model::{
-    Chain, ClipType, Device, DeviceId, DeviceKind, Master, Monitor, PluginFormat, Track, TrackKind,
+    Chain, ClipType, Device, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Track, TrackKind,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -133,9 +134,10 @@ fn add_keys(entry: &mut Map<String, Json>, keymap: &Keymap, id: &CommandId) {
 }
 
 /// The project, with everything's id: the tempo map, the loop, the tracks
-/// with their mixer settings, devices and clips, the master, the locators,
-/// and which parameters are automated. Notes, devices' parameters and
-/// automation points come from their own reads.
+/// with their mixer settings, devices, modulators, routings and clips, the
+/// master, the locators, and which parameters are automated. Notes,
+/// devices' and modulators' parameters and automation points come from
+/// their own reads.
 pub(crate) fn project(window: &impl Window) -> Json {
     let project = window.project();
     let tempo = &project.tempo;
@@ -185,14 +187,16 @@ pub(crate) fn project(window: &impl Window) -> Json {
         "metronome": project.metronome,
         "punch_in": project.punch_in,
         "punch_out": project.punch_out,
-        "tracks": project.tracks.iter().map(track).collect::<Vec<_>>(),
-        "master": master(&project.master),
+        "tracks": (project.tracks.iter())
+            .map(|t| track(project, t))
+            .collect::<Vec<_>>(),
+        "master": master(project),
         "locators": locators,
         "automation": automation,
     })
 }
 
-fn track(track: &Track) -> Json {
+fn track(project: &Project, track: &Track) -> Json {
     let kind = match track.kind {
         TrackKind::Audio => "audio",
         TrackKind::Midi => "midi",
@@ -251,16 +255,72 @@ fn track(track: &Track) -> Json {
             .collect();
         entry["takes"] = takes.into();
     }
+    add_modulation(
+        &mut entry,
+        project,
+        Chain::Track(track.id),
+        &track.modulation,
+    );
     entry
 }
 
-fn master(master: &Master) -> Json {
-    json!({
+fn master(project: &Project) -> Json {
+    let master = &project.master;
+    let mut entry = json!({
         "gain": short(master.gain),
         "pan": short(master.pan),
         "clip_type": clip_type(master.clip_type),
         "devices": master.devices.iter().map(device_entry).collect::<Vec<_>>(),
-    })
+    });
+    add_modulation(&mut entry, project, Chain::Master, &master.modulation);
+    entry
+}
+
+/// A channel's modulators and routings, if it has any: each modulator's
+/// id, name and kind, and each routing's settings, with the names the
+/// modulation commands give them.
+fn add_modulation(entry: &mut Json, project: &Project, chain: Chain, modulation: &Modulation) {
+    if modulation.is_empty() {
+        return;
+    }
+    let modulators: Vec<Json> = (modulation.modulators.iter())
+        .map(|modulator| {
+            json!({
+                "id": modulator.id.0,
+                "name": modulator.name,
+                "kind": modulator.kind.key(),
+            })
+        })
+        .collect();
+    let routings: Vec<Json> = (modulation.routings.iter())
+        .map(|routing| {
+            let mut entry = json!({
+                "id": routing.id.0,
+                "modulator": routing.from.modulator.0,
+                "output": routing.from.n,
+                "param": param_text(routing.to),
+                "amount": routing.amount,
+                "curve": routing.curve.key(),
+            });
+            if let Curve::Stepped(steps) = routing.curve {
+                entry["steps"] = steps.into();
+            }
+            if let Some(scale) = routing.scale {
+                entry["scale"] = json!({ "modulator": scale.modulator.0, "output": scale.n });
+            }
+            entry["lag"] = routing.lag.into();
+            if routing.bypassed {
+                entry["bypassed"] = true.into();
+            }
+            // Out of its modulator's reach, it waits until it's back.
+            if !project.routing_plays(chain, routing) {
+                entry["plays"] = false.into();
+            }
+            entry
+        })
+        .collect();
+    entry["modulators"] = modulators.into();
+    entry["routings"] = routings.into();
 }
 
 fn clip_type(clip_type: ClipType) -> &'static str {
@@ -521,6 +581,53 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
     Ok(entry)
 }
 
+/// One modulator: what it is, where it is, each of its parameters'
+/// number, name, range, unit and value, for `modulation.set_param` and
+/// automation, which name one as "modulator 6 param 2", and its outputs,
+/// for routings.
+pub(crate) fn modulator(window: &impl Window, id: ModulatorId) -> Result<Json, String> {
+    let project = window.project();
+    let Some((chain, index, modulator)) = project.find_modulator(id) else {
+        return Err(format!("There's no modulator {}.", id.0));
+    };
+    let params: Vec<Json> = (modulator.params().into_iter())
+        .filter_map(|n| {
+            let info = modulator.param(n)?;
+            let value = modulator.value(n).unwrap_or(info.default);
+            let mut entry = param_entry(n, &modulator.param_name(n)?, info, value);
+            // A Macro's are its knobs and buttons.
+            if let Some(control) = modulator.control(n) {
+                entry["kind"] = control.kind.key().into();
+            }
+            Some(entry)
+        })
+        .collect();
+    let outputs: Vec<Json> = (modulator.outputs().into_iter())
+        .map(|n| {
+            let mut entry = json!({ "output": n });
+            if let Some(name) = modulator.output_name(n) {
+                entry["name"] = name.into();
+            }
+            entry["range"] = if modulator.bipolar(n) {
+                "-1 to 1"
+            } else {
+                "0 to 1"
+            }
+            .into();
+            entry
+        })
+        .collect();
+    Ok(json!({
+        "id": modulator.id.0,
+        "name": modulator.name,
+        "kind": modulator.kind.key(),
+        "chain": chain_entry(chain),
+        "position": index,
+        "params": params,
+        "outputs": outputs,
+    }))
+}
+
 /// A device chain: a track's, by its id, or "master".
 fn chain_entry(chain: Chain) -> Json {
     match chain {
@@ -536,26 +643,32 @@ fn native_params(native: &NativeDevice) -> Json {
     let params: Vec<Json> = (native.params().iter().enumerate())
         .map(|(number, param)| {
             let value = native.value(number).unwrap_or(param.default);
-            let mut entry = json!({
-                "param": number,
-                "name": param.full_name(),
-                "value": value,
-                "shown": param.format(value),
-                "min": param.min,
-                "max": param.max,
-                "default": param.default,
-                "unit": unit(param.unit),
-            });
-            if let Unit::Choice(choices) = param.unit {
-                entry["choices"] = choices.to_vec().into();
-            }
-            if param.stepped {
-                entry["stepped"] = true.into();
-            }
-            entry
+            param_entry(number as u32, &param.full_name(), param, value)
         })
         .collect();
     params.into()
+}
+
+/// A parameter in a built-in device's or a modulator's table: its number,
+/// name, value, also as its control shows it, range, default and unit.
+fn param_entry(number: u32, name: &str, param: &ParamInfo, value: f64) -> Json {
+    let mut entry = json!({
+        "param": number,
+        "name": name,
+        "value": value,
+        "shown": param.format(value),
+        "min": param.min,
+        "max": param.max,
+        "default": param.default,
+        "unit": unit(param.unit),
+    });
+    if let Unit::Choice(choices) = param.unit {
+        entry["choices"] = choices.to_vec().into();
+    }
+    if param.stepped {
+        entry["stepped"] = true.into();
+    }
+    entry
 }
 
 fn unit(unit: Unit) -> &'static str {
@@ -567,6 +680,8 @@ fn unit(unit: Unit) -> &'static str {
         Unit::Milliseconds => "ms",
         Unit::Seconds => "s",
         Unit::Percent => "%",
+        Unit::Fraction => "fraction, from 0 to 1",
+        Unit::Degrees => "degrees",
         Unit::Semitones => "semitones",
         Unit::Cents => "cents",
         Unit::Ratio => "ratio",

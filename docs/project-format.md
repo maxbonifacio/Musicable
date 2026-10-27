@@ -9,7 +9,8 @@ tools can read and write projects too. `crates/io` implements it, in
 
 A project with a bass track playing a recording and sending to a reverb on
 a return track, and a keys track playing a note through the test
-instrument, bending it up a tone. It loops the first four bars, with the
+instrument, bending it up a tone, while an LFO there moves the
+instrument's level in eighth notes. It loops the first four bars, with the
 master's soft clip stage on, a locator marks the chorus at bar 3, and the
 bass's send to the reverb swells up to it. It was saved with the Mixing
 workspace:
@@ -17,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 17,
+  "version": 18,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -48,6 +49,8 @@ workspace:
   "next_clip_id": 2,
   "next_locator_id": 1,
   "next_take_id": 0,
+  "next_modulator_id": 1,
+  "next_routing_id": 1,
   "tracks": [
     {
       "id": 0,
@@ -99,6 +102,10 @@ workspace:
       ],
       "takes": [],
       "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
       "clip_type": "off",
       "console": {}
     },
@@ -120,6 +127,10 @@ workspace:
       "clips": [],
       "takes": [],
       "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
       "clip_type": "off",
       "console": {}
     },
@@ -198,6 +209,51 @@ workspace:
           }
         }
       ],
+      "modulation": {
+        "modulators": [
+          {
+            "id": 0,
+            "name": "LFO 1",
+            "kind": "lfo",
+            "params": {
+              "shape": 0.0,
+              "skew": 50.0,
+              "sync": 1.0,
+              "rate": 1.0,
+              "note": 5.0,
+              "phase": 0.0,
+              "start": 1.0,
+              "note_trigger": 0.0,
+              "trigger": 0.0,
+              "delay": 0.0,
+              "fade_in": 0.0,
+              "unipolar": 0.0
+            },
+            "controls": [],
+            "next_control": 0
+          }
+        ],
+        "routings": [
+          {
+            "id": 0,
+            "from": {
+              "modulator": 0,
+              "output": 0
+            },
+            "to": {
+              "device": {
+                "id": 0,
+                "param": 0
+              }
+            },
+            "amount": 0.2,
+            "curve": "linear",
+            "scale": null,
+            "lag": 0.0,
+            "bypassed": false
+          }
+        ]
+      },
       "clip_type": "off",
       "console": {}
     }
@@ -206,6 +262,10 @@ workspace:
     "gain": 1.0,
     "pan": 0.0,
     "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
     "clip_type": "soft",
     "console": {}
   },
@@ -274,7 +334,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 10 for this page. |
+| `version` | whole number | The format version: 18 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -288,6 +348,8 @@ in version control shows only what really changed.
 | `next_clip_id` | whole number | The same for clips. |
 | `next_locator_id` | whole number | The same for locators. |
 | `next_take_id` | whole number | The same for takes. |
+| `next_modulator_id` | whole number | The same for modulators, on tracks and on the master. |
+| `next_routing_id` | whole number | The same for modulators' routings. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
 | `locators` | array of locators | Named places in the song, in any order. |
@@ -351,6 +413,7 @@ change starts at must start within the position limit.
 | `clips` | array of clips | What the track plays: audio clips on an audio track, MIDI clips on a MIDI track, in any order. Return and group tracks have none. |
 | `takes` | array of takes | What the track recorded, top to bottom. Return and group tracks have none. |
 | `devices` | array of devices | The track's devices, in signal order. |
+| `modulation` | modulation | The track's modulators and their routings. |
 | `clip_type` | string | How the track's clip stage clips: `"off"`, clean floating point that never clips; `"hard"`, which cuts everything beyond full scale; or `"soft"`, which rounds off peaks above half scale so they get ever closer to full scale without reaching it. |
 | `console` | object | Console modelling settings. It's empty until console mode arrives, and has no fields yet. |
 
@@ -807,8 +870,127 @@ master, and the master feeds the audio device.
 | `gain` | float | The fader, as for a track. |
 | `pan` | float | Balance, as for a track. |
 | `devices` | array of devices | In signal order. |
+| `modulation` | modulation | The master's modulators and their routings. |
 | `clip_type` | string | As for a track. |
 | `console` | object | As for a track. |
+
+### Modulation
+
+A channel's modulators move parameters as the song plays, on top of their
+values and their automation, without changing either. Each track has its
+own modulation, and so does the master.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `modulators` | array of modulators | In the order the channel's modulator strip shows them. |
+| `routings` | array of routings | What the modulators move, in any order. |
+
+A **modulator**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_modulator_id`, and no other modulator in the project has it, on a track or on the master. It stays with the modulator. |
+| `name` | string | What the strip calls it, such as `"LFO 1"`. Not empty. |
+| `kind` | string | `"macro"`, knobs and buttons played by hand; `"lfo"`, a shape that repeats; or `"envelope"`, a shape that runs once each time something starts it. |
+| `params` | object | An LFO's or an Envelope's parameters, as a native device's `params` are: each value under its key from the tables below, and a parameter that's missing takes its default. Empty for a Macro, whose controls are its parameters. |
+| `controls` | array of controls | A Macro's knobs and buttons, in the order it shows them. Empty for the other kinds. |
+| `next_control` | whole number | The id a Macro's next control gets. It's above every control's id, and ids of deleted controls aren't used again, so it can be higher still. Musicable writes 0 for the other kinds. |
+
+An LFO's and an Envelope's parameters are numbered by their place in their
+kind's table, as a built-in device's are, and a Macro's by its controls'
+ids. Automation and routings name them as
+`{"modulator": {"id": id, "param": n}}`, so a modulator can move another.
+What each parameter does is in its kind's file in
+`crates/model/src/modulation/`.
+
+**LFO** (`"lfo"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `shape` | Shape | 0 Sine, 1 Triangle, 2 Saw, 3 Square | 0 |
+| 1 | `skew` | Skew | 0 to 100 % | 50 |
+| 2 | `sync` | Rate Sync | 0 off, 1 on | 0 |
+| 3 | `rate` | Rate Rate | 0.01 to 100 Hz | 1 |
+| 4 | `note` | Rate Note | 0 1/32, 1 1/16T, 2 1/16, 3 1/16D, 4 1/8T, 5 1/8, 6 1/8D, 7 1/4T, 8 1/4, 9 1/4D, 10 1/2T, 11 1/2, 12 1/2D, 13 1/1, 14 2/1, 15 4/1, 16 8/1, 17 16/1 | 8 |
+| 5 | `phase` | Phase | 0 to 360 degrees | 0 |
+| 6 | `start` | Start Mode | 0 Free, 1 Song, 2 Note | 0 |
+| 7 | `note_trigger` | Start Note Trigger | 0 Auto, 1 Always, 2 Legato, 3 Never | 0 |
+| 8 | `trigger` | Start Trigger | 0 to 1 | 0 |
+| 9 | `delay` | Start Delay | 0 to 10000 ms | 0 |
+| 10 | `fade_in` | Start Fade In | 0 to 10000 ms | 0 |
+| 11 | `unipolar` | Unipolar | 0 off, 1 on | 0 |
+
+**Envelope** (`"envelope"`):
+
+| # | Key | Control | Values | Default |
+|---|---|---|---|---|
+| 0 | `delay` | Delay | 0 to 10000 ms | 0 |
+| 1 | `attack` | Attack | 0 to 10000 ms | 10 |
+| 2 | `hold` | Hold | 0 to 10000 ms | 0 |
+| 3 | `decay` | Decay | 0 to 10000 ms | 300 |
+| 4 | `sustain` | Sustain | 0 to 100 % | 70 |
+| 5 | `release` | Release | 0 to 10000 ms | 300 |
+| 6 | `one_shot` | One Shot | 0 off, 1 on | 0 |
+| 7 | `attack_curve` | Attack Curve | -100 to 100 % | 0 |
+| 8 | `decay_curve` | Decay Curve | -100 to 100 % | 0 |
+| 9 | `release_curve` | Release Curve | -100 to 100 % | 0 |
+| 10 | `note_trigger` | Gate Note Trigger | 0 Auto, 1 Always, 2 Legato, 3 Never | 0 |
+| 11 | `gate` | Gate Level | 0 to 1 | 0 |
+| 12 | `transport` | Gate Transport | 0 off, 1 on | 0 |
+
+A **control** is one of a Macro's knobs or buttons:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below the Macro's `next_control`, and no other control of the Macro has it. It's the number of the control's parameter and of its output. |
+| `name` | string | What the Macro shows it as, such as `"Knob 1"`. Not empty. |
+| `kind` | string | `"knob"`, which turns from 0 to 1; `"toggle"`, a button that each press turns on or off; or `"momentary"`, a button that's on while it's held. |
+| `value` | float | From 0.0 to 1.0 for a knob, and 0.0 (off) or 1.0 (on) for a button. |
+
+An **output** is one of a modulator's outputs, as
+`{"modulator": id, "output": n}`: output `n` of the modulator with that id,
+which must be on the routing's channel. An LFO and an Envelope have one
+output, 0. A Macro has one for each control, numbered by the control's id,
+which gives the control's value. An LFO's output goes from −1 to 1, or from
+0 to 1 with `unipolar` on, and every other output from 0 to 1.
+
+A **routing** moves a parameter with an output:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_routing_id`, and no other routing in the project has it. |
+| `from` | output | The output that moves the parameter. |
+| `to` | parameter | The parameter it moves, named as a lane names it: one modulators can move. No two routings from the same output move the same parameter. |
+| `amount` | float | How far it moves the parameter when the output, once curved, is at 1. For a plugin's parameter, it's in the plugin's own units, as CLAP keeps modulation. For any other parameter, it's a share of the parameter's range, from −1.0 to 1.0, along the scale of its control: at 0.25 it moves the parameter a quarter of the way up the control, so a cutoff by the same number of octaves wherever it's set. Below 0 it moves it down. |
+| `curve` | curve | How it bends the output before the amount. |
+| `scale` | output or `null` | Another output that multiplies the amount, as velocity would, or `null` for none. |
+| `lag` | float | How long it takes to follow the output, from 0 to 10000 ms: about two thirds of the way in that time, as a gentle low pass does. 0 follows at once. |
+| `bypassed` | boolean | Whether it's bypassed: it moves nothing, and keeps its settings. |
+
+A **curve** is one of these, a string or an object:
+
+| Curve | Meaning |
+|---|---|
+| `"linear"` | The output as it is. |
+| `"exponential"` | Squared, keeping its sign: it moves slowly at first, then fast. |
+| `"logarithmic"` | Its square root, keeping its sign: fast at first, then slowly. |
+| `"s_curve"` | Slowly at both ends of the output's range and fast in the middle. |
+| `{"stepped": n}` | In `n` even steps across the output's range, from 2 to 128 steps. |
+| `"absolute"` | Its size, without its sign, so an LFO moves the parameter one way only. |
+| `"positive"` | Where it's above 0, and 0 elsewhere. |
+| `"negative"` | Where it's below 0, and 0 elsewhere. |
+
+Modulators can move the channels' faders, pans and sends, the test
+devices' parameters, every plugin parameter, and the built-in devices' and
+modulators' parameters but those of whole numbers, such as switches,
+choices and counts. They can't move a Bypass or a clip's parameters. A
+parameter moves by the sum of its routings, kept within its range. A
+modulator reaches its own channel: its devices, its fader, pan and sends,
+and the channel's other modulators. A group track's modulators also reach
+the tracks that feed the group, through other groups too, and the master's
+reach every channel. A routing to a parameter out of reach, such as one
+from a group to a track that no longer feeds the group, is kept and moves
+nothing until it's back in reach.
 
 ### Locator
 
@@ -841,6 +1023,7 @@ A **parameter** is an object with one field, saying whose it is:
 | `{"send": id}` | The `level` of the send with that id. |
 | `{"device": {"id": id, "param": n}}` | Parameter `n` of the device with that id. For a built-in device, `n` is the parameter's number in its kind's table (the `#` column above). For a plugin, `n` is the plugin's id for the parameter, as in its `params`, up to 4,294,967,295. A test device has only parameter 0: its `gain` or `level`. |
 | `{"bypass": id}` | The `bypassed` of the device with that id, on a track or on the master. |
+| `{"modulator": {"id": id, "param": n}}` | Parameter `n` of the modulator with that id: the parameter's number in an LFO's or an Envelope's table, or a Macro's control's id. |
 
 A **channel** is `{"track": id}`, the track with that id, or `"master"`.
 
@@ -848,9 +1031,10 @@ A **point** is a pair `[at, value]`. `at` is a position, 0 or after, and
 `value` a float in the parameter's own units, the ones its own field uses:
 linear gain for a fader, a send or a test gain, −1.0 to 1.0 for a pan, a
 built-in device's values as its `params` take them (within the range, and a
-whole number for switches, choices, notes and counts), a plugin's own
-values for its parameters, and 0.0 to 1.0 for a Bypass, which bypasses the
-device from 0.5.
+whole number for switches, choices, notes and counts), a modulator's as its
+`params` or a control's `value` takes them, a plugin's own values for its
+parameters, and 0.0 to 1.0 for a Bypass, which bypasses the device from
+0.5.
 
 Between two points the value moves in a straight line: for faders, sends and
 the test devices' settings on the fader's scale, where a gain's position is
@@ -901,6 +1085,7 @@ Signal flows from tracks to buses without loops:
 | 15 | 2026-10-25 | Spectral's High quality, rendering with Rubber Band, with its Envelope, and a curve for it. Version 14 warped clips render with Signalsmith Stretch, with the envelope at 128. |
 | 16 | 2026-10-25 | Granular: the warp mode that plays audio as short overlapping grains, with its Follow pitch, Grain Size and Fluctuation, and curves for the last two. Version 15 warped clips follow the pitch, with 30 ms grains and a fluctuation of 25. |
 | 17 | 2026-10-27 | Bypass and Deactivate: each device's `bypassed` and `active`, and Bypass lanes. Version 16 devices are all active, and none is bypassed. |
+| 18 | 2026-10-27 | Modulation: modulators on tracks and on the master, Macros, LFOs and Envelopes, with routings that move parameters, and lanes for their parameters. Version 17 channels have none. |
 
 ## Changing the format
 

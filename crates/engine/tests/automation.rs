@@ -577,7 +577,7 @@ fn nodes_that_read_no_automation_get_events_that_win() {
         .swap_graph(compile(&project).prepare(&config).unwrap())
         .unwrap();
     // A level set before the automation's first comes, on the same frame.
-    let (key, param) = keys::param(instrument).unwrap();
+    let (key, param) = keys::param(&project, instrument).unwrap();
     handle
         .send(Event::Param {
             node: key,

@@ -9,8 +9,9 @@ use musicable_model::automation;
 use musicable_model::clip::{
     AudioClip, Clip, ClipContent, Controller, Dimension, MidiClip, Offset, Point,
 };
-use musicable_model::native::{NativeDevice, NativeKind};
-use musicable_model::param::ClipParam;
+use musicable_model::modulation::{ControlKind, Curve, ModulatorKind, Output, Routing};
+use musicable_model::native::{NativeDevice, NativeKind, ParamInfo};
+use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
@@ -18,8 +19,8 @@ use musicable_model::warp::{
     TransientLoop, Warp, WarpMarker, WarpMode,
 };
 use musicable_model::{
-    AudioInput, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project, TestTone,
-    TrackId, TrackKind,
+    AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
+    TestTone, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -128,24 +129,162 @@ impl Random {
         let kind = self.pick(&NativeKind::ALL);
         let mut device = NativeDevice::new(kind);
         for (i, param) in kind.params().iter().enumerate() {
-            let value = match self.below(4) {
-                0 => continue,
-                1 => self.pick(&[param.min, param.max, param.default]),
-                // Any value in range, every bit pattern as likely.
-                2 if !param.stepped => loop {
-                    let value = self.f64();
-                    if param.is_valid(value) {
-                        break value;
-                    }
-                },
-                _ => param.from_unit((self.next() >> 11) as f64 / (1_u64 << 53) as f64),
-            };
-            device.values[i] = value;
+            if let Some(value) = self.value(param) {
+                device.values[i] = value;
+            }
         }
         if kind == NativeKind::Sampler && self.one_in(2) {
             device.sample = Some(format!("Samples/{}.wav", self.name()));
         }
         DeviceKind::Native(device)
+    }
+
+    /// A value for `param` anywhere in its range, or `None` to leave it at
+    /// its default.
+    fn value(&mut self, param: &ParamInfo) -> Option<f64> {
+        Some(match self.below(4) {
+            0 => return None,
+            1 => self.pick(&[param.min, param.max, param.default]),
+            // Any value in range, every bit pattern as likely.
+            2 if !param.stepped => self.within_f64(param.min, param.max),
+            _ => param.from_unit((self.next() >> 11) as f64 / (1_u64 << 53) as f64),
+        })
+    }
+
+    /// Any f64 from `low` to `high`, every bit pattern as likely.
+    fn within_f64(&mut self, low: f64, high: f64) -> f64 {
+        loop {
+            let value = self.f64();
+            if (low..=high).contains(&value) {
+                return value;
+            }
+        }
+    }
+
+    /// Modulators of every kind on the channels, set anywhere in their
+    /// ranges, and routings from them to parameters anywhere in the project
+    /// that modulators can move, in reach or not.
+    fn modulate(&mut self, project: &mut Project) {
+        let chains: Vec<Chain> = (project.tracks.iter().map(|t| Chain::Track(t.id)))
+            .chain([Chain::Master])
+            .collect();
+        for &chain in &chains {
+            for _ in 0..self.below(3) {
+                let kind = self.pick(&ModulatorKind::ALL);
+                let name = format!("{}{}", kind.name(), self.name());
+                let mut modulator = project.new_modulator(kind, name);
+                for (i, param) in kind.params().iter().enumerate() {
+                    if let Some(value) = self.value(param) {
+                        modulator.values[i] = value;
+                    }
+                }
+                for _ in 0..self.below(4) {
+                    if kind != ModulatorKind::Macro {
+                        break;
+                    }
+                    let mut control = modulator.new_control(self.pick(&ControlKind::ALL));
+                    if let Some(value) = self.value(control.kind.param()) {
+                        control.value = value;
+                    }
+                    if self.one_in(3) {
+                        control.name = format!("{}{}", control.name, self.name());
+                    }
+                    // Some are deleted.
+                    if !self.one_in(4) {
+                        modulator.controls.push(control);
+                    }
+                }
+                if !modulator.controls.is_empty() && self.one_in(4) {
+                    modulator.controls.remove(0);
+                }
+                project
+                    .modulation_mut(chain)
+                    .unwrap()
+                    .modulators
+                    .push(modulator);
+            }
+        }
+        project.next_modulator_id += self.below(3) as u32;
+
+        let mut params: Vec<ParamAddress> = Vec::new();
+        for &chain in &chains {
+            params.extend([ParamAddress::Volume(chain), ParamAddress::Pan(chain)]);
+            let devices = match chain {
+                Chain::Track(id) => {
+                    let track = project.track(id).unwrap();
+                    params.extend(track.sends.iter().map(|s| ParamAddress::Send(s.id)));
+                    &track.devices
+                }
+                Chain::Master => &project.master.devices,
+            };
+            for device in devices {
+                let count = match &device.kind {
+                    DeviceKind::Native(native) => native.params().len() as u32,
+                    _ => 1,
+                };
+                params.extend((0..count).map(|n| ParamAddress::Device(device.id, n)));
+                if let DeviceKind::Plugin(_) = device.kind {
+                    params.push(ParamAddress::Device(device.id, self.next() as u32));
+                }
+            }
+            for modulator in &project.modulation(chain).unwrap().modulators {
+                let numbers = modulator.params().into_iter();
+                params.extend(numbers.map(|n| ParamAddress::Modulator(modulator.id, n)));
+            }
+        }
+        params.retain(|&param| project.can_modulate(param));
+        let curves = [
+            Curve::Linear,
+            Curve::Exponential,
+            Curve::Logarithmic,
+            Curve::SCurve,
+            Curve::Stepped(2),
+            Curve::Stepped(Curve::STEPS_MAX),
+            Curve::Absolute,
+            Curve::Positive,
+            Curve::Negative,
+        ];
+        for &chain in &chains {
+            let modulators = &project.modulation(chain).unwrap().modulators;
+            let outputs: Vec<Output> = (modulators.iter())
+                .flat_map(|m| m.outputs().into_iter().map(|n| Output::new(m.id, n)))
+                .collect();
+            if outputs.is_empty() {
+                continue;
+            }
+            for _ in 0..self.below(5) {
+                let (from, to) = (self.pick(&outputs), self.pick(&params));
+                let modulation = project.modulation(chain).unwrap();
+                if modulation.routing_between(from, to).is_some() {
+                    continue;
+                }
+                let amount = match self.below(3) {
+                    0 => self.pick(&[-1.0, 0.0, -0.0, 0.25, 1.0]),
+                    _ if project.amount_fits(to, 2.0) => self.f64(),
+                    _ => self.within_f64(-1.0, 1.0),
+                };
+                let mut routing = project.new_routing(from, to, amount);
+                routing.curve = match self.pick(&curves) {
+                    Curve::Stepped(_) if self.one_in(2) => {
+                        Curve::Stepped(2 + self.below(u64::from(Curve::STEPS_MAX) - 1) as u32)
+                    }
+                    curve => curve,
+                };
+                routing.scale = self.one_in(3).then(|| self.pick(&outputs));
+                routing.lag = match self.below(3) {
+                    0 => 0.0,
+                    1 => self.pick(&[Routing::LAG_MAX, 20.0]),
+                    _ => self.within_f64(0.0, Routing::LAG_MAX),
+                };
+                routing.bypassed = self.one_in(4);
+                project
+                    .modulation_mut(chain)
+                    .unwrap()
+                    .routings
+                    .push(routing);
+            }
+        }
+        project.next_routing_id += self.below(3) as u32;
     }
 
     fn bpm(&mut self) -> f64 {
@@ -548,6 +687,7 @@ fn random_project(random: &mut Random) -> Project {
     project.next_take_id += random.below(3) as u32;
     project.punch_in = random.one_in(2);
     project.punch_out = random.one_in(2);
+    random.modulate(&mut project);
     project
 }
 

@@ -25,7 +25,9 @@ impl Params {
         let params = info
             .iter()
             .zip(&device.values)
-            .map(|(info, &value)| Param::new(value as f32, info.min as f32, info.max as f32))
+            .map(|(info, &value)| {
+                Param::new(value as f32, info.min as f32, info.max as f32).with_scale(info.scale)
+            })
             .collect();
         Self {
             info,
@@ -46,10 +48,24 @@ impl Params {
             set: vec![0.0; self.params.len()],
             automated: vec![false; self.params.len()],
             lanes: vec![0.0; self.params.len() * config.max_block],
-            modulations: vec![0.0; self.params.len()],
+            modulations: vec![0.0; self.params.len() * config.max_block],
             stride: config.max_block,
             len: 0,
         };
+    }
+
+    /// From [`Node::modulated`](crate::Node::modulated): something
+    /// modulates parameter `param` in the node's graph, so it keeps its
+    /// modulation when the node takes over from another.
+    pub fn modulated(&mut self, param: ParamId) {
+        let Ok(index) = usize::try_from(param.0) else {
+            return;
+        };
+        if let (Some(p), Some(info)) = (self.params.get_mut(index), self.info.get(index))
+            && info.modulated
+        {
+            p.set_modulated();
+        }
     }
 
     /// From [`Node::adopt`](crate::Node::adopt), with the parameters of the
@@ -85,7 +101,10 @@ impl Params {
     /// `param` follow `automation` frame by frame. Hands it back for a
     /// parameter the device hasn't got.
     pub fn automate(&mut self, param: ParamId, automation: Automation) -> Option<Automation> {
-        match self.params.get_mut(param.0 as usize) {
+        match usize::try_from(param.0)
+            .ok()
+            .and_then(|i| self.params.get_mut(i))
+        {
             Some(p) => {
                 p.automate(automation);
                 None
@@ -124,16 +143,17 @@ impl Params {
         let values = &mut self.values;
         values.len = frames.len();
         for (i, param) in self.params.iter_mut().enumerate() {
-            let slot = &mut values.data[i * values.stride..][..frames.len()];
+            let at = i * values.stride;
+            let slot = &mut values.data[at..][..frames.len()];
+            let modulations = &mut values.modulations[at..][..frames.len()];
             values.automated[i] = param.is_automated();
             values.steady[i] = if values.automated[i] {
-                let lane = &mut values.lanes[i * values.stride..][..frames.len()];
-                param.render_with_targets(ctx, frames.clone(), slot, lane)
+                let lane = &mut values.lanes[at..][..frames.len()];
+                param.render_with_targets(ctx, frames.clone(), slot, lane, Some(modulations))
             } else {
-                param.render(ctx, frames.clone(), slot)
+                param.render_with_modulation(ctx, frames.clone(), slot, modulations)
             };
             values.set[i] = param.target();
-            values.modulations[i] = param.modulation();
         }
         render(Span {
             event,
@@ -145,7 +165,10 @@ impl Params {
     fn apply(&mut self, event: &NodeEvent) {
         match event.kind {
             NodeEventKind::Param { param, value } => {
-                if let Some(p) = self.params.get_mut(param.0 as usize) {
+                if let Some(p) = usize::try_from(param.0)
+                    .ok()
+                    .and_then(|i| self.params.get_mut(i))
+                {
                     p.set(value as f32);
                 }
             }
@@ -154,7 +177,9 @@ impl Params {
                 amount,
                 note: None,
             } => {
-                let index = param.0 as usize;
+                let Ok(index) = usize::try_from(param.0) else {
+                    return;
+                };
                 if let (Some(p), Some(info)) = (self.params.get_mut(index), self.info.get(index))
                     && info.modulated
                 {
@@ -184,9 +209,10 @@ pub struct Values {
     /// span's.
     data: Vec<f32>,
     steady: Vec<bool>,
-    /// Each parameter's value set and its modulation, which hold over a
-    /// span: only an event changes them.
+    /// Each parameter's value set, which holds over a span: only an event
+    /// changes it.
     set: Vec<f32>,
+    /// Each parameter's modulation on each frame, laid out as `data` is.
     modulations: Vec<f32>,
     /// Whether each parameter follows automation, and for those that do,
     /// the automation's value on each frame, laid out as `data` is.
@@ -225,10 +251,11 @@ impl Values {
         }
     }
 
-    /// Its modulation for every voice over the span, in its units: 0.0 for
-    /// none. Its frames' values have it added already.
-    pub fn modulation(&self, param: usize) -> f32 {
-        self.modulations[param]
+    /// Its modulation for every voice on each of the span's frames, along
+    /// its scale ([`Param`](crate::automation::Param)): 0.0 for none. Its
+    /// frames' values have it already.
+    pub fn modulations(&self, param: usize) -> &[f32] {
+        &self.modulations[param * self.stride..][..self.len]
     }
 }
 
@@ -244,7 +271,7 @@ mod tests {
         NodeEvent {
             offset,
             kind: NodeEventKind::Param {
-                param: ParamId(param as u32),
+                param: ParamId(param as u64),
                 value,
             },
         }
@@ -254,7 +281,7 @@ mod tests {
         NodeEvent {
             offset,
             kind: NodeEventKind::Modulation {
-                param: ParamId(param as u32),
+                param: ParamId(param as u64),
                 amount,
                 note: None,
             },
@@ -325,20 +352,25 @@ mod tests {
     }
 
     #[test]
-    fn modulation_adds_at_once_within_the_range() {
+    fn modulation_ramps_in_within_the_range() {
         let mut params = prepared(NativeKind::Utility);
         let pan = utility::PAN;
         let events = [modulation(4, pan, 0.25), modulation(8, pan, 2.0)];
         let first = spans(&mut params, &events, pan);
         assert_eq!(first[0].2, [0.0; 4]);
-        assert_eq!(first[1].2, [0.25; 4]);
-        assert!(first[2].2.iter().all(|&v| v == 1.0));
-        // The next modulation replaces the last; a set value ramps under it.
+        // A modulation ramps in over 32 frames, a modulator's tick.
+        let step = 0.25 / 32.0;
+        assert_eq!(first[1].2, [step, 2.0 * step, 3.0 * step, 4.0 * step]);
+        // The next ramps on from there, and the sum stays within the range.
+        let ramp = &first[2].2;
+        assert!(ramp[14] < 1.0, "{}", ramp[14]);
+        assert!(ramp[15..].iter().all(|&v| v == 1.0));
+        // A set value ramps under the modulation.
         let events = [modulation(0, pan, -0.5), param_event(0, pan, 0.5)];
         let next = spans(&mut params, &events, pan);
         let values = &next.last().unwrap().2;
-        assert!((values[0] - (-0.5 + 0.05)).abs() < 1e-6, "{}", values[0]);
-        assert!((values[20] - 0.0).abs() < 1e-6);
+        assert!(values[..31].iter().all(|&v| v > 0.0));
+        assert_eq!(values[31], 0.0);
     }
 
     #[test]
@@ -350,14 +382,22 @@ mod tests {
         let mut seen = Vec::new();
         params.run(&context(32, &events), |span| {
             let values = span.values;
+            let modulations = values.modulations(pan);
+            assert_eq!(modulations.len(), span.frames.len());
             seen.push((
                 values.target(pan, 0),
-                values.modulation(pan),
+                modulations[0],
+                modulations[modulations.len() - 1],
                 values.steady(pan),
             ));
         });
-        // Ramping to -0.5 all the while, modulated by 0.25 from frame 4.
-        assert_eq!(seen, [(-0.5, 0.0, false), (-0.5, 0.25, false)]);
+        // Ramping to -0.5 all the while, and modulated from frame 4, the
+        // modulation ramping to 0.25 over 32 frames.
+        let step = 0.25 / 32.0;
+        assert_eq!(
+            seen,
+            [(-0.5, 0.0, 0.0, false), (-0.5, step, 28.0 * step, false)]
+        );
     }
 
     #[test]
@@ -376,13 +416,15 @@ mod tests {
     fn values_set_outside_the_range_stay_put() {
         let mut param = Param::new(5.0, 0.0, 1.0);
         param.prepare(1000);
-        let mut values = [0.0; 4];
+        let mut values = [0.0; 32];
+        // Before the parameter renders a frame, modulation applies at once.
         param.modulate(-1.0);
-        param.render(&context(4, &[]), 0..4, &mut values);
-        assert_eq!(values, [4.0; 4]);
+        param.render(&context(32, &[]), 0..32, &mut values);
+        assert_eq!(values, [4.0; 32]);
         param.modulate(1.0);
-        param.render(&context(4, &[]), 0..4, &mut values);
-        assert_eq!(values, [5.0; 4]);
+        param.render(&context(32, &[]), 0..32, &mut values);
+        assert!(values[..15].iter().all(|&v| v < 5.0));
+        assert_eq!(values[15..], [5.0; 17]);
     }
 
     #[test]
@@ -395,13 +437,22 @@ mod tests {
             &[param_event(0, pan, -0.5), modulation(0, pan, 0.25)],
             pan,
         );
+        assert_eq!(old.value(pan), -0.25);
+        // While something modulates the parameter in the new node's graph,
+        // it ramps on from where the old one was, -0.5, to its own value,
+        // 0.0, keeping the old one's modulation until the next comes.
+        let mut new = prepared(NativeKind::Utility);
+        new.modulated(ParamId(pan as u64));
+        new.take_over(&old);
+        let values = spans(&mut new, &[], pan).remove(0).2;
+        assert!((values[0] - (-0.45 + 0.25)).abs() < 1e-6, "{}", values[0]);
+        assert_eq!(values[31], 0.25);
+        // Otherwise the modulation ramps away to nothing.
         let mut new = prepared(NativeKind::Utility);
         new.take_over(&old);
         let values = spans(&mut new, &[], pan).remove(0).2;
-        // It ramps on from where the old one was, -0.5, to its own value,
-        // 0.0, with the old one's modulation.
-        assert_eq!(old.value(pan), -0.25);
-        assert!((values[0] - (-0.45 + 0.25)).abs() < 1e-6, "{}", values[0]);
-        assert_eq!(values[31], 0.25);
+        let first = -0.45 + 0.25 - 0.25 / 32.0;
+        assert!((values[0] - first).abs() < 1e-6, "{}", values[0]);
+        assert_eq!(values[31], 0.0);
     }
 }

@@ -38,6 +38,7 @@ mod key;
 mod keymap;
 pub mod locator;
 pub mod mixer;
+pub mod modulation;
 pub mod notes;
 pub mod options;
 pub mod panel;
@@ -617,6 +618,7 @@ pub fn register_all(registry: &mut Registry) {
     arrange::register(registry);
     locator::register(registry);
     device::register(registry);
+    modulation::register(registry);
     browser::register(registry);
     mixer::register(registry);
     take::register(registry);

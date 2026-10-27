@@ -97,10 +97,11 @@ cargo test --workspace
   links without a page, such as `[Mixing]()`. The first change to what one
   covers writes its page and links it.
 - **Some pages are made from the code**: every command with its default
-  keys, and the built-in devices' controls, in `manual/src/generated`, and
-  the audio commands, in `manual/src/generated-audio`. Don't edit them, as
-  a test checks they're what the code makes. After changing a command, a
-  default key or a device's parameters, make them again and commit them:
+  keys, and the built-in devices' and the modulators' controls, in
+  `manual/src/generated`, and the audio commands, in
+  `manual/src/generated-audio`. Don't edit them, as a test checks they're
+  what the code makes. After changing a command, a default key or a
+  device's or a modulator's parameters, make them again and commit them:
 
   ```sh
   MUSICABLE_BLESS=1 cargo test -p musicable-ui --lib manual

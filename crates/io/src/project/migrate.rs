@@ -34,6 +34,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     high_quality,
     granular,
     bypass,
+    modulation,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -304,6 +305,24 @@ fn playing(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
             add(device, &path, "bypassed", json!(false))?;
             add(device, &path, "active", json!(true))?;
         }
+    }
+    Ok(())
+}
+
+/// Version 18 added modulators, with their routings, on tracks and on the
+/// master. Version 17 channels have none.
+fn modulation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "next_modulator_id", json!(0))?;
+    add(file, "", "next_routing_id", json!(0))?;
+    let none = || json!({"modulators": [], "routings": []});
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        if let Some(track) = track.as_object_mut() {
+            add(track, &format!("tracks[{i}]"), "modulation", none())?;
+        }
+    }
+    if let Some(master) = file.get_mut("master").and_then(Value::as_object_mut) {
+        add(master, "master", "modulation", none())?;
     }
     Ok(())
 }
@@ -774,6 +793,29 @@ mod tests {
             run(&STEPS[..15], &mut file, 15).unwrap_err().path,
             "tracks[0].clips[0].content.audio.warp.granular",
             "Granular's settings in a version 15 file"
+        );
+    }
+
+    #[test]
+    fn version_17_channels_have_no_modulators() {
+        let mut file = json!({
+            "version": 17,
+            "tracks": [{"devices": []}, {"devices": []}],
+            "master": {"devices": []},
+        });
+        run(&STEPS[..17], &mut file, 17).unwrap();
+        let none = json!({"modulators": [], "routings": []});
+        assert_eq!(file["tracks"][0]["modulation"], none);
+        assert_eq!(file["tracks"][1]["modulation"], none);
+        assert_eq!(file["master"]["modulation"], none);
+        assert_eq!(file["next_modulator_id"], json!(0));
+        assert_eq!(file["next_routing_id"], json!(0));
+        assert_eq!(file["version"], json!(18));
+        let mut file = json!({"version": 17, "tracks": [{"modulation": {}}]});
+        assert_eq!(
+            run(&STEPS[..17], &mut file, 17).unwrap_err().path,
+            "tracks[0].modulation",
+            "a track's modulation in a version 17 file"
         );
     }
 

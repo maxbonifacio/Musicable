@@ -1,6 +1,6 @@
 //! The manual's pages that come from the code, in `manual/src/generated`:
 //! every command with its default keys, the default keys, and the built-in
-//! devices' controls. The manual's own pages include them. The tests check
+//! devices' and the modulators' controls. The manual's own pages include them. The tests check
 //! that the files are what the code makes now, so the manual keeps up with
 //! it, and that a page of the manual shows each one.
 //!
@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use musicable_commands::{CommandId, Keymap, Registry, Scope};
+use musicable_model::modulation::ModulatorKind;
 use musicable_model::native::{NativeKind, ParamInfo, Unit};
 
 use crate::menus::{area_of, capitalized, label, menus};
@@ -54,7 +55,16 @@ fn pages() -> BTreeMap<String, String> {
     );
     pages.insert("keys.md".to_owned(), keys_page(&commands, &keymap, &panels));
     for kind in NativeKind::ALL {
-        pages.insert(format!("devices/{}.md", kind.key()), controls_page(kind));
+        let page = controls_page(kind.params());
+        pages.insert(format!("devices/{}.md", kind.key()), page);
+    }
+    // A Macro's controls are its own.
+    for kind in ModulatorKind::ALL
+        .into_iter()
+        .filter(|k| !k.params().is_empty())
+    {
+        let page = controls_page(kind.params());
+        pages.insert(format!("modulators/{}.md", kind.key()), page);
     }
     pages
 }
@@ -158,11 +168,11 @@ fn panel_title<'a>(panels: &panels::Registry, id: &'a str) -> &'a str {
 /// controls' places in the device's table.
 type Group = (&'static str, Vec<usize>);
 
-/// The device's controls, a table for each group as the devices panel has
-/// them, with their ranges and defaults as it writes them. Groups of the
-/// same controls, such as the EQ's bands, share a table.
-fn controls_page(kind: NativeKind) -> String {
-    let params = kind.params();
+/// A device's or a modulator's controls, a table for each group as the
+/// devices panel has them, with their ranges and defaults as it writes
+/// them. Groups of the same controls, such as the EQ's bands, share a
+/// table.
+fn controls_page(params: &[ParamInfo]) -> String {
     let groups = native::groups(params);
     let mut tables = Vec::new();
     let mut start = 0;

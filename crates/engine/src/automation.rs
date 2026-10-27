@@ -150,11 +150,15 @@ impl Cursor {
 /// some, and otherwise the value set, ramping to each new one over 10 ms as
 /// [`Smoothed`] does. Wherever the automation jumps (at a step in its lane,
 /// where the playhead jumps, and where a new graph takes over), the base
-/// glides there over 10 ms, so it doesn't click. Modulation is added to
-/// the base after the ramp and the glide, unsmoothed, and the sum kept
-/// within the parameter's range. The range stretches to take in a base set
-/// outside it, so modulation never moves a value set out there, only keeps
-/// the sum in.
+/// glides there over 10 ms, so it doesn't click. Modulation moves the base
+/// along the parameter's [`Scale`], after the ramp and the glide: it's an
+/// offset on the scale's even axis ([`Scale::position`]), so in the
+/// parameter's units on a linear one, and in ratios on a log one. A new
+/// modulation ramps there over [`MODULATION_RAMP`] frames, the time between
+/// a modulator's ticks, so the modulation moves in straight lines from one
+/// tick to the next. The sum stays within the parameter's range, which
+/// stretches to take in a base set outside it, so modulation never moves a
+/// value set out there, only keeps the sum in.
 ///
 /// Per-note modulation is the node's own business: a `Param` is the part
 /// every voice shares.
@@ -164,8 +168,13 @@ pub struct Param {
     set: Smoothed,
     min: f32,
     max: f32,
+    scale: Scale,
     automation: Option<Reader>,
-    modulation: f32,
+    /// The modulation for every voice, ramping to each new one.
+    modulation: Smoothed,
+    /// Whether something modulates the parameter in the node's graph: see
+    /// [`Node::modulated`](crate::Node::modulated).
+    modulated: bool,
     /// How far the base is off the automation after a jump, falling to
     /// nothing over a ramp's length.
     glide: Smoothed,
@@ -187,14 +196,17 @@ struct Reader {
 }
 
 impl Param {
-    /// Set to `value`, with modulation kept within `min..=max`.
+    /// Set to `value`, with modulation kept within `min..=max`, on a linear
+    /// scale.
     pub fn new(value: f32, min: f32, max: f32) -> Self {
         Self {
             set: Smoothed::new(value),
             min: min.min(max),
             max: max.max(min),
+            scale: Scale::Linear,
             automation: None,
-            modulation: 0.0,
+            modulation: Smoothed::new(0.0),
+            modulated: false,
             glide: Smoothed::new(0.0),
             glide_from: None,
             base: value,
@@ -203,11 +215,25 @@ impl Param {
         }
     }
 
+    /// Modulated along `scale`.
+    pub fn with_scale(mut self, scale: Scale) -> Self {
+        self.scale = scale;
+        self
+    }
+
     /// Sets how long ramps and glides take at `sample_rate`. Call it from
     /// the node's [`Node::prepare`](crate::Node::prepare).
     pub fn prepare(&mut self, sample_rate: u32) {
         self.set.prepare(sample_rate);
         self.glide.prepare(sample_rate);
+        self.modulation.prepare_frames(MODULATION_RAMP);
+    }
+
+    /// Notes that something modulates the parameter in the node's graph,
+    /// so it keeps the modulation of the parameter it takes over from. Call
+    /// it from the node's [`Node::modulated`](crate::Node::modulated).
+    pub fn set_modulated(&mut self) {
+        self.modulated = true;
     }
 
     /// Follows `automation` in place of the value set. Call it from the
@@ -225,8 +251,10 @@ impl Param {
 
     /// Carries on from `previous`, the same parameter in the node this one
     /// replaces: from its value and its modulation, ramping or gliding on
-    /// to this one's. Call it from the node's
-    /// [`Node::adopt`](crate::Node::adopt).
+    /// to this one's. If nothing modulates it in this node's graph
+    /// ([`set_modulated`](Self::set_modulated)), its modulation ramps away
+    /// to nothing; otherwise it holds until the next comes. Call it from the
+    /// node's [`Node::adopt`](crate::Node::adopt).
     pub fn take_over(&mut self, previous: &Param) {
         if previous.automation.is_some() {
             let mut left = previous.set;
@@ -242,7 +270,11 @@ impl Param {
         self.base = previous.base;
         self.value = previous.value;
         self.jumps = previous.jumps;
-        self.modulation = previous.modulation;
+        if self.modulated {
+            self.modulation = previous.modulation;
+        } else {
+            self.modulation.take_over(&previous.modulation);
+        }
     }
 
     /// Starts afresh, as if it had rendered nothing yet: at the value set,
@@ -253,8 +285,9 @@ impl Param {
         self.glide.hold(0.0);
         self.glide.reset();
         self.glide_from = None;
+        self.modulation.reset();
         self.base = self.set.value();
-        self.value = self.modulated(self.base);
+        self.value = self.modulated(self.base, self.modulation.value());
         self.jumps = None;
     }
 
@@ -265,12 +298,13 @@ impl Param {
         self.set.set(value);
     }
 
-    /// Offsets the value by `amount` from here on, in place of the last
-    /// amount, for a [`Modulation`](crate::NodeEventKind::Modulation) event
-    /// without a note. Amounts that aren't finite are ignored.
+    /// Offsets the value by `amount` along its scale from here on, in
+    /// place of the last amount, ramping there, for a
+    /// [`Modulation`](crate::NodeEventKind::Modulation) event without a
+    /// note. Amounts that aren't finite are ignored.
     pub fn modulate(&mut self, amount: f32) {
         if amount.is_finite() {
-            self.modulation = amount;
+            self.modulation.set(amount);
         }
     }
 
@@ -285,9 +319,10 @@ impl Param {
         self.set.target()
     }
 
-    /// The modulation for every voice: 0.0 for none.
+    /// The modulation for every voice on the frame rendered last, along
+    /// the scale: 0.0 for none.
     pub fn modulation(&self) -> f32 {
-        self.modulation
+        self.modulation.value()
     }
 
     /// Writes the value for each frame in `frames` of the block into
@@ -300,17 +335,46 @@ impl Param {
         frames: Range<usize>,
         values: &mut [f32],
     ) -> bool {
+        self.render_into(ctx, frames, values, None, None)
+    }
+
+    /// Renders as [`render`](Self::render) does, and writes the
+    /// modulation on each frame into `modulations`, which is as long: for a
+    /// node that applies the modulation its own way, as the delay does to
+    /// its time.
+    pub fn render_with_modulation(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        frames: Range<usize>,
+        values: &mut [f32],
+        modulations: &mut [f32],
+    ) -> bool {
+        self.render_into(ctx, frames, values, None, Some(modulations))
+    }
+
+    fn render_into(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        frames: Range<usize>,
+        values: &mut [f32],
+        targets: Option<&mut [f32]>,
+        modulations: Option<&mut [f32]>,
+    ) -> bool {
         debug_assert_eq!(frames.len(), values.len(), "a value for each frame");
         if values.is_empty() {
             return true;
         }
         if self.automation.is_some() {
-            self.render_automation(ctx, frames, values, None)
+            self.render_automation(ctx, frames, values, targets, modulations)
         } else {
             if frames.start == 0 {
                 self.jumps = Some(ctx.transport.jumps);
             }
-            self.render_set(values)
+            let steady = self.render_set(values, modulations);
+            if let Some(targets) = targets {
+                targets.fill(self.set.target());
+            }
+            steady
         }
     }
 
@@ -326,32 +390,35 @@ impl Param {
         frames: Range<usize>,
         values: &mut [f32],
         targets: &mut [f32],
+        modulations: Option<&mut [f32]>,
     ) -> bool {
         debug_assert_eq!(values.len(), targets.len(), "a target for each frame");
-        if self.automation.is_some() && !values.is_empty() {
-            self.render_automation(ctx, frames, values, Some(targets))
-        } else {
-            let steady = self.render(ctx, frames, values);
-            targets.fill(self.set.target());
-            steady
-        }
+        self.render_into(ctx, frames, values, Some(targets), modulations)
     }
 
-    fn render_set(&mut self, values: &mut [f32]) -> bool {
+    fn render_set(&mut self, values: &mut [f32], mut modulations: Option<&mut [f32]>) -> bool {
         let len = values.len();
         self.glide.skip(len);
-        if self.set.is_settled() {
+        if self.set.is_settled() && self.modulation.is_settled() {
             self.set.skip(len);
-            let base = self.set.value();
-            let value = self.modulated(base);
+            self.modulation.skip(len);
+            let (base, modulation) = (self.set.value(), self.modulation.value());
+            let value = self.modulated(base, modulation);
             values.fill(value);
+            if let Some(modulations) = modulations {
+                modulations.fill(modulation);
+            }
             self.base = base;
             self.value = value;
             return true;
         }
-        for value in values.iter_mut() {
+        for (k, value) in values.iter_mut().enumerate() {
             let base = self.set.next_value();
-            *value = self.modulated(base);
+            let modulation = self.modulation.next_value();
+            if let Some(modulations) = modulations.as_deref_mut() {
+                modulations[k] = modulation;
+            }
+            *value = self.modulated(base, modulation);
             self.base = base;
         }
         self.value = values[len - 1];
@@ -364,6 +431,7 @@ impl Param {
         frames: Range<usize>,
         values: &mut [f32],
         mut targets: Option<&mut [f32]>,
+        mut modulations: Option<&mut [f32]>,
     ) -> bool {
         let (tempo, rate) = (ctx.tempo, ctx.sample_rate);
         let transport = ctx.transport;
@@ -385,7 +453,7 @@ impl Param {
                 glide(&mut self.glide, from - target);
             }
         }
-        let (min, max, modulation) = (self.min, self.max, self.modulation);
+        let (min, max, scale) = (self.min, self.max, self.scale);
         for (k, (value, i)) in values.iter_mut().zip(frames).enumerate() {
             let frame = if transport.playing {
                 position + i as i64
@@ -401,7 +469,11 @@ impl Param {
                 glide(&mut self.glide, self.base - target);
             }
             let base = target + self.glide.next_value();
-            *value = modulated(base, min, max, modulation);
+            let modulation = self.modulation.next_value();
+            if let Some(modulations) = modulations.as_deref_mut() {
+                modulations[k] = modulation;
+            }
+            *value = modulated(base, min, max, scale, modulation);
             self.base = base;
             started = true;
         }
@@ -409,18 +481,26 @@ impl Param {
         values.iter().all(|&v| v == values[0])
     }
 
-    fn modulated(&self, base: f32) -> f32 {
-        modulated(base, self.min, self.max, self.modulation)
+    fn modulated(&self, base: f32, modulation: f32) -> f32 {
+        modulated(base, self.min, self.max, self.scale, modulation)
     }
 }
 
-/// `base` offset by `modulation`, kept within `min..=max` stretched to take
-/// in `base`.
-fn modulated(base: f32, min: f32, max: f32, modulation: f32) -> f32 {
+/// How many frames a new modulation takes to ramp in: 32, the time between
+/// a modulator's ticks and between the values a lane sends as events.
+pub const MODULATION_RAMP: u32 = Feed::GRID as u32;
+
+/// `base` offset by `modulation` along `scale`'s even axis, kept within
+/// `min..=max` stretched to take in `base`.
+pub fn modulated(base: f32, min: f32, max: f32, scale: Scale, modulation: f32) -> f32 {
     if modulation == 0.0 {
         return base;
     }
-    (base + modulation).clamp(min.min(base), max.max(base))
+    let moved = match scale {
+        Scale::Linear => base + modulation,
+        scale => scale.value_at(scale.position(f64::from(base)) + f64::from(modulation)) as f32,
+    };
+    moved.clamp(min.min(base), max.max(base))
 }
 
 /// Starts `glide` falling from `offset` to nothing.
@@ -664,7 +744,7 @@ mod tests {
         param.automate(step);
         param.modulate(-0.25);
         render(&mut param, 0, 499, 499);
-        param.render_with_targets(&ctx, 0..4, &mut values, &mut targets);
+        param.render_with_targets(&ctx, 0..4, &mut values, &mut targets, None);
         assert_close(&values, &[0.75, 0.65, 0.55, 0.45]);
         assert_eq!(targets, [1.0, 0.0, 0.0, 0.0]);
         // Without automation, the value ramps to the value set, the target.
@@ -673,7 +753,7 @@ mod tests {
         set.modulate(0.25);
         render(&mut set, 0, 1, 1);
         set.set(0.5);
-        set.render_with_targets(&ctx, 0..4, &mut values, &mut targets);
+        set.render_with_targets(&ctx, 0..4, &mut values, &mut targets, None);
         assert_close(&values, &[0.3, 0.35, 0.4, 0.45]);
         assert_eq!(targets, [0.5; 4]);
         assert_eq!((set.target(), set.modulation()), (0.5, 0.25));
@@ -706,10 +786,16 @@ mod tests {
     fn modulation_adds_to_the_base_within_the_range() {
         let mut param = Param::new(0.5, 0.0, 1.0);
         param.prepare(RATE);
+        // Before the parameter renders a frame, modulation applies at once.
         param.modulate(0.25);
         assert_eq!(render(&mut param, 0, 2, 2), [0.75, 0.75]);
+        // After, each new amount ramps in over 32 frames, a modulator's
+        // tick, and the sum stays within the range.
         param.modulate(0.75);
-        assert_eq!(render(&mut param, 0, 1, 1), [1.0]);
+        let ramp = render(&mut param, 0, 32, 32);
+        assert_eq!(ramp[0], 0.75 + 0.5 / 32.0);
+        assert!(ramp[14] < 1.0);
+        assert!(ramp[15..].iter().all(|&v| v == 1.0));
         param.modulate(f32::NAN);
         assert_eq!(render(&mut param, 0, 1, 1), [1.0]);
         // A base set beyond the range stays where it was set.
@@ -718,7 +804,7 @@ mod tests {
         assert_eq!(render(&mut loud, 0, 1, 1), [2.0]);
         loud.modulate(-1.5);
         assert_eq!(render(&mut loud, 0, 1, 1), [0.5]);
-        // Added after the automation, unsmoothed.
+        // It adds to the automation too.
         let mut automated = Param::new(0.0, 0.0, 1.0);
         automated.prepare(RATE);
         automated.automate(automation(&[(0.0, 0.5)], Scale::Linear));

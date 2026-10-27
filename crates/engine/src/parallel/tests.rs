@@ -138,7 +138,7 @@ struct BlockSpec {
     frames: usize,
     playing: bool,
     /// Node events, in order: node, offset, parameter and value.
-    events: Vec<(usize, usize, u32, f64)>,
+    events: Vec<(usize, usize, u64, f64)>,
 }
 
 fn kind() -> impl Strategy<Value = Kind> {
@@ -187,7 +187,7 @@ fn spec(max_nodes: usize) -> impl Strategy<Value = Spec> {
 /// A few blocks of any length, with events for any of `nodes` nodes, some
 /// for parameters they don't have.
 fn blocks(nodes: usize) -> impl Strategy<Value = Vec<BlockSpec>> {
-    let event = (0..nodes, 0.0f64..1.0, 0..3u32, -1.0f64..1.0);
+    let event = (0..nodes, 0.0f64..1.0, 0..3u64, -1.0f64..1.0);
     let block = (
         1..=CONFIG.max_block,
         any::<bool>(),

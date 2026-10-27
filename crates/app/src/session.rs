@@ -13,6 +13,7 @@ use musicable_commands::{
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
+use musicable_engine::modulation;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
@@ -22,6 +23,7 @@ use musicable_engine::{
 };
 use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
+use musicable_model::modulation::Routing;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::WarpMode;
@@ -1119,7 +1121,7 @@ impl Session {
                         device, param, to, ..
                     } => self.engine.push(Message::Event(Event::Param {
                         node: keys::device(device),
-                        param: ParamId(param),
+                        param: ParamId(param.into()),
                         value: to,
                     })),
                     // A sampler reads its sample as the graph is built.
@@ -1169,6 +1171,54 @@ impl Session {
                     | Edit::RemoveLane { .. }
                     | Edit::LanePoints { .. }
                     | Edit::LaneOverridden { .. } => recompile = true,
+                    // Names, and the order of a strip, change nothing the
+                    // modulators play.
+                    Edit::ModulatorName { .. }
+                    | Edit::ControlName { .. }
+                    | Edit::MoveModulator { .. } => {}
+                    // A channel's modulation node has its modulators'
+                    // parameters, and its routings' amounts.
+                    Edit::ModulatorParam {
+                        modulator,
+                        param,
+                        to,
+                        ..
+                    } => {
+                        let project = self.document.project();
+                        if let Some((chain, ..)) = project.find_modulator(modulator) {
+                            self.engine.push(Message::Event(Event::Param {
+                                node: keys::modulation(chain),
+                                param: modulation::param_id(modulator, param),
+                                value: to,
+                            }));
+                        }
+                    }
+                    Edit::RoutingSettings { routing, from, to }
+                        if Routing {
+                            amount: to.amount,
+                            ..from
+                        } == to =>
+                    {
+                        let project = self.document.project();
+                        if let Some((chain, ..)) = project.find_routing(routing) {
+                            self.engine.push(Message::Event(Event::Param {
+                                node: keys::modulation(chain),
+                                param: modulation::amount_id(routing),
+                                value: to.amount,
+                            }));
+                        }
+                    }
+                    // Modulators, their controls and their routings are
+                    // compiled into the graph, and so is what else a
+                    // routing's settings change: its curve, its scale, its
+                    // lag, and whether it plays.
+                    Edit::AddModulator { .. }
+                    | Edit::RemoveModulator { .. }
+                    | Edit::AddControl { .. }
+                    | Edit::RemoveControl { .. }
+                    | Edit::AddRouting { .. }
+                    | Edit::RemoveRouting { .. }
+                    | Edit::RoutingSettings { .. } => recompile = true,
                 }
             }
         }

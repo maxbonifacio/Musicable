@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use musicable_model::clip::{ClipId, NoteId};
+use musicable_model::modulation::{ModulatorId, RoutingId};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::Beats;
 use musicable_model::{Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
@@ -37,6 +38,9 @@ pub enum Value {
     Locator(LocatorId),
     Device(DeviceId),
     Take(TakeId),
+    Modulator(ModulatorId),
+    /// A modulator's output moving a parameter.
+    Routing(RoutingId),
     /// A parameter anywhere in the project.
     Param(ParamAddress),
     List(Vec<Value>),
@@ -56,6 +60,8 @@ pub enum Type {
     Locator,
     Device,
     Take,
+    Modulator,
+    Routing,
     Param,
     List(&'static Type),
     /// One of these words, as text.
@@ -88,6 +94,8 @@ impl Type {
             Type::Locator => LocatorId::from_value(value).is_some(),
             Type::Device => DeviceId::from_value(value).is_some(),
             Type::Take => TakeId::from_value(value).is_some(),
+            Type::Modulator => ModulatorId::from_value(value).is_some(),
+            Type::Routing => RoutingId::from_value(value).is_some(),
             Type::Param => ParamAddress::from_value(value).is_some(),
             Type::List(item) => {
                 matches!(value, Value::List(values) if values.iter().all(|v| item.accepts(v)))
@@ -113,9 +121,11 @@ impl fmt::Display for Type {
             Type::Locator => f.write_str("a locator"),
             Type::Device => f.write_str("a device"),
             Type::Take => f.write_str("a take"),
+            Type::Modulator => f.write_str("a modulator"),
+            Type::Routing => f.write_str("a routing"),
             Type::Param => f.write_str(
-                "a parameter, such as \"track 3 volume\", \"master pan\", \"send 2\" or \
-                 \"device 4 param 17\"",
+                "a parameter, such as \"track 3 volume\", \"master pan\", \"send 2\", \
+                 \"device 4 param 17\" or \"modulator 5 param 3\"",
             ),
             Type::List(item) => write!(f, "a list, each {item}"),
             Type::Choice(choices) => match choices {
@@ -352,13 +362,16 @@ id_from_value!(NoteId, Note);
 id_from_value!(LocatorId, Locator);
 id_from_value!(DeviceId, Device);
 id_from_value!(TakeId, Take);
+id_from_value!(ModulatorId, Modulator);
+id_from_value!(RoutingId, Routing);
 
 impl FromValue for ParamAddress {
     const TYPE: Type = Type::Param;
 
     /// A parameter, or one written as a script would: "track 3 volume",
     /// "track 3 pan", "master volume", "master pan", "send 2", "device 4
-    /// param 17", "device 4 bypass", or "clip 5 gain".
+    /// param 17", "device 4 bypass", "clip 5 gain" or "modulator 6 param
+    /// 3".
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Param(param) => Some(*param),
@@ -394,12 +407,16 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
             ClipId(id(clip)?),
             ClipParam::from_key(what)?,
         )),
+        ["modulator", modulator, "param", n] => {
+            Some(ParamAddress::Modulator(ModulatorId(id(modulator)?), id(n)?))
+        }
         _ => None,
     }
 }
 
 /// A parameter as scripts write it: "track 3 volume", "master pan", "send
-/// 2", "device 4 param 17", "device 4 bypass", "clip 5 gain".
+/// 2", "device 4 param 17", "device 4 bypass", "clip 5 gain", "modulator 6
+/// param 3".
 pub fn param_text(param: ParamAddress) -> String {
     let chain = |chain| match chain {
         Chain::Track(track) => format!("track {}", track.0),
@@ -412,6 +429,7 @@ pub fn param_text(param: ParamAddress) -> String {
         ParamAddress::Device(device, n) => format!("device {} param {n}", device.0),
         ParamAddress::Bypass(device) => format!("device {} bypass", device.0),
         ParamAddress::Clip(clip, param) => format!("clip {} {}", clip.0, param.key()),
+        ParamAddress::Modulator(modulator, n) => format!("modulator {} param {n}", modulator.0),
     }
 }
 
@@ -597,6 +615,7 @@ mod tests {
             ParamAddress::Pan(Chain::Master),
             ParamAddress::Send(SendId(2)),
             ParamAddress::Device(DeviceId(4), 17),
+            ParamAddress::Modulator(ModulatorId(5), 3),
         ];
         for param in params {
             let text = Value::Text(param_text(param));
@@ -611,6 +630,7 @@ mod tests {
             "send",
             "master gain",
             "device 4 17",
+            "modulator 5",
         ] {
             assert_eq!(read(bad), None, "{bad}");
         }

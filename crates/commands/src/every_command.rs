@@ -30,7 +30,10 @@ use musicable_model::clip::{
     AudioClip, Clip, ClipContent, ClipId, Controller, MidiClip, NoteId, Offset, Point,
 };
 use musicable_model::mixer::Bus;
-use musicable_model::native::{NativeDevice, NativeKind};
+use musicable_model::modulation::{
+    ControlKind, Curve, Modulator, ModulatorId, ModulatorKind, Output, Routing,
+};
+use musicable_model::native::{NativeDevice, NativeKind, eq};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats};
@@ -47,8 +50,8 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, history, json, locator, mixer, notes, options, rewarp, take,
-    track, transient, transport, view, warp, warp_mode, workspace,
+    controllers, device, edit, file, history, json, locator, mixer, modulation, notes, options,
+    rewarp, take, track, transient, transport, view, warp, warp_mode, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -954,6 +957,169 @@ fn examples() -> Vec<Example> {
             let gain = other_level(Some(f64::from(track.gain)));
             Some(Args::new().with("track", track.id).with("gain", gain))
         }),
+        edits(modulation::ADD, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("kind", "lfo").with("track", track))
+        }),
+        edits(modulation::ADD, |_| {
+            Some(
+                Args::new()
+                    .with("kind", "macro")
+                    .with("master", true)
+                    .with("index", 0_i64),
+            )
+        }),
+        edits(modulation::ADD, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(
+                Args::new()
+                    .with("kind", "envelope")
+                    .with("track", track)
+                    .with("name", "Swell"),
+            )
+        }),
+        edits(modulation::ADD_CONTROL, |s| {
+            let id = find_modulator(s, |m| m.kind == ModulatorKind::Macro)?.id;
+            Some(Args::new().with("modulator", id).with("kind", "toggle"))
+        }),
+        // Each of a modulator's outputs to a fader of its own channel that
+        // it doesn't move yet.
+        edits(modulation::ADD_ROUTING, |s| {
+            let project = project(s);
+            let free = project.modulations().flat_map(|(chain, modulation)| {
+                modulation.modulators.iter().flat_map(move |m| {
+                    let faders = [ParamAddress::Volume(chain), ParamAddress::Pan(chain)];
+                    (m.outputs().into_iter()).flat_map(move |n| {
+                        let output = Output::new(m.id, n);
+                        (faders.into_iter())
+                            .filter(move |&to| modulation.routing_between(output, to).is_none())
+                            .map(move |to| (output, to))
+                    })
+                })
+            });
+            let (output, to) = pick(s, free)?;
+            Some(
+                Args::new()
+                    .with("modulator", output.modulator)
+                    .with("output", i64::from(output.n))
+                    .with("param", to)
+                    .with("amount", 0.5),
+            )
+        }),
+        edits(modulation::DELETE, |s| {
+            let id = find_modulator(s, |_| true)?.id;
+            Some(Args::new().with("modulator", id))
+        }),
+        edits(modulation::DELETE_CONTROL, |s| {
+            let (id, control) = find_control(s)?;
+            Some(
+                Args::new()
+                    .with("modulator", id)
+                    .with("control", i64::from(control)),
+            )
+        }),
+        edits(modulation::DELETE_ROUTING, |s| {
+            let routing = find_routing(s)?.id;
+            Some(Args::new().with("routing", routing))
+        }),
+        // To the start of its strip.
+        edits(modulation::MOVE, |s| {
+            let project = project(s);
+            let placed = project
+                .modulations()
+                .flat_map(|(_, m)| m.modulators.iter().skip(1));
+            let id = pick(s, placed)?.id;
+            Some(Args::new().with("modulator", id).with("index", 0_i64))
+        }),
+        edits(modulation::RENAME, |s| {
+            let modulator = find_modulator(s, |_| true)?;
+            Some(
+                Args::new()
+                    .with("modulator", modulator.id)
+                    .with("name", other_name(&modulator.name)),
+            )
+        }),
+        edits(modulation::RENAME_CONTROL, |s| {
+            let (id, control) = find_control(s)?;
+            let (_, _, modulator) = project(s).find_modulator(id)?;
+            let name = &modulator.control(control)?.name;
+            Some(
+                Args::new()
+                    .with("modulator", id)
+                    .with("control", i64::from(control))
+                    .with("name", other_name(name)),
+            )
+        }),
+        edits(modulation::SET_AMOUNT, |s| {
+            let routing = find_routing(s)?;
+            Some(
+                Args::new()
+                    .with("routing", routing.id)
+                    .with("amount", other_level(Some(routing.amount))),
+            )
+        }),
+        edits(modulation::SET_BYPASS, |s| {
+            let routing = find_routing(s)?;
+            Some(
+                Args::new()
+                    .with("routing", routing.id)
+                    .with("bypassed", !routing.bypassed),
+            )
+        }),
+        edits(modulation::SET_CURVE, |s| {
+            let routing = find_routing(s)?;
+            let curve = match routing.curve {
+                Curve::Linear => "s_curve",
+                _ => "linear",
+            };
+            Some(Args::new().with("routing", routing.id).with("curve", curve))
+        }),
+        edits(modulation::SET_CURVE, |s| {
+            let routing = find_routing(s)?;
+            let steps = match routing.curve {
+                Curve::Stepped(8) => 3,
+                _ => 8,
+            };
+            Some(
+                Args::new()
+                    .with("routing", routing.id)
+                    .with("curve", "stepped")
+                    .with("steps", steps),
+            )
+        }),
+        edits(modulation::SET_LAG, |s| {
+            let routing = find_routing(s)?;
+            let lag = if routing.lag == 0.0 { 120.0 } else { 0.0 };
+            Some(Args::new().with("routing", routing.id).with("lag", lag))
+        }),
+        // Scaled by its own output, or by none if it's scaled.
+        edits(modulation::SET_SCALE, |s| {
+            let routing = find_routing(s)?;
+            let args = Args::new().with("routing", routing.id);
+            Some(match routing.scale {
+                Some(_) => args,
+                None => args
+                    .with("modulator", routing.from.modulator)
+                    .with("output", i64::from(routing.from.n)),
+            })
+        }),
+        // An LFO's or an Envelope's first parameter, or a Macro's first
+        // knob or button, at the other end of its range.
+        edits(modulation::SET_PARAM, |s| {
+            let modulator = find_modulator(s, |m| !m.params().is_empty())?;
+            let n = modulator.params()[0];
+            let info = modulator.param(n)?;
+            let value = match modulator.value(n) == Some(info.min) {
+                true => info.max,
+                false => info.min,
+            };
+            Some(
+                Args::new()
+                    .with("modulator", modulator.id)
+                    .with("param", i64::from(n))
+                    .with("value", value),
+            )
+        }),
         edits(notes::ADD, |s| {
             let clip = find_clip(s, is_midi)?.id;
             Some(
@@ -1686,6 +1852,24 @@ fn find_device(s: &Rig, keep: impl Fn(&DeviceKind) -> bool) -> Option<DeviceId> 
     pick(s, devices.filter(|d| keep(&d.kind))).map(|d| d.id)
 }
 
+/// A modulator that `keep` keeps.
+fn find_modulator(s: &Rig, keep: impl Fn(&Modulator) -> bool) -> Option<&Modulator> {
+    let modulators = project(s).modulations().flat_map(|(_, m)| &m.modulators);
+    pick(s, modulators.filter(|m| keep(m)))
+}
+
+/// One of a Macro's knobs or buttons: the Macro's id and the control's.
+fn find_control(s: &Rig) -> Option<(ModulatorId, u32)> {
+    let modulators = project(s).modulations().flat_map(|(_, m)| &m.modulators);
+    let controls = modulators.flat_map(|m| m.controls.iter().map(|c| (m.id, c.id)));
+    pick(s, controls)
+}
+
+fn find_routing(s: &Rig) -> Option<Routing> {
+    let routings = project(s).modulations().flat_map(|(_, m)| &m.routings);
+    pick(s, routings).copied()
+}
+
 fn is_sampler(kind: &DeviceKind) -> bool {
     kind.native()
         .is_some_and(|native| native.kind == NativeKind::Sampler)
@@ -1860,8 +2044,11 @@ fn other_loop(project: &Project) -> (Beats, Beats) {
 /// track, a MIDI clip with notes, one off the grid and bending, and the
 /// sustain pedal, a MIDI take and a sampler; sends from both to the return
 /// track; an EQ on the group; two locators; a test device on the master;
-/// and lanes automating the audio track's volume, the master's pan and the
-/// plugin's parameter, which someone overrode.
+/// lanes automating the audio track's volume, the master's pan and the
+/// plugin's parameter, which someone overrode; an LFO and an Envelope on
+/// the group, the LFO moving the EQ, scaled by the Envelope, and the spare
+/// track's volume; and a Macro on the master with a knob and a button, the
+/// knob moving the plugin's parameter.
 fn fixture() -> Project {
     let mut project = Project::new();
     let audio = project.add_track("Audio", TrackKind::Audio);
@@ -1987,6 +2174,26 @@ fn fixture() -> Project {
         Lane::new(ParamAddress::Pan(Chain::Master), vec![point(0, -0.5)]),
         overridden,
     ];
+    let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+    let envelope = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+    let mut macros = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+    let button = macros.new_control(ControlKind::Momentary);
+    macros.controls.push(button);
+    let frequency = ParamAddress::Device(ids[2], eq::FREQ as u32);
+    let mut tone = project.new_routing(Output::new(lfo.id, 0), frequency, 0.25);
+    tone.scale = Some(Output::new(envelope.id, 0));
+    let spare_volume = ParamAddress::Volume(Chain::Track(spare));
+    let swell = project.new_routing(Output::new(lfo.id, 0), spare_volume, -0.5);
+    let knob = project.new_routing(
+        Output::new(macros.id, 0),
+        ParamAddress::Device(ids[0], 1),
+        0.5,
+    );
+    let modulation = &mut project.track_mut(group).unwrap().modulation;
+    modulation.modulators = vec![lfo, envelope];
+    modulation.routings = vec![tone, swell];
+    project.master.modulation.modulators = vec![macros];
+    project.master.modulation.routings = vec![knob];
     project
 }
 
@@ -2073,6 +2280,14 @@ fn masked(project: &Project) -> Project {
     project.next_clip_id = 0;
     project.next_locator_id = 0;
     project.next_take_id = 0;
+    project.next_modulator_id = 0;
+    project.next_routing_id = 0;
+    let tracks = project.tracks.iter_mut().map(|t| &mut t.modulation);
+    for modulation in tracks.chain([&mut project.master.modulation]) {
+        for modulator in &mut modulation.modulators {
+            modulator.next_control = 0;
+        }
+    }
     for track in &mut project.tracks {
         let takes = track.takes.iter_mut().flat_map(|take| &mut take.clips);
         for clip in track.clips.iter_mut().chain(takes) {
@@ -2084,9 +2299,9 @@ fn masked(project: &Project) -> Project {
     project
 }
 
-/// The project's counters that hand out ids, and each MIDI clip's, by the
-/// clip's id.
-fn counters(project: &Project) -> ([u32; 6], BTreeMap<ClipId, u32>) {
+/// The project's counters that hand out ids, each MIDI clip's, by the
+/// clip's id, and each Macro's, by the Macro's.
+fn counters(project: &Project) -> Counters {
     let ids = [
         project.next_track_id,
         project.next_send_id,
@@ -2094,13 +2309,21 @@ fn counters(project: &Project) -> ([u32; 6], BTreeMap<ClipId, u32>) {
         project.next_clip_id,
         project.next_locator_id,
         project.next_take_id,
+        project.next_modulator_id,
+        project.next_routing_id,
     ];
     let notes = every_clip(project).filter_map(|clip| match &clip.content {
         ClipContent::Midi(midi) => Some((clip.id, midi.next_note_id)),
         ClipContent::Audio(_) => None,
     });
-    (ids, notes.collect())
+    let modulators = project.modulations().flat_map(|(_, m)| &m.modulators);
+    let macros = modulators
+        .filter(|m| m.kind == ModulatorKind::Macro)
+        .map(|m| (m.id, m.next_control));
+    (ids, notes.collect(), macros.collect())
 }
+
+type Counters = ([u32; 8], BTreeMap<ClipId, u32>, BTreeMap<ModulatorId, u32>);
 
 /// Every clip, on the tracks and in their takes.
 fn every_clip(project: &Project) -> impl Iterator<Item = &Clip> {
@@ -2114,8 +2337,8 @@ fn every_clip(project: &Project) -> impl Iterator<Item = &Clip> {
 /// for the clips in both, and that every MIDI clip's is past its notes',
 /// so ids handed out are never handed out again.
 fn kept_counters(earlier: &Project, later: &Project, what: &str) {
-    let (before, before_notes) = counters(earlier);
-    let (after, after_notes) = counters(later);
+    let (before, before_notes, before_macros) = counters(earlier);
+    let (after, after_notes, after_macros) = counters(later);
     let behind = before
         .iter()
         .zip(&after)
@@ -2132,6 +2355,26 @@ fn kept_counters(earlier: &Project, later: &Project, what: &str) {
                 clip.0
             );
         }
+    }
+    for (modulator, before) in before_macros {
+        if let Some(&after) = after_macros.get(&modulator) {
+            assert!(
+                after >= before,
+                "{what} took the control counter of modulator {} back from {before} to {after}",
+                modulator.0
+            );
+        }
+    }
+    for modulator in later.modulations().flat_map(|(_, m)| &m.modulators) {
+        let below = modulator
+            .controls
+            .iter()
+            .all(|c| c.id < modulator.next_control);
+        assert!(
+            below,
+            "{what} left modulator {} handing out its controls' ids",
+            modulator.id.0
+        );
     }
     // A clip undo brings back has no counter to keep up with: its notes'
     // ids must still be below its own.

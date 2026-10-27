@@ -51,9 +51,11 @@ or frees.
    are split, and a block also ends early wherever the transport changes or
    the loop jumps back.
 3. For each block it applies the transport changes that are due, gives each
-   node its parameter events with their offsets into the block, runs the
-   renderer and copies the output to the device buffer, then adds the cue
-   output (see below) on top.
+   node its parameter events with their offsets into the block, has the
+   nodes that play notes play them ([Notes](#notes)) and the nodes that
+   modulate others send their modulation ([Modulation](#modulation)), runs
+   the renderer and copies the output to the device buffer, then adds the
+   cue output (see below) on top.
 
 ## Time and events
 
@@ -78,8 +80,10 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
 - `NodeEventKind::Modulation` offsets a parameter from its value, as a
   modulator does, and the next one for the parameter replaces it. With a
   note id, it offsets the parameter for that note's voice alone, on top of
-  the offset for every voice. CLAP plugins get it as parameter modulation,
-  per note too. Nothing sends it yet.
+  the offset for every voice. Musicable's own nodes take the offset along
+  the parameter's scale, and CLAP plugins get it as parameter modulation,
+  in their own units, per note too. The modulators send it for every voice
+  ([Modulation](#modulation)).
 - `Event::Note` plays a note on a node from outside the graph. Notes aren't
   sent again after a swap, as parameter values are (see [Notes](#notes)).
   Live MIDI input doesn't come this way, but with the device callback (see
@@ -413,8 +417,10 @@ follows tempo changes as clips do.
   overridden: its points, in beats, and its `Scale`. `keys::param` says
   which node has the parameter and which `ParamId` it is: a channel's
   fader, a `Gain`, for its volume (`Gain::GAIN`) and its pan
-  (`Gain::PAN`), a send's `Gain` for its level, and a device's node for its
-  parameter `n` (`ParamId(n)`). `Graph::automate` gives it to the node.
+  (`Gain::PAN`), a send's `Gain` for its level, a device's node for its
+  parameter `n` (`ParamId(n)`), and a modulator's channel's `Modulation`
+  node for the modulator's parameter `n` (`modulation::param_id`).
+  `Graph::automate` gives it to the node.
 - Whoever reads it places the points through the block's tempo map
   (`ProcessContext::tempo`), each on the frame `TempoMap::frame_at` gives.
   Between two points the value moves in a straight line in the lane's
@@ -431,8 +437,10 @@ follows tempo changes as clips do.
   line exactly. Wherever the automation jumps, at a step, where the
   playhead locates or loops, or where a new graph brings automation the
   old one hadn't, the value glides there over 10 ms instead, so it doesn't
-  click. Modulation (`Param::modulate`, for Tier 2's modulators) is added
-  after the ramp and the glide, unsmoothed, and the sum kept within the
+  click. Modulation (`Param::modulate`) moves the value along the
+  parameter's scale after the ramp and the glide, ramping to each new
+  amount over 32 frames, a modulator's tick
+  (`automation::MODULATION_RAMP`), and the sum stays within the
   parameter's range, so automation, modulation, MIDI mapping and
   extensions can all address the same parameter.
 - **Other nodes** hand their automation back, and the graph sends them its
@@ -969,6 +977,94 @@ in by its timbre, and louder with velocity and pressure. A note rises over
 down, notes let go sound on until it comes up. It adds what it plays to
 what comes into it.
 
+## Modulation
+
+A channel's modulators, the Macros, LFOs and Envelopes on a track or the
+master (`musicable_model::modulation`), play in a `modulation::Modulation`
+node, which `compile()` gives each channel that has modulators or
+parameters that modulators move (`keys::modulation`).
+
+**The control pass.** A node that modulates other nodes' parameters says
+so with `Graph::modulate(from, to, param)`, which returns the port `from`
+sends through, counting from 0 for each node, and tells `to` that its
+parameter is modulated (`Node::modulated`). `Graph::control` does the same
+for a node with no ports yet. Once the notes have played and before any
+node renders the block, the engine calls each such node's `Node::control`,
+each after the nodes that modulate it. It gets the block's events there,
+in `ctx.events`, instead of in `process`: its parameter changes, the notes
+sent to it and the modulation sent to it. It sends what it makes through
+its ports (`Controls::send`), which reach their nodes as
+`NodeEventKind::Modulation` events among the block's others. A route that
+would close a loop of nodes modulating each other is refused. Each port has
+room for a value on every 32nd frame of engine time and 17 more in a block,
+as a lane does, and the rest are dropped and counted in
+`Stats::events_dropped`. The pass runs on the audio thread before any node
+renders, so the renderers stay bit-identical with modulation
+(`tests/parallel.rs`).
+
+**Ticks.** A `Modulation` node works in ticks: on every 32nd frame of
+engine time, as a lane sends values, on the frames of its events, up to 16
+more a block, and on the first frame it plays. At each tick it takes the
+events up to there, moves its modulators on, works out each routing, and
+sends each parameter whose sum has changed its new one, which the
+parameter ramps to over the next 32 frames. The ticks fall on the same
+frames however the blocks fall, so a project modulates the same at any
+block size. What moves a modulator's own parameters, another modulator's
+routing or a lane, applies from the tick after, so modulators can move each
+other, even round a loop, without the graph having one.
+
+**Routings.** A routing takes one of its modulator's outputs, from 0 to 1,
+or from -1 to 1 for an LFO that isn't unipolar, bends it with its curve,
+multiplies it by another output on the channel if it has a scale, and by
+its amount, and follows it over its lag, as a gentle low pass does: about
+two thirds of the way in that time. Its amount is a share of its
+parameter's range along the parameter's scale, so the node multiplies it by
+the range's length there (`Scale::position` of the top less that of the
+bottom): a quarter moves a cutoff a quarter of its octaves. A plugin's
+parameter takes the amount in the plugin's own units. The routings to a
+parameter go out as one offset, their sum. A parameter event changes a
+routing's amount without a new graph (`modulation::amount_id`).
+
+**Across channels.** A modulator reaches its own channel's parameters, a
+group's also those of the tracks that feed it, and the master's every
+track's (`Project::in_reach`). A routing to another channel's parameter
+goes through that channel's node, which relays it: the routing's node sends
+what it adds through a port to a relay of the other
+(`Modulation::add_relay`), and the node there adds it to its own. So the
+master's node runs first, then the groups', outer ones first, then the
+tracks'. A routing that's bypassed, out of reach, or to a parameter whose
+node isn't in the graph, such as a missing plugin's, moves nothing.
+
+**The modulators.**
+
+- A Macro's controls are its outputs: a knob from 0 to 1, and a button at 0
+  or 1. Parameter events set them (`modulation::param_id`), as the app
+  sends one for each change, and so do lanes.
+- An LFO plays its shape, a sine, a triangle, a saw or a square, bent by
+  its skew and started where its phase says, at its rate, or synced, a
+  cycle each note value at the song's tempo. Free runs from when its node
+  starts. Song locks it to the song position, so it holds still while the
+  transport stands still. Note starts it again on notes, as its note
+  trigger says, and each time its Trigger rises past half way, then waits
+  its delay and fades in.
+- An Envelope runs its delay, attack, hold, decay, sustain and release,
+  each stage bent by its curve and left out at 0 ms, while its gate is
+  open: while notes are held, its Gate Level is above half way, or the
+  transport plays with its Transport switch on. One Shot leaves out the
+  sustain.
+- A note trigger of Auto acts as Always, unless a routing or a lane moves
+  the modulator's trigger or gate, when it acts as Never
+  (`Modulation::move_trigger`). A MIDI track's node gets the track's notes,
+  through its input monitor (`Graph::send_notes`), and keeps track of 64
+  held at once.
+
+**Swaps.** A new node carries on from the one it replaces, by modulator and
+routing id: each LFO's phase, each envelope's stage and level, each
+routing's lag, the notes held and when it last ticked, so recompiling moves
+nothing. The parameters it moves keep their modulation until its first
+tick sends them every sum, and a parameter that nothing modulates any more
+ramps its modulation away to nothing.
+
 ## Built-in devices
 
 Musicable's own devices (`DeviceKind::Native`) are nodes in
@@ -990,10 +1086,16 @@ parameters in `devices::Params`, which works each one out for every frame:
   ([Parameter smoothing](#parameter-smoothing)), and a new node carries on
   the ramps of the node it replaces (`Params::take_over`).
 - A parameter the table marks `modulated` takes `NodeEventKind::Modulation`
-  without a note: an amount in the parameter's units, added to the value
-  set on every frame from the event on, and kept in the parameter's range.
-  It applies at once, without a ramp, since a modulator moves smoothly by
-  itself. Modulation for one note is the instruments' to handle.
+  without a note: an amount along the parameter's scale
+  (`Scale::position`), so in its units on a linear scale and in ratios on a
+  log one, added to the value set on every frame from the event on, and
+  kept in the parameter's range. It ramps in over 32 frames, from one of
+  the modulators' ticks to the next ([Modulation](#modulation)), and before
+  the node has rendered a frame it applies at once. A new node keeps the
+  modulation of the one it replaces for the parameters that something
+  still modulates (`Node::modulated`, `Params::modulated`), and ramps the
+  rest away to nothing. Modulation for one note is the instruments' to
+  handle.
 - A parameter with automation follows it instead of the value set
   ([Automation](#automation)): each is an `automation::Param`, and the
   node's `Node::automate` hands the lane to `Params::automate`, which hands
@@ -1006,7 +1108,7 @@ parameters in `devices::Params`, which works each one out for every frame:
   (`Values::steady`), for a fast path. A device that moves a value its own
   way, as the delay fades to a new time and the reverb glides to a new
   size, reads where the value is heading on each frame and its modulation
-  apart instead (`Values::target`, `Values::modulation`): the value set,
+  apart instead (`Values::target`, `Values::modulations`): the value set,
   without its ramp, or with automation the lane's value on the frame,
   without the glide after a jump (`automation::Param::render_with_targets`).
   An event applies before the span it starts, which gets the event too, for
@@ -1311,10 +1413,11 @@ block needs them and put down when one does.
 
 ## Real-time rules
 
-`Node::process`, `Node::adopt` and `Node::play_notes` run on the audio
-thread, or on one of the parallel renderer's workers, which are real-time
-threads too, and so do `Node::stop`, `Node::flush` and `Node::reset`, which
-a device's switch calls, and everything they call. They must not:
+`Node::process`, `Node::adopt`, `Node::play_notes` and `Node::control` run
+on the audio thread, or on one of the parallel renderer's workers, which are
+real-time threads too, and so do `Node::stop`, `Node::flush` and
+`Node::reset`, which a device's switch calls, and everything they call.
+They must not:
 
 - allocate or free memory, including growing a `Vec`, cloning a `String` or
   dropping a `Box`;
@@ -1385,6 +1488,9 @@ thread, but node code shouldn't rely on denormals either way.
 | Old graphs and tempo maps waiting | 16 | The engine holds swaps and tempo maps until `collect_garbage` runs |
 | Nodes in a graph the parallel renderer shares | `ParallelOptions::max_nodes`, 16,384 by default | The audio thread renders the graph alone |
 | Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped` |
+| Modulation a node sends through each port in a block | A value on every 32nd frame of engine time, and 17 more | The rest are dropped and counted in `Stats::events_dropped` |
+| Ticks a channel's modulators take on their events' frames | 16 a block, besides the grid | Later events wait for the next tick on the grid |
+| Notes a channel's modulators keep track of | 64 held at once | Later notes still start them, but don't hold their gates open |
 | Notes sounding in a MIDI clip player | 1,024 | It doesn't start more |
 | Clips' notes sounding through a MIDI monitor | 1,024 | It doesn't pass more on |
 | Notes the test instrument plays at once | `TestInstrument::VOICES`, 32 | A new note takes the place of the one that started longest ago |

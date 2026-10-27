@@ -90,6 +90,10 @@ impl Node for Reverb {
         self.params.automate(param, automation)
     }
 
+    fn modulated(&mut self, param: ParamId) {
+        self.params.modulated(param);
+    }
+
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);
@@ -847,7 +851,7 @@ mod tests {
         let step =
             [(0, 50.0), (1, 50.0), (1, 80.0)].map(|(at, size)| Point::new(Beats::new(at), size));
         let lane = Automation::new(&step, NativeKind::Reverb.params()[SIZE].scale).unwrap();
-        assert!(reverb.automate(ParamId(SIZE as u32), lane).is_none());
+        assert!(reverb.automate(ParamId(SIZE as u64), lane).is_none());
         let automated = Run::new(Box::new(reverb)).playing().render(&input, &[]);
         assert_eq!(automated, set);
         assert_ne!(automated, run(&[]).playing().render(&input, &[]));

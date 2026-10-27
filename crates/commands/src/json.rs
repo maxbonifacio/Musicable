@@ -36,6 +36,8 @@ pub fn to_json(value: &Value) -> Json {
         Value::Locator(id) => Json::from(id.0),
         Value::Device(id) => Json::from(id.0),
         Value::Take(id) => Json::from(id.0),
+        Value::Modulator(id) => Json::from(id.0),
+        Value::Routing(id) => Json::from(id.0),
         Value::Param(param) => Json::String(param_text(*param)),
         Value::List(values) => Json::Array(values.iter().map(to_json).collect()),
     }
@@ -169,7 +171,14 @@ pub fn type_schema(ty: Type) -> Map<String, Json> {
         Type::Int => json!({"type": "integer"}),
         Type::Number | Type::Beats => json!({"type": "number"}),
         Type::Text | Type::Param => json!({"type": "string"}),
-        Type::Track | Type::Clip | Type::Note | Type::Locator | Type::Device | Type::Take => id(),
+        Type::Track
+        | Type::Clip
+        | Type::Note
+        | Type::Locator
+        | Type::Device
+        | Type::Take
+        | Type::Modulator
+        | Type::Routing => id(),
         Type::List(item) => json!({"type": "array", "items": type_schema(*item)}),
         Type::Choice(choices) => json!({"type": "string", "enum": choices}),
     };
@@ -193,6 +202,8 @@ pub fn type_text(ty: Type) -> String {
         Type::Locator => "a locator's id".into(),
         Type::Device => "a device's id".into(),
         Type::Take => "a take's id".into(),
+        Type::Modulator => "a modulator's id".into(),
+        Type::Routing => "a routing's id".into(),
         Type::Param | Type::Choice(_) => ty.to_string(),
         Type::List(item) => format!("a list, each {}", type_text(*item)),
     }
@@ -201,6 +212,7 @@ pub fn type_text(ty: Type) -> String {
 #[cfg(test)]
 mod tests {
     use musicable_model::clip::{ClipId, NoteId};
+    use musicable_model::modulation::{ModulatorId, RoutingId};
     use musicable_model::param::ParamAddress;
     use musicable_model::time::Beats;
     use musicable_model::{Chain, DeviceId, LocatorId, TakeId, TrackId};
@@ -225,6 +237,8 @@ mod tests {
             (Type::Locator, Value::Locator(LocatorId(6)), json!(6)),
             (Type::Device, Value::Device(DeviceId(7)), json!(7)),
             (Type::Take, Value::Take(TakeId(8)), json!(8)),
+            (Type::Modulator, Value::Modulator(ModulatorId(9)), json!(9)),
+            (Type::Routing, Value::Routing(RoutingId(10)), json!(10)),
             (
                 Type::Param,
                 Value::Param(ParamAddress::Volume(Chain::Master)),

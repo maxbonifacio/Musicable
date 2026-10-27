@@ -1,7 +1,7 @@
 //! The tools agents call: a few general ones that cover every command, so
 //! a new command reaches agents with no change here, and reads of the
-//! project, a clip, a device, a lane of automation, the editor's state and
-//! the undo history.
+//! project, a clip, a device, a modulator, a lane of automation, the
+//! editor's state and the undo history.
 //!
 //! A call's arguments are checked on the server's thread, against the
 //! commands' parameters for the commands it runs. The window then answers
@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use musicable_commands::{Args, Command, CommandError, CommandId, Registry, json};
 use musicable_model::DeviceId;
 use musicable_model::clip::ClipId;
+use musicable_model::modulation::ModulatorId;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
     InitializeResult, JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
@@ -32,6 +33,7 @@ pub const RUN_COMMANDS: &str = "run_commands";
 pub const GET_PROJECT: &str = "get_project";
 pub const GET_CLIP: &str = "get_clip";
 pub const GET_DEVICE: &str = "get_device";
+pub const GET_MODULATOR: &str = "get_modulator";
 pub const GET_AUTOMATION: &str = "get_automation";
 pub const GET_EDITOR: &str = "get_editor";
 pub const GET_HISTORY: &str = "get_history";
@@ -156,11 +158,12 @@ pub fn list() -> Vec<Tool> {
             GET_PROJECT,
             "Get Project",
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
-             tracks with their mixer settings, devices and clips, the master, the locators, and \
-             which parameters are automated, each with its id. A device that's bypassed says \
-             \"bypassed\": true, and one that's deactivated \"active\": false. A clip's notes, a \
-             device's parameters and a lane's points come from get_clip, get_device and \
-             get_automation.",
+             tracks with their mixer settings, devices and clips, and their modulators and \
+             routings if they have any, the master, the locators, and which parameters are \
+             automated, each with its id. A device that's bypassed says \"bypassed\": true, and \
+             one that's deactivated \"active\": false. A clip's notes, a device's or a \
+             modulator's parameters and a lane's points come from get_clip, get_device, \
+             get_modulator and get_automation.",
             object(json!({}), &[]),
         ),
         read(
@@ -185,6 +188,19 @@ pub fn list() -> Vec<Tool> {
             ),
         ),
         read(
+            GET_MODULATOR,
+            "Get Modulator",
+            "Reads one modulator, a Macro, an LFO or an Envelope: where it is, each of its \
+             parameters' number, name, range, unit and value, for modulation.set_param and \
+             automation, which name a modulator's parameter as \"modulator 6 param 2\", and its \
+             outputs, for modulation.add_routing. A Macro's parameters and outputs are its \
+             knobs and buttons, by number.",
+            object(
+                json!({ "modulator": id_number("The modulator's id.") }),
+                &["modulator"],
+            ),
+        ),
+        read(
             GET_AUTOMATION,
             "Get Automation",
             "Reads one parameter's automation: its points, each a position in beats and a \
@@ -194,7 +210,8 @@ pub fn list() -> Vec<Tool> {
                     "param": {
                         "type": "string",
                         "description": "The parameter, as get_project names it: \"track 3 volume\", \
-                                        \"master pan\", \"send 2\" or \"device 4 param 17\".",
+                                        \"master pan\", \"send 2\", \"device 4 param 17\" or \
+                                        \"modulator 6 param 2\".",
                     }
                 }),
                 &["param"],
@@ -281,6 +298,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         RUN_COMMANDS => &["name", "commands"],
         GET_CLIP => &["clip"],
         GET_DEVICE => &["device"],
+        GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -330,12 +348,14 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_PROJECT => Asked::Project,
         GET_CLIP => Asked::Clip(ClipId(id(arguments, "clip")?)),
         GET_DEVICE => Asked::Device(DeviceId(id(arguments, "device")?)),
+        GET_MODULATOR => Asked::Modulator(ModulatorId(id(arguments, "modulator")?)),
         GET_AUTOMATION => {
             let param = text(arguments, "param")?;
             let param = reads::parse_param(param).ok_or_else(|| {
                 Refused::Arguments(format!(
                     "There's no parameter called \"{param}\": they're named as \"track 3 \
-                     volume\", \"master pan\", \"send 2\" or \"device 4 param 17\"."
+                     volume\", \"master pan\", \"send 2\", \"device 4 param 17\" or \
+                     \"modulator 6 param 2\"."
                 ))
             })?;
             Asked::Automation(param)
@@ -610,6 +630,16 @@ mod tests {
             call(GET_CLIP, json!({"clip": -1})),
             refused("clip must be an id: a whole number.")
         );
+        assert_eq!(
+            call(GET_AUTOMATION, json!({"param": "modulator 6 param 2"})),
+            Ok(Asked::Automation(
+                musicable_model::param::ParamAddress::Modulator(ModulatorId(6), 2)
+            ))
+        );
+        assert_eq!(
+            call(GET_MODULATOR, json!({"modulator": 6})),
+            Ok(Asked::Modulator(ModulatorId(6)))
+        );
         assert_eq!(call(GET_HISTORY, json!({})), Ok(Asked::History));
         assert_eq!(
             call("get_mood", json!({})),
@@ -620,7 +650,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

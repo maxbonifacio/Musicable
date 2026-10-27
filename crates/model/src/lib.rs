@@ -11,7 +11,8 @@
 //! record from an [`Input`] into [`Take`]s, and comping copies the best of
 //! them to the track's own clips. [`param`] names every parameter in the
 //! project, and [`automation`] has the lanes that move them as the song
-//! plays. [`warp`] has how audio clips follow the tempo.
+//! plays, and [`modulation`] the modulators that move them on top. [`warp`]
+//! has how audio clips follow the tempo.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -20,6 +21,7 @@
 pub mod automation;
 pub mod clip;
 pub mod mixer;
+pub mod modulation;
 pub mod native;
 pub mod param;
 pub mod plugin;
@@ -29,6 +31,7 @@ pub mod warp;
 use automation::Lane;
 use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
+use modulation::Modulation;
 use native::NativeDevice;
 use plugin::PluginDevice;
 use time::{BeatRange, Beats, TempoMap};
@@ -347,6 +350,8 @@ pub struct Track {
     pub takes: Vec<Take>,
     /// In signal order.
     pub devices: Vec<Device>,
+    /// The track's modulators and their routings.
+    pub modulation: Modulation,
     pub clip_type: ClipType,
     pub console: ConsoleSettings,
 }
@@ -422,6 +427,8 @@ pub struct Master {
     pub pan: f32,
     /// In signal order.
     pub devices: Vec<Device>,
+    /// The master's modulators and their routings.
+    pub modulation: Modulation,
     pub clip_type: ClipType,
     pub console: ConsoleSettings,
 }
@@ -432,6 +439,7 @@ impl Default for Master {
             gain: 1.0,
             pan: 0.0,
             devices: Vec::new(),
+            modulation: Modulation::default(),
             clip_type: ClipType::Off,
             console: ConsoleSettings::default(),
         }
@@ -473,6 +481,10 @@ pub struct Project {
     pub next_locator_id: u32,
     /// The same for takes.
     pub next_take_id: u32,
+    /// The same for modulators, on tracks and on the master.
+    pub next_modulator_id: u32,
+    /// The same for routings.
+    pub next_routing_id: u32,
     /// The name of the workspace the project was saved with, which lays the
     /// app's panels out, for the app to switch to when it opens the
     /// project. Edits leave it alone: the app sets it as it saves.
@@ -500,6 +512,8 @@ impl Default for Project {
             next_clip_id: 0,
             next_locator_id: 0,
             next_take_id: 0,
+            next_modulator_id: 0,
+            next_routing_id: 0,
             workspace: None,
         }
     }
@@ -546,6 +560,7 @@ impl Project {
             clips: Vec::new(),
             takes: Vec::new(),
             devices: Vec::new(),
+            modulation: Modulation::default(),
             clip_type: ClipType::Off,
             console: ConsoleSettings::default(),
         }

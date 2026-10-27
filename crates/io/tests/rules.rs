@@ -7,7 +7,8 @@ use musicable_model::clip::{
     AudioClip, ClipContent, ClipId, Controller, MidiClip, NoteId, Offset, Point,
 };
 use musicable_model::mixer::Bus;
-use musicable_model::native::{NativeDevice, NativeKind, eq, sampler};
+use musicable_model::modulation::{ControlKind, ModulatorKind, Output, lfo};
+use musicable_model::native::{NativeDevice, NativeKind, eq, sampler, synth};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
@@ -2312,6 +2313,308 @@ fn lane_points_are_in_order_from_the_start_of_the_song() {
         &project,
         "automation[3].points[0][1]",
         "must be a finite number",
+    );
+}
+
+/// A synth track with an LFO and an Envelope moving the synth and the
+/// track's fader, and a Macro with a knob and a button on the master moving
+/// the LFO.
+fn modulated() -> Project {
+    let mut project = Project::new();
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    let synth = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+    let synth_id = synth.id;
+    project.track_mut(lead).unwrap().devices = vec![synth];
+    let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+    let envelope = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+    let mut macros = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+    let button = macros.new_control(ControlKind::Toggle);
+    macros.controls.push(button);
+    let (wobble, swell) = (Output::new(lfo.id, 0), Output::new(envelope.id, 0));
+    let cutoff = ParamAddress::Device(synth_id, synth::CUTOFF as u32);
+    let cutoff = project.new_routing(wobble, cutoff, 0.25);
+    let fader = ParamAddress::Volume(Chain::Track(lead));
+    let mut fader = project.new_routing(swell, fader, -0.5);
+    fader.scale = Some(wobble);
+    let rate = ParamAddress::Modulator(lfo.id, lfo::RATE as u32);
+    let rate = project.new_routing(Output::new(macros.id, 0), rate, 1.0);
+    let track = project.track_mut(lead).unwrap();
+    track.modulation.modulators = vec![lfo, envelope];
+    track.modulation.routings = vec![cutoff, fader];
+    project.master.modulation.modulators = vec![macros];
+    project.master.modulation.routings = vec![rate];
+    project
+}
+
+fn edited_modulation(edit: impl FnOnce(&mut Value, &mut Value)) -> Value {
+    edited_from(&modulated(), |f| {
+        let mut master = f["master"]["modulation"].take();
+        edit(&mut f["tracks"][0]["modulation"], &mut master);
+        f["master"]["modulation"] = master;
+    })
+}
+
+#[test]
+fn modulators_have_unique_ids_and_their_kinds_parameters() {
+    assert_eq!(
+        load(&edited_from(&modulated(), |_| ())).unwrap(),
+        modulated()
+    );
+    let at = "tracks[0].modulation.modulators[0]";
+    let macro_at = "master.modulation.modulators[0]";
+    refused(
+        &edited_modulation(|_, master| master["modulators"][0]["id"] = json!(1)),
+        &format!("{macro_at}.id"),
+        "tracks[0].modulation.modulators[1] has id 1 too",
+    );
+    refused(
+        &edited_from(&modulated(), |f| f["next_modulator_id"] = json!(2)),
+        "next_modulator_id",
+        "a modulator has id 2",
+    );
+    refused(
+        &edited_from(&modulated(), |f| f["next_routing_id"] = json!(1)),
+        "next_routing_id",
+        "a routing has id 2",
+    );
+    refused(
+        &edited_modulation(|track, _| track["modulators"][0]["kind"] = json!("chaos")),
+        &format!("{at}.kind"),
+        "unknown variant `chaos`",
+    );
+    refused(
+        &edited_modulation(|track, _| track["modulators"][0]["name"] = json!("")),
+        &format!("{at}.name"),
+        "can't be empty",
+    );
+    refused(
+        &edited_modulation(|track, _| track["modulators"][0]["params"]["speed"] = json!(1.0)),
+        &format!("{at}.params.speed"),
+        "isn't one of the LFO's parameters",
+    );
+    refused(
+        &edited_modulation(|track, _| track["modulators"][0]["params"]["rate"] = json!(1000.0)),
+        &format!("{at}.params.rate"),
+        "must be a number from 0.01 to 100",
+    );
+    refused(
+        &edited_modulation(|track, _| track["modulators"][0]["params"]["shape"] = json!(1.5)),
+        &format!("{at}.params.shape"),
+        "must be a whole number from 0 to 3",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["modulators"][0]["controls"] =
+                json!([{"id": 0, "name": "Knob 1", "kind": "knob", "value": 0.0}]);
+        }),
+        &format!("{at}.controls"),
+        "only Macros have controls",
+    );
+    refused(
+        &edited_modulation(|_, master| master["modulators"][0]["params"]["knob"] = json!(0.5)),
+        &format!("{macro_at}.params.knob"),
+        "a Macro's controls are its parameters",
+    );
+    // A missing parameter takes its default.
+    let file = edited_modulation(|track, _| {
+        track["modulators"][0]["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rate");
+    });
+    let mut project = modulated();
+    project.tracks[0].modulation.modulators[0].values[lfo::RATE] = 1.0;
+    assert_eq!(load(&file).unwrap(), project);
+}
+
+#[test]
+fn macro_controls_have_unique_ids_and_values_that_suit_them() {
+    let at = "master.modulation.modulators[0]";
+    refused(
+        &edited_modulation(|_, master| master["modulators"][0]["controls"][1]["id"] = json!(0)),
+        &format!("{at}.controls[1].id"),
+        "controls[0] has id 0 too",
+    );
+    refused(
+        &edited_modulation(|_, master| master["modulators"][0]["next_control"] = json!(1)),
+        &format!("{at}.next_control"),
+        "must be above every control's id, and controls[1] has id 1",
+    );
+    refused(
+        &edited_modulation(|_, master| {
+            master["modulators"][0]["controls"][1]["value"] = json!(0.5)
+        }),
+        &format!("{at}.controls[1].value"),
+        "must be 0 or 1",
+    );
+    refused(
+        &edited_modulation(|_, master| {
+            master["modulators"][0]["controls"][0]["value"] = json!(2.0)
+        }),
+        &format!("{at}.controls[0].value"),
+        "must be from 0 to 1",
+    );
+    refused(
+        &edited_modulation(|_, master| {
+            master["modulators"][0]["controls"][0]["kind"] = json!("slider")
+        }),
+        &format!("{at}.controls[0].kind"),
+        "unknown variant `slider`",
+    );
+    refused(
+        &edited_modulation(|_, master| master["modulators"][0]["controls"][0]["name"] = json!("")),
+        &format!("{at}.controls[0].name"),
+        "can't be empty",
+    );
+}
+
+#[test]
+fn routings_go_from_their_channels_outputs_to_parameters_they_can_move() {
+    let at = "tracks[0].modulation.routings";
+    refused(
+        &edited_modulation(|_, master| master["routings"][0]["from"]["modulator"] = json!(0)),
+        "master.modulation.routings[0].from.modulator",
+        "names modulator 0, which isn't on this channel",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["from"]["output"] = json!(1)),
+        &format!("{at}[0].from.output"),
+        "modulator 0 has no output 1",
+    );
+    refused(
+        &edited_modulation(|_, master| master["routings"][0]["from"]["output"] = json!(2)),
+        "master.modulation.routings[0].from.output",
+        "modulator 2 has no output 2",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][1]["scale"]["modulator"] = json!(2)),
+        &format!("{at}[1].scale.modulator"),
+        "names modulator 2, which isn't on this channel",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["routings"][1]["from"] = track["routings"][0]["from"].clone();
+            track["routings"][1]["to"] = track["routings"][0]["to"].clone();
+        }),
+        &format!("{at}[1].to"),
+        "routings[0] goes from the same output to it too",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["routings"][0]["to"] = json!({"device": {"id": 9, "param": 0}})
+        }),
+        &format!("{at}[0].to"),
+        "names device 9, which the file hasn't",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["routings"][0]["to"] = json!({"device": {"id": 0, "param": 99}})
+        }),
+        &format!("{at}[0].to"),
+        "names a parameter that its device or modulator hasn't",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["routings"][0]["to"] = json!({"device": {"id": 0, "param": synth::VOICES}})
+        }),
+        &format!("{at}[0].to"),
+        "names a parameter that modulators can't move",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["to"] = json!({"bypass": 0})),
+        &format!("{at}[0].to"),
+        "names a parameter that modulators can't move",
+    );
+    refused(
+        &edited_modulation(|_, master| {
+            master["routings"][0]["to"] = json!({"modulator": {"id": 2, "param": 1}});
+        }),
+        "master.modulation.routings[0].to",
+        "names a parameter that modulators can't move",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["amount"] = json!(1.5)),
+        &format!("{at}[0].amount"),
+        "must be from -1 to 1",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["lag"] = json!(-1.0)),
+        &format!("{at}[0].lag"),
+        "must be from 0 to 10000",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["curve"] = json!({"stepped": 1})),
+        &format!("{at}[0].curve.stepped"),
+        "must have from 2 to 128 steps",
+    );
+    refused(
+        &edited_modulation(|track, _| track["routings"][0]["curve"] = json!("wiggly")),
+        &format!("{at}[0].curve"),
+        "unknown variant `wiggly`",
+    );
+    refused(
+        &edited_modulation(|track, _| {
+            track["routings"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("scale");
+        }),
+        &format!("{at}[0]"),
+        "missing field `scale`",
+    );
+    // A routing out of reach waits, and a plugin's parameter moves in the
+    // plugin's own units.
+    let file = edited_modulation(|track, _| track["routings"][0]["to"] = json!({"pan": "master"}));
+    let mut project = modulated();
+    project.tracks[0].modulation.routings[0].to = ParamAddress::Pan(Chain::Master);
+    assert_eq!(load(&file).unwrap(), project);
+    let mut project = plugged();
+    let synth = project.tracks[0].devices[0].id;
+    let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+    let routing = project.new_routing(Output::new(lfo.id, 0), ParamAddress::Device(synth, 3), 50.0);
+    project.tracks[0].modulation.modulators = vec![lfo];
+    project.tracks[0].modulation.routings = vec![routing];
+    assert_eq!(load(&edited_from(&project, |_| ())).unwrap(), project);
+    // Saving checks the same.
+    let mut project = modulated();
+    let routing = project.tracks[0].modulation.routings[0];
+    project.tracks[0].modulation.routings[1].from = routing.from;
+    project.tracks[0].modulation.routings[1].to = routing.to;
+    refused_saving(
+        &project,
+        &format!("{at}[1].to"),
+        "goes from the same output",
+    );
+}
+
+#[test]
+fn lanes_move_parameters_their_modulators_have() {
+    let lane = |param| {
+        edited_from(&modulated(), |f| {
+            f["automation"] = json!([{"param": param, "points": [[0, 0.5]], "overridden": false}]);
+        })
+    };
+    let file = lane(json!({"modulator": {"id": 2, "param": 0}}));
+    assert_eq!(load(&file).unwrap().automation.len(), 1);
+    refused(
+        &lane(json!({"modulator": {"id": 2, "param": 1}})),
+        "automation[0].points[0][1]",
+        "must be a whole number from 0 to 1",
+    );
+    refused(
+        &lane(json!({"modulator": {"id": 2, "param": 5}})),
+        "automation[0].param",
+        "names parameter 5 of modulator 2, which hasn't it",
+    );
+    refused(
+        &lane(json!({"modulator": {"id": 7, "param": 0}})),
+        "automation[0].param",
+        "names modulator 7, which the file hasn't",
+    );
+    refused(
+        &lane(json!({"modulator": {"id": 0, "param": lfo::SHAPE}})),
+        "automation[0].points[0][1]",
+        "must be a whole number from 0 to 3",
     );
 }
 
