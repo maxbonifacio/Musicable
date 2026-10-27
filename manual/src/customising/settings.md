@@ -20,8 +20,8 @@ a panel, so workspaces don't keep it.
 - **Keys**: every command's keys ([Keys](keys.md)).
 - **Mouse**: what each gesture does ([The mouse](mouse.md)).
 - **Behaviour**: where Play/Stop plays from, what the piano roll calls
-  middle C, which of auto-warp's rules are on, and Fast analysis
-  ([below](#behaviour)).
+  middle C, which of auto-warp's rules are on, whether copies of devices
+  take their automation, and Fast analysis ([below](#behaviour)).
 - **Appearance**: the theme ([Themes](themes.md)).
 - **Workspaces**: your workspaces, with the keys that switch to each, and
   picking one switches to it. **Save As...**, **Rename...**, **Delete...**
@@ -59,6 +59,10 @@ with the [profile](profiles.md) in use.
   grid**, **Sounds without a pulse land on their hit**, and **The first file
   sets the song's tempo**. A file whose rule is off comes in as it is, and
   **Warp** warps it with one marker.
+- **Copies of devices take their automation**, as in Live: a device
+  copied, duplicated or pasted gets lanes of its own with the original's
+  points. Switch it off for copies that start without automation ([The
+  devices panel](../window/devices-panel.md#selecting-moving-and-copying)).
 - **Fast analysis** finds beats with the classic beat tracker alone, without
   the Beat This! network, which is quicker on a slow computer but less
   accurate. It's the computer's setting, the same in every profile. Files
@@ -195,6 +199,7 @@ Every setting can be left out:
 | `behaviour.warp_drifting` | Whether files whose tempo drifts get a marker on every downbeat, and on the beats that stray. | `true` |
 | `behaviour.sync_one_shots` | Whether sounds without a pulse play their first hit, or a riser's peak, where they're dropped. | `true` |
 | `behaviour.tempo_from_first_file` | Whether the first file with a pulse dropped into an empty song gives it its tempo and meter. | `true` |
+| `behaviour.copies_take_automation` | Whether copies of devices take their automation, in lanes of their own. | `true` |
 | `analysis.fast` | Whether analysis finds beats with the classic tracker alone, without the network. It's not one of a profile's settings. | `false` |
 | `render_cache.max_size_gb` | The most the render cache holds, in GB of 2^30 bytes, from 1 to 10,000. It's not one of a profile's settings. | 20 |
 | `render_cache.min_free_gb` | How much of its disk the render cache always leaves free, in GB, from 1 to 10,000. It's not one of a profile's settings. | 5 |

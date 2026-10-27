@@ -442,9 +442,65 @@ fn examples() -> Vec<Example> {
         edits(device::ADD_PRESET, |_| {
             Some(Args::new().with("preset", PRESET).with("new_track", true))
         }),
+        edits(device::COPY, |s| {
+            let device = find_device(s, |_| true)?;
+            let track = find_track(s, |_| true)?.id;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("track", track)
+                    .with("index", 0_i64),
+            )
+        }),
+        // A whole chain, onto a new track.
+        edits(device::COPY, |s| {
+            let chains = project(s)
+                .chains()
+                .filter(|(_, devices)| !devices.is_empty());
+            let (_, devices) = pick(s, chains)?;
+            let devices: Vec<DeviceId> = devices.iter().map(|d| d.id).collect();
+            Some(Args::new().with("devices", devices).with("new_track", true))
+        }),
         edits(device::DELETE, |s| {
             let device = find_device(s, |_| true)?;
             Some(Args::new().with("device", device))
+        }),
+        // From a track's devices to the end of the master's.
+        edits(device::MOVE, |s| {
+            let devices = project(s).tracks.iter().flat_map(|t| &t.devices);
+            let device = pick(s, devices)?.id;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("master", true),
+            )
+        }),
+        // To the start of its own chain.
+        edits(device::MOVE, |s| {
+            let (chain, device) = find_placed(s, |index, _| index > 0)?;
+            let args = Args::new()
+                .with("devices", vec![device])
+                .with("index", 0_i64);
+            Some(on_chain(args, chain))
+        }),
+        // Onto a new track.
+        edits(device::MOVE, |s| {
+            let device = find_device(s, |_| true)?;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("new_track", true),
+            )
+        }),
+        edits(device::MOVE_LEFT, |s| {
+            let (_, device) = find_placed(s, |index, _| index > 0)?;
+            s.select_devices(&[device]);
+            Some(Args::new())
+        }),
+        edits(device::MOVE_RIGHT, |s| {
+            let (_, device) = find_placed(s, |index, len| index + 1 < len)?;
+            s.select_devices(&[device]);
+            Some(Args::new())
         }),
         // One of Musicable's own devices.
         edits(device::SET_PARAM, |s| {
@@ -517,6 +573,7 @@ fn examples() -> Vec<Example> {
                 None => args.with("file", KICK),
             })
         }),
+        edits(device::TOGGLE_BYPASS, device_selected),
         leaves(device::HIDE_WINDOW, |s| {
             let device = find_device(s, |d| d.plugin().is_some())?;
             Some(Args::new().with("device", device))
@@ -529,15 +586,34 @@ fn examples() -> Vec<Example> {
             let device = find_device(s, |_| true)?;
             Some(Args::new().with("device", device))
         }),
+        leaves(device::SELECT, |s| {
+            let device = find_device(s, |_| true)?;
+            Some(Args::new().with("devices", vec![device]))
+        }),
+        // Added to those selected.
+        leaves(device::SELECT, |s| {
+            let (_, device) = find_placed(s, |index, _| index > 0)?;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("toggle", true),
+            )
+        }),
+        // None at all.
+        leaves(device::SELECT, |_| {
+            Some(Args::new().with("devices", Vec::<DeviceId>::new()))
+        }),
         leaves(device::SHOW_WINDOW, |s| {
             let device = find_device(s, |d| d.plugin().is_some())?;
             Some(Args::new().with("device", device))
         }),
         leaves(edit::COPY, clip_selected),
         leaves(edit::COPY, note_selected),
+        leaves(edit::COPY, device_selected),
         edits(edit::CUT, clip_selected),
         edits(edit::CUT, time_selected),
         edits(edit::CUT, note_selected),
+        edits(edit::CUT, device_selected),
         edits(edit::DELETE, clip_selected),
         edits(edit::DELETE, time_selected),
         // The selected tracks.
@@ -547,6 +623,7 @@ fn examples() -> Vec<Example> {
             Some(Args::new())
         }),
         edits(edit::DELETE, note_selected),
+        edits(edit::DELETE, device_selected),
         // The markers selected in the Sample Editor.
         edits(edit::DELETE, |s| {
             find_marker(s, |w| w.markers.len() > 1)?;
@@ -555,6 +632,7 @@ fn examples() -> Vec<Example> {
         edits(edit::DUPLICATE, clip_selected),
         edits(edit::DUPLICATE, time_selected),
         edits(edit::DUPLICATE, note_selected),
+        edits(edit::DUPLICATE, device_selected),
         edits(edit::PASTE, |s| {
             clip_selected(s)?;
             s.run(&edit::COPY);
@@ -568,6 +646,12 @@ fn examples() -> Vec<Example> {
             let (_, c) = project(s).find_clip(clip)?;
             let at = c.start + Beats::new(2);
             start_marker(s, at);
+            Some(Args::new())
+        }),
+        // In the devices panel: in front of the selected device.
+        edits(edit::PASTE, |s| {
+            device_selected(s)?;
+            s.run(&edit::COPY);
             Some(Args::new())
         }),
         edits(edit::QUANTIZE, |s| {
@@ -608,6 +692,8 @@ fn examples() -> Vec<Example> {
         leaves(edit::SELECT_ALL, note_selected),
         // In the Sample Editor.
         leaves(edit::SELECT_ALL, marker_selected),
+        // In the devices panel.
+        leaves(edit::SELECT_ALL, device_selected),
         leaves(edit::SELECT_CLIPS, |s| {
             let clip = find_clip(s, |_| true)?.id;
             Some(Args::new().with("clips", vec![clip]))
@@ -1605,6 +1691,34 @@ fn is_sampler(kind: &DeviceKind) -> bool {
         .is_some_and(|native| native.kind == NativeKind::Sampler)
 }
 
+/// A device, with its chain, whose place in the chain, from 0, and the
+/// chain's length `keep` keeps.
+fn find_placed(s: &Rig, keep: impl Fn(usize, usize) -> bool) -> Option<(Chain, DeviceId)> {
+    let placed = project(s).chains().flat_map(|(chain, devices)| {
+        let len = devices.len();
+        (devices.iter().enumerate()).map(move |(index, device)| (chain, index, len, device.id))
+    });
+    let (chain, _, _, device) = pick(s, placed.filter(|&(_, i, len, _)| keep(i, len)))?;
+    Some((chain, device))
+}
+
+/// `args` with `chain` as the device commands take a place: a track, or
+/// the master.
+fn on_chain(args: Args, chain: Chain) -> Args {
+    match chain {
+        Chain::Track(track) => args.with("track", track),
+        Chain::Master => args.with("master", true),
+    }
+}
+
+/// Selects a device in the devices panel, which gives it the focus, for a
+/// command without arguments.
+fn device_selected(s: &mut Rig) -> Option<Args> {
+    let device = find_device(s, |_| true)?;
+    s.select_devices(&[device]);
+    Some(Args::new())
+}
+
 /// A track with a send, and the return track it goes to.
 fn find_send(s: &Rig) -> Option<(TrackId, TrackId)> {
     let tracks = project(s).tracks.iter();
@@ -1845,6 +1959,11 @@ fn fixture() -> Project {
         (
             Chain::Track(group),
             DeviceKind::Native(NativeDevice::new(NativeKind::Eq)),
+        ),
+        // A second, to move along the chain.
+        (
+            Chain::Track(group),
+            DeviceKind::Native(NativeDevice::new(NativeKind::Delay)),
         ),
         (Chain::Master, DeviceKind::TestGain { gain: 0.5 }),
     ];

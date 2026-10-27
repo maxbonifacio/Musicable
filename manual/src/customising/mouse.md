@@ -21,9 +21,10 @@ The changes go to your mouse map file at once. [The
 arrangement](../window/arrangement.md#the-mouse), [the piano
 roll](../window/piano-roll.md#the-mouse), [the Sample
 Editor](../window/sample-editor.md#the-mouse), [the
-mixer](../window/mixer.md#moving-the-controls) and [the devices
-panel](../window/devices-panel.md#bypassing-and-deactivating) say what the
-gestures do at first.
+mixer](../window/mixer.md#moving-the-controls) and the devices panel, for
+[a device's title bar](../window/devices-panel.md#selecting-moving-and-copying)
+and [its Bypass button](../window/devices-panel.md#bypassing-and-deactivating),
+say what the gestures do at first.
 
 ## Your mouse map file
 

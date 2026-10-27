@@ -888,9 +888,9 @@ pub(super) fn drop_hint(painter: &Painter, scene: &Scene<'_>) {
     );
 }
 
-/// Where something dragged from the browser would go: its track's row, a
-/// new track's under the others, or the master's row, with a line where a
-/// sample would start.
+/// Where something dragged from the browser or the devices panel would go:
+/// its track's row, a new track's under the others, or the master's row,
+/// with a line where a sample would start.
 pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -930,7 +930,7 @@ pub(super) fn destination(painter: &Painter, scene: &Scene<'_>, to: &Destination
         Destination::Chain(Some(Chain::Master)) => {
             (layout.master.top..=layout.master.bottom(), None)
         }
-        Destination::Chain(_) | Destination::Sampler(_) => return,
+        Destination::Chain(_) | Destination::Devices { .. } | Destination::Sampler(_) => return,
     };
     let rect = Rect::from_x_y_ranges(across, rows.clone());
     painter.rect_stroke(rect.shrink(1.0), 0.0, outline, StrokeKind::Inside);

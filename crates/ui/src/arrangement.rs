@@ -830,9 +830,9 @@ impl Scene<'_> {
         self.snap(self.layout.beats_at(x), false).max(Beats::ZERO)
     }
 
-    /// Where something dragged from the browser goes if it's let go at
-    /// `pos`: on the track there, from the time there over the lanes, on a
-    /// new track under the tracks, or on the master.
+    /// Where something dragged from the browser or the devices panel goes
+    /// if it's let go at `pos`: on the track there, from the time there over
+    /// the lanes, on a new track under the tracks, or on the master.
     fn destination(&self, pos: Pos2) -> Option<Destination> {
         let layout = &self.layout;
         let in_lanes = layout.lanes.contains(pos);
@@ -1851,7 +1851,8 @@ impl Arrangement {
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene, plan.as_ref());
         let plan = plan.or(self.landed.take());
-        // What's dragged from the browser, and where it would go.
+        // What's dragged from the browser or the devices panel, and where
+        // it would go.
         let dropping = scene.pointer.and_then(|pos| {
             let dragged = egui::DragAndDrop::payload::<Dragged>(ui.ctx())?;
             let to = scene.destination(pos)?;
@@ -2470,7 +2471,8 @@ impl Arrangement {
                 (MouseAction::Copy, _) => Some(CursorIcon::Copy),
                 (action, _) => icon(drag.hit, Some(action)),
             },
-            // egui's while something's dragged from the browser.
+            // egui's while something's dragged from the browser or the
+            // devices panel.
             None if egui::DragAndDrop::has_any_payload(ui.ctx()) => return,
             None => {
                 let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {

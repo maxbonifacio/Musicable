@@ -1,17 +1,20 @@
 //! The devices panel, under the arrangement: the devices of the selected
 //! track, which can be the master track, in the order they play, with the
-//! controls of Musicable's own. And the browser's list of Musicable's own
-//! devices and the plugins installed, which adds them to the devices the
-//! panel shows.
+//! controls of Musicable's own. Clicks on their title bars select them, as
+//! the mouse map says, and drags move them along the chain, or onto a
+//! track or a mixer strip, or copy them there with Ctrl. And the browser's
+//! list of Musicable's own devices and the plugins installed, which adds
+//! them to the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use egui::{
-    Align, Button, Frame, Id, Label, Layout, Response, RichText, Role, ScrollArea, Sense, Stroke,
-    TextEdit, Ui, Vec2, WidgetInfo, vec2,
+    Align, Button, CursorIcon, Frame, Id, Label, LayerId, Layout, Order, Rect, Response, RichText,
+    Role, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder,
+    Vec2, WidgetInfo, WidgetText, pos2, vec2,
 };
-use musicable_commands::{Args, device};
+use musicable_commands::{Args, CommandId, device, edit};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
@@ -20,7 +23,7 @@ use crate::browser::{self, Destination, Dragged};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::native;
 use crate::search::score;
-use crate::shell::{Action, View};
+use crate::shell::{Action, View, with_keys};
 use crate::theme::Theme;
 use crate::widgets::{Face, name_box, paint_toggle};
 
@@ -101,6 +104,11 @@ pub(crate) struct DevicesPanel {
     saving: Option<Saving>,
     /// The device to scroll to, the next time the panel shows.
     reveal: Option<DeviceId>,
+    /// The boxes of the devices the panel showed last, left to right, and
+    /// the part of the panel they're in sight in: what's dragged into the
+    /// panel goes between them.
+    boxes: Vec<(DeviceId, Rect)>,
+    sight: Option<Rect>,
 }
 
 /// A device being saved as a preset.
@@ -148,6 +156,8 @@ impl DevicesPanel {
             });
         });
         ui.add_space(theme.devices.margin);
+        self.boxes.clear();
+        self.sight = None;
         let devices = chain.and_then(|chain| project.devices(chain));
         let Some(devices) = devices else {
             ui.centered_and_justified(|ui| {
@@ -162,21 +172,88 @@ impl DevicesPanel {
             return browse;
         }
         let reveal = self.reveal.take();
-        ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+        let selection = view.editor.selected_devices(project);
+        let shown = ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            // Under the boxes, so a click beside them, and not in one,
+            // selects none of them.
+            let beside = ui.interact(ui.clip_rect(), ui.scope_id().with("beside"), Sense::click());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = theme.devices.gap;
                 for device in devices {
                     ui.push_id(device.id, |ui| {
                         let saving = &mut self.saving;
-                        let shown = device_box(ui, device, view, theme, mouse, saving, actions);
+                        let shown =
+                            device_box(ui, device, view, &selection, theme, mouse, saving, actions);
                         if reveal == Some(device.id) {
                             shown.scroll_to_me(None);
                         }
+                        self.boxes.push((device.id, shown.rect));
                     });
                 }
             });
+            beside
         });
+        self.sight = Some(shown.inner_rect);
+        if shown.inner.clicked() && !selection.is_empty() {
+            actions.push(select(Vec::new(), false));
+        }
         browse
+    }
+
+    /// Lets what's dragged from the browser, or from the panel's title bars,
+    /// go into the panel, which is `area`, as the chain it shows, `chain`,
+    /// and returns what letting it go asks for. Between the devices, a line
+    /// shows where it would go. An empty chain is outlined while it's over
+    /// it.
+    pub fn drop(
+        &self,
+        ctx: &egui::Context,
+        area: Rect,
+        chain: Option<Chain>,
+        theme: &Theme,
+    ) -> Option<Action> {
+        let chain = chain?;
+        // Round every box.
+        let around = (self.boxes.iter())
+            .map(|&(_, rect)| rect)
+            .reduce(Rect::union);
+        let (Some(sight), Some(around)) = (self.sight, around) else {
+            return browser::drop_in(ctx, area, &Destination::Chain(Some(chain)), theme);
+        };
+        let pos = ctx.pointer_latest_pos().filter(|&pos| area.contains(pos))?;
+        let dragged = egui::DragAndDrop::payload::<Dragged>(ctx)?;
+        // Before the first device whose middle is right of the pointer.
+        let gap = (self.boxes.iter())
+            .take_while(|(_, rect)| rect.center().x < pos.x)
+            .count();
+        let index = match &*dragged {
+            // Counting the chain without the devices moved along it.
+            Dragged::Devices {
+                devices,
+                copy: false,
+                ..
+            } => {
+                let before = self.boxes[..gap].iter();
+                gap - before.filter(|(id, _)| devices.contains(id)).count()
+            }
+            _ => gap,
+        };
+        let action = dragged.dropped(&Destination::Devices { chain, index })?;
+        let half = theme.devices.gap / 2.0;
+        let x = match (gap.checked_sub(1), self.boxes.get(gap)) {
+            (Some(before), Some((_, after))) => (self.boxes[before].1.right() + after.left()) / 2.0,
+            (Some(_), None) => around.right() + half,
+            (None, _) => around.left() - half,
+        };
+        let x = x.clamp(sight.left() + 1.0, sight.right() - 1.0);
+        let layer = LayerId::new(Order::Foreground, Id::unique("drop between devices"));
+        let painter = ctx.layer_painter(layer).with_clip_rect(sight);
+        painter.vline(x, around.y_range(), Stroke::new(2.0, theme.start_marker));
+        if !ctx.input(|i| i.pointer.any_released()) {
+            return None;
+        }
+        egui::DragAndDrop::clear_payload(ctx);
+        Some(action)
     }
 
     /// Scrolls to `device` the next time the panel shows, if it shows it.
@@ -212,15 +289,19 @@ impl DevicesPanel {
     }
 }
 
-/// A device: its Bypass button and its name, and a built-in device's
-/// controls, or a plugin's kind and how its plugin is doing, dimmed while
-/// it's off. Its name's menu saves it as a preset, which `saving` asks the
-/// name of, and a sampler takes a sample dragged onto it from the browser.
-/// Returns its box.
+/// A device: its title bar, and a built-in device's controls, or a
+/// plugin's kind and how its plugin is doing, dimmed while it's off, and
+/// outlined while it's one of the devices selected, `selection`. A click on
+/// it that no control takes selects it, as one on its title bar does, and
+/// the title bar drags it. Its menu works on the selection if it's in it,
+/// and saves it as a preset, which `saving` asks the name of. A sampler
+/// takes a sample dragged onto it from the browser. Returns its box.
+#[allow(clippy::too_many_arguments)]
 fn device_box(
     ui: &mut Ui,
     device: &Device,
     view: &View<'_>,
+    selection: &[DeviceId],
     theme: &Theme,
     mouse: &MouseMap,
     saving: &mut Option<Saving>,
@@ -232,64 +313,123 @@ fn device_box(
         Some(native) => native::width(native, theme),
         None => sizes.device - 2.0 * sizes.margin,
     };
-    let shown = Frame::new()
-        .fill(theme.device)
-        .stroke(Stroke::new(1.0, theme.divider))
-        .corner_radius(theme.corner)
-        .inner_margin(sizes.margin)
-        .show(ui, |ui| {
-            ui.set_width(width);
-            // Top to bottom, whatever the row of boxes around it does.
-            ui.vertical(|ui| {
-                title_row(ui, device, name, theme, mouse, saving, actions);
-                // A device that's off looks it, though its controls still
-                // work, so it can be set up before it comes back.
-                if device.bypassed || !device.active {
-                    ui.multiply_opacity(sizes.dimmed.clamp(0.0, 1.0));
-                }
-                match device.kind {
-                    DeviceKind::Native(ref native) => {
-                        native::controls(ui, device.id, name, native, view, theme, mouse, actions);
+    // The box senses clicks under its controls, which take their own.
+    let shown = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
+        Frame::new()
+            .fill(theme.device)
+            .stroke(Stroke::new(1.0, theme.divider))
+            .corner_radius(theme.corner)
+            .inner_margin(sizes.margin)
+            .show(ui, |ui| {
+                ui.set_width(width);
+                // Top to bottom, whatever the row of boxes around it does.
+                ui.vertical(|ui| {
+                    let title = title_row(ui, device, name, theme, mouse, actions);
+                    // A device that's off looks it, though its controls
+                    // still work, so it can be set up before it comes back.
+                    if device.bypassed || !device.active {
+                        ui.multiply_opacity(sizes.dimmed.clamp(0.0, 1.0));
                     }
-                    DeviceKind::Plugin(_) => {
-                        ui.label(RichText::new(kind).size(theme.small_text).weak());
-                        plugin_status(ui, device.id, name, view, theme, actions);
+                    // What kind it is, which a click selects the device by,
+                    // as it does beside the controls.
+                    let kind = Label::new(RichText::new(kind).size(theme.small_text).weak());
+                    let kind = kind.selectable(false);
+                    match device.kind {
+                        DeviceKind::Native(ref native) => {
+                            native::controls(
+                                ui, device.id, name, native, view, theme, mouse, actions,
+                            );
+                        }
+                        DeviceKind::Plugin(_) => {
+                            ui.add(kind);
+                            plugin_status(ui, device.id, name, view, theme, actions);
+                        }
+                        _ => {
+                            ui.add(kind);
+                        }
                     }
-                    _ => {
-                        ui.label(RichText::new(kind).size(theme.small_text).weak());
-                    }
-                }
-            });
-        })
-        .response;
+                    title
+                })
+                .inner
+            })
+            .inner
+    });
+    let (title, body) = (shown.inner, shown.response);
+    let selected = selection.contains(&device.id);
+    if selected {
+        let outline = Stroke::new(1.5, theme.clip_selected);
+        (ui.painter()).rect_stroke(body.rect, theme.corner, outline, StrokeKind::Inside);
+    }
+    // Screen readers hear whether it's off, and selected, with its name.
+    let mut label = format!("Device {name}");
+    if device.bypassed {
+        label += ", bypassed";
+    }
+    if !device.active {
+        label += ", deactivated";
+    }
+    if selected {
+        label += ", selected";
+    }
+    title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
+    if title.clicked() || body.clicked() {
+        let mods = modifiers(ui.input(|input| input.modifiers));
+        match mouse.action(Target::DeviceTitle, Gesture::Click, mods) {
+            Some(MouseAction::Select) => actions.push(select(vec![device.id], false)),
+            Some(MouseAction::ToggleSelect) => actions.push(select(vec![device.id], true)),
+            _ => {}
+        }
+    }
+    // Its menu, and a drag, take it alone if it's not selected, and select
+    // it, as in Live; else the selection, all of it.
+    let opened = title.secondary_clicked() || body.secondary_clicked();
+    if (opened || title.drag_started()) && !selected {
+        actions.push(select(vec![device.id], false));
+    }
+    let targets = match selected {
+        true => selection.to_vec(),
+        false => vec![device.id],
+    };
+    drag(ui, &title, &targets, name, mouse);
+    if title.double_clicked() && device.kind.plugin().is_some() {
+        let args = Args::new().with("device", device.id);
+        actions.push(Action::RunWith(device::SHOW_WINDOW, args));
+    }
+    for response in [&title, &body] {
+        response.context_menu(|ui| menu(ui, device, name, view, &targets, saving, actions));
+    }
     // A sample dragged from the browser onto a sampler loads into it, where
     // the box is in sight.
     if (device.kind.native()).is_some_and(|native| native.kind == NativeKind::Sampler) {
-        let rect = shown.rect.intersect(ui.clip_rect());
+        let rect = body.rect.intersect(ui.clip_rect());
         let target = Destination::Sampler(device.id);
         actions.extend(browser::drop_in(ui.ctx(), rect, &target, theme));
     }
-    shown
+    body
 }
 
-/// A device's Bypass button, and its name, which shows its plugin's window
-/// when double-clicked, as in Live, and whose menu bypasses, deactivates
-/// and saves it as a preset, and the button that deletes it. And a
-/// sampler's sample.
+/// A device's title bar: its Bypass button, its name and the button that
+/// deletes it, and a sampler's sample. Returns its name's part, which the
+/// Bypass button and the others leave: what clicks select the device by,
+/// drags take it by, and a double-click shows its plugin's window by, as
+/// in Live.
 fn title_row(
     ui: &mut Ui,
     device: &Device,
     name: &str,
     theme: &Theme,
     mouse: &MouseMap,
-    saving: &mut Option<Saving>,
     actions: &mut Vec<Action>,
-) {
+) -> Response {
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let delete = ui.small_button("×").on_hover_text("Delete");
             let label = format!("Delete {name}");
             delete.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+            if delete.clicked() {
+                let args = Args::new().with("device", device.id);
+                actions.push(Action::RunWith(device::DELETE, args));
+            }
             let native = device.kind.native();
             if let Some(sampler) = native.filter(|native| native.kind == NativeKind::Sampler) {
                 let file = sampler.sample.as_deref();
@@ -299,62 +439,112 @@ fn title_row(
                 let text = RichText::new("Deactivated").size(theme.small_text).weak();
                 ui.add(Label::new(text).selectable(false));
             }
-            let title = RichText::new(name).strong().color(theme.header_text);
-            let title = Label::new(title)
-                .truncate()
-                .selectable(false)
-                .sense(Sense::click());
             // On the left, after the Bypass button, in the room the buttons
             // leave.
-            let title = ui
-                .with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    bypass_button(ui, device, name, theme, mouse, actions);
-                    ui.add(title)
-                })
-                .inner;
-            // Screen readers hear whether it's off with its name.
-            let mut label = format!("Device {name}");
-            if device.bypassed {
-                label += ", bypassed";
-            }
-            if !device.active {
-                label += ", deactivated";
-            }
-            title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
-            let args = Args::new().with("device", device.id);
-            if title.double_clicked() && device.kind.plugin().is_some() {
-                actions.push(Action::RunWith(device::SHOW_WINDOW, args.clone()));
-            }
-            title.context_menu(|ui| {
-                let bypass = ui.add(Button::new("Bypass").selected(device.bypassed));
-                if bypass.clicked() {
-                    actions.push(set_bypass(device.id, !device.bypassed));
-                }
-                let switch = if device.active {
-                    "Deactivate"
-                } else {
-                    "Activate"
-                };
-                if ui.button(switch).clicked() {
-                    actions.push(set_active(device.id, !device.active));
-                }
-                ui.separator();
-                if ui.button("Save as Preset...").clicked() {
-                    *saving = Some(Saving {
-                        device: device.id,
-                        name: None,
-                        device_name: name.to_owned(),
-                    });
-                }
-                if ui.button("Delete").clicked() {
-                    actions.push(Action::RunWith(device::DELETE, args.clone()));
-                }
-            });
-            if delete.clicked() {
-                actions.push(Action::RunWith(device::DELETE, args));
-            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                bypass_button(ui, device, name, theme, mouse, actions);
+                let size = vec2(ui.available_width(), ui.spacing().interact_size.y);
+                let (rect, title) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                let text = RichText::new(name).strong().color(theme.header_text);
+                let wrap = Some(TextWrapMode::Truncate);
+                let text =
+                    WidgetText::from(text).into_galley(ui, wrap, rect.width(), TextStyle::Body);
+                let at = pos2(rect.left(), rect.center().y - text.size().y / 2.0);
+                ui.painter().galley(at, text, theme.header_text);
+                title
+            })
+            .inner
+        })
+        .inner
+    })
+    .inner
+}
+
+/// Drags `devices` by the title bar `title`, of the device called `name`,
+/// while the mouse map's drag does: moving them, or copying them, as Ctrl
+/// does in Live's, by the modifiers held as they're let go.
+fn drag(ui: &Ui, title: &Response, devices: &[DeviceId], name: &str, mouse: &MouseMap) {
+    let ctx = ui.ctx();
+    let started = title.drag_started();
+    // Escape takes away what's dragged, and the drag with it.
+    if !started && !(title.dragged() && egui::DragAndDrop::has_payload_of_type::<Dragged>(ctx)) {
+        return;
+    }
+    let mods = modifiers(ui.input(|input| input.modifiers));
+    let copy = match mouse.action(Target::DeviceTitle, Gesture::Drag, mods) {
+        Some(MouseAction::Move) => false,
+        Some(MouseAction::Copy) => true,
+        _ => return,
+    };
+    let name = match devices {
+        [_] => name.to_owned(),
+        _ => format!("{} Devices", devices.len()),
+    };
+    let dragged = Dragged::Devices {
+        devices: devices.to_vec(),
+        copy,
+        name,
+    };
+    egui::DragAndDrop::set_payload(ctx, dragged);
+    if copy {
+        ctx.set_cursor_icon(CursorIcon::Copy);
+    }
+}
+
+/// A device's menu, which works on `targets`: the selected devices if it's
+/// one of them, or else the device alone. Bypass is ticked while they're
+/// all bypassed, and Activate shows while any is deactivated. The edit
+/// commands select them first, so they take them, and Save as Preset
+/// saves the device itself, `name`, which `saving` asks the name of.
+fn menu(
+    ui: &mut Ui,
+    device: &Device,
+    name: &str,
+    view: &View<'_>,
+    targets: &[DeviceId],
+    saving: &mut Option<Saving>,
+    actions: &mut Vec<Action>,
+) {
+    let all = |test: fn(&Device) -> bool| {
+        (targets.iter()).all(|&id| (view.project.find_device(id)).is_some_and(|(_, _, d)| test(d)))
+    };
+    let (bypassed, active) = (all(|d| d.bypassed), all(|d| d.active));
+    let bypass = Button::new("Bypass").selected(bypassed);
+    let bypass = with_keys(bypass, view, &device::TOGGLE_BYPASS);
+    if ui.add(bypass).clicked() {
+        actions.push(set_bypass(targets, !bypassed));
+    }
+    let switch = if active { "Deactivate" } else { "Activate" };
+    if ui.button(switch).clicked() {
+        actions.push(set_active(targets, !active));
+    }
+    ui.separator();
+    let pasting = view.editor.devices.clipboard.is_some();
+    let edits: [(&str, CommandId); 4] = [
+        ("Cut", edit::CUT),
+        ("Copy", edit::COPY),
+        ("Paste", edit::PASTE),
+        ("Duplicate", edit::DUPLICATE),
+    ];
+    for (title, command) in edits {
+        let enabled = pasting || command != edit::PASTE;
+        let button = with_keys(Button::new(title), view, &command);
+        if ui.add_enabled(enabled, button).clicked() {
+            actions.extend([select(targets.to_vec(), false), Action::Run(command)]);
+        }
+    }
+    ui.separator();
+    if ui.button("Save as Preset...").clicked() {
+        *saving = Some(Saving {
+            device: device.id,
+            name: None,
+            device_name: name.to_owned(),
         });
-    });
+    }
+    let delete = with_keys(Button::new("Delete"), view, &edit::DELETE);
+    if ui.add(delete).clicked() {
+        actions.extend([select(targets.to_vec(), false), Action::Run(edit::DELETE)]);
+    }
 }
 
 /// The Bypass button of `device`, which the panel calls `name`, drawn as
@@ -391,28 +581,37 @@ fn bypass_button(
         return;
     }
     let mods = modifiers(ui.input(|input| input.modifiers));
+    let id = [device.id];
     match mouse.action(Target::BypassButton, Gesture::Click, mods) {
-        Some(MouseAction::ToggleBypass) if !device.active => {
-            actions.push(set_active(device.id, true));
-        }
-        Some(MouseAction::ToggleBypass) => actions.push(set_bypass(device.id, !device.bypassed)),
-        Some(MouseAction::ToggleActive) => actions.push(set_active(device.id, !device.active)),
+        Some(MouseAction::ToggleBypass) if !device.active => actions.push(set_active(&id, true)),
+        Some(MouseAction::ToggleBypass) => actions.push(set_bypass(&id, !device.bypassed)),
+        Some(MouseAction::ToggleActive) => actions.push(set_active(&id, !device.active)),
         _ => {}
     }
 }
 
-/// The command that bypasses `device`, or brings it back.
-fn set_bypass(device: DeviceId, bypassed: bool) -> Action {
+/// The command that selects `devices`, or adds them to the selection or
+/// takes them out of it with `toggle`.
+fn select(devices: Vec<DeviceId>, toggle: bool) -> Action {
+    let mut args = Args::new().with("devices", devices);
+    if toggle {
+        args = args.with("toggle", true);
+    }
+    Action::RunWith(device::SELECT, args)
+}
+
+/// The command that bypasses `devices`, or brings them back.
+fn set_bypass(devices: &[DeviceId], bypassed: bool) -> Action {
     let args = Args::new()
-        .with("devices", vec![device])
+        .with("devices", devices.to_vec())
         .with("bypassed", bypassed);
     Action::RunWith(device::SET_BYPASS, args)
 }
 
-/// The command that deactivates `device`, or activates it.
-fn set_active(device: DeviceId, active: bool) -> Action {
+/// The command that deactivates `devices`, or activates them.
+fn set_active(devices: &[DeviceId], active: bool) -> Action {
     let args = Args::new()
-        .with("devices", vec![device])
+        .with("devices", devices.to_vec())
         .with("active", active);
     Action::RunWith(device::SET_ACTIVE, args)
 }
@@ -838,6 +1037,18 @@ mod tests {
         std::mem::take(&mut harness.state_mut().actions)
     }
 
+    /// Opens the menu of what's called `name` and picks `item`: whether
+    /// the item was ticked.
+    fn menu(harness: &mut Harness<'static, State>, name: &str, item: &str) -> Option<Toggled> {
+        harness.get_by_label(name).click_secondary();
+        harness.run();
+        let item = harness.get_by_role_and_label(Role::Button, item);
+        let ticked = item.accesskit_node().toggled();
+        item.click();
+        harness.run();
+        ticked
+    }
+
     fn native(project: &mut Project, kind: NativeKind) -> Device {
         project.new_device(DeviceKind::Native(NativeDevice::new(kind)))
     }
@@ -907,11 +1118,15 @@ mod tests {
         let at = harness.get_by_label("Device Surge XT").rect().center();
         double_click(&mut harness, at);
         click(&mut harness, "Delete Old Reverb");
+        // Each click of the double-click selects it, as one click does.
+        let selects = Action::RunWith(device::SELECT, Args::new().with("devices", vec![synth.id]));
         assert_eq!(
             actions(&mut harness),
             [
                 Action::RunWith(device::SHOW_WINDOW, on(&synth)),
                 Action::RunWith(device::HIDE_WINDOW, on(&synth)),
+                selects.clone(),
+                selects,
                 Action::RunWith(device::SHOW_WINDOW, on(&synth)),
                 Action::RunWith(device::DELETE, on(&reverb)),
             ]
@@ -1217,28 +1432,23 @@ mod tests {
         );
 
         // The name's menu has them too, with Bypass ticked while the device
-        // is bypassed.
-        let menu = |harness: &mut Harness<'static, State>, name: &str, item: &str| {
-            harness.get_by_label(name).click_secondary();
-            harness.run();
-            let item = harness.get_by_role_and_label(Role::Button, item);
-            let ticked = item.accesskit_node().toggled();
-            item.click();
-            harness.run();
-            ticked
-        };
-        let ticked = menu(&mut harness, "Device EQ, bypassed", "Bypass");
+        // is bypassed, and its key. Opening it selects the device.
+        let ticked = menu(&mut harness, "Device EQ, bypassed", "Bypass 0");
         assert_eq!(ticked, Some(Toggled::True));
-        let ticked = menu(&mut harness, "Device Old Reverb", "Bypass");
+        let ticked = menu(&mut harness, "Device Old Reverb", "Bypass 0");
         assert_eq!(ticked, Some(Toggled::False));
         menu(&mut harness, "Device Old Reverb", "Deactivate");
         menu(&mut harness, "Device Test Gain, deactivated", "Activate");
         assert_eq!(
             actions(&mut harness),
             [
+                super::select(vec![eq.id], false),
                 bypass(&eq, false),
+                super::select(vec![reverb.id], false),
                 bypass(&reverb, true),
+                super::select(vec![reverb.id], false),
                 active(&reverb, false),
+                super::select(vec![gain.id], false),
                 active(&gain, true),
             ]
         );
@@ -1354,14 +1564,277 @@ mod tests {
         drop_on(&mut harness, "Device Synth", Dragged::Sample(kick));
         assert_eq!(actions(&mut harness), []);
         // A device let go over the sampler goes in the chain, as anywhere in
-        // the panel.
+        // the panel: in front of the sampler, left of its middle.
         drop_on(
             &mut harness,
             "Device Sampler",
             Dragged::Native(NativeKind::Eq),
         );
         let args = Args::new().with("kind", "eq").with("track", keys);
+        let args = args.with("index", 0_i64);
         assert_eq!(actions(&mut harness), [Action::RunWith(device::ADD, args)]);
+    }
+
+    /// The command that selects `devices`, or toggles them.
+    fn selects(devices: &[&Device], toggle: bool) -> Action {
+        super::select(devices.iter().map(|device| device.id).collect(), toggle)
+    }
+
+    /// Presses the mouse's button at `at` with `mods` held, or lets go.
+    fn press(harness: &mut Harness<'static, State>, at: Pos2, pressed: bool, mods: Modifiers) {
+        harness.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: mods,
+        });
+        harness.run();
+    }
+
+    /// Drags from `from` towards `to` with `mods` held, in a few moves,
+    /// without letting go.
+    fn drag_to(harness: &mut Harness<'static, State>, from: Pos2, to: Pos2, mods: Modifiers) {
+        harness.event(Event::ModifiersChanged(mods));
+        harness.hover_at(from);
+        harness.run();
+        press(harness, from, true, mods);
+        for step in 1..=4 {
+            harness.hover_at(from + (to - from) * step as f32 / 4.0);
+            harness.run();
+        }
+    }
+
+    /// Drags from `from` to `to` with `mods` held, and lets go there.
+    fn drag(harness: &mut Harness<'static, State>, from: Pos2, to: Pos2, mods: Modifiers) {
+        drag_to(harness, from, to, mods);
+        press(harness, to, false, mods);
+        harness.event(Event::ModifiersChanged(Modifiers::NONE));
+        harness.run();
+    }
+
+    #[test]
+    fn clicks_select_devices_and_a_click_beside_them_selects_none() {
+        let mut project = Project::new();
+        let first = plugin(&mut project, "First", false);
+        let second = plugin(&mut project, "Second", false);
+        let mut harness = showing(vec![first.clone(), second.clone()], project);
+        // A click on a title bar selects its device alone, and Ctrl- or
+        // Shift-click adds it to the selection, or takes it out. A click in
+        // its box where no control is does as one on its title bar.
+        click(&mut harness, "Device First");
+        for mods in [Modifiers::CTRL, Modifiers::SHIFT] {
+            harness.get_by_label("Device Second").click_modifiers(mods);
+            harness.run();
+        }
+        let kind = harness.get_all_by_label("Effect · CLAP").nth(1).unwrap();
+        let kind = kind.rect().center();
+        crate::testing::click_at(&mut harness, kind);
+        assert_eq!(
+            actions(&mut harness),
+            [
+                selects(&[&first], false),
+                selects(&[&second], true),
+                selects(&[&second], true),
+                selects(&[&second], false),
+            ]
+        );
+
+        // A selected device's box is outlined, and screen readers hear it's
+        // selected. A click beside the boxes selects none of them, if any
+        // are selected.
+        harness.state_mut().editor.devices.selected = [second.id].into();
+        harness.run();
+        harness.get_by_label("Device First");
+        let title = harness.get_by_label("Device Second, selected").rect();
+        let beside = pos2(title.right() + 200.0, title.center().y);
+        crate::testing::click_at(&mut harness, beside);
+        assert_eq!(actions(&mut harness), [selects(&[], false)]);
+        harness.state_mut().editor.devices.selected.clear();
+        harness.run();
+        crate::testing::click_at(&mut harness, beside);
+        assert_eq!(actions(&mut harness), []);
+    }
+
+    #[test]
+    fn title_bars_drag_devices_along_the_chain_and_ctrl_copies_them() {
+        let mut project = Project::new();
+        let [a, b, c] = ["A", "B", "C"].map(|name| plugin(&mut project, name, false));
+        let mut harness = showing(vec![a.clone(), b.clone(), c.clone()], project);
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.run();
+        let keys = harness.state().project.tracks[0].id;
+        let title = |harness: &Harness<'static, State>, name: &str| {
+            let label = match harness.state().editor.devices.selected.is_empty() {
+                true => format!("Device {name}"),
+                false => format!("Device {name}, selected"),
+            };
+            harness.get_by_label(&label).rect()
+        };
+        let to = |command, devices: &[&Device], index: i64| {
+            let devices: Vec<DeviceId> = devices.iter().map(|device| device.id).collect();
+            let args = Args::new().with("devices", devices).with("track", keys);
+            Action::RunWith(command, args.with("index", index))
+        };
+
+        // Let go right of the middle of the last, a device goes after it,
+        // so it's third in the chain without it. Dragging it selects it.
+        let from = title(&harness, "A").center();
+        let after_c = title(&harness, "C").right_center() + vec2(4.0, 0.0);
+        drag(&mut harness, from, after_c, Modifiers::NONE);
+        assert_eq!(
+            actions(&mut harness),
+            [selects(&[&a], false), to(device::MOVE, &[&a], 2)]
+        );
+
+        // A selected device drags the selection, all of it, in the order
+        // they play: in front of the first.
+        harness.state_mut().editor.devices.selected = [a.id, b.id].into();
+        harness.run();
+        let from = title(&harness, "B").center();
+        let before_a = title(&harness, "A").left_center() - vec2(4.0, 0.0);
+        drag(&mut harness, from, before_a, Modifiers::NONE);
+        assert_eq!(actions(&mut harness), [to(device::MOVE, &[&a, &b], 0)]);
+        harness.state_mut().editor.devices.selected.clear();
+        harness.run();
+
+        // Ctrl copies, with a line where the copy would go, and the pointer
+        // says so.
+        let from = title(&harness, "C").center();
+        let after_a = title(&harness, "A").right_center() + vec2(4.0, 0.0);
+        drag_to(&mut harness, from, after_a, Modifiers::CTRL);
+        let dragged = egui::DragAndDrop::payload::<Dragged>(&harness.ctx).unwrap();
+        let copy = Dragged::Devices {
+            devices: vec![c.id],
+            copy: true,
+            name: "C".to_owned(),
+        };
+        assert_eq!((*dragged).clone(), copy);
+        assert_eq!(copy.name(), "Copy C");
+        let start_marker = harness.state().shell.theme().start_marker;
+        let (left, right) = (title(&harness, "A").right(), title(&harness, "B").left());
+        let lines = (harness.output().shapes.iter()).filter(|clipped| match &clipped.shape {
+            egui::Shape::LineSegment { points, stroke } => {
+                stroke.color == start_marker && (left..right).contains(&points[0].x)
+            }
+            _ => false,
+        });
+        assert_eq!(lines.count(), 1);
+        press(&mut harness, after_a, false, Modifiers::CTRL);
+        assert_eq!(
+            actions(&mut harness),
+            [selects(&[&c], false), to(device::COPY, &[&c], 1)]
+        );
+
+        // Escape stops a drag: nothing comes of letting go.
+        drag_to(&mut harness, from, after_a, Modifiers::NONE);
+        harness.key_press(Key::Escape);
+        harness.run();
+        press(&mut harness, after_a, false, Modifiers::NONE);
+        assert_eq!(actions(&mut harness), [selects(&[&c], false)]);
+        assert!(egui::DragAndDrop::payload::<Dragged>(&harness.ctx).is_none());
+    }
+
+    #[test]
+    fn devices_dragged_onto_tracks_and_strips_go_on_them() {
+        let mut project = Project::new();
+        let bass = project.add_track("Bass", TrackKind::Audio);
+        let a = plugin(&mut project, "A", false);
+        let mut harness = showing(vec![a.clone()], project);
+        harness.set_size(egui::vec2(1800.0, 900.0));
+        harness.run();
+        let moved = |args: Args| {
+            let args = args.with("devices", vec![a.id]);
+            Action::RunWith(device::MOVE, args)
+        };
+        let from = harness.get_by_label("Device A").rect().center();
+
+        // Onto a track's row in the arrangement, at the end of its chain.
+        let row = harness.get_by_label("Track Bass").rect();
+        drag(&mut harness, from, row.center(), Modifiers::NONE);
+        let selected = selects(&[&a], false);
+        let onto_bass = moved(Args::new().with("track", bass));
+        assert_eq!(actions(&mut harness), [selected.clone(), onto_bass.clone()]);
+        // Under the tracks, onto a track of its own.
+        let master = harness.get_by_label("Master track").rect();
+        let keys = harness.get_by_label("Track Keys").rect();
+        let below = pos2(row.center().x, (keys.bottom() + master.top()) / 2.0);
+        drag(&mut harness, from, below, Modifiers::NONE);
+        let new_track = moved(Args::new().with("new_track", true));
+        assert_eq!(actions(&mut harness), [selected.clone(), new_track]);
+        // Onto the master track, or a mixer strip.
+        drag(&mut harness, from, master.center(), Modifiers::NONE);
+        let strip = harness.get_by_label("Bass Strip").rect();
+        drag(&mut harness, from, strip.center(), Modifiers::NONE);
+        assert_eq!(
+            actions(&mut harness),
+            [
+                selected.clone(),
+                moved(Args::new().with("master", true)),
+                selected,
+                onto_bass,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_devices_menu_works_on_the_selection_if_its_in_it() {
+        let mut project = Project::new();
+        let [mut a, b, c] = ["A", "B", "C"].map(|name| plugin(&mut project, name, false));
+        a.bypassed = true;
+        let mut harness = showing(vec![a.clone(), b.clone(), c.clone()], project);
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.state_mut().editor.devices.selected = [a.id, c.id].into();
+        harness.run();
+        let run = |command| Action::Run(command);
+
+        // On the selection, of which one is bypassed: Bypass bypasses both.
+        let ticked = menu(&mut harness, "Device A, bypassed, selected", "Bypass 0");
+        assert_eq!(ticked, Some(Toggled::False));
+        menu(&mut harness, "Device C, selected", "Cut Ctrl+X");
+        menu(
+            &mut harness,
+            "Device A, bypassed, selected",
+            "Delete Backspace, Delete",
+        );
+        let both = Args::new().with("devices", vec![a.id, c.id]);
+        assert_eq!(
+            actions(&mut harness),
+            [
+                Action::RunWith(device::SET_BYPASS, both.with("bypassed", true)),
+                selects(&[&a, &c], false),
+                run(edit::CUT),
+                selects(&[&a, &c], false),
+                run(edit::DELETE),
+            ]
+        );
+
+        // On a device that isn't selected, it alone, which it selects.
+        // Paste waits for something cut or copied.
+        harness.get_by_label("Device B").click_secondary();
+        harness.run();
+        let paste = harness.get_by_role_and_label(Role::Button, "Paste Ctrl+V");
+        assert!(paste.accesskit_node().is_disabled());
+        harness.key_press(Key::Escape);
+        harness.run();
+        let clipboard = musicable_commands::editor::DeviceClipboard {
+            devices: Vec::new(),
+        };
+        harness.state_mut().editor.devices.clipboard = Some(clipboard);
+        harness.run();
+        menu(&mut harness, "Device B", "Paste Ctrl+V");
+        menu(&mut harness, "Device B", "Duplicate Ctrl+D");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                selects(&[&b], false),
+                selects(&[&b], false),
+                selects(&[&b], false),
+                run(edit::PASTE),
+                selects(&[&b], false),
+                selects(&[&b], false),
+                run(edit::DUPLICATE),
+            ]
+        );
     }
 
     #[test]

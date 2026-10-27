@@ -11,7 +11,7 @@ use egui::{Rect, Ui, UiBuilder};
 use musicable_model::Chain;
 
 use crate::arrangement::Arrangement;
-use crate::browser::{self, BrowserPanel, Destination};
+use crate::browser::BrowserPanel;
 use crate::devices::DevicesPanel;
 use crate::history::HistoryPanel;
 use crate::mixer::{self, Choices};
@@ -152,10 +152,10 @@ impl Registry {
                     (panels.devices).show(ui, view, cx.chain, theme, mouse, cx.actions)
                 });
                 cx.browse |= browse;
-                // Devices and presets dragged from the browser go in the
-                // chain the panel shows.
-                let target = Destination::Chain(cx.chain);
-                let dropped = browser::drop_in(ui.ctx(), rect, &target, cx.theme);
+                // Devices and presets dragged from the browser, and the
+                // panel's own devices, go in the chain the panel shows,
+                // between the devices where they're let go.
+                let dropped = (panels.devices).drop(ui.ctx(), rect, cx.chain, cx.theme);
                 cx.actions.extend(dropped);
             },
         });

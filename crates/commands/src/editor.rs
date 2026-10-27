@@ -1,6 +1,6 @@
-//! What the arrangement, the piano roll and the Sample Editor edit besides
-//! the project: the selection, the start marker, the grid, the zoom and how
-//! the editing behaves.
+//! What the arrangement, the piano roll, the Sample Editor and the devices
+//! panel edit besides the project: the selection, the start marker, the
+//! grid, the zoom and how the editing behaves.
 //!
 //! It lives with the [`Document`](crate::Document), outside the widgets, so
 //! commands read and change it just as the UI does, and so will extensions
@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use musicable_analysis::Analysis;
+use musicable_model::automation;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{Chain, Project, TrackId};
+use musicable_model::{Chain, Device, DeviceId, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::auto_warp::Pending;
@@ -66,6 +67,8 @@ pub struct Editor {
     pub piano_roll: PianoRoll,
     /// What the Sample Editor shows and has selected.
     pub sample_editor: SampleEditor,
+    /// What the devices panel has selected.
+    pub devices: Devices,
     /// The panel of the editor that fits the clip selected or opened last:
     /// the piano roll's for a MIDI clip, the Sample Editor's for an audio
     /// clip. The piano roll's keys show and hide it.
@@ -93,6 +96,7 @@ impl Default for Editor {
             focus: Focus::default(),
             piano_roll: PianoRoll::default(),
             sample_editor: SampleEditor::default(),
+            devices: Devices::default(),
             clip_editor: panel::PIANO_ROLL,
         }
     }
@@ -183,6 +187,25 @@ impl Editor {
         }
     }
 
+    /// Makes `chain` the selected track, whose devices the devices panel
+    /// shows. The devices selected there are forgotten if it's another.
+    pub fn select_track(&mut self, chain: Chain) {
+        if self.selected_track != Some(chain) {
+            self.devices.selected.clear();
+        }
+        self.selected_track = Some(chain);
+    }
+
+    /// The devices selected in the devices panel, in the order they play:
+    /// those of the chain it shows, the selected track's.
+    pub fn selected_devices(&self, project: &Project) -> Vec<DeviceId> {
+        let shown = self.selected_track.and_then(|chain| project.devices(chain));
+        (shown.unwrap_or_default().iter())
+            .map(|device| device.id)
+            .filter(|id| self.devices.selected.contains(id))
+            .collect()
+    }
+
     /// Gives the arrangement the focus, as selecting in it does, unless a
     /// panel that edits its selection, such as the mixer, has it.
     pub fn focus_arrangement(&mut self) {
@@ -192,8 +215,9 @@ impl Editor {
     }
 
     /// Forgets what `project` doesn't have any more: selected clips and
-    /// tracks that went, their heights and their take lanes, and the piano
-    /// roll's clip and notes.
+    /// tracks that went, their heights and their take lanes, the piano
+    /// roll's clip and notes, and the selected devices that aren't in the
+    /// chain the devices panel shows.
     pub fn prune(&mut self, project: &Project) {
         let tracks: BTreeSet<TrackId> = project.tracks.iter().map(|t| t.id).collect();
         let selection = &mut self.selection;
@@ -217,6 +241,13 @@ impl Editor {
             && !tracks.contains(&id)
         {
             self.selected_track = None;
+        }
+        if !self.devices.selected.is_empty() {
+            let shown = self.selected_track.and_then(|chain| project.devices(chain));
+            let shown: BTreeSet<DeviceId> = (shown.unwrap_or_default().iter())
+                .map(|device| device.id)
+                .collect();
+            self.devices.selected.retain(|id| shown.contains(id));
         }
         (self.track_heights).retain(|chain, _| chain.track().is_none_or(|id| tracks.contains(&id)));
         self.take_lanes.retain(|id| tracks.contains(id));
@@ -303,6 +334,7 @@ impl Focus {
             panel::ARRANGEMENT | panel::MIXER => Edits::Arrangement,
             panel::PIANO_ROLL => Edits::Notes,
             panel::SAMPLE_EDITOR => Edits::Markers,
+            panel::DEVICES => Edits::Devices,
             _ => Edits::Nothing,
         }
     }
@@ -327,6 +359,8 @@ pub enum Edits {
     /// The Sample Editor's selected warp markers: Delete and Select All act
     /// on them, and the clipboard leaves them alone.
     Markers,
+    /// The devices panel's selected devices.
+    Devices,
     /// Nothing: the panel has nothing selected that they take.
     Nothing,
 }
@@ -418,6 +452,27 @@ impl PianoRoll {
         let middle = (rows - key - 0.5) * key_height;
         (middle - height / 2.0).clamp(0.0, (rows * key_height - height).max(0.0))
     }
+}
+
+/// What the devices panel edits: its selected devices, and what Cut and
+/// Copy took from it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Devices {
+    /// The selected devices, of the chain the panel shows, the selected
+    /// track's: [`Editor::selected_devices`] gives them in the order they
+    /// play. Showing another chain forgets them.
+    pub selected: BTreeSet<DeviceId>,
+    /// What Cut and Copy took from it, for Paste.
+    pub clipboard: Option<DeviceClipboard>,
+}
+
+/// Devices that Cut or Copy took in the devices panel, as they were then,
+/// a plugin's state and all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceClipboard {
+    /// In the order they played, each with the lanes that automated it:
+    /// its parameters' and its Bypass's.
+    pub devices: Vec<(Device, Vec<automation::Lane>)>,
 }
 
 /// What the Sample Editor edits: the audio clip it shows, its selected warp
@@ -834,6 +889,10 @@ pub struct Behaviour {
     /// The first file with a pulse dropped into an empty song gives it its
     /// tempo and meter.
     pub tempo_from_first_file: bool,
+    /// Copies of devices take lanes of their own with the original's
+    /// points, as Live's have since 10.0.1. Without it, they start without
+    /// automation.
+    pub copies_take_automation: bool,
 }
 
 impl Default for Behaviour {
@@ -847,6 +906,7 @@ impl Default for Behaviour {
             warp_drifting: true,
             sync_one_shots: true,
             tempo_from_first_file: true,
+            copies_take_automation: true,
         }
     }
 }
@@ -915,9 +975,9 @@ pub struct Clipboard {
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::TrackKind;
     use musicable_model::clip::{ClipContent, MidiClip};
     use musicable_model::time::TimeSignature;
+    use musicable_model::{DeviceKind, TrackKind};
 
     use super::*;
 
@@ -1093,5 +1153,35 @@ mod tests {
         );
         assert_eq!(editor.sample_rate_of("a.wav"), 44_100);
         assert_eq!(editor.sample_rate_of("b.wav"), 48_000);
+    }
+
+    #[test]
+    fn the_devices_selected_are_those_of_the_chain_the_panel_shows() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut add = |chain: Chain| {
+            let device = project.new_device(DeviceKind::TestGain { gain: 1.0 });
+            let id = device.id;
+            project.devices_mut(chain).unwrap().push(device);
+            id
+        };
+        let [first, _, third] = [(); 3].map(|_| add(Chain::Track(keys)));
+        let gain = add(Chain::Master);
+        let mut editor = Editor::default();
+        editor.select_track(Chain::Track(keys));
+        editor.devices.selected = [third, first, gain].into();
+        // In the order they play, and only the shown chain's.
+        assert_eq!(editor.selected_devices(&project), [first, third]);
+        // Pruning forgets the others, and those that went.
+        project.tracks[0].devices.retain(|d| d.id != first);
+        editor.prune(&project);
+        assert_eq!(editor.devices.selected, [third].into());
+        // Showing the same chain keeps them, and showing another forgets
+        // them.
+        editor.select_track(Chain::Track(keys));
+        assert_eq!(editor.devices.selected, [third].into());
+        editor.select_track(Chain::Master);
+        assert!(editor.devices.selected.is_empty());
+        assert_eq!(editor.selected_track, Some(Chain::Master));
     }
 }

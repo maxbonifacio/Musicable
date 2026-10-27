@@ -1,13 +1,14 @@
 //! The mouse map: what a mouse gesture does, from where it starts and the
 //! modifiers held.
 //!
-//! The arrangement, the piano roll and the mixer look gestures up here
-//! instead of deciding for themselves, so the user can make the mouse work
-//! as another DAW's does, as a keymap does for keys. [`MouseMap::live`], the
-//! map Musicable starts with, follows Ableton Live on Windows, with Cmd
-//! standing in for Ctrl on a Mac. A [`MouseMapFile`] holds the user's
-//! changes to it, which the Settings window's Mouse page makes, from the
-//! actions each place can do ([`Target::actions`]).
+//! The arrangement, the piano roll, the Sample Editor, the mixer and the
+//! devices panel look gestures up here instead of deciding for themselves,
+//! so the user can make the mouse work as another DAW's does, as a keymap
+//! does for keys. [`MouseMap::live`], the map Musicable starts with, follows
+//! Ableton Live on Windows, with Cmd standing in for Ctrl on a Mac. A
+//! [`MouseMapFile`] holds the user's changes to it, which the Settings
+//! window's Mouse page makes, from the actions each place can do
+//! ([`Target::actions`]).
 
 mod file;
 
@@ -69,6 +70,9 @@ pub enum Target {
     DeviceControl,
     /// The Bypass button in a device's title bar, in the devices panel.
     BypassButton,
+    /// The rest of a device's title bar, with its name, in the devices
+    /// panel.
+    DeviceTitle,
     /// The arrangement's tracks and ruler, and the piano roll's notes and
     /// ruler, for the wheel.
     Timeline,
@@ -114,17 +118,19 @@ pub enum Gesture {
 /// What a gesture does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseAction {
-    /// Selects just the clip, the track or the note.
+    /// Selects just the clip, the track, the note or the device.
     Select,
-    /// Adds the clip, the track or the note to the selection, or takes it
-    /// out.
+    /// Adds the clip, the track, the note or the device to the selection,
+    /// or takes it out.
     ToggleSelect,
     /// Selects the clip and puts the start marker where it was clicked, so
     /// Split splits it there.
     SelectAndMark,
-    /// Moves the selected clips or notes, snapping to the grid.
+    /// Moves the selected clips or notes, snapping to the grid, or the
+    /// selected devices, to where they're let go.
     Move,
-    /// Copies the selected clips or notes, snapping to the grid.
+    /// Copies the selected clips or notes, snapping to the grid, or the
+    /// selected devices, to where they're let go.
     Copy,
     /// Moves the selected clips without snapping.
     MoveFree,
@@ -247,7 +253,7 @@ pub enum MouseAction {
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 36] = [
+    pub const ALL: [Target; 37] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -283,6 +289,7 @@ impl Target {
         Target::MixerControl,
         Target::DeviceControl,
         Target::BypassButton,
+        Target::DeviceTitle,
         Target::Timeline,
     ];
 
@@ -312,6 +319,7 @@ impl Target {
             Target::MixerControl => "mixer_control",
             Target::DeviceControl => "device_control",
             Target::BypassButton => "bypass_button",
+            Target::DeviceTitle => "device_title",
             Target::Timeline => "timeline",
             Target::Note => "note",
             Target::NoteEdge => "note_edge",
@@ -354,6 +362,7 @@ impl Target {
             Target::MixerControl => "A fader, pan or send",
             Target::DeviceControl => "A built-in device's control",
             Target::BypassButton => "A device's Bypass button",
+            Target::DeviceTitle => "A device's title bar",
             Target::Timeline => "Over the tracks or the notes",
             Target::Note => "A note",
             Target::NoteEdge => "A note's start or end",
@@ -462,6 +471,8 @@ impl Target {
             (T::SoloButton, Click) => &[A::ExclusiveSolo, A::AddSolo],
             (T::MixerControl | T::DeviceControl, Drag) => &[A::Coarse, A::Fine],
             (T::BypassButton, Click) => &[A::ToggleBypass, A::ToggleActive],
+            (T::DeviceTitle, Click) => &[A::Select, A::ToggleSelect],
+            (T::DeviceTitle, Drag) => &[A::Move, A::Copy],
             (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom],
             _ => &[],
         }
@@ -895,6 +906,12 @@ impl MouseMap {
         // Cubase. In Live it switches the devices beside it in a rack.
         bind(T::BypassButton, Click, &[none], A::ToggleBypass);
         bind(T::BypassButton, Click, &[alt], A::ToggleActive);
+        // Live's device title bars select as its clips do, and drag along
+        // the chain or onto tracks. Ctrl-dragging copies, as for clips.
+        bind(T::DeviceTitle, Click, &[none], A::Select);
+        bind(T::DeviceTitle, Click, &toggle, A::ToggleSelect);
+        bind(T::DeviceTitle, Drag, &[none], A::Move);
+        bind(T::DeviceTitle, Drag, &ctrl, A::Copy);
         bind(T::Timeline, Wheel, &[none], A::Scroll);
         bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
         bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);

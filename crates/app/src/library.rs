@@ -1169,6 +1169,18 @@ impl musicable_commands::Library for LibraryLink<'_> {
         self.library
             .save_preset(id, &device, device_name, name, self.plugins)
     }
+
+    /// Saved from the plugin as it plays, as a preset saves it.
+    fn plugin_state(&mut self, id: DeviceId) -> Option<PluginState> {
+        match self.plugins.instance(id)?.save_state() {
+            Ok(state) => Some(PluginState::new(state)),
+            Err(error) => {
+                (self.library.problems)
+                    .push(format!("{error}, so the copy has the state from before"));
+                None
+            }
+        }
+    }
 }
 
 /// The sample `device` plays, if it's a sampler with one.

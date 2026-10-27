@@ -119,7 +119,7 @@ pub struct Theme {
     pub clip_body: Color32,
     #[serde(with = "values::colour")]
     pub clip_text: Color32,
-    /// The outline of selected clips.
+    /// The outline of selected clips, notes and devices.
     #[serde(with = "values::colour")]
     pub clip_selected: Color32,
     #[serde(with = "values::colour")]

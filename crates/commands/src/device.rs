@@ -1,19 +1,27 @@
 //! The device commands: adding Musicable's own devices, plugins and presets
 //! to a track's devices or the master's, setting their parameters,
-//! bypassing and deactivating them, giving samplers their samples, showing
-//! and closing plugins' windows, saving devices as presets, and deleting
-//! devices.
+//! bypassing and deactivating them, selecting, moving and copying them,
+//! giving samplers their samples, showing and closing plugins' windows,
+//! saving devices as presets, and deleting devices.
+//!
+//! While the devices panel has the focus, the edit commands act on the
+//! devices it has selected through the handlers here: Cut, Copy and Paste
+//! with the panel's own clipboard, Duplicate, Delete and Select All.
 
 use std::path::Path;
 
+use musicable_model::automation::Lane;
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
-use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, TrackId, TrackKind};
+use musicable_model::{
+    Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId, TrackKind,
+};
 
-use crate::editor::Selection;
+use crate::editor::{DeviceClipboard, Editor, Focus, Selection};
 use crate::{
-    Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value,
+    Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Transaction, Type,
+    Value, When,
 };
 
 /// Adds one of Musicable's own devices to a track's devices, or the
@@ -33,6 +41,25 @@ pub const SET_BYPASS: CommandId = CommandId::new("device.set_bypass");
 /// Deactivates devices, which takes them out of the signal, latency and
 /// all, or activates them.
 pub const SET_ACTIVE: CommandId = CommandId::new("device.set_active");
+/// Bypasses the devices selected in the devices panel, or brings them back
+/// if every one is bypassed.
+pub const TOGGLE_BYPASS: CommandId = CommandId::new("device.toggle_bypass");
+/// Selects devices in the devices panel, for the edit commands, and gives
+/// the panel the focus.
+pub const SELECT: CommandId = CommandId::new("device.select");
+/// Moves devices to a track's devices, or the master's, side by side in the
+/// order they play. They keep their ids, so their lanes, their plugins and
+/// their sound go with them.
+pub const MOVE: CommandId = CommandId::new("device.move");
+/// Moves each run of the selected devices one place towards the start of
+/// the chain, past the device before it.
+pub const MOVE_LEFT: CommandId = CommandId::new("device.move_left");
+/// Moves each run of the selected devices one place towards the end of the
+/// chain, past the device after it.
+pub const MOVE_RIGHT: CommandId = CommandId::new("device.move_right");
+/// Puts copies of devices on a track's devices, or the master's, side by
+/// side in the order they play, each plugin's state taken afresh.
+pub const COPY: CommandId = CommandId::new("device.copy");
 /// Gives a sampler a sample, or takes its sample away.
 pub const SET_SAMPLE: CommandId = CommandId::new("device.set_sample");
 /// Asks for an audio file for a sampler to play: see [`SET_SAMPLE`].
@@ -62,6 +89,20 @@ const NEW_TRACK: Param = Param::optional(
     Type::Bool,
     "Puts it on a new track named after it instead: a MIDI track for an instrument, an \
      audio track for an effect.",
+);
+/// Where `device.move` and `device.copy` put devices: a place as
+/// `device.add` takes it.
+const TO_TRACK: Param = Param::optional(
+    "track",
+    Type::Track,
+    "The track they go on: the selected track without it.",
+);
+const TO_MASTER: Param = Param::optional("master", Type::Bool, "Puts them on the master instead.");
+const TO_NEW_TRACK: Param = Param::optional(
+    "new_track",
+    Type::Bool,
+    "Puts them on a new track named after the first instead: a MIDI track if one is an \
+     instrument, an audio track if none is.",
 );
 
 /// The keys of Musicable's own devices, as `device.add` takes them.
@@ -263,16 +304,7 @@ pub fn register(registry: &mut Registry) {
         ]),
         |ctx, args| {
             let devices = devices(ctx, args)?;
-            let bypassed = args.get("bypassed")?;
-            let verb = if bypassed { "Bypass" } else { "Bring Back" };
-            let name = switch_name(ctx, &devices, verb);
-            ctx.document.transact(&name, |tx| {
-                for &device in &devices {
-                    // As if by hand: its lane stops moving it.
-                    tx.override_automation(ParamAddress::Bypass(device));
-                    tx.set_device_bypass(device, bypassed);
-                }
-            });
+            set_bypass(ctx, &devices, args.get("bypassed")?);
             Ok(Value::None)
         },
     );
@@ -291,13 +323,138 @@ pub fn register(registry: &mut Registry) {
             let devices = devices(ctx, args)?;
             let active = args.get("active")?;
             let verb = if active { "Activate" } else { "Deactivate" };
-            let name = switch_name(ctx, &devices, verb);
+            let name = step_name(ctx, &devices, verb);
             ctx.document.transact(&name, |tx| {
                 for &device in &devices {
                     tx.set_device_active(device, active);
                 }
             });
             Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(TOGGLE_BYPASS, "Toggle Device Bypass").when(When::DevicesSelected),
+        |ctx, _| {
+            let devices = selected(ctx);
+            let project = ctx.document.project();
+            let bypassed = |&device: &DeviceId| {
+                (project.find_device(device)).is_some_and(|(_, _, found)| found.bypassed)
+            };
+            let all = devices.iter().all(bypassed);
+            set_bypass(ctx, &devices, !all);
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SELECT, "Select Devices").with_params(&[
+            Param::required(
+                "devices",
+                Type::DEVICES,
+                "The devices to select, all of one chain: a track's, or the master's. The \
+                 devices panel shows it. With none, no devices are selected.",
+            ),
+            Param::optional(
+                "toggle",
+                Type::Bool,
+                "Adds the devices to the selection, or takes away those already in it, \
+                 instead of selecting just them.",
+            ),
+        ]),
+        |ctx, args| {
+            let devices: Vec<DeviceId> = args.get("devices")?;
+            let toggle = args.opt("toggle")?.unwrap_or(false);
+            let project = ctx.document.project();
+            let mut chain = None;
+            for &device in &devices {
+                let Some((found, _, _)) = project.find_device(device) else {
+                    return Err(no_device(device));
+                };
+                if chain.is_some_and(|chain| chain != found) {
+                    return Err(CommandError::invalid(
+                        "give devices of one chain: a track's, or the master's",
+                    ));
+                }
+                chain = Some(found);
+            }
+            let editor = ctx.document.editor_mut();
+            if let Some(chain) = chain {
+                show_chain(editor, chain);
+            }
+            let selected = &mut editor.devices.selected;
+            if !toggle {
+                selected.clear();
+            }
+            for device in devices {
+                if !toggle || !selected.remove(&device) {
+                    selected.insert(device);
+                }
+            }
+            editor.focus = Focus::DEVICES;
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(MOVE, "Move Devices").with_params(&[
+            DEVICES,
+            TO_TRACK,
+            TO_MASTER,
+            Param::optional(
+                "index",
+                Type::Int,
+                "Where the first of them goes in the chain, counting it without them: the \
+                 end without it.",
+            ),
+            TO_NEW_TRACK,
+        ]),
+        |ctx, args| {
+            let devices = devices(ctx, args)?;
+            let (chain, index) = place(ctx, args, "devices")?;
+            let name = step_name(ctx, &devices, "Move");
+            let chain = ctx.document.transact(&name, |tx| {
+                let chain = chain.unwrap_or_else(|| new_track(tx, &devices));
+                move_devices(tx, &devices, chain, index);
+                chain
+            });
+            select_devices(ctx, chain, &devices);
+            Ok(Value::None)
+        },
+    );
+    for (id, title, left) in [
+        (MOVE_LEFT, "Move Devices Left", true),
+        (MOVE_RIGHT, "Move Devices Right", false),
+    ] {
+        registry.add(
+            Command::new(id, title).when(When::DevicesSelected),
+            move |ctx, _| {
+                nudge(ctx, left);
+                Ok(Value::None)
+            },
+        );
+    }
+    registry.add(
+        Command::new(COPY, "Copy Devices").with_params(&[
+            DEVICES,
+            TO_TRACK,
+            TO_MASTER,
+            Param::optional(
+                "index",
+                Type::Int,
+                "Where the first copy goes in the chain: the end without it.",
+            ),
+            TO_NEW_TRACK,
+        ]),
+        |ctx, args| {
+            let devices = devices(ctx, args)?;
+            let (chain, index) = place(ctx, args, "devices")?;
+            let name = step_name(ctx, &devices, "Copy");
+            let taken = taken(ctx, &devices);
+            let lanes = ctx.document.editor().behaviour.copies_take_automation;
+            let (chain, copies) = ctx.document.transact(&name, |tx| {
+                let chain = chain.unwrap_or_else(|| new_track(tx, &devices));
+                (chain, add_copies(tx, taken, chain, index, lanes))
+            });
+            select_devices(ctx, chain, &copies);
+            Ok(copies.into())
         },
     );
     registry.add(
@@ -376,27 +533,12 @@ fn add(
     kind: DeviceKind,
     name: &str,
 ) -> Result<Value, CommandError> {
-    let index = args
-        .opt::<i64>("index")?
-        .map_or(usize::MAX, |index| usize::try_from(index).unwrap_or(0));
     let what = match kind {
         DeviceKind::Plugin(_) => "plugin",
         _ => "device",
     };
-    let chain = match args.opt("new_track")?.unwrap_or(false) {
-        true => None,
-        false => Some(chain(
-            ctx,
-            args.opt("track")?,
-            args.opt("master")?.unwrap_or(false),
-            what,
-        )?),
-    };
-    let track = match kind.is_instrument() {
-        true => TrackKind::Midi,
-        false => TrackKind::Audio,
-    };
-    let track_name = device_name(&kind).to_owned();
+    let (chain, index) = place(ctx, args, what)?;
+    let (track_name, track) = track_for(&[&kind]);
     let (device, chain) = ctx.document.transact(name, |tx| {
         let chain = match chain {
             Some(chain) => chain,
@@ -407,17 +549,69 @@ fn add(
         tx.add_device(chain, index, device);
         (id, chain)
     });
-    let editor = ctx.document.editor_mut();
+    show_chain(ctx.document.editor_mut(), chain);
+    ctx.requests.push(Request::ShowDevice(device));
+    Ok(device.into())
+}
+
+/// Where `args` put devices: in a chain, or on a new track without one,
+/// at an index in it. `what` names the devices in the error without a
+/// track.
+fn place(
+    ctx: &Context<'_>,
+    args: &Args,
+    what: &str,
+) -> Result<(Option<Chain>, usize), CommandError> {
+    let index = args
+        .opt::<i64>("index")?
+        .map_or(usize::MAX, |index| usize::try_from(index).unwrap_or(0));
+    let chain = match args.opt("new_track")?.unwrap_or(false) {
+        true => None,
+        false => Some(chain(
+            ctx,
+            args.opt("track")?,
+            args.opt("master")?.unwrap_or(false),
+            what,
+        )?),
+    };
+    Ok((chain, index))
+}
+
+/// What a new track for devices of `kinds` is called, after the first of
+/// them, and what it is: a MIDI track if one is an instrument, an audio
+/// track if none is.
+fn track_for(kinds: &[&DeviceKind]) -> (String, TrackKind) {
+    let name = kinds.first().map_or("Device", |kind| device_name(kind));
+    let kind = match kinds.iter().any(|kind| kind.is_instrument()) {
+        true => TrackKind::Midi,
+        false => TrackKind::Audio,
+    };
+    (name.to_owned(), kind)
+}
+
+/// Adds a new track for `devices` (see [`track_for`]), where `device.add`
+/// puts one, and returns its chain.
+fn new_track(tx: &mut Transaction<'_>, devices: &[DeviceId]) -> Chain {
+    let project = tx.project();
+    let kinds: Vec<&DeviceKind> = (devices.iter())
+        .filter_map(|&device| project.find_device(device))
+        .map(|(_, _, found)| &found.kind)
+        .collect();
+    let (name, kind) = track_for(&kinds);
+    Chain::Track(crate::track::add_track(tx, name, kind))
+}
+
+/// Makes `chain` the selected track, for the devices panel to show it. If
+/// it's another, its track is selected, as a click on its header selects
+/// it, and the master leaves nothing selected.
+fn show_chain(editor: &mut Editor, chain: Chain) {
     if editor.selected_track != Some(chain) {
-        // As a click on its header selects it.
         editor.selection = Selection {
             tracks: chain.track().into_iter().collect(),
             ..Selection::default()
         };
-        editor.selected_track = Some(chain);
+        editor.select_track(chain);
     }
-    ctx.requests.push(Request::ShowDevice(device));
-    Ok(device.into())
 }
 
 /// The chain a new device goes in: the master's with `master`, else
@@ -461,31 +655,280 @@ fn find<'a>(ctx: &'a Context<'_>, device: DeviceId) -> Result<&'a Device, Comman
     }
 }
 
-/// The devices `args` give, each once, if the project has every one.
+/// The devices `args` give, each once and in the order they play, if the
+/// project has every one.
 fn devices(ctx: &Context<'_>, args: &Args) -> Result<Vec<DeviceId>, CommandError> {
-    let mut devices: Vec<DeviceId> = args.get("devices")?;
+    let devices: Vec<DeviceId> = args.get("devices")?;
     if devices.is_empty() {
         return Err(CommandError::invalid("give at least one device"));
     }
-    devices.sort_unstable();
-    devices.dedup();
     for &device in &devices {
         find(ctx, device)?;
     }
-    Ok(devices)
+    Ok(in_order(ctx.document.project(), &devices))
+}
+
+/// `devices` in the order they play: chain by chain, the tracks' in order
+/// and then the master's.
+fn in_order(project: &Project, devices: &[DeviceId]) -> Vec<DeviceId> {
+    (project.chains())
+        .flat_map(|(_, chain)| chain)
+        .map(|device| device.id)
+        .filter(|id| devices.contains(id))
+        .collect()
+}
+
+/// The devices the devices panel has selected, in the order they play.
+fn selected(ctx: &Context<'_>) -> Vec<DeviceId> {
+    let (project, editor) = (ctx.document.project(), ctx.document.editor());
+    editor.selected_devices(project)
 }
 
 /// What the Edit menu calls `verb` done to `devices`: "Bypass EQ" for one,
 /// and "Bypass 3 Devices" for several.
-fn switch_name(ctx: &Context<'_>, devices: &[DeviceId], verb: &str) -> String {
+fn step_name(ctx: &Context<'_>, devices: &[DeviceId], verb: &str) -> String {
     let project = ctx.document.project();
-    match devices {
-        [device] => match project.find_device(*device) {
-            Some((_, _, found)) => format!("{verb} {}", device_name(&found.kind)),
-            None => format!("{verb} Device"),
-        },
-        _ => format!("{verb} {} Devices", devices.len()),
+    let kinds: Vec<&DeviceKind> = (devices.iter())
+        .filter_map(|&device| project.find_device(device))
+        .map(|(_, _, found)| &found.kind)
+        .collect();
+    named(verb, &kinds)
+}
+
+/// What the Edit menu calls `verb` done to devices of `kinds`, as
+/// [`step_name`] has it.
+fn named(verb: &str, kinds: &[&DeviceKind]) -> String {
+    match kinds {
+        [kind] => format!("{verb} {}", device_name(kind)),
+        _ => format!("{verb} {} Devices", kinds.len()),
     }
+}
+
+/// Bypasses `devices`, or brings them back, as one step.
+fn set_bypass(ctx: &mut Context<'_>, devices: &[DeviceId], bypassed: bool) {
+    let verb = if bypassed { "Bypass" } else { "Bring Back" };
+    let name = step_name(ctx, devices, verb);
+    ctx.document.transact(&name, |tx| {
+        for &device in devices {
+            // As if by hand: its lane stops moving it.
+            tx.override_automation(ParamAddress::Bypass(device));
+            tx.set_device_bypass(device, bypassed);
+        }
+    });
+}
+
+/// Moves `devices`, in the order they play, to `index` in `chain`, counting
+/// the chain without them, side by side.
+fn move_devices(tx: &mut Transaction<'_>, devices: &[DeviceId], chain: Chain, index: usize) {
+    let Some(others) = tx.project().devices(chain) else {
+        return;
+    };
+    // The device they go in front of, if they don't go at the end.
+    let before = (others.iter())
+        .map(|device| device.id)
+        .filter(|id| !devices.contains(id))
+        .nth(index);
+    for &device in devices {
+        let at = before.and_then(|before| {
+            let chain = tx.project().devices(chain).unwrap_or_default();
+            (chain.iter())
+                .filter(|other| other.id != device)
+                .position(|other| other.id == before)
+        });
+        tx.move_device(device, chain, at.unwrap_or(usize::MAX));
+    }
+}
+
+/// Moves each run of the selected devices one place along their chain:
+/// past the device before it with `left`, or else past the one after it.
+/// A run at that end of the chain stays.
+fn nudge(ctx: &mut Context<'_>, left: bool) {
+    let selected = selected(ctx);
+    let project = ctx.document.project();
+    let Some(chain) = ctx.document.editor().selected_track else {
+        return;
+    };
+    let ids: Vec<DeviceId> = (project.devices(chain).unwrap_or_default().iter())
+        .map(|device| device.id)
+        .collect();
+    // Each run's neighbour goes to its other side. Runs have devices
+    // between them, so each move leaves the next run where it was.
+    let (mut moves, mut moving) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < ids.len() {
+        if !selected.contains(&ids[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < ids.len() && selected.contains(&ids[i]) {
+            i += 1;
+        }
+        let neighbour = match left {
+            true if start > 0 => Some((ids[start - 1], i - 1)),
+            false if i < ids.len() => Some((ids[i], start)),
+            _ => None,
+        };
+        if let Some(neighbour) = neighbour {
+            moves.push(neighbour);
+            moving.extend_from_slice(&ids[start..i]);
+        }
+    }
+    let name = step_name(ctx, &moving, "Move");
+    ctx.document.transact(&name, |tx| {
+        for (device, index) in moves {
+            tx.move_device(device, chain, index);
+        }
+    });
+    select_devices(ctx, chain, &selected);
+}
+
+/// `devices` as copies take them, each with the lanes that automate it: a
+/// plugin's state taken afresh, as Save as Preset takes it, since a change
+/// made in its window can reach the project late.
+fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<(Device, Vec<Lane>)> {
+    let mut taken = Vec::with_capacity(devices.len());
+    for &id in devices {
+        let state = ctx.library.plugin_state(id);
+        let project = ctx.document.project();
+        let Some((_, _, device)) = project.find_device(id) else {
+            continue;
+        };
+        let mut device = device.clone();
+        if let (DeviceKind::Plugin(plugin), Some(state)) = (&mut device.kind, state) {
+            plugin.settings.state = Some(state);
+        }
+        let lanes = (project.automation.iter())
+            .filter(|lane| lane.param.device() == Some(id))
+            .cloned()
+            .collect();
+        taken.push((device, lanes));
+    }
+    taken
+}
+
+/// Puts copies of `taken` at `index` in `chain`, or at the end if `index`
+/// is past it, side by side, and returns their ids. Each is a new device
+/// with the original's settings, and with `lanes`, lanes of its own with
+/// the original's points.
+fn add_copies(
+    tx: &mut Transaction<'_>,
+    taken: Vec<(Device, Vec<Lane>)>,
+    chain: Chain,
+    index: usize,
+    lanes: bool,
+) -> Vec<DeviceId> {
+    let mut copies = Vec::with_capacity(taken.len());
+    for (original, its_lanes) in taken {
+        let Device {
+            id: _,
+            kind,
+            bypassed,
+            active,
+        } = original;
+        let copy = Device {
+            bypassed,
+            active,
+            ..tx.new_device(kind)
+        };
+        let id = copy.id;
+        tx.add_device(chain, index.saturating_add(copies.len()), copy);
+        // Left out, as a file couldn't hold its settings.
+        if tx.project().find_device(id).is_none() {
+            continue;
+        }
+        copies.push(id);
+        for lane in its_lanes.into_iter().filter(|_| lanes) {
+            if let Some(param) = lane.param.with_device(id) {
+                tx.add_lane(usize::MAX, Lane { param, ..lane });
+            }
+        }
+    }
+    copies
+}
+
+/// Shows `chain` in the devices panel (see [`show_chain`]) with `devices`
+/// selected, and asks the app to bring the first into sight.
+fn select_devices(ctx: &mut Context<'_>, chain: Chain, devices: &[DeviceId]) {
+    let editor = ctx.document.editor_mut();
+    show_chain(editor, chain);
+    editor.devices.selected = devices.iter().copied().collect();
+    if let Some(&first) = devices.first() {
+        ctx.requests.push(Request::ShowDevice(first));
+    }
+}
+
+/// Takes the selected devices for Paste, as Copy does while the devices
+/// panel has the focus.
+pub(crate) fn copy(ctx: &mut Context<'_>) {
+    let devices = selected(ctx);
+    if !devices.is_empty() {
+        let devices = taken(ctx, &devices);
+        ctx.document.editor_mut().devices.clipboard = Some(DeviceClipboard { devices });
+    }
+}
+
+/// Takes the selected devices for Paste, then deletes them.
+pub(crate) fn cut(ctx: &mut Context<'_>) {
+    copy(ctx);
+    delete_selected(ctx, "Cut");
+}
+
+/// Deletes the selected devices, as one step.
+pub(crate) fn delete(ctx: &mut Context<'_>) {
+    delete_selected(ctx, "Delete");
+}
+
+fn delete_selected(ctx: &mut Context<'_>, verb: &str) {
+    let devices = selected(ctx);
+    let name = step_name(ctx, &devices, verb);
+    ctx.document.transact(&name, |tx| {
+        for device in devices {
+            tx.remove_device(device);
+        }
+    });
+}
+
+/// Puts copies of what Cut or Copy took in the devices panel in front of
+/// the first selected device, or at the end of the chain it shows, and
+/// selects them.
+pub(crate) fn paste(ctx: &mut Context<'_>) {
+    let (project, editor) = (ctx.document.project(), ctx.document.editor());
+    let (Some(chain), Some(clipboard)) = (editor.selected_track, &editor.devices.clipboard) else {
+        return;
+    };
+    let index = (editor.selected_devices(project).first())
+        .and_then(|&first| project.find_device(first))
+        .map_or(usize::MAX, |(_, index, _)| index);
+    let kinds: Vec<&DeviceKind> = clipboard.devices.iter().map(|(d, _)| &d.kind).collect();
+    let name = named("Paste", &kinds);
+    let taken = clipboard.devices.clone();
+    let lanes = editor.behaviour.copies_take_automation;
+    let copies = (ctx.document).transact(&name, |tx| add_copies(tx, taken, chain, index, lanes));
+    select_devices(ctx, chain, &copies);
+}
+
+/// Puts copies of the selected devices just after the last of them, and
+/// selects the copies, so doing it again makes more.
+pub(crate) fn duplicate(ctx: &mut Context<'_>) {
+    let devices = selected(ctx);
+    let Some((chain, last, _)) =
+        (devices.last()).and_then(|&last| ctx.document.project().find_device(last))
+    else {
+        return;
+    };
+    let name = step_name(ctx, &devices, "Duplicate");
+    let taken = taken(ctx, &devices);
+    let lanes = ctx.document.editor().behaviour.copies_take_automation;
+    let copies = (ctx.document).transact(&name, |tx| add_copies(tx, taken, chain, last + 1, lanes));
+    select_devices(ctx, chain, &copies);
+}
+
+/// Selects every device of the chain the devices panel shows.
+pub(crate) fn select_all(ctx: &mut Context<'_>) {
+    let (project, editor) = ctx.document.parts();
+    let shown = (editor.selected_track).and_then(|chain| project.devices(chain));
+    editor.devices.selected = shown.unwrap_or_default().iter().map(|d| d.id).collect();
 }
 
 /// The plugin device with id `device`, if the project has it.
@@ -531,14 +974,15 @@ fn plugin_name(plugin: &PluginDevice) -> &str {
 mod tests {
     use std::collections::BTreeSet;
 
-    use musicable_model::automation::{Lane, Point};
+    use musicable_model::automation::Point;
     use musicable_model::clip::ClipContent;
     use musicable_model::native::eq;
-    use musicable_model::plugin::PluginParam;
+    use musicable_model::plugin::{PluginParam, PluginState};
     use musicable_model::time::{BeatRange, Beats};
     use musicable_model::{Project, TrackKind};
 
     use super::*;
+    use crate::edit;
     use crate::testing::Setup;
 
     fn add(name: &str) -> Args {
@@ -1117,5 +1561,440 @@ mod tests {
         assert_eq!(setup.committed_names(), ["Add Synth", "Add EQ"]);
         assert!(setup.document.undo());
         assert_eq!(setup.document.project().tracks.len(), 2);
+    }
+
+    /// Puts one of Musicable's own devices at the end of `chain`.
+    fn put(project: &mut Project, chain: Chain, kind: NativeKind) -> DeviceId {
+        let device = project.new_device(DeviceKind::Native(NativeDevice::new(kind)));
+        let id = device.id;
+        project.devices_mut(chain).unwrap().push(device);
+        id
+    }
+
+    /// The devices of `chain`, in order.
+    fn ids(setup: &Setup, chain: Chain) -> Vec<DeviceId> {
+        let devices = setup.document.project().devices(chain).unwrap();
+        devices.iter().map(|device| device.id).collect()
+    }
+
+    /// The devices the devices panel has selected, in order.
+    fn in_panel(setup: &Setup) -> Vec<DeviceId> {
+        let editor = setup.document.editor();
+        editor.selected_devices(setup.document.project())
+    }
+
+    #[test]
+    fn devices_are_selected_in_one_chain_which_the_panel_shows() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let chain = Chain::Track(vocal);
+        let kinds = [NativeKind::Eq, NativeKind::Compressor, NativeKind::Delay];
+        let [eq, compressor, delay] = kinds.map(|kind| put(&mut project, chain, kind));
+        let utility = put(&mut project, Chain::Master, NativeKind::Utility);
+        let mut setup = Setup::new(project);
+        let select = |devices: Vec<DeviceId>, toggle: bool| {
+            Args::new().with("devices", devices).with("toggle", toggle)
+        };
+
+        let picked = select(vec![delay, eq], false);
+        setup.run_with(&SELECT, picked).unwrap();
+        // The panel shows their chain, with its track selected as a click
+        // on its header selects it, and has the focus.
+        let editor = setup.document.editor();
+        assert_eq!(editor.selected_track, Some(chain));
+        assert_eq!(editor.selection.tracks, BTreeSet::from([vocal]));
+        assert_eq!(editor.focus, Focus::DEVICES);
+        // In the order they play.
+        assert_eq!(in_panel(&setup), [eq, delay]);
+        let toggled = select(vec![delay, compressor], true);
+        setup.run_with(&SELECT, toggled).unwrap();
+        assert_eq!(in_panel(&setup), [eq, compressor]);
+        assert_eq!(
+            setup.run_with(&SELECT, select(vec![eq, utility], false)),
+            Err(CommandError::invalid(
+                "give devices of one chain: a track's, or the master's"
+            ))
+        );
+        assert_eq!(
+            setup.run_with(&SELECT, select(vec![DeviceId(9)], false)),
+            Err(CommandError::invalid("there's no device 9"))
+        );
+        assert_eq!(in_panel(&setup), [eq, compressor]);
+        // None: the chain stays.
+        setup.run_with(&SELECT, select(Vec::new(), false)).unwrap();
+        assert!(in_panel(&setup).is_empty());
+        assert_eq!(setup.document.editor().selected_track, Some(chain));
+
+        // The master's leaves no track selected.
+        setup.select_devices(&[utility]);
+        let editor = setup.document.editor();
+        assert_eq!(editor.selected_track, Some(Chain::Master));
+        assert!(editor.selection.is_empty());
+        // Showing another chain forgets them, and a device that goes
+        // leaves the selection.
+        setup.select_tracks(&[vocal]);
+        assert!(setup.document.editor().devices.selected.is_empty());
+        setup.select_devices(&[eq, delay]);
+        let gone = Args::new().with("device", delay);
+        setup.run_with(&DELETE, gone).unwrap();
+        assert_eq!(
+            setup.document.editor().devices.selected,
+            BTreeSet::from([eq])
+        );
+        // Selecting changes nothing to undo.
+        assert_eq!(setup.committed_names(), ["Delete Delay"]);
+    }
+
+    #[test]
+    fn moved_devices_keep_their_ids_and_lanes_in_one_step() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let bass = project.add_track("Bass", TrackKind::Audio);
+        let (v, b) = (Chain::Track(vocal), Chain::Track(bass));
+        let kinds = [
+            NativeKind::Eq,
+            NativeKind::Compressor,
+            NativeKind::Delay,
+            NativeKind::Reverb,
+        ];
+        let [eq, compressor, delay, reverb] = kinds.map(|kind| put(&mut project, v, kind));
+        let gate = put(&mut project, b, NativeKind::Gate);
+        // The EQ's output moves, and the delay is bypassed from the second
+        // bar.
+        let output = ParamAddress::Device(eq, eq::OUTPUT as u32);
+        let points = vec![
+            Point::new(Beats::ZERO, -6.0),
+            Point::new(Beats::new(4), 0.0),
+        ];
+        project.automation.push(Lane::new(output, points));
+        let bypass = vec![Point::new(Beats::new(4), 1.0)];
+        (project.automation).push(Lane::new(ParamAddress::Bypass(delay), bypass));
+        let before = project.clone();
+        let mut setup = Setup::new(project);
+        let moving = |devices: Vec<DeviceId>| Args::new().with("devices", devices);
+
+        assert_eq!(
+            setup.run_with(&MOVE, moving(vec![eq])),
+            Err(CommandError::invalid(
+                "select a track for the devices to go on"
+            ))
+        );
+        // Where it is already: no step.
+        let stays = moving(vec![eq]).with("track", vocal).with("index", 0_i64);
+        setup.run_with(&MOVE, stays).unwrap();
+        // Side by side, in the order they play, the first at the index in
+        // the chain without them.
+        let along = moving(vec![delay, eq]).with("track", vocal);
+        setup.run_with(&MOVE, along.with("index", 1_i64)).unwrap();
+        assert_eq!(ids(&setup, v), [compressor, eq, delay, reverb]);
+        // They keep their ids, so their lanes go with them.
+        assert_eq!(setup.document.project().automation, before.automation);
+        // Past the end, at the end.
+        let last = moving(vec![compressor]).with("index", 9_i64);
+        setup.run_with(&MOVE, last.with("track", vocal)).unwrap();
+        assert_eq!(ids(&setup, v), [eq, delay, reverb, compressor]);
+        // Onto another track, which the devices panel then shows, with
+        // them selected.
+        let across = moving(vec![reverb])
+            .with("track", bass)
+            .with("index", 0_i64);
+        setup.run_with(&MOVE, across).unwrap();
+        assert_eq!(ids(&setup, b), [reverb, gate]);
+        assert_eq!(setup.document.editor().selected_track, Some(b));
+        assert_eq!(in_panel(&setup), [reverb]);
+        // Onto the master, and onto a new track named after the first.
+        setup
+            .run_with(&MOVE, moving(vec![gate]).with("master", true))
+            .unwrap();
+        setup
+            .run_with(&MOVE, moving(vec![delay, eq]).with("new_track", true))
+            .unwrap();
+        assert_eq!(ids(&setup, Chain::Master), [gate]);
+        let project = setup.document.project();
+        let new = &project.tracks[2];
+        assert_eq!((new.name.as_str(), new.kind), ("EQ", TrackKind::Audio));
+        assert_eq!(ids(&setup, Chain::Track(new.id)), [eq, delay]);
+        assert_eq!(setup.document.project().automation, before.automation);
+        assert_eq!(
+            setup.committed_names(),
+            [
+                "Move 2 Devices",
+                "Move Compressor",
+                "Move Reverb",
+                "Move Gate",
+                "Move 2 Devices"
+            ]
+        );
+        // Each shows them, the one that left the EQ where it was too.
+        let shown = [eq, eq, compressor, reverb, gate, eq].map(Request::ShowDevice);
+        assert_eq!(setup.requests, shown);
+        // Each undoes in one step, back to where they were.
+        for _ in 0..5 {
+            assert!(setup.document.undo());
+        }
+        let project = setup.document.project();
+        assert_eq!(project.tracks, before.tracks);
+        assert_eq!(project.master, before.master);
+        // An instrument's new track is a MIDI track.
+        let synth = setup.run_with(&ADD, Args::new().with("kind", "synth").with("track", bass));
+        let Ok(Value::Device(synth)) = synth else {
+            panic!("a device, not {synth:?}");
+        };
+        let instruments = moving(vec![gate, synth]).with("new_track", true);
+        setup.run_with(&MOVE, instruments).unwrap();
+        let new = setup.document.project().tracks.last().unwrap();
+        assert_eq!((new.name.as_str(), new.kind), ("Gate", TrackKind::Midi));
+
+        assert_eq!(
+            setup.run_with(&MOVE, moving(Vec::new()).with("master", true)),
+            Err(CommandError::invalid("give at least one device"))
+        );
+        assert_eq!(
+            setup.run_with(&MOVE, moving(vec![DeviceId(9)]).with("master", true)),
+            Err(CommandError::invalid("there's no device 9"))
+        );
+        assert_eq!(
+            setup.run_with(&MOVE, moving(vec![eq]).with("track", TrackId(9))),
+            Err(CommandError::invalid("there's no track 9"))
+        );
+    }
+
+    #[test]
+    fn moving_left_or_right_moves_each_run_past_its_neighbour() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let v = Chain::Track(vocal);
+        let kinds = [
+            NativeKind::Eq,
+            NativeKind::Compressor,
+            NativeKind::Gate,
+            NativeKind::Delay,
+            NativeKind::Reverb,
+        ];
+        let [eq, compressor, gate, delay, reverb] = kinds.map(|kind| put(&mut project, v, kind));
+        let mut setup = Setup::new(project);
+        assert!(!setup.applies(&MOVE_LEFT) && !setup.applies(&MOVE_RIGHT));
+        setup.select_devices(&[compressor, delay]);
+        assert!(setup.applies(&MOVE_LEFT) && setup.applies(&MOVE_RIGHT));
+
+        setup.run(&MOVE_LEFT);
+        assert_eq!(ids(&setup, v), [compressor, eq, delay, gate, reverb]);
+        // A run at the start stays, and the others go on.
+        setup.run(&MOVE_LEFT);
+        assert_eq!(ids(&setup, v), [compressor, delay, eq, gate, reverb]);
+        // Side by side, they move as one run.
+        setup.run(&MOVE_RIGHT);
+        assert_eq!(ids(&setup, v), [eq, compressor, delay, gate, reverb]);
+        assert_eq!(in_panel(&setup), [compressor, delay]);
+        // At the end, nothing moves, and there's no step.
+        setup.select_devices(&[reverb]);
+        setup.run(&MOVE_RIGHT);
+        assert_eq!(
+            setup.committed_names(),
+            ["Move 2 Devices", "Move Delay", "Move 2 Devices"]
+        );
+        assert!(setup.document.undo());
+        assert_eq!(ids(&setup, v), [compressor, delay, eq, gate, reverb]);
+    }
+
+    #[test]
+    fn copies_are_new_devices_with_lanes_of_their_own() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let bass = project.add_track("Bass", TrackKind::Audio);
+        let (v, b) = (Chain::Track(vocal), Chain::Track(bass));
+        let eq = put(&mut project, v, NativeKind::Eq);
+        let plugin = project.new_device(synth());
+        let synth = plugin.id;
+        project.devices_mut(v).unwrap().push(plugin);
+        let gate = put(&mut project, b, NativeKind::Gate);
+        let found = project.device_mut(eq).unwrap();
+        found.bypassed = true;
+        if let DeviceKind::Native(native) = &mut found.kind {
+            native.values[eq::OUTPUT] = -3.0;
+        }
+        let point = |at, value| Point::new(Beats::new(at), value);
+        let output = ParamAddress::Device(eq, eq::OUTPUT as u32);
+        project.automation = vec![
+            Lane::new(output, vec![point(0, -6.0), point(4, 0.0)]),
+            Lane::new(ParamAddress::Bypass(eq), vec![point(8, 0.0)]),
+            Lane::new(ParamAddress::Device(synth, 3), vec![point(0, 0.25)]),
+            // Not the devices', so no copy takes it.
+            Lane::new(ParamAddress::Volume(v), vec![point(0, 0.5)]),
+        ];
+        let lanes = project.automation.clone();
+        let mut setup = Setup::new(project);
+        // A change made in the synth's window, which the project hasn't
+        // got yet.
+        let fresh = PluginState::new(vec![7, 7]);
+        setup.library.states.insert(synth, fresh.clone());
+
+        let copy = Args::new()
+            .with("devices", vec![synth, eq])
+            .with("track", bass)
+            .with("index", 0_i64);
+        let copies = setup.run_with(&COPY, copy).unwrap();
+        let on_bass = ids(&setup, b);
+        let [eq_copy, synth_copy] = [on_bass[0], on_bass[1]];
+        assert_eq!(copies, Value::from(vec![eq_copy, synth_copy]));
+        assert_eq!(on_bass[2], gate);
+        // The originals stay as they were.
+        assert_eq!(ids(&setup, v), [eq, synth]);
+        let project = setup.document.project();
+        let device = |id| project.find_device(id).unwrap().2.clone();
+        assert_eq!(
+            (device(eq_copy).kind, device(eq_copy).bypassed),
+            (device(eq).kind, true)
+        );
+        let settings = |id| device(id).kind.plugin().unwrap().settings.clone();
+        assert_eq!(settings(synth_copy).state, Some(fresh));
+        assert_eq!(settings(synth_copy).params, settings(synth).params);
+        assert_eq!(settings(synth).state, Some(PluginState::new(vec![1, 2])));
+        let calls = &setup.library.calls;
+        assert!(calls.contains(&format!("state {}", synth.0)));
+        // Each copy has lanes of its own with its original's points.
+        let copied: Vec<(ParamAddress, Vec<Point>)> = (project.automation[lanes.len()..].iter())
+            .map(|lane| (lane.param, lane.points.clone()))
+            .collect();
+        let output = ParamAddress::Device(eq_copy, eq::OUTPUT as u32);
+        assert_eq!(
+            copied,
+            [
+                (output, lanes[0].points.clone()),
+                (ParamAddress::Bypass(eq_copy), lanes[1].points.clone()),
+                (ParamAddress::Device(synth_copy, 3), lanes[2].points.clone()),
+            ]
+        );
+        assert_eq!(project.automation[..lanes.len()], lanes);
+        // The panel shows them, selected.
+        assert_eq!(setup.document.editor().selected_track, Some(b));
+        assert_eq!(in_panel(&setup), [eq_copy, synth_copy]);
+
+        // Without automation, as the setting has it.
+        setup.document.editor_mut().behaviour.copies_take_automation = false;
+        let copy = Args::new().with("devices", vec![eq]).with("master", true);
+        let Ok(Value::List(copies)) = setup.run_with(&COPY, copy) else {
+            panic!("a list of copies");
+        };
+        let [Value::Device(on_master)] = copies[..] else {
+            panic!("one copy, not {copies:?}");
+        };
+        let project = setup.document.project();
+        let its_own = |lane: &Lane| lane.param.device() == Some(on_master);
+        assert!(!project.automation.iter().any(its_own));
+        assert_eq!(setup.committed_names(), ["Copy 2 Devices", "Copy EQ"]);
+        // Undo takes copies and their lanes away together.
+        assert!(setup.document.undo());
+        assert!(setup.document.undo());
+        let project = setup.document.project();
+        assert_eq!(project.automation, lanes);
+        assert_eq!(ids(&setup, b), [gate]);
+    }
+
+    #[test]
+    fn the_edit_commands_take_the_selected_devices_while_the_panel_has_the_focus() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let v = Chain::Track(vocal);
+        let kinds = [NativeKind::Eq, NativeKind::Compressor, NativeKind::Delay];
+        let [eq, compressor, delay] = kinds.map(|kind| put(&mut project, v, kind));
+        let utility = put(&mut project, Chain::Master, NativeKind::Utility);
+        let bypass = vec![Point::new(Beats::new(4), 1.0)];
+        (project.automation).push(Lane::new(ParamAddress::Bypass(delay), bypass));
+        let mut setup = Setup::new(project);
+        let takers = [edit::CUT, edit::COPY, edit::DUPLICATE, edit::DELETE];
+        assert!(!takers.iter().any(|id| setup.applies(id)));
+        setup.select_devices(&[delay, eq]);
+        assert!(takers.iter().all(|id| setup.applies(id)));
+        assert!(setup.applies(&edit::SELECT_ALL));
+        assert!(!setup.applies(&edit::PASTE));
+
+        setup.run(&edit::COPY);
+        assert!(setup.applies(&edit::PASTE));
+        // Duplicate puts copies just after the last, and selects them, so
+        // doing it again makes more.
+        setup.run(&edit::DUPLICATE);
+        let after = ids(&setup, v);
+        assert_eq!(after[..3], [eq, compressor, delay]);
+        let (eq_2, delay_2) = (after[3], after[4]);
+        assert_eq!(in_panel(&setup), [eq_2, delay_2]);
+        let project = setup.document.project();
+        assert!(project.lane(ParamAddress::Bypass(delay_2)).is_some());
+        // Paste puts them in front of the first selected device.
+        setup.select_devices(&[compressor]);
+        setup.run(&edit::PASTE);
+        let after = ids(&setup, v);
+        assert_eq!([after[0], after[3]], [eq, compressor]);
+        assert_eq!(in_panel(&setup), after[1..3]);
+        // With nothing selected, at the end, on the master too.
+        setup.select_devices(&[utility]);
+        setup.select_devices(&[]);
+        setup.run(&edit::PASTE);
+        let on_master = ids(&setup, Chain::Master);
+        assert_eq!((on_master.len(), on_master[0]), (3, utility));
+        assert_eq!(in_panel(&setup), on_master[1..]);
+        // Cut takes them, then deletes them.
+        setup.select_devices(&[compressor]);
+        setup.run(&edit::CUT);
+        assert!(setup.document.project().find_device(compressor).is_none());
+        let clipboard = setup.document.editor().devices.clipboard.clone().unwrap();
+        assert_eq!(clipboard.devices.len(), 1);
+        assert_eq!(clipboard.devices[0].0.id, compressor);
+        // Delete deletes them all, as one step.
+        setup.select_devices(&[eq, delay]);
+        setup.run(&edit::DELETE);
+        let project = setup.document.project();
+        assert!(project.lane(ParamAddress::Bypass(delay)).is_none());
+        // Select All selects the whole chain.
+        setup.run(&edit::SELECT_ALL);
+        assert_eq!(in_panel(&setup), ids(&setup, v));
+        assert_eq!(
+            setup.committed_names(),
+            [
+                "Duplicate 2 Devices",
+                "Paste 2 Devices",
+                "Paste 2 Devices",
+                "Cut Compressor",
+                "Delete 2 Devices"
+            ]
+        );
+        assert!(setup.document.undo());
+        assert_eq!(ids(&setup, v)[..2], [eq, after[1]]);
+        // While the arrangement has the focus, they're the arrangement's.
+        setup.select_tracks(&[vocal]);
+        assert!(!setup.applies(&edit::COPY) && !setup.applies(&edit::DUPLICATE));
+    }
+
+    #[test]
+    fn the_selected_devices_are_bypassed_or_all_brought_back() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let v = Chain::Track(vocal);
+        let [eq, compressor] =
+            [NativeKind::Eq, NativeKind::Compressor].map(|k| put(&mut project, v, k));
+        project.device_mut(eq).unwrap().bypassed = true;
+        let bypass = vec![Point::new(Beats::new(4), 1.0)];
+        (project.automation).push(Lane::new(ParamAddress::Bypass(compressor), bypass));
+        let mut setup = Setup::new(project);
+        assert!(!setup.applies(&TOGGLE_BYPASS));
+        setup.select_devices(&[eq, compressor]);
+        let bypassed = |setup: &Setup| {
+            let project = setup.document.project();
+            [eq, compressor].map(|id| project.find_device(id).unwrap().2.bypassed)
+        };
+        // Not every one is, so all are.
+        setup.run(&TOGGLE_BYPASS);
+        assert_eq!(bypassed(&setup), [true, true]);
+        // As if by hand: the lane stops moving it.
+        assert!(setup.document.project().automation[0].overridden);
+        setup.run(&TOGGLE_BYPASS);
+        assert_eq!(bypassed(&setup), [false, false]);
+        assert_eq!(
+            setup.committed_names(),
+            ["Bypass 2 Devices", "Bring Back 2 Devices"]
+        );
+        // Wherever the focus is, as from the command palette.
+        setup.document.editor_mut().focus = Focus::ARRANGEMENT;
+        assert!(setup.applies(&TOGGLE_BYPASS));
     }
 }

@@ -73,6 +73,15 @@ arrangement, **Re-Enable Automation** and **Clear Automation**.
 **Automation > Re-Enable Automation** re-enables every overridden lane at
 once.
 
+## Moving and copying devices
+
+A device's automation goes with it when it moves, along its chain or to
+another track. A copy of a device, dragged, duplicated or pasted, gets lanes
+of its own with the original's points, as in Live, and they show on its
+track. Switch off **Copies of devices take their automation** on the
+Settings window's Behaviour page for copies that start without automation
+([Settings](../customising/settings.md#behaviour)).
+
 ## Not yet
 
 Points can't be selected to move or delete several at once yet, the lines

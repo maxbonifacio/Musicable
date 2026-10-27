@@ -154,12 +154,14 @@ All act on its notes instead, as they do in Live's MIDI note editor: Paste
 puts the notes at the start marker, in the clip the piano roll shows, and
 Duplicate puts a copy just after the selected notes. While the Sample
 Editor has it, Delete and Select All act on its warp markers, and Cut,
-Copy, Paste and Duplicate don't apply. Split always acts on clips, and
-doesn't apply while the piano roll or the Sample Editor has the focus. The
-mixer shows the arrangement's tracks, so while it has the focus they act on
-the arrangement's selection, as Live's mixer does in its Arrangement View. The
-devices panel, the browser and the History panel have nothing they take,
-so there they don't apply. Quantize moves the piano roll's notes while it
+Copy, Paste and Duplicate don't apply. While the devices panel has it,
+Cut, Copy, Paste, Duplicate, Delete and Select All act on its selected
+devices ([Device](#device)). Split always acts on clips, and applies only
+while the arrangement or the mixer has the focus. The mixer shows the
+arrangement's tracks, so while it has the focus they act on the
+arrangement's selection, as Live's mixer does in its Arrangement View. The
+browser and the History panel have nothing they take, so there they don't
+apply. Quantize moves the piano roll's notes while it
 has the focus, the Sample Editor's transients while it has it
 ([Transients](#transients)), and else those of the selected clips, MIDI and
 warped audio, at the zoom of the panel they're in.
@@ -174,7 +176,7 @@ warped audio, at the zoom of the panel they're in.
 | `edit.duplicate` | Duplicate | Puts a copy of the selection just after it, and selects the copy | Ctrl+D | Ctrl+D |
 | `edit.delete` | Delete | Deletes the selected clips, or what the time selection covers, or the selected tracks | Delete, Backspace | Delete |
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
-| `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip, or every warp marker of the Sample Editor's | Ctrl+A | Ctrl+A |
+| `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip, or every warp marker of the Sample Editor's, or every device the devices panel shows | Ctrl+A | Ctrl+A |
 | `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header or its mixer strip does | none | Clicking the Main track |
 | `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
 | `edit.quantize` | Quantize | Moves the selected notes' starts to the nearest line of the grid, or all the clip's notes if none are selected; the transients in the Sample Editor's time selection, or all those its clip plays, giving each a warp marker; or the notes and transients of the selected clips. `notes`, `frames` and `clip` name what it moves, `amount` moves them part of the way, and `ends` moves notes' ends too. It was `notes.quantize`, which keymap files can still name | Ctrl+U | Ctrl+U |
@@ -568,7 +570,8 @@ which needs a selection, so New Group Track has no key yet.
 
 Devices go on a track or on the master, in the order the signal goes
 through them. The devices panel and the browser run these, with the
-device's id as `device`.
+device's id as `device`, or a list of ids as `devices`, which they take in
+the order the devices play.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -579,6 +582,12 @@ device's id as `device`.
 | `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
 | `device.set_bypass` | Set Device Bypass | Bypasses the devices `devices`, or brings them back with `bypassed` false: each stops, and what comes into it plays on, as late as its latency would make it, so the mix keeps its timing. It overrides their Bypass lanes, as moving a control does | none | The device's power button |
 | `device.set_active` | Set Device Active | Deactivates the devices `devices`, or activates them with `active` true. A deactivated device is out of the signal, latency and all, though it keeps its place and its settings, and a plugin stays loaded | none | none |
+| `device.toggle_bypass` | Toggle Device Bypass | Bypasses the devices selected in the devices panel, or brings them back if every one is bypassed | 0 in the devices panel | none |
+| `device.select` | Select Devices | Selects the devices `devices`, all of one chain, which the devices panel then shows, or adds them to the selection or takes those already in it away with `toggle`, and gives the panel the focus. With none, none are selected | none | Clicking a device's title bar |
+| `device.move` | Move Devices | Moves the devices `devices` to `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` onto a new track named after the first: a MIDI track if one is an instrument, an audio track if none is. `index` counts the chain without them. They keep their ids, so their lanes and their plugins go with them | none | Dragging a device's title bar |
+| `device.move_left` | Move Devices Left | Moves each run of the selected devices one place towards the start of the chain, past the device before it | Ctrl+Left in the devices panel | none |
+| `device.move_right` | Move Devices Right | Moves each run of the selected devices one place towards the end of the chain, past the device after it | Ctrl+Right in the devices panel | none |
+| `device.copy` | Copy Devices | Puts copies of the devices `devices` where `device.move` puts them, but with `index` counting the chain as it is. Each is a new device with its original's settings, a plugin's state taken afresh, and lanes of its own with the original's points, unless the Behaviour setting says not to. Returns the copies | none | Ctrl-dragging a device's title bar |
 | `device.set_sample` | Set Sample | Gives the sampler `device` the audio file `file` to play, a path as clips name files ([project-format.md](project-format.md)), or takes its sample away without one | none | Drop a file on Simpler |
 | `device.load_sample` | Load Sample... | Asks for an audio file and gives it to the sampler `device` with `device.set_sample` | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
@@ -598,7 +607,26 @@ track it goes on, or the master, becomes the selected track, as a click on
 its header makes it, if it isn't already, and the app is asked, with
 `Request::ShowDevice`, to bring the devices panel in front of the piano
 roll and scroll it to the device. A preset of a VST3 plugin needs the
-plugin installed, and is refused without it. Giving a sampler its sample
+plugin installed, and is refused without it.
+
+Moved and copied devices, side by side in the order they played, go in
+sight the same way, selected. Moving is "Move EQ", or "Move 2 Devices" for
+several, one step however many go: the `MoveDevice` edit, which keeps the
+device's id, so undo puts it back where it was, its lanes and plugin with
+it. Copying is "Copy EQ". Selecting changes nothing to undo, and showing
+another chain in the devices panel forgets the devices selected. While the
+devices panel has the focus, the edit commands act on its selected devices
+([Edit](#edit)): Cut and Copy take them, as they are, with the lanes that
+automate them, into the panel's own clipboard (`editor::DeviceClipboard`);
+Paste puts copies in front of the first selected device, or at the end of
+the chain the panel shows; Duplicate puts copies just after the last
+selected one and selects them, so doing it again makes more; and Delete
+deletes them. Each is a step named after the devices, such as "Paste EQ"
+or "Duplicate 2 Devices". A copy's plugin state is taken afresh from the
+plugin, as Save as Preset takes it (`Library::plugin_state`), since a
+change made in its window can reach the project late. Copies take their
+originals' automation, as Live's have since 10.0.1, with lanes of their
+own, unless the Behaviour setting `copies_take_automation` is off. Giving a sampler its sample
 is "Load Sample", and taking it away "Remove Sample". `device.load_sample`
 asks the app, with `Request::LoadSample`, which shows a dialog in the
 project's folder, and a sample dragged from the browser onto a sampler
@@ -800,8 +828,8 @@ its other view, rather than windows of their own for its panels.
 
 ## The editor's state
 
-What the arrangement, the piano roll and the Sample Editor edit besides
-the project lives in an `Editor`, kept with the `Document` (`Document::editor` and
+What the arrangement, the piano roll, the Sample Editor and the devices
+panel edit besides the project lives in an `Editor`, kept with the `Document` (`Document::editor` and
 `editor_mut`), outside the widgets. Commands read and change it just as the
 UI does, and so will extensions and agents. It isn't saved with the
 project, undo leaves it alone, and opening a project starts a new one, but
@@ -834,12 +862,12 @@ for the behaviour settings.
   mixer, the devices, the piano roll, the Sample Editor, the browser or
   the history. `Focus::edits` says what the edit commands act on there
   (`Edits`): the arrangement's selection in the arrangement and the mixer,
-  the notes in the piano roll, the warp markers in the Sample Editor, and
-  nothing in the others. The zoom acts on the piano roll or the Sample
+  the notes in the piano roll, the warp markers in the Sample Editor, the
+  selected devices in the devices panel, and nothing in the others. The zoom acts on the piano roll or the Sample
   Editor while it has the focus, and on the arrangement otherwise.
   Clicking in a panel or on its tab gives it the focus
   ([app.md](app.md#the-panels)), and so do the selection commands of the
-  arrangement, the piano roll and the Sample Editor. A panel's own keys
+  arrangement, the piano roll, the Sample Editor and the devices panel. A panel's own keys
   work while it has it ([below](#the-keymap-file)).
 - **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
   selected notes, its own viewport (song positions across, as the
@@ -853,14 +881,21 @@ for the behaviour settings.
   its own viewport, song positions across as the piano roll's are, and
   which of the clip's parameters its lane shows (`ClipParam`). Its grid is
   the arrangement's too, at its zoom.
+- **The devices panel** (`editor::Devices`): the devices selected there,
+  which are always of the chain it shows, the selected track's, so
+  selecting another track forgets them (`Editor::select_track`), and
+  `Editor::selected_devices` gives them in the order they play; and what
+  Cut and Copy took from it (`DeviceClipboard`), the devices as they were,
+  a plugin's state and all, with the lanes that automated them.
 - **The clip editor** (`Editor::clip_editor`): the panel of the editor
   that fits the clip selected or opened last, the piano roll's or the
   Sample Editor's, which Clip Editor and Switch Devices and Clip Editor
   show.
 - **Behaviour** (`Behaviour`): how editing behaves where people's habits
   differ, kept as settings so profiles can follow other DAWs. So far:
-  where Play/Stop plays from, and what middle C is called (`MiddleC`: C3 as
-  in Live, C4, or C5).
+  where Play/Stop plays from, what middle C is called (`MiddleC`: C3 as
+  in Live, C4, or C5), and whether copies of devices take their automation
+  (`copies_take_automation`).
 - **Audio files** (`AudioFile`): the sample rate, length and channels of
   each file clips play, by the path the clips give, and the tempo its loop
   data gives, if it has any, which Warp starts a clip at. The app reads

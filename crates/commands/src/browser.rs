@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use musicable_model::plugin::PluginState;
 use musicable_model::{DeviceId, DeviceKind};
 
 use crate::{Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
@@ -37,8 +38,9 @@ pub const FOCUS_SEARCH: CommandId = CommandId::new("browser.focus_search");
 /// How many files a search gives back without a limit.
 const LIMIT: usize = 100;
 
-/// The browser's library of samples and presets, as commands see it. The
-/// app implements it.
+/// The browser's library of samples and presets, as commands see it, with
+/// the plugins' states that presets and copies of devices take. The app
+/// implements it.
 pub trait Library {
     /// The audio files of the library whose names, folders or tags have
     /// every word of `text`, best first, at most `limit` of them. The
@@ -73,6 +75,13 @@ pub trait Library {
         device_name: &str,
         name: Option<&str>,
     ) -> Result<PathBuf, String>;
+    /// The state of the plugin of the project's device `id`, saved afresh,
+    /// as it is for a preset, for a copy of the device: `None` if the device
+    /// isn't a plugin whose plugin plays, or it couldn't save, when a copy
+    /// takes the state the project has.
+    fn plugin_state(&mut self, _id: DeviceId) -> Option<PluginState> {
+        None
+    }
 }
 
 /// No library: where the app has none, as when it exports. Every command

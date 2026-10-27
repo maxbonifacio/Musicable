@@ -6,7 +6,8 @@
 //! plugins come back from the project's file as they were saved. VST3
 //! plugins go on tracks the same way, and their windows open inside
 //! Musicable's on Windows. A device's Bypass button bypasses its plugin,
-//! and deactivates it with Alt.
+//! and deactivates it with Alt, and the devices panel's keys act on the
+//! devices selected there.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -250,6 +251,71 @@ fn the_bypass_button_bypasses_a_plugin_and_alt_click_deactivates_it() {
     press(&mut harness, chord("Ctrl+Z"));
     assert_eq!(switches(&harness), (false, true));
     harness.get_by_label("Device Test Gain");
+    assert!(
+        harness.state().messages.is_empty(),
+        "{:?}",
+        harness.state().messages
+    );
+    drop(harness);
+    library.assert_alright();
+}
+
+#[test]
+fn the_devices_panels_keys_act_on_the_devices_selected_there() {
+    let config = TempDir::new("panel-keys-config");
+    let folder = TempDir::new("panel-keys-song");
+    let library = Library::copy(&folder.0, "test-plugins");
+    scanned(&config.0, &library);
+    let mut song = Project::new();
+    song.add_track("Bass", TrackKind::Audio);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path));
+    let header = harness.get_by_label("Track Bass").rect();
+    click_at(
+        &mut harness,
+        pos2(header.left() + 12.0, header.center().y),
+        1,
+    );
+    click(&mut harness, "Add Device...");
+    double_click(&mut harness, "Test Gain");
+    double_click(&mut harness, "Test Synth");
+    let gain = plugins(&harness, "Bass")[0].1;
+    let undo =
+        |harness: &Harness<'static, App>| harness.state().session.undo_name().map(str::to_owned);
+
+    // A click on its title bar selects it, for the panel's keys: 0
+    // bypasses it, and Ctrl+Right moves it past the synth.
+    click(&mut harness, "Device Test Gain");
+    harness.get_by_label("Device Test Gain, selected");
+    press(&mut harness, chord("0"));
+    let project = harness.state().session.project();
+    assert!(project.find_device(gain).unwrap().2.bypassed);
+    assert_eq!(undo(&harness).as_deref(), Some("Bypass Test Gain"));
+    press(&mut harness, chord("Ctrl+Right"));
+    assert_eq!(names(&harness, "Bass"), ["Test Synth", "Test Gain"]);
+    assert_eq!(undo(&harness).as_deref(), Some("Move Test Gain"));
+
+    // The edit keys take it too: Ctrl+D puts a copy after it, bypassed as
+    // it is, and selects the copy, which Delete deletes.
+    press(&mut harness, chord("Ctrl+D"));
+    let on_bass = plugins(&harness, "Bass");
+    assert_eq!(
+        names(&harness, "Bass"),
+        ["Test Synth", "Test Gain", "Test Gain"]
+    );
+    assert_eq!(undo(&harness).as_deref(), Some("Duplicate Test Gain"));
+    let copy = on_bass[2].1;
+    let project = harness.state().session.project();
+    assert!(project.find_device(copy).unwrap().2.bypassed);
+    let editor = harness.state().session.editor();
+    assert_eq!(editor.selected_devices(project), [copy]);
+    press(&mut harness, chord("Delete"));
+    assert_eq!(
+        plugins(&harness, "Bass")[1..],
+        [("Test Gain".to_owned(), gain)]
+    );
+    assert_eq!(undo(&harness).as_deref(), Some("Delete Test Gain"));
     assert!(
         harness.state().messages.is_empty(),
         "{:?}",

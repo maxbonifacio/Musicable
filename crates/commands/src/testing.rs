@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use musicable_model::clip::ClipId;
+use musicable_model::plugin::PluginState;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, DeviceKind, Project, TrackId};
 
@@ -70,6 +71,9 @@ pub(crate) struct StubLibrary {
     pub presets: BTreeMap<PathBuf, DeviceKind>,
     /// The presets saved: the device, its name, and the preset's name.
     pub saved: Vec<(DeviceKind, String, Option<String>)>,
+    /// The states the plugins of devices have now, which the project may
+    /// not have yet.
+    pub states: BTreeMap<DeviceId, PluginState>,
     pub calls: Vec<String>,
 }
 
@@ -159,6 +163,11 @@ impl Library for StubLibrary {
             "/presets/{device_name}/{name}.musicable-preset"
         )))
     }
+
+    fn plugin_state(&mut self, id: DeviceId) -> Option<PluginState> {
+        self.calls.push(format!("state {}", id.0));
+        self.states.get(&id).cloned()
+    }
 }
 
 /// A document with every command, and what running them asks for.
@@ -234,6 +243,12 @@ impl Setup {
     pub fn select_tracks(&mut self, tracks: &[TrackId]) {
         let args = Args::new().with("tracks", tracks.to_vec());
         self.run_with(&edit::SELECT_TRACKS, args).unwrap();
+    }
+
+    /// Selects `devices` in the devices panel, which gives it the focus.
+    pub fn select_devices(&mut self, devices: &[DeviceId]) {
+        let args = Args::new().with("devices", devices.to_vec());
+        self.run_with(&crate::device::SELECT, args).unwrap();
     }
 
     /// Selects from beat `start` to beat `end` on `tracks`.

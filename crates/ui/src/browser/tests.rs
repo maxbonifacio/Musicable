@@ -632,12 +632,17 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
     harness.run();
     harness.key_press(Key::Enter);
     harness.run();
+    // Opening its menu selected it.
+    let select = Args::new().with("devices", vec![synth.id]);
     let save = Args::new()
         .with("device", synth.id)
         .with("name", "Warm Pad");
     assert_eq!(
         actions(&mut harness),
-        [Action::RunWith(device::SAVE_PRESET, save)]
+        [
+            Action::RunWith(device::SELECT, select),
+            Action::RunWith(device::SAVE_PRESET, save)
+        ]
     );
     assert!(harness.query_by_label("Save Vital as a Preset").is_none());
     assert!(!harness.state().shell.asking());

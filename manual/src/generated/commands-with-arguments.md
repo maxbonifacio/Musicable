@@ -51,10 +51,13 @@
 | Add Device | `device.add` |
 | Add Plugin | `device.add_plugin` |
 | Add Preset | `device.add_preset` |
+| Copy Devices | `device.copy` |
 | Delete Device | `device.delete` |
 | Hide Plugin Window | `device.hide_window` |
 | Load Sample... | `device.load_sample` |
+| Move Devices | `device.move` |
 | Save Device as Preset | `device.save_preset` |
+| Select Devices | `device.select` |
 | Set Device Active | `device.set_active` |
 | Set Device Bypass | `device.set_bypass` |
 | Set Device Parameter | `device.set_param` |

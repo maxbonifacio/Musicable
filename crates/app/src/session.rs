@@ -1161,6 +1161,7 @@ impl Session {
                     | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. }
+                    | Edit::MoveDevice { .. }
                     | Edit::DeviceActive { .. } => recompile = true,
                     // So is automation, and the plugins leave what it moves
                     // to the engine.

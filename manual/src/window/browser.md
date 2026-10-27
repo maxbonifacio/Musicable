@@ -91,10 +91,13 @@ vendor too, the best matches first.
 
 Double-click a device to put it at the end of the selected track's devices,
 or the master's while the master track is selected. Or drag it: into the
-devices panel, onto a track for the end of its devices, onto the master
-track for the master's, or below the tracks for a new track named after it,
-a MIDI track for an instrument and an audio track for an effect. The track
-it goes on is selected, so the devices panel shows it there.
+devices panel, between the devices where a line shows it would go, onto a
+track or its mixer strip for the end of its devices, onto the master track
+for the master's, or below the tracks for a new track named after it, a
+MIDI track for an instrument and an audio track for an effect. The track
+it goes on is selected, so the devices panel shows it there. Devices
+dragged by their title bars in the devices panel go the same places
+([The devices panel](devices-panel.md#selecting-moving-and-copying)).
 
 ## Presets
 

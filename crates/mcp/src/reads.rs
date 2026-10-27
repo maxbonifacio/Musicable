@@ -661,6 +661,9 @@ pub(crate) fn editor(window: &impl Window) -> Json {
             "markers": sample.markers.iter().map(|&beat| beats(beat)).collect::<Vec<_>>(),
             "lane": sample.lane.key(),
         },
+        "devices": {
+            "selected": ids(&mut editor.selected_devices(window.project()).iter().map(|d| d.0)),
+        },
     })
 }
 

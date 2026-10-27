@@ -207,8 +207,9 @@ lives. What each still lacks is in its doc's "Not done yet".
   (`crates/app/tests/mpe.rs`).
 - **Devices and plugins.** Devices are in the model, with ids for their
   node keys, and `compile()` puts them between a channel's source and its
-  pre-fader slot, each with a `Slot::BeforeDevice` in front of it. There
-  are plugins, and a test gain and a test instrument. CLAP and VST3
+  pre-fader slot, each with a `Slot::BeforeDevice` in front of it that
+  moves with it. There are plugins, and a test gain and a test
+  instrument. CLAP and VST3
   hosting are built in `crates/plugins` ([plugins.md](plugins.md)): an
   `Instance` lives on the main thread, where both formats want everything
   but processing done, and makes the `Node`s that process it, so every

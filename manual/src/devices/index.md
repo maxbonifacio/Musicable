@@ -17,7 +17,9 @@ The browser's Devices list has them under **Built-in**, above the plugins,
 and its search field finds them by name. Double-click one to put it at the
 end of the selected track's devices, or the master's while the master track
 is selected, with every control at its default. Or drag it into the devices
-panel, or onto a track.
+panel, or onto a track. Drag a device's title bar to move it, and Ctrl-drag
+it to copy it, with its settings and its automation ([The devices
+panel](../window/devices-panel.md#selecting-moving-and-copying)).
 
 ## Their controls
 

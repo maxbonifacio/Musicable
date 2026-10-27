@@ -142,6 +142,16 @@ version = 1
 "transient.insert" = ["Ctrl+Shift+I"]
 "transient.delete" = ["Ctrl+Shift+Backspace"]
 
+# The devices panel's keys act on the devices it has selected. Live's 0
+# deactivates clips and tracks, and Live has no key for its devices: here 0
+# bypasses the devices, or brings them all back if every one is bypassed.
+# Ctrl and the arrow keys move them one place along the chain. Ctrl+G stays
+# free, for grouping devices later.
+[panels.devices]
+"device.toggle_bypass" = ["0"]
+"device.move_left" = ["Ctrl+Left"]
+"device.move_right" = ["Ctrl+Right"]
+
 # The arrow keys step through the History panel's list: Up takes a step back,
 # as undo does, and Down makes the next one again, as redo does.
 [panels.history]

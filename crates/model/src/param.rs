@@ -43,6 +43,16 @@ impl ParamAddress {
             Self::Volume(_) | Self::Pan(_) | Self::Send(_) | Self::Clip(..) => None,
         }
     }
+
+    /// The same parameter of `device`, if it's a device's: what a copy of
+    /// the device has where the original has this one.
+    pub fn with_device(self, device: DeviceId) -> Option<Self> {
+        match self {
+            Self::Device(_, n) => Some(Self::Device(device, n)),
+            Self::Bypass(_) => Some(Self::Bypass(device)),
+            Self::Volume(_) | Self::Pan(_) | Self::Send(_) | Self::Clip(..) => None,
+        }
+    }
 }
 
 /// One of an audio clip's own parameters. All but Gain belong to its warp,

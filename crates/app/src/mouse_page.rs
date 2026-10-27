@@ -82,6 +82,7 @@ const GROUPS: [(&str, &[Target]); 7] = [
             Target::MixerControl,
             Target::DeviceControl,
             Target::BypassButton,
+            Target::DeviceTitle,
         ],
     ),
     ("Scrolling and zooming", &[Target::Timeline]),

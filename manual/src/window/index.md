@@ -9,8 +9,8 @@ once you show them.
 ## The menu bar
 
 The menu bar lists the commands with their keys, under File, Edit, Track,
-Clip, Notes, Automation, Locator, Transport, Browser, View, Workspaces and
-Options. [Every command](../reference/commands.md) lists them all.
+Clip, Notes, Automation, Locator, Transport, Device, Browser, View,
+Workspaces and Options. [Every command](../reference/commands.md) lists them all.
 
 Undo and Redo name the change they would make, as in "Undo Set Tempo", and
 are greyed out when there's nothing to undo or redo, as is any command that
@@ -97,9 +97,10 @@ gives it the focus, and so does moving the keyboard focus into it with Tab;
 a click in a menu or in a window over the panels doesn't.
 
 The keys and the edit commands act where the focus is. Copy and Delete take
-the notes selected in the piano roll while it has the focus, the clips, time
-or tracks selected in the arrangement while the arrangement or the mixer has
-it, and nothing in the devices panel, the browser and the History panel.
+the notes selected in the piano roll while it has the focus, the devices
+selected in the devices panel while it has it, the clips, time or tracks
+selected in the arrangement while the arrangement or the mixer has it, and
+nothing in the browser and the History panel.
 Delete and Select All act on the Sample Editor's warp markers while it has
 the focus. The piano roll and the Sample Editor take the focus once they
 show a clip. A panel's own keys,

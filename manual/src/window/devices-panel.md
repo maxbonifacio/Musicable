@@ -10,10 +10,53 @@ shows the master's. **Add Device** opens the browser's devices.
 
 Double-click a device in the browser's Devices list to put it at the end of
 the selected track's devices, or the master's while the master track is
-selected. Or drag it into the devices panel, onto a track, or below the
+selected. Or drag it into the devices panel, where a line shows where it
+would go between the devices, onto a track or a mixer strip, or below the
 tracks for a new track ([The browser](browser.md#devices)). Adding a device,
 however it's added, brings the devices panel forward and scrolls it to the
-device.
+device. The **×** at the right of a device's title bar deletes it.
+
+## Selecting, moving and copying
+
+Click a device's title bar, or its box where no control takes the click, to
+select it, as in Live: it's outlined. **Ctrl-click** or **Shift-click**
+adds a device to the selection, or takes it out, and a click beside the
+devices selects none. Only the devices panel's track has devices selected,
+so selecting another track forgets them.
+
+- **Drag** a device by its title bar to move it, with the other selected
+  devices if it's one of them. In the devices panel, a line shows where
+  they'll go. Let go of them over the arrangement to move them onto a
+  track, the master track, or below the tracks onto a new track named
+  after the first, or over a mixer strip to put them at the end of its
+  devices. Press **Escape** before you let go to leave them where they
+  were.
+- **Ctrl-drag** copies them instead.
+- **Ctrl+Left** and **Ctrl+Right** move the selected devices one place
+  along the chain.
+- **0** bypasses the selected devices, or brings them back if they're all
+  bypassed. Live has no key for this; its 0 deactivates clips and tracks.
+- While the devices panel has the focus, which a click in it gives it, the
+  edit keys work on the selected devices: **Ctrl+X** cuts them, **Ctrl+C**
+  copies them, **Ctrl+V** puts copies in front of the first selected
+  device, or at the end, **Ctrl+D** puts copies just after the last one,
+  **Delete** deletes them, and **Ctrl+A** selects every device.
+- A device's right-click menu has **Cut**, **Copy**, **Paste**,
+  **Duplicate** and **Delete** too, with **Bypass** and **Deactivate**. It
+  works on the selected devices if the device is one of them, or else on
+  the device alone, which it selects.
+
+A moved device takes everything with it: its settings, its automation, and
+a plugin's own window, open if it was. While the song plays, it's heard in
+its new place at once. A copy is a device of its own, with its original's
+settings, a plugin's state as its window has it, and its automation, in
+lanes of its own with the same points, as in Live. Turn off **Copies of
+devices take their automation** on the Settings window's Behaviour page for
+copies that start without any ([Settings](../customising/settings.md)).
+Pasted and duplicated devices are copies too, and copies come selected, so
+Ctrl+D again makes more. Each move or copy is one step in the undo history,
+such as "Move EQ" or "Copy 2 Devices". The Settings window's Mouse page
+changes what the clicks and drags do ([The mouse](../customising/mouse.md)).
 
 ## Bypassing and deactivating
 
@@ -37,7 +80,11 @@ Live, lit while the device plays.
   with a look-ahead limiter or a linear-phase EQ. A click on a deactivated
   device's button activates it again, as Alt-click does.
 - The device's right-click menu has **Bypass**, ticked while the device is
-  bypassed, and **Deactivate**, or **Activate**.
+  bypassed, and **Deactivate**, or **Activate**. For the selected devices,
+  Bypass is ticked while they're all bypassed, and Activate shows while
+  any is deactivated.
+- **0** bypasses the selected devices, or brings them back if every one is
+  bypassed.
 
 Each is a step in the undo history, such as "Bypass EQ" or "Deactivate
 EQ". A bypassed instrument is silent: the notes it was playing end with the
@@ -61,7 +108,6 @@ and:
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live
   ([Plugins](../using/plugins.md#plugin-windows)).
-- **×**, which deletes the device.
 - Why the plugin isn't playing, when it isn't: it isn't installed, it didn't
   load, or the scan that finds it hasn't finished. A device whose plugin
   isn't playing lets the signal through as it is, and keeps its settings for

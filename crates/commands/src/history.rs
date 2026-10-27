@@ -773,6 +773,12 @@ mod tests {
                 from: true,
                 to: false,
             },
+            // Between the synth just added and the sampler.
+            Edit::MoveDevice {
+                device: effect,
+                from: (Chain::Track(audio), 0),
+                to: (Chain::Track(midi), 1),
+            },
             Edit::PluginSettings {
                 device: effect,
                 from: effect_settings,
@@ -830,7 +836,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 58;
+    const KINDS: usize = 59;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -894,6 +900,7 @@ mod tests {
             Edit::ClipGain { .. } => 55,
             Edit::DeviceBypass { .. } => 56,
             Edit::DeviceActive { .. } => 57,
+            Edit::MoveDevice { .. } => 58,
         }
     }
 

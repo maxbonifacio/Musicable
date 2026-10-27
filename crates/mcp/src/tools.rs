@@ -204,8 +204,9 @@ pub fn list() -> Vec<Tool> {
             GET_EDITOR,
             "Get Editor",
             "Reads the editor's state: what's selected, the selected track, which panel has \
-             the focus, where the start marker is, the grid, what's in sight, and the clip the \
-             piano roll shows and its selected notes.",
+             the focus, where the start marker is, the grid, what's in sight, the clip the \
+             piano roll shows and its selected notes, and the devices selected in the devices \
+             panel, which shows the selected track's, in the order they play.",
             object(json!({}), &[]),
         ),
         read(
