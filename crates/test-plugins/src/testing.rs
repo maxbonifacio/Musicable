@@ -294,6 +294,28 @@ impl Library {
         (requests, threads)
     }
 
+    /// How many times the host started the plugin processing, stopped it
+    /// and reset it, and how many blocks of frames it processed.
+    ///
+    /// # Safety
+    ///
+    /// As for [`request_callback`](Self::request_callback).
+    pub unsafe fn lifecycle(&self, plugin: *const clap_plugin) -> Lifecycle {
+        let get = self.hook::<unsafe extern "C" fn(*const clap_plugin, *mut [u32; 4])>(
+            "musicable_test_lifecycle",
+        );
+        let mut counts = [0; 4];
+        // SAFETY: the caller's promise.
+        unsafe { get(plugin, &mut counts) };
+        let [starts, stops, resets, blocks] = counts;
+        Lifecycle {
+            starts,
+            stops,
+            resets,
+            blocks,
+        }
+    }
+
     /// The transport's flags, position in beats and tempo, as the plugin
     /// last saw them.
     ///
@@ -481,6 +503,30 @@ impl Library {
         unsafe { get(object, &mut transport) }.then_some(transport)
     }
 
+    /// How many times the host turned a VST3 plugin's processing on and
+    /// off, as [`Lifecycle::starts`] and [`Lifecycle::stops`], and how many
+    /// blocks of frames it processed.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_label`](Self::vst3_label).
+    pub unsafe fn vst3_lifecycle(&self, object: *mut c_void) -> Option<Lifecycle> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void, *mut [u32; 3]) -> bool>(
+            "musicable_test_vst3_lifecycle",
+        );
+        let mut counts = [0; 3];
+        // SAFETY: the caller's promise.
+        unsafe { get(object, &mut counts) }.then(|| {
+            let [starts, stops, blocks] = counts;
+            Lifecycle {
+                starts,
+                stops,
+                resets: 0,
+                blocks,
+            }
+        })
+    }
+
     /// Has a VST3 plugin ask the host to restart it with VST3's `flags`.
     ///
     /// # Safety
@@ -492,6 +538,18 @@ impl Library {
         // SAFETY: the caller's promise.
         unsafe { restart(object, flags) }
     }
+}
+
+/// How many times a host started a plugin processing, stopped it and reset
+/// it, and how many blocks of frames the plugin processed: see
+/// [`Library::lifecycle`] and [`Library::vst3_lifecycle`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lifecycle {
+    pub starts: u32,
+    pub stops: u32,
+    /// CLAP's resets. VST3 has none: it turns processing off and on.
+    pub resets: u32,
+    pub blocks: u32,
 }
 
 /// `path` as the host loads libraries by: canonical, and on Windows without

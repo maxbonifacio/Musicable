@@ -95,6 +95,16 @@ pub struct DeviceId(pub u32);
 pub struct Device {
     pub id: DeviceId,
     pub kind: DeviceKind,
+    /// Whether it's bypassed: it stops, and what comes into it plays on in
+    /// its place, delayed by its latency, so nothing else in the mix moves.
+    /// Its Bypass lane automates it ([`ParamAddress::Bypass`]).
+    ///
+    /// [`ParamAddress::Bypass`]: param::ParamAddress::Bypass
+    pub bypassed: bool,
+    /// Whether it's in the signal at all. A deactivated device keeps its
+    /// place and its settings, but the signal goes on as if it weren't
+    /// there, latency and all.
+    pub active: bool,
 }
 
 /// What a device is: one of Musicable's own, a plugin, or a test device.
@@ -552,11 +562,14 @@ impl Project {
         }
     }
 
-    /// A device with the next device id, for the caller to add.
+    /// A device with the next device id, for the caller to add: active,
+    /// and not bypassed.
     pub fn new_device(&mut self, kind: DeviceKind) -> Device {
         Device {
             id: DeviceId(next_id(&mut self.next_device_id, "device")),
             kind,
+            bypassed: false,
+            active: true,
         }
     }
 

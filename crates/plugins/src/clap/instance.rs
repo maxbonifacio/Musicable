@@ -180,6 +180,9 @@ impl Instance {
             get(CLAP_EXT_THREAD_POOL).cast_mut().cast(),
             Ordering::Release,
         );
+        shared
+            .params
+            .store(ext.params.cast_mut(), Ordering::Release);
         let mut instance = Self {
             shared,
             library,

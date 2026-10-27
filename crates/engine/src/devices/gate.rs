@@ -56,6 +56,15 @@ impl Node for Gate {
         } = self;
         params.run(ctx, |span| state.render(&span, output, *sample_rate));
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.state = State::default();
+    }
 }
 
 /// Where the gate has got to.

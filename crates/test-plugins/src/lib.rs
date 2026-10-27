@@ -5,7 +5,9 @@
 //! - **Test Gain** (`org.musicable.test.gain`), a stereo effect that
 //!   multiplies its input by its Gain parameter and delays it by its Latency
 //!   parameter, which it reports to the host as its latency. Changing the
-//!   latency asks the host to restart the plugin, as real plugins do.
+//!   latency asks the host to restart the plugin, as real plugins do. Its
+//!   Bypass parameter is the plugin's own bypass, as CLAP lets a plugin say:
+//!   on, it plays its input unchanged, but as late.
 //! - **Test Synth** (`org.musicable.test.synth`), an instrument that plays
 //!   each note as a sine at the note's pitch, shaped by CLAP's note
 //!   expressions for tuning, pressure and brightness. It can render its
@@ -56,7 +58,7 @@ mod plugin;
 pub mod testing;
 pub mod vst3;
 
-pub use plugin::{GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS};
+pub use plugin::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS};
 
 /// The CLAP entry point the host looks for.
 #[allow(non_upper_case_globals)]
@@ -348,6 +350,22 @@ pub unsafe extern "C" fn musicable_test_pool_use(
         requests.write(r);
         threads.write(t);
     }
+}
+
+/// How many times the host started the plugin processing, stopped it and
+/// reset it, and how many blocks of frames it processed, into `counts`, in
+/// that order.
+///
+/// # Safety
+///
+/// `plugin` must be a plugin of this library that isn't destroyed, and
+/// `counts` valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_lifecycle(plugin: *const clap_plugin, counts: *mut [u32; 4]) {
+    // SAFETY: the caller's promise.
+    let lifecycle = unsafe { plugin::from_clap(plugin) }.lifecycle();
+    // SAFETY: the caller's promise.
+    unsafe { counts.write(lifecycle) };
 }
 
 /// Counts the plugins of this library alive now, for tests that check the

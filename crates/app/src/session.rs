@@ -14,6 +14,7 @@ use musicable_commands::{
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
+use musicable_engine::switch::Switch;
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
     NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError, TransportCommand,
@@ -1108,6 +1109,15 @@ impl Session {
                     })),
                     // A sampler reads its sample as the graph is built.
                     Edit::NativeSample { .. } => recompile = true,
+                    // A device's switch bypasses it, and the plugins follow
+                    // below.
+                    Edit::DeviceBypass { device, to, .. } => {
+                        self.engine.push(Message::Event(Event::Param {
+                            node: keys::device(device),
+                            param: Switch::BYPASS,
+                            value: if to { 1.0 } else { 0.0 },
+                        }));
+                    }
                     // Tracks and their inputs are compiled into the graph,
                     // and the recorder records the armed ones.
                     Edit::AddTrack { .. } | Edit::RemoveTrack { .. } | Edit::TrackInput { .. } => {
@@ -1135,7 +1145,8 @@ impl Session {
                     | Edit::NoteVelocity { .. }
                     | Edit::Controller { .. }
                     | Edit::AddDevice { .. }
-                    | Edit::RemoveDevice { .. } => recompile = true,
+                    | Edit::RemoveDevice { .. }
+                    | Edit::DeviceActive { .. } => recompile = true,
                     // So is automation, and the plugins leave what it moves
                     // to the engine.
                     Edit::AddLane { .. }

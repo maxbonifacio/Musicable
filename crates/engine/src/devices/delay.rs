@@ -34,12 +34,7 @@ impl Delay {
                 lines: Vec::new(),
                 mask: 0,
                 write: 0,
-                time: Time {
-                    now: 0.0,
-                    fade: None,
-                    wanted: 0.0,
-                    started: false,
-                },
+                time: Time::default(),
                 filters: [[State::default(); 2]; 2],
                 cuts: Cuts::new(),
                 sample_rate: 48_000.0,
@@ -90,6 +85,15 @@ impl Node for Delay {
         let Self { params, echoes } = self;
         params.run(ctx, |span| echoes.render(ctx, &span, output));
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.echoes.reset();
+    }
 }
 
 /// The delay's lines and what reads and fills them.
@@ -111,6 +115,14 @@ struct Echoes {
 }
 
 impl Echoes {
+    /// Empties the lines and the filters, for a time set afresh.
+    fn reset(&mut self) {
+        self.lines.fill(0.0);
+        self.write = 0;
+        self.time = Time::default();
+        self.filters = [[State::default(); 2]; 2];
+    }
+
     /// Renders one span of the output, in place.
     fn render(&mut self, ctx: &ProcessContext<'_>, span: &Span<'_>, output: &mut AudioMut<'_>) {
         let values = span.values;
@@ -196,7 +208,7 @@ impl Echoes {
 
 /// The time the echoes are read at, in frames, which fades to a new one
 /// rather than sliding there.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Time {
     /// The time read.
     now: f64,

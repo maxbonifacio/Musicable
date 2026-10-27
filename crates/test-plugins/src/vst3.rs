@@ -539,6 +539,9 @@ struct Lifecycle {
     setup: Mutex<Option<ProcessSetup>>,
     active: AtomicBool,
     processing: AtomicBool,
+    /// How many times the host turned processing on and off, and how many
+    /// blocks of frames it processed.
+    counts: [AtomicU32; 3],
 }
 
 impl Lifecycle {
@@ -590,6 +593,8 @@ impl Lifecycle {
             return kResultFalse;
         }
         self.processing.store(state != 0, Ordering::SeqCst);
+        let count = if state != 0 { 0 } else { 1 };
+        self.counts[count].fetch_add(1, Ordering::SeqCst);
         kResultOk
     }
 
@@ -613,7 +618,14 @@ impl Lifecycle {
             violation("process got another sample size than the plugin was set up for");
             return None;
         }
+        if data.numSamples > 0 {
+            self.counts[2].fetch_add(1, Ordering::SeqCst);
+        }
         Some((data.numSamples as usize, setup.sampleRate))
+    }
+
+    fn counts(&self) -> [u32; 3] {
+        self.counts.each_ref().map(|c| c.load(Ordering::SeqCst))
     }
 
     fn check_inactive(&self, what: &str) {
@@ -2870,6 +2882,32 @@ pub unsafe extern "C" fn musicable_test_vst3_transport(
     };
     // SAFETY: the caller's promise.
     unsafe { transport.write(seen) };
+    true
+}
+
+/// How many times the host turned the plugin's processing on and off, and
+/// how many blocks of frames it processed, into `counts`, in that order.
+/// Returns whether `object` is a component, Test Gain's or Test Synth.
+///
+/// # Safety
+///
+/// As for [`musicable_test_vst3_gui`], and `counts` must be valid for
+/// writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_vst3_lifecycle(
+    object: *mut c_void,
+    counts: *mut [u32; 3],
+) -> bool {
+    let seen = match find(object) {
+        Some(Object::Gain(g)) => g.upgrade().map(|g| g.lifecycle.counts()),
+        Some(Object::Synth(s)) => s.upgrade().map(|s| s.lifecycle.counts()),
+        _ => None,
+    };
+    let Some(seen) = seen else {
+        return false;
+    };
+    // SAFETY: the caller's promise.
+    unsafe { counts.write(seen) };
     true
 }
 

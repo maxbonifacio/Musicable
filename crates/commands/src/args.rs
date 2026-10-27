@@ -69,6 +69,8 @@ impl Type {
     pub const TRACKS: Type = Type::List(&Type::Track);
     /// A list of notes.
     pub const NOTES: Type = Type::List(&Type::Note);
+    /// A list of devices.
+    pub const DEVICES: Type = Type::List(&Type::Device);
 
     /// Whether `value` can be read as this type. Numbers stand in for
     /// positions in beats, and whole numbers for ids and for floats, as a
@@ -356,7 +358,7 @@ impl FromValue for ParamAddress {
 
     /// A parameter, or one written as a script would: "track 3 volume",
     /// "track 3 pan", "master volume", "master pan", "send 2", "device 4
-    /// param 17", or "clip 5 gain".
+    /// param 17", "device 4 bypass", or "clip 5 gain".
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Param(param) => Some(*param),
@@ -387,6 +389,7 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
         ["master", what] => fader(Chain::Master, what),
         ["send", send] => Some(ParamAddress::Send(SendId(id(send)?))),
         ["device", device, "param", n] => Some(ParamAddress::Device(DeviceId(id(device)?), id(n)?)),
+        ["device", device, "bypass"] => Some(ParamAddress::Bypass(DeviceId(id(device)?))),
         ["clip", clip, what] => Some(ParamAddress::Clip(
             ClipId(id(clip)?),
             ClipParam::from_key(what)?,
@@ -396,7 +399,7 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
 }
 
 /// A parameter as scripts write it: "track 3 volume", "master pan", "send
-/// 2", "device 4 param 17", "clip 5 gain".
+/// 2", "device 4 param 17", "device 4 bypass", "clip 5 gain".
 pub fn param_text(param: ParamAddress) -> String {
     let chain = |chain| match chain {
         Chain::Track(track) => format!("track {}", track.0),
@@ -407,6 +410,7 @@ pub fn param_text(param: ParamAddress) -> String {
         ParamAddress::Pan(on) => format!("{} pan", chain(on)),
         ParamAddress::Send(send) => format!("send {}", send.0),
         ParamAddress::Device(device, n) => format!("device {} param {n}", device.0),
+        ParamAddress::Bypass(device) => format!("device {} bypass", device.0),
         ParamAddress::Clip(clip, param) => format!("clip {} {}", clip.0, param.key()),
     }
 }

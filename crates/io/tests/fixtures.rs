@@ -53,6 +53,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("spectral", spectral()),
         ("high-quality", high_quality()),
         ("granular", granular()),
+        ("bypass", bypass()),
     ]
 }
 
@@ -1122,6 +1123,48 @@ fn granular() -> Project {
     moving.set_lane(ClipParam::Transpose, vec![point(0, 0.0), point(4, -12.0)]);
     let moving = project.new_clip("Moving", beats(24, 28), ClipContent::Audio(moving));
     project.track_mut(vocal).unwrap().clips = vec![vox, bass, pad, wide, kept, moving];
+    project
+}
+
+/// Bypass and Deactivate, from version 17: a bypassed EQ, a deactivated
+/// compressor and a reverb with a Bypass lane that steps on and off on a
+/// track, an instrument both bypassed and deactivated, and a bypassed plugin
+/// on the master.
+fn bypass() -> Project {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let native = |project: &mut Project, kind| {
+        project.new_device(DeviceKind::Native(NativeDevice::new(kind)))
+    };
+    let mut tone = native(&mut project, NativeKind::Eq);
+    tone.bypassed = true;
+    let mut compressor = native(&mut project, NativeKind::Compressor);
+    compressor.active = false;
+    let reverb = native(&mut project, NativeKind::Reverb);
+    let reverb_id = reverb.id;
+    let mut synth = native(&mut project, NativeKind::Synth);
+    (synth.bypassed, synth.active) = (true, false);
+    let mut limiter = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Vst3,
+        id: "ABCDEF0123456789ABCDEF0123456789".into(),
+        name: "Limiter".into(),
+        instrument: false,
+        settings: PluginSettings::default(),
+    }));
+    limiter.bypassed = true;
+    project.track_mut(vocal).unwrap().devices = vec![tone, compressor, reverb];
+    project.track_mut(keys).unwrap().devices = vec![synth];
+    project.master.devices = vec![limiter];
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    let steps = vec![
+        point(0, 0.0),
+        point(4, 0.0),
+        point(4, 1.0),
+        point(8, 1.0),
+        point(8, 0.0),
+    ];
+    project.automation = vec![Lane::new(ParamAddress::Bypass(reverb_id), steps)];
     project
 }
 

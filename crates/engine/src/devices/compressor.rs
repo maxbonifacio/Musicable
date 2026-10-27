@@ -68,6 +68,15 @@ impl Node for Compressor {
         } = self;
         params.run(ctx, |span| state.render(&span, output, *sample_rate));
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.state = State::default();
+    }
 }
 
 /// What the compressor remembers from frame to frame.

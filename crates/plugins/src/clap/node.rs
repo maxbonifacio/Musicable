@@ -4,6 +4,7 @@
 use std::fmt;
 use std::ptr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::events::{
@@ -19,6 +20,7 @@ use clap_sys::ext::note_ports::{
 };
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
+use musicable_engine::switch::Switch;
 use musicable_engine::{
     AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NodeMaker, NoteEvent, NoteId,
     ProcessContext,
@@ -173,6 +175,7 @@ impl NodeSource {
             _library: Arc::clone(&self.library),
             transport: transport(None),
             ended: Vec::with_capacity(VOICE_CAPACITY),
+            resetting: false,
         }
     }
 }
@@ -199,6 +202,10 @@ impl fmt::Debug for NodeSource {
 /// its main output port. It sends the plugin its parameter and note events,
 /// and the transport. Until the plugin is active, while it's being set up,
 /// and if it fails, the node plays silence.
+///
+/// Stopping the node, as its device is bypassed, stops the plugin
+/// processing. Its parameter changes go to the plugin's `flush` meanwhile,
+/// and the plugin resets before it processes again.
 pub struct ClapNode {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
@@ -207,6 +214,8 @@ pub struct ClapNode {
     transport: clap_event_transport,
     /// The notes whose voices the plugin ended in the last block.
     ended: Vec<NoteId>,
+    /// Whether the plugin resets before it next processes.
+    resetting: bool,
 }
 
 impl fmt::Debug for ClapNode {
@@ -222,11 +231,21 @@ impl Node for ClapNode {
         self.shared.latency()
     }
 
+    /// Carries on with a reset due on the same plugin.
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<ClapNode>()
+            && Arc::ptr_eq(&previous.shared, &self.shared)
+        {
+            self.resetting = previous.resetting;
+        }
+    }
+
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
         let Self {
             shared,
             transport,
             ended,
+            resetting,
             ..
         } = self;
         ended.clear();
@@ -236,7 +255,7 @@ impl Node for ClapNode {
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
-        if !run(shared, transport, ctx, inputs, output, audio) {
+        if !run(shared, transport, resetting, ctx, inputs, output, audio) {
             output.clear();
         }
         // Both hold as many as there are voices, so this doesn't allocate.
@@ -246,12 +265,101 @@ impl Node for ClapNode {
     fn ended_voices(&self) -> &[NoteId] {
         &self.ended
     }
+
+    /// Stops the plugin processing, or has the next flush stop it, if the
+    /// main thread has it.
+    fn stop(&mut self) {
+        if let Some(_busy) = self.shared.try_enter() {
+            let _audio_thread = AudioThread::enter();
+            stop_processing(&self.shared);
+        }
+    }
+
+    /// Hands the plugin's `flush` the block's parameter changes and
+    /// modulation, and the main thread's, at the block's first frame. The
+    /// plugin's own changes go back to the main thread, as they do from
+    /// processing. A plugin still processing stops first.
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.ended.clear();
+        let shared = &*self.shared;
+        let Some(_busy) = shared.try_enter() else {
+            return;
+        };
+        let _audio_thread = AudioThread::enter();
+        stop_processing(shared);
+        if shared.lifecycle() != ACTIVE {
+            return;
+        }
+        let params = shared.params.load(Ordering::Acquire);
+        // SAFETY: the extension lives as long as the plugin.
+        let Some(flush) = (unsafe { params.as_ref() }).and_then(|p| p.flush) else {
+            return;
+        };
+        // SAFETY: `busy` is held, so nothing else touches it.
+        let audio = unsafe { &mut *shared.audio.get() };
+        audio.events.clear();
+        while !audio.events.is_full() {
+            let Ok(change) = audio.from_main.pop() else {
+                break;
+            };
+            audio.events.push(Event::param(0, change.id, change.value));
+        }
+        for event in ctx.events {
+            match event.kind {
+                NodeEventKind::Param { param, value } if param != Switch::BYPASS => {
+                    audio.events.push(Event::param(0, param.0, value));
+                }
+                NodeEventKind::Modulation {
+                    param,
+                    amount,
+                    note: None,
+                } => audio.events.push(Event::modulation(0, param.0, amount)),
+                _ => {}
+            }
+        }
+        if audio.events.is_empty() {
+            return;
+        }
+        let in_events = audio.events.list();
+        let mut out = events::Output {
+            queue: &mut audio.to_main,
+            voices: None,
+        };
+        let out_events = events::output_list(&mut out);
+        // SAFETY: active and not processing, on an audio thread, with lists
+        // that stay put for the call.
+        unsafe { flush(shared.plugin(), &in_events, &out_events) };
+        audio.events.clear();
+    }
+
+    /// Has the plugin reset before it next processes.
+    fn reset(&mut self) {
+        self.resetting = true;
+    }
+}
+
+/// Stops the plugin processing, if it is, holding `busy` on an audio
+/// thread.
+fn stop_processing(shared: &Shared) {
+    if shared.lifecycle() != PROCESSING {
+        return;
+    }
+    let plugin = shared.plugin();
+    // SAFETY: a processing plugin stays alive until the main thread, which
+    // waits for `busy`, deactivates it.
+    if let Some(stop) = unsafe { (*plugin).stop_processing } {
+        // SAFETY: processing, on an audio thread.
+        unsafe { stop(plugin) };
+    }
+    shared.set_lifecycle(ACTIVE);
 }
 
 /// Processes the plugin for one block, holding `busy`: false if it can't.
+/// It resets first if `resetting`.
 fn run(
     shared: &Shared,
     transport_event: &mut clap_event_transport,
+    resetting: &mut bool,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
     output: &mut AudioMut<'_>,
@@ -283,6 +391,17 @@ fn run(
             return false;
         }
         shared.set_lifecycle(PROCESSING);
+    }
+    if std::mem::take(resetting) {
+        // SAFETY: active, on an audio thread.
+        if let Some(reset) = clap.reset {
+            // SAFETY: as above.
+            unsafe { reset(plugin) };
+        }
+        // Its voices are gone.
+        audio.sounding.clear();
+        audio.voices.clear();
+        audio.midi.restart();
     }
 
     audio.inputs.clear(frames);
@@ -350,6 +469,8 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
     for (i, event) in ctx.events.iter().enumerate() {
         let time = event.offset as u32;
         match event.kind {
+            // The switch's bypass is its own.
+            NodeEventKind::Param { param, .. } if param == Switch::BYPASS => {}
             NodeEventKind::Param { param, value } => {
                 audio.events.push(Event::param(time, param.0, value));
             }

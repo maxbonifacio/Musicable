@@ -24,10 +24,25 @@ pub enum ParamAddress {
     /// of one of Musicable's own devices' parameters, never reused. The
     /// device's node has it as `ParamId(n)`.
     Device(DeviceId, u32),
+    /// A device's Bypass: 1.0 while it's bypassed and 0.0 while it plays,
+    /// so its lane steps between the two, as a plugin's own bypass
+    /// parameter does. Any device has it, whatever its kind.
+    Bypass(DeviceId),
     /// One of an audio clip's own parameters. Its curve is in the clip, in
     /// the clip's own time, rather than in the project's lanes, so it
     /// moves, copies and splits with the clip.
     Clip(ClipId, ClipParam),
+}
+
+impl ParamAddress {
+    /// The device whose parameter it is, if it's a device's: one of its
+    /// own, or its Bypass.
+    pub fn device(self) -> Option<DeviceId> {
+        match self {
+            Self::Device(device, _) | Self::Bypass(device) => Some(device),
+            Self::Volume(_) | Self::Pan(_) | Self::Send(_) | Self::Clip(..) => None,
+        }
+    }
 }
 
 /// One of an audio clip's own parameters. All but Gain belong to its warp,
@@ -322,6 +337,18 @@ impl ParamSpec {
         }
     }
 
+    /// A device's Bypass: off, 0.0, while it plays, and on, 1.0, while it's
+    /// bypassed.
+    pub fn bypass() -> Self {
+        Self {
+            name: "Bypass".into(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            scale: Scale::Linear,
+        }
+    }
+
     /// The level of a send to the return track `to`: from silence to 0 dB.
     pub fn send(to: &str) -> Self {
         Self {
@@ -362,6 +389,7 @@ impl Project {
                 Some(ParamSpec::send(&self.track(to)?.name))
             }
             ParamAddress::Clip(_, param) => Some(param.spec()),
+            ParamAddress::Bypass(_) => Some(ParamSpec::bypass()),
             ParamAddress::Device(device, n) => {
                 if let Some(info) = self.native_param(address) {
                     return Some(ParamSpec {
@@ -429,6 +457,7 @@ impl Project {
                 let (track, clip) = self.find_clip(clip)?;
                 matches!(clip.content, ClipContent::Audio(_)).then_some(Chain::Track(track.id))
             }
+            ParamAddress::Bypass(device) => self.find_device(device).map(|(chain, ..)| chain),
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
                 let known = match &device.kind {
@@ -467,6 +496,10 @@ impl Project {
                     ClipParam::Gain => Some(f64::from(audio.gain)),
                     _ => audio.warp.as_ref()?.param(param),
                 }
+            }
+            ParamAddress::Bypass(device) => {
+                let (_, _, device) = self.find_device(device)?;
+                Some(if device.bypassed { 1.0 } else { 0.0 })
             }
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;

@@ -60,6 +60,22 @@ impl Params {
         }
     }
 
+    /// From [`Node::flush`](crate::Node::flush): takes the parameter
+    /// changes and the modulation in `events`, as a block renders them.
+    pub fn flush(&mut self, events: &[NodeEvent]) {
+        for event in events {
+            self.apply(event);
+        }
+    }
+
+    /// From [`Node::reset`](crate::Node::reset): every parameter starts
+    /// afresh at its value.
+    pub fn reset(&mut self) {
+        for param in &mut self.params {
+            param.reset();
+        }
+    }
+
     /// Parameter `param`'s value on the last frame rendered.
     pub fn value(&self, param: usize) -> f32 {
         self.params[param].value()

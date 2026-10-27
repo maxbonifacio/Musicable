@@ -1,7 +1,8 @@
 //! The device commands: adding Musicable's own devices, plugins and presets
-//! to a track's devices or the master's, setting their parameters, giving
-//! samplers their samples, showing and closing plugins' windows, saving
-//! devices as presets, and deleting devices.
+//! to a track's devices or the master's, setting their parameters,
+//! bypassing and deactivating them, giving samplers their samples, showing
+//! and closing plugins' windows, saving devices as presets, and deleting
+//! devices.
 
 use std::path::Path;
 
@@ -26,6 +27,12 @@ pub const ADD_PRESET: CommandId = CommandId::new("device.add_preset");
 pub const SAVE_PRESET: CommandId = CommandId::new("device.save_preset");
 /// Sets a device's parameter, or leaves a plugin's to its state.
 pub const SET_PARAM: CommandId = CommandId::new("device.set_param");
+/// Bypasses devices, or brings them back: a bypassed device stops, and what
+/// comes into it plays on, as late as its latency would make it.
+pub const SET_BYPASS: CommandId = CommandId::new("device.set_bypass");
+/// Deactivates devices, which takes them out of the signal, latency and
+/// all, or activates them.
+pub const SET_ACTIVE: CommandId = CommandId::new("device.set_active");
 /// Gives a sampler a sample, or takes its sample away.
 pub const SET_SAMPLE: CommandId = CommandId::new("device.set_sample");
 /// Asks for an audio file for a sampler to play: see [`SET_SAMPLE`].
@@ -38,6 +45,7 @@ pub const HIDE_WINDOW: CommandId = CommandId::new("device.hide_window");
 pub const DELETE: CommandId = CommandId::new("device.delete");
 
 const DEVICE: Param = Param::required("device", Type::Device, "The device.");
+const DEVICES: Param = Param::required("devices", Type::DEVICES, "The devices.");
 const TRACK: Param = Param::optional(
     "track",
     Type::Track,
@@ -244,6 +252,55 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_BYPASS, "Set Device Bypass").with_params(&[
+            DEVICES,
+            Param::required(
+                "bypassed",
+                Type::Bool,
+                "Whether they're bypassed: each stops, and what comes into it plays on, as \
+                 late as its latency would make it, so the mix keeps its timing.",
+            ),
+        ]),
+        |ctx, args| {
+            let devices = devices(ctx, args)?;
+            let bypassed = args.get("bypassed")?;
+            let verb = if bypassed { "Bypass" } else { "Bring Back" };
+            let name = switch_name(ctx, &devices, verb);
+            ctx.document.transact(&name, |tx| {
+                for &device in &devices {
+                    // As if by hand: its lane stops moving it.
+                    tx.override_automation(ParamAddress::Bypass(device));
+                    tx.set_device_bypass(device, bypassed);
+                }
+            });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SET_ACTIVE, "Set Device Active").with_params(&[
+            DEVICES,
+            Param::required(
+                "active",
+                Type::Bool,
+                "Whether they're active. A deactivated device is out of the signal, latency \
+                 and all, though it keeps its place and its settings, and a plugin stays \
+                 loaded.",
+            ),
+        ]),
+        |ctx, args| {
+            let devices = devices(ctx, args)?;
+            let active = args.get("active")?;
+            let verb = if active { "Activate" } else { "Deactivate" };
+            let name = switch_name(ctx, &devices, verb);
+            ctx.document.transact(&name, |tx| {
+                for &device in &devices {
+                    tx.set_device_active(device, active);
+                }
+            });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(SET_SAMPLE, "Set Sample").with_params(&[
             DEVICE,
             Param::optional(
@@ -404,6 +461,33 @@ fn find<'a>(ctx: &'a Context<'_>, device: DeviceId) -> Result<&'a Device, Comman
     }
 }
 
+/// The devices `args` give, each once, if the project has every one.
+fn devices(ctx: &Context<'_>, args: &Args) -> Result<Vec<DeviceId>, CommandError> {
+    let mut devices: Vec<DeviceId> = args.get("devices")?;
+    if devices.is_empty() {
+        return Err(CommandError::invalid("give at least one device"));
+    }
+    devices.sort_unstable();
+    devices.dedup();
+    for &device in &devices {
+        find(ctx, device)?;
+    }
+    Ok(devices)
+}
+
+/// What the Edit menu calls `verb` done to `devices`: "Bypass EQ" for one,
+/// and "Bypass 3 Devices" for several.
+fn switch_name(ctx: &Context<'_>, devices: &[DeviceId], verb: &str) -> String {
+    let project = ctx.document.project();
+    match devices {
+        [device] => match project.find_device(*device) {
+            Some((_, _, found)) => format!("{verb} {}", device_name(&found.kind)),
+            None => format!("{verb} Device"),
+        },
+        _ => format!("{verb} {} Devices", devices.len()),
+    }
+}
+
 /// The plugin device with id `device`, if the project has it.
 fn plugin<'a>(ctx: &'a Context<'_>, device: DeviceId) -> Result<&'a PluginDevice, CommandError> {
     find(ctx, device)?
@@ -447,6 +531,7 @@ fn plugin_name(plugin: &PluginDevice) -> &str {
 mod tests {
     use std::collections::BTreeSet;
 
+    use musicable_model::automation::{Lane, Point};
     use musicable_model::clip::ClipContent;
     use musicable_model::native::eq;
     use musicable_model::plugin::PluginParam;
@@ -662,6 +747,77 @@ mod tests {
             settings(&setup, device).params,
             [PluginParam { id: 1, value: -2.0 }]
         );
+    }
+
+    #[test]
+    fn devices_are_bypassed_and_deactivated_as_steps_in_the_undo_history() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+        let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+        let ids = (eq.id, gain.id);
+        project.track_mut(vocal).unwrap().devices.push(eq);
+        project.master.devices.push(gain);
+        let (eq, gain) = ids;
+        // A lane bypasses the EQ in the second bar.
+        let points = vec![
+            Point::new(Beats::new(4), 0.0),
+            Point::new(Beats::new(4), 1.0),
+        ];
+        let lane = Lane::new(ParamAddress::Bypass(eq), points);
+        project.automation.push(lane);
+        let mut setup = Setup::new(project);
+        let set = |devices: Vec<DeviceId>, bypassed: bool| {
+            Args::new()
+                .with("devices", devices)
+                .with("bypassed", bypassed)
+        };
+        let state = |setup: &Setup, device| {
+            let (_, _, found) = setup.document.project().find_device(device).unwrap();
+            (found.bypassed, found.active)
+        };
+
+        setup.run_with(&SET_BYPASS, set(vec![eq], true)).unwrap();
+        assert_eq!(state(&setup, eq), (true, true));
+        // As if by hand, so the lane stops moving it.
+        assert!(setup.document.project().automation[0].overridden);
+        setup.run_with(&SET_BYPASS, set(vec![gain, eq, gain], true)).unwrap();
+        setup.run_with(&SET_BYPASS, set(vec![eq], false)).unwrap();
+        let active = |devices: Vec<DeviceId>, active: bool| {
+            Args::new().with("devices", devices).with("active", active)
+        };
+        setup.run_with(&SET_ACTIVE, active(vec![eq], false)).unwrap();
+        assert_eq!(state(&setup, eq), (false, false));
+        setup.run_with(&SET_ACTIVE, active(vec![eq, gain], true)).unwrap();
+        assert_eq!(
+            setup.committed_names(),
+            [
+                "Bypass EQ",
+                "Bypass 2 Devices",
+                "Bring Back EQ",
+                "Deactivate EQ",
+                "Activate 2 Devices"
+            ]
+        );
+        assert_eq!(state(&setup, gain), (true, true));
+        assert!(setup.document.undo());
+        assert_eq!(state(&setup, eq), (false, false));
+
+        assert_eq!(
+            setup.run_with(&SET_BYPASS, set(vec![eq, DeviceId(7)], true)),
+            Err(CommandError::invalid("there's no device 7"))
+        );
+        assert_eq!(
+            setup.run_with(&SET_ACTIVE, active(Vec::new(), true)),
+            Err(CommandError::invalid("give at least one device"))
+        );
+        // Its Bypass lane goes with it.
+        setup
+            .run_with(&DELETE, Args::new().with("device", eq))
+            .unwrap();
+        assert!(setup.document.project().automation.is_empty());
+        assert!(setup.document.undo());
+        assert_eq!(setup.document.project().automation.len(), 1);
     }
 
     fn native(setup: &Setup, device: DeviceId) -> NativeDevice {

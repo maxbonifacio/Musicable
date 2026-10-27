@@ -112,6 +112,13 @@ impl MidiOut {
         self.started = false;
     }
 
+    /// Forgets everything, as the plugin resets, keeping the layout:
+    /// nothing sounds, and the plugin is told its layout again before
+    /// anything plays.
+    pub(crate) fn restart(&mut self) {
+        self.reset(self.layout);
+    }
+
     /// The channel and key `note` plays on, while it sounds.
     pub(crate) fn find(&self, note: NoteId) -> Option<(u8, u8)> {
         let playing = self.notes.iter().find(|p| p.note == note)?;
