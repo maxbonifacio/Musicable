@@ -163,8 +163,9 @@ impl Command {
 ///
 /// The edit commands act where the [focus](Editor::focus) is, so what's
 /// selected means the piano roll's notes while it has the focus, the Sample
-/// Editor's warp markers while it has it, and the arrangement's clips, time
-/// or tracks while the arrangement has it.
+/// Editor's warp markers while it has it, the devices panel's devices while
+/// it has it, and the arrangement's clips, time or tracks while the
+/// arrangement has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum When {
     #[default]
@@ -174,17 +175,17 @@ pub enum When {
     /// Clips are selected, or a stretch of time is, and the arrangement or
     /// the mixer has the focus.
     ClipsOrTimeSelected,
-    /// Something Copy can take is selected where the focus is: notes, or
-    /// clips or time.
+    /// Something Copy can take is selected where the focus is: notes,
+    /// devices, or clips or time.
     CanCopy,
-    /// Something is selected where the focus is: notes, warp markers, or
-    /// clips, time or tracks.
+    /// Something is selected where the focus is: notes, warp markers,
+    /// devices, or clips, time or tracks.
     SomethingSelected,
     /// Something Zoom to Selection can show is selected where the focus is:
     /// notes, warp markers, or clips or time.
     CanZoomToSelection,
     /// The panel with the focus has things to select: the arrangement's
-    /// clips, or the piano roll's notes.
+    /// clips, the piano roll's notes, or the devices panel's devices.
     CanSelectAll,
     /// Tracks are selected.
     TracksSelected,
@@ -196,6 +197,8 @@ pub enum When {
     HasLocators,
     /// The piano roll has the focus, and notes selected.
     NotesSelected,
+    /// The devices panel has devices selected, wherever the focus is.
+    DevicesSelected,
     /// Quantize has something to move: the piano roll's notes, while it has
     /// the focus and shows a clip, the transients of the Sample Editor's
     /// warped clip, while it has the focus, or else the notes of the
@@ -231,6 +234,7 @@ impl When {
         let edits = editor.focus.edits();
         let notes = edits == Edits::Notes;
         let markers = edits == Edits::Markers;
+        let devices = edits == Edits::Devices;
         let arranging = edits == Edits::Arrangement;
         let sample = &editor.sample_editor;
         match self {
@@ -251,13 +255,23 @@ impl When {
                 sample.clip.is_some() && !sample.markers.is_empty()
             }
             When::MarkersSelected => false,
+            When::CanCopy | When::SomethingSelected if devices => {
+                !editor.selected_devices(project).is_empty()
+            }
+            When::DevicesSelected => !editor.selected_devices(project).is_empty(),
             When::ClipsOrTimeSelected | When::CanCopy | When::CanZoomToSelection => {
                 arranging && (!selection.clips.is_empty() || selection.time.is_some())
             }
             When::SomethingSelected => arranging && !selection.is_empty(),
+            When::CanSelectAll if devices => (editor.selected_track)
+                .and_then(|chain| project.devices(chain))
+                .is_some_and(|shown| !shown.is_empty()),
             When::CanSelectAll => edits != Edits::Nothing,
             When::TracksSelected => !selection.tracks.is_empty(),
             When::CanPaste if notes => roll.clip.is_some() && roll.clipboard.is_some(),
+            When::CanPaste if devices => {
+                editor.selected_track.is_some() && editor.devices.clipboard.is_some()
+            }
             When::CanPaste => arranging && editor.clipboard.is_some(),
             When::CanRename => {
                 selection.clips.len() == 1 || matches!(editor.selected_track, Some(Chain::Track(_)))
@@ -343,7 +357,8 @@ pub enum Request {
     /// in front of the devices, or the devices in front of it.
     SwitchDevicesClipEditor(&'static str),
     /// Bring the devices panel in front of the piano roll, unless it's
-    /// hidden, with this device in sight: it was just added.
+    /// hidden, with this device in sight: it was just added, moved or
+    /// copied.
     ShowDevice(DeviceId),
     /// Move the panel with the focus to a new window of its own.
     MoveToNewWindow,

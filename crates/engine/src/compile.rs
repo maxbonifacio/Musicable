@@ -52,14 +52,14 @@ use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, 
 /// The keys [`compile`] gives model objects' nodes.
 ///
 /// A track's nodes have its id in the low 32 bits of the key and their role
-/// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 6 for
-/// the built-in slots, 7 for the output stage, 8 for a group's or a
-/// return's bus, 11 for an audio or MIDI track's clip player and 12 for a
-/// track's input monitor. The slot in
-/// front of a device also has the device's position in the top 16 bits. The
-/// master's strip has the keys of a track whose id is `u32::MAX`, which no
-/// track has. Sends and devices have their own ids in the low 32 bits, with
-/// role 9 for sends and 10 for devices. Keys with role 0 belong to no
+/// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 5 for
+/// the built-in slots after the devices, 7 for the output stage, 8 for a
+/// group's or a return's bus, 11 for an audio or MIDI track's clip player
+/// and 12 for a track's input monitor. The master's strip has the keys of a
+/// track whose id is `u32::MAX`, which no track has. Sends and devices have
+/// their own ids in the low 32 bits, with role 9 for sends and 10 for
+/// devices, and so does the slot in front of a device, with role 6, so it
+/// goes where the device goes. Keys with role 0 belong to no
 /// channel.
 pub mod keys {
     use musicable_model::param::ParamAddress;
@@ -95,13 +95,15 @@ pub mod keys {
         track_key(2, track)
     }
 
-    /// The native stage in one of a track's built-in slots.
+    /// The native stage in one of a track's built-in slots. The one in
+    /// front of a device has the device's id, not the track's, so it's the
+    /// same on any track, and on the master.
     pub fn track_slot(track: TrackId, slot: Slot) -> NodeKey {
         let role = match slot {
             Slot::PreFader => 3,
             Slot::PostFader => 4,
             Slot::BusFeed => 5,
-            Slot::BeforeDevice(device) => 6 | u64::from(device) << 16,
+            Slot::BeforeDevice(device) => return NodeKey(6 << 32 | u64::from(device.0)),
         };
         track_key(role, track)
     }
@@ -201,8 +203,10 @@ pub mod keys {
 /// post-fader slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// In front of the channel's device `n`, counting from 0.
-    BeforeDevice(u16),
+    /// In front of the channel's device with this id. It goes with the
+    /// device, along the chain or to another, so its stage stays the
+    /// device's own.
+    BeforeDevice(DeviceId),
     /// After the devices, in front of the fader.
     PreFader,
     /// Right after the fader.
@@ -784,11 +788,8 @@ impl Strip<'_> {
             }
         };
         let mut instrument = None;
-        for (position, device) in channel.devices().iter().enumerate() {
-            // A key has room for 65,536 slots in front of devices.
-            if let Ok(position) = u16::try_from(position) {
-                slot(self, Slot::BeforeDevice(position));
-            }
+        for device in channel.devices() {
+            slot(self, Slot::BeforeDevice(device.id));
             let key = keys::device(device.id);
             let node = match device_node(device, devices, media) {
                 Some(node) if !device.active => {
@@ -1157,14 +1158,7 @@ mod tests {
 
     #[test]
     fn every_node_has_its_own_key() {
-        let slots = [
-            Slot::BeforeDevice(0),
-            Slot::BeforeDevice(1),
-            Slot::BeforeDevice(u16::MAX),
-            Slot::PreFader,
-            Slot::PostFader,
-            Slot::BusFeed,
-        ];
+        let slots = [Slot::PreFader, Slot::PostFader, Slot::BusFeed];
         let mut seen = BTreeSet::from([
             keys::MASTER,
             keys::CUE,
@@ -1173,7 +1167,7 @@ mod tests {
             keys::master_output(),
         ]);
         seen.extend(slots.map(keys::master_slot));
-        assert_eq!(seen.len(), 11);
+        assert_eq!(seen.len(), 8);
         // The last id a project hands out is one below `u32::MAX`.
         for id in [0, 1, u32::MAX - 1] {
             let track = TrackId(id);
@@ -1186,7 +1180,13 @@ mod tests {
                 keys::track_clips(track),
                 keys::track_input(track),
             ];
-            let others = [keys::send(SendId(id)), keys::device(DeviceId(id))];
+            // The slot in front of a device is the device's, whichever
+            // chain it's on.
+            let before = Slot::BeforeDevice(DeviceId(id));
+            let in_front = keys::track_slot(track, before);
+            assert_eq!(keys::track_slot(TrackId(7), before), in_front);
+            assert_eq!(keys::master_slot(before), in_front);
+            let others = [keys::send(SendId(id)), keys::device(DeviceId(id)), in_front];
             for key in strip.into_iter().chain(roles).chain(others) {
                 assert!(seen.insert(key), "{key:?} is taken");
             }
@@ -1341,6 +1341,45 @@ mod tests {
         // In another slot it's another node, so it starts again.
         handle.swap_graph(graph(Slot::PreFader)).unwrap();
         assert_eq!(left(play(&mut engine, 100)), count(0));
+    }
+
+    #[test]
+    fn the_stage_in_front_of_a_device_goes_with_it() {
+        let mut p = Project::new();
+        let first = p.add_track("First", TrackKind::Audio);
+        let second = p.add_track("Second", TrackKind::Audio);
+        let gain = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        let device = gain.id;
+        p.track_mut(first).unwrap().devices.push(gain);
+        let meters = Meters::new();
+        let graph = |p: &Project| {
+            let ramp = |_: Channel<'_>, slot: Slot| {
+                (slot == Slot::BeforeDevice(device)).then(|| Box::new(Ramp(0.0)) as Box<dyn Node>)
+            };
+            let devices = Devices::new();
+            compile_with(
+                p,
+                &meters,
+                &Media::new(),
+                &devices,
+                &InputLayout::new(),
+                ramp,
+            )
+            .prepare(&CONFIG)
+            .unwrap()
+        };
+        let left = |out: Vec<f32>| -> Vec<f32> { out.into_iter().step_by(2).collect() };
+        let count = |from: u16| -> Vec<f32> { (from..from + 100).map(f32::from).collect() };
+
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(graph(&p)).unwrap();
+        assert_eq!(left(play(&mut engine, 100)), count(0));
+        // Moved to the other track, the device takes the stage in front of
+        // it along, and it carries on, as a console stage would.
+        let moved = p.track_mut(first).unwrap().devices.remove(0);
+        p.track_mut(second).unwrap().devices.push(moved);
+        handle.swap_graph(graph(&p)).unwrap();
+        assert_eq!(left(play(&mut engine, 100)), count(100));
     }
 
     #[test]

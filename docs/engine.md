@@ -517,7 +517,9 @@ feed.
   clip type, is an ordinary recompile and swap.
 - A stage's key comes from its track id and slot (`keys::track_slot`), so it
   keeps its state across swaps like any other node. Moved to another slot,
-  it starts fresh.
+  it starts fresh. The slot in front of a device is keyed by the device's
+  id instead, so it goes with the device, along the chain or to another
+  track, as the device's own node does.
 
 **Mute and solo.** `Project::silenced` works out which track outputs and
 sends are cut, and `compile()` builds that into each output stage and send

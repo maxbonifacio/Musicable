@@ -2,8 +2,9 @@
 //! folders added to the library, the devices to put on tracks, and the
 //! presets, each with a search. Picking a sample previews it, a double-click
 //! puts it on the selected track, and samples, devices and presets drag onto
-//! the arrangement's tracks, or into the devices panel: a sample onto a
-//! sampler there.
+//! the arrangement's tracks and the mixer's strips, or into the devices
+//! panel: between the devices there, or a sample onto a sampler. The devices
+//! panel's own devices drag the same way.
 //!
 //! What the browser does, it does with the library's commands, and what it
 //! lists is what the library's last search or Find Similar found, so a
@@ -110,7 +111,8 @@ pub struct Preview<'a> {
     pub peaks: Option<&'a Peaks>,
 }
 
-/// Something dragged from the browser: egui's drag-and-drop payload.
+/// Something dragged from the browser, or from the devices panel: egui's
+/// drag-and-drop payload.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Dragged {
     Sample(PathBuf),
@@ -121,9 +123,17 @@ pub(crate) enum Dragged {
         path: PathBuf,
         name: String,
     },
+    /// Devices of one chain, by their title bars in the devices panel: they
+    /// move where they're let go, or copies of them go there with `copy`.
+    /// `name` is the device's, or says how many there are.
+    Devices {
+        devices: Vec<DeviceId>,
+        copy: bool,
+        name: String,
+    },
 }
 
-/// Where something dragged from the browser is let go.
+/// Where something dragged is let go.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Destination {
     /// A track, at a time on it over the arrangement's lanes.
@@ -134,21 +144,29 @@ pub(crate) enum Destination {
     },
     /// Under the tracks, for a track of its own.
     NewTrack { at: Option<Beats> },
-    /// The devices of the chain the devices panel shows, or of the selected
-    /// track.
+    /// The end of a chain, or of the selected track's without one: the
+    /// master's, a mixer strip's, or an empty one in the devices panel.
     Chain(Option<Chain>),
+    /// Between the devices of the chain the devices panel shows: the place
+    /// the first of what's dragged takes, counting the chain without the
+    /// devices dragged along it.
+    Devices { chain: Chain, index: usize },
     /// A sampler in the devices panel, which takes a sample as its own.
     Sampler(DeviceId),
 }
 
 impl Dragged {
     /// What it's called by the pointer while it's dragged.
-    fn name(&self) -> String {
+    pub(crate) fn name(&self) -> String {
         match self {
             Self::Sample(path) => stem(path),
             Self::Native(kind) => kind.name().to_owned(),
             Self::Plugin(plugin) => plugin.name.clone(),
             Self::Preset { name, .. } => name.clone(),
+            Self::Devices {
+                name, copy: true, ..
+            } => format!("Copy {name}"),
+            Self::Devices { name, .. } => name.clone(),
         }
     }
 
@@ -161,7 +179,7 @@ impl Dragged {
                 let (track, at) = match *target {
                     Destination::Track { track, audio, at } => (audio.then_some(track), at),
                     Destination::NewTrack { at } => (None, at),
-                    Destination::Chain(_) => return None,
+                    Destination::Chain(_) | Destination::Devices { .. } => return None,
                     Destination::Sampler(device) => {
                         let file = file.clone();
                         return Some(Action::LoadSample { device, file });
@@ -173,27 +191,34 @@ impl Dragged {
             Self::Native(kind) => (device::ADD, Args::new().with("kind", kind.key())),
             Self::Plugin(plugin) => (device::ADD_PLUGIN, devices::add(plugin, None)),
             Self::Preset { path, .. } => (device::ADD_PRESET, preset_args(path)),
+            Self::Devices { devices, copy, .. } => {
+                let command = if *copy { device::COPY } else { device::MOVE };
+                (command, Args::new().with("devices", devices.clone()))
+            }
         };
         let (command, args) = args;
         let args = match *target {
             Destination::Track { track, .. } => args.with("track", track),
             Destination::NewTrack { .. } => args.with("new_track", true),
             Destination::Chain(chain) => onto(args, chain),
+            Destination::Devices { chain, index } => {
+                onto(args, Some(chain)).with("index", index as i64)
+            }
             Destination::Sampler(_) => return None,
         };
         Some(Action::RunWith(command, args))
     }
 }
 
-/// What's dragged from the browser, if it can go to `target`.
+/// What's dragged, if it can go to `target`.
 pub(crate) fn dragged_to(ctx: &Context, target: &Destination) -> Option<Dragged> {
     let dragged = egui::DragAndDrop::payload::<Dragged>(ctx)?;
     dragged.dropped(target).map(|_| (*dragged).clone())
 }
 
-/// Lets something dragged from the browser go into `rect` as `target`,
-/// such as the devices panel's chain: outlines `rect` while it's over it,
-/// and returns what letting it go there asks for.
+/// Lets something dragged go into `rect` as `target`, such as a mixer
+/// strip's chain: outlines `rect` while it's over it, and returns what
+/// letting it go there asks for.
 pub(crate) fn drop_in(
     ctx: &Context,
     rect: Rect,
@@ -215,8 +240,8 @@ pub(crate) fn drop_in(
     dragged.dropped(target)
 }
 
-/// Shows the name of what's dragged from the browser by the pointer, if
-/// it's in this window: past its edge, the window it's over shows it.
+/// Shows the name of what's dragged by the pointer, if it's in this
+/// window: past its edge, the window it's over shows it.
 pub(crate) fn show_dragged(ctx: &Context) {
     let Some(dragged) = egui::DragAndDrop::payload::<Dragged>(ctx) else {
         return;

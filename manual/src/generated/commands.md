@@ -107,6 +107,14 @@
 | Tempo Up | Ctrl+Shift+Up | `transport.tempo_up` |
 | Tempo Down | Ctrl+Shift+Down | `transport.tempo_down` |
 
+### Device
+
+| Command | Keys | Id |
+|---|---|---|
+| Move Devices Left | Ctrl+Left in the Devices panel | `device.move_left` |
+| Move Devices Right | Ctrl+Right in the Devices panel | `device.move_right` |
+| Toggle Device Bypass | 0 in the Devices panel | `device.toggle_bypass` |
+
 ### Browser
 
 | Command | Keys | Id |

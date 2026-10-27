@@ -418,6 +418,35 @@ impl Transaction<'_> {
         Some(device)
     }
 
+    /// Moves the device with id `device` to `index` in `chain`, counting
+    /// without it, or to the end if `index` is past it. It keeps its id, so
+    /// its lanes, which name it by its id, go with it, and so do its plugin
+    /// and its node's sound. A device the project hasn't got, or a chain
+    /// whose track isn't there, is left alone.
+    pub fn move_device(&mut self, device: DeviceId, chain: Chain, index: usize) {
+        let Some((from, at, _)) = self.project.find_device(device) else {
+            return;
+        };
+        if self.project.devices(chain).is_none() {
+            return;
+        }
+        let Some(moved) = (self.project.devices_mut(from)).map(|devices| devices.remove(at)) else {
+            return;
+        };
+        let Some(devices) = self.project.devices_mut(chain) else {
+            return;
+        };
+        let index = index.min(devices.len());
+        devices.insert(index, moved);
+        if (from, at) != (chain, index) {
+            self.edits.push(Edit::MoveDevice {
+                device,
+                from: (from, at),
+                to: (chain, index),
+            });
+        }
+    }
+
     /// Bypasses the device with id `device`, or brings it back with
     /// `false`. A bypassed device stops, and what comes into it plays on,
     /// as late as its latency would make it. A device the project hasn't
@@ -1624,6 +1653,7 @@ impl Transaction<'_> {
             Edit::RemoveDevice { device, .. } => {
                 self.remove_device(device.id);
             }
+            Edit::MoveDevice { device, to, .. } => self.move_device(*device, to.0, to.1),
             Edit::DeviceBypass { device, to, .. } => self.set_device_bypass(*device, *to),
             Edit::DeviceActive { device, to, .. } => self.set_device_active(*device, *to),
             Edit::PluginParam {
@@ -1983,6 +2013,14 @@ pub enum Edit {
         index: usize,
         device: Device,
     },
+    /// The device with id `device` moved from a chain and its place there
+    /// to another, or to another place in the same chain. Its place in
+    /// `to` counts the chain without it.
+    MoveDevice {
+        device: DeviceId,
+        from: (Chain, usize),
+        to: (Chain, usize),
+    },
     /// The device with id `device` was bypassed, or brought back.
     DeviceBypass {
         device: DeviceId,
@@ -2316,6 +2354,11 @@ impl Edit {
                 chain,
                 index,
                 device,
+            },
+            Edit::MoveDevice { device, from, to } => Edit::MoveDevice {
+                device,
+                from: to,
+                to: from,
             },
             Edit::DeviceBypass { device, from, to } => Edit::DeviceBypass {
                 device,
@@ -2674,7 +2717,7 @@ impl Edit {
                     ..
                 },
             ) if param == other => *to = *next,
-            // Adding and removing never merge: each is a step of its own.
+            // Adding, removing and moving never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
                 | Edit::LoopRegion { .. }
@@ -2724,6 +2767,7 @@ impl Edit {
                 | Edit::LocatorName { .. }
                 | Edit::AddDevice { .. }
                 | Edit::RemoveDevice { .. }
+                | Edit::MoveDevice { .. }
                 | Edit::DeviceBypass { .. }
                 | Edit::DeviceActive { .. }
                 | Edit::PluginParam { .. }
@@ -2779,6 +2823,7 @@ impl Edit {
             | Edit::DeviceBypass { from, to, .. }
             | Edit::DeviceActive { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
+            Edit::MoveDevice { from, to, .. } => from == to,
             Edit::TrackInput { from, to, .. } => from == to,
             Edit::TrackMonitor { from, to, .. } => from == to,
             Edit::TrackClipType { from, to, .. } | Edit::MasterClipType { from, to } => from == to,

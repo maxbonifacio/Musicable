@@ -39,6 +39,12 @@ master track for the master's, or below the tracks for a new track named
 after it: a MIDI track for an instrument and an audio track for an effect
 ([The browser](../window/browser.md#devices)).
 
+Drag a plugin device by its title bar in the devices panel to move it along
+the chain or to another track, and Ctrl-drag it to copy it ([The devices
+panel](../window/devices-panel.md#selecting-moving-and-copying)). A moved
+plugin plays on, with its window open if it was. A copy loads the plugin
+again, with the state the original has in its window.
+
 ## Plugin windows
 
 **Plugin Window**, on the plugin's device in the devices panel, opens the
@@ -65,9 +71,9 @@ automation or the project, so it comes back as you left it.
 
 ## Undo, saving and timing
 
-Adding a plugin, deleting it and every change made in its window are steps
-in the undo history, named after the plugin, such as "Change Surge XT"; a
-whole drag of a knob is one. What a plugin changes on its own, as it loads,
+Adding a plugin, moving it, copying it, deleting it and every change made
+in its window are steps in the undo history, named after the plugin, such
+as "Change Surge XT"; a whole drag of a knob is one. What a plugin changes on its own, as it loads,
 or with its window closed, goes into the project without a step. Saving the
 project saves each plugin's state as it is then.
 

@@ -626,7 +626,33 @@ opacity, and still work, and a deactivated one says so beside its name.
 The name's menu has Bypass, ticked while the device is bypassed, and
 Deactivate or Activate. Screen readers hear the button as "EQ Bypass",
 on while the device is bypassed, and the name with the device's state,
-such as "Device EQ, bypassed".
+such as "Device EQ, bypassed, selected".
+
+A click on a device's title bar, or on its box where no control takes it,
+selects the device (`device.select`), as the mouse map's `DeviceTitle`
+target says: in Live's map, Ctrl-click and Shift-click add it to the
+selection or take it out, and a click beside the boxes selects none. The
+selection is the editor's (`Editor::devices`, [commands.md](commands.md#the-editors-state)),
+of the chain the panel shows, and selecting gives the panel the focus, so
+the edit commands act on the selected devices and the panel's keys
+(`[panels.devices]` in the keymap) do too: 0 bypasses them, or brings them
+all back (`device.toggle_bypass`), and Ctrl+Left and Ctrl+Right move them
+one place along the chain (`device.move_left`, `device.move_right`). They're
+outlined in the theme's `clip_selected` colour. A device's menu works on
+the selection if the device is in it, and otherwise selects the device
+alone, as in Live, and so does a drag.
+
+Dragging a title bar moves the devices (`device.move`), and Ctrl-dragging
+copies them (`device.copy`), as the `DeviceTitle` target's drag says; Escape
+lets go of them. Over the panel, a line in the `start_marker` colour shows
+where they'd go between the devices, which `DevicesPanel::drop` works out
+from the boxes it drew last, and devices and presets from the browser go in
+at the line too. Over the arrangement they go on a track's row or the
+master's, or under the tracks on a new track, as the browser's devices do
+([The browser](#the-browser)), and onto a mixer strip, at the end of its
+track's devices. A moved device keeps its id, so its node and its plugin go
+with it: a plugin's window stays open, and the graph swaps at once, without
+a crossfade, even while the song plays.
 
 Every device's Bypass is a parameter automation can move
 ([commands.md](commands.md#automation)): the arrangement's lane chooser
@@ -1177,8 +1203,9 @@ uses it, as does Capture.
   reported.
 - [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays the
   test plugins on tracks through the session, as CLAP and as VST3: saved
-  and opened again, undoing changes made in their windows, missing, and
-  lined up with a dry track by delay compensation. It also runs the app's
+  and opened again, undoing changes made in their windows, moved to
+  another track with a window open and copied, missing, and lined up with
+  a dry track by delay compensation. It also runs the app's
   binary as the plugin scanner, on a CLAP library and a VST3 bundle.
 
 To see the window without Windows, a Linux build runs under Xvfb, and the
@@ -1196,8 +1223,9 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
   two points that differ, so switching at a place takes a step there.
 - Reordering tracks, grouping the selected ones (Live's Ctrl+G), and
   devices in the mixer.
-- Moving devices along a chain, and a device's parameters in the devices
-  panel.
+- A plugin's parameters in the devices panel; crossfading the swap when a
+  device moves while the song plays, which switches at once for now; and
+  grouping the selected devices, which Ctrl+G is kept free for.
 - In the browser: analysis, which will tag sounds by how they sound and
   find similar ones by an embedding; previews in time with the song;
   watching the library's folders, which are looked through at each start

@@ -211,7 +211,7 @@ pub fn register(registry: &mut Registry) {
             let (track, clips) = insert_audio(ctx, &files, args.opt("track")?, args.opt("at")?)?;
             let editor = ctx.document.editor_mut();
             editor.selection = Selection::clips(clips.clone());
-            editor.selected_track = Some(Chain::Track(track));
+            editor.select_track(Chain::Track(track));
             Ok(clips.into())
         },
     );

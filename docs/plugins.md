@@ -281,6 +281,12 @@ open project, on a track or on the master:
   its settings. A change to the settings, from `device.set_param` or undo,
   goes to the plugin as far as it differs from what the plugin has: a new
   state through `load_state`, then the parameters through `set_param`.
+  Moving a device, along its chain or to another track, keeps its
+  instance, which goes by the device's id: the plugin plays on in the new
+  graph, its window open. A copy is a new device, which loads a plugin of
+  its own with the state its original's plugin saves as it's copied
+  (`Library::plugin_state`), as a preset takes it, so a change still on
+  its way from the plugin's window isn't left out.
 - **Following the plugin.** `Session::tick` polls the plugins every frame.
   A parameter someone turns in the plugin's window is set in the project
   in a transaction named after the plugin, such as "Change Test Gain", and
@@ -432,7 +438,8 @@ at run time may allocate the first time the thread touches it.
 The app's tests use the same plugins, in both formats:
 [`crates/app/tests/plugins.rs`](../crates/app/tests/plugins.rs) plays them
 through the session, saves and opens them again, undoes changes made in
-their windows and redoes past the changes they make on their own, plays a
+their windows and redoes past the changes they make on their own, moves
+one to another track with its window open and copies it, plays a
 missing plugin, lines a latent plugin up with a dry
 track to the sample, also after its latency changes, and runs the app's
 binary as the scanner.

@@ -393,6 +393,7 @@ mod tests {
                 "Automation",
                 "Locator",
                 "Transport",
+                "Device",
                 "Macro",
                 "Browser",
                 "View",

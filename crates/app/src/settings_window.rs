@@ -668,6 +668,16 @@ fn behaviour(ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
         .weak(),
     );
     ui.add_space(8.0);
+    ui.label(RichText::new("Devices").strong());
+    ui.checkbox(
+        &mut new.copies_take_automation,
+        "Copies of devices take their automation",
+    )
+    .on_hover_text(
+        "A device copied, duplicated or pasted gets lanes of its own with the original's \
+         points, as in Live. Without it, copies start without automation.",
+    );
+    ui.add_space(8.0);
     ui.label(RichText::new("Analysis").strong());
     let mut fast = cx.settings.analysis.fast;
     if ui

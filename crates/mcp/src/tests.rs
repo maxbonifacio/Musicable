@@ -634,6 +634,16 @@ fn reads_say_which_devices_are_bypassed_or_deactivated() {
         (delay.get("bypassed"), &delay["active"]),
         (None, &json!(false))
     );
+
+    // The devices selected, in the order they play.
+    rig.call(
+        "run_command",
+        json!({"id": "device.select", "args": {"devices": [2, 0]}}),
+    )
+    .unwrap();
+    let editor = rig.call("get_editor", json!({})).unwrap();
+    assert_eq!(editor["devices"], json!({"selected": [0, 2]}));
+    assert_eq!(editor["focus"], "devices");
 }
 
 #[test]

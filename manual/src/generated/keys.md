@@ -71,6 +71,14 @@
 | Ctrl+Alt+U | View: Show/Hide Take Lanes |
 | Ctrl+Alt+3 | View: Clip Editor |
 
+## In the Devices panel
+
+| Keys | Command |
+|---|---|
+| 0 | Device: Toggle Device Bypass |
+| Ctrl+Left | Device: Move Devices Left |
+| Ctrl+Right | Device: Move Devices Right |
+
 ## In the History panel
 
 | Keys | Command |

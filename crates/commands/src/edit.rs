@@ -13,9 +13,11 @@
 //! They act where the [focus](crate::Focus) is: on the arrangement's
 //! selection while the arrangement or the mixer has it, and while the
 //! piano roll has it, Cut, Copy, Paste, Duplicate, Delete and Select All
-//! act on its notes instead (see [`notes`]). While the Sample Editor has
-//! it, Delete and Select All act on its warp markers (see [`warp`]). In the
-//! other panels they don't apply. Split acts on clips only.
+//! act on its notes instead (see [`notes`]). While the devices panel has
+//! it, they act on its selected devices (see [`device`]), and while the
+//! Sample Editor has it, Delete and Select All act on its warp markers (see
+//! [`warp`]). In the other panels they don't apply. Split acts on clips
+//! only.
 //!
 //! Quantize moves things towards the grid, as Live's does: the piano roll's
 //! notes while it has the focus, the Sample Editor's transients while it
@@ -34,7 +36,7 @@ use crate::{
     Args, Command, CommandError, CommandId, Context, Named, Param, Registry, Request, Transaction,
     Type, Value, When,
 };
-use crate::{arrange, notes, panel, transient, warp};
+use crate::{arrange, device, notes, panel, transient, warp};
 
 /// Takes back the last change to the project.
 pub const UNDO: CommandId = CommandId::new("edit.undo");
@@ -85,23 +87,37 @@ const COMMANDS: [(CommandId, &str, When, Handler); 10] = [
         ctx.document.redo();
     }),
     (CUT, "Cut", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::cut, nothing, cut)
+        by_focus(ctx, [notes::cut, nothing, device::cut, cut]);
     }),
     (COPY, "Copy", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::copy, nothing, copy);
+        by_focus(ctx, [notes::copy, nothing, device::copy, copy]);
     }),
     (PASTE, "Paste", When::CanPaste, |ctx| {
-        by_focus(ctx, notes::paste, nothing, paste);
+        by_focus(ctx, [notes::paste, nothing, device::paste, paste]);
     }),
     (DUPLICATE, "Duplicate", When::CanCopy, |ctx| {
-        by_focus(ctx, notes::duplicate, nothing, duplicate);
+        by_focus(
+            ctx,
+            [notes::duplicate, nothing, device::duplicate, duplicate],
+        );
     }),
     (DELETE, "Delete", When::SomethingSelected, |ctx| {
-        by_focus(ctx, notes::delete, warp::delete_selected, delete);
+        by_focus(
+            ctx,
+            [notes::delete, warp::delete_selected, device::delete, delete],
+        );
     }),
     (SPLIT, "Split", When::ClipsOrTimeSelected, split),
     (SELECT_ALL, "Select All", When::CanSelectAll, |ctx| {
-        by_focus(ctx, notes::select_all, warp::select_all, select_all);
+        by_focus(
+            ctx,
+            [
+                notes::select_all,
+                warp::select_all,
+                device::select_all,
+                select_all,
+            ],
+        );
     }),
     (
         SELECT_MASTER,
@@ -111,13 +127,15 @@ const COMMANDS: [(CommandId, &str, When, Handler); 10] = [
     ),
 ];
 
-/// Runs `notes` while the piano roll has the focus, `markers` while the
-/// Sample Editor has it, or `arrangement` while the arrangement or the
-/// mixer has it.
-fn by_focus(ctx: &mut Context<'_>, notes: Handler, markers: Handler, arrangement: Handler) {
+/// Runs one of `[notes, markers, devices, arrangement]`: `notes` while the
+/// piano roll has the focus, `markers` while the Sample Editor has it,
+/// `devices` while the devices panel has it, or `arrangement` while the
+/// arrangement or the mixer has it.
+fn by_focus(ctx: &mut Context<'_>, [notes, markers, devices, arrangement]: [Handler; 4]) {
     match ctx.document.editor().focus.edits() {
         Edits::Notes => notes(ctx),
         Edits::Markers => markers(ctx),
+        Edits::Devices => devices(ctx),
         Edits::Arrangement => arrangement(ctx),
         Edits::Nothing => {}
     }
@@ -302,7 +320,7 @@ fn quantize(ctx: &mut Context<'_>, args: &Args) -> Result<Value, CommandError> {
         None => match editor.focus.edits() {
             Edits::Notes => Some(notes::clip_arg(ctx, args)?),
             Edits::Markers => Some(warp::clip_arg(ctx, args)?),
-            Edits::Arrangement | Edits::Nothing => None,
+            Edits::Arrangement | Edits::Devices | Edits::Nothing => None,
         },
     };
     let mut changes = Vec::new();
@@ -396,7 +414,7 @@ fn select_clips(
         }
     }
     if let Some(&track) = tracks.last() {
-        editor.selected_track = Some(Chain::Track(track));
+        editor.select_track(Chain::Track(track));
     }
     editor.focus_arrangement();
     let selected: Vec<ClipId> = clips
@@ -452,7 +470,7 @@ fn select_time(
     if !editor.selected_track.is_some_and(covered)
         && let Some(topmost) = topmost
     {
-        editor.selected_track = Some(topmost);
+        editor.select_track(topmost);
     }
     let time = (!range.is_empty() && topmost.is_some()).then_some(TimeSelection {
         range,
@@ -485,7 +503,7 @@ fn select_tracks(
         }
     }
     if let Some(&track) = tracks.iter().rev().find(|t| selection.tracks.contains(t)) {
-        editor.selected_track = Some(Chain::Track(track));
+        editor.select_track(Chain::Track(track));
     }
     editor.focus_arrangement();
     Ok(())
@@ -495,7 +513,7 @@ fn select_tracks(
 fn select_master(ctx: &mut Context<'_>) {
     let editor = ctx.document.editor_mut();
     editor.selection = Selection::default();
-    editor.selected_track = Some(Chain::Master);
+    editor.select_track(Chain::Master);
     editor.focus_arrangement();
 }
 

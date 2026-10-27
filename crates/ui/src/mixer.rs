@@ -11,7 +11,8 @@
 //!
 //! Clicking a strip where it has no control selects its track, or the
 //! master, as clicking its header in the arrangement does, and a selected
-//! track's strip is lit, as its header is.
+//! track's strip is lit, as its header is. Devices and presets dragged onto
+//! a strip, from the browser or the devices panel, go on its track.
 //!
 //! An automated fader, pan or send shows the value its automation gives it
 //! at the playhead, with a dot in the automation's colour, grey once
@@ -37,6 +38,7 @@ use musicable_model::{
     AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
 };
 
+use crate::browser::{self, Destination};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
 use crate::shell::Action;
@@ -447,6 +449,11 @@ impl Mixer<'_> {
             Some(*id)
         });
         self.parts.context_menu(&strip, MIXER_STRIP, clicked);
+        // Devices and presets dragged from the browser, and devices from the
+        // devices panel, go at the end of its chain, as on its track.
+        let rect = strip.rect.intersect(ui.clip_rect());
+        let target = Destination::Chain(Some(channel.chain()));
+        actions.extend(browser::drop_in(ui.ctx(), rect, &target, self.theme));
     }
 
     /// Whether `channel`'s strip is lit: its track is selected, or is the

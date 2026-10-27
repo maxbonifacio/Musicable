@@ -2,10 +2,11 @@
 //! (`crates/test-plugins`), CLAP and VST3 alike. A plugin loads once a scan
 //! says it's installed, plays, and comes back from the project's file as it
 //! was saved. Changes made in its window are steps in the undo history, and
-//! the ones it makes on its own aren't, so redo carries on past them. Its
-//! parameters follow their automation until someone turns them by hand. Its
-//! own Bypass is its device's. A missing plugin lets the sound through and
-//! says why. Delay compensation
+//! the ones it makes on its own aren't, so redo carries on past them. A
+//! plugin moved to another track plays on there, its window open, and a
+//! copy loads a plugin of its own. Its parameters follow their automation
+//! until someone turns them by hand. Its own Bypass is its device's. A
+//! missing plugin lets the sound through and says why. Delay compensation
 //! lines a latent plugin up with a dry track to the sample, also after the
 //! plugin's latency changes. And the app's binary scans each library in a
 //! process of its own, so a library that crashes takes only that process
@@ -458,6 +459,75 @@ fn own_changes_are_no_steps_in_the_undo_history(format: PluginFormat) {
     let instance = rig.session.plugin(gain).unwrap();
     assert_eq!(plugins.label(instance), "Bright");
     near(rig.peaks(), half);
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_clap_plugin_moves_with_its_window_open_and_a_copy_loads_its_own() {
+    moves_and_copies(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_plugin_moves_with_its_window_open_and_a_copy_loads_its_own() {
+    moves_and_copies(PluginFormat::Vst3);
+}
+
+fn moves_and_copies(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "moved");
+    let quarter = with_param(GAIN, plugins.factor(0.25));
+    let (mut song, gain) = tone_with(|p| plugins.gain(p, quarter));
+    // A quieter tone on a track of its own, so each track's gain is heard.
+    let quiet = song.add_track("Quiet", TrackKind::Audio);
+    song.track_mut(quiet).unwrap().tone = Some(TestTone {
+        frequency: 440.0,
+        level: 0.25,
+    });
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    let first = [0.5 * 0.25 + 0.25; 2];
+    near(rig.peaks(), first);
+    // What's alive of one plugin: a VST3 plugin's component and controller.
+    let one = plugins.library.alive();
+    let parent = ParentWindow::Win32(ptr::without_provenance_mut(77));
+    let instance = rig.session.plugin_mut(gain.id).unwrap();
+    instance.open_window(parent, 1.0).unwrap();
+    let open = plugins.library.alive();
+
+    // Moved to the quiet track, it plays there, the same plugin, with its
+    // window still open, and undone, it goes back the same way.
+    let to_quiet = Args::new()
+        .with("devices", vec![gain.id])
+        .with("track", quiet);
+    rig.session.run_with(&device::MOVE, &to_quiet).unwrap();
+    assert_eq!(rig.session.undo_name(), Some("Move Test Gain"));
+    near(rig.peaks(), [0.5 + 0.25 * 0.25; 2]);
+    assert!(rig.session.plugin(gain.id).unwrap().is_window_open());
+    assert_eq!(plugins.library.alive(), open);
+    rig.session.run(&edit::UNDO).unwrap();
+    near(rig.peaks(), first);
+    let instance = rig.session.plugin_mut(gain.id).unwrap();
+    assert!(instance.is_window_open());
+    assert_eq!(plugins.library.alive(), open);
+
+    // A copy loads a plugin of its own, with the state the original's has,
+    // though the project hasn't caught up with it yet.
+    instance.close_window();
+    let closed = plugins.library.alive();
+    plugins.set_label(rig.session.plugin(gain.id).unwrap(), "Warm");
+    let Ok(Value::List(copies)) = rig.session.run_with(&device::COPY, &to_quiet) else {
+        panic!("no copies");
+    };
+    let [Value::Device(copy)] = copies[..] else {
+        panic!("one copy, not {copies:?}");
+    };
+    near(rig.peaks(), [(0.5 + 0.25) * 0.25; 2]);
+    assert_eq!(plugins.library.alive(), closed + one);
+    assert_eq!(plugins.label(rig.session.plugin(copy).unwrap()), "Warm");
+    assert_eq!(rig.session.undo_name(), Some("Copy Test Gain"));
+    rig.session.run(&edit::UNDO).unwrap();
+    near(rig.peaks(), first);
+    assert_eq!(plugins.library.alive(), closed);
     drop(rig);
     plugins.assert_alright();
 }
