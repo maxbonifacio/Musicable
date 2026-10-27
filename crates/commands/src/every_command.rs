@@ -691,6 +691,10 @@ fn examples() -> Vec<Example> {
         }),
         // Without arguments: the selected clip.
         leaves(edit::RENAME, clip_selected),
+        leaves(edit::RENAME, |s| {
+            let id = find_modulator(s, |m| m.kind == ModulatorKind::Macro)?.id;
+            Some(Args::new().with("modulator", id).with("control", 0_i64))
+        }),
         leaves(edit::SELECT_ALL, bare),
         // In the piano roll.
         leaves(edit::SELECT_ALL, note_selected),

@@ -1039,39 +1039,14 @@ impl Scene<'_> {
             .map_or(Envelope::Lane, |(_, from, to)| Envelope::Line { from, to })
     }
 
-    /// What the parameter at `param` is: as the project knows it, or as
-    /// its plugin says, or else a parameter from 0 to 1.
+    /// What the parameter at `param` is: see [`param_spec`].
     fn spec(&self, param: ParamAddress) -> ParamSpec {
-        if let Some(spec) = self.project().param_spec(param) {
-            return spec;
-        }
-        let listed = match param {
-            ParamAddress::Device(device, n) => (self.view.plugins.status.get(&device))
-                .and_then(|status| status.params.iter().find(|p| p.id == n)),
-            _ => None,
-        };
-        match (listed, param) {
-            (Some(listed), _) => listed.spec.clone(),
-            (None, ParamAddress::Device(_, n)) => unknown(format!("Parameter {n}")),
-            (None, param) => unknown(param_text(param)),
-        }
+        param_spec(self.view, param)
     }
 
-    /// What the automation lane of `param` is called: the parameter's name,
-    /// after its device's for a device's.
+    /// What the automation lane of `param` is called: see [`param_name`].
     fn lane_name(&self, param: ParamAddress) -> String {
-        let name = self.spec(param).name;
-        let project = self.project();
-        // A wire's gain goes with the device it feeds.
-        let device = match param {
-            ParamAddress::Wire(wire) => project.wire(wire).map(|wire| wire.to.device()),
-            param => param.device(),
-        };
-        let device = device.and_then(|device| project.find_device(device));
-        match device {
-            Some((_, _, device)) => format!("{}: {name}", describe(device).0),
-            None => name,
-        }
+        param_name(self.view, param)
     }
 
     /// An automation lane's name, with its channel's: "Volume of Drums".
@@ -1134,76 +1109,9 @@ impl Scene<'_> {
     }
 
     /// The parameters on `chain` an automation lane can show, with their
-    /// names: the channel's volume, pan and sends, then each device's
-    /// parameters, by device: its Bypass, then every one in a built-in
-    /// device's table, or the ones a plugin lists.
-    #[allow(clippy::type_complexity)]
-    fn chain_params(
-        &self,
-        chain: Chain,
-    ) -> (
-        Vec<(ParamAddress, String)>,
-        Vec<(String, Vec<(ParamAddress, String)>)>,
-    ) {
-        let project = self.project();
-        let mut own = vec![
-            (ParamAddress::Volume(chain), "Volume".to_owned()),
-            (ParamAddress::Pan(chain), "Pan".to_owned()),
-        ];
-        if let Chain::Track(id) = chain
-            && let Some(track) = project.track(id)
-        {
-            for send in &track.sends {
-                let param = ParamAddress::Send(send.id);
-                own.push((param, self.spec(param).name));
-            }
-        }
-        let devices = project.devices(chain).unwrap_or_default();
-        let devices = devices.iter().map(|device| {
-            let bypass = ParamAddress::Bypass(device.id);
-            let mut params = vec![(bypass, self.spec(bypass).name)];
-            params.extend(match &device.kind {
-                DeviceKind::Plugin(_) => {
-                    let status = self.view.plugins.status.get(&device.id);
-                    let listed = status.map_or(&[][..], |status| &status.params[..]);
-                    let mut params: Vec<(ParamAddress, String)> = (listed.iter())
-                        .map(|p| (ParamAddress::Device(device.id, p.id), p.spec.name.clone()))
-                        .collect();
-                    // Lanes of parameters it doesn't list, as before it
-                    // loads.
-                    for lane in &project.automation {
-                        if let ParamAddress::Device(on, _) = lane.param
-                            && on == device.id
-                            && !params.iter().any(|&(param, _)| param == lane.param)
-                        {
-                            params.push((lane.param, self.spec(lane.param).name));
-                        }
-                    }
-                    params
-                }
-                DeviceKind::Native(native) => (0..native.params().len() as u32)
-                    .map(|n| {
-                        let param = ParamAddress::Device(device.id, n);
-                        (param, self.spec(param).name)
-                    })
-                    .collect(),
-                DeviceKind::TestGain { .. } | DeviceKind::TestInstrument { .. } => {
-                    let param = ParamAddress::Device(device.id, 0);
-                    vec![(param, self.spec(param).name)]
-                }
-            });
-            // The gains of the wires into its side inputs.
-            let ports = project.ports(device.id);
-            let wires = ports.into_iter().flat_map(|port| project.wires_into(port));
-            for param in wires
-                .map(|wire| ParamAddress::Wire(wire.id))
-                .collect::<Vec<_>>()
-            {
-                params.push((param, self.spec(param).name));
-            }
-            (describe(device).0.to_owned(), params)
-        });
-        (own, devices.collect())
+    /// names: see [`chain_params`].
+    fn chain_params(&self, chain: Chain) -> ChainParams {
+        chain_params(self.view, chain)
     }
 
     /// The parameter a new lane under `chain` shows: the first automated
@@ -1611,6 +1519,131 @@ impl Scene<'_> {
             _ => None,
         }
     }
+}
+
+/// The parameters of a channel: its own, with their names, then each
+/// device's and each modulator's, by its name.
+pub(crate) type ChainParams = (
+    Vec<(ParamAddress, String)>,
+    Vec<(String, Vec<(ParamAddress, String)>)>,
+);
+
+/// What the parameter at `param` is: as the project knows it, or as its
+/// plugin says, or else a parameter from 0 to 1.
+pub(crate) fn param_spec(view: &View<'_>, param: ParamAddress) -> ParamSpec {
+    if let Some(spec) = view.project.param_spec(param) {
+        return spec;
+    }
+    let listed = match param {
+        ParamAddress::Device(device, n) => (view.plugins.status.get(&device))
+            .and_then(|status| status.params.iter().find(|p| p.id == n)),
+        _ => None,
+    };
+    match (listed, param) {
+        (Some(listed), _) => listed.spec.clone(),
+        (None, ParamAddress::Device(_, n)) => unknown(format!("Parameter {n}")),
+        (None, param) => unknown(param_text(param)),
+    }
+}
+
+/// What the parameter at `param` is called, as its automation lane names
+/// it: after its device's name for a device's, and its modulator's for a
+/// modulator's.
+pub(crate) fn param_name(view: &View<'_>, param: ParamAddress) -> String {
+    let name = param_spec(view, param).name;
+    let project = view.project;
+    let modulator = param.modulator().and_then(|id| project.find_modulator(id));
+    if let Some((_, _, modulator)) = modulator {
+        return format!("{}: {name}", modulator.name);
+    }
+    // A wire's gain goes with the device it feeds.
+    let device = match param {
+        ParamAddress::Wire(wire) => project.wire(wire).map(|wire| wire.to.device()),
+        param => param.device(),
+    };
+    let device = device.and_then(|device| project.find_device(device));
+    match device {
+        Some((_, _, device)) => format!("{}: {name}", describe(device).0),
+        None => name,
+    }
+}
+
+/// The parameters on `chain` an automation lane can show, with their
+/// names: the channel's volume, pan and sends, then each device's
+/// parameters, by device: its Bypass, then every one in a built-in
+/// device's table, or the ones a plugin lists, and the gains of the wires
+/// into it. Then each modulator's, by modulator.
+pub(crate) fn chain_params(view: &View<'_>, chain: Chain) -> ChainParams {
+    let project = view.project;
+    let mut own = vec![
+        (ParamAddress::Volume(chain), "Volume".to_owned()),
+        (ParamAddress::Pan(chain), "Pan".to_owned()),
+    ];
+    if let Chain::Track(id) = chain
+        && let Some(track) = project.track(id)
+    {
+        for send in &track.sends {
+            let param = ParamAddress::Send(send.id);
+            own.push((param, param_spec(view, param).name));
+        }
+    }
+    let devices = project.devices(chain).unwrap_or_default();
+    let devices = devices.iter().map(|device| {
+        let bypass = ParamAddress::Bypass(device.id);
+        let mut params = vec![(bypass, param_spec(view, bypass).name)];
+        params.extend(match &device.kind {
+            DeviceKind::Plugin(_) => {
+                let status = view.plugins.status.get(&device.id);
+                let listed = status.map_or(&[][..], |status| &status.params[..]);
+                let mut params: Vec<(ParamAddress, String)> = (listed.iter())
+                    .map(|p| (ParamAddress::Device(device.id, p.id), p.spec.name.clone()))
+                    .collect();
+                // Lanes of parameters it doesn't list, as before it
+                // loads.
+                for lane in &project.automation {
+                    if let ParamAddress::Device(on, _) = lane.param
+                        && on == device.id
+                        && !params.iter().any(|&(param, _)| param == lane.param)
+                    {
+                        params.push((lane.param, param_spec(view, lane.param).name));
+                    }
+                }
+                params
+            }
+            DeviceKind::Native(native) => (0..native.params().len() as u32)
+                .map(|n| {
+                    let param = ParamAddress::Device(device.id, n);
+                    (param, param_spec(view, param).name)
+                })
+                .collect(),
+            DeviceKind::TestGain { .. } | DeviceKind::TestInstrument { .. } => {
+                let param = ParamAddress::Device(device.id, 0);
+                vec![(param, param_spec(view, param).name)]
+            }
+        });
+        // The gains of the wires into its side inputs.
+        let ports = project.ports(device.id);
+        let wires = ports.into_iter().flat_map(|port| project.wires_into(port));
+        for param in wires
+            .map(|wire| ParamAddress::Wire(wire.id))
+            .collect::<Vec<_>>()
+        {
+            params.push((param, param_spec(view, param).name));
+        }
+        (describe(device).0.to_owned(), params)
+    });
+    let mut groups: Vec<(String, Vec<(ParamAddress, String)>)> = devices.collect();
+    let modulators = project
+        .modulation(chain)
+        .map_or(&[][..], |m| &m.modulators[..]);
+    for modulator in modulators {
+        let params = (modulator.params().into_iter())
+            .map(|n| ParamAddress::Modulator(modulator.id, n))
+            .map(|param| (param, param_spec(view, param).name))
+            .collect();
+        groups.push((modulator.name.clone(), params));
+    }
+    (own, groups)
 }
 
 /// A parameter called `name`, from 0 to 1, for a lane whose parameter is
@@ -2590,7 +2623,7 @@ fn choose_param(ui: &mut Ui, scene: &Scene<'_>, lane: &AutoRow, actions: &mut Ve
 struct Button {
     rect: Rect,
     response: Response,
-    face: Face,
+    face: Face<'static>,
     on: bool,
     colour: Color32,
 }

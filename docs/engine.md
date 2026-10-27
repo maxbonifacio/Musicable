@@ -573,6 +573,12 @@ until `Meter::clear_highest`.
   aren't raced.
 - The app's `Session` keeps the `Meters` and compiles with them, and the
   mixer reads them every frame (see [app.md](app.md#the-mixer)).
+- `Meters` also keeps a `meter::Reading`, an atomic number, for each of the
+  modulators' outputs and each parameter routings move, which `follow`
+  keeps as it does the meters. The `Modulation` nodes set them at each tick
+  ([Modulation](#modulation)), and the window shows them on the modulator
+  strip's handles and the controls they move (see
+  [app.md](app.md#the-modulator-strip)).
 
 ## Wires
 
@@ -1099,6 +1105,13 @@ what it adds through a port to a relay of the other
 master's node runs first, then the groups', outer ones first, then the
 tracks'. A routing that's bypassed, out of reach, or to a parameter whose
 node isn't in the graph, such as a missing plugin's, moves nothing.
+
+**Readings.** At each tick, a node also sets the readings `compile()` gives
+it from the `Meters` (`Modulation::read_output`, `read_target`): where each
+of its modulators' outputs is, and for each parameter of its own channel,
+the sum it sends, the routings it relays included, as a share of the
+parameter's range, or in a plugin's units. Only one node sets each, so
+they aren't raced.
 
 **The modulators.**
 

@@ -6,8 +6,9 @@ several controls at once. They never change the controls' own values: a
 control comes back to where it was once nothing modulates it, and nothing
 a modulator does goes into the project or the undo history.
 
-Each track has modulators of its own, and so has the master. There are
-three kinds:
+Each track has modulators of its own, and so has the master, in its
+**modulator strip**, at the left of its devices in the devices panel. There
+are three kinds:
 
 - A **Macro** has knobs and buttons, which you play by hand, or automate. A
   knob turns from 0 to 1. A **toggle** button turns on or off at each press,
@@ -15,11 +16,54 @@ three kinds:
 - An **LFO** plays a shape that repeats.
 - An **Envelope** plays a shape once each time it's started, by a note, say.
 
-The modulation commands add modulators and routings and change them, each
-change a step you can undo ([Commands the mouse
-runs](../reference/commands.md#commands-the-mouse-runs)). Agents run them
-([Agents](../reference/command-line.md#agents)), and the project file keeps
-what they make.
+Each change you make to them is a step you can undo. The same changes are
+the modulation commands ([Commands the mouse
+runs](../reference/commands.md#commands-the-mouse-runs)), which agents run
+too ([Agents](../reference/command-line.md#agents)), and the project file
+keeps what they make.
+
+## The modulator strip
+
+**Add Modulator**, over the devices panel, adds a Macro, an LFO or an
+Envelope at the end of the selected track's strip, or of the master's while
+the master track is selected. Each modulator has a card in the strip, with
+a green line along its top, left of the devices:
+
+- An LFO's or an Envelope's card has its controls, which work as a built-in
+  device's do ([Using the devices](../devices/index.md#their-controls)), and
+  its output's **handle** left of its name.
+- A Macro's card has its knobs and buttons, each with its output's handle
+  at its right. The **+** by its name adds a knob, a toggle button or a
+  momentary button. Right-click a knob or a button to rename it or delete
+  it. Hold a momentary button down: it's on until you let go, and it leaves
+  no step in the undo history.
+- A handle fills as far as its output goes, as the song plays: from the
+  bottom, or from the middle for an LFO that isn't unipolar.
+- Right-click a card's name to rename the modulator, move it left or right
+  along the strip, or delete it. The **×** at the right of its name deletes
+  it too, with its routings and those to its controls.
+
+## Routing an output
+
+- **Drag** a handle onto a control to have its output move the control, by
+  25% to start with. While you drag it, the controls it can move are
+  outlined, and the one under the pointer brightly. It goes onto the bars
+  of built-in devices and modulators, the mixer's faders, pans and sends,
+  and sidechains' gains.
+- **Click** a handle for its menu: what its output moves, each opening to
+  its routing's settings, then **Route To**, which lists every control it
+  can move, a CLAP plugin's parameters too. They're by device and by
+  modulator, and by channel too if it reaches more than its own. Those it
+  moves already are ticked.
+- **Right-click** a control that modulators can move: its menu lists each
+  routing that moves it, with its amount, or why it moves nothing, each
+  opening to its settings, then **Add Modulation**, which lists the outputs
+  that can move it besides.
+
+A control that modulators move has a green line along its foot, or beside a
+fader, from as low to as high as they can take it from where it is, and a
+dot where they have it, which moves as they do. Its own value stays where
+you set it.
 
 ## Routings
 
@@ -51,6 +95,11 @@ Each routing has its own settings:
   pass would.
 - **Bypass**: a bypassed routing moves nothing, and keeps its settings.
 
+In a routing's menu, drag **Amount** or **Lag** sideways, or click it and
+type a value: a whole drag is one step in the undo history. **Curve** and
+**Scale** open to their choices, with **Steps** under a stepped curve, and
+**Delete Routing** deletes it.
+
 Modulation moves a control from its value, or from what its automation
 gives it at the time, and keeps it within its range. Modulators move the
 mixer's faders, pans and sends, the gains of
@@ -61,7 +110,9 @@ parameters.
 
 A modulator's own controls can be automated, and moved by other
 modulators, as a device's can: an LFO that speeds up over the chorus, or a
-Macro's knob turning an envelope's decay.
+Macro's knob turning an envelope's decay. Their automation lanes are under
+the modulator's name in a lane's list of controls, and named after it, as
+"LFO 1: Rate" ([Automation](automation.md)).
 
 ## What a modulator reaches
 

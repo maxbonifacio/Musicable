@@ -766,7 +766,7 @@ does is in the kind's file in `crates/model/src/native/`.
 | # | Key | Control | Values | Default |
 |---|---|---|---|---|
 | 0 | `sync` | Time Sync | 0 off, 1 on | 1 |
-| 1 | `time` | Time Time | 1 to 5000 ms | 250 |
+| 1 | `time` | Time | 1 to 5000 ms | 250 |
 | 2 | `note` | Time Note | 0 1/32, 1 1/16T, 2 1/16, 3 1/16D, 4 1/8T, 5 1/8, 6 1/8D, 7 1/4T, 8 1/4, 9 1/4D, 10 1/2T, 11 1/2, 12 1/2D, 13 1/1 | 6 |
 | 3 | `feedback` | Feedback | 0 to 100 % | 40 |
 | 4 | `ping_pong` | Ping Pong | 0 off, 1 on | 0 |
@@ -922,7 +922,7 @@ What each parameter does is in its kind's file in
 | 0 | `shape` | Shape | 0 Sine, 1 Triangle, 2 Saw, 3 Square | 0 |
 | 1 | `skew` | Skew | 0 to 100 % | 50 |
 | 2 | `sync` | Rate Sync | 0 off, 1 on | 0 |
-| 3 | `rate` | Rate Rate | 0.01 to 100 Hz | 1 |
+| 3 | `rate` | Rate | 0.01 to 100 Hz | 1 |
 | 4 | `note` | Rate Note | 0 1/32, 1 1/16T, 2 1/16, 3 1/16D, 4 1/8T, 5 1/8, 6 1/8D, 7 1/4T, 8 1/4, 9 1/4D, 10 1/2T, 11 1/2, 12 1/2D, 13 1/1, 14 2/1, 15 4/1, 16 8/1, 17 16/1 | 8 |
 | 5 | `phase` | Phase | 0 to 360 degrees | 0 |
 | 6 | `start` | Start Mode | 0 Free, 1 Song, 2 Note | 0 |

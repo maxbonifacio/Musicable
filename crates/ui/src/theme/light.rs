@@ -62,6 +62,7 @@ impl Theme {
             automation_lane: gray(230),
             automation: rgb(214, 60, 50),
             automation_off: gray(140),
+            modulation: rgb(20, 150, 95),
             header: gray(234),
             header_selected: rgb(210, 220, 234),
             header_text: gray(25),

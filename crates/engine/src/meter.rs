@@ -5,12 +5,15 @@
 //! waits on the audio thread, and a meter carries on across graph swaps
 //! when the new graph's node gets the same one. [`Meters`] keeps one for
 //! each channel of a project, for [`compile_metered`](crate::compile::compile_metered)
-//! to put in the graph and the UI to read.
+//! to put in the graph and the UI to read, and a [`Reading`] of each
+//! modulator's outputs and of what moves each parameter modulators move.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
+use musicable_model::modulation::Output;
+use musicable_model::param::ParamAddress;
 use musicable_model::{Project, TrackId};
 
 use crate::AudioRef;
@@ -110,12 +113,40 @@ impl Meter {
     }
 }
 
+/// A number a node works out as it plays, for any thread to read, such as
+/// where a modulator's output has got to. It starts at 0.
+#[derive(Debug, Default)]
+pub struct Reading(AtomicU32);
+
+impl Reading {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Relaxed))
+    }
+
+    /// Real-time safe. One node at a time sets a reading, so what it sets
+    /// isn't raced.
+    pub fn set(&self, value: f32) {
+        self.0.store(value.to_bits(), Relaxed);
+    }
+}
+
 /// The meters of a project's channels: one for each track, and one for the
-/// master.
+/// master. And the readings of its modulators, which their channels'
+/// [`Modulation`](crate::modulation::Modulation) nodes set at each tick:
+/// where each output is, and how far the routings that play move each
+/// parameter they move, as a share of its range
+/// ([`Routing::amount`](musicable_model::modulation::Routing::amount)), or
+/// in a plugin's units for a plugin's parameter.
 #[derive(Debug, Clone, Default)]
 pub struct Meters {
     tracks: BTreeMap<TrackId, Arc<Meter>>,
     master: Arc<Meter>,
+    outputs: BTreeMap<Output, Arc<Reading>>,
+    moved: BTreeMap<ParamAddress, Arc<Reading>>,
 }
 
 impl Meters {
@@ -123,8 +154,9 @@ impl Meters {
         Self::default()
     }
 
-    /// Meters for every track of `project`: tracks that had one keep it, new
-    /// tracks get one, and the meters of tracks it no longer has go.
+    /// Meters for every track of `project`, and readings for every output
+    /// of its modulators and every parameter its routings move: those that
+    /// had one keep it, new ones get one, and the rest go.
     pub fn follow(&mut self, project: &Project) {
         let mut tracks = BTreeMap::new();
         for track in &project.tracks {
@@ -132,6 +164,22 @@ impl Meters {
             tracks.insert(track.id, meter);
         }
         self.tracks = tracks;
+        let (mut outputs, mut moved) = (BTreeMap::new(), BTreeMap::new());
+        for (_, modulation) in project.modulations() {
+            for modulator in &modulation.modulators {
+                for n in modulator.outputs() {
+                    let output = Output::new(modulator.id, n);
+                    outputs.insert(output, self.outputs.remove(&output).unwrap_or_default());
+                }
+            }
+            for routing in &modulation.routings {
+                let param = routing.to;
+                (moved.entry(param))
+                    .or_insert_with(|| self.moved.remove(&param).unwrap_or_default());
+            }
+        }
+        self.outputs = outputs;
+        self.moved = moved;
     }
 
     /// The meter of the track with `id`, if it has one.
@@ -141,6 +189,18 @@ impl Meters {
 
     pub fn master(&self) -> &Arc<Meter> {
         &self.master
+    }
+
+    /// The reading of `output`, a modulator's, if it has one: from -1 to 1
+    /// for a bipolar output, and from 0 to 1 for the others.
+    pub fn output(&self, output: Output) -> Option<&Arc<Reading>> {
+        self.outputs.get(&output)
+    }
+
+    /// The reading of how far modulators move the parameter at `param`, if
+    /// it has one.
+    pub fn moved(&self, param: ParamAddress) -> Option<&Arc<Reading>> {
+        self.moved.get(&param)
     }
 
     /// Clears the highest reading of every meter.
@@ -153,6 +213,8 @@ impl Meters {
 
 #[cfg(test)]
 mod tests {
+    use musicable_model::Chain;
+
     use super::*;
 
     const RATE: u32 = 48_000;
@@ -253,6 +315,53 @@ mod tests {
         project.tracks.remove(0);
         meters.follow(&project);
         assert!(meters.track(a).is_none());
+    }
+
+    #[test]
+    fn modulators_outputs_and_the_parameters_they_move_keep_their_readings() {
+        use musicable_model::modulation::ModulatorKind;
+        let mut project = Project::new();
+        let a = project.add_track("A", musicable_model::TrackKind::Audio);
+        let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+        let (lfo_out, volume) = (
+            Output::new(lfo.id, 0),
+            ParamAddress::Volume(Chain::Track(a)),
+        );
+        let routing = project.new_routing(lfo_out, volume, 0.5);
+        let modulation = &mut project.track_mut(a).unwrap().modulation;
+        modulation.modulators.push(lfo);
+        modulation.routings.push(routing);
+        let mut meters = Meters::new();
+        meters.follow(&project);
+        let (output, moved) = (
+            meters.output(lfo_out).unwrap(),
+            meters.moved(volume).unwrap(),
+        );
+        let (output, moved) = (Arc::clone(output), Arc::clone(moved));
+        output.set(-0.5);
+        assert_eq!(meters.output(lfo_out).unwrap().get(), -0.5);
+
+        // A second routing to the same parameter shares its reading, and a
+        // second modulator gets its own.
+        let macros = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+        let knob = Output::new(macros.id, 0);
+        let second = project.new_routing(knob, volume, 0.25);
+        let modulation = &mut project.track_mut(a).unwrap().modulation;
+        modulation.modulators.push(macros);
+        modulation.routings.push(second);
+        meters.follow(&project);
+        assert!(Arc::ptr_eq(meters.output(lfo_out).unwrap(), &output));
+        assert!(Arc::ptr_eq(meters.moved(volume).unwrap(), &moved));
+        assert_eq!(meters.output(knob).unwrap().get(), 0.0);
+
+        // Without routings to it, the parameter's reading goes.
+        project.track_mut(a).unwrap().modulation.routings.clear();
+        meters.follow(&project);
+        assert!(meters.moved(volume).is_none());
+        assert!(meters.output(knob).is_some());
+        project.tracks.clear();
+        meters.follow(&project);
+        assert!(meters.output(lfo_out).is_none());
     }
 
     #[test]

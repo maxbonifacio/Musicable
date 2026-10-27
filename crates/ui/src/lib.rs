@@ -29,6 +29,7 @@ mod keys;
 mod manual;
 mod menus;
 mod mixer;
+mod modulators;
 mod mouse;
 mod native;
 mod palette;

@@ -17,7 +17,9 @@
 //! An automated fader, pan or send shows the value its automation gives it
 //! at the playhead, with a dot in the automation's colour, grey once
 //! someone overrode it. Its context menu shows its automation lane, clears
-//! the automation, or re-enables it.
+//! the automation, or re-enables it. One that modulators move shows how
+//! far they can move it, and where they have it, and its menu lists them
+//! ([`modulators`]). A modulator's output dragged onto one moves it.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -32,6 +34,7 @@ use musicable_commands::editor::Editor;
 use musicable_commands::mixer::Change;
 use musicable_commands::{Args, automation, edit};
 use musicable_model::mixer::Bus;
+use musicable_model::modulation::Output;
 use musicable_model::param::ParamAddress;
 use musicable_model::time::Beats;
 use musicable_model::{
@@ -39,6 +42,7 @@ use musicable_model::{
 };
 
 use crate::browser::{self, Destination};
+use crate::modulators::{self, Travel};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
 use crate::shell::Action;
@@ -81,11 +85,19 @@ pub(crate) struct Choices<'a> {
     pub midi: &'a [MidiChoice],
 }
 
-/// The readings of the project's meters, as the engine last measured them.
+/// The readings of the project's meters, as the engine last measured them,
+/// and of its modulators, as their channels' nodes last worked them out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Levels {
     pub tracks: BTreeMap<TrackId, Level>,
     pub master: Level,
+    /// Where each modulator's outputs are: from -1 to 1 for a bipolar
+    /// output, and from 0 to 1 for the others.
+    pub outputs: BTreeMap<Output, f32>,
+    /// How far the routings that play move each parameter they move, all
+    /// together: as a share of its range, or in a plugin's own units for a
+    /// plugin's parameter.
+    pub moved: BTreeMap<ParamAddress, f32>,
 }
 
 impl Levels {
@@ -153,6 +165,7 @@ pub(crate) fn show(
         returns,
         inputs,
         playhead,
+        levels,
         fader: 0.0,
         theme,
         mouse,
@@ -354,6 +367,8 @@ pub(crate) struct Mixer<'a> {
     inputs: Choices<'a>,
     /// Where automated controls show their automation's value.
     playhead: Beats,
+    /// Where modulators have the controls they move.
+    levels: &'a Levels,
     /// How tall the faders are.
     fader: f32,
     theme: &'a Theme,
@@ -541,6 +556,8 @@ impl Mixer<'_> {
         let (_, own) = channel.gain_and_pan(self.project);
         let shown = self.shown(param, own);
         let control = self.pan_control(ui, shown, &format!("{} Pan", channel.name()));
+        let travel = foot(control.0.rect);
+        self.modulated(ui, &control.0, param, travel, (shown + 1.0) / 2.0, actions);
         self.automated(ui, &control.0, param, "pan", actions);
         moved(control, actions, |pan| match channel {
             Channel::Track(track, _) => Change::Pan(track.id, pan),
@@ -554,6 +571,16 @@ impl Mixer<'_> {
         let (own, _) = channel.gain_and_pan(self.project);
         let gain = self.shown(param, own);
         let fader = self.channel(ui, gain, channel.level(), channel.name());
+        // Up its left edge, beside the groove.
+        let rect = fader.0.rect;
+        let (bottom, top) = self.travel(rect);
+        let x = rect.left() + 1.5;
+        let travel = Travel {
+            low: pos2(x, bottom),
+            high: pos2(x, top),
+        };
+        let at = height_of(gain, FADER_TOP);
+        self.modulated(ui, &fader.0, param, travel, at, actions);
         self.automated(ui, &fader.0, param, "fader", actions);
         moved(fader, actions, |gain| channel.gain(gain));
     }
@@ -1000,6 +1027,9 @@ impl Mixer<'_> {
         let control = self.send_control(ui, level, &to.name, &label, width);
         if let Some(send) = send {
             let param = ParamAddress::Send(send.id);
+            let at = height_of(level, SEND_TOP);
+            let travel = foot(control.0.rect);
+            self.modulated(ui, &control.0, param, travel, at, actions);
             self.mark(ui, &control.0, param);
             control.0.context_menu(|ui| {
                 if ui.button("Remove Send").clicked() {
@@ -1012,6 +1042,7 @@ impl Mixer<'_> {
                 }
                 ui.separator();
                 self.automation_items(ui, param, actions);
+                modulators::routing_items(ui, self.project, param, actions);
                 ui.separator();
                 self.parts.menu_items(ui, MIXER_STRIP, Some("sends"));
             });
@@ -1063,9 +1094,30 @@ impl Mixer<'_> {
         self.mark(ui, response, param);
         response.context_menu(|ui| {
             self.automation_items(ui, param, actions);
+            modulators::routing_items(ui, self.project, param, actions);
             ui.separator();
             self.parts.menu_items(ui, MIXER_STRIP, Some(part));
         });
+    }
+
+    /// Shows along `travel` how far modulators can move the control
+    /// `response` of `param` from `at`, where its value is, and where they
+    /// have it, and takes a modulator's output dragged onto it.
+    fn modulated(
+        &self,
+        ui: &Ui,
+        response: &Response,
+        param: ParamAddress,
+        travel: Travel,
+        at: f32,
+        actions: &mut Vec<Action>,
+    ) {
+        let shown = modulators::Shown {
+            project: self.project,
+            levels: self.levels,
+            param,
+        };
+        actions.extend(shown.on(ui, response, travel, at, self.theme));
     }
 
     fn mark(&self, ui: &Ui, response: &Response, param: ParamAddress) {
@@ -1690,6 +1742,16 @@ pub(crate) fn name_menu(response: &Response, label: String, value: &str) {
     });
 }
 
+/// The travel along the foot of a control at `rect` that moves sideways,
+/// for what modulators do to it.
+fn foot(rect: Rect) -> Travel {
+    let y = rect.bottom() - 2.0;
+    Travel {
+        low: pos2(rect.left(), y),
+        high: pos2(rect.right(), y),
+    }
+}
+
 /// Where `gain` sits on a scale whose top is `top` dB: 0.0 for silence, 1.0
 /// at the top. The fourth root spreads out the loud end as a console's
 /// faders do: on a fader, 0 dB sits 84% of the way up, -20 dB at 47% and
@@ -1774,6 +1836,7 @@ mod tests {
         CommandError, CommandId, Context, Document, Named, NoLibrary, Request, mixer,
     };
     use musicable_model::automation::{Lane, Point};
+    use musicable_model::modulation::ModulatorKind;
     use musicable_model::param::Scale;
 
     use super::*;
@@ -2502,6 +2565,101 @@ mod tests {
         assert_eq!(parse_decibels("-INF"), Some(f64::from(FLOOR)));
         assert_eq!(parse_decibels("loud"), None);
         assert_eq!(parse_decibels("NaN"), None);
+    }
+
+    #[test]
+    fn modulators_move_faders_pans_and_sends_that_they_reach() {
+        let (mut project, [lead, keys, drums, _]) = project();
+        // An LFO on the drums group, which Keys feeds, and a Macro on the
+        // master, which reaches every track.
+        let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+        let knobs = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+        let (lfo_out, knob) = (Output::new(lfo.id, 0), Output::new(knobs.id, 0));
+        project
+            .track_mut(drums)
+            .unwrap()
+            .modulation
+            .modulators
+            .push(lfo);
+        project.master.modulation.modulators.push(knobs);
+        let send = ParamAddress::Send(project.track(lead).unwrap().sends[0].id);
+        let mut harness = harness(project);
+        let menu = |harness: &mut Harness<'_, State>, control: &str| {
+            harness
+                .get_by_role_and_label(Role::Slider, control)
+                .click_secondary();
+            harness.run();
+        };
+        let add = |harness: &mut Harness<'_, State>, control: &str, output: &str| {
+            menu(harness, control);
+            harness.get_by_label("Add Modulation").hover();
+            harness.run();
+            harness.get_by_role_and_label(Role::Button, output).click();
+            harness.run();
+        };
+        add(&mut harness, "Keys Volume", "LFO 1 on Drums");
+        add(&mut harness, "Lead Pan", "Macro 1: Knob 1 on Master");
+        add(
+            &mut harness,
+            "Lead Send to Reverb",
+            "Macro 1: Knob 1 on Master",
+        );
+        let routed = |harness: &Harness<'_, State>, param| {
+            let project = harness.state().document.project();
+            let routings = project.routings_to(param);
+            routings
+                .map(|(_, r)| (r.from, r.amount))
+                .collect::<Vec<_>>()
+        };
+        let volume = |track| ParamAddress::Volume(Chain::Track(track));
+        let pan = ParamAddress::Pan(Chain::Track(lead));
+        let new = modulators::NEW_AMOUNT;
+        assert_eq!(routed(&harness, volume(keys)), [(lfo_out, new)]);
+        assert_eq!(routed(&harness, pan), [(knob, new)]);
+        assert_eq!(routed(&harness, send), [(knob, new)]);
+
+        // Lead doesn't feed the group, so only the master's Macro reaches
+        // it.
+        menu(&mut harness, "Lead Volume");
+        harness.get_by_label("Add Modulation").hover();
+        harness.run();
+        assert!(harness.query_by_label("LFO 1 on Drums").is_none());
+        harness.get_by_role_and_label(Role::Button, "Macro 1: Knob 1 on Master");
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        // A fader lists what moves it, with its settings.
+        menu(&mut harness, "Keys Volume");
+        harness.get_by_label("LFO 1 on Drums +25%").hover();
+        harness.run();
+        harness.get_by_label("Bypass").click();
+        harness.run();
+        let project = harness.state().document.project();
+        let (_, routing) = project.routings_to(volume(keys)).next().unwrap();
+        assert!(routing.bypassed);
+
+        // An output let go on a fader moves it.
+        let dragged = browser::Dragged::Output {
+            output: knob,
+            owner: Chain::Master,
+            name: "Macro 1: Knob 1".to_owned(),
+        };
+        let fader = harness
+            .get_by_role_and_label(Role::Slider, "Lead Volume")
+            .rect()
+            .center();
+        egui::DragAndDrop::set_payload(&harness.ctx, dragged);
+        harness.hover_at(fader);
+        harness.run();
+        harness.event(egui::Event::PointerButton {
+            pos: fader,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run();
+        assert_eq!(routed(&harness, volume(lead)), [(knob, new)]);
+        assert!(harness.state().errors.is_empty());
     }
 
     #[test]

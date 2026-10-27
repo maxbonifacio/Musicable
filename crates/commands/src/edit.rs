@@ -166,8 +166,28 @@ pub fn register(registry: &mut Registry) {
                 Param::optional("track", Type::Track, "A track to name."),
                 Param::optional("locator", Type::Locator, "A locator to name."),
                 Param::optional("take", Type::Take, "A take to name."),
+                Param::optional("modulator", Type::Modulator, "A modulator to name."),
+                Param::optional(
+                    "control",
+                    Type::Int,
+                    "With a Macro, one of its knobs or buttons to name, by its number.",
+                ),
             ]),
         |ctx, args| {
+            if let Some(modulator) = args.opt("modulator")? {
+                let named = match args.opt::<i64>("control")? {
+                    Some(n) => match u32::try_from(n) {
+                        Ok(n) => Named::Control(modulator, n),
+                        Err(_) => {
+                            let error = format!("there's no control {n}");
+                            return Err(CommandError::invalid(error));
+                        }
+                    },
+                    None => Named::Modulator(modulator),
+                };
+                ctx.requests.push(Request::Rename(named));
+                return Ok(Value::None);
+            }
             let named = match (
                 args.opt("clip")?,
                 args.opt("take")?,
@@ -745,6 +765,7 @@ fn split_track(tx: &mut Transaction<'_>, track: TrackId, at: Beats) {
 #[cfg(test)]
 mod tests {
     use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
+    use musicable_model::modulation::ModulatorId;
     use musicable_model::{LocatorId, TakeId, TrackKind};
 
     use super::*;
@@ -1232,6 +1253,12 @@ mod tests {
         // A take, with its track, as a take lane's menu asks.
         let args = Args::new().with("take", 4_i64).with("track", keys);
         setup.run_with(&RENAME, args).unwrap();
+        // A modulator, and a Macro's knob, as the modulator strip asks.
+        let args = Args::new().with("modulator", 5_i64);
+        setup.run_with(&RENAME, args.clone()).unwrap();
+        setup
+            .run_with(&RENAME, args.with("control", 1_i64))
+            .unwrap();
         assert_eq!(
             setup.requests,
             [
@@ -1240,6 +1267,8 @@ mod tests {
                 Request::Rename(Named::Track(keys)),
                 Request::Rename(Named::Locator(LocatorId(3))),
                 Request::Rename(Named::Take(TakeId(4))),
+                Request::Rename(Named::Modulator(ModulatorId(5))),
+                Request::Rename(Named::Control(ModulatorId(5), 1)),
             ]
         );
     }

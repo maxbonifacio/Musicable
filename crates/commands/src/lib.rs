@@ -16,6 +16,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use musicable_model::clip::{ClipContent, ClipId};
+use musicable_model::modulation::ModulatorId;
 use musicable_model::time::Beats;
 use musicable_model::{Chain, DeviceId, LocatorId, Project, TakeId, TrackId};
 
@@ -434,6 +435,9 @@ pub enum Named {
     Clip(ClipId),
     Locator(LocatorId),
     Take(TakeId),
+    Modulator(ModulatorId),
+    /// A Macro's knob or button, by its number.
+    Control(ModulatorId, u32),
 }
 
 /// What a running command can reach.

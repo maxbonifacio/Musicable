@@ -97,8 +97,10 @@ pub(super) fn sources(
             let control = Control {
                 setting,
                 info: &GAIN,
+                name: GAIN.name,
                 label: format!("{name} {}{number}", GAIN.full_name()),
                 project,
+                levels: view.levels,
             };
             control.show(ui, GAIN.clamp(value), width, theme, mouse, actions);
         });

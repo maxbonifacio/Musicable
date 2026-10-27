@@ -178,7 +178,7 @@ warped audio, at the zoom of the panel they're in.
 | `edit.split` | Split | Splits the clips at the time selection's edges, or the selected clips at the start marker | Ctrl+E | Ctrl+E |
 | `edit.select_all` | Select All | Selects every clip, or every note of the piano roll's clip, or every warp marker of the Sample Editor's, or every device the devices panel shows | Ctrl+A | Ctrl+A |
 | `edit.select_master` | Select Master Track | Makes the master track the selected track, with nothing else selected, so the devices panel shows the master's devices, as clicking its header or its mixer strip does | none | Clicking the Main track |
-| `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator` or `take` names something else | Ctrl+R | Ctrl+R |
+| `edit.rename` | Rename | Asks for a new name for the selected clip, or the selected track; `clip`, `track`, `locator`, `take` or `modulator` names something else, and `control` with `modulator` one of a Macro's knobs or buttons | Ctrl+R | Ctrl+R |
 | `edit.quantize` | Quantize | Moves the selected notes' starts to the nearest line of the grid, or all the clip's notes if none are selected; the transients in the Sample Editor's time selection, or all those its clip plays, giving each a warp marker; or the notes and transients of the selected clips. `notes`, `frames` and `clip` name what it moves, `amount` moves them part of the way, and `ends` moves notes' ends too. It was `notes.quantize`, which keymap files can still name | Ctrl+U | Ctrl+U |
 
 And for the arrangement's clicks, scripts and agents:
