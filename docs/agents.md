@@ -157,8 +157,9 @@ a page made from the code.
   `overwrite`, and never to a file it reads, even with it. It writes
   `NAME.part`, and renames it once it's whole, so a file that's there is
   whole; one that fails or is cancelled removes it. Cuts, joins and
-  conversions that only change the format or widen the samples copy them
-  exactly, read the new file back, and say whether it's `exact`.
+  conversions that only change the format, widen the samples or make a
+  mono file stereo copy them exactly, read the new file back, and say
+  whether it's `exact`.
 
 Loudness is measured as [analysis.md](analysis.md#loudness) describes.
 
