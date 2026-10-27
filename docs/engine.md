@@ -344,8 +344,10 @@ delayed by its latency, so nothing else in the mix moves and no new graph
 is needed.
 
 - While the device plays, the switch plays it and keeps a dry copy of
-  what comes into it, delayed by the device's latency, so the copy lines
-  up with the device's output frame for frame.
+  what comes into its main input, delayed by the device's latency, so the
+  copy lines up with the device's output frame for frame. A side input,
+  such as a compressor's sidechain, goes to the device but never plays in
+  its place ([Wires](#wires)).
 - Bypassing crossfades from the device to the dry copy over 10 ms, the
   time automation's steps take, and the device's tail goes with the fade.
   Once the fade is over, the switch stops the device (`Node::stop`). From
@@ -495,7 +497,8 @@ source → [before device 0] → device 0 → … → [pre-fader] → fader → 
   `Project::can_feed` and `can_send`. Groups can feed groups, but not ones
   that feed them; return tracks feed the master and have no sends; sends go
   to return tracks, one per return. `output_of` and `sends_of` leave out
-  what breaks the rules, so even a hand-edited file compiles.
+  what breaks the rules, so even a hand-edited file compiles. A wire can
+  close a loop with them, and has rules of its own ([Wires](#wires)).
 - **Devices** (`Track::devices`, `Master::devices`) sit between the source
   and the pre-fader slot, in order, each keyed by its `DeviceId`
   (`keys::device`), so a device keeps its state when it moves. Plugins
@@ -570,6 +573,68 @@ until `Meter::clear_highest`.
   aren't raced.
 - The app's `Session` keeps the `Meters` and compiles with them, and the
   mixer reads them every frame (see [app.md](app.md#the-mixer)).
+
+## Wires
+
+A wire (`musicable_model::routing::Wire`) takes the signal at a point on a
+channel, a tap, into a device's side input, a port, such as the
+compressor's and the gate's Sidechain ([Built-in
+devices](#built-in-devices)). `compile()` adds the wires once every strip
+is built, so a wire can join any two:
+
+- **Taps.** As it builds each strip, the compiler notes where each tap's
+  signal is. A track's Pre FX is the head of its strip, its source. A
+  device's tap is what its switch puts out, or what comes into it where
+  it's deactivated. Post FX is the last node before the fader, where
+  pre-fader sends take their signal, and Post Fader the last after the
+  post-fader slot. The master has Post FX and Post Fader. Every tap comes
+  before the output stage, where mute and solo cut, so a muted track's
+  wires carry on: a muted ghost kick still ducks the bass. A MIDI track's
+  Pre FX is notes, which no wire takes yet.
+- **The wire** (`keys::wire`) is a `Gain` at the wire's gain, fed by its
+  tap, and feeding its device's switch on side input 0. Its `Gain::GAIN`
+  ramps as a send's does, a lane (`ParamAddress::Wire`) automates it, and
+  modulators move it from silence to +24 dB (`Gain::with_max_gain`), from
+  the channel of the device it feeds ([Modulation](#modulation)). Wires
+  into the same port sum there.
+- **Ports.** `Graph::connect_to` feeds a node's input `port`:
+  `InputPort::Main`, the sum every node hears, which `connect` feeds, or
+  `InputPort::Side(n)`. `Graph::prepare` puts each node's inputs in order
+  of port, the main input's first, and the node reads them through
+  `Inputs`: `iter` and `get` give the main input's, and `side(n)` those of
+  side input `n`. A node without a side input never looks at one.
+- **Delay compensation** lines up a side input as it does any path that
+  meets another at a node ([Delay compensation](#delay-compensation)):
+  whichever of the main input and the key is earlier waits for the other,
+  so the key comes in with the beat it belongs to, to the sample. Where
+  the key is the later one, say through a linear-phase EQ on the kick, the
+  keyed track waits for it, and the master lines the rest of the mix up
+  with that.
+- **The switch** passes its device every input, side inputs too, for each
+  part of a block it renders on its own (`Inputs::range`). Its dry copy is
+  what comes into the main input, so a bypassed compressor plays its own
+  input, never its key. A deactivated device's switch is out of the strip,
+  so the wires into it have nothing to feed, and the compiler leaves them
+  out.
+- **Which wires play.** `Project::live_wires` gives the wires the engine
+  plays: each whose ends the project has and whose tap carries sound,
+  unless it would close a loop with the outputs, the sends and the wires
+  before it. In a project the commands edit, that's all of them, since
+  they refuse a wire that would make a loop, but even a hand-edited file
+  compiles.
+
+**Loops.** Outputs and sends can't loop on their own, but a wire can close
+a loop with them, such as a compressor keyed from a group its own track
+feeds, from the master, or from after itself. `Project::check_wire`
+follows the signal point to point, not track to track, so two tracks can
+key each other from their Pre FX, which comes before either's devices. The
+commands refuse a wire that would close a loop, and an edit that moves a
+device, an output or a send takes itself back if `Project::wire_in_a_loop`
+finds one ([commands.md](commands.md#wires)).
+
+**Edits.** A wire's gain is a parameter, sent to its `Gain` as a send's
+level is. Adding a wire, removing one or moving it to another tap changes
+the graph's shape and recompiles.
 
 ## Clips
 
@@ -1167,6 +1232,23 @@ designed curve to within 0.001 dB, for both detectors, hard and soft
 knees; they follow the reduction frame by frame along the attack's and
 the release's exponentials; and RMS reads a sine 3 dB under its peak.
 
+**The key** (`devices::key`) is what the compressor's and the gate's
+detectors follow. It's the device's own input, or with Sidechain on and
+something wired to side input 0, the sum of what comes into that
+([Wires](#wires)), crossfading as Sidechain ramps; with nothing wired, it's
+the input whatever Sidechain says, so a device never keys from silence. A
+high-pass and a low-pass shape it, each a Butterworth section of the EQ's
+state variable filter, 12 dB an octave. At the ends of their ranges, 20 Hz
+and 20 kHz, they cut nothing, so they're left out: one fades out over 10
+ms as it gets there, and in again as it leaves, so the key doesn't jump.
+Listen plays the key in place of the output, crossfading as it ramps.
+Where the key is the input untouched and Listen is off, the device runs as
+it did before keys. The tests measure the filters' responses against the
+EQ's design to within 0.001 dB, check that a side input turns the input
+down by its own level and that the key is the input until something's
+wired, that Listen plays the key, filtered, and that a filter's fade
+doesn't jump, and render the same with a key however the blocks fall.
+
 **The gate** (`devices::Gate`): opens on the frame the louder channel's
 peak reaches the threshold, and closes once the peak has stayed more than
 `return` dB under it for the hold. Its gain fades in a straight line, from
@@ -1175,6 +1257,9 @@ starts part of the way takes that part of the time, and open, the signal
 passes untouched. A new gate starts open, so it lets a signal through
 until there's a quiet spell. Its tests check the hold, the fades, the
 floor and the return frame by frame, and that one loud channel opens both.
+Its peak is the key's, as the compressor's level is, and its tests check
+that a side input opens it on its own peak, that Listen plays the side
+input, and that a key low-pass keeps it shut on highs.
 
 **The delay** (`devices::Delay`): a line for each channel, long enough for
 the longest time, 5 s, read between frames by cubic (Catmull-Rom)

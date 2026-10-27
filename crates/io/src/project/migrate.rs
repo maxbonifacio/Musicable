@@ -35,6 +35,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     granular,
     bypass,
     modulation,
+    wires,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -325,6 +326,14 @@ fn modulation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         add(master, "master", "modulation", none())?;
     }
     Ok(())
+}
+
+/// Version 19 added wires between channels, such as the keys of
+/// compressors' sidechains, and lanes for their gains. Version 18 files have
+/// none.
+fn wires(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "next_wire_id", json!(0))?;
+    add(file, "", "wires", json!([]))
 }
 
 /// A change to a warp in a file, given the warp and its path.

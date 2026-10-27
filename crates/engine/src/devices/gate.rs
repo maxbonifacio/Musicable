@@ -1,18 +1,32 @@
-//! The gate: see [`musicable_model::native::gate`].
+//! The gate: see [`musicable_model::native::gate`]. The peak it opens on
+//! is the [key](super::key)'s, which is the input unless Sidechain or the
+//! key filters say otherwise.
 
-use musicable_model::native::gate::{ATTACK, FLOOR, HOLD, RELEASE, RETURN, THRESHOLD};
+use musicable_model::native::gate::{
+    ATTACK, FLOOR, HOLD, KEY_HIGH_PASS, KEY_LOW_PASS, LISTEN, RELEASE, RETURN, SIDECHAIN, THRESHOLD,
+};
 use musicable_model::native::{NativeDevice, decibels_to_gain};
 
+use super::key::{Key, KeyParams};
 use super::{Params, Span, Values};
 use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
 /// The parameters the DSP reads.
 const PARAMS: [usize; 6] = [THRESHOLD, RETURN, ATTACK, HOLD, RELEASE, FLOOR];
 
+/// Where the key's parameters are.
+const KEY: KeyParams = KeyParams {
+    sidechain: SIDECHAIN,
+    high_pass: KEY_HIGH_PASS,
+    low_pass: KEY_LOW_PASS,
+    listen: LISTEN,
+};
+
 /// The gate's node.
 #[derive(Debug, Clone)]
 pub struct Gate {
     params: Params,
+    key: Key,
     state: State,
     sample_rate: f64,
 }
@@ -21,6 +35,7 @@ impl Gate {
     pub fn new(device: &NativeDevice) -> Self {
         Self {
             params: Params::new(device),
+            key: Key::new(device, KEY),
             state: State::default(),
             sample_rate: 48_000.0,
         }
@@ -30,6 +45,7 @@ impl Gate {
 impl Node for Gate {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
+        self.key.prepare(config);
         self.sample_rate = f64::from(config.sample_rate);
     }
 
@@ -44,6 +60,7 @@ impl Node for Gate {
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);
+            self.key.take_over(&previous.key);
             self.state = previous.state;
         }
     }
@@ -53,12 +70,14 @@ impl Node for Gate {
         for input in inputs.iter() {
             output.add_from(input);
         }
+        self.key.take(&inputs, output.frames());
         let Self {
             params,
+            key,
             state,
             sample_rate,
         } = self;
-        params.run(ctx, |span| state.render(&span, output, *sample_rate));
+        params.run(ctx, |span| state.render(&span, output, key, *sample_rate));
     }
 
     fn flush(&mut self, ctx: &ProcessContext<'_>) {
@@ -67,6 +86,7 @@ impl Node for Gate {
 
     fn reset(&mut self) {
         self.params.reset();
+        self.key.reset();
         self.state = State::default();
     }
 }
@@ -94,13 +114,20 @@ impl Default for State {
 }
 
 impl State {
-    /// Gates one span of the output, in place.
-    fn render(&mut self, span: &Span<'_>, output: &mut AudioMut<'_>, sample_rate: f64) {
+    /// Gates one span of the output, in place, by the peak of `key`.
+    fn render(
+        &mut self,
+        span: &Span<'_>,
+        output: &mut AudioMut<'_>,
+        key: &mut Key,
+        sample_rate: f64,
+    ) {
         let frames = span.frames.len();
         if frames == 0 {
             return;
         }
         let values = span.values;
+        let mut key = key.span(values, span.frames.clone());
         let mut out = output.range_mut(span.frames.clone());
         let mut channels = out.channels_mut();
         let Some(left) = channels.next() else {
@@ -113,9 +140,11 @@ impl State {
             if !steady && i > 0 {
                 settings = Settings::at(values, i, sample_rate);
             }
+            let own = [left[i], right.as_ref().map_or(left[i], |right| right[i])];
+            let keyed = key.as_mut().map_or(own, |key| key.at(i, own));
             let peak = match &right {
-                Some(right) => left[i].abs().max(right[i].abs()),
-                None => left[i].abs(),
+                Some(_) => keyed[0].abs().max(keyed[1].abs()),
+                None => keyed[0].abs(),
             };
             let gain = self.gain(&settings, f64::from(peak));
             if gain != 1.0 {
@@ -124,10 +153,16 @@ impl State {
                     right[i] = (f64::from(right[i]) * gain) as f32;
                 }
             }
+            if let Some(key) = &key {
+                key.listen(i, keyed[0], &mut left[i]);
+                if let Some(right) = &mut right {
+                    key.listen(i, keyed[1], &mut right[i]);
+                }
+            }
         }
     }
 
-    /// Takes in a frame's peak, and returns its gain.
+    /// Takes in the peak of a frame of the key, and returns its gain.
     fn gain(&mut self, settings: &Settings, peak: f64) -> f64 {
         if peak >= settings.open {
             self.open = true;
@@ -395,5 +430,91 @@ mod tests {
             channel.extend(rest);
         }
         assert_eq!(swapped, whole);
+    }
+    /// With Sidechain on, the side input's peak opens and closes it, frame
+    /// by frame as it would on its own: a kick opens a pad on each hit.
+    #[test]
+    fn sidechain_opens_it_on_the_side_inputs_peak() {
+        let kick = steps(&[(-6.0, 1000), (-60.0, 10_000), (-6.0, 1000), (-60.0, 6000)]);
+        // Loud enough to hold it open on its own.
+        let pad = steps(&[(-20.0, kick.len())]);
+        let alone = run(&device(&[])).render(&[kick.clone(), kick.clone()], &[]);
+        let keyed = run(&device(&[(SIDECHAIN, 1.0)])).render_keyed(
+            &[pad.clone(), pad.clone()],
+            Some(&[kick.clone(), kick.clone()]),
+            &[],
+        );
+        assert_eq!(keyed[0], keyed[1]);
+        for i in 0..kick.len() {
+            let expected = f64::from(alone[0][i]) / f64::from(kick[i]);
+            gained(&pad, &keyed[0], i..i + 1, |_| expected);
+        }
+        // So it's closed between the hits, at its floor.
+        gained(&pad, &keyed[0], 7000..11_000, |_| FLOOR_GAIN);
+        gained(
+            &pad,
+            &keyed[0],
+            12_000 + HOLD_FRAMES + RELEASE_FRAMES..18_000,
+            |_| FLOOR_GAIN,
+        );
+    }
+
+    #[test]
+    fn listen_plays_the_side_input_with_sidechain_on() {
+        let pad = steps(&[(-20.0, 4000)]);
+        let kick = hits(4000);
+        let gate = device(&[(SIDECHAIN, 1.0), (LISTEN, 1.0)]);
+        let output = run(&gate).render_keyed(
+            &[pad.clone(), pad.clone()],
+            Some(&[kick.clone(), kick.clone()]),
+            &[],
+        );
+        assert_eq!(output, [kick.clone(), kick]);
+    }
+
+    /// A key low-pass lets a drum's gate open on its thump, not on the
+    /// hi-hat in its microphone.
+    #[test]
+    fn a_key_low_pass_keeps_it_shut_on_highs() {
+        let hat: Vec<f32> = (0..20_000)
+            .map(|i| (0.3 * (TAU * 9000.0 * i as f64 / 48_000.0).sin()) as f32)
+            .collect();
+        let open = run(&device(&[])).render(&[hat.clone(), hat.clone()], &[]);
+        assert_eq!(open[0], hat);
+        let filtered = device(&[(KEY_LOW_PASS, 200.0)]);
+        let shut = run(&filtered).render(&[hat.clone(), hat.clone()], &[]);
+        gained(
+            &hat,
+            &shut[0],
+            HOLD_FRAMES + RELEASE_FRAMES + 50..20_000,
+            |_| FLOOR_GAIN,
+        );
+    }
+
+    #[test]
+    fn blocks_of_any_length_render_the_same_with_a_key() {
+        let gate = device(&[(THRESHOLD, -30.0), (HOLD, 5.0), (RELEASE, 20.0)]);
+        let input = hits(20_000);
+        let side: Vec<f32> = hits(20_000).iter().rev().copied().collect();
+        let events = [
+            param(900, SIDECHAIN, 1.0),
+            param(3000, KEY_HIGH_PASS, 400.0),
+            param(6000, KEY_LOW_PASS, 3000.0),
+            param(9000, LISTEN, 1.0),
+            param(10_500, LISTEN, 0.0),
+            param(13_001, SIDECHAIN, 0.0),
+            param(16_000, KEY_HIGH_PASS, 20.0),
+        ];
+        let render = |block| {
+            run(&gate).with_block(block).render_keyed(
+                &[input.clone(), input.clone()],
+                Some(&[side.clone(), side.clone()]),
+                &events,
+            )
+        };
+        let reference = render(512);
+        for block in [1, 7, 64, 333] {
+            assert_eq!(render(block), reference, "blocks of {block}");
+        }
     }
 }

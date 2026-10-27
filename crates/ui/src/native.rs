@@ -1,16 +1,21 @@
 //! The controls of Musicable's own devices, in the devices panel. Each
 //! parameter has one: a bar to drag for a number, a button for a switch and
 //! a menu for a choice. They stand in columns in the order of the device's
-//! table, a column for each group of parameters, such as an EQ's band.
+//! table, a column for each group of parameters, such as an EQ's band. The
+//! Compressor's and the Gate's Sidechain column starts with its sources
+//! (see [`sidechain`]).
+
+mod sidechain;
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Key, Popup, Rangef, Rect, Response, RichText, Sense,
     StrokeKind, TextEdit, Ui, vec2,
 };
-use musicable_commands::{Args, device};
+use musicable_commands::{Args, device, wire};
 use musicable_model::native::{NativeDevice, ParamInfo, Unit};
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::WireId;
 use musicable_model::{DeviceId, Project};
 
 use crate::mixer::{automated_value, automation_items, automation_mark, name_menu, slider_info};
@@ -22,6 +27,10 @@ use crate::widgets::{Face, toggle};
 /// The most controls in a column: a group with more goes on in the next
 /// one.
 pub(crate) const ROWS: usize = 5;
+
+/// The group of the Compressor's and the Gate's side input, whose column
+/// starts with its sources.
+const SIDECHAIN: &str = "Sidechain";
 
 /// Each group's name and parameters, by their places in `params`, with the
 /// groups in the order they first come in the table. Tables only grow at
@@ -70,6 +79,9 @@ pub(crate) fn controls(
     let params = device.params();
     // A device without groups needs no headings.
     let headed = params.iter().any(|info| !info.group.is_empty());
+    // The side input whose sources the Sidechain column picks.
+    let port = view.project.ports(id).first().copied();
+    let width = theme.devices.control;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = theme.devices.gap;
         let mut group = None;
@@ -78,38 +90,99 @@ pub(crate) fn controls(
             let title = params[column[0]].group;
             let heading = if group == Some(title) { "" } else { title };
             group = Some(title);
+            let port = port.filter(|_| heading == SIDECHAIN);
             ui.vertical(|ui| {
-                ui.set_width(theme.devices.control);
+                ui.set_width(width);
                 if headed {
-                    ui.label(RichText::new(heading).size(theme.small_text).weak());
+                    let heading = ui.label(RichText::new(heading).size(theme.small_text).weak());
+                    if let Some(port) = port {
+                        sidechain::add(ui, heading.rect, port, name, view, theme, actions);
+                    }
                 }
-                for index in column {
-                    let param = ParamAddress::Device(id, index as u32);
+                let show = |ui: &mut Ui, index: usize, width: f32, actions: &mut Vec<Action>| {
+                    let param = Setting::Param(id, index);
                     let playhead = view.playback.playhead;
                     let own = device.values[index];
-                    let automated = automated_value(view.project, param, playhead, own);
+                    let automated = automated_value(view.project, param.address(), playhead, own);
                     // Between points, a switch or a choice shows its
                     // nearest value.
                     let value = params[index].clamp(automated);
                     let control = Control {
-                        device: id,
-                        index,
+                        setting: param,
                         info: &params[index],
                         label: format!("{name} {}", params[index].full_name()),
                         project: view.project,
                     };
-                    ui.push_id(index, |ui| control.show(ui, value, theme, mouse, actions));
+                    ui.push_id(index, |ui| {
+                        control.show(ui, value, width, theme, mouse, actions)
+                    });
+                };
+                let Some(port) = port else {
+                    for index in column {
+                        show(ui, index, width, actions);
+                    }
+                    return;
+                };
+                sidechain::sources(ui, port, name, view, theme, mouse, actions);
+                // Its switches are short, so they share a row, above its
+                // filters.
+                let (switches, others): (Vec<usize>, Vec<usize>) =
+                    (column.iter()).partition(|&&index| params[index].unit == Unit::Switch);
+                ui.horizontal(|ui| {
+                    let gap = ui.spacing().item_spacing.x;
+                    let count = switches.len().max(1) as f32;
+                    let each = (width - gap * (count - 1.0)) / count;
+                    for index in switches {
+                        show(ui, index, each, actions);
+                    }
+                });
+                for index in others {
+                    show(ui, index, width, actions);
                 }
             });
         }
     });
 }
 
+/// What a control sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Setting {
+    /// A device's parameter, by its place in the device's table.
+    Param(DeviceId, usize),
+    /// A wire's gain.
+    WireGain(WireId),
+}
+
+impl Setting {
+    /// Where automation finds it.
+    fn address(self) -> ParamAddress {
+        match self {
+            Self::Param(device, index) => ParamAddress::Device(device, index as u32),
+            Self::WireGain(wire) => ParamAddress::Wire(wire),
+        }
+    }
+
+    /// The command that sets it to `value`.
+    fn set(self, value: f64) -> Action {
+        match self {
+            Self::Param(device, index) => {
+                let args = Args::new()
+                    .with("device", device)
+                    .with("param", index as i64)
+                    .with("value", value);
+                Action::RunWith(device::SET_PARAM, args)
+            }
+            Self::WireGain(wire) => {
+                let args = Args::new().with("wire", wire).with("gain", value);
+                Action::RunWith(wire::SET_GAIN, args)
+            }
+        }
+    }
+}
+
 /// One parameter's control.
 struct Control<'a> {
-    device: DeviceId,
-    /// The parameter's place in the device's table.
-    index: usize,
+    setting: Setting,
     info: &'a ParamInfo,
     /// What screen readers call it: "EQ Band 1 Freq".
     label: String,
@@ -118,15 +191,17 @@ struct Control<'a> {
 }
 
 impl Control<'_> {
+    /// Shows it `width` wide, at `value`.
     fn show(
         &self,
         ui: &mut Ui,
         value: f64,
+        width: f32,
         theme: &Theme,
         mouse: &MouseMap,
         actions: &mut Vec<Action>,
     ) {
-        let size = vec2(theme.devices.control, ui.spacing().interact_size.y);
+        let size = vec2(width, ui.spacing().interact_size.y);
         let info = self.info;
         match info.unit {
             Unit::Switch => {
@@ -159,7 +234,7 @@ impl Control<'_> {
                     current.clone()
                 };
                 let mut picked = None;
-                let menu = ComboBox::from_id_salt(self.index)
+                let menu = ComboBox::from_id_salt(self.setting)
                     .width(size.x)
                     .selected_text(RichText::new(shown).size(theme.small_text))
                     .show_ui(ui, |ui| {
@@ -197,7 +272,7 @@ impl Control<'_> {
 
     /// Where automation finds the parameter.
     fn param(&self) -> ParamAddress {
-        ParamAddress::Device(self.device, self.index as u32)
+        self.setting.address()
     }
 
     /// Marks the control `response` if the parameter has automation, and
@@ -213,11 +288,7 @@ impl Control<'_> {
 
     /// The command that sets the parameter to `value`.
     fn set(&self, value: f64) -> Action {
-        let args = Args::new()
-            .with("device", self.device)
-            .with("param", self.index as i64)
-            .with("value", value);
-        Action::RunWith(device::SET_PARAM, args)
+        self.setting.set(value)
     }
 
     /// A bar `width` wide, filled as far as `value` is along the

@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 18,
+  "version": 19,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -51,6 +51,7 @@ workspace:
   "next_take_id": 0,
   "next_modulator_id": 1,
   "next_routing_id": 1,
+  "next_wire_id": 0,
   "tracks": [
     {
       "id": 0,
@@ -288,6 +289,7 @@ workspace:
       "overridden": false
     }
   ],
+  "wires": [],
   "workspace": "Mixing"
 }
 ```
@@ -350,10 +352,12 @@ in version control shows only what really changed.
 | `next_take_id` | whole number | The same for takes. |
 | `next_modulator_id` | whole number | The same for modulators, on tracks and on the master. |
 | `next_routing_id` | whole number | The same for modulators' routings. |
+| `next_wire_id` | whole number | The same for wires. |
 | `tracks` | array of tracks | Top to bottom, as the arrangement shows them. |
 | `master` | master | The master channel. |
 | `locators` | array of locators | Named places in the song, in any order. |
 | `automation` | array of lanes | The automated parameters, a lane for each, in any order. |
+| `wires` | array of wires | The wires that take signal from one point in the mix into a device, such as a compressor's sidechain, in the order they were made. |
 | `workspace` | string or null | The name of the workspace the project was saved with, which lays Musicable's panels out. Musicable switches to it as it opens the project, if the user has a workspace by that name. |
 
 ### Tempo map
@@ -737,6 +741,10 @@ does is in the kind's file in `crates/model/src/native/`.
 | 5 | `output` | Output | -24 to 24 dB | 0 |
 | 6 | `mix` | Mix | 0 to 100 % | 100 |
 | 7 | `detector` | Detector | 0 Peak, 1 RMS | 0 |
+| 8 | `sidechain` | Sidechain On | 0 off, 1 on | 0 |
+| 9 | `key_high_pass` | Sidechain High-Pass | 20 to 20000 Hz | 20 |
+| 10 | `key_low_pass` | Sidechain Low-Pass | 20 to 20000 Hz | 20000 |
+| 11 | `listen` | Sidechain Listen | 0 off, 1 on | 0 |
 
 **Gate** (`"gate"`):
 
@@ -748,6 +756,10 @@ does is in the kind's file in `crates/model/src/native/`.
 | 3 | `hold` | Hold | 0 to 1000 ms | 10 |
 | 4 | `release` | Release | 1 to 3000 ms | 100 |
 | 5 | `floor` | Floor | -80 to 0 dB | -80 |
+| 6 | `sidechain` | Sidechain On | 0 off, 1 on | 0 |
+| 7 | `key_high_pass` | Sidechain High-Pass | 20 to 20000 Hz | 20 |
+| 8 | `key_low_pass` | Sidechain Low-Pass | 20 to 20000 Hz | 20000 |
+| 9 | `listen` | Sidechain Listen | 0 off, 1 on | 0 |
 
 **Delay** (`"delay"`):
 
@@ -980,17 +992,18 @@ A **curve** is one of these, a string or an object:
 | `"positive"` | Where it's above 0, and 0 elsewhere. |
 | `"negative"` | Where it's below 0, and 0 elsewhere. |
 
-Modulators can move the channels' faders, pans and sends, the test
-devices' parameters, every plugin parameter, and the built-in devices' and
-modulators' parameters but those of whole numbers, such as switches,
-choices and counts. They can't move a Bypass or a clip's parameters. A
-parameter moves by the sum of its routings, kept within its range. A
-modulator reaches its own channel: its devices, its fader, pan and sends,
-and the channel's other modulators. A group track's modulators also reach
-the tracks that feed the group, through other groups too, and the master's
-reach every channel. A routing to a parameter out of reach, such as one
-from a group to a track that no longer feeds the group, is kept and moves
-nothing until it's back in reach.
+Modulators can move the channels' faders, pans and sends, wires' gains,
+the test devices' parameters, every plugin parameter, and the built-in
+devices' and modulators' parameters but those of whole numbers, such as
+switches, choices and counts. They can't move a Bypass or a clip's
+parameters. A parameter moves by the sum of its routings, kept within its
+range. A modulator reaches its own channel: its devices and the gains of
+the wires into them, its fader, pan and sends, and the channel's other
+modulators. A group track's modulators also reach the tracks that feed the
+group, through other groups too, and the master's reach every channel. A
+routing to a parameter out of reach, such as one from a group to a track
+that no longer feeds the group, is kept and moves nothing until it's back
+in reach.
 
 ### Locator
 
@@ -1024,20 +1037,21 @@ A **parameter** is an object with one field, saying whose it is:
 | `{"device": {"id": id, "param": n}}` | Parameter `n` of the device with that id. For a built-in device, `n` is the parameter's number in its kind's table (the `#` column above). For a plugin, `n` is the plugin's id for the parameter, as in its `params`, up to 4,294,967,295. A test device has only parameter 0: its `gain` or `level`. |
 | `{"bypass": id}` | The `bypassed` of the device with that id, on a track or on the master. |
 | `{"modulator": {"id": id, "param": n}}` | Parameter `n` of the modulator with that id: the parameter's number in an LFO's or an Envelope's table, or a Macro's control's id. |
+| `{"wire": id}` | The `gain` of the wire with that id. |
 
 A **channel** is `{"track": id}`, the track with that id, or `"master"`.
 
 A **point** is a pair `[at, value]`. `at` is a position, 0 or after, and
 `value` a float in the parameter's own units, the ones its own field uses:
-linear gain for a fader, a send or a test gain, −1.0 to 1.0 for a pan, a
+linear gain for a fader, a send, a wire or a test gain, −1.0 to 1.0 for a pan, a
 built-in device's values as its `params` take them (within the range, and a
 whole number for switches, choices, notes and counts), a modulator's as its
 `params` or a control's `value` takes them, a plugin's own values for its
 parameters, and 0.0 to 1.0 for a Bypass, which bypasses the device from
 0.5.
 
-Between two points the value moves in a straight line: for faders, sends and
-the test devices' settings on the fader's scale, where a gain's position is
+Between two points the value moves in a straight line: for faders, sends,
+wires and the test devices' settings on the fader's scale, where a gain's position is
 its fourth root; for a built-in device's parameter on the scale its control
 spreads its values over, as its kind's file in `crates/model/src/native/`
 gives it (frequencies in ratios, for one); and for pans and plugins'
@@ -1063,6 +1077,41 @@ Signal flows from tracks to buses without loops:
   return track. Return tracks have no sends.
 - Any track, group tracks included, can feed a group or send to a return
   track, wherever it is in the list.
+- Wires take signal from a point on a channel, a **tap**, into a device,
+  through one of its **ports**. A wire can't close a loop with the outputs,
+  the sends and the other wires: what comes out of the device it feeds
+  can't reach its tap. So a compressor can't be keyed from after itself,
+  from the group its track feeds, or from the master, which every track
+  reaches, but two tracks can key each other from their Pre FX.
+
+### Wire
+
+A wire takes a tap's signal into a port, at a gain. Wires into the same
+port sum.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | Below `next_wire_id`, and no other wire has it. |
+| `from` | tap | Where it takes its signal. |
+| `to` | port | Where the signal goes. No two wires join the same tap and port. |
+| `gain` | float | Linear: 1.0 is unity. |
+
+A **tap** is an object with one field, saying which point on a channel it
+is. Taps come before mute and solo, so a muted track's signal still goes
+where its wires take it.
+
+| Tap | Meaning |
+|---|---|
+| `{"pre_fx": id}` | What comes into the devices of the track with that id: its clips and its input, or on a group or a return track, what feeds it. Not a MIDI track's, whose is its notes. |
+| `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. |
+| `{"post_fx": channel}` | What comes out of a channel's last device, where its pre-fader sends take their signal. |
+| `{"post_fader": channel}` | What comes out of a channel's fader and pan, where its post-fader sends take their signal. |
+
+A **port** is an object with one field:
+
+| Port | Meaning |
+|---|---|
+| `{"sidechain": id}` | The side input of the Compressor or the Gate with that id, which its detector hears while its `sidechain` parameter is on. |
 
 ## Versions
 
@@ -1086,6 +1135,7 @@ Signal flows from tracks to buses without loops:
 | 16 | 2026-10-25 | Granular: the warp mode that plays audio as short overlapping grains, with its Follow pitch, Grain Size and Fluctuation, and curves for the last two. Version 15 warped clips follow the pitch, with 30 ms grains and a fluctuation of 25. |
 | 17 | 2026-10-27 | Bypass and Deactivate: each device's `bypassed` and `active`, and Bypass lanes. Version 16 devices are all active, and none is bypassed. |
 | 18 | 2026-10-27 | Modulation: modulators on tracks and on the master, Macros, LFOs and Envelopes, with routings that move parameters, and lanes for their parameters. Version 17 channels have none. |
+| 19 | 2026-10-27 | Wires, from taps on channels into devices' ports, starting with the Compressor's and the Gate's sidechains, and lanes for their gains. Version 18 files have none. |
 
 ## Changing the format
 

@@ -21,10 +21,11 @@ use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Offset
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::{ControlKind, Curve, ModulatorKind, Output, envelope, lfo};
 use musicable_model::native::{
-    NativeDevice, NativeKind, ParamInfo, Unit, eq, sampler, synth, utility,
+    NativeDevice, NativeKind, ParamInfo, Unit, compressor, eq, gate, sampler, synth, utility,
 };
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
     GranularSettings, Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings,
@@ -58,6 +59,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("granular", granular()),
         ("bypass", bypass()),
         ("modulation", modulation()),
+        ("sidechain", sidechain()),
     ]
 }
 
@@ -1274,6 +1276,56 @@ fn modulation() -> Project {
             vec![point(0, 50.0), point(4, 10.0)],
         ),
     ];
+    project
+}
+
+/// Sidechains, from version 19: a compressor on a bass keyed by the kick's
+/// Post FX, with its Sidechain on and its key filtered, a gate on a pad
+/// keyed by the kick's Pre FX and by the bass after its compressor, summed,
+/// a compressor on the master keyed by a group's Post Fader, and a lane on
+/// a key's gain.
+fn sidechain() -> Project {
+    let mut project = Project::new();
+    let kick = project.add_track("Kick", TrackKind::Audio);
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    let pad = project.add_track("Pad", TrackKind::Midi);
+    let group = project.add_track("Drums", TrackKind::Group);
+    project.track_mut(kick).unwrap().output = Bus::Group(group);
+    let native = |project: &mut Project, kind| {
+        project.new_device(DeviceKind::Native(NativeDevice::new(kind)))
+    };
+    let mut ducker = native(&mut project, NativeKind::Compressor);
+    let settings = ducker.kind.native_mut().unwrap();
+    settings.set(compressor::SIDECHAIN, 1.0);
+    settings.set(compressor::KEY_HIGH_PASS, 60.0);
+    settings.set(compressor::KEY_LOW_PASS, 4000.0);
+    let synth = native(&mut project, NativeKind::Synth);
+    let mut gate = native(&mut project, NativeKind::Gate);
+    gate.kind.native_mut().unwrap().set(gate::SIDECHAIN, 1.0);
+    let glue = native(&mut project, NativeKind::Compressor);
+    let (ducker_id, gate_id, glue_id) = (ducker.id, gate.id, glue.id);
+    project.track_mut(bass).unwrap().devices = vec![ducker];
+    project.track_mut(pad).unwrap().devices = vec![synth, gate];
+    project.master.devices = vec![glue];
+    let wire = |project: &mut Project, from, to, gain| {
+        let mut wire = project.new_wire(from, Port::Sidechain(to));
+        wire.gain = gain;
+        project.wires.push(wire);
+        wire.id
+    };
+    let key = wire(
+        &mut project,
+        Tap::PostFx(Chain::Track(kick)),
+        ducker_id,
+        0.5,
+    );
+    wire(&mut project, Tap::PreFx(kick), gate_id, 1.0);
+    wire(&mut project, Tap::Device(ducker_id), gate_id, 2.0);
+    let drums = Tap::PostFader(Chain::Track(group));
+    wire(&mut project, drums, glue_id, 1.0);
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    let swell = vec![point(0, 0.25), point(8, 1.0)];
+    project.automation = vec![Lane::new(ParamAddress::Wire(key), swell)];
     project
 }
 

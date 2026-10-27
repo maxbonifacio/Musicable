@@ -18,6 +18,7 @@ use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::{self, ModulatorId, RoutingId};
 use musicable_model::param::{self as param, ParamAddress};
+use musicable_model::routing::{self, WireId};
 use musicable_model::time::{self, Beats};
 use musicable_model::warp;
 use musicable_model::{self as model, Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
@@ -48,10 +49,12 @@ pub(super) struct File {
     next_take_id: u32,
     next_modulator_id: u32,
     next_routing_id: u32,
+    next_wire_id: u32,
     tracks: Vec<Track>,
     master: Master,
     locators: Vec<Locator>,
     automation: Vec<Lane>,
+    wires: Vec<Wire>,
     /// The workspace the project was saved with.
     #[serde(deserialize_with = "Option::deserialize")]
     workspace: Option<String>,
@@ -534,6 +537,8 @@ enum Param {
         id: u32,
         param: u32,
     },
+    /// A wire's gain, by the wire's id.
+    Wire(u32),
 }
 
 /// A track by id, `{"track": 3}`, or `"master"`.
@@ -542,6 +547,39 @@ enum Param {
 enum Channel {
     Track(u32),
     Master,
+}
+
+/// A wire: a tap's signal, into a port.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wire {
+    id: u32,
+    from: Tap,
+    to: Port,
+    /// Linear.
+    gain: f32,
+}
+
+/// Externally tagged: `{"pre_fx": 3}` for track 3's Pre FX, `{"device": 5}`
+/// for what device 5 puts out, `{"post_fx": {"track": 3}}` or
+/// `{"post_fader": "master"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Tap {
+    /// A track's id.
+    PreFx(u32),
+    /// A device's id.
+    Device(u32),
+    PostFx(Channel),
+    PostFader(Channel),
+}
+
+/// Externally tagged: `{"sidechain": 7}` for device 7's Sidechain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Port {
+    /// A Compressor's or a Gate's, by the device's id.
+    Sidechain(u32),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -654,6 +692,7 @@ impl From<&model::Project> for File {
             tracks,
             locators,
             automation,
+            wires,
             next_track_id,
             next_send_id,
             next_device_id,
@@ -662,6 +701,7 @@ impl From<&model::Project> for File {
             next_take_id,
             next_modulator_id,
             next_routing_id,
+            next_wire_id,
             workspace,
         } = project;
         Self {
@@ -682,6 +722,7 @@ impl From<&model::Project> for File {
             next_take_id: *next_take_id,
             next_modulator_id: *next_modulator_id,
             next_routing_id: *next_routing_id,
+            next_wire_id: *next_wire_id,
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
@@ -690,6 +731,7 @@ impl From<&model::Project> for File {
                 .filter(|lane| !matches!(lane.param, ParamAddress::Clip(..)))
                 .map(Lane::from)
                 .collect(),
+            wires: wires.iter().map(Wire::from).collect(),
             workspace: workspace.clone(),
         }
     }
@@ -717,10 +759,12 @@ impl File {
             next_take_id,
             next_modulator_id,
             next_routing_id,
+            next_wire_id,
             tracks,
             master,
             locators,
             automation,
+            wires,
             workspace,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
@@ -785,11 +829,20 @@ impl File {
             model_locators.push(locator.to_model(&path)?);
         }
         locator_ids.check_next()?;
+        let mut wire_ids = Ids::new("wire", "next_wire_id", *next_wire_id);
+        let mut model_wires = Vec::with_capacity(wires.len());
+        for (i, wire) in wires.iter().enumerate() {
+            let path = format!("wires[{i}]");
+            wire_ids.add(wire.id, &path)?;
+            model_wires.push(wire.to_model(&path)?);
+        }
+        wire_ids.check_next()?;
         let params = Params {
             tracks: &kinds,
             sends: &send_ids,
             devices: &device_ids,
             modulators: &modulator_ids,
+            wires: &wire_ids,
         };
         let mut automated: HashMap<Param, usize> = HashMap::new();
         let mut model_lanes = Vec::with_capacity(automation.len());
@@ -822,6 +875,7 @@ impl File {
             tracks: model_tracks,
             locators: model_locators,
             automation: model_lanes,
+            wires: model_wires,
             next_track_id: *next_track_id,
             next_send_id: *next_send_id,
             next_device_id: *next_device_id,
@@ -830,10 +884,12 @@ impl File {
             next_take_id: *next_take_id,
             next_modulator_id: *next_modulator_id,
             next_routing_id: *next_routing_id,
+            next_wire_id: *next_wire_id,
             workspace: workspace.clone(),
         };
         check_loops(&project)?;
         check_routings(&project)?;
+        check_wires(&project)?;
         // Which parameters a device has depends on its kind, and a built-in
         // device's take the values its own do.
         for (i, lane) in project.automation.iter().enumerate() {
@@ -945,6 +1001,109 @@ fn check_loops(project: &model::Project) -> Result<(), Invalid> {
         }
     }
     Ok(())
+}
+
+/// Refuses wires that can't join the file's project: from a track or a
+/// device it hasn't, or from a MIDI track's Pre FX, which is notes, into a
+/// device it hasn't or one without the port, a second wire joining the same
+/// ends, and a wire that closes a loop.
+fn check_wires(project: &model::Project) -> Result<(), Invalid> {
+    for (i, wire) in project.wires.iter().enumerate() {
+        let path = format!("wires[{i}]");
+        let from = || format!("{path}.from");
+        let no_device = |id: DeviceId| format!("there's no device with id {}", id.0);
+        match wire.from {
+            routing::Tap::PreFx(id)
+            | routing::Tap::PostFx(Chain::Track(id))
+            | routing::Tap::PostFader(Chain::Track(id)) => match project.track(id) {
+                None => return Err(Invalid::new(from(), no_track(id.0))),
+                Some(track)
+                    if track.kind == model::TrackKind::Midi
+                        && wire.from == routing::Tap::PreFx(id) =>
+                {
+                    let message = format!("is MIDI track {}'s Pre FX, which is notes", id.0);
+                    return Err(Invalid::new(from(), message));
+                }
+                Some(_) => {}
+            },
+            routing::Tap::Device(id) if project.find_device(id).is_none() => {
+                return Err(Invalid::new(from(), no_device(id)));
+            }
+            routing::Tap::Device(_)
+            | routing::Tap::PostFx(Chain::Master)
+            | routing::Tap::PostFader(Chain::Master) => {}
+        }
+        let device = wire.to.device();
+        if project.find_device(device).is_none() {
+            return Err(Invalid::new(format!("{path}.to"), no_device(device)));
+        }
+        if !project.has_port(wire.to) {
+            let message = format!(
+                "device {} has no sidechain: only a Compressor and a Gate have one",
+                device.0
+            );
+            return Err(Invalid::new(format!("{path}.to"), message));
+        }
+        let same = |w: &routing::Wire| (w.from, w.to) == (wire.from, wire.to);
+        if let Some(first) = project.wires[..i].iter().position(same) {
+            let message = format!("wires[{first}] joins the same tap and port");
+            return Err(Invalid::new(path, message));
+        }
+    }
+    if let Some(wire) = project.wire_in_a_loop() {
+        let i = project.wire_index(wire).expect("the wire is the project's");
+        let message = "makes a loop: what comes out of the device it feeds reaches its tap";
+        return Err(Invalid::new(format!("wires[{i}]"), message));
+    }
+    Ok(())
+}
+
+impl From<&routing::Wire> for Wire {
+    fn from(wire: &routing::Wire) -> Self {
+        let routing::Wire { id, from, to, gain } = *wire;
+        let channel = |chain| match chain {
+            Chain::Track(track) => Channel::Track(track.0),
+            Chain::Master => Channel::Master,
+        };
+        Self {
+            id: id.0,
+            from: match from {
+                routing::Tap::PreFx(track) => Tap::PreFx(track.0),
+                routing::Tap::Device(device) => Tap::Device(device.0),
+                routing::Tap::PostFx(chain) => Tap::PostFx(channel(chain)),
+                routing::Tap::PostFader(chain) => Tap::PostFader(channel(chain)),
+            },
+            to: match to {
+                routing::Port::Sidechain(device) => Port::Sidechain(device.0),
+            },
+            gain,
+        }
+    }
+}
+
+impl Wire {
+    /// The wire, with the ids it names as they are: which tracks and
+    /// devices the file has is checked once they're all read.
+    fn to_model(&self, path: &str) -> Result<routing::Wire, Invalid> {
+        let Self { id, from, to, gain } = *self;
+        let chain = |channel| match channel {
+            Channel::Track(id) => Chain::Track(TrackId(id)),
+            Channel::Master => Chain::Master,
+        };
+        Ok(routing::Wire {
+            id: WireId(id),
+            from: match from {
+                Tap::PreFx(track) => routing::Tap::PreFx(TrackId(track)),
+                Tap::Device(device) => routing::Tap::Device(DeviceId(device)),
+                Tap::PostFx(channel) => routing::Tap::PostFx(chain(channel)),
+                Tap::PostFader(channel) => routing::Tap::PostFader(chain(channel)),
+            },
+            to: match to {
+                Port::Sidechain(device) => routing::Port::Sidechain(DeviceId(device)),
+            },
+            gain: finite(gain, || format!("{path}.gain"))?,
+        })
+    }
 }
 
 impl From<&time::TempoMap> for TempoMap {
@@ -2777,12 +2936,13 @@ impl Locator {
 }
 
 /// What a lane's or a routing's parameter can belong to: the file's
-/// tracks, sends, devices and modulators.
+/// tracks, sends, devices, modulators and wires.
 struct Params<'a> {
     tracks: &'a HashMap<u32, TrackKind>,
     sends: &'a Ids,
     devices: &'a Ids,
     modulators: &'a Ids,
+    wires: &'a Ids,
 }
 
 impl From<ParamAddress> for Param {
@@ -2804,6 +2964,7 @@ impl From<ParamAddress> for Param {
                 id: modulator.0,
                 param,
             },
+            ParamAddress::Wire(wire) => Param::Wire(wire.0),
             ParamAddress::Clip(..) => unreachable!("a clip's curves are in the clip"),
         }
     }
@@ -2843,6 +3004,10 @@ impl Param {
                 ParamAddress::Modulator(ModulatorId(id), param)
             }
             Param::Modulator { id, .. } => return Err(missing("modulator", id)),
+            Param::Wire(id) if params.wires.seen.contains_key(&id) => {
+                ParamAddress::Wire(WireId(id))
+            }
+            Param::Wire(id) => return Err(missing("wire", id)),
         })
     }
 }

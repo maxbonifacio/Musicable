@@ -61,6 +61,12 @@ pub struct State {
 }
 
 impl State {
+    /// The memory of a section that has had silence coming in.
+    pub const SILENT: Self = Self {
+        ic1eq: 0.0,
+        ic2eq: 0.0,
+    };
+
     /// Filters one sample.
     #[inline]
     pub fn tick(&mut self, c: &Coefficients, v0: f64) -> f64 {

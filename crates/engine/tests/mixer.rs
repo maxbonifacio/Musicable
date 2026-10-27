@@ -13,7 +13,9 @@ use musicable_engine::{
     ReferenceRenderer, Renderer, TransportCommand, compile, compile_metered, rt,
 };
 use musicable_model::mixer::{Bus, pan_gains};
-use musicable_model::{ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
+use musicable_model::native::{NativeDevice, NativeKind, compressor, gate};
+use musicable_model::routing::{Port, Tap};
+use musicable_model::{Chain, ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -378,7 +380,8 @@ impl Random {
 }
 
 /// A random mix: tracks of every kind, groups in groups, sends before and
-/// after the fader, pan, mute, solo, devices and clip types.
+/// after the fader, pan, mute, solo, devices, keyed compressors and gates
+/// with wires from anywhere, and clip types.
 fn random_mix(random: &mut Random) -> Project {
     let mut p = Project::new();
     p.metronome = random.one_in(2);
@@ -420,11 +423,58 @@ fn random_mix(random: &mut Random) -> Project {
             let device = p.new_device(DeviceKind::TestGain { gain });
             p.track_mut(id).unwrap().devices.push(device);
         }
+        if random.one_in(3) {
+            let device = p.new_device(DeviceKind::Native(keyed(random)));
+            p.track_mut(id).unwrap().devices.push(device);
+        }
     }
     p.master.gain = random.gain();
     p.master.pan = random.pan();
     p.master.clip_type = random.clip_type();
+    if random.one_in(3) {
+        let device = p.new_device(DeviceKind::Native(keyed(random)));
+        p.master.devices.push(device);
+    }
+    let chains = ids
+        .iter()
+        .map(|&id| Chain::Track(id))
+        .chain([Chain::Master]);
+    let taps: Vec<Tap> = chains.flat_map(|chain| p.taps(chain)).collect();
+    let ports: Vec<Port> = (p.chains())
+        .flat_map(|(_, devices)| devices.iter().map(|d| d.id))
+        .flat_map(|device| p.ports(device))
+        .collect();
+    for _ in 0..random.below(8) {
+        if ports.is_empty() {
+            break;
+        }
+        let (from, to) = (random.pick(&taps), random.pick(&ports));
+        if p.can_wire(from, to) {
+            let mut wire = p.new_wire(from, to);
+            wire.gain = random.gain();
+            p.wires.push(wire);
+        }
+    }
     p
+}
+
+/// A compressor or a gate with Sidechain on, quick to act.
+fn keyed(random: &mut Random) -> NativeDevice {
+    if random.one_in(2) {
+        let mut device = NativeDevice::new(NativeKind::Compressor);
+        device.set(compressor::SIDECHAIN, 1.0);
+        device.set(compressor::THRESHOLD, -30.0);
+        device.set(compressor::ATTACK, 0.5);
+        device.set(compressor::RELEASE, 20.0);
+        device
+    } else {
+        let mut device = NativeDevice::new(NativeKind::Gate);
+        device.set(gate::SIDECHAIN, 1.0);
+        device.set(gate::THRESHOLD, -20.0);
+        device.set(gate::HOLD, 1.0);
+        device.set(gate::RELEASE, 5.0);
+        device
+    }
 }
 
 /// Plays `project` through `renderer` while its faders, pans, sends and
@@ -498,9 +548,10 @@ fn same(a: &[f32], b: &[f32]) -> bool {
 #[test]
 fn every_mix_sounds_the_same_with_the_parallel_renderer() {
     let mut random = Random(7);
-    let mut heard = 0;
+    let (mut heard, mut wired) = (0, 0);
     for i in 0..40 {
         let project = random_mix(&mut random);
+        wired += usize::from(!project.live_wires().is_empty());
         let seed = random.next();
         let expected = mix_session(&project, seed, Box::new(ReferenceRenderer));
         heard += usize::from(expected.iter().any(|&s| s != 0.0));
@@ -516,4 +567,5 @@ fn every_mix_sounds_the_same_with_the_parallel_renderer() {
         }
     }
     assert!(heard > 30, "only {heard} of the mixes made a sound");
+    assert!(wired > 10, "only {wired} of the mixes had wires");
 }

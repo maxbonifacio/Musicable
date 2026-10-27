@@ -670,8 +670,14 @@ impl App {
     fn act(&mut self, action: Action, ctx: &egui::Context, frame: &eframe::Frame) {
         match action {
             // The shell offers the session's own commands.
+            // A key or a menu runs commands that apply now, but one can
+            // still refuse, as a move that would close a loop does.
             Action::Run(id) => {
-                let _ = self.session.run(&id);
+                if let Err(CommandError::Invalid(message)) =
+                    self.session.run_with(&id, &Args::new())
+                {
+                    self.messages.push(capital(&format!("{message}.")));
+                }
             }
             Action::RunWith(id, args) => match self.session.run_with(&id, &args) {
                 Ok(_) | Err(CommandError::NotNow(_)) => {}
@@ -689,7 +695,11 @@ impl App {
             Action::SetTempo(bpm) => self.session.set_tempo(bpm),
             Action::BeginGesture => self.session.begin_gesture(),
             Action::EndGesture => self.session.end_gesture(),
-            Action::Mixer(change) => self.session.change_mixer(change),
+            Action::Mixer(change) => {
+                if let Err(error) = self.session.change_mixer(change) {
+                    self.messages.push(capital(&format!("{error}.")));
+                }
+            }
             Action::ListInputs => self.list_inputs(),
             Action::ClearPeaks => self.session.meters().clear_highest(),
             Action::SetKeymap(keymap) => {

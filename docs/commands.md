@@ -637,6 +637,60 @@ and the status bar says why. A new device starts with the plugin's own
 defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
+Deleting a track or a device deletes the wires to and from it, as edits of
+their own in the same step, so undo brings them back ([Wires](#wires)). A
+copy of a device keeps the wires into it, at their gains and with their
+lanes when the copy takes its original's, so a copied compressor keeps its
+key: from the same taps, or from the copy of a device copied with it. A
+wire whose copy would close a loop, as into a copy put before the device
+it's keyed after, is left out, and the wires from a device's tap don't
+come with its copy. A move that would close a loop through a wire is
+refused, with an error naming the wire, and changes nothing. Moving
+several devices is checked once they've all moved
+(`Transaction::at_once`), as one move can close a loop that the next
+opens again.
+
+### Wires
+
+A wire takes the signal at a tap, a point on a track or the master, into a
+device's port, such as the Compressor's and the Gate's Sidechain, at a
+gain, and wires into the same port sum
+([project-format.md](project-format.md#wire)). The devices panel's
+Sidechain column runs these ([app.md](app.md#the-devices-panel)).
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `wire.connect` | Connect Wire | Wires a tap into the side input of the Compressor or the Gate `device`, at `gain` (linear, 1 without it), and turns its Sidechain on. Returns the new wire | none | Audio From, in a compressor's Sidechain |
+| `wire.disconnect` | Disconnect Wire | Removes the wire `wire`, with the lane on its gain and the routings to it | none | No Input |
+| `wire.set_source` | Set Wire Source | Has the wire `wire` take its signal from another tap, keeping its gain, its lane and its place | none | Audio From |
+| `wire.set_gain` | Set Wire Gain | Sets the wire's `gain`, linear, from silence to about 15.85, +24 dB. It overrides the lane on it, as moving a control does | none | The sidechain's Gain |
+
+A tap is `after`, a device, for what that device puts out, on any track;
+or `track` or `master` with `tap`: `pre_fx` for what comes into a track's
+devices, `post_fx` (without `tap`) for what comes out of the last of them,
+and `post_fader` for what comes out of the fader and pan. The master has
+no Pre FX, and a MIDI track's is notes, which no wire takes yet. The steps
+are "Connect Wire", "Disconnect Wire", "Wire Source" and "Wire Gain", and
+a wire's gain is a parameter like any other, which scripts write as
+"wire 1" ([Automation](#automation)). Modulators move it as they move a
+send's level, as far as the wire's own range, and a modulator reaches it
+where it reaches the device the wire feeds ([Modulation](#modulation)).
+
+A wire is refused, with an error that says why, when the project hasn't
+got the tap or the port, when the tap is wired to the port already, and
+when it would make a loop: when what the device puts out reaches the tap,
+as it does a group its track feeds, the master, or a point after itself,
+such as "That would make a loop: what the Compressor on Bass puts out
+reaches Master Post FX". The check follows the signal point to point
+(`Project::check_wire`), so two tracks can key each other from their Pre
+FX. Moving a device, an output or a send can close a loop through a wire
+too, and a `Transaction` refuses one that does, with the wire in the way:
+`move_device`, `set_track_output` and `add_send` give back a `Loop`, which
+`wire::refused` makes the command's error, such as "That would make a
+loop, through the wire from Kick Post FX to the Compressor on Bass".
+Undo and redo go back to how the project was, so `Transaction::apply`
+never refuses.
+
 ### Modulation
 
 Modulators move parameters as the song plays without changing their
@@ -675,8 +729,8 @@ modulator's parameter is "Change LFO 2", and a run of changes to one
 parameter merges into one step, as a control's drag does. A routing's
 steps are "Add Routing", "Set Routing Amount" and so on, and bypassing it
 "Bypass Routing" or "Bring Back Routing". Deleting a modulator, a control,
-a device, a send or a track deletes the routings from it and to its
-parameters as part of the same step, so undo puts them back. A routing
+a device, a send, a wire or a track deletes the routings from it and to
+its parameters as part of the same step, so undo puts them back. A routing
 whose parameter goes out of the modulator's reach, as when its track
 leaves the group, stays in the project and moves nothing until it's back.
 The engine plays modulators without a new graph for each change of a
@@ -689,7 +743,7 @@ Automation moves a parameter through points over the song
 ([project-format.md](project-format.md#lane)). Each command names
 its parameter with an argument of type `param`, a `ParamAddress`, which
 scripts write as text: "track 3 volume", "master pan", "send 2",
-"device 4 param 17", "device 4 bypass", "clip 5 transpose" or
+"device 4 param 17", "device 4 bypass", "wire 1", "clip 5 transpose" or
 "modulator 6 param 3" (`param_text`). A built-in device's parameter is its
 number in its kind's table, a plugin's its id in the plugin, and a test
 device's is 0. A modulator's is its number in an LFO's or an Envelope's
@@ -788,7 +842,9 @@ The commands are `mixer.set_volume`, `set_pan`, `set_mute`, `set_solo`,
 `set_master_volume`, `set_master_pan` and `set_master_clip_type`; deleting a
 track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
 (left) to 1. A change the routing rules don't allow, such as an output that
-would make a loop, does nothing.
+would make a loop, does nothing. An output or a new send that would close a
+loop through a wire is refused, with an error naming the wire
+([Wires](#wires)), which the app shows in its status bar.
 
 `mixer.set_input` takes an input of the kind the track records: the input's
 `device` id, as the audio settings list it, or the default input without

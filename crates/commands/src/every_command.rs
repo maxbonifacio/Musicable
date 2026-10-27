@@ -36,6 +36,7 @@ use musicable_model::modulation::{
 use musicable_model::native::{NativeDevice, NativeKind, eq};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::{
     Onset, Onsets, Origin, Preserve, TransientLoop, Warp, WarpMarker, WarpMode,
@@ -51,7 +52,7 @@ use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
     controllers, device, edit, file, history, json, locator, mixer, modulation, notes, options,
-    rewarp, take, track, transient, transport, view, warp, warp_mode, workspace,
+    rewarp, take, track, transient, transport, view, warp, warp_mode, wire, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -777,6 +778,38 @@ fn examples() -> Vec<Example> {
             let at = (1..).map(Beats::new).find(free)?;
             start_marker(s, at);
             Some(Args::new())
+        }),
+        // From another track's Post FX, as the source picker gives it.
+        edits(wire::CONNECT, |s| {
+            let (tap, port) = find_wireable(s, |project, tap, port| {
+                let chain = project.tap_chain(tap);
+                matches!(tap, Tap::PostFx(_)) && chain != project.port_chain(port)
+            })?;
+            Some(connect_args(tap, port))
+        }),
+        // From after a device, with a gain.
+        edits(wire::CONNECT, |s| {
+            let (tap, port) = find_wireable(s, |_, tap, _| matches!(tap, Tap::Device(_)))?;
+            Some(connect_args(tap, port).with("gain", 0.5))
+        }),
+        // From a track's Pre FX.
+        edits(wire::CONNECT, |s| {
+            let (tap, port) = find_wireable(s, |_, tap, _| matches!(tap, Tap::PreFx(_)))?;
+            Some(connect_args(tap, port))
+        }),
+        edits(wire::DISCONNECT, |s| {
+            let wire = pick(s, project(s).wires.iter())?;
+            Some(Args::new().with("wire", wire.id))
+        }),
+        edits(wire::SET_SOURCE, |s| {
+            let wire = *pick(s, project(s).wires.iter())?;
+            let (tap, _) = find_wireable(s, |_, _, port| port == wire.to)?;
+            Some(wire::with_tap(Args::new().with("wire", wire.id), tap))
+        }),
+        edits(wire::SET_GAIN, |s| {
+            let wire = pick(s, project(s).wires.iter())?;
+            let gain = if wire.gain == 0.5 { 1.0 } else { 0.5 };
+            Some(Args::new().with("wire", wire.id).with("gain", gain))
         }),
         edits(locator::DELETE, |s| {
             let locator = pick(s, project(s).locators.iter())?;
@@ -1886,6 +1919,23 @@ fn find_placed(s: &Rig, keep: impl Fn(usize, usize) -> bool) -> Option<(Chain, D
     Some((chain, device))
 }
 
+/// A tap and a port that `keep` keeps, which a wire could join.
+fn find_wireable(s: &Rig, keep: impl Fn(&Project, Tap, Port) -> bool) -> Option<(Tap, Port)> {
+    let project = project(s);
+    let devices = project.chains().flat_map(|(_, devices)| devices);
+    let ports: Vec<Port> = devices.flat_map(|d| project.ports(d.id)).collect();
+    let taps = project.chains().flat_map(|(chain, _)| project.taps(chain));
+    let pairs = taps.flat_map(|tap| ports.iter().map(move |&port| (tap, port)));
+    let wireable =
+        |&(tap, port): &(Tap, Port)| project.can_wire(tap, port) && keep(project, tap, port);
+    pick(s, pairs.filter(wireable))
+}
+
+/// The arguments of `wire.connect` for a wire from `tap` to `port`.
+fn connect_args(tap: Tap, port: Port) -> Args {
+    wire::with_tap(Args::new().with("device", port.device()), tap)
+}
+
 /// `args` with `chain` as the device commands take a place: a track, or
 /// the master.
 fn on_chain(args: Args, chain: Chain) -> Args {
@@ -2139,6 +2189,11 @@ fn fixture() -> Project {
     });
     let devices = [
         (Chain::Track(audio), plugin),
+        // Keyed from the spare track, below.
+        (
+            Chain::Track(audio),
+            DeviceKind::Native(NativeDevice::new(NativeKind::Compressor)),
+        ),
         (
             Chain::Track(midi),
             DeviceKind::Native(NativeDevice::new(NativeKind::Sampler)),
@@ -2166,6 +2221,8 @@ fn fixture() -> Project {
         vec![point(0, 0.25), point(4, 0.75)],
     );
     overridden.overridden = true;
+    let key = project.new_wire(Tap::PostFx(Chain::Track(spare)), Port::Sidechain(ids[1]));
+    project.wires.push(key);
     project.automation = vec![
         Lane::new(
             ParamAddress::Volume(Chain::Track(audio)),
@@ -2173,6 +2230,10 @@ fn fixture() -> Project {
         ),
         Lane::new(ParamAddress::Pan(Chain::Master), vec![point(0, -0.5)]),
         overridden,
+        Lane::new(
+            ParamAddress::Wire(key.id),
+            vec![point(0, 1.0), point(4, 0.5)],
+        ),
     ];
     let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
     let envelope = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
@@ -2282,6 +2343,7 @@ fn masked(project: &Project) -> Project {
     project.next_take_id = 0;
     project.next_modulator_id = 0;
     project.next_routing_id = 0;
+    project.next_wire_id = 0;
     let tracks = project.tracks.iter_mut().map(|t| &mut t.modulation);
     for modulation in tracks.chain([&mut project.master.modulation]) {
         for modulator in &mut modulation.modulators {
@@ -2311,6 +2373,7 @@ fn counters(project: &Project) -> Counters {
         project.next_take_id,
         project.next_modulator_id,
         project.next_routing_id,
+        project.next_wire_id,
     ];
     let notes = every_clip(project).filter_map(|clip| match &clip.content {
         ClipContent::Midi(midi) => Some((clip.id, midi.next_note_id)),
@@ -2323,7 +2386,7 @@ fn counters(project: &Project) -> Counters {
     (ids, notes.collect(), macros.collect())
 }
 
-type Counters = ([u32; 8], BTreeMap<ClipId, u32>, BTreeMap<ModulatorId, u32>);
+type Counters = ([u32; 9], BTreeMap<ClipId, u32>, BTreeMap<ModulatorId, u32>);
 
 /// Every clip, on the tracks and in their takes.
 fn every_clip(project: &Project) -> impl Iterator<Item = &Clip> {

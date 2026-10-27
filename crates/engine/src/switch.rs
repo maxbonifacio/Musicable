@@ -5,15 +5,17 @@ use std::ops::Range;
 
 use crate::nodes::{Delay, Smoothed};
 use crate::{
-    AudioBuffer, AudioMut, AudioRef, Automation, EngineConfig, Inputs, MidiMessage, Node,
-    NodeEvent, NodeEventKind, NoteId, Notes, ParamId, ProcessContext,
+    AudioBuffer, AudioMut, Automation, EngineConfig, Inputs, MidiMessage, Node, NodeEvent,
+    NodeEventKind, NoteId, Notes, ParamId, ProcessContext,
 };
 
 /// A device's node, in the switch that bypasses it. The compiler puts one
 /// in each device's place, with the device's key.
 ///
 /// While the device plays, the switch plays the device and keeps a copy of
-/// what comes into it, delayed by the device's latency: the dry copy.
+/// what comes into its main input, delayed by the device's latency: the dry
+/// copy. The device hears its side inputs too, such as a compressor's
+/// sidechain, but they never play in its place.
 /// Bypassing the device ([`BYPASS`](Self::BYPASS)) crossfades to the dry
 /// copy over 10 ms, so nothing else in the mix moves, and stops the device
 /// ([`Node::stop`]) once the fade is over. While it's stopped, it gets its
@@ -83,10 +85,6 @@ const DUE: usize = 16;
 /// them, the part is cut in two, and more than this on one frame come a
 /// frame late.
 const SHIFTED: usize = 256;
-
-/// How many inputs the device gets in a part of a block. A device in a
-/// chain has one.
-const INPUTS: usize = 16;
 
 impl Switch {
     /// The switch's parameter: 1.0 bypasses the device, and 0.0 brings it
@@ -505,7 +503,7 @@ fn part<'a>(
 }
 
 /// Renders `device` over `frames` of `output`, with `part` its context and
-/// the same frames of `inputs`.
+/// the same frames of `inputs`, side inputs' included.
 fn process_part(
     device: &mut dyn Node,
     part: &ProcessContext<'_>,
@@ -513,13 +511,7 @@ fn process_part(
     frames: Range<usize>,
     output: &mut AudioMut<'_>,
 ) {
-    let mut views = [AudioRef::empty(0); INPUTS];
-    debug_assert!(inputs.len() <= INPUTS, "a device has a few inputs");
-    let count = inputs.len().min(INPUTS);
-    for (view, input) in views.iter_mut().zip(inputs.iter()) {
-        *view = input.range(frames.clone());
-    }
-    let inputs = Inputs::from_views(&views[..count]);
+    let inputs = inputs.range(frames.clone());
     device.process(part, inputs, &mut output.range_mut(frames));
 }
 

@@ -681,6 +681,24 @@ glides to a new size. Screen readers find each control by the device's
 name and the control's, such as "EQ Band 3 Freq", and can set a bar to a
 number.
 
+The Compressor's and the Gate's Sidechain column (`native::sidechain`)
+starts with a picker for each wire into the device's side input, with the
+wire's gain under it, or one picker that says No Input. A picker's menu has
+No Input, then each other track, opening to its taps, then This track,
+opening to the points before the device on its own chain, as the manual's
+[Sidechains](../manual/src/using/sidechains.md) page shows. A tap the side
+input takes already, or one that would close a loop, is listed but greyed
+out, and its hover text says why (`Project::check_wire`). Picking runs
+`wire.connect`, `wire.set_source` or `wire.disconnect`
+([commands.md](commands.md#wires)), and the + by the column's name adds
+another source. A wire's gain is a bar like the device's own
+(`native::Setting::WireGain`), which runs `wire.set_gain`, and its lane,
+named after its source, such as "Sidechain from Kick Post FX", is among
+the device's parameters in the arrangement's lane chooser. Screen readers
+hear the pickers as "Compressor Sidechain Source", then "Source 2" and on,
+the gains as "Compressor Sidechain Gain", and the + as "Add a Source to
+Compressor Sidechain".
+
 A sampler reads the whole of its file when the graph is next built, and
 samplers playing the same file share it. Loading and removing a sample are
 steps in the undo history: "Load Sample" and "Remove Sample". Every control

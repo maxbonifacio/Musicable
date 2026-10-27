@@ -52,11 +52,12 @@ pub mod transport;
 pub mod view;
 pub mod warp;
 pub mod warp_mode;
+pub mod wire;
 pub mod workspace;
 
 pub use args::{Args, CommandError, FromValue, Param, Type, Value, param_text};
 pub use browser::{Library, NoLibrary};
-pub use document::{Committed, Document, Edit, Transaction};
+pub use document::{Committed, Document, Edit, Loop, Transaction};
 pub use editor::{Editor, Edits, Focus};
 pub use history::Steps;
 pub use key::{ChordError, Key, KeyChord, Modifiers};
@@ -629,6 +630,7 @@ pub fn register_all(registry: &mut Registry) {
     rewarp::register(registry);
     transient::register(registry);
     automation::register(registry);
+    wire::register(registry);
     view::register(registry);
     workspace::register(registry);
     options::register(registry);

@@ -70,6 +70,7 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         config,
         nodes,
         inputs,
+        ports,
         order,
         buffers,
         events,
@@ -83,7 +84,7 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         let mut output = std::mem::take(&mut buffers[node.0]);
         let (start, end) = event_ranges[node.0];
         let ctx = block.context(config.sample_rate, &events[start as usize..end as usize]);
-        let inputs = Inputs::graph(buffers, &inputs[node.0], block.frames);
+        let inputs = Inputs::graph(buffers, &inputs[node.0], &ports[node.0], block.frames);
         nodes[node.0].process(&ctx, inputs, &mut output.view_mut(block.frames));
         buffers[node.0] = output;
     }

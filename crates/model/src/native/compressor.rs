@@ -9,10 +9,20 @@
 //! peaks, RMS its power averaged over the attack time, so RMS responds a
 //! little more slowly. The output gain comes after, and `mix` blends the
 //! compressed signal with what came in, for parallel compression.
+//!
+//! The level comes from the key: the device's own input, or with
+//! `sidechain` on, its side input, which wires feed from other points in
+//! the mix (see [`routing`](crate::routing)). With nothing wired to the side
+//! input, the key is the device's own input whatever `sidechain` says, so it
+//! never keys from silence. The key goes through a 12 dB per octave
+//! high-pass at `key_high_pass` and a low-pass at `key_low_pass`, so a bass
+//! line doesn't pump it, and `listen` plays the key, filtered, in place of
+//! the output, for setting them. At their ends, 20 Hz and 20 kHz, the
+//! filters cut nothing.
 
 use super::Scale::{Linear, Log};
-use super::Unit::{Decibels, Milliseconds, Percent, Ratio};
-use super::{ParamInfo, choice, param};
+use super::Unit::{Decibels, Hertz, Milliseconds, Percent, Ratio};
+use super::{ParamInfo, choice, param, switch};
 
 /// In dB.
 pub const THRESHOLD: usize = 0;
@@ -30,12 +40,21 @@ pub const OUTPUT: usize = 5;
 pub const MIX: usize = 6;
 /// What the level follows: one of [`DETECTORS`].
 pub const DETECTOR: usize = 7;
+/// Whether the level comes from the side input, rather than the device's
+/// own input: 0 off, 1 on.
+pub const SIDECHAIN: usize = 8;
+/// Where the key's high-pass cuts, in Hz. 20 Hz cuts nothing.
+pub const KEY_HIGH_PASS: usize = 9;
+/// Where the key's low-pass cuts, in Hz. 20 kHz cuts nothing.
+pub const KEY_LOW_PASS: usize = 10;
+/// Whether the output is the key, as the level follows it: 0 off, 1 on.
+pub const LISTEN: usize = 11;
 
 /// The detectors: peak, or RMS.
 pub const DETECTORS: [&str; 2] = ["Peak", "RMS"];
 
 #[rustfmt::skip]
-pub(super) const PARAMS: [ParamInfo; 8] = [
+pub(super) const PARAMS: [ParamInfo; 12] = [
     param("threshold", "Threshold", "", [-60.0, 0.0, -18.0], Decibels, Linear),
     param("ratio", "Ratio", "", [1.0, 20.0, 4.0], Ratio, Log),
     param("attack", "Attack", "", [0.1, 200.0, 10.0], Milliseconds, Log),
@@ -44,6 +63,10 @@ pub(super) const PARAMS: [ParamInfo; 8] = [
     param("output", "Output", "", [-24.0, 24.0, 0.0], Decibels, Linear),
     param("mix", "Mix", "", [0.0, 100.0, 100.0], Percent, Linear),
     choice("detector", "Detector", "", &DETECTORS, 0),
+    switch("sidechain", "On", "Sidechain", false),
+    param("key_high_pass", "High-Pass", "Sidechain", [20.0, 20_000.0, 20.0], Hertz, Log),
+    param("key_low_pass", "Low-Pass", "Sidechain", [20.0, 20_000.0, 20_000.0], Hertz, Log),
+    switch("listen", "Listen", "Sidechain", false),
 ];
 
 /// How many dB the compressor turns a steady signal `level` dB loud down

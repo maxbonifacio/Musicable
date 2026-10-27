@@ -6,7 +6,7 @@ use std::fmt;
 use musicable_model::clip::Controller;
 
 use crate::automation::Feed;
-use crate::buffer::{AudioBuffer, AudioRef};
+use crate::buffer::{AudioBuffer, AudioRef, InputPort};
 use crate::engine::EVENT_CAPACITY;
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
@@ -61,6 +61,8 @@ pub struct Graph {
     keys: Vec<NodeKey>,
     /// `inputs[n]` lists the nodes feeding node `n`, in connection order.
     inputs: Vec<Vec<NodeId>>,
+    /// `ports[n][i]` is the port of node `n` that `inputs[n][i]` feeds.
+    ports: Vec<Vec<InputPort>>,
     /// `outputs[n]` lists the nodes that node `n` feeds.
     outputs: Vec<Vec<NodeId>>,
     output: Option<NodeId>,
@@ -101,6 +103,7 @@ impl Graph {
         self.nodes.push(node);
         self.keys.push(key);
         self.inputs.push(Vec::new());
+        self.ports.push(Vec::new());
         self.outputs.push(Vec::new());
         NodeId(self.nodes.len() - 1)
     }
@@ -136,14 +139,28 @@ impl Graph {
         Ok(())
     }
 
-    /// Feeds `from`'s output into `to`.
+    /// Feeds `from`'s output into `to`'s main input.
     pub fn connect(&mut self, from: NodeId, to: NodeId) -> Result<(), GraphError> {
+        self.connect_to(from, to, InputPort::Main)
+    }
+
+    /// Feeds `from`'s output into `to`'s input `port`, such as a
+    /// compressor's sidechain. Delay compensation lines up what comes into
+    /// every port of a node alike, so a side input's signal arrives with
+    /// the main input's.
+    pub fn connect_to(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        port: InputPort,
+    ) -> Result<(), GraphError> {
         self.check(from)?;
         self.check(to)?;
         if from == to || self.reaches(to, from) {
             return Err(GraphError::Cycle);
         }
         self.inputs[to.0].push(from);
+        self.ports[to.0].push(port);
         self.outputs[from.0].push(to);
         Ok(())
     }
@@ -270,6 +287,7 @@ impl Graph {
                 return Err(GraphError::NoChannels(NodeId(i)));
             }
         }
+        self.sort_ports();
         let (mut delays, latency) = self.compensate(config, &mut output);
         delays.sort_unstable();
         let buffers: Vec<AudioBuffer> = self
@@ -337,6 +355,7 @@ impl Graph {
             event_ranges: vec![(0, 0); self.nodes.len()],
             nodes: self.nodes,
             inputs: self.inputs,
+            ports: self.ports,
             order,
             output,
             cue: self.cue,
@@ -386,6 +405,21 @@ impl Graph {
             ordered.push(waiting.remove(ready));
         }
         ordered
+    }
+
+    /// Puts each node's inputs in order of port, as [`Inputs`](crate::Inputs)
+    /// takes them: the main input's first, then each side input's, each in
+    /// the order they were connected.
+    fn sort_ports(&mut self) {
+        for (inputs, ports) in self.inputs.iter_mut().zip(&mut self.ports) {
+            if ports.is_sorted() {
+                continue;
+            }
+            let mut sorted: Vec<(InputPort, NodeId)> =
+                ports.iter().copied().zip(inputs.iter().copied()).collect();
+            sorted.sort_by_key(|&(port, _)| port);
+            (*ports, *inputs) = sorted.into_iter().unzip();
+        }
     }
 
     /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
@@ -473,6 +507,7 @@ impl Graph {
         delay.prepare(config);
         self.nodes.push(Box::new(delay));
         self.inputs.push(vec![from]);
+        self.ports.push(vec![InputPort::Main]);
         self.outputs.push(Vec::new());
         NodeId(self.nodes.len() - 1)
     }
@@ -561,6 +596,8 @@ pub struct PreparedGraph {
     pub(crate) config: EngineConfig,
     pub(crate) nodes: Vec<Box<dyn Node>>,
     pub(crate) inputs: Vec<Vec<NodeId>>,
+    /// The port each of a node's inputs feeds, in order of port.
+    pub(crate) ports: Vec<Vec<InputPort>>,
     /// Every node comes after all of its inputs.
     pub(crate) order: Vec<NodeId>,
     pub(crate) output: NodeId,

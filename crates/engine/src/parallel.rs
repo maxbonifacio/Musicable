@@ -59,7 +59,8 @@ pub(crate) use schedule::Schedule;
 
 use self::deque::{Deque, Steal};
 use crate::{
-    Block, Inputs, Node, NodeEvent, NodeId, PreparedGraph, ReferenceRenderer, Renderer, rt,
+    Block, InputPort, Inputs, Node, NodeEvent, NodeId, PreparedGraph, ReferenceRenderer, Renderer,
+    rt,
 };
 
 /// How a [`ParallelRenderer`] runs.
@@ -234,6 +235,7 @@ impl ParallelRenderer {
         let job = Job {
             nodes: graph.nodes.as_mut_ptr(),
             inputs: graph.inputs.as_ptr(),
+            ports: graph.ports.as_ptr(),
             events: graph.events.as_ptr(),
             event_ranges: graph.event_ranges.as_ptr(),
             schedule: &graph.schedule,
@@ -429,6 +431,7 @@ impl Lane {
 struct Job {
     nodes: *mut Box<dyn Node>,
     inputs: *const Vec<NodeId>,
+    ports: *const Vec<InputPort>,
     events: *const NodeEvent,
     event_ranges: *const (u32, u32),
     schedule: *const Schedule,
@@ -725,7 +728,12 @@ impl Shared {
             let events =
                 std::slice::from_raw_parts(job.events.add(start as usize), (end - start) as usize);
             let ctx = block.context(job.sample_rate, events);
-            let inputs = Inputs::shared(&schedule.buffers, &*job.inputs.add(n), block.frames);
+            let inputs = Inputs::shared(
+                &schedule.buffers,
+                &*job.inputs.add(n),
+                &*job.ports.add(n),
+                block.frames,
+            );
             let mut output = schedule.buffers[n].view_mut(block.frames);
             let node = &mut **job.nodes.add(n);
             let ran = panic::catch_unwind(AssertUnwindSafe(|| {

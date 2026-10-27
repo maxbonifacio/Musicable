@@ -17,6 +17,7 @@ use musicable_model::modulation::{
 use musicable_model::native::NativeKind;
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::PluginSettings;
+use musicable_model::routing::{Port, Tap, Wire, WireError, WireId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Input, Locator, LocatorId, Monitor, Project,
@@ -301,6 +302,11 @@ pub struct Transaction<'a> {
     project: &'a mut Project,
     editor: &'a Editor,
     edits: Vec<Edit>,
+    /// Whether a move, an output or a send that closes a loop through a
+    /// wire is refused as it's made: not within [`at_once`](Self::at_once),
+    /// which checks once all its edits are made, or while undo and redo
+    /// [apply](Self::apply) edits.
+    checks_loops: bool,
 }
 
 impl<'a> Transaction<'a> {
@@ -309,6 +315,7 @@ impl<'a> Transaction<'a> {
             project,
             editor,
             edits: Vec::new(),
+            checks_loops: true,
         }
     }
 }
@@ -406,10 +413,14 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
-    /// The routings to its parameters and the lanes that automate them and
-    /// its Bypass go first, each as an edit of its own.
+    /// The wires to and from it, the routings to its parameters and the
+    /// lanes that automate them and its Bypass go first, each as an edit of
+    /// its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
         self.project.find_device(device)?;
+        for wire in self.project.wires_of_device(device) {
+            self.remove_wire(wire);
+        }
         self.remove_routings(|_, _, routing| routing.to.device() == Some(device));
         self.remove_lanes(|param| param.device() == Some(device));
         let (chain, index, _) = self.project.find_device(device)?;
@@ -424,31 +435,46 @@ impl Transaction<'_> {
 
     /// Moves the device with id `device` to `index` in `chain`, counting
     /// without it, or to the end if `index` is past it. It keeps its id, so
-    /// its lanes, which name it by its id, go with it, and so do its plugin
-    /// and its node's sound. A device the project hasn't got, or a chain
-    /// whose track isn't there, is left alone.
-    pub fn move_device(&mut self, device: DeviceId, chain: Chain, index: usize) {
+    /// its lanes and its wires, which name it by its id, go with it, and so
+    /// do its plugin and its node's sound. A device the project hasn't got,
+    /// or a chain whose track isn't there, is left alone, and a move that
+    /// would close a loop through a wire is refused.
+    pub fn move_device(
+        &mut self,
+        device: DeviceId,
+        chain: Chain,
+        index: usize,
+    ) -> Result<(), Loop> {
         let Some((from, at, _)) = self.project.find_device(device) else {
-            return;
+            return Ok(());
         };
         if self.project.devices(chain).is_none() {
-            return;
+            return Ok(());
         }
         let Some(moved) = (self.project.devices_mut(from)).map(|devices| devices.remove(at)) else {
-            return;
+            return Ok(());
         };
         let Some(devices) = self.project.devices_mut(chain) else {
-            return;
+            return Ok(());
         };
         let index = index.min(devices.len());
         devices.insert(index, moved);
-        if (from, at) != (chain, index) {
-            self.edits.push(Edit::MoveDevice {
-                device,
-                from: (from, at),
-                to: (chain, index),
-            });
+        if (from, at) == (chain, index) {
+            return Ok(());
         }
+        if let Some(wire) = self.closed_loop() {
+            let devices = self.project.devices_mut(chain).expect("it just went in");
+            let moved = devices.remove(index);
+            let devices = self.project.devices_mut(from).expect("it just came out");
+            devices.insert(at, moved);
+            return Err(Loop(wire));
+        }
+        self.edits.push(Edit::MoveDevice {
+            device,
+            from: (from, at),
+            to: (chain, index),
+        });
+        Ok(())
     }
 
     /// Bypasses the device with id `device`, or brings it back with
@@ -605,12 +631,16 @@ impl Transaction<'_> {
     }
 
     /// Removes the track with id `id` and returns it. What refers to it goes
-    /// first, each as an edit of its own: tracks feeding it feed the master
-    /// instead, sends to it go, and so do the routings on other channels to
-    /// its parameters, and the lanes that automate its parameters, its
-    /// sends', its devices' and its modulators'.
+    /// first, each as an edit of its own: the wires to and from it and its
+    /// devices go, tracks feeding it feed the master instead, sends to it
+    /// go, and so do the routings on other channels to its parameters, and
+    /// the lanes that automate its parameters, its sends', its devices' and
+    /// its modulators'.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
         self.project.track(id)?;
+        for wire in self.project.wires_of_track(id) {
+            self.remove_wire(wire);
+        }
         let feeding: Vec<TrackId> = self
             .project
             .tracks
@@ -619,7 +649,9 @@ impl Transaction<'_> {
             .map(|t| t.id)
             .collect();
         for track in feeding {
-            self.set_track_output(track, Bus::Master);
+            // A track feeding the group reaches the master through it, so
+            // feeding the master closes no loop.
+            let _ = self.set_track_output(track, Bus::Master);
         }
         let sends: Vec<(TrackId, SendId)> = self
             .project
@@ -779,18 +811,25 @@ impl Transaction<'_> {
     }
 
     /// Feeds the track's output to `output`, if the track can feed it: see
-    /// [`Project::can_feed`]. Otherwise it does nothing.
-    pub fn set_track_output(&mut self, track: TrackId, output: Bus) {
+    /// [`Project::can_feed`]. Otherwise it does nothing. An output that
+    /// would close a loop through a wire is refused.
+    pub fn set_track_output(&mut self, track: TrackId, output: Bus) -> Result<(), Loop> {
         if !self.project.can_feed(track, output) {
-            return;
+            return Ok(());
         }
-        if let Some(from) = self.replace(track, |t| &mut t.output, output) {
-            self.edits.push(Edit::TrackOutput {
-                track,
-                from,
-                to: output,
-            });
+        let Some(from) = self.replace(track, |t| &mut t.output, output) else {
+            return Ok(());
+        };
+        if let Some(wire) = self.closed_loop() {
+            self.replace(track, |t| &mut t.output, from);
+            return Err(Loop(wire));
         }
+        self.edits.push(Edit::TrackOutput {
+            track,
+            from,
+            to: output,
+        });
+        Ok(())
     }
 
     pub fn set_track_clip_type(&mut self, track: TrackId, clip_type: ClipType) {
@@ -805,17 +844,27 @@ impl Transaction<'_> {
 
     /// Puts `send` at `index` in the track's sends, or at the end if `index`
     /// is past them, if the track can send to the send's return track: see
-    /// [`Project::can_send`]. Otherwise it does nothing.
-    pub fn add_send(&mut self, track: TrackId, index: usize, send: Send) {
+    /// [`Project::can_send`]. Otherwise it does nothing. A send that would
+    /// close a loop through a wire is refused.
+    pub fn add_send(&mut self, track: TrackId, index: usize, send: Send) -> Result<(), Loop> {
         if !self.project.can_send(track, send.to) {
-            return;
+            return Ok(());
         }
         let Some(t) = self.project.track_mut(track) else {
-            return;
+            return Ok(());
         };
         let index = index.min(t.sends.len());
         t.sends.insert(index, send);
+        if let Some(wire) = self.closed_loop() {
+            let t = self
+                .project
+                .track_mut(track)
+                .expect("it just took the send");
+            t.sends.remove(index);
+            return Err(Loop(wire));
+        }
         self.edits.push(Edit::AddSend { track, index, send });
+        Ok(())
     }
 
     /// Removes the track's send with id `send`. The routings to its level
@@ -1350,6 +1399,82 @@ impl Transaction<'_> {
         }
     }
 
+    /// A new wire from `from` to `to` at unity gain, with the next wire id,
+    /// for [`add_wire`](Self::add_wire): see [`Project::new_wire`].
+    pub fn new_wire(&mut self, from: Tap, to: Port) -> Wire {
+        self.project.new_wire(from, to)
+    }
+
+    /// Puts `wire` at `index` in the project's wires, or at the end if
+    /// `index` is past them, with its gain kept to its range, if it can join
+    /// the project: see [`Project::check_wire`]. A wire with the id of one
+    /// the project has is refused as wired already.
+    pub fn add_wire(&mut self, index: usize, mut wire: Wire) -> Result<(), WireError> {
+        if self.project.wire(wire.id).is_some() {
+            return Err(WireError::Wired(wire.id));
+        }
+        self.project.check_wire(wire.from, wire.to)?;
+        wire.gain = wire_gain(wire.gain).unwrap_or(1.0);
+        let index = index.min(self.project.wires.len());
+        self.project.wires.insert(index, wire);
+        self.edits.push(Edit::AddWire { index, wire });
+        Ok(())
+    }
+
+    /// Removes the wire with id `wire`, and returns it. The routings to its
+    /// gain and the lane that automates it go first, each as an edit of its
+    /// own.
+    pub fn remove_wire(&mut self, wire: WireId) -> Option<Wire> {
+        self.project.wire(wire)?;
+        let gain = ParamAddress::Wire(wire);
+        self.remove_routings(|_, _, routing| routing.to == gain);
+        self.remove_lane(gain);
+        let index = self.project.wire_index(wire)?;
+        let wire = self.project.wires.remove(index);
+        self.edits.push(Edit::RemoveWire { index, wire });
+        Some(wire)
+    }
+
+    /// Has the wire with id `wire` take its signal from `from` instead,
+    /// keeping its gain, the lane on it and its place, if it can: see
+    /// [`Project::check_wire`].
+    pub fn set_wire_from(&mut self, wire: WireId, from: Tap) -> Result<(), WireError> {
+        let Some(&Wire { from: was, to, .. }) = self.project.wire(wire) else {
+            return Ok(());
+        };
+        if was == from {
+            return Ok(());
+        }
+        self.project.check_wire(from, to)?;
+        if let Some(w) = self.project.wire_mut(wire) {
+            w.from = from;
+        }
+        self.edits.push(Edit::WireFrom {
+            wire,
+            from: was,
+            to: from,
+        });
+        Ok(())
+    }
+
+    /// Sets a wire's gain. Linear, 1.0 is unity, kept from silence to
+    /// [`Wire::GAIN_MAX`]. A gain that isn't a finite number does nothing.
+    pub fn set_wire_gain(&mut self, wire: WireId, gain: f32) {
+        let Some(gain) = wire_gain(gain) else {
+            return;
+        };
+        if let Some(w) = self.project.wire_mut(wire)
+            && w.gain != gain
+        {
+            let from = std::mem::replace(&mut w.gain, gain);
+            self.edits.push(Edit::WireGain {
+                wire,
+                from,
+                to: gain,
+            });
+        }
+    }
+
     /// Puts `lane` at `index` in the project's lanes, or at the end if
     /// `index` is past them, with its points tidied (see
     /// [`automation::tidy`]). A lane left without points is left out, and
@@ -1825,6 +1950,7 @@ impl Transaction<'_> {
                 }
             }
             ParamAddress::Bypass(device) => self.set_device_bypass(device, value >= 0.5),
+            ParamAddress::Wire(wire) => self.set_wire_gain(wire, narrow),
             ParamAddress::Clip(clip, ClipParam::Gain) => self.set_clip_gain(clip, narrow),
             ParamAddress::Clip(clip, param) => self.set_warp_param(clip, param, value),
             ParamAddress::Modulator(modulator, n) => self.set_modulator_param(modulator, n, value),
@@ -1912,9 +2038,65 @@ impl Transaction<'_> {
         (*field != value).then(|| std::mem::replace(field, value))
     }
 
+    /// Makes the edits `edit` makes as one change, checking that they
+    /// close no loop through a wire once they're all made, rather than as
+    /// each is made: what moving several devices takes, as one move can
+    /// close a loop that the next opens again. If they end with a loop, or
+    /// `edit` gives up, they're all taken back.
+    pub fn at_once<R>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<R, Loop>,
+    ) -> Result<R, Loop> {
+        let start = self.edits.len();
+        let checks = std::mem::replace(&mut self.checks_loops, false);
+        let mut made = edit(self);
+        self.checks_loops = checks;
+        if made.is_ok()
+            && let Some(wire) = self.closed_loop()
+        {
+            made = Err(Loop(wire));
+        }
+        if made.is_err() {
+            self.take_back(start);
+        }
+        made
+    }
+
+    /// The wire in a loop, if there is one and loops are checked as edits
+    /// are made: see [`at_once`](Self::at_once).
+    fn closed_loop(&self) -> Option<WireId> {
+        self.checks_loops
+            .then(|| self.project.wire_in_a_loop())
+            .flatten()
+    }
+
+    /// Takes back every edit the transaction has made, so it leaves no
+    /// record: what a command does when it can't finish.
+    pub fn cancel(&mut self) {
+        self.take_back(0);
+    }
+
+    /// Takes back the edits made since the first `count`, newest first.
+    fn take_back(&mut self, count: usize) {
+        let made = self.edits.split_off(count.min(self.edits.len()));
+        for edit in made.iter().rev() {
+            self.apply(&edit.inverse());
+        }
+        self.edits.truncate(count);
+    }
+
     /// Makes the change `edit` describes, through the setter for what it
     /// changes, as undo and redo do: `apply(&edit.inverse())` takes it back.
+    /// Undo and redo go back to how the project was, which can be how it
+    /// was in the middle of [`at_once`](Self::at_once), so nothing they
+    /// make is refused for closing a loop.
     pub fn apply(&mut self, edit: &Edit) {
+        let checks = std::mem::replace(&mut self.checks_loops, false);
+        self.make(edit);
+        self.checks_loops = checks;
+    }
+
+    fn make(&mut self, edit: &Edit) {
         match edit {
             Edit::Tempo { to, .. } => self.set_tempo(to.clone()),
             Edit::LoopRegion { to, .. } => self.set_loop_region(*to),
@@ -1938,9 +2120,13 @@ impl Transaction<'_> {
             Edit::TrackArmed { track, to, .. } => self.set_track_armed(*track, *to),
             Edit::TrackInput { track, to, .. } => self.set_track_input(*track, to.clone()),
             Edit::TrackMonitor { track, to, .. } => self.set_track_monitor(*track, *to),
-            Edit::TrackOutput { track, to, .. } => self.set_track_output(*track, *to),
+            Edit::TrackOutput { track, to, .. } => {
+                let _ = self.set_track_output(*track, *to);
+            }
             Edit::TrackClipType { track, to, .. } => self.set_track_clip_type(*track, *to),
-            Edit::AddSend { track, index, send } => self.add_send(*track, *index, *send),
+            Edit::AddSend { track, index, send } => {
+                let _ = self.add_send(*track, *index, *send);
+            }
             Edit::RemoveSend { track, send, .. } => self.remove_send(*track, send.id),
             Edit::SendLevel {
                 track, send, to, ..
@@ -1996,7 +2182,9 @@ impl Transaction<'_> {
             Edit::RemoveDevice { device, .. } => {
                 self.remove_device(device.id);
             }
-            Edit::MoveDevice { device, to, .. } => self.move_device(*device, to.0, to.1),
+            Edit::MoveDevice { device, to, .. } => {
+                let _ = self.move_device(*device, to.0, to.1);
+            }
             Edit::DeviceBypass { device, to, .. } => self.set_device_bypass(*device, *to),
             Edit::DeviceActive { device, to, .. } => self.set_device_active(*device, *to),
             Edit::PluginParam {
@@ -2009,6 +2197,16 @@ impl Transaction<'_> {
                 device, param, to, ..
             } => self.set_native_param(*device, *param, *to),
             Edit::NativeSample { device, to, .. } => self.set_native_sample(*device, to.clone()),
+            Edit::AddWire { index, wire } => {
+                let _ = self.add_wire(*index, *wire);
+            }
+            Edit::RemoveWire { wire, .. } => {
+                self.remove_wire(wire.id);
+            }
+            Edit::WireFrom { wire, to, .. } => {
+                let _ = self.set_wire_from(*wire, *to);
+            }
+            Edit::WireGain { wire, to, .. } => self.set_wire_gain(*wire, *to),
             Edit::AddLane { index, lane } => self.add_lane(*index, lane.clone()),
             Edit::RemoveLane { lane, .. } => {
                 self.remove_lane(lane.param);
@@ -2060,6 +2258,16 @@ impl Transaction<'_> {
             Edit::RoutingSettings { to, .. } => self.set_routing(*to),
         }
     }
+}
+
+/// Why an edit was refused: it would have closed a loop through the wire
+/// with this id. See [`Project::wire_in_a_loop`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loop(pub WireId);
+
+/// `gain` kept from silence to [`Wire::GAIN_MAX`], if it's a finite number.
+fn wire_gain(gain: f32) -> Option<f32> {
+    gain.is_finite().then(|| gain.clamp(0.0, Wire::GAIN_MAX))
 }
 
 /// An audio clip's fades. MIDI clips have none.
@@ -2446,6 +2654,28 @@ pub enum Edit {
         device: DeviceId,
         from: Option<String>,
         to: Option<String>,
+    },
+    /// `wire` went in at `index` in the project's wires.
+    AddWire {
+        index: usize,
+        wire: Wire,
+    },
+    /// `wire`, which was at `index` in the project's wires, went.
+    RemoveWire {
+        index: usize,
+        wire: Wire,
+    },
+    /// The wire with id `wire` took its signal from another tap.
+    WireFrom {
+        wire: WireId,
+        from: Tap,
+        to: Tap,
+    },
+    /// The gain of the wire with id `wire` changed.
+    WireGain {
+        wire: WireId,
+        from: f32,
+        to: f32,
     },
     /// `lane` went in at `index` in the project's lanes: its parameter is
     /// automated.
@@ -2859,6 +3089,18 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::AddWire { index, wire } => Edit::RemoveWire { index, wire },
+            Edit::RemoveWire { index, wire } => Edit::AddWire { index, wire },
+            Edit::WireFrom { wire, from, to } => Edit::WireFrom {
+                wire,
+                from: to,
+                to: from,
+            },
+            Edit::WireGain { wire, from, to } => Edit::WireGain {
+                wire,
+                from: to,
+                to: from,
+            },
             Edit::AddLane { index, lane } => Edit::RemoveLane { index, lane },
             Edit::RemoveLane { index, lane } => Edit::AddLane { index, lane },
             Edit::LanePoints { param, from, to } => Edit::LanePoints {
@@ -3258,6 +3500,14 @@ impl Edit {
                 },
             ) if device == other => to.clone_from(next),
             (
+                Edit::WireGain { wire, to, .. },
+                Edit::WireGain {
+                    wire: other,
+                    to: next,
+                    ..
+                },
+            ) if wire == other => *to = *next,
+            (
                 Edit::LanePoints { param, to, .. },
                 Edit::LanePoints {
                     param: other,
@@ -3374,6 +3624,10 @@ impl Edit {
                 | Edit::PluginSettings { .. }
                 | Edit::NativeParam { .. }
                 | Edit::NativeSample { .. }
+                | Edit::AddWire { .. }
+                | Edit::RemoveWire { .. }
+                | Edit::WireFrom { .. }
+                | Edit::WireGain { .. }
                 | Edit::AddLane { .. }
                 | Edit::RemoveLane { .. }
                 | Edit::LanePoints { .. }
@@ -3418,6 +3672,8 @@ impl Edit {
             | Edit::RemoveLocator { .. }
             | Edit::AddDevice { .. }
             | Edit::RemoveDevice { .. }
+            | Edit::AddWire { .. }
+            | Edit::RemoveWire { .. }
             | Edit::AddLane { .. }
             | Edit::RemoveLane { .. }
             | Edit::AddModulator { .. }
@@ -3430,6 +3686,7 @@ impl Edit {
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
             | Edit::SendLevel { from, to, .. }
+            | Edit::WireGain { from, to, .. }
             | Edit::MasterGain { from, to }
             | Edit::MasterPan { from, to } => from == to,
             Edit::TrackMuted { from, to, .. }
@@ -3440,6 +3697,7 @@ impl Edit {
             | Edit::DeviceBypass { from, to, .. }
             | Edit::DeviceActive { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
+            Edit::WireFrom { from, to, .. } => from == to,
             Edit::MoveDevice { from, to, .. } => from == to,
             Edit::TrackInput { from, to, .. } => from == to,
             Edit::TrackMonitor { from, to, .. } => from == to,

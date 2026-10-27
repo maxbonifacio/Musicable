@@ -352,6 +352,7 @@ mod tests {
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::param::{ClipParam, ParamAddress};
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+    use musicable_model::routing::{Port, Tap, Wire, WireId};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
     use musicable_model::warp::Warp;
     use musicable_model::{
@@ -381,7 +382,8 @@ mod tests {
     /// two with a send, and a spare one that nothing refers to; two audio
     /// clips, one with fades, and a MIDI clip with two notes; two takes of
     /// an audio clip on the audio track; two locators; a plugin on the audio
-    /// track, a test device on the master and a sampler on the MIDI track;
+    /// track, a test device on the master, a sampler on the MIDI track, and
+    /// a compressor on the group keyed from the audio and MIDI tracks;
     /// lanes that automate the audio track's volume and the master's pan;
     /// an LFO and an Envelope on the audio track, moving its pan and its
     /// volume; and on the master, a Macro with a knob and a button, and an
@@ -439,6 +441,14 @@ mod tests {
         let sampler = NativeDevice::new(NativeKind::Sampler);
         let sampler = project.new_device(DeviceKind::Native(sampler));
         project.track_mut(midi).unwrap().devices.push(sampler);
+        let compressor = NativeDevice::new(NativeKind::Compressor);
+        let compressor = project.new_device(DeviceKind::Native(compressor));
+        let key = Port::Sidechain(compressor.id);
+        project.track_mut(group).unwrap().devices.push(compressor);
+        for track in [audio, midi] {
+            let wire = project.new_wire(Tap::PostFx(Chain::Track(track)), key);
+            project.wires.push(wire);
+        }
         let lanes = [
             (ParamAddress::Volume(Chain::Track(audio)), fade()),
             (ParamAddress::Pan(Chain::Master), vec![point(0, -0.5)]),
@@ -515,6 +525,11 @@ mod tests {
         let synth = project.new_device(plugin(true));
         let effect = DeviceId(0);
         let kick = DeviceId(2);
+        let compressor = DeviceId(3);
+        let new_wire = Wire {
+            gain: 0.5,
+            ..project.new_wire(Tap::PreFx(audio), Port::Sidechain(compressor))
+        };
         let effect_settings = project
             .find_device(effect)
             .unwrap()
@@ -832,6 +847,24 @@ mod tests {
                 from: None,
                 to: Some("Samples/Kick.wav".into()),
             },
+            Edit::AddWire {
+                index: 2,
+                wire: new_wire,
+            },
+            Edit::WireFrom {
+                wire: WireId(1),
+                from: Tap::PostFx(Chain::Track(midi)),
+                to: Tap::PostFader(Chain::Track(midi)),
+            },
+            Edit::WireGain {
+                wire: WireId(1),
+                from: 1.0,
+                to: 0.25,
+            },
+            Edit::RemoveWire {
+                index: 0,
+                wire: project.wires[0],
+            },
             Edit::LanePoints {
                 param: ParamAddress::Volume(Chain::Track(audio)),
                 from: fade(),
@@ -935,7 +968,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 70;
+    const KINDS: usize = 74;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1011,6 +1044,10 @@ mod tests {
             Edit::RoutingSettings { .. } => 67,
             Edit::RemoveRouting { .. } => 68,
             Edit::RemoveModulator { .. } => 69,
+            Edit::AddWire { .. } => 70,
+            Edit::RemoveWire { .. } => 71,
+            Edit::WireGain { .. } => 72,
+            Edit::WireFrom { .. } => 73,
         }
     }
 

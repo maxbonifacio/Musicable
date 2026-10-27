@@ -205,3 +205,12 @@
 | Set Transient Loop Mode | `warp.set_transient_loop` |
 | Set Clip Transpose | `warp.set_transpose` |
 | Warp at Song Tempo From Here | `warp.song_tempo_from_here` |
+
+### Wire
+
+| Command | Id |
+|---|---|
+| Connect Wire | `wire.connect` |
+| Disconnect Wire | `wire.disconnect` |
+| Set Wire Gain | `wire.set_gain` |
+| Set Wire Source | `wire.set_source` |

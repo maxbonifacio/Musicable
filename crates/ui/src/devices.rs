@@ -965,10 +965,12 @@ mod tests {
     use egui::{Event, Key, Modifiers, PointerButton, Pos2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use musicable_commands::{options, view};
+    use musicable_commands::{options, view, wire};
     use musicable_model::TrackKind;
+    use musicable_model::mixer::Bus;
     use musicable_model::native::{NativeDevice, eq, synth, utility};
     use musicable_model::plugin::{PluginDevice, PluginSettings};
+    use musicable_model::routing::{Port, Tap, Wire};
 
     use super::*;
     use crate::panels::{BROWSER, DEVICES};
@@ -1984,6 +1986,143 @@ mod tests {
             [
                 Action::RunWith(device::ADD, add.clone().with("track", keys)),
                 Action::RunWith(device::ADD, add.with("master", true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_sidechain_column_picks_a_compressors_sources_from_any_track() {
+        let mut project = Project::new();
+        let kick = project.add_track("Kick", TrackKind::Audio);
+        let gate = native(&mut project, NativeKind::Gate);
+        project.track_mut(kick).unwrap().devices = vec![gate];
+        let pad = project.add_track("Pad", TrackKind::Audio);
+        let group = project.add_track("Bus", TrackKind::Group);
+        // A narrow device before it, so its box is in sight.
+        let utility = native(&mut project, NativeKind::Utility);
+        let compressor = native(&mut project, NativeKind::Compressor);
+        let mut harness = showing(vec![utility.clone(), compressor.clone()], project);
+        let keys = harness.state().project.tracks.last().unwrap().id;
+        harness.state_mut().project.track_mut(keys).unwrap().output = Bus::Group(group);
+        harness.run();
+        let source = |harness: &Harness<'static, State>, label: &str| {
+            let picker = harness.get_by_role_and_label(Role::ComboBox, label);
+            picker.value()
+        };
+        let first = "Compressor Sidechain Source";
+        assert_eq!(source(&harness, first).as_deref(), Some("No Input"));
+        // No gain without a wire, and nothing to add to.
+        assert!(
+            harness
+                .query_by_label("Compressor Sidechain Gain")
+                .is_none()
+        );
+        assert!(
+            harness
+                .query_by_label("Add a Source to Compressor Sidechain")
+                .is_none()
+        );
+        // Its switches share a row, above its filters.
+        let rect =
+            |harness: &Harness<'static, State>, label: &str| harness.get_by_label(label).rect();
+        let (on, listen) = (
+            rect(&harness, "Compressor Sidechain On"),
+            rect(&harness, "Compressor Sidechain Listen"),
+        );
+        assert_eq!(on.top(), listen.top());
+        assert!(on.right() < listen.left());
+        assert!(on.bottom() < rect(&harness, "Compressor Sidechain High-Pass").top());
+
+        // The other tracks, each opening to its taps, then the points before
+        // the compressor on its own track. The group the track feeds would
+        // close a loop.
+        harness.get_by_role_and_label(Role::ComboBox, first).click();
+        harness.run();
+        assert!(
+            harness
+                .get_by_role_and_label(Role::Button, "Bus")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_role_and_label(Role::Button, "Kick").hover();
+        harness.run();
+        for tap in ["Pre FX", "after Gate", "Post FX", "Post Fader"] {
+            harness.get_by_role_and_label(Role::Button, tap);
+        }
+        harness
+            .get_by_role_and_label(Role::Button, "Post FX")
+            .click();
+        harness.run();
+        let connect = Args::new().with("device", compressor.id);
+        let kick_post_fx = connect.clone().with("track", kick).with("tap", "post_fx");
+        assert_eq!(
+            actions(&mut harness),
+            [Action::RunWith(wire::CONNECT, kick_post_fx)]
+        );
+
+        // With a wire from the kick, and one from after the utility.
+        let port = Port::Sidechain(compressor.id);
+        let project = &mut harness.state_mut().project;
+        let from_kick = project.new_wire(Tap::PostFx(Chain::Track(kick)), port);
+        let after_utility = Wire {
+            gain: 0.5,
+            ..project.new_wire(Tap::Device(utility.id), port)
+        };
+        project.wires = vec![from_kick, after_utility];
+        harness.run();
+        assert_eq!(source(&harness, first).as_deref(), Some("Kick, Post FX"));
+        let second = "Compressor Sidechain Source 2";
+        assert_eq!(source(&harness, second).as_deref(), Some("after Utility"));
+        let gain = harness.get_by_role_and_label(Role::Slider, "Compressor Sidechain Gain 2");
+        assert_eq!(gain.accesskit_node().numeric_value(), Some(0.5));
+
+        // Another tap moves the wire, and No Input takes it away.
+        harness.get_by_role_and_label(Role::ComboBox, first).click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "This track")
+            .hover();
+        harness.run();
+        // The second wire takes it already.
+        let after_utility = harness.get_by_role_and_label(Role::Button, "after Utility");
+        assert!(after_utility.accesskit_node().is_disabled());
+        harness.get_by_role_and_label(Role::Button, "Kick").hover();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Pre FX")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::ComboBox, first).click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "No Input")
+            .click();
+        harness.run();
+        // The + adds a source, and the bar sets a wire's gain.
+        harness
+            .get_by_label("Add a Source to Compressor Sidechain")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Pad").hover();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Post Fader")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Slider, "Compressor Sidechain Gain")
+            .set_value_accesskit(0.25);
+        harness.run();
+        let on = |args: Args| args.with("wire", from_kick.id);
+        let kick_pre_fx = on(Args::new()).with("track", kick).with("tap", "pre_fx");
+        let pad_post_fader = connect.with("track", pad).with("tap", "post_fader");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                Action::RunWith(wire::SET_SOURCE, kick_pre_fx),
+                Action::RunWith(wire::DISCONNECT, on(Args::new())),
+                Action::RunWith(wire::CONNECT, pad_post_fader),
+                Action::RunWith(wire::SET_GAIN, on(Args::new()).with("gain", 0.25)),
             ]
         );
     }

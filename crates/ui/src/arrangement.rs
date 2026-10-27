@@ -1061,9 +1061,13 @@ impl Scene<'_> {
     /// after its device's for a device's.
     fn lane_name(&self, param: ParamAddress) -> String {
         let name = self.spec(param).name;
-        let device = param
-            .device()
-            .and_then(|device| self.project().find_device(device));
+        let project = self.project();
+        // A wire's gain goes with the device it feeds.
+        let device = match param {
+            ParamAddress::Wire(wire) => project.wire(wire).map(|wire| wire.to.device()),
+            param => param.device(),
+        };
+        let device = device.and_then(|device| project.find_device(device));
         match device {
             Some((_, _, device)) => format!("{}: {name}", describe(device).0),
             None => name,
@@ -1188,6 +1192,15 @@ impl Scene<'_> {
                     vec![(param, self.spec(param).name)]
                 }
             });
+            // The gains of the wires into its side inputs.
+            let ports = project.ports(device.id);
+            let wires = ports.into_iter().flat_map(|port| project.wires_into(port));
+            for param in wires
+                .map(|wire| ParamAddress::Wire(wire.id))
+                .collect::<Vec<_>>()
+            {
+                params.push((param, self.spec(param).name));
+            }
             (describe(device).0.to_owned(), params)
         });
         (own, devices.collect())

@@ -60,8 +60,8 @@ impl State {
             Action::Run(id) => self.commands.run_with(id, &Args::new(), &mut ctx),
             Action::RunWith(id, args) => self.commands.run_with(id, args, &mut ctx),
             Action::Mixer(change) => {
-                musicable_commands::mixer::change(&mut self.document, change.clone());
-                Ok(musicable_commands::Value::None)
+                musicable_commands::mixer::change(&mut self.document, change.clone())
+                    .map(|()| musicable_commands::Value::None)
             }
             _ => Ok(musicable_commands::Value::None),
         };

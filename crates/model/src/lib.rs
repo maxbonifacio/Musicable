@@ -12,7 +12,9 @@
 //! them to the track's own clips. [`param`] names every parameter in the
 //! project, and [`automation`] has the lanes that move them as the song
 //! plays, and [`modulation`] the modulators that move them on top. [`warp`]
-//! has how audio clips follow the tempo.
+//! has how audio clips follow the tempo. [`routing`] has the wires that
+//! take one channel's signal into another's devices, such as a
+//! compressor's sidechain.
 //!
 //! Project files (`musicable_io::project`) save every field of the project,
 //! so adding or changing one changes the file format. See
@@ -25,6 +27,7 @@ pub mod modulation;
 pub mod native;
 pub mod param;
 pub mod plugin;
+pub mod routing;
 pub mod time;
 pub mod warp;
 
@@ -34,6 +37,7 @@ use mixer::Bus;
 use modulation::Modulation;
 use native::NativeDevice;
 use plugin::PluginDevice;
+use routing::Wire;
 use time::{BeatRange, Beats, TempoMap};
 
 /// Stable identifier for a track within a project.
@@ -162,6 +166,19 @@ impl DeviceKind {
         match self {
             Self::Native(native) => Some(native),
             _ => None,
+        }
+    }
+
+    /// What the browser and the Edit menu call it: a built-in device by its
+    /// kind, such as "EQ", and a plugin by its name.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Native(native) => native.kind.name(),
+            Self::Plugin(plugin) => match plugin.name.trim() {
+                "" => "Plugin",
+                name => name,
+            },
+            Self::TestGain { .. } | Self::TestInstrument { .. } => "Device",
         }
     }
 }
@@ -467,6 +484,9 @@ pub struct Project {
     pub locators: Vec<Locator>,
     /// The automated parameters' lanes, one for each, in any order.
     pub automation: Vec<Lane>,
+    /// The wires between channels, such as the keys of compressors'
+    /// sidechains, in the order they were made. See [`routing`].
+    pub wires: Vec<Wire>,
     /// The id [`add_track`](Self::add_track) gives the next track. Ids are
     /// never reused, so it stays above the id of every track the project has
     /// had, deleted ones included.
@@ -485,6 +505,8 @@ pub struct Project {
     pub next_modulator_id: u32,
     /// The same for routings.
     pub next_routing_id: u32,
+    /// The same for wires.
+    pub next_wire_id: u32,
     /// The name of the workspace the project was saved with, which lays the
     /// app's panels out, for the app to switch to when it opens the
     /// project. Edits leave it alone: the app sets it as it saves.
@@ -506,6 +528,7 @@ impl Default for Project {
             tracks: Vec::new(),
             locators: Vec::new(),
             automation: Vec::new(),
+            wires: Vec::new(),
             next_track_id: 0,
             next_send_id: 0,
             next_device_id: 0,
@@ -514,6 +537,7 @@ impl Default for Project {
             next_take_id: 0,
             next_modulator_id: 0,
             next_routing_id: 0,
+            next_wire_id: 0,
             workspace: None,
         }
     }

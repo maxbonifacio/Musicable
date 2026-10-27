@@ -13,8 +13,8 @@ use musicable_model::{
 };
 
 use crate::{
-    Args, Command, CommandError, CommandId, Document, Param, Registry, Transaction, Type, Value,
-    track,
+    Args, Command, CommandError, CommandId, Document, Loop, Param, Registry, Transaction, Type,
+    Value, track, wire,
 };
 
 /// Sets a track's fader.
@@ -238,7 +238,7 @@ pub fn register(registry: &mut Registry) {
             Command::new(id, title).with_params(params),
             move |ctx, args| {
                 let change = build(args, ctx.document.project())?;
-                self::change(ctx.document, change);
+                self::change(ctx.document, change)?;
                 Ok(Value::None)
             },
         );
@@ -347,10 +347,12 @@ pub enum Change {
     Monitor(TrackId, Monitor),
     /// Where the track's output goes. Buses the track can't feed are left
     /// alone: see [`Project::can_feed`](musicable_model::Project::can_feed).
+    /// One that would close a loop through a wire is refused.
     Output(TrackId, Bus),
     ClipType(TrackId, ClipType),
     /// The level of `track`'s send to the return track `to`, linear. A
-    /// track with no send there gets one, after the fader.
+    /// track with no send there gets one, after the fader, unless it would
+    /// close a loop through a wire.
     SendLevel {
         track: TrackId,
         to: TrackId,
@@ -497,73 +499,83 @@ impl Change {
 
 /// Makes `change` to the document's project, as one transaction. Moving an
 /// automated fader, pan or send overrides its automation, as moving it by
-/// hand does.
-pub fn change(document: &mut Document, change: Change) {
+/// hand does. An output or a new send that would close a loop through a
+/// wire is refused, with an error naming the wire, and changes nothing.
+pub fn change(document: &mut Document, change: Change) -> Result<(), CommandError> {
     let by_hand = |tx: &mut Transaction<'_>, param, value: f32| {
         tx.set_param_by_hand(param, f64::from(value));
     };
-    document.transact(change.name(), |tx| match change {
-        Change::Gain(track, gain) => by_hand(tx, ParamAddress::Volume(Chain::Track(track)), gain),
-        Change::Pan(track, pan) => by_hand(tx, ParamAddress::Pan(Chain::Track(track)), pan),
-        Change::Muted(track, muted) => tx.set_track_muted(track, muted),
-        Change::Solo {
-            track,
-            solo,
-            exclusive,
-        } => {
-            if exclusive {
-                let others: Vec<TrackId> = tx
-                    .project()
-                    .tracks
-                    .iter()
-                    .filter(|t| t.id != track)
-                    .map(|t| t.id)
-                    .collect();
-                for other in others {
-                    tx.set_track_solo(other, false);
+    let made = document.transact(change.name(), |tx| -> Result<(), Loop> {
+        match change {
+            Change::Gain(track, gain) => {
+                by_hand(tx, ParamAddress::Volume(Chain::Track(track)), gain)
+            }
+            Change::Pan(track, pan) => by_hand(tx, ParamAddress::Pan(Chain::Track(track)), pan),
+            Change::Muted(track, muted) => tx.set_track_muted(track, muted),
+            Change::Solo {
+                track,
+                solo,
+                exclusive,
+            } => {
+                if exclusive {
+                    let others: Vec<TrackId> = tx
+                        .project()
+                        .tracks
+                        .iter()
+                        .filter(|t| t.id != track)
+                        .map(|t| t.id)
+                        .collect();
+                    for other in others {
+                        tx.set_track_solo(other, false);
+                    }
+                }
+                tx.set_track_solo(track, solo);
+            }
+            Change::SoloSafe(track, solo_safe) => tx.set_track_solo_safe(track, solo_safe),
+            Change::Armed(track, armed) => tx.set_track_armed(track, armed),
+            Change::Input(track, input) => tx.set_track_input(track, input),
+            Change::Monitor(track, monitor) => tx.set_track_monitor(track, monitor),
+            Change::Output(track, output) => tx.set_track_output(track, output)?,
+            Change::ClipType(track, clip_type) => tx.set_track_clip_type(track, clip_type),
+            Change::SendLevel { track, to, level } => {
+                // A silent send would change nothing but the file.
+                let send = match send_to(tx.project(), track, to) {
+                    Some(send) => Some(send),
+                    None if level.is_finite() && level > 0.0 => add_send(tx, track, to)?,
+                    None => None,
+                };
+                if let Some(send) = send {
+                    by_hand(tx, ParamAddress::Send(send), level);
                 }
             }
-            tx.set_track_solo(track, solo);
-        }
-        Change::SoloSafe(track, solo_safe) => tx.set_track_solo_safe(track, solo_safe),
-        Change::Armed(track, armed) => tx.set_track_armed(track, armed),
-        Change::Input(track, input) => tx.set_track_input(track, input),
-        Change::Monitor(track, monitor) => tx.set_track_monitor(track, monitor),
-        Change::Output(track, output) => tx.set_track_output(track, output),
-        Change::ClipType(track, clip_type) => tx.set_track_clip_type(track, clip_type),
-        Change::SendLevel { track, to, level } => {
-            // A silent send would change nothing but the file.
-            let send = match send_to(tx.project(), track, to) {
-                Some(send) => Some(send),
-                None if level.is_finite() && level > 0.0 => add_send(tx, track, to),
-                None => None,
-            };
-            if let Some(send) = send {
-                by_hand(tx, ParamAddress::Send(send), level);
+            Change::SendPreFader {
+                track,
+                to,
+                pre_fader,
+            } => {
+                let send = match send_to(tx.project(), track, to) {
+                    Some(send) => Some(send),
+                    None => add_send(tx, track, to)?,
+                };
+                if let Some(send) = send {
+                    tx.set_send_pre_fader(track, send, pre_fader);
+                }
             }
-        }
-        Change::SendPreFader {
-            track,
-            to,
-            pre_fader,
-        } => {
-            let send = send_to(tx.project(), track, to).or_else(|| add_send(tx, track, to));
-            if let Some(send) = send {
-                tx.set_send_pre_fader(track, send, pre_fader);
+            Change::RemoveSend { track, to } => {
+                if let Some(send) = send_to(tx.project(), track, to) {
+                    tx.remove_send(track, send);
+                }
             }
-        }
-        Change::RemoveSend { track, to } => {
-            if let Some(send) = send_to(tx.project(), track, to) {
-                tx.remove_send(track, send);
+            Change::Delete(track) => {
+                tx.remove_track(track);
             }
+            Change::MasterGain(gain) => by_hand(tx, ParamAddress::Volume(Chain::Master), gain),
+            Change::MasterPan(pan) => by_hand(tx, ParamAddress::Pan(Chain::Master), pan),
+            Change::MasterClipType(clip_type) => tx.set_master_clip_type(clip_type),
         }
-        Change::Delete(track) => {
-            tx.remove_track(track);
-        }
-        Change::MasterGain(gain) => by_hand(tx, ParamAddress::Volume(Chain::Master), gain),
-        Change::MasterPan(pan) => by_hand(tx, ParamAddress::Pan(Chain::Master), pan),
-        Change::MasterClipType(clip_type) => tx.set_master_clip_type(clip_type),
+        Ok(())
     });
+    made.map_err(|refused| wire::refused(document.project(), refused))
 }
 
 /// The id of `track`'s send to the track `to`, if it has one.
@@ -577,14 +589,15 @@ fn send_to(project: &Project, track: TrackId, to: TrackId) -> Option<SendId> {
 }
 
 /// Adds a silent send after the fader from `track` to the return track `to`,
-/// if `track` can send there, and returns its id.
-fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Option<SendId> {
+/// if `track` can send there, and returns its id, unless it would close a
+/// loop through a wire.
+fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Result<Option<SendId>, Loop> {
     if !tx.project().can_send(track, to) {
-        return None;
+        return Ok(None);
     }
     let send = tx.new_send(to);
-    tx.add_send(track, usize::MAX, send);
-    Some(send.id)
+    tx.add_send(track, usize::MAX, send)?;
+    Ok(Some(send.id))
 }
 
 #[cfg(test)]
@@ -608,9 +621,9 @@ mod tests {
     #[test]
     fn each_change_is_one_named_transaction() {
         let (mut doc, [drums, _, _]) = document();
-        change(&mut doc, Change::Gain(drums, 0.5));
-        change(&mut doc, Change::Pan(drums, -2.0));
-        change(&mut doc, Change::Muted(drums, true));
+        change(&mut doc, Change::Gain(drums, 0.5)).unwrap();
+        change(&mut doc, Change::Pan(drums, -2.0)).unwrap();
+        change(&mut doc, Change::Muted(drums, true)).unwrap();
         let committed = doc.take_committed();
         let names: Vec<&str> = committed.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Volume", "Pan", "Mute"]);
@@ -634,9 +647,9 @@ mod tests {
             solo: true,
             exclusive,
         };
-        change(&mut doc, solo(drums, false));
-        change(&mut doc, solo(reverb, false));
-        change(&mut doc, solo(group, true));
+        change(&mut doc, solo(drums, false)).unwrap();
+        change(&mut doc, solo(reverb, false)).unwrap();
+        change(&mut doc, solo(group, true)).unwrap();
         let soloed: Vec<bool> = doc.project().tracks.iter().map(|t| t.solo).collect();
         assert_eq!(soloed, [false, true, false]);
     }
@@ -650,12 +663,12 @@ mod tests {
             level,
         };
         // A silent send, and one to a track that isn't a return: nothing.
-        change(&mut doc, level(reverb, 0.0));
-        change(&mut doc, level(group, 0.5));
+        change(&mut doc, level(reverb, 0.0)).unwrap();
+        change(&mut doc, level(group, 0.5)).unwrap();
         assert_eq!(doc.take_committed(), []);
         // The first level adds the send, the second changes it.
-        change(&mut doc, level(reverb, 0.5));
-        change(&mut doc, level(reverb, 0.25));
+        change(&mut doc, level(reverb, 0.5)).unwrap();
+        change(&mut doc, level(reverb, 0.25)).unwrap();
         let sends = &doc.project().track(drums).unwrap().sends;
         assert_eq!(sends.len(), 1);
         assert_eq!(
@@ -679,7 +692,7 @@ mod tests {
             to: reverb,
             pre_fader,
         };
-        change(&mut doc, pre_fader(true));
+        change(&mut doc, pre_fader(true)).unwrap();
         assert!(doc.project().tracks[0].sends[0].pre_fader);
         change(
             &mut doc,
@@ -687,7 +700,8 @@ mod tests {
                 track: drums,
                 to: reverb,
             },
-        );
+        )
+        .unwrap();
         assert!(doc.project().track(drums).unwrap().sends.is_empty());
         let committed = doc.take_committed();
         assert_eq!(committed.len(), 2);
@@ -703,7 +717,7 @@ mod tests {
             }]
         );
         // Pre/post on a track with no send adds a silent one.
-        change(&mut doc, pre_fader(true));
+        change(&mut doc, pre_fader(true)).unwrap();
         let sends = &doc.project().track(drums).unwrap().sends;
         assert_eq!((sends[0].level, sends[0].pre_fader), (0.0, true));
     }
@@ -713,19 +727,19 @@ mod tests {
         let (mut doc, [drums, group, reverb]) = document();
         // Into itself, into a track that isn't a group, and a return into a
         // group: all left alone.
-        change(&mut doc, Change::Output(group, Bus::Group(group)));
-        change(&mut doc, Change::Output(group, Bus::Group(drums)));
-        change(&mut doc, Change::Output(reverb, Bus::Group(group)));
+        change(&mut doc, Change::Output(group, Bus::Group(group))).unwrap();
+        change(&mut doc, Change::Output(group, Bus::Group(drums))).unwrap();
+        change(&mut doc, Change::Output(reverb, Bus::Group(group))).unwrap();
         assert_eq!(doc.take_committed(), []);
-        change(&mut doc, Change::Output(drums, Bus::Master));
+        change(&mut doc, Change::Output(drums, Bus::Master)).unwrap();
         assert_eq!(doc.project().track(drums).unwrap().output, Bus::Master);
     }
 
     #[test]
     fn only_audio_and_midi_tracks_arm() {
         let (mut doc, [drums, group, _]) = document();
-        change(&mut doc, Change::Armed(group, true));
-        change(&mut doc, Change::Armed(drums, true));
+        change(&mut doc, Change::Armed(group, true)).unwrap();
+        change(&mut doc, Change::Armed(drums, true)).unwrap();
         let armed: Vec<bool> = doc.project().tracks.iter().map(|t| t.armed).collect();
         assert_eq!(armed, [true, false, false]);
     }
@@ -811,11 +825,11 @@ mod tests {
             to: reverb,
             level: 0.5,
         };
-        change(&mut doc, send);
+        change(&mut doc, send).unwrap();
         doc.take_committed();
         let send = doc.project().tracks[0].sends[0];
-        change(&mut doc, Change::Delete(group));
-        change(&mut doc, Change::Delete(reverb));
+        change(&mut doc, Change::Delete(group)).unwrap();
+        change(&mut doc, Change::Delete(reverb)).unwrap();
         let committed = doc.take_committed();
         let project = doc.project();
         assert_eq!(project.tracks.len(), 1);
@@ -840,9 +854,9 @@ mod tests {
     #[test]
     fn values_a_file_cant_hold_do_nothing() {
         let (mut doc, [drums, _, _]) = document();
-        change(&mut doc, Change::Gain(drums, f32::NAN));
-        change(&mut doc, Change::Pan(drums, f32::NAN));
-        change(&mut doc, Change::MasterGain(f32::INFINITY));
+        change(&mut doc, Change::Gain(drums, f32::NAN)).unwrap();
+        change(&mut doc, Change::Pan(drums, f32::NAN)).unwrap();
+        change(&mut doc, Change::MasterGain(f32::INFINITY)).unwrap();
         assert_eq!(doc.take_committed(), []);
     }
 
@@ -899,7 +913,7 @@ mod tests {
             let (id, args) = change.command();
             assert!(!args.is_empty(), "{id}");
             setup.run_with(&id, args).unwrap();
-            super::change(&mut expected, change.clone());
+            super::change(&mut expected, change.clone()).unwrap();
             assert_eq!(setup.document.project(), expected.project(), "{change:?}");
         }
         let names = setup.committed_names();
