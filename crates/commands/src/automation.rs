@@ -297,15 +297,20 @@ fn automatable(ctx: &Context<'_>, param: ParamAddress) -> Result<ParamAddress, C
 
 /// `points` with their values within the range of `param`, where the
 /// project knows it, and whole numbers for a built-in device's switches,
-/// choices and counts. A plugin keeps its own parameters in range.
+/// choices and counts, and for a Bypass, which is off or on. A plugin keeps
+/// its own parameters in range.
 fn clamped(project: &Project, param: ParamAddress, mut points: Vec<Point>) -> Vec<Point> {
     if let Some(info) = project.native_param(param) {
         for point in &mut points {
             point.value = info.clamp(point.value);
         }
     } else if let Some(spec) = project.param_spec(param) {
+        let switch = matches!(param, ParamAddress::Bypass(_));
         for point in &mut points {
             point.value = spec.clamp(point.value);
+            if switch {
+                point.value = point.value.round();
+            }
         }
     }
     points

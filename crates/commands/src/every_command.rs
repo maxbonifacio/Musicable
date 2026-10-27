@@ -155,6 +155,16 @@ fn examples() -> Vec<Example> {
                     .with("value", 0.25),
             )
         }),
+        // A device's Bypass, which steps off and on.
+        edits(automation::ADD_POINT, |s| {
+            let device = find_device(s, |_| true)?;
+            Some(
+                Args::new()
+                    .with("param", ParamAddress::Bypass(device))
+                    .with("at", Beats::new(2))
+                    .with("value", 1.0),
+            )
+        }),
         edits(automation::CLEAR, |s| {
             let lane = pick(s, project(s).automation.iter())?;
             Some(Args::new().with("param", lane.param))
@@ -464,6 +474,37 @@ fn examples() -> Vec<Example> {
                     .with("device", device)
                     .with("param", 1_i64)
                     .with("value", other_level(value)),
+            )
+        }),
+        edits(device::SET_BYPASS, |s| {
+            let device = find_device(s, |_| true)?;
+            let (_, _, found) = project(s).find_device(device)?;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("bypassed", !found.bypassed),
+            )
+        }),
+        // Every device at once: all bypassed, or all brought back if they
+        // all are.
+        edits(device::SET_BYPASS, |s| {
+            let project = project(s);
+            let devices: Vec<_> = project.chains().flat_map(|(_, d)| d).collect();
+            let bypassed = !devices.iter().all(|d| d.bypassed);
+            let devices: Vec<DeviceId> = devices.iter().map(|d| d.id).collect();
+            (!devices.is_empty()).then(|| {
+                Args::new()
+                    .with("devices", devices)
+                    .with("bypassed", bypassed)
+            })
+        }),
+        edits(device::SET_ACTIVE, |s| {
+            let device = find_device(s, |_| true)?;
+            let (_, _, found) = project(s).find_device(device)?;
+            Some(
+                Args::new()
+                    .with("devices", vec![device])
+                    .with("active", !found.active),
             )
         }),
         edits(device::SET_SAMPLE, |s| {

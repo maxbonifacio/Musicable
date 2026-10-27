@@ -385,6 +385,8 @@ struct Expression {
 #[serde(deny_unknown_fields)]
 struct Device {
     id: u32,
+    bypassed: bool,
+    active: bool,
     kind: DeviceKind,
 }
 
@@ -521,6 +523,8 @@ enum Param {
         id: u32,
         param: u32,
     },
+    /// A device's Bypass, by the device's id.
+    Bypass(u32),
 }
 
 /// A track by id, `{"track": 3}`, or `"master"`.
@@ -1972,9 +1976,16 @@ impl Send {
 
 impl From<&model::Device> for Device {
     fn from(device: &model::Device) -> Self {
-        let model::Device { id, kind } = device;
+        let model::Device {
+            id,
+            kind,
+            bypassed,
+            active,
+        } = device;
         Self {
             id: id.0,
+            bypassed: *bypassed,
+            active: *active,
             kind: match kind {
                 model::DeviceKind::TestGain { gain } => DeviceKind::TestGain { gain: *gain },
                 model::DeviceKind::TestInstrument { level } => {
@@ -1990,10 +2001,17 @@ impl From<&model::Device> for Device {
 /// A device list, `path` being where it is in the file.
 fn devices_to_model(devices: &[Device], path: &str) -> Result<Vec<model::Device>, Invalid> {
     let device = |(j, device): (usize, &Device)| {
-        let Device { id, kind } = device;
+        let Device {
+            id,
+            bypassed,
+            active,
+            kind,
+        } = device;
         let path = format!("{path}[{j}].kind");
         Ok(model::Device {
             id: DeviceId(*id),
+            bypassed: *bypassed,
+            active: *active,
             kind: match kind {
                 DeviceKind::TestGain { gain } => model::DeviceKind::TestGain {
                     gain: finite(*gain, || format!("{path}.test_gain.gain"))?,
@@ -2290,6 +2308,7 @@ impl From<&automation::Lane> for Lane {
                     id: device.0,
                     param,
                 },
+                ParamAddress::Bypass(device) => Param::Bypass(device.0),
                 ParamAddress::Clip(..) => unreachable!("a clip's curves are in the clip"),
             },
             points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
@@ -2328,10 +2347,19 @@ impl Lane {
                 ParamAddress::Device(DeviceId(id), param)
             }
             Param::Device { id, .. } => return Err(missing("device", id)),
+            Param::Bypass(id) if params.devices.seen.contains_key(&id) => {
+                ParamAddress::Bypass(DeviceId(id))
+            }
+            Param::Bypass(id) => return Err(missing("device", id)),
         };
-        let pan = matches!(param, ParamAddress::Pan(_));
-        let range = |value: f64| {
-            (pan && !(-1.0..=1.0).contains(&value)).then(|| "must be from -1 to 1".to_owned())
+        let range = |value: f64| match param {
+            ParamAddress::Pan(_) if !(-1.0..=1.0).contains(&value) => {
+                Some("must be from -1 to 1".to_owned())
+            }
+            ParamAddress::Bypass(_) if !(0.0..=1.0).contains(&value) => {
+                Some("must be from 0 to 1".to_owned())
+            }
+            _ => None,
         };
         Ok(automation::Lane {
             param,

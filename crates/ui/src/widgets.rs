@@ -1,6 +1,8 @@
 //! Small widgets for the shell and the app's windows, and how they write
 //! positions and times.
 
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
 use egui::{
     Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Painter, Rect, Response, Role,
     Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
@@ -146,6 +148,9 @@ pub(crate) enum Face {
     Dot,
     /// A triangle pointing down, for a button that opens a menu.
     Menu,
+    /// A power symbol, a ring with a bar through its top, as the Bypass
+    /// buttons of devices have.
+    Power,
 }
 
 /// A button `width` wide and a row of the mixer high that's lit in `color`
@@ -215,6 +220,21 @@ pub(crate) fn paint_toggle(
                 pos2(c.x, c.y + r / 2.0 + 1.0),
             ];
             painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
+        }
+        Face::Power => {
+            let c = rect.center();
+            let r = rect.height().min(rect.width()) * 0.26;
+            let stroke = Stroke::new(1.5, ink);
+            // From the top's right round to its left, clockwise, leaving a
+            // gap for the bar.
+            let gap = 0.28 * PI;
+            let steps = 24;
+            let ring = (0..=steps).map(|i| {
+                let angle = -FRAC_PI_2 + gap + (TAU - 2.0 * gap) * i as f32 / steps as f32;
+                c + r * vec2(angle.cos(), angle.sin())
+            });
+            painter.add(Shape::line(ring.collect(), stroke));
+            painter.line_segment([c - vec2(0.0, 1.2 * r), c - vec2(0.0, 0.2 * r)], stroke);
         }
     }
 }

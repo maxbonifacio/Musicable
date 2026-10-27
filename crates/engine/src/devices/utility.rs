@@ -58,6 +58,15 @@ impl Node for Utility {
         } = self;
         params.run(ctx, |span| render(&span, output, dc, *pole));
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.dc = [(0.0, 0.0); 2];
+    }
 }
 
 /// Renders one span of the output, in place.

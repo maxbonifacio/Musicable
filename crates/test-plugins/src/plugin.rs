@@ -34,7 +34,7 @@ use clap_sys::ext::note_ports::{
     CLAP_NOTE_DIALECT_MIDI_MPE, clap_note_port_info, clap_plugin_note_ports,
 };
 use clap_sys::ext::params::{
-    CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_MODULATABLE,
+    CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_MODULATABLE,
     CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_STEPPED, clap_host_params,
     clap_param_info, clap_plugin_params,
 };
@@ -137,10 +137,11 @@ struct Param {
 /// two up gets the wrong parameter.
 pub const GAIN: clap_id = 10;
 pub const LATENCY: clap_id = 11;
+pub const BYPASS: clap_id = 12;
 pub const LEVEL: clap_id = 20;
 pub const THREADS: clap_id = 21;
 
-const GAIN_PARAMS: [Param; 2] = [
+const GAIN_PARAMS: [Param; 3] = [
     Param {
         id: GAIN,
         name: "Gain",
@@ -156,6 +157,16 @@ const GAIN_PARAMS: [Param; 2] = [
         max: 48_000.0,
         default: 0.0,
         flags: CLAP_PARAM_IS_STEPPED,
+    },
+    // The plugin's own bypass, as many effects have: it plays its input
+    // unchanged, as late as its latency makes it.
+    Param {
+        id: BYPASS,
+        name: "Bypass",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        flags: CLAP_PARAM_IS_BYPASS | CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE,
     },
 ];
 
@@ -298,6 +309,7 @@ struct Audio {
     max_frames: u32,
     /// The gain's.
     gain: f64,
+    bypassed: bool,
     latency: usize,
     delay: [Vec<f32>; 2],
     position: usize,
@@ -341,7 +353,10 @@ pub(crate) struct TestPlugin {
     active: AtomicBool,
     processing: AtomicBool,
     /// The parameters' values, as the main thread sees them, as bits.
-    values: [AtomicU64; 2],
+    values: [AtomicU64; 3],
+    /// How many times the host started the plugin processing, stopped it
+    /// and reset it, and how many blocks of frames it processed.
+    lifecycle: [AtomicU32; 4],
     /// The gain's latency since it was last activated.
     active_latency: AtomicU32,
     label: Mutex<String>,
@@ -396,7 +411,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
     } else {
         return ptr::null();
     };
-    let (descriptor, params) = match kind {
+    let (descriptor, params): (_, &[Param]) = match kind {
         Kind::Gain => (&GAIN_DESCRIPTOR, &GAIN_PARAMS),
         Kind::Synth => (&SYNTH_DESCRIPTOR, &SYNTH_PARAMS),
     };
@@ -422,7 +437,10 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         initialized: AtomicBool::new(false),
         active: AtomicBool::new(false),
         processing: AtomicBool::new(false),
-        values: [params[0].default, params[1].default].map(|v| AtomicU64::new(v.to_bits())),
+        values: std::array::from_fn(|i| {
+            AtomicU64::new(params.get(i).map_or(0.0, |p| p.default).to_bits())
+        }),
+        lifecycle: std::array::from_fn(|_| AtomicU32::new(0)),
         active_latency: AtomicU32::new(0),
         label: Mutex::new(String::new()),
         main_thread_calls: AtomicU32::new(0),
@@ -439,6 +457,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
             sample_rate: 0.0,
             max_frames: 0,
             gain: params[0].default,
+            bypassed: false,
             latency: 0,
             delay: [Vec::new(), Vec::new()],
             position: 0,
@@ -495,7 +514,7 @@ impl TestPlugin {
         unsafe { *self.ext.get() }
     }
 
-    fn params(&self) -> &'static [Param; 2] {
+    fn params(&self) -> &'static [Param] {
         match self.kind {
             Kind::Gain => &GAIN_PARAMS,
             Kind::Synth => &SYNTH_PARAMS,
@@ -512,6 +531,18 @@ impl TestPlugin {
 
     fn set_value(&self, index: usize, value: f64) {
         self.values[index].store(value.to_bits(), Ordering::SeqCst);
+    }
+
+    /// How many times the host started the plugin processing, stopped it
+    /// and reset it, and how many blocks of frames it processed.
+    pub(crate) fn lifecycle(&self) -> [u32; 4] {
+        self.lifecycle
+            .each_ref()
+            .map(|count| count.load(Ordering::SeqCst))
+    }
+
+    fn count(&self, what: usize) {
+        self.lifecycle[what].fetch_add(1, Ordering::SeqCst);
     }
 
     /// Asks the host whether this is the main thread: `None` if it can't
@@ -715,7 +746,7 @@ impl TestPlugin {
         if lines.next() != Some("musicable-test-plugin 1") {
             return false;
         }
-        let mut values = [self.value(0), self.value(1)];
+        let mut values: Vec<f64> = (0..self.params().len()).map(|i| self.value(i)).collect();
         let mut label = String::new();
         for line in lines {
             let Some((key, value)) = line.split_once('=') else {
@@ -733,7 +764,7 @@ impl TestPlugin {
                 value.clone_into(&mut label);
             }
         }
-        for (index, value) in values.into_iter().enumerate() {
+        for (index, &value) in values.iter().enumerate() {
             self.set_value(index, value);
         }
         *self.label.lock().unwrap_or_else(|e| e.into_inner()) = label;
@@ -762,11 +793,12 @@ impl TestPlugin {
         self.set_value(index, value);
         match (self.kind, index) {
             (Kind::Gain, 0) => audio.gain = value,
-            (Kind::Gain, _) => {
+            (Kind::Gain, 1) => {
                 if latency_frames(value) != audio.latency {
                     self.request_restart();
                 }
             }
+            (Kind::Gain, _) => audio.bypassed = value >= 0.5,
             (Kind::Synth, 0) => audio.level = value,
             (Kind::Synth, _) => audio.threads = value >= 0.5,
         }
@@ -964,7 +996,11 @@ impl TestPlugin {
                 } else {
                     None
                 };
-                let gain = audio.gain + audio.modulation;
+                let gain = if audio.bypassed {
+                    1.0
+                } else {
+                    audio.gain + audio.modulation
+                };
                 for frame in start..end {
                     for (channel, out) in out.iter().enumerate() {
                         let x = match &input {
@@ -1396,6 +1432,7 @@ unsafe extern "C" fn plugin_activate(
     audio.sample_rate = sample_rate;
     audio.max_frames = max_frames;
     audio.gain = this.value(0);
+    audio.bypassed = this.kind == Kind::Gain && this.value(2) >= 0.5;
     audio.level = this.value(0);
     audio.threads = this.value(1) >= 0.5;
     audio.modulation = 0.0;
@@ -1449,6 +1486,7 @@ unsafe extern "C" fn plugin_start_processing(plugin: *const clap_plugin) -> bool
     if this.processing.swap(true, Ordering::SeqCst) {
         violation("start_processing was called while the plugin was processing");
     }
+    this.count(0);
     true
 }
 
@@ -1459,6 +1497,7 @@ unsafe extern "C" fn plugin_stop_processing(plugin: *const clap_plugin) {
     if !this.processing.swap(false, Ordering::SeqCst) {
         violation("stop_processing was called while the plugin wasn't processing");
     }
+    this.count(1);
 }
 
 unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
@@ -1469,6 +1508,7 @@ unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
         violation("reset was called while the plugin was inactive");
         return;
     }
+    this.count(2);
     // SAFETY: the thread processing calls it.
     let audio = unsafe { &mut *this.audio.get() };
     for line in &mut audio.delay {
@@ -1493,6 +1533,9 @@ unsafe extern "C" fn plugin_process(
     // SAFETY: the host passes its process struct.
     let process = unsafe { &*process };
     let frames = process.frames_count as usize;
+    if frames > 0 {
+        this.count(3);
+    }
     {
         // SAFETY: the thread processing touches it.
         let audio = unsafe { &*this.audio.get() };
@@ -1687,7 +1730,7 @@ unsafe extern "C" fn params_value_to_text(
         GAIN => format!("{value:.2}"),
         LATENCY => format!("{} samples", latency_frames(value)),
         LEVEL => format!("{:.0} %", value * 100.0),
-        THREADS => if value >= 0.5 { "On" } else { "Off" }.to_owned(),
+        THREADS | BYPASS => if value >= 0.5 { "On" } else { "Off" }.to_owned(),
         _ => return false,
     };
     // SAFETY: the host passes a buffer of `capacity` bytes.
@@ -1710,7 +1753,7 @@ unsafe extern "C" fn params_text_to_value(
     let parsed = match id {
         GAIN | LATENCY => number(),
         LEVEL => number().map(|n| n / 100.0),
-        THREADS => match text.as_ref() {
+        THREADS | BYPASS => match text.as_ref() {
             "On" => Some(1.0),
             "Off" => Some(0.0),
             _ => None,

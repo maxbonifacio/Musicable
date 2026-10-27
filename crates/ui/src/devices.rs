@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use egui::{
     Align, Button, Frame, Id, Label, Layout, Response, RichText, Role, ScrollArea, Sense, Stroke,
-    TextEdit, Ui, WidgetInfo, vec2,
+    TextEdit, Ui, Vec2, WidgetInfo, vec2,
 };
 use musicable_commands::{Args, device};
 use musicable_model::native::NativeKind;
@@ -17,12 +17,12 @@ use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::{self, Destination, Dragged};
-use crate::mouse::MouseMap;
+use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::native;
 use crate::search::score;
 use crate::shell::{Action, View};
 use crate::theme::Theme;
-use crate::widgets::name_box;
+use crate::widgets::{Face, name_box, paint_toggle};
 
 /// The plugin search field's id, so a key can focus it.
 pub(crate) const PLUGIN_SEARCH: &str = "plugin search";
@@ -212,10 +212,11 @@ impl DevicesPanel {
     }
 }
 
-/// A device: its name, and a built-in device's controls, or a plugin's
-/// kind and how its plugin is doing. Its name's menu saves it as a preset,
-/// which `saving` asks the name of, and a sampler takes a sample dragged
-/// onto it from the browser. Returns its box.
+/// A device: its Bypass button and its name, and a built-in device's
+/// controls, or a plugin's kind and how its plugin is doing, dimmed while
+/// it's off. Its name's menu saves it as a preset, which `saving` asks the
+/// name of, and a sampler takes a sample dragged onto it from the browser.
+/// Returns its box.
 fn device_box(
     ui: &mut Ui,
     device: &Device,
@@ -240,7 +241,12 @@ fn device_box(
             ui.set_width(width);
             // Top to bottom, whatever the row of boxes around it does.
             ui.vertical(|ui| {
-                title_row(ui, device, name, theme, saving, actions);
+                title_row(ui, device, name, theme, mouse, saving, actions);
+                // A device that's off looks it, though its controls still
+                // work, so it can be set up before it comes back.
+                if device.bypassed || !device.active {
+                    ui.multiply_opacity(sizes.dimmed.clamp(0.0, 1.0));
+                }
                 match device.kind {
                     DeviceKind::Native(ref native) => {
                         native::controls(ui, device.id, name, native, view, theme, mouse, actions);
@@ -266,14 +272,16 @@ fn device_box(
     shown
 }
 
-/// A device's name, which shows its plugin's window when double-clicked, as
-/// in Live, and whose menu saves it as a preset, and the button that
-/// deletes it. And a sampler's sample.
+/// A device's Bypass button, and its name, which shows its plugin's window
+/// when double-clicked, as in Live, and whose menu bypasses, deactivates
+/// and saves it as a preset, and the button that deletes it. And a
+/// sampler's sample.
 fn title_row(
     ui: &mut Ui,
     device: &Device,
     name: &str,
     theme: &Theme,
+    mouse: &MouseMap,
     saving: &mut Option<Saving>,
     actions: &mut Vec<Action>,
 ) {
@@ -287,22 +295,50 @@ fn title_row(
                 let file = sampler.sample.as_deref();
                 sample(ui, device.id, name, file, theme, actions);
             }
+            if !device.active {
+                let text = RichText::new("Deactivated").size(theme.small_text).weak();
+                ui.add(Label::new(text).selectable(false));
+            }
             let title = RichText::new(name).strong().color(theme.header_text);
             let title = Label::new(title)
                 .truncate()
                 .selectable(false)
                 .sense(Sense::click());
-            // On the left, in the room the button leaves.
+            // On the left, after the Bypass button, in the room the buttons
+            // leave.
             let title = ui
-                .with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(title))
+                .with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    bypass_button(ui, device, name, theme, mouse, actions);
+                    ui.add(title)
+                })
                 .inner;
-            let label = format!("Device {name}");
+            // Screen readers hear whether it's off with its name.
+            let mut label = format!("Device {name}");
+            if device.bypassed {
+                label += ", bypassed";
+            }
+            if !device.active {
+                label += ", deactivated";
+            }
             title.widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
             let args = Args::new().with("device", device.id);
             if title.double_clicked() && device.kind.plugin().is_some() {
                 actions.push(Action::RunWith(device::SHOW_WINDOW, args.clone()));
             }
             title.context_menu(|ui| {
+                let bypass = ui.add(Button::new("Bypass").selected(device.bypassed));
+                if bypass.clicked() {
+                    actions.push(set_bypass(device.id, !device.bypassed));
+                }
+                let switch = if device.active {
+                    "Deactivate"
+                } else {
+                    "Activate"
+                };
+                if ui.button(switch).clicked() {
+                    actions.push(set_active(device.id, !device.active));
+                }
+                ui.separator();
                 if ui.button("Save as Preset...").clicked() {
                     *saving = Some(Saving {
                         device: device.id,
@@ -319,6 +355,66 @@ fn title_row(
             }
         });
     });
+}
+
+/// The Bypass button of `device`, which the panel calls `name`, drawn as
+/// Live's power button: lit while the device plays, and dark while it's
+/// bypassed or deactivated. What a click does is the mouse map's: in
+/// Live's, a click bypasses the device or brings it back, and Alt-click
+/// deactivates it or activates it.
+fn bypass_button(
+    ui: &mut Ui,
+    device: &Device,
+    name: &str,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    let side = ui.spacing().interact_size.y;
+    let (rect, button) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    // Screen readers hear it as the switch it's named for, which is on
+    // while the device is bypassed.
+    let label = format!("{name} Bypass");
+    button.widget_info(|| WidgetInfo::selected(Role::Button, true, device.bypassed, &label));
+    let plays = device.active && !device.bypassed;
+    paint_toggle(ui, rect, &button, Face::Power, plays, theme.switch, theme);
+    let about = match (device.active, device.bypassed) {
+        (false, _) => "Deactivated: out of the signal, latency and all. Click to activate it.",
+        (true, true) => "Bypassed. Click to bring it back, or Alt-click to deactivate it.",
+        (true, false) => {
+            "Bypass: click to bypass it, or Alt-click to deactivate it, which takes its \
+             latency out too."
+        }
+    };
+    let button = button.on_hover_text(about);
+    if !button.clicked() {
+        return;
+    }
+    let mods = modifiers(ui.input(|input| input.modifiers));
+    match mouse.action(Target::BypassButton, Gesture::Click, mods) {
+        Some(MouseAction::ToggleBypass) if !device.active => {
+            actions.push(set_active(device.id, true));
+        }
+        Some(MouseAction::ToggleBypass) => actions.push(set_bypass(device.id, !device.bypassed)),
+        Some(MouseAction::ToggleActive) => actions.push(set_active(device.id, !device.active)),
+        _ => {}
+    }
+}
+
+/// The command that bypasses `device`, or brings it back.
+fn set_bypass(device: DeviceId, bypassed: bool) -> Action {
+    let args = Args::new()
+        .with("devices", vec![device])
+        .with("bypassed", bypassed);
+    Action::RunWith(device::SET_BYPASS, args)
+}
+
+/// The command that deactivates `device`, or activates it.
+fn set_active(device: DeviceId, active: bool) -> Action {
+    let args = Args::new()
+        .with("devices", vec![device])
+        .with("active", active);
+    Action::RunWith(device::SET_ACTIVE, args)
 }
 
 /// The sample `file` of the sampler `device`, which the panel calls `name`:
@@ -1051,6 +1147,127 @@ mod tests {
                 set(&eq, band(1, eq::FREQ), 1200.0),
             ]
         );
+    }
+
+    #[test]
+    fn the_bypass_button_bypasses_and_alt_click_deactivates() {
+        let mut project = Project::new();
+        let mut eq = native(&mut project, NativeKind::Eq);
+        eq.bypassed = true;
+        let reverb = plugin(&mut project, "Old Reverb", false);
+        let mut gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+        gain.active = false;
+        let devices = vec![eq.clone(), reverb.clone(), gain.clone()];
+        let mut harness = showing(devices, project);
+        // Wide enough for all three.
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.run();
+        let bypass = |device: &Device, bypassed: bool| {
+            let args = Args::new()
+                .with("devices", vec![device.id])
+                .with("bypassed", bypassed);
+            Action::RunWith(device::SET_BYPASS, args)
+        };
+        let active = |device: &Device, active: bool| {
+            let args = Args::new()
+                .with("devices", vec![device.id])
+                .with("active", active);
+            Action::RunWith(device::SET_ACTIVE, args)
+        };
+        // Left of the name, which says whether the device is off. Screen
+        // readers hear the button on while the device is bypassed.
+        let button = harness.get_by_label("Old Reverb Bypass").rect();
+        let name = harness.get_by_label("Device Old Reverb").rect();
+        assert!(button.right() <= name.left() && (button.center().y - name.center().y).abs() < 2.0);
+        let toggled = |harness: &Harness<'static, State>, label: &str| {
+            harness.get_by_label(label).accesskit_node().toggled()
+        };
+        assert_eq!(toggled(&harness, "EQ Bypass"), Some(Toggled::True));
+        assert_eq!(toggled(&harness, "Old Reverb Bypass"), Some(Toggled::False));
+        assert_eq!(toggled(&harness, "Test Gain Bypass"), Some(Toggled::False));
+        harness.get_by_label("Device EQ, bypassed");
+        harness.get_by_label("Device Test Gain, deactivated");
+        harness.get_by_label("Deactivated");
+
+        // A click bypasses a device or brings it back, and Alt-click
+        // deactivates it. A deactivated device's button activates it.
+        click(&mut harness, "EQ Bypass");
+        click(&mut harness, "Old Reverb Bypass");
+        harness
+            .get_by_label("Old Reverb Bypass")
+            .click_modifiers(Modifiers::ALT);
+        harness.run();
+        click(&mut harness, "Test Gain Bypass");
+        harness
+            .get_by_label("Test Gain Bypass")
+            .click_modifiers(Modifiers::ALT);
+        harness.run();
+        // A bypassed device's controls still work.
+        click(&mut harness, "EQ Band 1 On");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                bypass(&eq, false),
+                bypass(&reverb, true),
+                active(&reverb, false),
+                active(&gain, true),
+                active(&gain, true),
+                set(&eq, eq::ON, 1.0),
+            ]
+        );
+
+        // The name's menu has them too, with Bypass ticked while the device
+        // is bypassed.
+        let menu = |harness: &mut Harness<'static, State>, name: &str, item: &str| {
+            harness.get_by_label(name).click_secondary();
+            harness.run();
+            let item = harness.get_by_role_and_label(Role::Button, item);
+            let ticked = item.accesskit_node().toggled();
+            item.click();
+            harness.run();
+            ticked
+        };
+        let ticked = menu(&mut harness, "Device EQ, bypassed", "Bypass");
+        assert_eq!(ticked, Some(Toggled::True));
+        let ticked = menu(&mut harness, "Device Old Reverb", "Bypass");
+        assert_eq!(ticked, Some(Toggled::False));
+        menu(&mut harness, "Device Old Reverb", "Deactivate");
+        menu(&mut harness, "Device Test Gain, deactivated", "Activate");
+        assert_eq!(
+            actions(&mut harness),
+            [
+                bypass(&eq, false),
+                bypass(&reverb, true),
+                active(&reverb, false),
+                active(&gain, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_mouse_map_says_what_the_bypass_button_does() {
+        let mut project = Project::new();
+        let utility = native(&mut project, NativeKind::Utility);
+        let mut harness = showing(vec![utility.clone()], project);
+        let mut mouse = MouseMap::live();
+        let (button, click) = (Target::BypassButton, Gesture::Click);
+        let none = musicable_commands::Modifiers::NONE;
+        mouse.bind(button, click, none, MouseAction::ToggleActive);
+        mouse.unbind(button, click, musicable_commands::Modifiers::ALT);
+        harness.state_mut().shell.set_mouse_map(mouse);
+        harness.run();
+        harness.get_by_label("Utility Bypass").click();
+        harness.run();
+        // Alt does nothing of its own now, so it clicks as nothing held does.
+        harness
+            .get_by_label("Utility Bypass")
+            .click_modifiers(Modifiers::ALT);
+        harness.run();
+        let args = Args::new()
+            .with("devices", vec![utility.id])
+            .with("active", false);
+        let deactivate = Action::RunWith(device::SET_ACTIVE, args);
+        assert_eq!(actions(&mut harness), [deactivate.clone(), deactivate]);
     }
 
     #[test]

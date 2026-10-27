@@ -3,7 +3,9 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use musicable_engine::switch::Switch;
 use musicable_engine::{
     AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, ProcessContext,
 };
@@ -166,6 +168,7 @@ impl NodeSource {
         Vst3Node {
             shared: Arc::clone(&self.shared),
             _module: Arc::clone(&self.module),
+            resetting: false,
         }
     }
 }
@@ -192,10 +195,17 @@ impl fmt::Debug for NodeSource {
 /// its main output bus. It sends the plugin its parameter changes and
 /// notes, and the transport. Until the plugin is active, while it's being
 /// set up, and if it fails, the node plays silence.
+///
+/// While the node is stopped, as its device is bypassed, the plugin gets
+/// its parameter changes in blocks of no frames. VST3 resets a plugin by
+/// turning its processing off and on again, which it does before it
+/// processes again.
 pub struct Vst3Node {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
     _module: Arc<Module>,
+    /// Whether the plugin resets before it next processes.
+    resetting: bool,
 }
 
 impl fmt::Debug for Vst3Node {
@@ -211,23 +221,75 @@ impl Node for Vst3Node {
         self.shared.latency()
     }
 
+    /// Carries on with a reset due on the same plugin.
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<Vst3Node>()
+            && Arc::ptr_eq(&previous.shared, &self.shared)
+        {
+            self.resetting = previous.resetting;
+        }
+    }
+
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
         let shared = &self.shared;
+        shared.running.store(true, Ordering::Release);
         let Some(_busy) = shared.try_enter() else {
             output.clear();
             return;
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
-        if !run(shared, ctx, inputs, output, audio) {
+        if !run(shared, &mut self.resetting, ctx, inputs, output, audio) {
             output.clear();
         }
+    }
+
+    /// The plugin stays processing, as VST3 sees it, so the main thread
+    /// can hand it changes, and gets no blocks.
+    fn stop(&mut self) {
+        self.shared.running.store(false, Ordering::Release);
+    }
+
+    /// Hands the plugin the block's parameter changes, and the main
+    /// thread's, in a block of no frames, if there are any.
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        let shared = &self.shared;
+        let Some(_busy) = shared.try_enter() else {
+            return;
+        };
+        if shared.lifecycle() != PROCESSING {
+            return;
+        }
+        // SAFETY: as in `run`.
+        let Some(processor) = (unsafe { ComRef::from_raw(shared.processor()) }) else {
+            return;
+        };
+        let _audio_thread = AudioThread::enter();
+        // SAFETY: `busy` is held, so nothing else touches it.
+        let audio = unsafe { &mut *shared.audio.get() };
+        param_changes(ctx, audio);
+        audio.events.clear();
+        if audio.changes.is_empty() {
+            return;
+        }
+        audio.changes.ready();
+        // SAFETY: processing, holding `busy`; a block of no frames reads
+        // no buffers.
+        unsafe { process(processor, audio, 0) };
+        audio.changes.clear();
+    }
+
+    /// Has the plugin reset before it next processes.
+    fn reset(&mut self) {
+        self.resetting = true;
     }
 }
 
 /// Processes the plugin for one block, holding `busy`: false if it can't.
+/// It resets first if `resetting`.
 fn run(
     shared: &Shared,
+    resetting: &mut bool,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
     output: &mut AudioMut<'_>,
@@ -249,6 +311,16 @@ fn run(
         return false;
     };
     let _audio_thread = AudioThread::enter();
+    if std::mem::take(resetting) {
+        // SAFETY: processing, holding `busy`. VST3 lets the processing
+        // thread turn processing off and on.
+        unsafe {
+            processor.setProcessing(0);
+            processor.setProcessing(1);
+        }
+        // Its voices are gone.
+        audio.sounding.clear();
+    }
     audio.inputs.clear(frames);
     audio.outputs.clear(frames);
     if let Some(main) = audio.inputs.channels.main() {
@@ -375,6 +447,8 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
     for event in ctx.events {
         let offset = event.offset as i32;
         match event.kind {
+            // The switch's bypass is its own.
+            NodeEventKind::Param { param, .. } if param == Switch::BYPASS => {}
             NodeEventKind::Param { param, value } => {
                 audio.changes.push(param.0, offset, value, true);
             }
@@ -390,6 +464,34 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
         }
     }
     audio.changes.ready();
+}
+
+/// Puts the parameter changes from the main thread and the block's in the
+/// plugin's list, all at the block's first frame, for a plugin that isn't
+/// processing the block: the block's notes are dropped.
+fn param_changes(ctx: &ProcessContext<'_>, audio: &mut Audio) {
+    audio.changes.clear();
+    while !audio.changes.is_full() {
+        let Ok(change) = audio.from_main.pop() else {
+            break;
+        };
+        audio.changes.push(change.id, 0, change.value, false);
+    }
+    for event in ctx.events {
+        match event.kind {
+            NodeEventKind::Param { param, value } if param != Switch::BYPASS => {
+                audio.changes.push(param.0, 0, value, true);
+            }
+            // A controller's parameter, such as the sustain pedal's, comes
+            // back where it was left.
+            NodeEventKind::Controller { controller, value } => {
+                if let Some(id) = audio.controllers[usize::from(controller.number())] {
+                    audio.changes.push(id, 0, value.into(), true);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The events that play `note` on the plugin.

@@ -23,6 +23,15 @@
 //! here until their automation stops, and the values it reports for them
 //! are the automation's, which don't go into the project. Moving one in the
 //! plugin's window overrides its automation, as moving any control does.
+//!
+//! A plugin's own bypass parameter, if it has one, is its device's Bypass:
+//! it follows the device's `bypassed`, rather than the plugin's settings,
+//! and clicking it in the plugin's window bypasses the device. Musicable
+//! still does the bypassing, with the device's switch in the engine, which
+//! stops the plugin. So the plugin isn't bypassing itself as the switch
+//! fades it out, the parameter only turns on once the plugin's node has
+//! stopped. While a lane moves the device's Bypass, the parameter stays
+//! off, and the switch does it all.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -56,6 +65,12 @@ pub(crate) enum Change {
         by_hand: bool,
     },
     GestureEnd,
+    /// The plugin's own bypass parameter turned on or off: its device is to
+    /// be bypassed, or brought back. `by_hand` as for [`Param`](Self::Param).
+    Bypass {
+        bypassed: bool,
+        by_hand: bool,
+    },
     /// The plugin's settings as a whole, as it saved them after a change its
     /// parameters don't say, such as someone picking a preset. `by_hand`
     /// as for [`Param`](Self::Param).
@@ -70,6 +85,31 @@ pub(crate) enum Change {
     Window(PluginEvent),
     /// Something went wrong with the plugin.
     Failed(String),
+}
+
+/// A plugin's own bypass parameter: its id, and its values off and on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BypassParam {
+    id: u32,
+    off: f64,
+    on: f64,
+}
+
+impl BypassParam {
+    /// The first of the plugin's parameters that says it's the plugin's
+    /// bypass.
+    fn of(instance: &Instance) -> Option<Self> {
+        let param = instance.params().iter().find(|p| p.bypass)?;
+        Some(Self {
+            id: param.id,
+            off: param.min,
+            on: param.max,
+        })
+    }
+
+    fn is_on(&self, value: f64) -> bool {
+        value >= (self.off + self.on) / 2.0
+    }
 }
 
 /// The instances of the open project's plugins.
@@ -105,6 +145,15 @@ struct Hosted {
     /// The parameters that follow automation, which the engine gives the
     /// plugin.
     automated: BTreeSet<u32>,
+    /// The plugin's own bypass parameter, if it has one.
+    bypass: Option<BypassParam>,
+    /// Whether the plugin's own bypass is on, as it was last given or said.
+    bypassed: bool,
+    /// Whether it's to be on: the device is bypassed, and no lane moves its
+    /// Bypass.
+    wanted: bool,
+    /// Whether a lane moves the device's Bypass.
+    bypass_lane: bool,
     /// How many gestures are open in the plugin's window.
     gestures: u32,
     /// The plugin's state changed in a way its parameters don't say, and
@@ -152,30 +201,41 @@ impl Plugins {
     /// with automation loaded a state, which moves the automated parameters
     /// too, so the engine sends it their values afresh.
     pub fn sync(&mut self, project: &Project) -> bool {
-        let devices: BTreeMap<DeviceId, &PluginDevice> = project
+        let devices: BTreeMap<DeviceId, (&PluginDevice, bool)> = project
             .chains()
             .flat_map(|(_, devices)| devices)
-            .filter_map(|d| Some((d.id, d.kind.plugin()?)))
+            .filter_map(|d| Some((d.id, (d.kind.plugin()?, d.bypassed))))
             .collect();
         let mut automated: BTreeMap<DeviceId, BTreeSet<u32>> = BTreeMap::new();
+        let mut bypass_lanes = BTreeSet::new();
         for lane in project.automation.iter().filter(|lane| !lane.overridden) {
-            if let ParamAddress::Device(device, param) = lane.param {
-                automated.entry(device).or_default().insert(param);
+            match lane.param {
+                ParamAddress::Device(device, param) => {
+                    automated.entry(device).or_default().insert(param);
+                }
+                ParamAddress::Bypass(device) => {
+                    bypass_lanes.insert(device);
+                }
+                _ => {}
             }
         }
         let before = self.hosted.len();
         self.hosted.retain(|id, _| devices.contains_key(id));
         self.failed.retain(|id, _| devices.contains_key(id));
         let mut changed = self.hosted.len() != before;
-        for (&id, &plugin) in &devices {
+        for (&id, &(plugin, bypassed)) in &devices {
             let automated = automated.remove(&id).unwrap_or_default();
+            let bypass = Bypass {
+                bypassed,
+                lane: bypass_lanes.contains(&id),
+            };
             if let Some(hosted) = self.hosted.get_mut(&id) {
-                match hosted.apply(&plugin.settings, automated) {
+                match hosted.apply(&plugin.settings, automated, bypass) {
                     Ok(loaded) => changed |= loaded && !hosted.automated.is_empty(),
                     Err(problem) => self.problems.push(problem),
                 }
             } else if self.installed.is_some() && !self.failed.contains_key(&id) {
-                match self.load(plugin, automated) {
+                match self.load(plugin, automated, bypass) {
                     Ok(hosted) => {
                         self.hosted.insert(id, hosted);
                         changed = true;
@@ -191,8 +251,13 @@ impl Plugins {
     }
 
     /// Loads `plugin` and gives it its settings, but for the `automated`
-    /// parameters.
-    fn load(&mut self, plugin: &PluginDevice, automated: BTreeSet<u32>) -> Result<Hosted, String> {
+    /// parameters, and its device's Bypass.
+    fn load(
+        &mut self,
+        plugin: &PluginDevice,
+        automated: BTreeSet<u32>,
+        bypass: Bypass,
+    ) -> Result<Hosted, String> {
         let name = display_name(plugin);
         let Some(info) = self
             .installed()
@@ -212,16 +277,21 @@ impl Plugins {
         let mut hosted = Hosted {
             nodes: Arc::new(instance.node_source()),
             base: values(&instance),
+            bypass: BypassParam::of(&instance),
             instance,
             name,
             applied: PluginSettings::default(),
             fresh,
             automated: BTreeSet::new(),
+            bypassed: false,
+            wanted: false,
+            bypass_lane: false,
             gestures: 0,
             dirty: false,
             settling: Instant::now(),
         };
-        if let Err(problem) = hosted.apply(&plugin.settings, automated) {
+        hosted.bypassed = hosted.own_bypass();
+        if let Err(problem) = hosted.apply(&plugin.settings, automated, bypass) {
             self.problems.push(problem);
         }
         if let Err(e) = hosted.instance.activate(self.config) {
@@ -327,15 +397,25 @@ impl Plugins {
     }
 }
 
+/// What a plugin device's Bypass is: whether the device is bypassed, and
+/// whether a lane moves it.
+#[derive(Debug, Clone, Copy)]
+struct Bypass {
+    bypassed: bool,
+    lane: bool,
+}
+
 impl Hosted {
     /// Gives the plugin `settings`, as far as they differ from what it has,
     /// but for the `automated` parameters, which the engine gives it. A
-    /// parameter whose automation stopped gets its value back. Returns
+    /// parameter whose automation stopped gets its value back. Its own
+    /// bypass parameter follows `bypass`, whatever the settings say. Returns
     /// whether the plugin loaded a state.
     fn apply(
         &mut self,
         settings: &PluginSettings,
         automated: BTreeSet<u32>,
+        bypass: Bypass,
     ) -> Result<bool, String> {
         let released: BTreeSet<u32> = self.automated.difference(&automated).copied().collect();
         self.automated = automated;
@@ -355,6 +435,8 @@ impl Hosted {
                 params: Vec::new(),
             };
             self.base = values(&self.instance);
+            // The state can turn its bypass on or off: the device's wins.
+            self.bypassed = self.own_bypass();
         }
         let ids: BTreeSet<u32> = (settings.params.iter())
             .chain(&self.applied.params)
@@ -362,7 +444,11 @@ impl Hosted {
             .chain(released.iter().copied())
             .collect();
         let mut given = false;
+        let own_bypass = self.bypass.map(|b| b.id);
         for id in ids.difference(&self.automated) {
+            if Some(*id) == own_bypass {
+                continue;
+            }
             let base = self.base.get(id).copied();
             let wanted = settings.param(*id).or(base);
             let had = self.applied.param(*id).or(base);
@@ -377,7 +463,56 @@ impl Hosted {
             self.settle();
         }
         self.applied.params.clone_from(&settings.params);
+        self.wanted = bypass.bypassed && !bypass.lane;
+        self.bypass_lane = bypass.lane;
+        self.link_bypass();
         result
+    }
+
+    /// Whether the plugin's own bypass is on, as it has it.
+    fn own_bypass(&self) -> bool {
+        self.bypass.is_some_and(|param| {
+            (self.instance.param_value(param.id)).is_some_and(|value| param.is_on(value))
+        })
+    }
+
+    /// Turns the plugin's own bypass on or off as its device's Bypass has
+    /// it, once it can: off at once, and on once the plugin's node has
+    /// stopped, after the switch's fade. A parameter with a lane of its own
+    /// follows that instead.
+    fn link_bypass(&mut self) {
+        let Some(param) = self.bypass else {
+            return;
+        };
+        if self.bypassed == self.wanted || self.automated.contains(&param.id) {
+            return;
+        }
+        if self.wanted && self.instance.is_running() {
+            return;
+        }
+        self.bypassed = self.wanted;
+        let value = if self.wanted { param.on } else { param.off };
+        self.instance.set_param(param.id, value);
+        self.settle();
+    }
+
+    /// Takes in the plugin's own bypass moving to `value`, as made
+    /// `by_hand` or not. By hand, it bypasses the device or brings it back.
+    /// On the plugin's own, as when a MIDI control it learned moves it, the
+    /// device follows, unless a lane moves the device's Bypass, or the
+    /// plugin is taking in what it was given: the link sets it back then.
+    fn follow_bypass(&mut self, param: BypassParam, value: f64, by_hand: bool) -> Option<Change> {
+        let bypassed = param.is_on(value);
+        if bypassed == self.bypassed {
+            return None;
+        }
+        self.bypassed = bypassed;
+        if !by_hand && (self.bypass_lane || Instant::now() < self.settling) {
+            return None;
+        }
+        // The device follows, so the link has nothing to set back.
+        self.wanted = bypassed;
+        Some(Change::Bypass { bypassed, by_hand })
     }
 
     /// Starts the plugin's settling: what it reports for a while from now
@@ -409,6 +544,14 @@ impl Hosted {
                 // it: only someone moving it overrides the automation.
                 PluginEvent::ParamChanged { param, .. }
                     if self.gestures == 0 && self.automated.contains(&param) => {}
+                PluginEvent::ParamChanged { param, value }
+                    if let Some(bypass) = self.bypass
+                        && bypass.id == param
+                        && !self.automated.contains(&param) =>
+                {
+                    let by_hand = self.gestures > 0 || self.by_hand();
+                    changes.extend(self.follow_bypass(bypass, value, by_hand));
+                }
                 PluginEvent::ParamChanged { param, value } => {
                     let had = self.applied.param(param).or(self.base.get(&param).copied());
                     // A plugin can echo a value the host set.
@@ -430,7 +573,11 @@ impl Hosted {
                     }
                 }
                 PluginEvent::GestureEnd { .. } => {}
-                PluginEvent::StateChanged | PluginEvent::ParamsChanged => self.dirty = true,
+                PluginEvent::StateChanged => self.dirty = true,
+                PluginEvent::ParamsChanged => {
+                    self.dirty = true;
+                    self.bypass = BypassParam::of(&self.instance);
+                }
                 PluginEvent::Restarted { latency_changed } => {
                     self.settle();
                     if latency_changed {
@@ -447,6 +594,9 @@ impl Hosted {
             let by_hand = self.by_hand();
             self.capture(by_hand, &mut changes);
         }
+        // Its node may have stopped since, or the plugin moved its bypass
+        // when it wasn't to.
+        self.link_bypass();
         changes
     }
 
@@ -460,6 +610,12 @@ impl Hosted {
         if self.fresh.is_none() {
             for (id, value) in values(&self.instance) {
                 if self.automated.contains(&id) {
+                    continue;
+                }
+                if let Some(bypass) = self.bypass
+                    && bypass.id == id
+                {
+                    changes.extend(self.follow_bypass(bypass, value, by_hand));
                     continue;
                 }
                 let had = self.applied.param(id).or(self.base.get(&id).copied());

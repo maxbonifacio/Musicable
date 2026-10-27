@@ -203,6 +203,14 @@ impl<V: Voice> Voices<V> {
         self.sustain = previous.sustain;
     }
 
+    /// From [`Node::reset`](crate::Node::reset): every voice stops at once,
+    /// with the sustain pedal up.
+    pub(crate) fn reset(&mut self) {
+        self.slots = [V::default(); SLOTS];
+        self.sustain = false;
+        self.ended.clear();
+    }
+
     /// The notes whose voices ended in the block last rendered.
     pub(crate) fn ended(&self) -> &[NoteId] {
         &self.ended

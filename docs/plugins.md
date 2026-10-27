@@ -72,6 +72,20 @@ shorter block, plays silence.
   the restart a plugin asked for until then, so a plugin given another
   latency before it first activates, as a saved project's plugins are,
   doesn't restart again once it's playing.
+- **Bypassing.** A plugin's nodes sit in their device's switch
+  ([engine.md](engine.md#bypassing-devices)), which stops a bypassed
+  device once its fade is over, and the node stops the plugin processing
+  (`stop_processing`) on the audio thread. While it's stopped, the node
+  flushes each block's parameter changes, from the app, the graph and the
+  plugin's window, into the plugin (`params.flush`, which CLAP allows on
+  the audio thread while the plugin is active and not processing), so it
+  comes back as it was left. Coming back, the node starts it processing
+  on its next block and resets it first (`reset`), which "clears all
+  buffers" and "kills all voices", so it starts from silence. A
+  deactivated device's switch never starts its plugin. `Instance::
+  is_running` says whether a node is processing the plugin, which the
+  app's link to the plugin's own bypass waits for
+  ([Plugins on tracks](#plugins-on-tracks)).
 - **Failing.** A plugin that fails to start processing is deactivated on
   the next `poll`, which says why.
 - **Destroying.** Dropping the `Instance` closes the plugin's window,
@@ -212,6 +226,13 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   (`ParamsChanged`). New parameter values, and the plugin saying it's
   changed (`setDirty`), are `StateChanged`. A restart asked for while the
   plugin is inactive waits for it to activate, which is the restart.
+- **Bypassing.** A VST3 plugin stays processing, as VST3 sees it, while
+  its device is bypassed: its node gives it no frames, and hands it the
+  parameter changes in process calls of no frames, which VST3 has "when
+  the host wants to flush the parameters". Coming back, the node stops
+  and starts its processing (`setProcessing(false)`, then `(true)`), on
+  the thread that processes it, where the plugin "has to reset its inner
+  processing state".
 - **Notes** go to the first event input, with note ids, which notes off
   name. Pitch bend is VST3's tuning expression, which goes from 120
   semitones down to 120 up; pressure is poly pressure, and timbre is
@@ -280,11 +301,30 @@ open project, on a track or on the master:
   has everything the plugins keep, and `params` is usually empty there.
 - **Another engine**, for another sample rate or buffer size, activates
   every plugin again for it.
+- **Its own bypass.** A plugin can mark a parameter as its bypass (CLAP's
+  `CLAP_PARAM_IS_BYPASS`, VST3's `kIsBypass`), and the first it marks is
+  linked to its device's Bypass, so the two never disagree. The device's
+  Bypass is the truth, and Musicable still does the bypassing, since VST3
+  says a plugin that bypasses itself keeps processing, and its latency:
+  the link turns the plugin's own bypass off at once, and on once its
+  node has stopped (`Instance::is_running`), after the fade, so the
+  plugin doesn't change its sound under it. A Bypass lane on the device
+  leaves the plugin's own bypass off. Clicking the plugin's own bypass
+  button in its window bypasses the device, as a step named "Bypass Test
+  Gain", and overrides a Bypass lane, as the device's Bypass button does;
+  the plugin switching it on its own, outside a gesture and with its
+  window closed, is followed without a step. While a lane moves the
+  device's Bypass, or as the plugin settles after a state, what the
+  plugin does to its own bypass is set back. A project's state wins as it
+  loads: the plugin's own bypass is set to the device's after its state.
+  The parameter has no lane of its own, since the device's Bypass lane
+  covers it, but a project with a lane on it from before keeps the lane,
+  and the link leaves it alone.
 - **Automation.** A plugin's parameters can be automated like the mixer's,
   by id ([commands.md](commands.md#automation)). The arrangement offers
   those the plugin calls automatable and neither hides nor keeps
-  read-only, with values in its own units: CLAP's range, VST3's normalized
-  values. The graph sends the values to the plugin as parameter events
+  read-only, but for its own bypass, with values in its own units: CLAP's
+  range, VST3's normalized values. The graph sends the values to the plugin as parameter events
   ([engine.md](engine.md#automation)). Turning an automated parameter in
   the plugin's window overrides its automation, as moving a mixer control
   does, until it's re-enabled; while it follows its automation the project
@@ -345,7 +385,8 @@ CLAP asks.
 
 `crates/test-plugins` builds a CLAP library with two plugins. Test Gain
 multiplies by its Gain and delays by its Latency, which it reports, and
-asks to restart when the latency changes. Test Synth plays each note as a
+asks to restart when the latency changes. Its Bypass, marked as its
+bypass, plays its input unchanged, as late as its latency makes it. Test Synth plays each note as a
 sine shaped by its note expression, as loud as its Level, which can be
 modulated for each note's voice, says when each voice ends, and can render
 its voices on the host's thread pool, noting which threads run them. It
@@ -367,6 +408,10 @@ CC 7 to its Level through its MIDI mapping. Both
 check VST3's rules, in the same count: what's called on which thread and in
 which state, and that the host connects, terminates and lets go of each
 object, in order, before the module exits.
+
+Both formats' plugins also count how often they start, stop and reset
+processing, and how many blocks with frames they render
+(`testing::Lifecycle`), which the Bypass tests check.
 
 Each test copies the library to a file of its own, or makes a VST3 bundle
 of its own (`testing::copy_vst3`), so the plugins' counts are its own. A

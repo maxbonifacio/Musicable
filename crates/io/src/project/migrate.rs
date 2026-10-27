@@ -33,6 +33,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     spectral,
     high_quality,
     granular,
+    bypass,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -280,6 +281,31 @@ fn granular(file: &mut Map<String, Value>) -> Result<(), Invalid> {
         let granular = json!({"follow_pitch": true, "grain_size": 30.0, "fluctuation": 25.0});
         add(warp, path, "granular", granular)
     })
+}
+
+/// Version 17 added Bypass and Deactivate. Version 16 devices all play, on
+/// tracks and on the master.
+fn bypass(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        playing(track.get_mut("devices"), &format!("tracks[{i}].devices"))?;
+    }
+    let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
+    playing(master, "master.devices")
+}
+
+/// Leaves each device in `devices`, a list at `path`, active and not
+/// bypassed.
+fn playing(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let devices = devices.and_then(Value::as_array_mut);
+    for (j, device) in devices.into_iter().flatten().enumerate() {
+        if let Some(device) = device.as_object_mut() {
+            let path = format!("{path}[{j}]");
+            add(device, &path, "bypassed", json!(false))?;
+            add(device, &path, "active", json!(true))?;
+        }
+    }
+    Ok(())
 }
 
 /// A change to a warp in a file, given the warp and its path.

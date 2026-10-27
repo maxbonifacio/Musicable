@@ -403,11 +403,11 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
-    /// The lanes that automate its parameters go first, each as an edit of
-    /// its own.
+    /// The lanes that automate its parameters and its Bypass go first, each
+    /// as an edit of its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
         self.project.find_device(device)?;
-        self.remove_lanes(|param| matches!(param, ParamAddress::Device(d, _) if d == device));
+        self.remove_lanes(|param| param.device() == Some(device));
         let (chain, index, _) = self.project.find_device(device)?;
         let device = self.project.devices_mut(chain)?.remove(index);
         self.edits.push(Edit::RemoveDevice {
@@ -416,6 +416,42 @@ impl Transaction<'_> {
             device: device.clone(),
         });
         Some(device)
+    }
+
+    /// Bypasses the device with id `device`, or brings it back with
+    /// `false`. A bypassed device stops, and what comes into it plays on,
+    /// as late as its latency would make it. A device the project hasn't
+    /// got is left alone.
+    pub fn set_device_bypass(&mut self, device: DeviceId, bypassed: bool) {
+        let Some(d) = self.project.device_mut(device) else {
+            return;
+        };
+        if d.bypassed != bypassed {
+            d.bypassed = bypassed;
+            self.edits.push(Edit::DeviceBypass {
+                device,
+                from: !bypassed,
+                to: bypassed,
+            });
+        }
+    }
+
+    /// Deactivates the device with id `device`, or activates it with
+    /// `true`. A deactivated device is out of the signal, latency and all,
+    /// though it keeps its place and its settings. A device the project
+    /// hasn't got is left alone.
+    pub fn set_device_active(&mut self, device: DeviceId, active: bool) {
+        let Some(d) = self.project.device_mut(device) else {
+            return;
+        };
+        if d.active != active {
+            d.active = active;
+            self.edits.push(Edit::DeviceActive {
+                device,
+                from: !active,
+                to: active,
+            });
+        }
     }
 
     /// Sets the parameter `param` of the plugin device with id `device` to
@@ -1417,6 +1453,7 @@ impl Transaction<'_> {
                     self.set_plugin_param(device, n, Some(value));
                 }
             }
+            ParamAddress::Bypass(device) => self.set_device_bypass(device, value >= 0.5),
             ParamAddress::Clip(clip, ClipParam::Gain) => self.set_clip_gain(clip, narrow),
             ParamAddress::Clip(clip, param) => self.set_warp_param(clip, param, value),
         }
@@ -1587,6 +1624,8 @@ impl Transaction<'_> {
             Edit::RemoveDevice { device, .. } => {
                 self.remove_device(device.id);
             }
+            Edit::DeviceBypass { device, to, .. } => self.set_device_bypass(*device, *to),
+            Edit::DeviceActive { device, to, .. } => self.set_device_active(*device, *to),
             Edit::PluginParam {
                 device, param, to, ..
             } => self.set_plugin_param(*device, *param, *to),
@@ -1944,6 +1983,18 @@ pub enum Edit {
         index: usize,
         device: Device,
     },
+    /// The device with id `device` was bypassed, or brought back.
+    DeviceBypass {
+        device: DeviceId,
+        from: bool,
+        to: bool,
+    },
+    /// The device with id `device` was deactivated, or activated.
+    DeviceActive {
+        device: DeviceId,
+        from: bool,
+        to: bool,
+    },
     /// A parameter of the plugin device with id `device` changed. `None` is
     /// the value in the plugin's state.
     PluginParam {
@@ -2266,6 +2317,16 @@ impl Edit {
                 index,
                 device,
             },
+            Edit::DeviceBypass { device, from, to } => Edit::DeviceBypass {
+                device,
+                from: to,
+                to: from,
+            },
+            Edit::DeviceActive { device, from, to } => Edit::DeviceActive {
+                device,
+                from: to,
+                to: from,
+            },
             Edit::PluginParam {
                 device,
                 param,
@@ -2544,6 +2605,22 @@ impl Edit {
                 },
             ) if locator == other => to.clone_from(next),
             (
+                Edit::DeviceBypass { device, to, .. },
+                Edit::DeviceBypass {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            )
+            | (
+                Edit::DeviceActive { device, to, .. },
+                Edit::DeviceActive {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => *to = *next,
+            (
                 Edit::PluginParam {
                     device, param, to, ..
                 },
@@ -2647,6 +2724,8 @@ impl Edit {
                 | Edit::LocatorName { .. }
                 | Edit::AddDevice { .. }
                 | Edit::RemoveDevice { .. }
+                | Edit::DeviceBypass { .. }
+                | Edit::DeviceActive { .. }
                 | Edit::PluginParam { .. }
                 | Edit::PluginSettings { .. }
                 | Edit::NativeParam { .. }
@@ -2696,7 +2775,9 @@ impl Edit {
             | Edit::TrackSolo { from, to, .. }
             | Edit::TrackSoloSafe { from, to, .. }
             | Edit::TrackArmed { from, to, .. }
-            | Edit::SendPreFader { from, to, .. } => from == to,
+            | Edit::SendPreFader { from, to, .. }
+            | Edit::DeviceBypass { from, to, .. }
+            | Edit::DeviceActive { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
             Edit::TrackInput { from, to, .. } => from == to,
             Edit::TrackMonitor { from, to, .. } => from == to,

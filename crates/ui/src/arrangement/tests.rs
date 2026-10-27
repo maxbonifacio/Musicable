@@ -1557,6 +1557,52 @@ fn an_automation_lanes_header_chooses_adds_and_hides_lanes() {
 }
 
 #[test]
+fn every_device_has_a_bypass_lane_that_steps_off_and_on() {
+    let (mut project, ids) = project();
+    let gain = project.new_device(DeviceKind::TestGain { gain: 1.0 });
+    let bypass = ParamAddress::Bypass(gain.id);
+    project.track_mut(ids.drums).unwrap().devices.push(gain);
+    // Bypassed from beat 4 on.
+    let points = vec![
+        Point::new(Beats::ZERO, 0.0),
+        Point::new(Beats::new(4), 0.0),
+        Point::new(Beats::new(4), 1.0),
+    ];
+    project.automation.push(Lane::new(bypass, points));
+    let mut harness = harness(project);
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    // The automated lane shows, named after its device, with its value at
+    // the playhead.
+    let automation = &harness.state().editor().automation;
+    assert_eq!(
+        automation.get(&Chain::Track(ids.drums)),
+        Some(&vec![bypass])
+    );
+    let value = |harness: &Harness<'_, State>| {
+        let header = harness.get_by_label("Test Gain: Bypass of Drums");
+        header.value()
+    };
+    assert_eq!(value(&harness).as_deref(), Some("Off"));
+    harness.state_mut().player.playhead = Beats::new(6);
+    harness.run();
+    assert_eq!(value(&harness).as_deref(), Some("On"));
+
+    // The chooser offers it first among the device's parameters.
+    harness
+        .get_by_label("Choose the parameter of Test Gain: Bypass of Drums")
+        .click();
+    harness.run();
+    harness.get_by_label("Test Gain").hover();
+    harness.run();
+    let top = |label| harness.get_by_label(label).rect().top();
+    assert!(top("Bypass") < top("Gain"));
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn automation_menus_clear_and_re_enable_a_lane() {
     let (mut project, ids) = project();
     let volume = ParamAddress::Volume(Chain::Track(ids.drums));

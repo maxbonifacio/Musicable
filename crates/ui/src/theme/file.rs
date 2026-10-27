@@ -52,7 +52,7 @@ const SECTIONS: [(&str, &str); 14] = [
     ("mixer", "The mixer's sizes."),
     (
         "devices",
-        "The devices panel's sizes, and the browser's width.",
+        "The devices panel's sizes and dimming, and the browser's width.",
     ),
     ("piano_roll", "The piano roll's sizes."),
     ("sample_editor", "The Sample Editor's sizes."),

@@ -245,6 +245,19 @@ impl Param {
         self.modulation = previous.modulation;
     }
 
+    /// Starts afresh, as if it had rendered nothing yet: at the value set,
+    /// or at the automation's value once it renders, with no ramp or glide.
+    /// For a node's [`Node::reset`](crate::Node::reset).
+    pub fn reset(&mut self) {
+        self.set.reset();
+        self.glide.hold(0.0);
+        self.glide.reset();
+        self.glide_from = None;
+        self.base = self.set.value();
+        self.value = self.modulated(self.base);
+        self.jumps = None;
+    }
+
     /// Sets the value, for a [`Param`](crate::NodeEventKind::Param) event.
     /// It ramps there over 10 ms, and applies once the parameter has no
     /// automation.

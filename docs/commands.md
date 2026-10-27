@@ -577,6 +577,8 @@ device's id as `device`.
 | `device.add_preset` | Add Preset | Adds the device the preset file `preset` holds, set as it was saved, where `device.add_plugin` puts one. Returns the new device | none | Double-click in the browser |
 | `device.save_preset` | Save Device as Preset | Saves the device `device` as a Musicable preset called `name`, or the device's name and a number, in the presets folder, and returns its path. A name the device has a preset for already is refused | none | Save Preset, on the device's title bar |
 | `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
+| `device.set_bypass` | Set Device Bypass | Bypasses the devices `devices`, or brings them back with `bypassed` false: each stops, and what comes into it plays on, as late as its latency would make it, so the mix keeps its timing. It overrides their Bypass lanes, as moving a control does | none | The device's power button |
+| `device.set_active` | Set Device Active | Deactivates the devices `devices`, or activates them with `active` true. A deactivated device is out of the signal, latency and all, though it keeps its place and its settings, and a plugin stays loaded | none | none |
 | `device.set_sample` | Set Sample | Gives the sampler `device` the audio file `file` to play, a path as clips name files ([project-format.md](project-format.md)), or takes its sample away without one | none | Drop a file on Simpler |
 | `device.load_sample` | Load Sample... | Asks for an audio file and gives it to the sampler `device` with `device.set_sample` | none | none |
 | `device.show_window` | Show Plugin Window | Shows the plugin's own window, or brings it to the front | none | Ctrl+Alt+P (all of them) |
@@ -586,7 +588,11 @@ device's id as `device`.
 Adding, changing and deleting are transactions named after the device:
 a built-in device by its kind, such as "Add EQ" and "Change EQ", and a
 plugin by its name, such as "Delete Surge XT"; adding a preset is named
-after the preset. So undo covers them, and dragging a control is one
+after the preset. Bypassing is "Bypass EQ" or "Bring Back EQ", and
+"Bypass 3 Devices" for several, and deactivating "Deactivate EQ" or
+"Activate EQ". The devices panel's Bypass button runs them
+([app.md](app.md#the-devices-panel)), and so does a plugin's own bypass
+button, in its window ([plugins.md](plugins.md#plugins-on-tracks)). So undo covers them, and dragging a control is one
 gesture, which one undo takes back. A device added goes in sight: the
 track it goes on, or the master, becomes the selected track, as a click on
 its header makes it, if it isn't already, and the app is asked, with
@@ -609,9 +615,11 @@ Automation moves a parameter through points over the song
 ([project-format.md](project-format.md#lane)). Each command names
 its parameter with an argument of type `param`, a `ParamAddress`, which
 scripts write as text: "track 3 volume", "master pan", "send 2",
-"device 4 param 17" or "clip 5 transpose" (`param_text`). A built-in
-device's parameter is its number in its kind's table, a plugin's its id in
-the plugin, and a test device's is 0. An audio clip's are its gain and its
+"device 4 param 17", "device 4 bypass" or "clip 5 transpose"
+(`param_text`). A built-in device's parameter is its number in its kind's
+table, a plugin's its id in the plugin, and a test device's is 0. Every
+device has a Bypass, whatever its kind, which steps between off, 0, and
+on, 1, where on is bypassed, as a plugin's own bypass parameter does. An audio clip's are its gain and its
 warp's settings, by their keys as Show Clip Lane takes them
 ([Warp modes](#warp-modes)): their curves are in the clip, in its own
 time, where the Sample Editor's lane shows them, and an unwarped clip plays
@@ -630,8 +638,8 @@ only its gain's.
 
 Values are kept within the parameter's range where the project knows it,
 as it does for the mixer's, the built-in devices', the clips' and the test
-devices' parameters, and a switch's, a choice's, a note's, a count's or a
-clip's Preserve's and Transient Loop Mode's are rounded to whole numbers,
+devices' parameters, and a switch's, a choice's, a note's, a count's, a
+Bypass's or a clip's Preserve's and Transient Loop Mode's are rounded to whole numbers,
 as their steps; a plugin keeps its own in range. Deleting a lane's last point clears it. The arrangement's
 gestures run these, and a drag of a point or a stretch of line, or a drag
 that draws, runs Edit Automation once, when it ends
@@ -640,8 +648,9 @@ that draws, runs Edit Automation once, when it ends
 Moving a control by hand overrides its automation, as in Live:
 `Transaction::set_param_by_hand` sets the value and marks the lane
 overridden in the same step, so one undo puts both back. The mixer's
-changes, `device.set_param` (and so the built-in devices' controls) and
-what plugins change in their own windows all do. An overridden lane keeps its points, which can be edited as
+changes, `device.set_param` (and so the built-in devices' controls),
+`device.set_bypass` (and so the Bypass button) and what plugins change in
+their own windows all do. An overridden lane keeps its points, which can be edited as
 usual, and the parameter holds the value it was moved to until Re-Enable
 Automation.
 
@@ -882,8 +891,8 @@ a track, its input and monitoring among them, a send and the master; adding
 and removing clips, and their timing, fades and names; adding and removing
 notes, and their timing, keys and velocities; adding, naming and removing
 takes; adding, moving, naming and removing locators; adding and removing
-devices, and a plugin's parameters and settings; and each parameter's
-automation, and whether it's overridden.
+devices, bypassing and deactivating them, and a plugin's parameters and
+settings; and each parameter's automation, and whether it's overridden.
 `Transaction::editor` reads the editor's state, such as the files' sample
 rates. Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing
@@ -1014,6 +1023,8 @@ stops the transport at the start of the song. Then:
   | Adding or removing a clip, its timing, its fades | A new graph |
   | Adding or removing a note, its timing, key or velocity | A new graph, which lets go of a note that was sounding where it changed |
   | Adding or removing a device | A new graph, after its plugin loads or goes |
+  | Bypassing a device | Its switch's `Switch::BYPASS` parameter ([engine.md](engine.md#bypassing-devices)), and the link sets the plugin's own bypass ([plugins.md](plugins.md#plugins-on-tracks)) |
+  | Deactivating or activating a device | A new graph |
   | A plugin's parameters and settings | Nothing: the plugin gets them ([plugins.md](plugins.md#plugins-on-tracks)) |
   | Track and clip names, arm, locators | Nothing yet |
 

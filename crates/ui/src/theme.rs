@@ -35,7 +35,8 @@ pub struct Theme {
     /// Input monitoring's buttons, when they're on.
     #[serde(with = "values::colour")]
     pub monitor: Color32,
-    /// Built-in devices' switches, when they're on.
+    /// Built-in devices' switches when they're on, and the Bypass buttons
+    /// of devices that play.
     #[serde(with = "values::colour")]
     pub switch: Color32,
     #[serde(with = "values::colour")]
@@ -350,6 +351,9 @@ pub struct DeviceSizes {
     /// The space around what's in a device's box, and between the boxes.
     pub margin: f32,
     pub gap: f32,
+    /// How opaque the controls of a bypassed or deactivated device are,
+    /// from 0 to 1, so it looks off while they still work.
+    pub dimmed: f32,
     /// The browser's width until the user drags its edge.
     pub browser: f32,
 }
@@ -689,6 +693,7 @@ impl Theme {
                 control: 96.0,
                 margin: 4.0,
                 gap: 6.0,
+                dimmed: 0.4,
                 browser: 260.0,
             },
             browser: BrowserSizes {

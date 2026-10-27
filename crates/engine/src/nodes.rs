@@ -136,6 +136,11 @@ impl Node for Delay {
         }
     }
 
+    fn reset(&mut self) {
+        self.held.fill(0.0);
+        self.next = 0;
+    }
+
     fn process(
         &mut self,
         _ctx: &ProcessContext<'_>,
@@ -192,6 +197,10 @@ impl Node for Latent {
         if let Some(previous) = previous.downcast_mut::<Latent>() {
             self.0.adopt(&mut previous.0);
         }
+    }
+
+    fn reset(&mut self) {
+        self.0.reset();
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
@@ -329,6 +338,14 @@ impl Smoothed {
     pub fn settle(&mut self) {
         self.from = self.target;
         self.frame = self.frames;
+    }
+
+    /// Jumps to the target, as if its node had rendered nothing yet, so new
+    /// values apply at once again until it renders a frame: for a node
+    /// starting afresh ([`Node::reset`]).
+    pub fn reset(&mut self) {
+        self.settle();
+        self.started = false;
     }
 
     /// Jumps to `value` and holds it there, as if it had ramped there: for
@@ -533,6 +550,18 @@ impl Node for Gain {
             self.mute.take_over(&previous.mute);
             self.pan.take_over(&previous.pan);
         }
+    }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        for event in ctx.events {
+            self.apply(event);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.gain.reset();
+        self.mute.reset();
+        self.pan.reset();
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
@@ -1297,6 +1326,20 @@ impl Node for TestInstrument {
             self.sustain = previous.sustain;
             self.started = previous.started;
         }
+    }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        for event in ctx.events {
+            if let NodeEventKind::Param { .. } = event.kind {
+                self.apply(event);
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.level.reset();
+        self.voices = [Voice::default(); Self::VOICES];
+        self.sustain = false;
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {

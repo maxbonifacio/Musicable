@@ -55,6 +55,8 @@
 | Hide Plugin Window | `device.hide_window` |
 | Load Sample... | `device.load_sample` |
 | Save Device as Preset | `device.save_preset` |
+| Set Device Active | `device.set_active` |
+| Set Device Bypass | `device.set_bypass` |
 | Set Device Parameter | `device.set_param` |
 | Set Sample | `device.set_sample` |
 | Show Plugin Window | `device.show_window` |

@@ -82,6 +82,15 @@ impl Node for Equalizer {
             }
         });
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.bands = [BandFilter::default(); BANDS];
+    }
 }
 
 /// One band's filters: its sections' coefficients, and each channel's

@@ -157,8 +157,10 @@ pub fn list() -> Vec<Tool> {
             "Get Project",
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
              tracks with their mixer settings, devices and clips, the master, the locators, and \
-             which parameters are automated, each with its id. A clip's notes, a device's \
-             parameters and a lane's points come from get_clip, get_device and get_automation.",
+             which parameters are automated, each with its id. A device that's bypassed says \
+             \"bypassed\": true, and one that's deactivated \"active\": false. A clip's notes, a \
+             device's parameters and a lane's points come from get_clip, get_device and \
+             get_automation.",
             object(json!({}), &[]),
         ),
         read(
@@ -173,9 +175,10 @@ pub fn list() -> Vec<Tool> {
         read(
             GET_DEVICE,
             "Get Device",
-            "Reads one device: what it is, where it is, and each of its parameters' number, \
-             name, range, unit and value, for device.set_param and automation, which name a \
-             device's parameter as \"device 4 param 2\".",
+            "Reads one device: what it is, where it is, whether it's bypassed or deactivated, \
+             and each of its parameters' number, name, range, unit and value, for \
+             device.set_param and automation, which name a device's parameter as \"device 4 \
+             param 2\" and its Bypass as \"device 4 bypass\".",
             object(
                 json!({ "device": id_number("The device's id.") }),
                 &["device"],

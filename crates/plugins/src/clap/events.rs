@@ -176,6 +176,10 @@ impl InputEvents {
         self.events.len() == self.events.capacity()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
     /// Adds an event no earlier than the last, unless the list is full.
     pub(crate) fn push(&mut self, event: Event) {
         if self.is_full() {

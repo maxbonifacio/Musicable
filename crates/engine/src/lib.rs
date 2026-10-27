@@ -38,6 +38,7 @@ pub mod preview;
 mod render;
 pub mod resample;
 pub mod rt;
+pub mod switch;
 pub mod tasks;
 pub mod timeline;
 mod transport;
@@ -155,6 +156,28 @@ pub trait Node: Any + Send {
     fn ended_voices(&self) -> &[NoteId] {
         &[]
     }
+
+    /// Stops the node rendering, as when its device is bypassed: called on
+    /// the audio thread after the last block it renders for a while. Until
+    /// [`reset`](Node::reset) starts it again, it gets its events through
+    /// [`flush`](Node::flush) instead of [`process`](Node::process). A
+    /// plugin stops processing.
+    fn stop(&mut self) {}
+
+    /// Takes the parameter changes in `ctx.events`, whatever their offsets,
+    /// while the node is stopped ([`stop`](Node::stop)), without rendering,
+    /// so it starts again as they leave it. Its other events, such as
+    /// notes, are dropped. Called on the audio thread for every block it's
+    /// stopped for, events or not, so a plugin can take the changes made in
+    /// its window too.
+    fn flush(&mut self, _ctx: &ProcessContext<'_>) {}
+
+    /// Starts the node again after [`stop`](Node::stop), as if it had
+    /// rendered nothing yet: its delay lines, filters, envelopes and voices
+    /// empty, and its parameters at their values, without a ramp. Called on
+    /// the audio thread before the first block it renders again. A plugin
+    /// resets its processing state.
+    fn reset(&mut self) {}
 }
 
 impl dyn Node {

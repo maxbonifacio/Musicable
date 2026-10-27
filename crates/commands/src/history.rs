@@ -763,6 +763,16 @@ mod tests {
                 index: 0,
                 device: project.master.devices[0].clone(),
             },
+            Edit::DeviceBypass {
+                device: effect,
+                from: false,
+                to: true,
+            },
+            Edit::DeviceActive {
+                device: kick,
+                from: true,
+                to: false,
+            },
             Edit::PluginSettings {
                 device: effect,
                 from: effect_settings,
@@ -820,7 +830,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 56;
+    const KINDS: usize = 58;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -882,6 +892,8 @@ mod tests {
             Edit::LaneOverridden { .. } => 53,
             Edit::ClipWarping { .. } => 54,
             Edit::ClipGain { .. } => 55,
+            Edit::DeviceBypass { .. } => 56,
+            Edit::DeviceActive { .. } => 57,
         }
     }
 

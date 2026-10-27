@@ -17,7 +17,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 16,
+  "version": 17,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -189,6 +189,8 @@ workspace:
       "devices": [
         {
           "id": 0,
+          "bypassed": false,
+          "active": true,
           "kind": {
             "test_instrument": {
               "level": 0.5
@@ -576,6 +578,8 @@ A **device** processes the signal on its way through the channel:
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | whole number | Below `next_device_id`, and no other device in the project has it, on a track or on the master. |
+| `bypassed` | boolean | Whether the device is bypassed: the signal coming in passes it unchanged, as late as the device's latency would make it, so the channel keeps its timing. A Bypass lane moves it as the song plays. |
+| `active` | boolean | Whether the device is active. A deactivated device is out of the channel, latency and all: the signal passes straight through, and the device takes no processing. It keeps its `bypassed` for when it's active again. |
 | `kind` | object | What the device is, as an object with one field: the kind's name, holding the kind's settings. |
 
 There are four kinds of device: Musicable's own, plugins, and two test
@@ -589,9 +593,11 @@ devices.
 | `test_instrument` | `level`: float | Plays the notes of the track's MIDI clips with a plain tone, added to the signal coming in: a sine at each note's pitch, bent by its pitch bend, brighter with its timbre, and louder with velocity and pressure, peaking at `level` at full velocity. |
 
 So a test device that halves the signal is
-`{"id": 3, "kind": {"test_gain": {"gain": 0.5}}}`. On a MIDI track, the
-first instrument gets the notes: the first device that plays notes, which
-is a sampler, a synth, a test instrument or a plugin instrument.
+`{"id": 3, "bypassed": false, "active": true, "kind": {"test_gain": {"gain": 0.5}}}`.
+On a MIDI track, the first instrument gets the notes: the first device that
+plays notes, which is a sampler, a synth, a test instrument or a plugin
+instrument. It gets them bypassed or deactivated too, and doesn't play
+them, so they don't go on to an instrument after it.
 
 A **native device**'s settings say which of Musicable's own devices it is
 and how it's set:
@@ -784,7 +790,9 @@ A **plugin**'s settings say which plugin it is and how it's set:
 | `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
 
 Opening the project gives the plugin its state, then the parameter values.
-Musicable saves a fresh state from each plugin it has open, so `params` is
+A plugin's own bypass parameter, if it has one, follows the device's
+`bypassed` both ways, so opening the project sets it from `bypassed`,
+whatever the state and `params` say. Musicable saves a fresh state from each plugin it has open, so `params` is
 usually empty in a file it writes. A plugin that isn't on the computer
 passes the signal through unchanged, and keeps its settings as they are, so
 the project still has them when it opens where the plugin is.
@@ -832,6 +840,7 @@ A **parameter** is an object with one field, saying whose it is:
 | `{"pan": channel}` | A channel's `pan`. |
 | `{"send": id}` | The `level` of the send with that id. |
 | `{"device": {"id": id, "param": n}}` | Parameter `n` of the device with that id. For a built-in device, `n` is the parameter's number in its kind's table (the `#` column above). For a plugin, `n` is the plugin's id for the parameter, as in its `params`, up to 4,294,967,295. A test device has only parameter 0: its `gain` or `level`. |
+| `{"bypass": id}` | The `bypassed` of the device with that id, on a track or on the master. |
 
 A **channel** is `{"track": id}`, the track with that id, or `"master"`.
 
@@ -839,8 +848,9 @@ A **point** is a pair `[at, value]`. `at` is a position, 0 or after, and
 `value` a float in the parameter's own units, the ones its own field uses:
 linear gain for a fader, a send or a test gain, −1.0 to 1.0 for a pan, a
 built-in device's values as its `params` take them (within the range, and a
-whole number for switches, choices, notes and counts), and a plugin's own
-values for its parameters.
+whole number for switches, choices, notes and counts), a plugin's own
+values for its parameters, and 0.0 to 1.0 for a Bypass, which bypasses the
+device from 0.5.
 
 Between two points the value moves in a straight line: for faders, sends and
 the test devices' settings on the fader's scale, where a gain's position is
@@ -853,7 +863,9 @@ share a position. Between two points that differ, a switch or a choice
 passes through the values between them, so to switch one at a place, put a
 step there. Before the first point the lane holds the first point's value,
 and after the last the last point's. Playback glides over steps and jumps in
-10 ms, so they don't click.
+10 ms, so they don't click. A Bypass crossfades over 10 ms too, starting
+as late as the device's latency, so its signal and the one passing it line
+up.
 
 ### Routing
 
@@ -888,6 +900,7 @@ Signal flows from tracks to buses without loops:
 | 14 | 2026-10-25 | Spectral: the warp mode that stretches audio in the frequency domain, keeping its pitch, with its Formants, and a curve for them. Version 13 warped clips keep their formants in place. |
 | 15 | 2026-10-25 | Spectral's High quality, rendering with Rubber Band, with its Envelope, and a curve for it. Version 14 warped clips render with Signalsmith Stretch, with the envelope at 128. |
 | 16 | 2026-10-25 | Granular: the warp mode that plays audio as short overlapping grains, with its Follow pitch, Grain Size and Fluctuation, and curves for the last two. Version 15 warped clips follow the pitch, with 30 ms grains and a fluctuation of 25. |
+| 17 | 2026-10-27 | Bypass and Deactivate: each device's `bypassed` and `active`, and Bypass lanes. Version 16 devices are all active, and none is bypassed. |
 
 ## Changing the format
 

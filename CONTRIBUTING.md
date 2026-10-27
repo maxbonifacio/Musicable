@@ -141,8 +141,9 @@ steps.
 
 ## Real-time code
 
-Code that runs on the audio thread (`Node::process`, `Node::adopt` and
-anything they call) must not allocate or free memory, lock, block or do I/O.
+Code that runs on the audio thread (`Node::process`, `Node::adopt`,
+`Node::stop`, `Node::flush`, `Node::reset` and anything they call) must not
+allocate or free memory, lock, block or do I/O.
 Allocate when the node is built or in `Node::prepare`. In `adopt`, swap
 resources with the old node rather than dropping them.
 

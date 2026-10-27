@@ -19,7 +19,10 @@
 //! recompiled.
 //!
 //! Plugins process outside the engine, in plugin instances the app holds:
-//! [`Devices`] has the app's [`NodeMaker`] for each plugin device.
+//! [`Devices`] has the app's [`NodeMaker`] for each plugin device. Each
+//! device's node sits in a [`Switch`], which bypasses it as the device's
+//! Bypass says. A deactivated device's switch stays in the graph, so its
+//! plugin stops in step with it, but out of the signal, latency and all.
 //!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
@@ -43,6 +46,7 @@ use crate::media::Media;
 use crate::meter::Meters;
 use crate::midi::MidiMonitor;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
+use crate::switch::Switch;
 use crate::{Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, PreparedGraph};
 
 /// The keys [`compile`] gives model objects' nodes.
@@ -63,6 +67,7 @@ pub mod keys {
 
     use super::Slot;
     use crate::nodes::Gain;
+    use crate::switch::Switch;
     use crate::{NodeKey, ParamId};
 
     /// The master bus, where the tracks that don't feed a group sum.
@@ -133,7 +138,8 @@ pub mod keys {
         NodeKey(9 << 32 | u64::from(send.0))
     }
 
-    /// A device, on a track or on the master.
+    /// A device, on a track or on the master: its [`Switch`], with the
+    /// device's node inside.
     pub fn device(device: DeviceId) -> NodeKey {
         NodeKey(10 << 32 | u64::from(device.0))
     }
@@ -156,9 +162,10 @@ pub mod keys {
 
     /// The node with the parameter at `address`, and the parameter: a
     /// channel's fader's [`Gain::GAIN`] for its volume and [`Gain::PAN`] for
-    /// its pan, a send's [`Gain::GAIN`], and a device's parameter `n` as
-    /// `ParamId(n)`. A clip's parameters have none: its clip player follows
-    /// the curves the clip keeps.
+    /// its pan, a send's [`Gain::GAIN`], a device's parameter `n` as
+    /// `ParamId(n)`, and its Bypass as its switch's [`Switch::BYPASS`]. A
+    /// clip's parameters have none: its clip player follows the curves the
+    /// clip keeps.
     pub fn param(address: ParamAddress) -> Option<(NodeKey, ParamId)> {
         let fader = |chain| match chain {
             Chain::Track(track) => track_gain(track),
@@ -168,7 +175,10 @@ pub mod keys {
             ParamAddress::Volume(chain) => (fader(chain), Gain::GAIN),
             ParamAddress::Pan(chain) => (fader(chain), Gain::PAN),
             ParamAddress::Send(send) => (self::send(send), Gain::GAIN),
+            // The switch's own id, which no plugin has.
+            ParamAddress::Device(_, n) if ParamId(n) == Switch::BYPASS => return None,
             ParamAddress::Device(device, n) => (self::device(device), ParamId(n)),
+            ParamAddress::Bypass(device) => (self::device(device), Switch::BYPASS),
             ParamAddress::Clip(..) => return None,
         })
     }
@@ -754,10 +764,12 @@ impl Strip<'_> {
         id
     }
 
-    /// Adds `channel`'s devices, its fader and the stages `stages` puts in
-    /// its slots, up to its output stage. A device without a node leaves the
-    /// signal as it is, with the slot in front of it still there. An
-    /// instrument without one still takes the notes, so they don't go to an
+    /// Adds `channel`'s devices, each in its [`Switch`], its fader and the
+    /// stages `stages` puts in its slots, up to its output stage. A device
+    /// without a node leaves the signal as it is, with the slot in front of
+    /// it still there, and so does a deactivated one, whose switch is in
+    /// the graph but not in the strip. An instrument without a node, or
+    /// deactivated, still takes the notes, so they don't go to an
     /// instrument after it.
     fn channel(
         &mut self,
@@ -777,8 +789,15 @@ impl Strip<'_> {
             if let Ok(position) = u16::try_from(position) {
                 slot(self, Slot::BeforeDevice(position));
             }
-            let node = device_node(device, devices, media)
-                .map(|node| self.push(keys::device(device.id), node));
+            let key = keys::device(device.id);
+            let node = match device_node(device, devices, media) {
+                Some(node) if !device.active => {
+                    self.graph.add(key, Switch::deactivated(node));
+                    None
+                }
+                Some(node) => Some(self.push(key, Box::new(Switch::new(node, device.bypassed)))),
+                None => None,
+            };
             if device.kind.is_instrument() && instrument.is_none() {
                 instrument = Some(node);
             }
@@ -1461,6 +1480,166 @@ mod tests {
             .prepare(&CONFIG)
             .unwrap();
         assert!(render(graph, 1000).iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn a_deactivated_instrument_still_takes_the_notes() {
+        let mut p = Project::new();
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let mut notes = musicable_model::clip::MidiClip::default();
+        notes.add_note(Beats::ZERO, Beats::new(1), 69, 1.0);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let clip = p.new_clip("Note", range, ClipContent::Midi(notes));
+        let mut synth = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        synth.active = false;
+        let after = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let t = p.track_mut(keys).unwrap();
+        t.clips.push(clip);
+        t.devices = vec![synth, after];
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert!(render(graph, 1000).iter().all(|&s| s == 0.0));
+    }
+
+    /// Halves the signal 37 frames late, standing in for a plugin that
+    /// looks ahead.
+    struct LateHalf(Delay);
+
+    impl Node for LateHalf {
+        fn prepare(&mut self, config: &EngineConfig) {
+            self.0.prepare(config);
+        }
+
+        fn latency(&self) -> usize {
+            self.0.frames()
+        }
+
+        fn adopt(&mut self, previous: &mut dyn Node) {
+            if let Some(previous) = previous.downcast_mut::<LateHalf>() {
+                self.0.adopt(&mut previous.0);
+            }
+        }
+
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            inputs: Inputs<'_>,
+            output: &mut AudioMut<'_>,
+        ) {
+            self.0.process(ctx, inputs, output);
+            for channel in output.channels_mut() {
+                channel.iter_mut().for_each(|s| *s *= 0.5);
+            }
+        }
+
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+    }
+
+    struct LateHalves;
+
+    impl NodeMaker for LateHalves {
+        fn make(&self) -> Box<dyn Node> {
+            Box::new(LateHalf(Delay::new(37)))
+        }
+    }
+
+    /// A tone through a plugin that halves it 37 frames late, and the
+    /// plugin's device.
+    fn late_halves() -> (Project, DeviceId, Devices) {
+        let mut p = Project::new();
+        let track = p.add_track("Tone", TrackKind::Audio);
+        let device = p.new_device(plugin(false));
+        let id = device.id;
+        let t = p.track_mut(track).unwrap();
+        t.tone = Some(TestTone {
+            frequency: 440.0,
+            level: 0.5,
+        });
+        t.devices.push(device);
+        let mut devices = Devices::new();
+        devices.insert(id, Arc::new(LateHalves));
+        (p, id, devices)
+    }
+
+    #[test]
+    fn bypassed_devices_keep_their_latency_and_deactivated_ones_lose_it() {
+        let (mut p, id, devices) = late_halves();
+        let graph = |p: &Project| {
+            compile_with_devices(p, &Meters::new(), &Media::new(), &devices)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
+        let playing = graph(&p);
+        assert_eq!(playing.latency(), 37);
+        let playing = render(playing, 256);
+        p.tracks[0].devices[0].bypassed = true;
+        let bypassed = graph(&p);
+        assert_eq!(bypassed.latency(), 37);
+        let bypassed = render(bypassed, 256);
+        p.tracks[0].devices[0].bypassed = false;
+        p.tracks[0].devices[0].active = false;
+        let deactivated = graph(&p);
+        assert_eq!(deactivated.latency(), 0);
+        assert!(deactivated.contains(keys::device(id)));
+        let deactivated = render(deactivated, 256);
+
+        // Deactivated, the tone plays as if there were no device; bypassed,
+        // as it comes in, 37 frames late; playing, halved as well.
+        p.tracks[0].devices.clear();
+        let without = render(graph(&p), 256);
+        assert!(without.iter().any(|&s| s != 0.0));
+        assert_eq!(deactivated, without);
+        let mut late = vec![0.0; 2 * 37];
+        late.extend_from_slice(&without[..without.len() - 2 * 37]);
+        assert_eq!(bypassed, late);
+        let half: Vec<f32> = late.iter().map(|s| s * 0.5).collect();
+        assert_eq!(playing, half);
+    }
+
+    #[test]
+    fn a_bypass_lane_switches_on_the_frame_it_asks_for() {
+        use musicable_model::automation::{Lane, Point};
+        use musicable_model::param::ParamAddress;
+
+        let (mut p, id, devices) = late_halves();
+        let graph = |p: &Project| {
+            compile_with_devices(p, &Meters::new(), &Media::new(), &devices)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
+        let beat = p.tempo.frame_at(Beats::new(1), CONFIG.sample_rate) as usize;
+        let frames = beat + 1000;
+        let playing = render(graph(&p), frames);
+        p.tracks[0].devices[0].bypassed = true;
+        let bypassed = render(graph(&p), frames);
+        // Bypassed from the first beat on. The device is set bypassed, which
+        // the lane overrides from the first frame, without a fade.
+        let point = |at: i64, value: f64| Point::new(Beats::new(at), value);
+        let lane = Lane::new(
+            ParamAddress::Bypass(id),
+            vec![point(0, 0.0), point(1, 0.0), point(1, 1.0)],
+        );
+        p.automation.push(lane);
+        let switched = render(graph(&p), frames);
+        // The fade starts where the first beat comes out, 37 frames late,
+        // and takes 10 ms.
+        let start = beat + 37;
+        let fade = 480;
+        let expected: Vec<f32> = (0..2 * frames)
+            .map(|i| {
+                let m = match (i / 2).checked_sub(start) {
+                    None => 0.0,
+                    Some(k) => ((k + 1).min(fade)) as f32 / fade as f32,
+                };
+                playing[i] * (1.0 - m) + bypassed[i] * m
+            })
+            .collect();
+        // Frame by frame, since the whole lot would make a long message.
+        if let Some(i) = (0..2 * frames).find(|&i| switched[i] != expected[i]) {
+            let (got, due) = (switched[i], expected[i]);
+            panic!("{got} on frame {} where {due} was due", i / 2);
+        }
     }
 
     #[test]

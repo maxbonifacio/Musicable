@@ -23,6 +23,7 @@ use clap_sys::ext::note_ports::{
 };
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_rescan_flags,
+    clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state};
 use clap_sys::ext::thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check};
@@ -48,6 +49,9 @@ pub(crate) struct Shared {
     pub(crate) plugin: AtomicPtr<clap_plugin>,
     /// The plugin's thread pool extension, if it has one.
     pub(crate) thread_pool: AtomicPtr<clap_plugin_thread_pool>,
+    /// The plugin's parameters extension, if it has one, for a node to
+    /// flush the plugin while it's stopped.
+    pub(crate) params: AtomicPtr<clap_plugin_params>,
     /// The plugin's main thread, which made the instance, as
     /// [`thread_mark`] gives it.
     main_thread: usize,
@@ -55,6 +59,9 @@ pub(crate) struct Shared {
     lifecycle: AtomicU8,
     /// The plugin's latency, in frames, as it said when it last activated.
     latency: AtomicUsize,
+    /// Whether a node renders the plugin: from the first block a node plays
+    /// until the node stops, as its device is bypassed.
+    pub(crate) running: AtomicBool,
     /// Whoever holds it has `audio`.
     busy: BusyFlag,
     pub(crate) requests: Requests,
@@ -119,9 +126,11 @@ impl Shared {
             },
             plugin: AtomicPtr::new(ptr::null_mut()),
             thread_pool: AtomicPtr::new(ptr::null_mut()),
+            params: AtomicPtr::new(ptr::null_mut()),
             main_thread: thread_mark(),
             lifecycle: AtomicU8::new(INACTIVE),
             latency: AtomicUsize::new(0),
+            running: AtomicBool::new(false),
             busy: BusyFlag::default(),
             requests: Requests {
                 window_resize: AtomicU64::new(NO_RESIZE),

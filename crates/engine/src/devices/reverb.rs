@@ -68,15 +68,7 @@ impl Reverb {
                 memory: Vec::new(),
                 rings: [Ring::default(); 2 + LINES],
                 write: 0,
-                lengths: Lengths {
-                    from: [0.0; LINES],
-                    to: [0.0; LINES],
-                    now: [0.0; LINES],
-                    whole: [0; LINES],
-                    along: 1.0,
-                    step: 0.0,
-                    size: f32::NAN,
-                },
+                lengths: Lengths::new(),
                 absorb: Absorb::default(),
                 damped: [0.0; CHANNELS],
                 low_cut: [State::default(); 2],
@@ -112,6 +104,15 @@ impl Node for Reverb {
         }
         let Self { params, space } = self;
         params.run(ctx, |span| space.render(&span, output));
+    }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.space.reset();
     }
 }
 
@@ -165,6 +166,16 @@ impl Space {
         self.memory = vec![0.0; start];
         self.absorb = Absorb::default();
         self.cut = None;
+    }
+
+    /// Empties the lines and the filters, for a size set afresh.
+    fn reset(&mut self) {
+        self.memory.fill(0.0);
+        self.write = 0;
+        self.lengths = Lengths::new();
+        self.damped = [0.0; CHANNELS];
+        self.low_cut = [State::default(); 2];
+        self.started = false;
     }
 
     /// Carries on from `previous`, the reverb this one replaces, so the
@@ -334,6 +345,19 @@ struct Lengths {
 }
 
 impl Lengths {
+    /// For no size yet.
+    fn new() -> Self {
+        Self {
+            from: [0.0; LINES],
+            to: [0.0; LINES],
+            now: [0.0; LINES],
+            whole: [0; LINES],
+            along: 1.0,
+            step: 0.0,
+            size: f32::NAN,
+        }
+    }
+
     /// Glides to the lengths for `size` percent, or jumps there.
     fn aim(&mut self, size: f32, sample_rate: f64, jump: bool) {
         if size == self.size && !jump {

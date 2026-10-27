@@ -139,6 +139,16 @@ impl Node for Synth {
     fn ended_voices(&self) -> &[NoteId] {
         self.voices.ended()
     }
+
+    fn flush(&mut self, ctx: &ProcessContext<'_>) {
+        self.params.flush(ctx.events);
+    }
+
+    fn reset(&mut self) {
+        self.params.reset();
+        self.voices.reset();
+        self.last = None;
+    }
 }
 
 /// Applies a note, modulation for one or the sustain pedal, with the
