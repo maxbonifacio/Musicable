@@ -67,6 +67,8 @@ pub enum Target {
     MixerControl,
     /// A built-in device's control, in the devices panel.
     DeviceControl,
+    /// The Bypass button in a device's title bar, in the devices panel.
+    BypassButton,
     /// The arrangement's tracks and ruler, and the piano roll's notes and
     /// ruler, for the wheel.
     Timeline,
@@ -234,12 +236,18 @@ pub enum MouseAction {
     /// Moves the transient to another moment of the file, between the
     /// transients either side.
     MoveTransient,
+    /// Bypasses the device, or brings it back. A deactivated device, it
+    /// activates.
+    ToggleBypass,
+    /// Deactivates the device, taking its latency out too, or activates
+    /// it.
+    ToggleActive,
 }
 
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 35] = [
+    pub const ALL: [Target; 36] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -274,6 +282,7 @@ impl Target {
         Target::SoloButton,
         Target::MixerControl,
         Target::DeviceControl,
+        Target::BypassButton,
         Target::Timeline,
     ];
 
@@ -302,6 +311,7 @@ impl Target {
             Target::SoloButton => "solo_button",
             Target::MixerControl => "mixer_control",
             Target::DeviceControl => "device_control",
+            Target::BypassButton => "bypass_button",
             Target::Timeline => "timeline",
             Target::Note => "note",
             Target::NoteEdge => "note_edge",
@@ -343,6 +353,7 @@ impl Target {
             Target::SoloButton => "Solo, in a header or a strip",
             Target::MixerControl => "A fader, pan or send",
             Target::DeviceControl => "A built-in device's control",
+            Target::BypassButton => "A device's Bypass button",
             Target::Timeline => "Over the tracks or the notes",
             Target::Note => "A note",
             Target::NoteEdge => "A note's start or end",
@@ -450,6 +461,7 @@ impl Target {
             // The mixer's and the devices'.
             (T::SoloButton, Click) => &[A::ExclusiveSolo, A::AddSolo],
             (T::MixerControl | T::DeviceControl, Drag) => &[A::Coarse, A::Fine],
+            (T::BypassButton, Click) => &[A::ToggleBypass, A::ToggleActive],
             (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom],
             _ => &[],
         }
@@ -525,7 +537,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 54] = [
+    pub const ALL: [MouseAction; 56] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -580,6 +592,8 @@ impl MouseAction {
         MouseAction::MoveMarkerFree,
         MouseAction::MoveAudio,
         MouseAction::MoveTransient,
+        MouseAction::ToggleBypass,
+        MouseAction::ToggleActive,
     ];
 
     /// Its name in mouse map files.
@@ -639,6 +653,8 @@ impl MouseAction {
             MouseAction::MoveMarkerFree => "move_marker_free",
             MouseAction::MoveAudio => "move_audio",
             MouseAction::MoveTransient => "move_transient",
+            MouseAction::ToggleBypass => "toggle_bypass",
+            MouseAction::ToggleActive => "toggle_active",
         }
     }
 
@@ -699,6 +715,8 @@ impl MouseAction {
             MouseAction::MoveMarkerFree => "Move the warp marker off the grid",
             MouseAction::MoveAudio => "Move the audio under the warp marker",
             MouseAction::MoveTransient => "Move the transient",
+            MouseAction::ToggleBypass => "Bypass the device or bring it back",
+            MouseAction::ToggleActive => "Deactivate the device or activate it",
         }
     }
 
@@ -873,6 +891,10 @@ impl MouseMap {
         bind(T::MixerControl, Drag, &ctrl, A::Fine);
         bind(T::DeviceControl, Drag, &[none], A::Coarse);
         bind(T::DeviceControl, Drag, &ctrl, A::Fine);
+        // Live's power button bypasses, and Alt-click deactivates, as in
+        // Cubase. In Live it switches the devices beside it in a rack.
+        bind(T::BypassButton, Click, &[none], A::ToggleBypass);
+        bind(T::BypassButton, Click, &[alt], A::ToggleActive);
         bind(T::Timeline, Wheel, &[none], A::Scroll);
         bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
         bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);

@@ -67,7 +67,10 @@ pub(crate) enum Change {
     GestureEnd,
     /// The plugin's own bypass parameter turned on or off: its device is to
     /// be bypassed, or brought back. `by_hand` as for [`Param`](Self::Param).
-    Bypass { bypassed: bool, by_hand: bool },
+    Bypass {
+        bypassed: bool,
+        by_hand: bool,
+    },
     /// The plugin's settings as a whole, as it saved them after a change its
     /// parameters don't say, such as someone picking a preset. `by_hand`
     /// as for [`Param`](Self::Param).

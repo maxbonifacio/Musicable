@@ -331,6 +331,58 @@ comes before it on its track, which is the usual chain. And meters measure
 where they are, before the delays at the buses, so a latent track's meter
 moves later than a dry one's.
 
+## Bypassing devices
+
+Each device's node sits in a `switch::Switch`, which has the device's key
+and bypasses it as the device's Bypass says (`Device::bypassed`). A
+bypassed device stops, and what came into it plays on in its place,
+delayed by its latency, so nothing else in the mix moves and no new graph
+is needed.
+
+- While the device plays, the switch plays it and keeps a dry copy of
+  what comes into it, delayed by the device's latency, so the copy lines
+  up with the device's output frame for frame.
+- Bypassing crossfades from the device to the dry copy over 10 ms, the
+  time automation's steps take, and the device's tail goes with the fade.
+  Once the fade is over, the switch stops the device (`Node::stop`). From
+  then on the device gets each block's events through `Node::flush`
+  instead of rendering, so its parameter changes still land, and only the
+  dry copy costs anything.
+- Bringing the device back resets it at once (`Node::reset`): its delay
+  lines, filters, envelopes and voices empty, and its parameters at their
+  values, without a ramp. It renders from that frame, and the crossfade
+  back to it starts its latency later, so a device that looks ahead has
+  caught up before it's heard.
+- The switch's parameter is `Switch::BYPASS`, `ParamId(u32::MAX)`: 1.0
+  bypasses and 0.0 brings back. CLAP (`CLAP_INVALID_ID`) and VST3
+  (`kNoParamId`) keep that id from plugins, so it's never one of theirs,
+  and device nodes ignore it. `keys::param` gives a Bypass lane
+  (`ParamAddress::Bypass`) to the switch, which takes it as events
+  (`Switch::automate`), a switch on each step.
+- A switch applies to what comes into the device from its event's frame,
+  so the fade starts at the output the device's latency later, where that
+  frame comes out: after delay compensation, a lane switches on the frame
+  it asks for. Where the device starts or stops partway through a block,
+  it renders that part as a block of its own, so the switch renders the
+  same samples however the blocks fall. Up to 16 switches can be on their
+  way through a device at once, and one more replaces the last, so the
+  latest lands.
+- In a swap, a switch carries on from the one it replaces
+  (`Node::adopt`): its device's state, the dry copy and any fade under
+  way. Once a lane stops moving it, it goes back to the project's Bypass.
+- A bypassed instrument is silent, and its notes end with the fade. Notes
+  that start while it's bypassed aren't heard: it comes back fresh, and
+  the next note plays.
+
+A deactivated device (`Device::active` false) is out of the signal
+altogether, latency and all, so every path that meets its track moves,
+and each change is a new graph. Its switch (`Switch::deactivated`) is
+still in the graph, though not in the strip: it never starts its device,
+so a plugin stops on the audio thread as the graph takes over, and its
+node goes on taking parameter changes through `flush`. A deactivated
+instrument still takes the track's notes, so they don't go to an
+instrument after it.
+
 ## Parameter smoothing
 
 A parameter that would click when it jumps ramps to each new value instead:
@@ -971,6 +1023,12 @@ frame on which a switch is off starts the EQ's band or the utility's DC
 filter afresh, as a span that's off throughout does, and a band's sections
 work in `f64` either way.
 
+**Stopping.** While its device is bypassed or deactivated, a node takes
+its events through `Node::flush`, which `Params::flush` applies without
+rendering, and `Node::reset` brings it back with its lines, filters and
+voices empty and its parameters at their values (`Params::reset`)
+([Bypassing devices](#bypassing-devices)).
+
 **The utility** (`devices::Utility`): a DC filter (a one-pole high-pass at
 5 Hz), each side's polarity, the width (mid and side, exact at 100%), the
 pan (the mixer's pan law) and the gain, in that order, with the mute
@@ -1253,7 +1311,8 @@ block needs them and put down when one does.
 
 `Node::process`, `Node::adopt` and `Node::play_notes` run on the audio
 thread, or on one of the parallel renderer's workers, which are real-time
-threads too, and so does everything they call. They must not:
+threads too, and so do `Node::stop`, `Node::flush` and `Node::reset`, which
+a device's switch calls, and everything they call. They must not:
 
 - allocate or free memory, including growing a `Vec`, cloning a `String` or
   dropping a `Box`;

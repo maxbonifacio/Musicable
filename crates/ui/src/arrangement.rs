@@ -1061,10 +1061,9 @@ impl Scene<'_> {
     /// after its device's for a device's.
     fn lane_name(&self, param: ParamAddress) -> String {
         let name = self.spec(param).name;
-        let device = match param {
-            ParamAddress::Device(device, _) => self.project().find_device(device),
-            _ => None,
-        };
+        let device = param
+            .device()
+            .and_then(|device| self.project().find_device(device));
         match device {
             Some((_, _, device)) => format!("{}: {name}", describe(device).0),
             None => name,
@@ -1109,6 +1108,9 @@ impl Scene<'_> {
         }
         Some(match param {
             ParamAddress::Pan(_) => pan_text(value as f32),
+            // Between points, the nearest.
+            ParamAddress::Bypass(_) if value >= 0.5 => "On".to_owned(),
+            ParamAddress::Bypass(_) => "Off".to_owned(),
             _ if spec.scale == Scale::Fader => decibels(value as f32),
             _ => format!("{value:.2}"),
         })
@@ -1129,8 +1131,8 @@ impl Scene<'_> {
 
     /// The parameters on `chain` an automation lane can show, with their
     /// names: the channel's volume, pan and sends, then each device's
-    /// parameters, by device: every one in a built-in device's table, and
-    /// the ones a plugin lists.
+    /// parameters, by device: its Bypass, then every one in a built-in
+    /// device's table, or the ones a plugin lists.
     #[allow(clippy::type_complexity)]
     fn chain_params(
         &self,
@@ -1154,7 +1156,9 @@ impl Scene<'_> {
         }
         let devices = project.devices(chain).unwrap_or_default();
         let devices = devices.iter().map(|device| {
-            let params = match &device.kind {
+            let bypass = ParamAddress::Bypass(device.id);
+            let mut params = vec![(bypass, self.spec(bypass).name)];
+            params.extend(match &device.kind {
                 DeviceKind::Plugin(_) => {
                     let status = self.view.plugins.status.get(&device.id);
                     let listed = status.map_or(&[][..], |status| &status.params[..]);
@@ -1183,7 +1187,7 @@ impl Scene<'_> {
                     let param = ParamAddress::Device(device.id, 0);
                     vec![(param, self.spec(param).name)]
                 }
-            };
+            });
             (describe(device).0.to_owned(), params)
         });
         (own, devices.collect())

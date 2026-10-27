@@ -260,7 +260,10 @@ impl Switch {
                 break;
             }
             let mut end = frames;
-            if let Some(event) = ctx.events[next..].iter().find(|e| switch_value(e).is_some()) {
+            if let Some(event) = ctx.events[next..]
+                .iter()
+                .find(|e| switch_value(e).is_some())
+            {
                 end = end.min(event.offset);
             }
             if let Some(&(time, _)) = self.due.front() {
@@ -548,7 +551,7 @@ mod tests {
     }
 
     impl Probe {
-        fn new(latency: usize) -> (Box<dyn Node>, Arc<Counts>) {
+        fn boxed(latency: usize) -> (Box<dyn Node>, Arc<Counts>) {
             let counts = Arc::new(Counts::default());
             let probe = Probe {
                 delay: Delay::new(latency),
@@ -635,7 +638,11 @@ mod tests {
     fn faded(from: &[f32], to: &[f32], start: usize, dry: impl Fn(usize) -> f32) -> Vec<f32> {
         let mut out = from[..start].to_vec();
         for i in start..from.len() {
-            let m = if i - start < FADE { dry(i - start) } else { 1.0 };
+            let m = if i - start < FADE {
+                dry(i - start)
+            } else {
+                1.0
+            };
             out.push(from[i] * (1.0 - m) + to[i] * m);
         }
         out
@@ -647,7 +654,7 @@ mod tests {
 
     #[test]
     fn a_bypassed_device_plays_its_input_late_by_its_latency() {
-        let (probe, counts) = Probe::new(5);
+        let (probe, counts) = Probe::boxed(5);
         let input = signal(300);
         let out = render(Switch::new(probe, true), 64, &input, &[]);
         assert_eq!(out, late(&input, 5));
@@ -658,7 +665,7 @@ mod tests {
     #[test]
     fn bypassing_crossfades_to_the_input_over_10_ms_then_stops_the_device() {
         for latency in [0, 7] {
-            let (probe, counts) = Probe::new(latency);
+            let (probe, counts) = Probe::boxed(latency);
             let input = signal(1000);
             let out = render(Switch::new(probe, false), 64, &input, &[switch(100, true)]);
             let dry = late(&input, latency);
@@ -673,7 +680,7 @@ mod tests {
 
     #[test]
     fn a_device_brought_back_starts_afresh_and_fades_in_after_its_latency() {
-        let (probe, counts) = Probe::new(7);
+        let (probe, counts) = Probe::boxed(7);
         let input = signal(1000);
         let out = render(Switch::new(probe, true), 64, &input, &[switch(200, false)]);
         let dry = late(&input, 7);
@@ -708,14 +715,21 @@ mod tests {
         ];
         let outputs: Vec<Vec<f32>> = [1, 37, 64, 512, 2000]
             .into_iter()
-            .map(|block| render(Switch::new(Probe::new(7).0, false), block, &input, &events))
+            .map(|block| {
+                render(
+                    Switch::new(Probe::boxed(7).0, false),
+                    block,
+                    &input,
+                    &events,
+                )
+            })
             .collect();
         for output in &outputs[1..] {
             assert_eq!(output, &outputs[0]);
         }
         // Brought back before it stopped, the device carried on; brought
         // back after, it started afresh.
-        let (probe, counts) = Probe::new(7);
+        let (probe, counts) = Probe::boxed(7);
         render(Switch::new(probe, false), 64, &input, &events);
         assert_eq!(counts.get()[1..3], [1, 1]);
     }
@@ -724,10 +738,10 @@ mod tests {
     fn a_new_switch_carries_on_with_the_fade_under_way() {
         let input = signal(1000);
         let events = [switch(100, true)];
-        let whole = render(Switch::new(Probe::new(7).0, false), 64, &input, &events);
-        let mut run = Run::new(Box::new(Switch::new(Probe::new(7).0, false))).with_block(64);
+        let whole = render(Switch::new(Probe::boxed(7).0, false), 64, &input, &events);
+        let mut run = Run::new(Box::new(Switch::new(Probe::boxed(7).0, false))).with_block(64);
         let mut out = run.render(&[input[..300].to_vec()], &events)[0].clone();
-        run.swap(Box::new(Switch::new(Probe::new(7).0, false)));
+        run.swap(Box::new(Switch::new(Probe::boxed(7).0, false)));
         out.extend_from_slice(&run.render(&[input[300..].to_vec()], &[])[0]);
         assert_eq!(out, whole);
     }
@@ -736,11 +750,11 @@ mod tests {
     fn a_switch_its_lane_stops_moving_goes_back_to_the_projects_state() {
         let input = signal(1000);
         // The lane had the device playing, where the project bypasses it.
-        let mut automated = Switch::new(Probe::new(7).0, true);
+        let mut automated = Switch::new(Probe::boxed(7).0, true);
         automated.automated = true;
         let mut run = Run::new(Box::new(automated)).with_block(64);
         let mut out = run.render(&[input[..300].to_vec()], &[switch(0, false)])[0].clone();
-        run.swap(Box::new(Switch::new(Probe::new(7).0, true)));
+        run.swap(Box::new(Switch::new(Probe::boxed(7).0, true)));
         out.extend_from_slice(&run.render(&[input[300..].to_vec()], &[])[0]);
         let dry = late(&input, 7);
         let wet: Vec<f32> = dry.iter().map(|s| s * 0.5).collect();
@@ -749,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_stopped_device_still_takes_its_parameters() {
-        let (probe, counts) = Probe::new(0);
+        let (probe, counts) = Probe::boxed(0);
         let param = |at: usize| NodeEvent {
             offset: at,
             kind: NodeEventKind::Param {
@@ -766,9 +780,9 @@ mod tests {
     #[test]
     fn a_deactivated_device_is_silent_and_stops() {
         let input = signal(300);
-        let mut run = Run::new(Box::new(Switch::new(Probe::new(7).0, false))).with_block(64);
-        run.render(&[input.clone()], &[]);
-        let (probe, counts) = Probe::new(7);
+        let mut run = Run::new(Box::new(Switch::new(Probe::boxed(7).0, false))).with_block(64);
+        run.render(std::slice::from_ref(&input), &[]);
+        let (probe, counts) = Probe::boxed(7);
         let mut deactivated = Switch::deactivated(probe);
         deactivated.prepare(&EngineConfig {
             sample_rate: 48_000,

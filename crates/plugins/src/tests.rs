@@ -606,7 +606,11 @@ pub(crate) fn play_blocks(
 /// bypassed at frame 256 and brought back at frame 1280: the device's
 /// output at gain `before`, a crossfade from 288 to 768 to `signal` 32
 /// frames late, and from 1312 to 1792 back to the device at gain `after`.
-pub(crate) fn bypassed_at_256_and_back_at_1280(signal: &[f32], before: f32, after: f32) -> Vec<f32> {
+pub(crate) fn bypassed_at_256_and_back_at_1280(
+    signal: &[f32],
+    before: f32,
+    after: f32,
+) -> Vec<f32> {
     let late = |t: usize| if t < 32 { 0.0 } else { signal[t - 32] };
     (0..signal.len())
         .map(|t| {
@@ -677,7 +681,12 @@ fn a_bypassed_plugin_stops_and_starts_afresh_as_it_comes_back() {
     assert_eq!((lifecycle[1].stops, lifecycle[2].stops), (0, 1));
     assert_eq!(lifecycle[2].blocks, lifecycle[4].blocks);
     assert_eq!(
-        (lifecycle[4].starts, lifecycle[4].resets, lifecycle[5].starts, lifecycle[5].resets),
+        (
+            lifecycle[4].starts,
+            lifecycle[4].resets,
+            lifecycle[5].starts,
+            lifecycle[5].resets
+        ),
         (1, 0, 2, 1)
     );
     assert_eq!(lifecycle[7].stops, 1);

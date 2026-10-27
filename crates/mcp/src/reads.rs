@@ -267,7 +267,8 @@ fn clip_type(clip_type: ClipType) -> &'static str {
     musicable_commands::mixer::clip_type_name(clip_type)
 }
 
-/// A device as the project lists it: its id, name and kind.
+/// A device as the project lists it: its id, name and kind, and whether
+/// it's bypassed or deactivated, if it is.
 fn device_entry(device: &Device) -> Json {
     let mut entry = json!({
         "id": device.id.0,
@@ -276,6 +277,12 @@ fn device_entry(device: &Device) -> Json {
     });
     if device.kind.is_instrument() {
         entry["instrument"] = true.into();
+    }
+    if device.bypassed {
+        entry["bypassed"] = true.into();
+    }
+    if !device.active {
+        entry["active"] = false.into();
     }
     entry
 }

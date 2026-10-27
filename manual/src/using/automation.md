@@ -26,6 +26,18 @@ dashed line. A built-in device's lane spreads the values as its control
 does, a frequency on a log scale say, and names them as it does ("1.20
 kHz").
 
+## Bypass
+
+Every device has a **Bypass** lane, first in its submenu, which bypasses
+the device and brings it back as its Bypass button does ([The devices
+panel](../window/devices-panel.md#bypassing-and-deactivating)): **On** is
+bypassed, and **Off** plays, as in a plugin's own bypass. It switches on the
+very sample it's drawn at, with the 10 ms fade, in playback and in an
+export alike, and keeps the device's latency, so the mix keeps its timing.
+Clicking the Bypass button overrides the lane. A plugin's own bypass, if
+it has one, follows the device's, so it has no lane of its own
+([Plugins](plugins.md#bypassing)).
+
 ## Drawing
 
 - **Drag** across a lane to draw a value for each step of the grid crossed,

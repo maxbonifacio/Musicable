@@ -559,7 +559,9 @@ fn a_plugins_own_bypass_is_its_devices() {
             .with("devices", vec![device.id])
             .with("bypassed", bypassed)
     };
-    rig.session.run_with(&device::SET_BYPASS, &set(true)).unwrap();
+    rig.session
+        .run_with(&device::SET_BYPASS, &set(true))
+        .unwrap();
     assert_eq!(own(&rig), Some(0.0));
     near(rig.peaks(), TONE);
     assert_eq!(own(&rig), Some(1.0));
@@ -584,7 +586,9 @@ fn a_plugins_own_bypass_is_its_devices() {
         .unwrap();
     near(rig.peaks(), TONE);
     assert_eq!(own(&rig), Some(0.0));
-    rig.session.run_with(&device::SET_BYPASS, &set(false)).unwrap();
+    rig.session
+        .run_with(&device::SET_BYPASS, &set(false))
+        .unwrap();
     near(rig.peaks(), wet);
     drop(rig);
     plugins.assert_alright();

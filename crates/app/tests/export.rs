@@ -6,7 +6,8 @@
 //! soloed, and with solo on the mix is as heard. The tail renders a
 //! release and leaves the quiet end off, normalising takes the peak to full
 //! scale, and FLAC and 16-bit files hold the same samples, rounded. A
-//! cancelled export, or one that fails, leaves no files behind.
+//! Bypass lane switches on the sample it asks for. A cancelled export, or
+//! one that fails, leaves no files behind.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -348,6 +349,67 @@ fn an_exported_mixdown_is_what_the_app_plays_to_the_sample() {
         .filter(|name| name.ends_with(".part"))
         .collect();
     assert_eq!(leftovers, Vec::<String>::new());
+    library.assert_alright();
+}
+
+#[test]
+fn a_bypass_lane_switches_on_the_sample_it_asks_for() {
+    let dir = folder("bypass");
+    let (library, installed) = plugins(&dir, "bypass");
+    // The bass alone, through Test Gain, which halves it 300 frames late.
+    let mut song = song(&dir);
+    song.tracks.retain(|track| track.name == "Bass");
+    let gain = song.tracks[0].devices[0].id;
+    song.automation
+        .retain(|lane| lane.param.device() == Some(gain));
+    let render = |song: &Project, name: &str| {
+        let file = dir.join(format!("{name}.wav"));
+        let settings = exact();
+        let report = export(job(
+            song,
+            &dir,
+            &installed,
+            settings,
+            &file,
+            &BTreeSet::new(),
+        ));
+        assert_eq!((report.failed.as_deref(), report.cancelled), (None, false));
+        assert_eq!(report.problems, Vec::<String>::new());
+        read(&file).0
+    };
+    let playing = render(&song, "Playing");
+    let mut bypassed = song.clone();
+    bypassed.tracks[0].devices[0].bypassed = true;
+    let bypassed = render(&bypassed, "Bypassed");
+    assert_ne!(playing, bypassed);
+    // Bypassed from beat 2 on.
+    let at = |beat: i64, value: f64| Point::new(Beats::new(beat), value);
+    let steps = vec![at(0, 0.0), at(2, 0.0), at(2, 1.0)];
+    song.automation
+        .push(Lane::new(ParamAddress::Bypass(gain), steps));
+    let switched = render(&song, "Switched");
+
+    // The fade starts on the frame of the step, as the plugin's latency is
+    // made up, and takes 10 ms.
+    let step = song.tempo.frame_at(Beats::new(2), CONFIG.sample_rate) as usize;
+    let fade = 480;
+    assert_eq!(
+        (playing.len(), bypassed.len()),
+        (switched.len(), switched.len())
+    );
+    for (i, &got) in switched.iter().enumerate() {
+        let over = match (i / 2).checked_sub(step) {
+            None => 0.0,
+            Some(k) => ((k + 1).min(fade)) as f32 / fade as f32,
+        };
+        let due = playing[i] * (1.0 - over) + bypassed[i] * over;
+        if (got - due).abs() > 1e-6 {
+            panic!("{got} on frame {} where {due} was due", i / 2);
+        }
+    }
+    // As the app plays it.
+    let (_, played) = live(&song, &dir, &installed, CONFIG, switched.len() / 2);
+    assert_same(&switched, &played, "the bass");
     library.assert_alright();
 }
 

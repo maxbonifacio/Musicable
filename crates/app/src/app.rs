@@ -1933,11 +1933,17 @@ struct Listed {
 }
 
 /// The parameters of `params` automation can move: those the plugin
-/// neither hides nor keeps to itself.
+/// neither hides nor keeps to itself, but for its own bypass, the first it
+/// marks as one, which is its device's Bypass and has that lane.
 fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
+    let bypass = params
+        .iter()
+        .find(|param| param.bypass)
+        .map(|param| param.id);
     params
         .iter()
         .filter(|param| param.automatable && !param.hidden && !param.read_only)
+        .filter(|param| Some(param.id) != bypass)
         .map(|param| PluginParam {
             id: param.id,
             spec: ParamSpec {

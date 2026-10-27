@@ -49,6 +49,20 @@ its monitor, stays in front of it and minimizes with it. Elsewhere it's a
 window of the plugin's own. VST3 plugins' windows open only on Windows so
 far.
 
+## Bypassing
+
+A plugin device's Bypass button stops the plugin, as it does any device
+([The devices
+panel](../window/devices-panel.md#bypassing-and-deactivating)). A plugin
+with a bypass switch of its own shares it with its device: bypassing the
+device switches the plugin's own on, once the device has faded out, and
+clicking the plugin's own in its window bypasses the device, as a step in
+the undo history. So they never disagree, and Musicable still does the
+bypassing, which keeps the plugin's latency and frees its CPU. When a
+project opens, the device's Bypass wins over what the plugin's state says.
+A bypassed plugin still takes the changes made to it, from its window,
+automation or the project, so it comes back as you left it.
+
 ## Undo, saving and timing
 
 Adding a plugin, deleting it and every change made in its window are steps

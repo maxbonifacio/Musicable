@@ -953,9 +953,11 @@ impl Session {
                     let name = format!("{verb} {}", self.plugins.name(device).unwrap_or("Plugin"));
                     let (param, value) = (ParamAddress::Bypass(device), f64::from(bypassed));
                     if by_hand {
-                        self.document.transact(&name, |tx| tx.set_param_by_hand(param, value));
+                        self.document
+                            .transact(&name, |tx| tx.set_param_by_hand(param, value));
                     } else {
-                        self.document.follow(&name, |tx| tx.set_param_value(param, value));
+                        self.document
+                            .follow(&name, |tx| tx.set_param_value(param, value));
                     }
                 }
                 Change::Settings {

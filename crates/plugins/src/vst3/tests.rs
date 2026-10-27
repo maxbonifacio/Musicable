@@ -326,7 +326,11 @@ fn a_deactivated_plugin_still_takes_its_changes() {
     assert_eq!(play(&mut active, &input, &block)[0], scaled(&input, 0.5));
     let after = plugins.lifecycle(&instance);
     assert_eq!(
-        (after.starts - before.starts, after.stops - before.stops, after.blocks - before.blocks),
+        (
+            after.starts - before.starts,
+            after.stops - before.stops,
+            after.blocks - before.blocks
+        ),
         (1, 1, 1)
     );
     drop((playing, deactivated, active, instance));

@@ -781,14 +781,20 @@ mod tests {
         assert_eq!(state(&setup, eq), (true, true));
         // As if by hand, so the lane stops moving it.
         assert!(setup.document.project().automation[0].overridden);
-        setup.run_with(&SET_BYPASS, set(vec![gain, eq, gain], true)).unwrap();
+        setup
+            .run_with(&SET_BYPASS, set(vec![gain, eq, gain], true))
+            .unwrap();
         setup.run_with(&SET_BYPASS, set(vec![eq], false)).unwrap();
         let active = |devices: Vec<DeviceId>, active: bool| {
             Args::new().with("devices", devices).with("active", active)
         };
-        setup.run_with(&SET_ACTIVE, active(vec![eq], false)).unwrap();
+        setup
+            .run_with(&SET_ACTIVE, active(vec![eq], false))
+            .unwrap();
         assert_eq!(state(&setup, eq), (false, false));
-        setup.run_with(&SET_ACTIVE, active(vec![eq, gain], true)).unwrap();
+        setup
+            .run_with(&SET_ACTIVE, active(vec![eq, gain], true))
+            .unwrap();
         assert_eq!(
             setup.committed_names(),
             [

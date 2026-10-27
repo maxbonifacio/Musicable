@@ -36,6 +36,13 @@ Every change is a step in the undo history, named after the device, such as
 "Change EQ", and a whole drag is one step. Changes are smoothed, so they
 don't click.
 
+The **Bypass** button left of a device's name bypasses it, and Alt-click
+deactivates it ([The devices
+panel](../window/devices-panel.md#bypassing-and-deactivating)). A bypassed
+device's controls still work, and it comes back afresh: a delay's or a
+reverb's tail, a compressor's envelope and an instrument's voices start
+from silence.
+
 Every control can be automated. A control with automation follows it, with
 a dot at its top left: red while it follows, grey once you move the control
 by hand, which overrides the automation until you re-enable it. Right-click

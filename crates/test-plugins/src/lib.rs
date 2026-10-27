@@ -361,7 +361,10 @@ pub unsafe extern "C" fn musicable_test_pool_use(
 /// `plugin` must be a plugin of this library that isn't destroyed, and
 /// `counts` valid for writing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn musicable_test_lifecycle(plugin: *const clap_plugin, counts: *mut [u32; 4]) {
+pub unsafe extern "C" fn musicable_test_lifecycle(
+    plugin: *const clap_plugin,
+    counts: *mut [u32; 4],
+) {
     // SAFETY: the caller's promise.
     let lifecycle = unsafe { plugin::from_clap(plugin) }.lifecycle();
     // SAFETY: the caller's promise.

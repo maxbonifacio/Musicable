@@ -5,7 +5,8 @@
 //! made in the plugin's window are steps in the undo history, and the
 //! plugins come back from the project's file as they were saved. VST3
 //! plugins go on tracks the same way, and their windows open inside
-//! Musicable's on Windows.
+//! Musicable's on Windows. A device's Bypass button bypasses its plugin,
+//! and deactivates it with Alt.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -19,7 +20,7 @@ use musicable_model::plugin::PluginSettings;
 use musicable_model::{DeviceId, Project, TrackKind};
 use musicable_plugins::scan::{self, Outcome, ScanCache};
 use musicable_test_plugins::testing::Library;
-use musicable_test_plugins::{LEVEL, gui};
+use musicable_test_plugins::{BYPASS, GAIN, LEVEL, gui};
 
 use super::App;
 use super::testing::{TempDir, chord, press, window};
@@ -189,6 +190,71 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
     assert_eq!(names(&harness, "Keys"), ["Test Synth", "Test Gain"]);
     let instance = harness.state().session.plugin(synth).unwrap();
     assert_eq!(instance.param_value(LEVEL), Some(0.25));
+    drop(harness);
+    library.assert_alright();
+}
+
+#[test]
+fn the_bypass_button_bypasses_a_plugin_and_alt_click_deactivates_it() {
+    let config = TempDir::new("bypass-config");
+    let folder = TempDir::new("bypass-song");
+    let library = Library::copy(&folder.0, "test-plugins");
+    scanned(&config.0, &library);
+    let mut song = Project::new();
+    song.add_track("Bass", TrackKind::Audio);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path));
+    let header = harness.get_by_label("Track Bass").rect();
+    click_at(
+        &mut harness,
+        pos2(header.left() + 12.0, header.center().y),
+        1,
+    );
+    click(&mut harness, "Add Device...");
+    double_click(&mut harness, "Test Gain");
+    let gain = plugins(&harness, "Bass")[0].1;
+
+    // The plugin's own bypass is its device's Bypass, so automation lists
+    // only the device's.
+    let listed = |harness: &Harness<'static, App>| -> Vec<u32> {
+        let status = &harness.state().plugin_status[&gain];
+        status.params.iter().map(|param| param.id).collect()
+    };
+    assert_eq!(listed(&harness), [GAIN]);
+    assert_ne!(BYPASS, GAIN);
+
+    // The Bypass button bypasses it, and Alt-click deactivates it, each a
+    // step to undo.
+    let switches = |harness: &Harness<'static, App>| {
+        let project = harness.state().session.project();
+        let (_, _, device) = project.find_device(gain).unwrap();
+        (device.bypassed, device.active)
+    };
+    click(&mut harness, "Test Gain Bypass");
+    assert_eq!(switches(&harness), (true, true));
+    assert_eq!(
+        harness.state().session.undo_name(),
+        Some("Bypass Test Gain")
+    );
+    harness.get_by_label("Device Test Gain, bypassed");
+    harness
+        .get_by_label("Test Gain Bypass")
+        .click_modifiers(Modifiers::ALT);
+    harness.run();
+    assert_eq!(switches(&harness), (true, false));
+    let undo = harness.state().session.undo_name();
+    assert_eq!(undo, Some("Deactivate Test Gain"));
+    harness.get_by_label("Device Test Gain, bypassed, deactivated");
+    press(&mut harness, chord("Ctrl+Z"));
+    press(&mut harness, chord("Ctrl+Z"));
+    assert_eq!(switches(&harness), (false, true));
+    harness.get_by_label("Device Test Gain");
+    assert!(
+        harness.state().messages.is_empty(),
+        "{:?}",
+        harness.state().messages
+    );
     drop(harness);
     library.assert_alright();
 }

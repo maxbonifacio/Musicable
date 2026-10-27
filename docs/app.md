@@ -611,6 +611,30 @@ loops, leaving out what was recorded, the last run, waiting for inputs and
 the timeline, how far back inputs are held, new streams, shared and
 refused inputs, and why there's nothing to take, for audio and MIDI.
 
+## The devices panel
+
+[The devices panel](../manual/src/window/devices-panel.md) in the manual
+has what a device's box shows. Each box's title bar starts with its Bypass
+button, drawn as Live's power button (`widgets::Face::Power`), lit in the
+theme's `switch` colour while the device plays. What a click on it does
+is the mouse map's `BypassButton` target: in Live's map, a click bypasses
+the device or brings it back (`device.set_bypass`), and Alt-click
+deactivates it or activates it (`device.set_active`), as in Cubase; a
+click on a deactivated device's button activates it. A bypassed or
+deactivated device's controls are drawn at the theme's `devices.dimmed`
+opacity, and still work, and a deactivated one says so beside its name.
+The name's menu has Bypass, ticked while the device is bypassed, and
+Deactivate or Activate. Screen readers hear the button as "EQ Bypass",
+on while the device is bypassed, and the name with the device's state,
+such as "Device EQ, bypassed".
+
+Every device's Bypass is a parameter automation can move
+([commands.md](commands.md#automation)): the arrangement's lane chooser
+lists it first among each device's parameters, and the lane's header says
+"On" while the device is bypassed and "Off" while it plays. A plugin's own
+bypass parameter isn't listed, as the device's Bypass covers it
+([plugins.md](plugins.md#plugins-on-tracks)).
+
 ## Built-in devices
 
 [Built-in devices](../manual/src/devices/index.md) in the manual has a page

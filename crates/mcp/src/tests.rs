@@ -604,6 +604,39 @@ fn reads_give_clips_devices_automation_and_the_editor() {
 }
 
 #[test]
+fn reads_say_which_devices_are_bypassed_or_deactivated() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_audio_track"},
+            {"id": "device.add", "args": {"kind": "eq", "track": 0}},
+            {"id": "device.add", "args": {"kind": "delay", "track": 0}},
+            {"id": "device.add", "args": {"kind": "utility", "track": 0}},
+            {"id": "device.set_bypass", "args": {"devices": [0], "bypassed": true}},
+            {"id": "device.set_active", "args": {"devices": [1], "active": false}},
+        ]}),
+    )
+    .unwrap();
+    let project = rig.call("get_project", json!({})).unwrap();
+    assert_eq!(
+        project["tracks"][0]["devices"],
+        json!([
+            {"id": 0, "name": "EQ", "kind": "eq", "bypassed": true},
+            {"id": 1, "name": "Delay", "kind": "delay", "active": false},
+            {"id": 2, "name": "Utility", "kind": "utility"},
+        ])
+    );
+    let eq = rig.call("get_device", json!({"device": 0})).unwrap();
+    assert_eq!((&eq["bypassed"], eq.get("active")), (&json!(true), None));
+    let delay = rig.call("get_device", json!({"device": 1})).unwrap();
+    assert_eq!(
+        (delay.get("bypassed"), &delay["active"]),
+        (None, &json!(false))
+    );
+}
+
+#[test]
 fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
     let mut project = Project::new();
     let track = project.add_track("Voice", TrackKind::Audio);
