@@ -172,7 +172,7 @@ fn parameter_changes_land_on_their_frames() {
     let dry = reference(&project(|_| vec![]));
     let mute = Event::Param {
         node: keys::device(id.unwrap()),
-        param: ParamId(utility::MUTE as u32),
+        param: ParamId(utility::MUTE as u64),
         value: 1.0,
     };
     let wet = play(
@@ -298,7 +298,7 @@ fn random_session(random: &mut Random) -> (Project, Media, Vec<(u64, Event)>) {
                 let value = kind.params()[i].from_unit(random.unit());
                 let event = Event::Param {
                     node: keys::device(device.id),
-                    param: ParamId(i as u32),
+                    param: ParamId(i as u64),
                     value,
                 };
                 events.push((random.next() % 4800, event));

@@ -83,6 +83,10 @@ impl Node for Synth {
         self.params.automate(param, automation)
     }
 
+    fn modulated(&mut self, param: ParamId) {
+        self.params.modulated(param);
+    }
+
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);
@@ -994,12 +998,15 @@ mod tests {
             })
             .collect();
         // A node made from the project with the value set before the swap
-        // carries on just as the old one would have.
+        // carries on just as the old one would have, and so does the
+        // modulation of a parameter something still modulates.
         let mut moved = synth.clone();
         moved.set(CUTOFF, 400.0);
         let mut run = Run::new(Box::new(Synth::new(&synth)));
         let mut swapped = run.render(&[vec![0.0; 2000], vec![0.0; 2000]], &first);
-        run.swap(Box::new(Synth::new(&moved)));
+        let mut new = Box::new(Synth::new(&moved));
+        new.modulated(ParamId(RESONANCE as u64));
+        run.swap(new);
         let rest = run.render(&[vec![0.0; 7000], vec![0.0; 7000]], &later);
         for (channel, rest) in swapped.iter_mut().zip(rest) {
             channel.extend(rest);

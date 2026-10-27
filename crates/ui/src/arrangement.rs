@@ -1102,7 +1102,7 @@ impl Scene<'_> {
             }
             _ => project.param_value(param),
         }?;
-        if let Some(info) = project.native_param(param) {
+        if let Some(info) = project.param_info(param) {
             // Between points, a switch or a choice shows its nearest value.
             return Some(info.format(info.clamp(value)));
         }

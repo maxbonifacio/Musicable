@@ -258,6 +258,8 @@ impl ParamInfo {
             Unit::Seconds if value < 10.0 => format!("{value:.2} s"),
             Unit::Seconds => format!("{value:.1} s"),
             Unit::Percent => format!("{:.0}%", tidy(value, 0)),
+            Unit::Fraction => format!("{:.0}%", tidy(value * 100.0, 0)),
+            Unit::Degrees => format!("{:.0}°", tidy(value, 0)),
             Unit::Semitones if self.stepped => signed(format!("{value:.0} st"), value),
             Unit::Semitones => signed(format!("{:.1} st", tidy(value, 1)), tidy(value, 1)),
             Unit::Cents => signed(format!("{:.0} ct", tidy(value, 0)), tidy(value, 0)),
@@ -309,6 +311,8 @@ impl ParamInfo {
             Unit::Seconds => number(&text, &[("ms", 0.001), ("s", 1.0), ("", 1.0)])?,
             Unit::Decibels => number(&text, &[("db", 1.0), ("", 1.0)])?,
             Unit::Percent => number(&text, &[("%", 1.0), ("", 1.0)])?,
+            Unit::Fraction => number(&text, &[("%", 0.01), ("", 0.01)])?,
+            Unit::Degrees => number(&text, &[("°", 1.0), ("deg", 1.0), ("", 1.0)])?,
             Unit::Semitones => number(&text, &[("st", 1.0), ("", 1.0)])?,
             Unit::Cents => number(&text, &[("ct", 1.0), ("", 1.0)])?,
             Unit::Ratio => number(&text, &[(":1", 1.0), ("", 1.0)])?,
@@ -319,7 +323,7 @@ impl ParamInfo {
 }
 
 /// A continuous parameter that modulators can move, for the tables.
-const fn param(
+pub(crate) const fn param(
     key: &'static str,
     name: &'static str,
     group: &'static str,
@@ -342,7 +346,7 @@ const fn param(
 }
 
 /// A parameter of whole numbers from `min` to `max`.
-const fn whole(
+pub(crate) const fn whole(
     key: &'static str,
     name: &'static str,
     group: &'static str,
@@ -357,13 +361,18 @@ const fn whole(
 }
 
 /// A switch: 0.0 off, 1.0 on.
-const fn switch(key: &'static str, name: &'static str, group: &'static str, on: bool) -> ParamInfo {
+pub(crate) const fn switch(
+    key: &'static str,
+    name: &'static str,
+    group: &'static str,
+    on: bool,
+) -> ParamInfo {
     let default = if on { 1.0 } else { 0.0 };
     whole(key, name, group, [0.0, 1.0, default], Unit::Switch)
 }
 
 /// One of `choices`, by its index.
-const fn choice(
+pub(crate) const fn choice(
     key: &'static str,
     name: &'static str,
     group: &'static str,
@@ -395,6 +404,11 @@ pub enum Unit {
     /// From 0 to 100, or more for something that can go past full, such as
     /// a stereo width.
     Percent,
+    /// From 0.0 to 1.0, shown as a percentage: how far up a Macro's knob
+    /// is.
+    Fraction,
+    /// An angle, such as an LFO's phase, from 0 to 360.
+    Degrees,
     Semitones,
     Cents,
     /// A compressor's ratio, shown as "4.0:1".
@@ -429,9 +443,12 @@ fn decibels(gain: f64) -> String {
     }
 }
 
-/// "31.5 Hz", "250 Hz", "1.20 kHz", "12.0 kHz".
+/// "0.25 Hz", "31.5 Hz", "250 Hz", "1.20 kHz", "12.0 kHz".
 fn hertz(hz: f64) -> String {
-    if hz < 100.0 {
+    // An LFO's rate, say.
+    if hz < 9.995 {
+        format!("{hz:.2} Hz")
+    } else if hz < 100.0 {
         format!("{hz:.1} Hz")
     } else if hz < 999.5 {
         format!("{hz:.0} Hz")
@@ -519,7 +536,7 @@ fn parse_note(text: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
@@ -544,36 +561,41 @@ mod tests {
     #[test]
     fn tables_are_well_formed() {
         for kind in NativeKind::ALL {
-            let params = kind.params();
-            let keys: BTreeSet<_> = params.iter().map(|p| p.key).collect();
-            assert_eq!(keys.len(), params.len(), "{kind:?} has a key twice");
-            for p in params {
-                let at = format!("{kind:?} {}", p.key);
-                let lowercase = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
-                assert!(p.key.chars().all(lowercase), "{at}: key");
-                assert!(!p.name.is_empty(), "{at}: name");
-                assert!(p.min < p.max, "{at}: range");
-                assert!(p.is_valid(p.default), "{at}: default");
-                match p.scale {
-                    Scale::Linear => {}
-                    Scale::Log => assert!(p.min > 0.0, "{at}: log from 0"),
-                    Scale::Fader => assert_eq!(p.min, 0.0, "{at}: fader not from 0"),
+            assert_well_formed(&format!("{kind:?}"), kind.params());
+        }
+    }
+
+    /// Checks the rules of [`tables_are_well_formed`] for the table of
+    /// `what`.
+    pub(crate) fn assert_well_formed(what: &str, params: &[ParamInfo]) {
+        let keys: BTreeSet<_> = params.iter().map(|p| p.key).collect();
+        assert_eq!(keys.len(), params.len(), "{what} has a key twice");
+        for p in params {
+            let at = format!("{what} {}", p.key);
+            let lowercase = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+            assert!(p.key.chars().all(lowercase), "{at}: key");
+            assert!(!p.name.is_empty(), "{at}: name");
+            assert!(p.min < p.max, "{at}: range");
+            assert!(p.is_valid(p.default), "{at}: default");
+            match p.scale {
+                Scale::Linear => {}
+                Scale::Log => assert!(p.min > 0.0, "{at}: log from 0"),
+                Scale::Fader => assert_eq!(p.min, 0.0, "{at}: fader not from 0"),
+            }
+            if p.stepped {
+                assert_eq!(p.scale, Scale::Linear, "{at}: stepped scale");
+                assert!(!p.modulated, "{at}: modulated steps");
+                assert_eq!(p.min.fract() + p.max.fract(), 0.0, "{at}: steps");
+            }
+            match p.unit {
+                Unit::Switch => assert_eq!((p.min, p.max, p.stepped), (0.0, 1.0, true)),
+                Unit::Choice(choices) => {
+                    assert!(p.stepped, "{at}: choice");
+                    assert_eq!(p.max as usize + 1, choices.len(), "{at}: choices");
                 }
-                if p.stepped {
-                    assert_eq!(p.scale, Scale::Linear, "{at}: stepped scale");
-                    assert!(!p.modulated, "{at}: modulated steps");
-                    assert_eq!(p.min.fract() + p.max.fract(), 0.0, "{at}: steps");
-                }
-                match p.unit {
-                    Unit::Switch => assert_eq!((p.min, p.max, p.stepped), (0.0, 1.0, true)),
-                    Unit::Choice(choices) => {
-                        assert!(p.stepped, "{at}: choice");
-                        assert_eq!(p.max as usize + 1, choices.len(), "{at}: choices");
-                    }
-                    Unit::Note => assert!(p.stepped && p.min >= 0.0 && p.max <= 127.0),
-                    Unit::Gain => assert_eq!(p.scale, Scale::Fader, "{at}: gain"),
-                    _ => {}
-                }
+                Unit::Note => assert!(p.stepped && p.min >= 0.0 && p.max <= 127.0),
+                Unit::Gain => assert_eq!(p.scale, Scale::Fader, "{at}: gain"),
+                _ => {}
             }
         }
     }
@@ -666,6 +688,9 @@ mod tests {
         assert_eq!(eq("band1_freq").format(250.0), "250 Hz");
         assert_eq!(eq("band1_freq").format(1200.0), "1.20 kHz");
         assert_eq!(eq("band1_freq").format(12_000.0), "12.0 kHz");
+        let lfo = crate::modulation::ModulatorKind::Lfo.params();
+        assert_eq!(lfo[crate::modulation::lfo::RATE].format(0.25), "0.25 Hz");
+        assert_eq!(lfo[crate::modulation::lfo::RATE].format(12.5), "12.5 Hz");
         assert_eq!(eq("band1_gain").format(3.0), "+3.0 dB");
         assert_eq!(eq("band1_gain").format(-0.01), "0.0 dB");
         assert_eq!(eq("band1_gain").format(-6.0), "-6.0 dB");

@@ -23,7 +23,7 @@ use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
     AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NodeMaker, NoteEvent, NoteId,
-    ProcessContext,
+    ParamId, ProcessContext,
 };
 use musicable_model::clip::Dimension;
 
@@ -38,6 +38,11 @@ use crate::threads::{ACTIVE, AudioThread, FAILED, PROCESSING};
 /// How many events a plugin can get in one block, beyond which they're
 /// dropped and counted.
 pub(crate) const EVENT_CAPACITY: usize = 4096;
+
+/// How many parameters a node keeps track of being modulated, to end the
+/// modulation of those a new graph leaves unmodulated. A plugin's params
+/// beyond them keep the modulation they had last.
+const MODULATED_CAPACITY: usize = 256;
 
 /// Everything processing a plugin needs. Whoever holds the instance's
 /// `busy` flag has it: the node processing, or the main thread setting the
@@ -176,6 +181,8 @@ impl NodeSource {
             transport: transport(None),
             ended: Vec::with_capacity(VOICE_CAPACITY),
             resetting: false,
+            modulated: Vec::new(),
+            stale: Vec::with_capacity(MODULATED_CAPACITY),
         }
     }
 }
@@ -206,6 +213,10 @@ impl fmt::Debug for NodeSource {
 /// Stopping the node, as its device is bypassed, stops the plugin
 /// processing. Its parameter changes go to the plugin's `flush` meanwhile,
 /// and the plugin resets before it processes again.
+///
+/// Modulation goes to the plugin in its own units, as CLAP has it. Where a
+/// new graph no longer modulates a parameter that the node it replaces
+/// did, the node ends the parameter's modulation before anything else.
 pub struct ClapNode {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
@@ -216,6 +227,12 @@ pub struct ClapNode {
     ended: Vec<NoteId>,
     /// Whether the plugin resets before it next processes.
     resetting: bool,
+    /// The parameters something modulates in the node's graph
+    /// ([`Node::modulated`]), as many as [`MODULATED_CAPACITY`].
+    modulated: Vec<u32>,
+    /// The parameters the node it replaced had modulated, and this one
+    /// hasn't, whose modulation it ends before its first block.
+    stale: Vec<u32>,
 }
 
 impl fmt::Debug for ClapNode {
@@ -231,12 +248,30 @@ impl Node for ClapNode {
         self.shared.latency()
     }
 
-    /// Carries on with a reset due on the same plugin.
+    fn modulated(&mut self, param: ParamId) {
+        if let Ok(id) = u32::try_from(param.0)
+            && !self.modulated.contains(&id)
+            && self.modulated.len() < MODULATED_CAPACITY
+        {
+            self.modulated.push(id);
+        }
+    }
+
+    /// Carries on with a reset due on the same plugin, and ends the
+    /// modulation of the parameters this node leaves unmodulated.
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<ClapNode>()
             && Arc::ptr_eq(&previous.shared, &self.shared)
         {
             self.resetting = previous.resetting;
+            // Both hold as many as the capacity, so this doesn't allocate.
+            let stale = (previous.modulated.iter().chain(&previous.stale))
+                .filter(|id| !self.modulated.contains(id));
+            for &id in stale {
+                if !self.stale.contains(&id) && self.stale.len() < MODULATED_CAPACITY {
+                    self.stale.push(id);
+                }
+            }
         }
     }
 
@@ -246,6 +281,7 @@ impl Node for ClapNode {
             transport,
             ended,
             resetting,
+            stale,
             ..
         } = self;
         ended.clear();
@@ -256,7 +292,9 @@ impl Node for ClapNode {
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
-        if !run(shared, transport, resetting, ctx, inputs, output, audio) {
+        if !run(
+            shared, transport, resetting, stale, ctx, inputs, output, audio,
+        ) {
             output.clear();
         }
         // Both hold as many as there are voices, so this doesn't allocate.
@@ -306,16 +344,23 @@ impl Node for ClapNode {
             };
             audio.events.push(Event::param(0, change.id, change.value));
         }
+        end_stale(&mut self.stale, audio);
         for event in ctx.events {
             match event.kind {
                 NodeEventKind::Param { param, value } if param != Switch::BYPASS => {
-                    audio.events.push(Event::param(0, param.0, value));
+                    if let Ok(id) = u32::try_from(param.0) {
+                        audio.events.push(Event::param(0, id, value));
+                    }
                 }
                 NodeEventKind::Modulation {
                     param,
                     amount,
                     note: None,
-                } => audio.events.push(Event::modulation(0, param.0, amount)),
+                } => {
+                    if let Ok(id) = u32::try_from(param.0) {
+                        audio.events.push(Event::modulation(0, id, amount));
+                    }
+                }
                 _ => {}
             }
         }
@@ -356,12 +401,24 @@ fn stop_processing(shared: &Shared) {
     shared.set_lifecycle(ACTIVE);
 }
 
+/// Ends the modulation of the parameters in `stale`, which it empties, at
+/// the start of the plugin's next list of events.
+fn end_stale(stale: &mut Vec<u32>, audio: &mut Audio) {
+    for &id in stale.iter() {
+        audio.events.push(Event::modulation(0, id, 0.0));
+    }
+    stale.clear();
+}
+
 /// Processes the plugin for one block, holding `busy`: false if it can't.
-/// It resets first if `resetting`.
+/// It resets first if `resetting`, and ends the modulation of the
+/// parameters in `stale` first thing.
+#[allow(clippy::too_many_arguments)]
 fn run(
     shared: &Shared,
     transport_event: &mut clap_event_transport,
     resetting: &mut bool,
+    stale: &mut Vec<u32>,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
     output: &mut AudioMut<'_>,
@@ -411,7 +468,7 @@ fn run(
     if let Some(main) = audio.inputs.channels.main() {
         audio.inputs.channels.mix_into(main, inputs, frames);
     }
-    events_for_block(ctx, audio);
+    events_for_block(ctx, audio, stale);
     *transport_event = transport(Some(ctx));
 
     let in_events = audio.events.list();
@@ -450,8 +507,9 @@ fn run(
 }
 
 /// Puts the block's events in the plugin's list: parameter changes from the
-/// main thread first, then the node's own events, in order.
-fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
+/// main thread first, then the end of the modulation in `stale`, then the
+/// node's own events, in order.
+fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio, stale: &mut Vec<u32>) {
     audio.events.clear();
     while !audio.events.is_full() {
         let Ok(change) = audio.from_main.pop() else {
@@ -459,6 +517,7 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
         };
         audio.events.push(Event::param(0, change.id, change.value));
     }
+    end_stale(stale, audio);
     // A plugin that takes notes as MIDI hears how its channels are laid out
     // before anything else.
     if let Some(port) = audio
@@ -474,20 +533,27 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
             // The switch's bypass is its own.
             NodeEventKind::Param { param, .. } if param == Switch::BYPASS => {}
             NodeEventKind::Param { param, value } => {
-                audio.events.push(Event::param(time, param.0, value));
+                if let Ok(id) = u32::try_from(param.0) {
+                    audio.events.push(Event::param(time, id, value));
+                }
             }
             NodeEventKind::Modulation {
                 param,
                 amount,
                 note: None,
             } => {
-                audio.events.push(Event::modulation(time, param.0, amount));
+                if let Ok(id) = u32::try_from(param.0) {
+                    audio.events.push(Event::modulation(time, id, amount));
+                }
             }
             NodeEventKind::Modulation {
                 param,
                 amount,
                 note: Some(note),
             } => {
+                let Ok(param) = u32::try_from(param.0) else {
+                    continue;
+                };
                 // The voice the plugin plays the note with, while it sounds,
                 // by its note id, or by its channel and key for a plugin that
                 // takes MIDI.
@@ -501,7 +567,7 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
                 };
                 audio.events.push(Event::note_modulation(
                     time,
-                    param.0,
+                    param,
                     amount,
                     id,
                     port.index as i16,

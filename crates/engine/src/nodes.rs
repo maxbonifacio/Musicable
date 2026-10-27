@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::mixer::pan_gains;
-use musicable_model::param::ParamSpec;
+use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{ClipType, Monitor};
 
@@ -276,7 +276,13 @@ impl Smoothed {
     /// Sets how many frames a ramp takes at `sample_rate`. Call it from the
     /// node's [`Node::prepare`].
     pub fn prepare(&mut self, sample_rate: u32) {
-        self.frames = (Self::RAMP_SECONDS * f64::from(sample_rate)).round() as u32;
+        self.prepare_frames((Self::RAMP_SECONDS * f64::from(sample_rate)).round() as u32);
+    }
+
+    /// Has ramps take `frames` frames, whatever the sample rate: for what
+    /// moves in steps of engine time, as modulation does.
+    pub fn prepare_frames(&mut self, frames: u32) {
+        self.frames = frames;
         self.step = 1.0 / self.frames.max(1) as f32;
         self.settle();
     }
@@ -408,7 +414,7 @@ impl Gain {
     /// A stereo gain stage.
     pub fn new(gain: f32) -> Self {
         Self {
-            gain: Param::new(gain, 0.0, ParamSpec::VOLUME_MAX as f32),
+            gain: Param::new(gain, 0.0, ParamSpec::VOLUME_MAX as f32).with_scale(Scale::Fader),
             mute: Smoothed::new(1.0),
             pan: Param::new(0.0, -1.0, 1.0),
             channels: 2,
@@ -418,6 +424,13 @@ impl Gain {
 
     pub fn with_pan(mut self, pan: f32) -> Self {
         self.pan = Param::new(pan, -1.0, 1.0);
+        self
+    }
+
+    /// Keeps the gain from 0.0 to `max` under modulation, rather than to
+    /// +6 dB: a send's goes as far as unity.
+    pub fn with_max_gain(mut self, max: f32) -> Self {
+        self.gain = Param::new(self.gain.target(), 0.0, max).with_scale(Scale::Fader);
         self
     }
 
@@ -542,6 +555,14 @@ impl Node for Gain {
             _ => return Some(automation),
         }
         None
+    }
+
+    fn modulated(&mut self, param: ParamId) {
+        match param {
+            Self::GAIN => self.gain.set_modulated(),
+            Self::PAN => self.pan.set_modulated(),
+            _ => {}
+        }
     }
 
     fn adopt(&mut self, previous: &mut dyn Node) {

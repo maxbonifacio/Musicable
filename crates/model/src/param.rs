@@ -4,6 +4,7 @@
 //! and its [`Scale`].
 
 use crate::clip::{ClipContent, ClipId};
+use crate::modulation::ModulatorId;
 use crate::native::ParamInfo;
 use crate::warp::{
     GranularSettings, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
@@ -32,6 +33,10 @@ pub enum ParamAddress {
     /// the clip's own time, rather than in the project's lanes, so it
     /// moves, copies and splits with the clip.
     Clip(ClipId, ClipParam),
+    /// Parameter `n` of a modulator: the number of an LFO's or an
+    /// Envelope's parameter in its kind's table, or of a Macro's control
+    /// (see [`modulation`](crate::modulation)).
+    Modulator(ModulatorId, u32),
 }
 
 impl ParamAddress {
@@ -40,7 +45,19 @@ impl ParamAddress {
     pub fn device(self) -> Option<DeviceId> {
         match self {
             Self::Device(device, _) | Self::Bypass(device) => Some(device),
-            Self::Volume(_) | Self::Pan(_) | Self::Send(_) | Self::Clip(..) => None,
+            Self::Volume(_)
+            | Self::Pan(_)
+            | Self::Send(_)
+            | Self::Clip(..)
+            | Self::Modulator(..) => None,
+        }
+    }
+
+    /// The modulator whose parameter it is, if it's a modulator's.
+    pub fn modulator(self) -> Option<ModulatorId> {
+        match self {
+            Self::Modulator(modulator, _) => Some(modulator),
+            _ => None,
         }
     }
 
@@ -50,7 +67,11 @@ impl ParamAddress {
         match self {
             Self::Device(_, n) => Some(Self::Device(device, n)),
             Self::Bypass(_) => Some(Self::Bypass(device)),
-            Self::Volume(_) | Self::Pan(_) | Self::Send(_) | Self::Clip(..) => None,
+            Self::Volume(_)
+            | Self::Pan(_)
+            | Self::Send(_)
+            | Self::Clip(..)
+            | Self::Modulator(..) => None,
         }
     }
 }
@@ -379,9 +400,9 @@ impl ParamSpec {
 impl Project {
     /// What the parameter at `address` is, where the project knows: the
     /// mixer's parameters, the built-in devices' from their kind's table,
-    /// and the test devices'. A plugin's parameters are the plugin's to
-    /// say, so they have none here. `None` too where the project hasn't the
-    /// parameter's channel, send or device.
+    /// the modulators' and the test devices'. A plugin's parameters are the
+    /// plugin's to say, so they have none here. `None` too where the
+    /// project hasn't the parameter's channel, send, device or modulator.
     pub fn param_spec(&self, address: ParamAddress) -> Option<ParamSpec> {
         if !self.has_param(address) {
             return None;
@@ -400,6 +421,17 @@ impl Project {
             }
             ParamAddress::Clip(_, param) => Some(param.spec()),
             ParamAddress::Bypass(_) => Some(ParamSpec::bypass()),
+            ParamAddress::Modulator(modulator, n) => {
+                let (_, _, modulator) = self.find_modulator(modulator)?;
+                let info = modulator.param(n)?;
+                Some(ParamSpec {
+                    name: modulator.param_name(n)?,
+                    min: info.min,
+                    max: info.max,
+                    default: info.default,
+                    scale: info.scale,
+                })
+            }
             ParamAddress::Device(device, n) => {
                 if let Some(info) = self.native_param(address) {
                     return Some(ParamSpec {
@@ -439,17 +471,26 @@ impl Project {
         device.kind.native()?.params().get(n as usize)
     }
 
+    /// The row that says what the parameter at `address` is, for one of a
+    /// built-in device's parameters or a modulator's.
+    pub fn param_info(&self, address: ParamAddress) -> Option<&'static ParamInfo> {
+        match address {
+            ParamAddress::Modulator(modulator, n) => self.find_modulator(modulator)?.2.param(n),
+            _ => self.native_param(address),
+        }
+    }
+
     /// Whether the project has the parameter at `address`: the channel,
-    /// send or device it belongs to, and for a built-in device, a parameter
-    /// in its kind's table, and for a test device, parameter 0, its only
-    /// one. Which parameters a plugin has is the plugin's to say, so any of
-    /// a plugin's counts.
+    /// send, device or modulator it belongs to, and for a built-in device
+    /// or a modulator, a parameter it has, and for a test device, parameter
+    /// 0, its only one. Which parameters a plugin has is the plugin's to
+    /// say, so any of a plugin's counts.
     pub fn has_param(&self, address: ParamAddress) -> bool {
         self.param_chain(address).is_some()
     }
 
     /// The channel the parameter at `address` is on: the track or the
-    /// master whose fader, send or device it belongs to.
+    /// master whose fader, send, device or modulator it belongs to.
     pub fn param_chain(&self, address: ParamAddress) -> Option<Chain> {
         match address {
             ParamAddress::Volume(Chain::Master) | ParamAddress::Pan(Chain::Master) => {
@@ -468,6 +509,10 @@ impl Project {
                 matches!(clip.content, ClipContent::Audio(_)).then_some(Chain::Track(track.id))
             }
             ParamAddress::Bypass(device) => self.find_device(device).map(|(chain, ..)| chain),
+            ParamAddress::Modulator(modulator, n) => {
+                let (chain, _, modulator) = self.find_modulator(modulator)?;
+                modulator.param(n).map(|_| chain)
+            }
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
                 let known = match &device.kind {
@@ -482,8 +527,8 @@ impl Project {
 
     /// The parameter's own value, which applies where automation doesn't:
     /// a channel's gain or pan, a send's level, a built-in or test device's
-    /// setting, or a plugin parameter set since the plugin last saved its
-    /// state.
+    /// setting, a modulator's, or a plugin parameter set since the plugin
+    /// last saved its state.
     /// `None` for a plugin parameter that keeps the value its state gives
     /// it, and for parameters the project hasn't.
     pub fn param_value(&self, address: ParamAddress) -> Option<f64> {
@@ -511,6 +556,7 @@ impl Project {
                 let (_, _, device) = self.find_device(device)?;
                 Some(if device.bypassed { 1.0 } else { 0.0 })
             }
+            ParamAddress::Modulator(modulator, n) => self.find_modulator(modulator)?.2.value(n),
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {

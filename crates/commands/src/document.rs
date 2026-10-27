@@ -11,6 +11,9 @@ use musicable_model::clip::{
     Point, Timing, Warping,
 };
 use musicable_model::mixer::Bus;
+use musicable_model::modulation::{
+    Control, ControlKind, Modulator, ModulatorId, ModulatorKind, Output, Routing, RoutingId,
+};
 use musicable_model::native::NativeKind;
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::PluginSettings;
@@ -403,10 +406,11 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
-    /// The lanes that automate its parameters and its Bypass go first, each
-    /// as an edit of its own.
+    /// The routings to its parameters and the lanes that automate them and
+    /// its Bypass go first, each as an edit of its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
         self.project.find_device(device)?;
+        self.remove_routings(|_, _, routing| routing.to.device() == Some(device));
         self.remove_lanes(|param| param.device() == Some(device));
         let (chain, index, _) = self.project.find_device(device)?;
         let device = self.project.devices_mut(chain)?.remove(index);
@@ -602,8 +606,9 @@ impl Transaction<'_> {
 
     /// Removes the track with id `id` and returns it. What refers to it goes
     /// first, each as an edit of its own: tracks feeding it feed the master
-    /// instead, sends to it go, and so do the lanes that automate its
-    /// parameters, its sends' and its devices'.
+    /// instead, sends to it go, and so do the routings on other channels to
+    /// its parameters, and the lanes that automate its parameters, its
+    /// sends', its devices' and its modulators'.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
         self.project.track(id)?;
         let feeding: Vec<TrackId> = self
@@ -626,6 +631,10 @@ impl Transaction<'_> {
             self.remove_send(track, send);
         }
         let on_track = Some(Chain::Track(id));
+        // Its own routings go with it.
+        self.remove_routings(|project, chain, routing| {
+            Some(chain) != on_track && project.param_chain(routing.to) == on_track
+        });
         let project = &*self.project;
         let lanes: Vec<ParamAddress> = (project.automation.iter())
             .map(|l| l.param)
@@ -809,14 +818,16 @@ impl Transaction<'_> {
         self.edits.push(Edit::AddSend { track, index, send });
     }
 
-    /// Removes the track's send with id `send`. The lane that automates its
-    /// level goes first, as an edit of its own.
+    /// Removes the track's send with id `send`. The routings to its level
+    /// and the lane that automates it go first, each as an edit of its own.
     pub fn remove_send(&mut self, track: TrackId, send: SendId) {
         let has = |t: &Track| t.sends.iter().any(|s| s.id == send);
         if !self.project.track(track).is_some_and(has) {
             return;
         }
-        self.remove_lane(ParamAddress::Send(send));
+        let level = ParamAddress::Send(send);
+        self.remove_routings(|_, _, routing| routing.to == level);
+        self.remove_lane(level);
         let Some(t) = self.project.track_mut(track) else {
             return;
         };
@@ -1454,6 +1465,337 @@ impl Transaction<'_> {
         }
     }
 
+    /// A new modulator of `kind` called `name`, with the next modulator id,
+    /// for [`add_modulator`](Self::add_modulator): see
+    /// [`Project::new_modulator`]. As with tracks, taking an id isn't an
+    /// edit.
+    pub fn new_modulator(&mut self, kind: ModulatorKind, name: impl Into<String>) -> Modulator {
+        self.project.new_modulator(kind, name)
+    }
+
+    /// Puts `modulator` at `index` in the modulator strip of `chain`, or at
+    /// the end if `index` is past it. It's left out if the chain's track
+    /// isn't there, if the project has a modulator with its id, or if a
+    /// file couldn't hold it ([`Modulator::is_valid`]).
+    pub fn add_modulator(&mut self, chain: Chain, index: usize, modulator: Modulator) {
+        if !modulator.is_valid() || self.project.find_modulator(modulator.id).is_some() {
+            return;
+        }
+        let Some(modulation) = self.project.modulation_mut(chain) else {
+            return;
+        };
+        let index = index.min(modulation.modulators.len());
+        modulation.modulators.insert(index, modulator.clone());
+        self.edits.push(Edit::AddModulator {
+            chain,
+            index,
+            modulator,
+        });
+    }
+
+    /// Removes the modulator with id `id` from its strip, and returns it.
+    /// What refers to it goes first, each as an edit of its own: the
+    /// routings from its outputs and to its parameters, wherever they are,
+    /// and the lanes that automate its parameters. Routings it scales lose
+    /// their scale.
+    pub fn remove_modulator(&mut self, id: ModulatorId) -> Option<Modulator> {
+        self.project.find_modulator(id)?;
+        self.remove_routings(|_, _, routing| {
+            routing.from.modulator == id || routing.to.modulator() == Some(id)
+        });
+        self.unscale(|output| output.modulator == id);
+        self.remove_lanes(|param| param.modulator() == Some(id));
+        let (chain, index, _) = self.project.find_modulator(id)?;
+        let modulator = self.project.modulation_mut(chain)?.modulators.remove(index);
+        self.edits.push(Edit::RemoveModulator {
+            chain,
+            index,
+            modulator: modulator.clone(),
+        });
+        Some(modulator)
+    }
+
+    /// Moves the modulator with id `id` to `index` in its strip, counting
+    /// without it, or to the end if `index` is past it. A modulator the
+    /// project hasn't got is left alone.
+    pub fn move_modulator(&mut self, id: ModulatorId, index: usize) {
+        let Some((chain, from, _)) = self.project.find_modulator(id) else {
+            return;
+        };
+        let Some(modulation) = self.project.modulation_mut(chain) else {
+            return;
+        };
+        let modulator = modulation.modulators.remove(from);
+        let to = index.min(modulation.modulators.len());
+        modulation.modulators.insert(to, modulator);
+        if from != to {
+            self.edits.push(Edit::MoveModulator {
+                modulator: id,
+                from,
+                to,
+            });
+        }
+    }
+
+    /// Renames the modulator with id `id`. An empty name does nothing,
+    /// since a file can't hold it.
+    pub fn set_modulator_name(&mut self, id: ModulatorId, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(m) = self.project.modulator_mut(id)
+            && m.name != name
+        {
+            let from = std::mem::replace(&mut m.name, name.to_owned());
+            self.edits.push(Edit::ModulatorName {
+                modulator: id,
+                from,
+                to: name.to_owned(),
+            });
+        }
+    }
+
+    /// Sets parameter `n` of the modulator with id `id` to `value`, kept in
+    /// its range and to its steps ([`Modulator::set`]). Not a number does
+    /// nothing, and so do a modulator the project hasn't and a parameter
+    /// it hasn't got.
+    pub fn set_modulator_param(&mut self, id: ModulatorId, n: u32, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let Some(modulator) = self.project.modulator_mut(id) else {
+            return;
+        };
+        let Some(from) = modulator.set(n, value) else {
+            return;
+        };
+        let to = modulator
+            .value(n)
+            .expect("the modulator has the parameter it set");
+        if from != to {
+            self.edits.push(Edit::ModulatorParam {
+                modulator: id,
+                param: n,
+                from,
+                to,
+            });
+        }
+    }
+
+    /// A new control of `kind` for the Macro with id `modulator`, for
+    /// [`add_control`](Self::add_control), or `None` if the project hasn't
+    /// a Macro with that id: see [`Modulator::new_control`]. Taking an id
+    /// isn't an edit, as with notes.
+    pub fn new_control(&mut self, modulator: ModulatorId, kind: ControlKind) -> Option<Control> {
+        let modulator = self.macro_mut(modulator)?;
+        Some(modulator.new_control(kind))
+    }
+
+    /// Puts `control` at `index` in the controls of the Macro with id
+    /// `modulator`, or at the end if `index` is past them. It's left out if
+    /// there's no Macro with that id, if it has a control with the
+    /// control's id, or if a file couldn't hold the control: it needs a
+    /// name, and a value its kind takes.
+    ///
+    /// The control's id is one the Macro handed out (see
+    /// [`new_control`](Self::new_control)), or else the Macro takes it
+    /// then, as a clip takes a note's ([`add_note`](Self::add_note)).
+    pub fn add_control(&mut self, modulator: ModulatorId, index: usize, control: Control) {
+        if control.name.is_empty() || !control.kind.param().is_valid(control.value) {
+            return;
+        }
+        let Some(after) = control.id.checked_add(1) else {
+            return;
+        };
+        let Some(m) = self.macro_mut(modulator) else {
+            return;
+        };
+        if m.control(control.id).is_some() {
+            return;
+        }
+        m.next_control = m.next_control.max(after);
+        let index = index.min(m.controls.len());
+        m.controls.insert(index, control.clone());
+        self.edits.push(Edit::AddControl {
+            modulator,
+            index,
+            control,
+        });
+    }
+
+    /// Removes the control with id `control` from the Macro with id
+    /// `modulator`, and returns it. What refers to it goes first, each as
+    /// an edit of its own: the routings from its output and to its
+    /// parameter, and the lane that automates it. Routings it scales lose
+    /// their scale.
+    pub fn remove_control(&mut self, modulator: ModulatorId, control: u32) -> Option<Control> {
+        self.macro_mut(modulator)?.control(control)?;
+        let output = Output::new(modulator, control);
+        let param = ParamAddress::Modulator(modulator, control);
+        self.remove_routings(|_, _, routing| routing.from == output || routing.to == param);
+        self.unscale(|scale| scale == output);
+        self.remove_lane(param);
+        let m = self.macro_mut(modulator)?;
+        let index = m.control_index(control)?;
+        let control = m.controls.remove(index);
+        self.edits.push(Edit::RemoveControl {
+            modulator,
+            index,
+            control: control.clone(),
+        });
+        Some(control)
+    }
+
+    /// Renames the control with id `control` of the Macro with id
+    /// `modulator`. An empty name does nothing.
+    pub fn set_control_name(&mut self, modulator: ModulatorId, control: u32, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(c) = self
+            .macro_mut(modulator)
+            .and_then(|m| m.control_mut(control))
+            && c.name != name
+        {
+            let from = std::mem::replace(&mut c.name, name.to_owned());
+            self.edits.push(Edit::ControlName {
+                modulator,
+                control,
+                from,
+                to: name.to_owned(),
+            });
+        }
+    }
+
+    /// The Macro with id `id`, if the project has one.
+    fn macro_mut(&mut self, id: ModulatorId) -> Option<&mut Modulator> {
+        let modulator = self.project.modulator_mut(id)?;
+        (modulator.kind == ModulatorKind::Macro).then_some(modulator)
+    }
+
+    /// A new routing from `from` to `to` by `amount`, with the next routing
+    /// id, for [`add_routing`](Self::add_routing): see
+    /// [`Project::new_routing`].
+    pub fn new_routing(&mut self, from: Output, to: ParamAddress, amount: f64) -> Routing {
+        self.project.new_routing(from, to, amount)
+    }
+
+    /// Puts `routing` at `index` in the routings of `chain`, or at the end
+    /// if `index` is past them. It's left out if the chain's track isn't
+    /// there, if the project has a routing with its id, or if a file
+    /// couldn't hold it: it must go from an output of one of the chain's
+    /// modulators, scaled by another of theirs if by any, to a parameter
+    /// modulators can move, by an amount that suits it
+    /// ([`Project::amount_fits`]), with settings a file can hold
+    /// ([`Routing::is_valid`]), and be the chain's only routing from its
+    /// output to its parameter. Whether the parameter is in the chain's
+    /// reach is the caller's to say: one out of reach waits, unplayed.
+    pub fn add_routing(&mut self, chain: Chain, index: usize, routing: Routing) {
+        let project = &*self.project;
+        let Some(modulation) = project.modulation(chain) else {
+            return;
+        };
+        let fits = routing.is_valid()
+            && project.find_routing(routing.id).is_none()
+            && project.can_modulate(routing.to)
+            && project.amount_fits(routing.to, routing.amount)
+            && modulation.has_output(routing.from)
+            && routing
+                .scale
+                .is_none_or(|scale| modulation.has_output(scale))
+            && modulation
+                .routing_between(routing.from, routing.to)
+                .is_none();
+        if !fits {
+            return;
+        }
+        let Some(modulation) = self.project.modulation_mut(chain) else {
+            return;
+        };
+        let index = index.min(modulation.routings.len());
+        modulation.routings.insert(index, routing);
+        self.edits.push(Edit::AddRouting {
+            chain,
+            index,
+            routing,
+        });
+    }
+
+    /// Removes the routing with id `id` from its channel, and returns it.
+    pub fn remove_routing(&mut self, id: RoutingId) -> Option<Routing> {
+        let (chain, index, _) = self.project.find_routing(id)?;
+        let routing = self.project.modulation_mut(chain)?.routings.remove(index);
+        self.edits.push(Edit::RemoveRouting {
+            chain,
+            index,
+            routing,
+        });
+        Some(routing)
+    }
+
+    /// Gives the routing with `routing`'s id `routing`'s settings: its
+    /// amount, curve, scale, lag and bypass. Its output and its parameter
+    /// are what it is, so a routing that differs in them does nothing, and
+    /// so do settings a file couldn't hold, as with
+    /// [`add_routing`](Self::add_routing).
+    pub fn set_routing(&mut self, routing: Routing) {
+        let project = &*self.project;
+        let Some((chain, _, old)) = project.find_routing(routing.id) else {
+            return;
+        };
+        let on_chain = |scale| {
+            project
+                .modulation(chain)
+                .is_some_and(|m| m.has_output(scale))
+        };
+        let fits = (old.from, old.to) == (routing.from, routing.to)
+            && routing.is_valid()
+            && project.amount_fits(routing.to, routing.amount)
+            && routing.scale.is_none_or(on_chain);
+        if !fits || *old == routing {
+            return;
+        }
+        let Some(settings) = self.project.routing_mut(routing.id) else {
+            return;
+        };
+        let from = std::mem::replace(settings, routing);
+        self.edits.push(Edit::RoutingSettings {
+            routing: routing.id,
+            from,
+            to: routing,
+        });
+    }
+
+    /// Removes the routings `which` picks, given the project and each
+    /// routing's channel, each as an edit of its own.
+    fn remove_routings(&mut self, which: impl Fn(&Project, Chain, &Routing) -> bool) {
+        let project = &*self.project;
+        let routings: Vec<RoutingId> = (project.modulations())
+            .flat_map(|(chain, m)| m.routings.iter().map(move |r| (chain, r)))
+            .filter(|&(chain, routing)| which(project, chain, routing))
+            .map(|(_, routing)| routing.id)
+            .collect();
+        for routing in routings {
+            self.remove_routing(routing);
+        }
+    }
+
+    /// Takes the outputs `which` picks away from the routings they scale,
+    /// each as an edit of its own.
+    fn unscale(&mut self, which: impl Fn(Output) -> bool) {
+        let unscaled: Vec<Routing> = (self.project.modulations())
+            .flat_map(|(_, m)| &m.routings)
+            .filter(|routing| routing.scale.is_some_and(&which))
+            .map(|&routing| Routing {
+                scale: None,
+                ..routing
+            })
+            .collect();
+        for routing in unscaled {
+            self.set_routing(routing);
+        }
+    }
+
     /// Sets the own value of the parameter at `param`: the value it has
     /// where automation doesn't move it. Values that aren't finite do
     /// nothing, and so do parameters the project hasn't and the test
@@ -1485,6 +1827,7 @@ impl Transaction<'_> {
             ParamAddress::Bypass(device) => self.set_device_bypass(device, value >= 0.5),
             ParamAddress::Clip(clip, ClipParam::Gain) => self.set_clip_gain(clip, narrow),
             ParamAddress::Clip(clip, param) => self.set_warp_param(clip, param, value),
+            ParamAddress::Modulator(modulator, n) => self.set_modulator_param(modulator, n, value),
         }
     }
 
@@ -1672,6 +2015,49 @@ impl Transaction<'_> {
             }
             Edit::LanePoints { param, to, .. } => self.set_lane_points(*param, to.clone()),
             Edit::LaneOverridden { param, to, .. } => self.set_lane_overridden(*param, *to),
+            Edit::AddModulator {
+                chain,
+                index,
+                modulator,
+            } => self.add_modulator(*chain, *index, modulator.clone()),
+            // As with tracks, what referred to it is taken back or made
+            // again as edits of its own.
+            Edit::RemoveModulator { modulator, .. } => {
+                self.remove_modulator(modulator.id);
+            }
+            Edit::MoveModulator { modulator, to, .. } => self.move_modulator(*modulator, *to),
+            Edit::ModulatorName { modulator, to, .. } => self.set_modulator_name(*modulator, to),
+            Edit::ModulatorParam {
+                modulator,
+                param,
+                to,
+                ..
+            } => self.set_modulator_param(*modulator, *param, *to),
+            Edit::AddControl {
+                modulator,
+                index,
+                control,
+            } => self.add_control(*modulator, *index, control.clone()),
+            Edit::RemoveControl {
+                modulator, control, ..
+            } => {
+                self.remove_control(*modulator, control.id);
+            }
+            Edit::ControlName {
+                modulator,
+                control,
+                to,
+                ..
+            } => self.set_control_name(*modulator, *control, to),
+            Edit::AddRouting {
+                chain,
+                index,
+                routing,
+            } => self.add_routing(*chain, *index, *routing),
+            Edit::RemoveRouting { routing, .. } => {
+                self.remove_routing(routing.id);
+            }
+            Edit::RoutingSettings { to, .. } => self.set_routing(*to),
         }
     }
 }
@@ -2085,6 +2471,77 @@ pub enum Edit {
         from: bool,
         to: bool,
     },
+    /// `modulator` went in at `index` in the modulator strip of `chain`.
+    AddModulator {
+        chain: Chain,
+        index: usize,
+        modulator: Modulator,
+    },
+    /// `modulator`, which was at `index` in the strip of `chain`, went.
+    RemoveModulator {
+        chain: Chain,
+        index: usize,
+        modulator: Modulator,
+    },
+    /// The modulator with id `modulator` moved from one place in its strip
+    /// to another. Its place in `to` counts the strip without it.
+    MoveModulator {
+        modulator: ModulatorId,
+        from: usize,
+        to: usize,
+    },
+    ModulatorName {
+        modulator: ModulatorId,
+        from: String,
+        to: String,
+    },
+    /// Parameter `param` of the modulator with id `modulator` changed.
+    ModulatorParam {
+        modulator: ModulatorId,
+        param: u32,
+        from: f64,
+        to: f64,
+    },
+    /// `control` went in at `index` in the controls of the Macro with id
+    /// `modulator`.
+    AddControl {
+        modulator: ModulatorId,
+        index: usize,
+        control: Control,
+    },
+    /// `control`, which was at `index` in the Macro's controls, went.
+    RemoveControl {
+        modulator: ModulatorId,
+        index: usize,
+        control: Control,
+    },
+    /// The control with id `control` of the Macro with id `modulator` was
+    /// renamed.
+    ControlName {
+        modulator: ModulatorId,
+        control: u32,
+        from: String,
+        to: String,
+    },
+    /// `routing` went in at `index` in the routings of `chain`.
+    AddRouting {
+        chain: Chain,
+        index: usize,
+        routing: Routing,
+    },
+    /// `routing`, which was at `index` in the routings of `chain`, went.
+    RemoveRouting {
+        chain: Chain,
+        index: usize,
+        routing: Routing,
+    },
+    /// The settings of the routing with id `routing` changed: its amount,
+    /// curve, scale, lag or bypass.
+    RoutingSettings {
+        routing: RoutingId,
+        from: Routing,
+        to: Routing,
+    },
 }
 
 impl Edit {
@@ -2414,6 +2871,105 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::AddModulator {
+                chain,
+                index,
+                modulator,
+            } => Edit::RemoveModulator {
+                chain,
+                index,
+                modulator,
+            },
+            Edit::RemoveModulator {
+                chain,
+                index,
+                modulator,
+            } => Edit::AddModulator {
+                chain,
+                index,
+                modulator,
+            },
+            Edit::MoveModulator {
+                modulator,
+                from,
+                to,
+            } => Edit::MoveModulator {
+                modulator,
+                from: to,
+                to: from,
+            },
+            Edit::ModulatorName {
+                modulator,
+                from,
+                to,
+            } => Edit::ModulatorName {
+                modulator,
+                from: to,
+                to: from,
+            },
+            Edit::ModulatorParam {
+                modulator,
+                param,
+                from,
+                to,
+            } => Edit::ModulatorParam {
+                modulator,
+                param,
+                from: to,
+                to: from,
+            },
+            Edit::AddControl {
+                modulator,
+                index,
+                control,
+            } => Edit::RemoveControl {
+                modulator,
+                index,
+                control,
+            },
+            Edit::RemoveControl {
+                modulator,
+                index,
+                control,
+            } => Edit::AddControl {
+                modulator,
+                index,
+                control,
+            },
+            Edit::ControlName {
+                modulator,
+                control,
+                from,
+                to,
+            } => Edit::ControlName {
+                modulator,
+                control,
+                from: to,
+                to: from,
+            },
+            Edit::AddRouting {
+                chain,
+                index,
+                routing,
+            } => Edit::RemoveRouting {
+                chain,
+                index,
+                routing,
+            },
+            Edit::RemoveRouting {
+                chain,
+                index,
+                routing,
+            } => Edit::AddRouting {
+                chain,
+                index,
+                routing,
+            },
+            Edit::RoutingSettings { routing, from, to } => Edit::RoutingSettings {
+                routing,
+                from: to,
+                to: from,
+            },
         }
     }
 
@@ -2717,6 +3273,50 @@ impl Edit {
                     ..
                 },
             ) if param == other => *to = *next,
+            (
+                Edit::ModulatorName { modulator, to, .. },
+                Edit::ModulatorName {
+                    modulator: other,
+                    to: next,
+                    ..
+                },
+            ) if modulator == other => to.clone_from(next),
+            (
+                Edit::ModulatorParam {
+                    modulator,
+                    param,
+                    to,
+                    ..
+                },
+                Edit::ModulatorParam {
+                    modulator: other,
+                    param: other_param,
+                    to: next,
+                    ..
+                },
+            ) if modulator == other && param == other_param => *to = *next,
+            (
+                Edit::ControlName {
+                    modulator,
+                    control,
+                    to,
+                    ..
+                },
+                Edit::ControlName {
+                    modulator: other,
+                    control: other_control,
+                    to: next,
+                    ..
+                },
+            ) if modulator == other && control == other_control => to.clone_from(next),
+            (
+                Edit::RoutingSettings { routing, to, .. },
+                Edit::RoutingSettings {
+                    routing: other,
+                    to: next,
+                    ..
+                },
+            ) if routing == other => *to = *next,
             // Adding, removing and moving never merge: each is a step of its own.
             (
                 Edit::Tempo { .. }
@@ -2777,7 +3377,18 @@ impl Edit {
                 | Edit::AddLane { .. }
                 | Edit::RemoveLane { .. }
                 | Edit::LanePoints { .. }
-                | Edit::LaneOverridden { .. },
+                | Edit::LaneOverridden { .. }
+                | Edit::AddModulator { .. }
+                | Edit::RemoveModulator { .. }
+                | Edit::MoveModulator { .. }
+                | Edit::ModulatorName { .. }
+                | Edit::ModulatorParam { .. }
+                | Edit::AddControl { .. }
+                | Edit::RemoveControl { .. }
+                | Edit::ControlName { .. }
+                | Edit::AddRouting { .. }
+                | Edit::RemoveRouting { .. }
+                | Edit::RoutingSettings { .. },
                 _,
             ) => return false,
         }
@@ -2808,7 +3419,13 @@ impl Edit {
             | Edit::AddDevice { .. }
             | Edit::RemoveDevice { .. }
             | Edit::AddLane { .. }
-            | Edit::RemoveLane { .. } => false,
+            | Edit::RemoveLane { .. }
+            | Edit::AddModulator { .. }
+            | Edit::RemoveModulator { .. }
+            | Edit::AddControl { .. }
+            | Edit::RemoveControl { .. }
+            | Edit::AddRouting { .. }
+            | Edit::RemoveRouting { .. } => false,
             Edit::TrackName { from, to, .. } => from == to,
             Edit::TrackGain { from, to, .. }
             | Edit::TrackPan { from, to, .. }
@@ -2845,6 +3462,10 @@ impl Edit {
             Edit::NativeSample { from, to, .. } => from == to,
             Edit::LanePoints { from, to, .. } => from == to,
             Edit::LaneOverridden { from, to, .. } => from == to,
+            Edit::MoveModulator { from, to, .. } => from == to,
+            Edit::ModulatorName { from, to, .. } | Edit::ControlName { from, to, .. } => from == to,
+            Edit::ModulatorParam { from, to, .. } => from == to,
+            Edit::RoutingSettings { from, to, .. } => from == to,
         }
     }
 }

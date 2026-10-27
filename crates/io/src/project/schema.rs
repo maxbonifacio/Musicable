@@ -16,6 +16,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use musicable_model::automation;
 use musicable_model::clip::{self, ClipId, Dimension, NoteId};
 use musicable_model::mixer::Bus;
+use musicable_model::modulation::{self, ModulatorId, RoutingId};
 use musicable_model::param::{self as param, ParamAddress};
 use musicable_model::time::{self, Beats};
 use musicable_model::warp;
@@ -45,6 +46,8 @@ pub(super) struct File {
     next_clip_id: u32,
     next_locator_id: u32,
     next_take_id: u32,
+    next_modulator_id: u32,
+    next_routing_id: u32,
     tracks: Vec<Track>,
     master: Master,
     locators: Vec<Locator>,
@@ -123,6 +126,7 @@ struct Track {
     clips: Vec<Clip>,
     takes: Vec<Take>,
     devices: Vec<Device>,
+    modulation: Modulation,
     clip_type: ClipType,
     console: ConsoleSettings,
 }
@@ -525,6 +529,11 @@ enum Param {
     },
     /// A device's Bypass, by the device's id.
     Bypass(u32),
+    /// A modulator's id, and the modulator's number for the parameter.
+    Modulator {
+        id: u32,
+        param: u32,
+    },
 }
 
 /// A track by id, `{"track": 3}`, or `"master"`.
@@ -541,8 +550,95 @@ struct Master {
     gain: f32,
     pan: f32,
     devices: Vec<Device>,
+    modulation: Modulation,
     clip_type: ClipType,
     console: ConsoleSettings,
+}
+
+/// A channel's modulators and their routings.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Modulation {
+    modulators: Vec<Modulator>,
+    routings: Vec<Routing>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Modulator {
+    id: u32,
+    name: String,
+    kind: ModulatorKind,
+    /// An LFO's or an Envelope's parameter values, by key, as a native
+    /// device's are: empty for a Macro.
+    params: NativeParams,
+    /// A Macro's controls: none for the other kinds.
+    controls: Vec<Control>,
+    next_control: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ModulatorKind {
+    Macro,
+    Lfo,
+    Envelope,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Control {
+    id: u32,
+    name: String,
+    kind: ControlKind,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ControlKind {
+    Knob,
+    Toggle,
+    Momentary,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Routing {
+    id: u32,
+    from: Output,
+    to: Param,
+    amount: f64,
+    curve: Curve,
+    #[serde(deserialize_with = "Option::deserialize")]
+    scale: Option<Output>,
+    lag: f64,
+    bypassed: bool,
+}
+
+/// One of a modulator's outputs, by the modulator's id and the output's
+/// number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Output {
+    modulator: u32,
+    output: u32,
+}
+
+/// `"linear"`, or `{"stepped": 4}` with a stepped curve's steps.
+// An S-curve is `"s_curve"`, as the model has it.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Curve {
+    Linear,
+    Exponential,
+    Logarithmic,
+    SCurve,
+    Stepped(u32),
+    Absolute,
+    Positive,
+    Negative,
 }
 
 impl From<&model::Project> for File {
@@ -564,6 +660,8 @@ impl From<&model::Project> for File {
             next_clip_id,
             next_locator_id,
             next_take_id,
+            next_modulator_id,
+            next_routing_id,
             workspace,
         } = project;
         Self {
@@ -582,6 +680,8 @@ impl From<&model::Project> for File {
             next_clip_id: *next_clip_id,
             next_locator_id: *next_locator_id,
             next_take_id: *next_take_id,
+            next_modulator_id: *next_modulator_id,
+            next_routing_id: *next_routing_id,
             tracks: tracks.iter().map(Track::from).collect(),
             master: Master::from(master),
             locators: locators.iter().map(Locator::from).collect(),
@@ -615,6 +715,8 @@ impl File {
             next_clip_id,
             next_locator_id,
             next_take_id,
+            next_modulator_id,
+            next_routing_id,
             tracks,
             master,
             locators,
@@ -632,6 +734,8 @@ impl File {
         let mut device_ids = Ids::new("device", "next_device_id", *next_device_id);
         let mut clip_ids = Ids::new("clip", "next_clip_id", *next_clip_id);
         let mut take_ids = Ids::new("take", "next_take_id", *next_take_id);
+        let mut modulator_ids = Ids::new("modulator", "next_modulator_id", *next_modulator_id);
+        let mut routing_ids = Ids::new("routing", "next_routing_id", *next_routing_id);
         let mut model_tracks = Vec::with_capacity(tracks.len());
         for (i, track) in tracks.iter().enumerate() {
             let path = format!("tracks[{i}]");
@@ -652,6 +756,10 @@ impl File {
             for (j, device) in track.devices.iter().enumerate() {
                 device_ids.add(device.id, &format!("{path}.devices[{j}]"))?;
             }
+            let modulation = format!("{path}.modulation");
+            track
+                .modulation
+                .add_ids(&modulation, &mut modulator_ids, &mut routing_ids)?;
             model_tracks.push(track.to_model(&path)?);
         }
         ids.check_next()?;
@@ -666,6 +774,9 @@ impl File {
             device_ids.add(device.id, &format!("master.devices[{j}]"))?;
         }
         device_ids.check_next()?;
+        (master.modulation).add_ids("master.modulation", &mut modulator_ids, &mut routing_ids)?;
+        modulator_ids.check_next()?;
+        routing_ids.check_next()?;
         let mut locator_ids = Ids::new("locator", "next_locator_id", *next_locator_id);
         let mut model_locators = Vec::with_capacity(locators.len());
         for (i, locator) in locators.iter().enumerate() {
@@ -678,6 +789,7 @@ impl File {
             tracks: &kinds,
             sends: &send_ids,
             devices: &device_ids,
+            modulators: &modulator_ids,
         };
         let mut automated: HashMap<Param, usize> = HashMap::new();
         let mut model_lanes = Vec::with_capacity(automation.len());
@@ -689,6 +801,16 @@ impl File {
             }
             model_lanes.push(lane.to_model(&path, &params)?);
         }
+        let mut master = master.to_model()?;
+        // Routings name parameters anywhere in the project, so they're read
+        // once every channel is.
+        for (i, track) in tracks.iter().enumerate() {
+            let path = format!("tracks[{i}].modulation");
+            model_tracks[i].modulation.routings =
+                track.modulation.routings_to_model(&path, &params)?;
+        }
+        master.modulation.routings =
+            (self.master.modulation).routings_to_model("master.modulation", &params)?;
         let project = model::Project {
             tempo,
             loop_region,
@@ -696,7 +818,7 @@ impl File {
             metronome: *metronome,
             punch_in: *punch_in,
             punch_out: *punch_out,
-            master: master.to_model()?,
+            master,
             tracks: model_tracks,
             locators: model_locators,
             automation: model_lanes,
@@ -706,12 +828,24 @@ impl File {
             next_clip_id: *next_clip_id,
             next_locator_id: *next_locator_id,
             next_take_id: *next_take_id,
+            next_modulator_id: *next_modulator_id,
+            next_routing_id: *next_routing_id,
             workspace: workspace.clone(),
         };
         check_loops(&project)?;
+        check_routings(&project)?;
         // Which parameters a device has depends on its kind, and a built-in
         // device's take the values its own do.
         for (i, lane) in project.automation.iter().enumerate() {
+            if let ParamAddress::Modulator(modulator, n) = lane.param
+                && !project.has_param(lane.param)
+            {
+                let message = format!(
+                    "names parameter {n} of modulator {}, which hasn't it",
+                    modulator.0
+                );
+                return Err(Invalid::new(format!("automation[{i}].param"), message));
+            }
             if let ParamAddress::Device(device, n) = lane.param
                 && !project.has_param(lane.param)
             {
@@ -726,7 +860,7 @@ impl File {
                 );
                 return Err(Invalid::new(format!("automation[{i}].param"), message));
             }
-            let Some(info) = project.native_param(lane.param) else {
+            let Some(info) = project.param_info(lane.param) else {
                 continue;
             };
             for (j, point) in lane.points.iter().enumerate() {
@@ -957,6 +1091,7 @@ impl From<&model::Track> for Track {
             clips,
             takes,
             devices,
+            modulation,
             clip_type,
             console,
         } = track;
@@ -991,6 +1126,7 @@ impl From<&model::Track> for Track {
             clips: clips.iter().map(Clip::from).collect(),
             takes: takes.iter().map(Take::from).collect(),
             devices: devices.iter().map(Device::from).collect(),
+            modulation: Modulation::from(modulation),
             clip_type: ClipType::from(*clip_type),
             console: ConsoleSettings {},
         }
@@ -1017,6 +1153,7 @@ impl Track {
             clips,
             takes,
             devices,
+            modulation,
             clip_type,
             console,
         } = self;
@@ -1090,6 +1227,7 @@ impl Track {
             clips,
             takes,
             devices: devices_to_model(devices, &format!("{path}.devices"))?,
+            modulation: modulation.to_model(&format!("{path}.modulation"))?,
             clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
         })
@@ -2224,6 +2362,7 @@ impl From<&model::Master> for Master {
             gain,
             pan,
             devices,
+            modulation,
             clip_type,
             console,
         } = master;
@@ -2232,6 +2371,7 @@ impl From<&model::Master> for Master {
             gain: *gain,
             pan: *pan,
             devices: devices.iter().map(Device::from).collect(),
+            modulation: Modulation::from(modulation),
             clip_type: ClipType::from(*clip_type),
             console: ConsoleSettings {},
         }
@@ -2244,6 +2384,7 @@ impl Master {
             gain,
             pan,
             devices,
+            modulation,
             clip_type,
             console,
         } = self;
@@ -2252,10 +2393,365 @@ impl Master {
             gain: finite(*gain, || "master.gain".to_owned())?,
             pan: balance(*pan, || "master.pan".to_owned())?,
             devices: devices_to_model(devices, "master.devices")?,
+            modulation: modulation.to_model("master.modulation")?,
             clip_type: model::ClipType::from(*clip_type),
             console: model::ConsoleSettings {},
         })
     }
+}
+
+impl From<&modulation::Modulation> for Modulation {
+    fn from(modulation: &modulation::Modulation) -> Self {
+        let modulation::Modulation {
+            modulators,
+            routings,
+        } = modulation;
+        Self {
+            modulators: modulators.iter().map(Modulator::from).collect(),
+            routings: routings.iter().map(Routing::from).collect(),
+        }
+    }
+}
+
+impl Modulation {
+    /// Adds the ids of its modulators and its routings to those seen so
+    /// far, `path` being where it is.
+    fn add_ids(&self, path: &str, modulators: &mut Ids, routings: &mut Ids) -> Result<(), Invalid> {
+        for (j, modulator) in self.modulators.iter().enumerate() {
+            modulators.add(modulator.id, &format!("{path}.modulators[{j}]"))?;
+        }
+        for (j, routing) in self.routings.iter().enumerate() {
+            routings.add(routing.id, &format!("{path}.routings[{j}]"))?;
+        }
+        Ok(())
+    }
+
+    /// The modulators, with no routings yet: their parameters can be
+    /// anywhere in the project, so [`routings_to_model`](Self::routings_to_model)
+    /// reads them once every channel's ids are known.
+    fn to_model(&self, path: &str) -> Result<modulation::Modulation, Invalid> {
+        let modulators = (self.modulators.iter().enumerate())
+            .map(|(j, modulator)| modulator.to_model(&format!("{path}.modulators[{j}]")))
+            .collect::<Result<_, _>>()?;
+        Ok(modulation::Modulation {
+            modulators,
+            routings: Vec::new(),
+        })
+    }
+
+    /// The routings, `path` being where the modulation is: each from an
+    /// output of one of its modulators, scaled by another if it has a
+    /// scale, to a parameter the file has, and no two from the same output
+    /// to the same parameter.
+    fn routings_to_model(
+        &self,
+        path: &str,
+        params: &Params<'_>,
+    ) -> Result<Vec<modulation::Routing>, Invalid> {
+        let output = |output: Output, path: String| {
+            let Some(modulator) = self.modulators.iter().find(|m| m.id == output.modulator) else {
+                let message = format!(
+                    "names modulator {}, which isn't on this channel",
+                    output.modulator
+                );
+                return Err(Invalid::new(format!("{path}.modulator"), message));
+            };
+            let has = match modulator.kind {
+                ModulatorKind::Macro => modulator.controls.iter().any(|c| c.id == output.output),
+                ModulatorKind::Lfo | ModulatorKind::Envelope => output.output == 0,
+            };
+            if !has {
+                let message = format!(
+                    "modulator {} has no output {}",
+                    output.modulator, output.output
+                );
+                return Err(Invalid::new(format!("{path}.output"), message));
+            }
+            Ok(modulation::Output::new(
+                ModulatorId(output.modulator),
+                output.output,
+            ))
+        };
+        let mut routings: Vec<modulation::Routing> = Vec::with_capacity(self.routings.len());
+        for (j, routing) in self.routings.iter().enumerate() {
+            let Routing {
+                id,
+                from,
+                to,
+                amount,
+                curve,
+                scale,
+                lag,
+                bypassed,
+            } = routing;
+            let path = format!("{path}.routings[{j}]");
+            let from = output(*from, format!("{path}.from"))?;
+            let to = to.to_model(&format!("{path}.to"), params)?;
+            if let Some(first) = routings.iter().position(|r| r.from == from && r.to == to) {
+                let message = format!("routings[{first}] goes from the same output to it too");
+                return Err(Invalid::new(format!("{path}.to"), message));
+            }
+            let curve = match *curve {
+                Curve::Linear => modulation::Curve::Linear,
+                Curve::Exponential => modulation::Curve::Exponential,
+                Curve::Logarithmic => modulation::Curve::Logarithmic,
+                Curve::SCurve => modulation::Curve::SCurve,
+                Curve::Stepped(steps) => modulation::Curve::Stepped(steps),
+                Curve::Absolute => modulation::Curve::Absolute,
+                Curve::Positive => modulation::Curve::Positive,
+                Curve::Negative => modulation::Curve::Negative,
+            };
+            if !curve.is_valid() {
+                let message = format!("must have from 2 to {} steps", modulation::Curve::STEPS_MAX);
+                return Err(Invalid::new(format!("{path}.curve.stepped"), message));
+            }
+            let scale = match scale {
+                Some(scale) => Some(output(*scale, format!("{path}.scale"))?),
+                None => None,
+            };
+            if !(0.0..=modulation::Routing::LAG_MAX).contains(lag) {
+                let message = format!("must be from 0 to {}", modulation::Routing::LAG_MAX);
+                return Err(Invalid::new(format!("{path}.lag"), message));
+            }
+            routings.push(modulation::Routing {
+                id: RoutingId(*id),
+                from,
+                to,
+                amount: finite(*amount, || format!("{path}.amount"))?,
+                curve,
+                scale,
+                lag: *lag,
+                bypassed: *bypassed,
+            });
+        }
+        Ok(routings)
+    }
+}
+
+impl From<&modulation::Modulator> for Modulator {
+    fn from(modulator: &modulation::Modulator) -> Self {
+        let modulation::Modulator {
+            id,
+            kind,
+            name,
+            values,
+            controls,
+            next_control,
+        } = modulator;
+        let params = kind.params().iter().zip(values);
+        Self {
+            id: id.0,
+            name: name.clone(),
+            kind: match kind {
+                modulation::ModulatorKind::Macro => ModulatorKind::Macro,
+                modulation::ModulatorKind::Lfo => ModulatorKind::Lfo,
+                modulation::ModulatorKind::Envelope => ModulatorKind::Envelope,
+            },
+            params: NativeParams(params.map(|(p, &v)| (p.key.to_owned(), v)).collect()),
+            controls: controls.iter().map(Control::from).collect(),
+            next_control: *next_control,
+        }
+    }
+}
+
+impl Modulator {
+    /// Parameters missing from the file take their defaults, as a native
+    /// device's do.
+    fn to_model(&self, path: &str) -> Result<modulation::Modulator, Invalid> {
+        let Self {
+            id,
+            name,
+            kind,
+            params,
+            controls,
+            next_control,
+        } = self;
+        let kind = match kind {
+            ModulatorKind::Macro => modulation::ModulatorKind::Macro,
+            ModulatorKind::Lfo => modulation::ModulatorKind::Lfo,
+            ModulatorKind::Envelope => modulation::ModulatorKind::Envelope,
+        };
+        if name.is_empty() {
+            return Err(Invalid::new(format!("{path}.name"), "can't be empty"));
+        }
+        let mut modulator = modulation::Modulator::new(ModulatorId(*id), kind, name.clone());
+        modulator.controls.clear();
+        modulator.next_control = *next_control;
+        let table = kind.params();
+        let mut given = vec![false; table.len()];
+        for (key, value) in &params.0 {
+            let path = format!("{path}.params.{key}");
+            let Some(i) = table.iter().position(|p| p.key == key) else {
+                let message = match kind {
+                    modulation::ModulatorKind::Macro => {
+                        "isn't a parameter: a Macro's controls are its parameters".to_owned()
+                    }
+                    _ => format!("isn't one of the {}'s parameters", kind.name()),
+                };
+                return Err(Invalid::new(path, message));
+            };
+            if std::mem::replace(&mut given[i], true) {
+                return Err(Invalid::new(path, "is given twice"));
+            }
+            let p = &table[i];
+            if !p.is_valid(*value) {
+                let number = if p.stepped {
+                    "a whole number"
+                } else {
+                    "a number"
+                };
+                let message = format!("must be {number} from {} to {}", p.min, p.max);
+                return Err(Invalid::new(path, message));
+            }
+            modulator.values[i] = *value;
+        }
+        if kind != modulation::ModulatorKind::Macro && !controls.is_empty() {
+            let message = "must be empty: only Macros have controls";
+            return Err(Invalid::new(format!("{path}.controls"), message));
+        }
+        for (k, control) in controls.iter().enumerate() {
+            let path = format!("{path}.controls[{k}]");
+            let control = control.to_model(&path)?;
+            if let Some(first) = modulator.control_index(control.id) {
+                let message = format!("controls[{first}] has id {} too", control.id);
+                return Err(Invalid::new(format!("{path}.id"), message));
+            }
+            if control.id >= *next_control {
+                let message = format!(
+                    "must be above every control's id, and controls[{k}] has id {}",
+                    control.id
+                );
+                let path = path.rsplit_once(".controls").map_or(path.as_str(), |p| p.0);
+                return Err(Invalid::new(format!("{path}.next_control"), message));
+            }
+            modulator.controls.push(control);
+        }
+        Ok(modulator)
+    }
+}
+
+impl From<&modulation::Control> for Control {
+    fn from(control: &modulation::Control) -> Self {
+        let modulation::Control {
+            id,
+            name,
+            kind,
+            value,
+        } = control;
+        Self {
+            id: *id,
+            name: name.clone(),
+            kind: match kind {
+                modulation::ControlKind::Knob => ControlKind::Knob,
+                modulation::ControlKind::Toggle => ControlKind::Toggle,
+                modulation::ControlKind::Momentary => ControlKind::Momentary,
+            },
+            value: *value,
+        }
+    }
+}
+
+impl Control {
+    fn to_model(&self, path: &str) -> Result<modulation::Control, Invalid> {
+        let Self {
+            id,
+            name,
+            kind,
+            value,
+        } = self;
+        let kind = match kind {
+            ControlKind::Knob => modulation::ControlKind::Knob,
+            ControlKind::Toggle => modulation::ControlKind::Toggle,
+            ControlKind::Momentary => modulation::ControlKind::Momentary,
+        };
+        if name.is_empty() {
+            return Err(Invalid::new(format!("{path}.name"), "can't be empty"));
+        }
+        if !kind.param().is_valid(*value) {
+            let message = if kind.is_button() {
+                "must be 0 or 1"
+            } else {
+                "must be from 0 to 1"
+            };
+            return Err(Invalid::new(format!("{path}.value"), message));
+        }
+        Ok(modulation::Control {
+            id: *id,
+            name: name.clone(),
+            kind,
+            value: *value,
+        })
+    }
+}
+
+impl From<&modulation::Routing> for Routing {
+    fn from(routing: &modulation::Routing) -> Self {
+        let modulation::Routing {
+            id,
+            from,
+            to,
+            amount,
+            curve,
+            scale,
+            lag,
+            bypassed,
+        } = routing;
+        let output = |output: &modulation::Output| Output {
+            modulator: output.modulator.0,
+            output: output.n,
+        };
+        Self {
+            id: id.0,
+            from: output(from),
+            to: Param::from(*to),
+            amount: *amount,
+            curve: match *curve {
+                modulation::Curve::Linear => Curve::Linear,
+                modulation::Curve::Exponential => Curve::Exponential,
+                modulation::Curve::Logarithmic => Curve::Logarithmic,
+                modulation::Curve::SCurve => Curve::SCurve,
+                modulation::Curve::Stepped(steps) => Curve::Stepped(steps),
+                modulation::Curve::Absolute => Curve::Absolute,
+                modulation::Curve::Positive => Curve::Positive,
+                modulation::Curve::Negative => Curve::Negative,
+            },
+            scale: scale.as_ref().map(output),
+            lag: *lag,
+            bypassed: *bypassed,
+        }
+    }
+}
+
+/// Refuses routings to parameters the project hasn't, and amounts that
+/// don't suit their parameters ([`model::Project::amount_fits`]), once the
+/// project is read: which parameters a device or a modulator has depends
+/// on its kind.
+fn check_routings(project: &model::Project) -> Result<(), Invalid> {
+    for (chain, modulation) in project.modulations() {
+        let at = match chain {
+            Chain::Track(id) => {
+                let i = project.track_index(id).expect("the project's own track");
+                format!("tracks[{i}].modulation")
+            }
+            Chain::Master => "master.modulation".to_owned(),
+        };
+        for (j, routing) in modulation.routings.iter().enumerate() {
+            let path = format!("{at}.routings[{j}]");
+            if !project.has_param(routing.to) {
+                let message = "names a parameter that its device or modulator hasn't";
+                return Err(Invalid::new(format!("{path}.to"), message));
+            }
+            if !project.can_modulate(routing.to) {
+                let message = "names a parameter that modulators can't move";
+                return Err(Invalid::new(format!("{path}.to"), message));
+            }
+            if !project.amount_fits(routing.to, routing.amount) {
+                let message = "must be from -1 to 1: a share of the parameter's range";
+                return Err(Invalid::new(format!("{path}.amount"), message));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl From<&model::Locator> for Locator {
@@ -2280,63 +2776,55 @@ impl Locator {
     }
 }
 
-/// What a lane's parameter can belong to: the file's tracks, sends and
-/// devices.
+/// What a lane's or a routing's parameter can belong to: the file's
+/// tracks, sends, devices and modulators.
 struct Params<'a> {
     tracks: &'a HashMap<u32, TrackKind>,
     sends: &'a Ids,
     devices: &'a Ids,
+    modulators: &'a Ids,
 }
 
-impl From<&automation::Lane> for Lane {
-    fn from(lane: &automation::Lane) -> Self {
-        let automation::Lane {
-            param,
-            points,
-            overridden,
-        } = lane;
+impl From<ParamAddress> for Param {
+    fn from(param: ParamAddress) -> Self {
         let channel = |chain| match chain {
             Chain::Track(track) => Channel::Track(track.0),
             Chain::Master => Channel::Master,
         };
-        Self {
-            param: match *param {
-                ParamAddress::Volume(chain) => Param::Volume(channel(chain)),
-                ParamAddress::Pan(chain) => Param::Pan(channel(chain)),
-                ParamAddress::Send(send) => Param::Send(send.0),
-                ParamAddress::Device(device, param) => Param::Device {
-                    id: device.0,
-                    param,
-                },
-                ParamAddress::Bypass(device) => Param::Bypass(device.0),
-                ParamAddress::Clip(..) => unreachable!("a clip's curves are in the clip"),
+        match param {
+            ParamAddress::Volume(chain) => Param::Volume(channel(chain)),
+            ParamAddress::Pan(chain) => Param::Pan(channel(chain)),
+            ParamAddress::Send(send) => Param::Send(send.0),
+            ParamAddress::Device(device, param) => Param::Device {
+                id: device.0,
+                param,
             },
-            points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
-            overridden: *overridden,
+            ParamAddress::Bypass(device) => Param::Bypass(device.0),
+            ParamAddress::Modulator(modulator, param) => Param::Modulator {
+                id: modulator.0,
+                param,
+            },
+            ParamAddress::Clip(..) => unreachable!("a clip's curves are in the clip"),
         }
     }
 }
 
-impl Lane {
-    fn to_model(&self, path: &str, params: &Params<'_>) -> Result<automation::Lane, Invalid> {
-        let Self {
-            param,
-            points,
-            overridden,
-        } = self;
+impl Param {
+    /// The parameter, `path` being where it is in the file.
+    fn to_model(self, path: &str, params: &Params<'_>) -> Result<ParamAddress, Invalid> {
         let channel = |channel| match channel {
             Channel::Master => Ok(Chain::Master),
             Channel::Track(id) if params.tracks.contains_key(&id) => Ok(Chain::Track(TrackId(id))),
             Channel::Track(id) => {
                 let message = format!("names track {id}, which the file hasn't");
-                Err(Invalid::new(format!("{path}.param"), message))
+                Err(Invalid::new(path, message))
             }
         };
         let missing = |what: &str, id: u32| {
             let message = format!("names {what} {id}, which the file hasn't");
-            Invalid::new(format!("{path}.param"), message)
+            Invalid::new(path, message)
         };
-        let param = match *param {
+        Ok(match self {
             Param::Volume(on) => ParamAddress::Volume(channel(on)?),
             Param::Pan(on) => ParamAddress::Pan(channel(on)?),
             Param::Send(id) if params.sends.seen.contains_key(&id) => {
@@ -2351,7 +2839,37 @@ impl Lane {
                 ParamAddress::Bypass(DeviceId(id))
             }
             Param::Bypass(id) => return Err(missing("device", id)),
-        };
+            Param::Modulator { id, param } if params.modulators.seen.contains_key(&id) => {
+                ParamAddress::Modulator(ModulatorId(id), param)
+            }
+            Param::Modulator { id, .. } => return Err(missing("modulator", id)),
+        })
+    }
+}
+
+impl From<&automation::Lane> for Lane {
+    fn from(lane: &automation::Lane) -> Self {
+        let automation::Lane {
+            param,
+            points,
+            overridden,
+        } = lane;
+        Self {
+            param: Param::from(*param),
+            points: points.iter().map(|p| (p.at.ticks(), p.value)).collect(),
+            overridden: *overridden,
+        }
+    }
+}
+
+impl Lane {
+    fn to_model(&self, path: &str, params: &Params<'_>) -> Result<automation::Lane, Invalid> {
+        let Self {
+            param,
+            points,
+            overridden,
+        } = self;
+        let param = param.to_model(&format!("{path}.param"), params)?;
         let range = |value: f64| match param {
             ParamAddress::Pan(_) if !(-1.0..=1.0).contains(&value) => {
                 Some("must be from -1 to 1".to_owned())

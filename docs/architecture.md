@@ -291,8 +291,8 @@ what Tier 1 left is in each doc's "Not done yet"
 ## Where Tier 2 starts
 
 Tier 2 of the feature list, a studio replacement, and where each part
-should go. None of it is built yet. Where Tier 1 left room for a part, this
-says what's there.
+should go. Where Tier 1 left room for a part, this says what's there, and
+where a part has started, what's built.
 
 - **ARA 2**, for Melodyne and the like. ARA rides on a plugin's instance,
   so it starts in `crates/plugins`, beside `Instance` on the main thread.
@@ -456,18 +456,22 @@ says what's there.
   parameters have addresses as any device's do (`ParamAddress::Device`).
   Its WebAssembly gets its memory in `Node::prepare`, where every node
   allocates.
-- **Modulators.** Tier 1 left room for them in the engine.
-  `NodeEventKind::Modulation` offsets a parameter without changing its
-  value, for every voice or for one note. The built-in devices' parameters
-  say whether they can be modulated (`ParamInfo::modulated`), and add
-  modulation frame by frame, after their smoothing
+- **Modulators.** They have started: format 18 gives each track and the
+  master a `Modulation`, its Macros, LFOs and Envelopes and their routings
+  to parameters (`musicable_model::modulation`;
+  [project-format.md](project-format.md)), the `modulation.*` commands edit
+  them with undo ([commands.md](commands.md#modulation)), and each channel's
+  `modulation::Modulation` node plays them, sending its parameters
+  `NodeEventKind::Modulation` from the engine's control pass, before the
+  block renders ([engine.md](engine.md#modulation)). The built-in devices'
+  parameters say whether they can be modulated (`ParamInfo::modulated`),
+  and add modulation frame by frame, after their smoothing
   (`automation::Param::modulate`). CLAP plugins get it as CLAP's parameter
-  modulation, for one note too, and VST3 plugins keep their base values in
-  the project, to get it as plain parameter changes. CLAP plugins and the
-  built-in instruments say when their voices end (`Node::ended_voices`), for
-  modulators that run a copy for each voice. The modulators themselves are
-  new: in the model, on tracks, groups and the master, and in the graph, a
-  node for each track that sends their targets the modulation.
+  modulation, for one note too. Still to come: the app's modulator strip,
+  more kinds, VST3 plugins, which keep their base values in the project to
+  get modulation as plain parameter changes, and modulators that run a copy
+  for each voice, for which CLAP plugins and the built-in instruments say
+  when their voices end (`Node::ended_voices`).
 - **Online sounds and services.** The browser's library keeps a `Record`
   for each file, with room for analysis: tags, measurements, and the
   embedding that searching with a sound compares.

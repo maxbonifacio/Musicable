@@ -71,6 +71,12 @@ pub struct Graph {
     note_routes: Vec<(NodeId, NodeId)>,
     /// The automation nodes handed back, to send them as events.
     feeds: Vec<(NodeId, ParamId, Feed)>,
+    /// The nodes whose [`Node::control`] runs each block, from
+    /// [`control`](Graph::control) and [`modulate`](Graph::modulate).
+    controllers: Vec<NodeId>,
+    /// Which nodes modulate which nodes' parameters, from
+    /// [`modulate`](Graph::modulate), in the order they were added.
+    modulations: Vec<(NodeId, NodeId, ParamId)>,
 }
 
 impl Graph {
@@ -160,6 +166,45 @@ impl Graph {
             self.note_routes.push((from, to));
         }
         Ok(())
+    }
+
+    /// Has the engine call `node`'s [`Node::control`] for each block, once
+    /// the notes have played and before any node renders, so it can
+    /// modulate other nodes' parameters ([`modulate`](Graph::modulate)).
+    pub fn control(&mut self, node: NodeId) -> Result<(), GraphError> {
+        self.check(node)?;
+        if !self.controllers.contains(&node) {
+            self.controllers.push(node);
+        }
+        Ok(())
+    }
+
+    /// Has `from` modulate `to`'s parameter `param`, and returns the port
+    /// `from` sends the modulation through ([`Controls::send`]): the ports
+    /// of each node count from 0, in the order they're added. The engine
+    /// calls `from`'s [`Node::control`] for each block, and `to` gets what
+    /// it sends as [`Modulation`](NodeEventKind::Modulation) events among
+    /// its other events for the block, so `to` can be any node, even one
+    /// that modulates others in turn: each node's `control` runs after the
+    /// nodes that modulate it. A route that would close a loop of nodes
+    /// modulating each other is refused. Tells `to` that `param` is
+    /// modulated ([`Node::modulated`]).
+    pub fn modulate(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        param: ParamId,
+    ) -> Result<usize, GraphError> {
+        self.check(from)?;
+        self.check(to)?;
+        if from == to || self.modulation_reaches(to, from) {
+            return Err(GraphError::Cycle);
+        }
+        self.control(from)?;
+        self.nodes[to.0].modulated(param);
+        let ports = self.modulations.iter().filter(|m| m.0 == from).count();
+        self.modulations.push((from, to, param));
+        Ok(ports)
     }
 
     /// Sets the node whose output the engine plays.
@@ -266,12 +311,27 @@ impl Graph {
             plays_notes[player.node.0] = true;
             inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY);
         }
+        let room = Feed::room(config.max_block);
+        let controllers = self.order_controllers();
+        let mut is_controller = vec![false; self.nodes.len()];
+        for controller in &controllers {
+            let node = controller.node;
+            is_controller[node.0] = true;
+            // What comes to it: the engine's events, the notes, its
+            // automation and the modulation of the nodes that modulate it.
+            let routes_in = routes.iter().filter(|&&(_, to)| to == node).count();
+            let feeds_in = self.feeds.iter().filter(|f| f.0 == node).count();
+            let ports_in = self.modulations.iter().filter(|m| m.1 == node).count();
+            let notes_in = routes_in * Notes::CAPACITY;
+            inbox = inbox.max(EVENT_CAPACITY + notes_in + (feeds_in + ports_in) * room);
+        }
         // Room for every parameter event the engine can hold, for each
-        // player's notes to each of its targets, and for the automation
-        // the graph sends.
+        // player's notes to each of its targets, for the automation the
+        // graph sends and for what each port of each controller sends.
         let notes: usize = ordered.iter().map(|p| p.targets.len()).sum();
-        let feeds = self.feeds.len() * Feed::room(config.max_block);
-        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds;
+        let feeds = self.feeds.len() * room;
+        let ports = self.modulations.len() * room;
+        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds + ports;
         Ok(PreparedGraph {
             config: *config,
             event_ranges: vec![(0, 0); self.nodes.len()],
@@ -292,8 +352,40 @@ impl Graph {
             inbox: Vec::with_capacity(inbox),
             inbox_events: Vec::with_capacity(inbox),
             feeds: self.feeds,
+            controllers,
+            is_controller,
             schedule,
         })
+    }
+
+    /// The nodes whose [`Node::control`] runs, each after the nodes that
+    /// modulate it, with where each of their ports goes. Modulation doesn't
+    /// go around loops, so one is always ready.
+    fn order_controllers(&self) -> Vec<Modulator> {
+        let mut waiting: Vec<Modulator> = self
+            .controllers
+            .iter()
+            .map(|&node| Modulator {
+                node,
+                ports: (self.modulations.iter())
+                    .filter(|m| m.0 == node)
+                    .map(|&(_, to, param)| (to, param))
+                    .collect(),
+            })
+            .collect();
+        let mut ordered = Vec::with_capacity(waiting.len());
+        while !waiting.is_empty() {
+            let modulated = |c: &Modulator| {
+                let from_waiting = |from: NodeId| waiting.iter().any(|w| w.node == from);
+                (self.modulations.iter()).any(|&(from, to, _)| to == c.node && from_waiting(from))
+            };
+            let ready = waiting
+                .iter()
+                .position(|c| !modulated(c))
+                .expect("no loops");
+            ordered.push(waiting.remove(ready));
+        }
+        ordered
     }
 
     /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
@@ -409,6 +501,22 @@ impl Graph {
         false
     }
 
+    /// Whether modulation can pass from `start` to `target`.
+    fn modulation_reaches(&self, start: NodeId, target: NodeId) -> bool {
+        let mut seen = vec![false; self.nodes.len()];
+        let mut stack = vec![start];
+        while let Some(n) = stack.pop() {
+            if n == target {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[n.0], true) {
+                let next = self.modulations.iter().filter(|m| m.0 == n);
+                stack.extend(next.map(|m| m.1));
+            }
+        }
+        false
+    }
+
     /// Whether signal can flow from `start` to `target`.
     fn reaches(&self, start: NodeId, target: NodeId) -> bool {
         let mut seen = vec![false; self.nodes.len()];
@@ -486,6 +594,12 @@ pub struct PreparedGraph {
     /// The automation the graph sends nodes as events, by node and
     /// parameter.
     feeds: Vec<(NodeId, ParamId, Feed)>,
+    /// The nodes that modulate others, each after those that modulate it,
+    /// and where their ports go.
+    controllers: Vec<Modulator>,
+    /// Whether each node is a controller: it gets its events with
+    /// [`Node::control`] rather than [`Node::process`].
+    is_controller: Vec<bool>,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
 }
@@ -521,6 +635,13 @@ pub(crate) struct Routed {
 struct Player {
     node: NodeId,
     targets: Vec<NodeId>,
+}
+
+/// A node that modulates others, and the node and parameter each of its
+/// ports goes to.
+struct Modulator {
+    node: NodeId,
+    ports: Vec<(NodeId, ParamId)>,
 }
 
 /// Where a node puts the notes it plays in a block: see
@@ -578,6 +699,85 @@ impl Notes<'_> {
     /// The block's length: notes are sent at offsets below it.
     pub fn frames(&self) -> usize {
         self.frames
+    }
+}
+
+/// Where a node puts the modulation it makes in a block: see
+/// [`Node::control`].
+pub struct Controls<'a> {
+    routed: &'a mut Vec<Routed>,
+    /// Where each port goes.
+    ports: &'a [(NodeId, ParamId)],
+    frames: usize,
+    /// How many more events the node can send this block.
+    room: usize,
+    /// Events there was no room for.
+    dropped: u64,
+}
+
+impl Controls<'_> {
+    /// Sends `amount` of modulation through `port`, `offset` frames into
+    /// the block: a [`Modulation`](NodeEventKind::Modulation) event for the
+    /// parameter the port goes to. Send a block's modulation in order of
+    /// offset. Returns whether there was room for it: each port has room
+    /// for a value on every 32nd frame of engine time and on 16 frames
+    /// more, as lanes do, and events beyond its node's share are dropped
+    /// and counted in [`Stats::events_dropped`](crate::Stats::events_dropped).
+    /// A port the node hasn't takes nothing.
+    pub fn send(&mut self, port: usize, offset: usize, amount: f64) -> bool {
+        debug_assert!(offset < self.frames, "modulation is sent within the block");
+        let Some(&(node, param)) = self.ports.get(port) else {
+            return false;
+        };
+        if self.room == 0 {
+            self.dropped += 1;
+            return false;
+        }
+        self.room -= 1;
+        let order = self.routed.len() as u32;
+        let kind = NodeEventKind::Modulation {
+            param,
+            amount,
+            note: None,
+        };
+        let event = NodeEvent { offset, kind };
+        self.routed.push(Routed { node, order, event });
+        true
+    }
+
+    /// How many ports the node has.
+    pub fn ports(&self) -> usize {
+        self.ports.len()
+    }
+
+    /// The block's length: modulation is sent at offsets below it.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+}
+
+#[cfg(test)]
+impl<'a> Controls<'a> {
+    /// For a node's own tests: what goes through `ports` lands in `routed`,
+    /// with room for `room` events in a block of `frames`.
+    pub(crate) fn for_tests(
+        routed: &'a mut Vec<Routed>,
+        ports: &'a [(NodeId, ParamId)],
+        frames: usize,
+        room: usize,
+    ) -> Self {
+        Self {
+            routed,
+            ports,
+            frames,
+            room,
+            dropped: 0,
+        }
+    }
+
+    /// How many events there was no room for.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
     }
 }
 
@@ -726,7 +926,53 @@ impl PreparedGraph {
         // The players have had theirs.
         if !players.is_empty() {
             routed.retain(|r| !(plays_notes[r.node.0] && is_played(r)));
+            renumber(routed);
         }
+        dropped
+    }
+
+    /// Has each node that modulates others send its modulation for `block`
+    /// ([`Node::control`]), each after the nodes that modulate it, and
+    /// returns how many of their events there was no room for. Runs on the
+    /// audio thread, once the notes have played and before the block
+    /// renders.
+    pub(crate) fn control(&mut self, block: &Block<'_>) -> u64 {
+        let Self {
+            config,
+            nodes,
+            routed,
+            controllers,
+            is_controller,
+            inbox,
+            inbox_events,
+            ..
+        } = self;
+        if controllers.is_empty() {
+            return 0;
+        }
+        let room = Feed::room(config.max_block);
+        let mut dropped = 0;
+        for controller in controllers.iter() {
+            // Everything sent to it so far, which is all of it: the nodes
+            // that modulate it have had their turn.
+            inbox.clear();
+            inbox.extend(routed.iter().filter(|r| r.node == controller.node));
+            inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
+            inbox_events.clear();
+            inbox_events.extend(inbox.iter().map(|r| r.event));
+            let ctx = block.context(config.sample_rate, inbox_events);
+            let mut controls = Controls {
+                routed,
+                ports: &controller.ports,
+                frames: block.frames,
+                room: controller.ports.len() * room,
+                dropped: 0,
+            };
+            nodes[controller.node.0].control(&ctx, &mut controls);
+            dropped += controls.dropped;
+        }
+        // The controllers have had theirs.
+        routed.retain(|r| !is_controller[r.node.0]);
         dropped
     }
 
@@ -768,6 +1014,14 @@ impl PreparedGraph {
             self.event_ranges[r.node.0] = (0, 0);
         }
         self.events.clear();
+    }
+}
+
+/// Numbers the events in `routed` in the order they're in, after some have
+/// gone, so the events sent next come after all of them.
+fn renumber(routed: &mut [Routed]) {
+    for (order, r) in routed.iter_mut().enumerate() {
+        r.order = order as u32;
     }
 }
 
@@ -1024,6 +1278,100 @@ mod tests {
             .downcast_mut::<Pulse>()
             .unwrap();
         assert_eq!(pulse.0, 1);
+    }
+
+    /// Sends the modulation it gets plus one, or one if it gets none,
+    /// through its port on each block's first frame, and counts the events
+    /// `process` gets.
+    #[derive(Default)]
+    struct AddOne(usize);
+
+    impl Node for AddOne {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            self.0 += ctx.events.len();
+            output.clear();
+        }
+
+        fn control(&mut self, ctx: &ProcessContext<'_>, controls: &mut Controls<'_>) {
+            let got = ctx.events.iter().find_map(|e| match e.kind {
+                NodeEventKind::Modulation { amount, .. } => Some(amount),
+                _ => None,
+            });
+            assert!(controls.send(0, 0, got.unwrap_or(0.0) + 1.0));
+        }
+    }
+
+    /// Keeps the modulation it gets, and which parameters the graph says
+    /// are modulated.
+    struct Modulated {
+        got: Vec<(usize, ParamId, f64)>,
+        modulated: Vec<ParamId>,
+    }
+
+    impl Node for Modulated {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            for event in ctx.events {
+                if let NodeEventKind::Modulation { param, amount, .. } = event.kind {
+                    self.got.push((event.offset, param, amount));
+                }
+            }
+            output.clear();
+        }
+
+        fn modulated(&mut self, param: ParamId) {
+            self.modulated.push(param);
+        }
+    }
+
+    #[test]
+    fn modulation_flows_through_chains_of_nodes_but_not_around_loops() {
+        let mut g = Graph::new();
+        // Added in another order than the modulation flows.
+        let target = Modulated {
+            got: Vec::with_capacity(8),
+            modulated: Vec::new(),
+        };
+        let target = g.add(NodeKey(0), target);
+        let second = g.add(NodeKey(1), AddOne::default());
+        let first = g.add(NodeKey(2), AddOne::default());
+        assert_eq!(g.modulate(second, target, ParamId(7)), Ok(0));
+        assert_eq!(g.modulate(first, second, ParamId(3)), Ok(0));
+        assert_eq!(
+            g.modulate(target, first, ParamId(0)),
+            Err(GraphError::Cycle)
+        );
+        assert_eq!(g.modulate(first, first, ParamId(0)), Err(GraphError::Cycle));
+        g.set_output(target).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        let tempo = TempoMap::default();
+        let block = Block {
+            frames: 64,
+            time: 0,
+            transport: TransportState::default(),
+            tempo: &tempo,
+            input: AudioRef::empty(64),
+            midi: &[],
+        };
+        rt::scope(|| {
+            assert_eq!(graph.control(&block), 0);
+            graph.load_routed();
+            ReferenceRenderer.render(&mut graph, &block);
+            graph.clear_routed();
+        });
+        let target = graph.nodes[target.0]
+            .as_mut()
+            .downcast_mut::<Modulated>()
+            .unwrap();
+        // One from the first, and one more from the second, which runs
+        // after it.
+        assert_eq!(target.got, [(0, ParamId(7), 2.0)]);
+        assert_eq!(target.modulated, [ParamId(7)]);
+        // The modulation came to the second with `control`, not `process`.
+        let second = graph.nodes[second.0]
+            .as_mut()
+            .downcast_mut::<AddOne>()
+            .unwrap();
+        assert_eq!(second.0, 0);
     }
 
     fn impulse(at: u64) -> Impulse {

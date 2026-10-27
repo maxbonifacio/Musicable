@@ -450,7 +450,9 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
             // The switch's bypass is its own.
             NodeEventKind::Param { param, .. } if param == Switch::BYPASS => {}
             NodeEventKind::Param { param, value } => {
-                audio.changes.push(param.0, offset, value, true);
+                if let Ok(id) = u32::try_from(param.0) {
+                    audio.changes.push(id, offset, value, true);
+                }
             }
             NodeEventKind::Note(note) => note_events(audio, offset, note),
             // A controller moves the parameter the plugin maps it to.
@@ -480,7 +482,9 @@ fn param_changes(ctx: &ProcessContext<'_>, audio: &mut Audio) {
     for event in ctx.events {
         match event.kind {
             NodeEventKind::Param { param, value } if param != Switch::BYPASS => {
-                audio.changes.push(param.0, 0, value, true);
+                if let Ok(id) = u32::try_from(param.0) {
+                    audio.changes.push(id, 0, value, true);
+                }
             }
             // A controller's parameter, such as the sustain pedal's, comes
             // back where it was left.

@@ -93,7 +93,7 @@ impl Switch {
     /// back. CLAP (`CLAP_INVALID_ID`) and VST3 (`kNoParamId`) keep its id
     /// from plugins, so it's never one of a plugin's, and the device's node
     /// ignores it.
-    pub const BYPASS: ParamId = ParamId(u32::MAX);
+    pub const BYPASS: ParamId = ParamId(u32::MAX as u64);
 
     /// Puts `device`, a device's node, in a switch, bypassed or not.
     pub fn new(device: Box<dyn Node>, bypassed: bool) -> Self {
@@ -325,6 +325,12 @@ impl Node for Switch {
                 Some(automation)
             }
             _ => self.device.automate(param, automation),
+        }
+    }
+
+    fn modulated(&mut self, param: ParamId) {
+        if param != Self::BYPASS {
+            self.device.modulated(param);
         }
     }
 

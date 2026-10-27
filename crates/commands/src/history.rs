@@ -345,6 +345,10 @@ mod tests {
         Offset, Point, Timing, Warping,
     };
     use musicable_model::mixer::Bus;
+    use musicable_model::modulation::{
+        Control, ControlKind, Curve, ModulatorId, ModulatorKind, Output, Routing, RoutingId,
+        envelope, lfo,
+    };
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::param::{ClipParam, ParamAddress};
     use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
@@ -378,8 +382,10 @@ mod tests {
     /// clips, one with fades, and a MIDI clip with two notes; two takes of
     /// an audio clip on the audio track; two locators; a plugin on the audio
     /// track, a test device on the master and a sampler on the MIDI track;
-    /// and lanes that automate the audio track's volume and the master's
-    /// pan.
+    /// lanes that automate the audio track's volume and the master's pan;
+    /// an LFO and an Envelope on the audio track, moving its pan and its
+    /// volume; and on the master, a Macro with a knob and a button, and an
+    /// LFO that nothing refers to.
     fn base() -> Project {
         let mut project = Project::new();
         let audio = project.add_track("Audio", TrackKind::Audio);
@@ -440,6 +446,24 @@ mod tests {
         for (param, points) in lanes {
             project.automation.push(Lane::new(param, points));
         }
+        let lfo = project.new_modulator(ModulatorKind::Lfo, "LFO 1");
+        let envelope = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+        let mut macros = project.new_modulator(ModulatorKind::Macro, "Macro 1");
+        let button = macros.new_control(ControlKind::Toggle);
+        macros.controls.push(button);
+        // As if a third control had been added and deleted.
+        macros.new_control(ControlKind::Knob);
+        let spare = project.new_modulator(ModulatorKind::Lfo, "LFO 2");
+        let routings = [
+            (lfo.id, ParamAddress::Pan(Chain::Track(audio)), 0.5),
+            (envelope.id, ParamAddress::Volume(Chain::Track(audio)), 0.25),
+        ];
+        let routings = routings
+            .map(|(from, to, amount)| project.new_routing(Output::new(from, 0), to, amount));
+        let modulation = &mut project.track_mut(audio).unwrap().modulation;
+        modulation.modulators = vec![lfo, envelope];
+        modulation.routings = routings.to_vec();
+        project.master.modulation.modulators = vec![macros, spare];
         project
     }
 
@@ -499,6 +523,10 @@ mod tests {
             .plugin()
             .unwrap();
         let effect_settings = effect_settings.settings.clone();
+        let [lfo_id, envelope_id, macro_id] = [0, 1, 2].map(ModulatorId);
+        let new_envelope = project.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+        let macros = project.find_modulator(macro_id).unwrap().2.clone();
+        let routings = project.tracks[0].modulation.routings.clone();
         let edits = vec![
             Edit::Tempo {
                 from: project.tempo.clone(),
@@ -828,6 +856,77 @@ mod tests {
                 index: 1,
                 lane: project.automation[1].clone(),
             },
+            Edit::AddModulator {
+                chain: Chain::Track(midi),
+                index: 0,
+                modulator: new_envelope,
+            },
+            Edit::MoveModulator {
+                modulator: envelope_id,
+                from: 1,
+                to: 0,
+            },
+            Edit::ModulatorName {
+                modulator: lfo_id,
+                from: "LFO 1".into(),
+                to: "Wobble".into(),
+            },
+            Edit::ModulatorParam {
+                modulator: lfo_id,
+                param: lfo::RATE as u32,
+                from: 1.0,
+                to: 4.0,
+            },
+            Edit::AddControl {
+                modulator: macro_id,
+                index: 2,
+                control: Control {
+                    id: 2,
+                    name: "Knob 2".into(),
+                    kind: ControlKind::Knob,
+                    value: 0.5,
+                },
+            },
+            Edit::RemoveControl {
+                modulator: macro_id,
+                index: 1,
+                control: macros.controls[1].clone(),
+            },
+            Edit::ControlName {
+                modulator: macro_id,
+                control: 0,
+                from: "Knob 1".into(),
+                to: "Drive".into(),
+            },
+            Edit::AddRouting {
+                chain: Chain::Track(audio),
+                index: 2,
+                routing: Routing::new(
+                    RoutingId(2),
+                    Output::new(lfo_id, 0),
+                    ParamAddress::Modulator(envelope_id, envelope::ATTACK as u32),
+                    0.5,
+                ),
+            },
+            Edit::RoutingSettings {
+                routing: RoutingId(0),
+                from: routings[0],
+                to: Routing {
+                    curve: Curve::Exponential,
+                    lag: 50.0,
+                    ..routings[0]
+                },
+            },
+            Edit::RemoveRouting {
+                chain: Chain::Track(audio),
+                index: 1,
+                routing: routings[1],
+            },
+            Edit::RemoveModulator {
+                chain: Chain::Master,
+                index: 1,
+                modulator: project.master.modulation.modulators[1].clone(),
+            },
         ];
         let mut kinds: Vec<_> = edits.iter().map(kind).collect();
         kinds.dedup();
@@ -836,7 +935,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 59;
+    const KINDS: usize = 70;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -901,6 +1000,17 @@ mod tests {
             Edit::DeviceBypass { .. } => 56,
             Edit::DeviceActive { .. } => 57,
             Edit::MoveDevice { .. } => 58,
+            Edit::AddModulator { .. } => 59,
+            Edit::MoveModulator { .. } => 60,
+            Edit::ModulatorName { .. } => 61,
+            Edit::ModulatorParam { .. } => 62,
+            Edit::AddControl { .. } => 63,
+            Edit::RemoveControl { .. } => 64,
+            Edit::ControlName { .. } => 65,
+            Edit::AddRouting { .. } => 66,
+            Edit::RoutingSettings { .. } => 67,
+            Edit::RemoveRouting { .. } => 68,
+            Edit::RemoveModulator { .. } => 69,
         }
     }
 

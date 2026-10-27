@@ -300,7 +300,7 @@ fn automatable(ctx: &Context<'_>, param: ParamAddress) -> Result<ParamAddress, C
 /// choices and counts, and for a Bypass, which is off or on. A plugin keeps
 /// its own parameters in range.
 fn clamped(project: &Project, param: ParamAddress, mut points: Vec<Point>) -> Vec<Point> {
-    if let Some(info) = project.native_param(param) {
+    if let Some(info) = project.param_info(param) {
         for point in &mut points {
             point.value = info.clamp(point.value);
         }

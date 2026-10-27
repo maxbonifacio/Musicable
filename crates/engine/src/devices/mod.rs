@@ -5,12 +5,13 @@
 //! out each one's value for every frame with an
 //! [`automation::Param`](crate::automation::Param): its automation at the
 //! song position, or else the value set, ramping to each new one over 10
-//! ms, plus any modulation, which applies at once. The node hands its
-//! automation to its `Params` ([`Params::automate`]), so it follows lanes
-//! frame by frame rather than as parameter events. It renders a block in spans
-//! that end where its events fall ([`Params::run`]), so a parameter change,
-//! a modulation or a note lands on its frame however the blocks fall, and
-//! a device renders the same sample for sample whatever their length.
+//! ms, plus any modulation, which ramps in over a modulator's tick. The
+//! node hands its automation to its `Params` ([`Params::automate`]), so it
+//! follows lanes frame by frame rather than as parameter events. It renders
+//! a block in spans that end where its events fall ([`Params::run`]), so a
+//! parameter change, a modulation or a note lands on its frame however the
+//! blocks fall, and a device renders the same sample for sample whatever
+//! their length.
 //!
 //! A kind whose DSP isn't built yet has no node, so it passes the signal
 //! through unchanged. [`BUILT`] lists the kinds that have one.
@@ -124,7 +125,7 @@ pub(crate) mod testing {
         NodeEvent {
             offset: at,
             kind: NodeEventKind::Param {
-                param: ParamId(param as u32),
+                param: ParamId(param as u64),
                 value,
             },
         }
@@ -135,7 +136,7 @@ pub(crate) mod testing {
         NodeEvent {
             offset: at,
             kind: NodeEventKind::Modulation {
-                param: ParamId(param as u32),
+                param: ParamId(param as u64),
                 amount,
                 note: None,
             },

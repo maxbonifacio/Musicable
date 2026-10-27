@@ -107,6 +107,26 @@
 | Set Solo-Safe | `mixer.set_solo_safe` |
 | Set Volume | `mixer.set_volume` |
 
+### Modulation
+
+| Command | Id |
+|---|---|
+| Add Modulator | `modulation.add` |
+| Add Macro Control | `modulation.add_control` |
+| Add Routing | `modulation.add_routing` |
+| Delete Modulator | `modulation.delete` |
+| Delete Macro Control | `modulation.delete_control` |
+| Delete Routing | `modulation.delete_routing` |
+| Move Modulator | `modulation.move` |
+| Rename Modulator | `modulation.rename` |
+| Rename Macro Control | `modulation.rename_control` |
+| Set Routing Amount | `modulation.set_amount` |
+| Set Routing Bypass | `modulation.set_bypass` |
+| Set Routing Curve | `modulation.set_curve` |
+| Set Routing Lag | `modulation.set_lag` |
+| Set Modulator Parameter | `modulation.set_param` |
+| Set Routing Scale | `modulation.set_scale` |
+
 ### Notes
 
 | Command | Id |

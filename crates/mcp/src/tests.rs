@@ -287,6 +287,7 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_project",
             "get_clip",
             "get_device",
+            "get_modulator",
             "get_automation",
             "get_editor",
             "get_history",
@@ -647,6 +648,98 @@ fn reads_say_which_devices_are_bypassed_or_deactivated() {
 }
 
 #[test]
+fn reads_give_modulators_and_their_routings() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_audio_track"},
+            {"id": "device.add", "args": {"kind": "utility", "track": 0}},
+            {"id": "modulation.add", "args": {"kind": "lfo", "track": 0}},
+            {"id": "modulation.add", "args": {"kind": "macro", "track": 0}},
+            // A Macro starts with a knob.
+            {"id": "modulation.add_control", "args": {"modulator": 1, "kind": "toggle"}},
+            {"id": "modulation.add_routing", "args": {
+                "modulator": 0, "param": "track 0 pan", "amount": 0.5,
+            }},
+            {"id": "modulation.add_routing", "args": {
+                "modulator": 1, "output": 1, "param": "device 0 param 1", "amount": -0.25,
+            }},
+            {"id": "modulation.set_curve", "args": {"routing": 1, "curve": "stepped"}},
+            {"id": "modulation.set_scale", "args": {"routing": 1, "modulator": 1}},
+            {"id": "modulation.set_bypass", "args": {"routing": 0, "bypassed": true}},
+            {"id": "automation.add_point", "args": {
+                "param": "modulator 0 param 0", "at": 0, "value": 2,
+            }},
+        ]}),
+    )
+    .unwrap();
+
+    let project = rig.call("get_project", json!({})).unwrap();
+    let track = &project["tracks"][0];
+    assert_eq!(
+        track["modulators"],
+        json!([
+            {"id": 0, "name": "LFO 1", "kind": "lfo"},
+            {"id": 1, "name": "Macro 1", "kind": "macro"},
+        ])
+    );
+    assert_eq!(
+        track["routings"],
+        json!([
+            {
+                "id": 0, "modulator": 0, "output": 0, "param": "track 0 pan", "amount": 0.5,
+                "curve": "linear", "lag": 0.0, "bypassed": true,
+            },
+            {
+                "id": 1, "modulator": 1, "output": 1, "param": "device 0 param 1",
+                "amount": -0.25, "curve": "stepped", "steps": 4,
+                "scale": {"modulator": 1, "output": 0}, "lag": 0.0,
+            },
+        ])
+    );
+    // A channel without modulators says nothing of them.
+    assert_eq!(project["master"].get("modulators"), None);
+    assert_eq!(
+        project["automation"],
+        json!([{"param": "modulator 0 param 0", "points": 1, "overridden": false}])
+    );
+
+    let lfo = rig.call("get_modulator", json!({"modulator": 0})).unwrap();
+    assert_eq!(
+        (&lfo["kind"], &lfo["chain"], &lfo["position"]),
+        (&json!("lfo"), &json!({"track": 0}), &json!(0))
+    );
+    let params = lfo["params"].as_array().unwrap();
+    assert!(!params.is_empty());
+    for (number, param) in params.iter().enumerate() {
+        assert_eq!(param["param"], number);
+        assert!(param["name"].as_str().is_some_and(|name| !name.is_empty()));
+        assert!(param["value"].is_number() && param["shown"].is_string());
+    }
+    assert_eq!(
+        lfo["outputs"],
+        json!([{"output": 0, "name": "LFO 1", "range": "-1 to 1"}])
+    );
+
+    let macro_ = rig.call("get_modulator", json!({"modulator": 1})).unwrap();
+    let controls: Vec<_> = (macro_["params"].as_array().unwrap().iter())
+        .map(|p| (&p["param"], &p["name"], &p["kind"], &p["value"]))
+        .collect();
+    assert_eq!(
+        controls,
+        [
+            (&json!(0), &json!("Knob 1"), &json!("knob"), &json!(0.0)),
+            (&json!(1), &json!("Button 1"), &json!("toggle"), &json!(0.0)),
+        ]
+    );
+    assert_eq!(
+        rig.call("get_modulator", json!({"modulator": 9})),
+        Err("There's no modulator 9.".into())
+    );
+}
+
+#[test]
 fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
     let mut project = Project::new();
     let track = project.add_track("Voice", TrackKind::Audio);
@@ -877,11 +970,11 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     // They come after the app's tools, as read-only as they are.
     let listed = runtime.block_on(client.list_all_tools()).unwrap();
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 12, "{names:?}");
-    assert_eq!(names[10..], ["audio_echo", "audio_wait"]);
+    assert_eq!(names.len(), 13, "{names:?}");
+    assert_eq!(names[11..], ["audio_echo", "audio_wait"]);
     let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
-    assert_eq!((read_only(10), read_only(11)), (Some(true), Some(false)));
-    assert!(listed[10].output_schema.is_some());
+    assert_eq!((read_only(11), read_only(12)), (Some(true), Some(false)));
+    assert!(listed[11].output_schema.is_some());
     let server = client.peer_info().expect("the server introduced itself");
     let instructions = server.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("undo"), "{instructions}");

@@ -34,8 +34,8 @@ A command can take arguments, and give back a result, so the arrangement's
 gestures, scripts and agents can say exactly what to change. Its `params`
 list them: each `Param` has a name, a `Type` (a bool, an integer, a number,
 text, a position in beats, a track, a clip, a note, a locator, a device, a
-take, a parameter, or a list of one of those), whether it's optional, and a
-line on what it's for.
+take, a modulator, a routing, a parameter, or a list of one of those),
+whether it's optional, and a line on what it's for.
 
 - `Registry::run_with(id, &args, ctx)` runs a command with `Args`, built
   with `Args::new().with("clips", ids).with("by", Beats::new(4))`. It checks
@@ -637,15 +637,63 @@ and the status bar says why. A new device starts with the plugin's own
 defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
+### Modulation
+
+Modulators move parameters as the song plays without changing their
+values ([project-format.md](project-format.md#modulation)): a Macro's
+knobs and buttons, played by hand, an LFO, a shape that repeats, and an
+Envelope, a shape that runs once each time it's started. Each track has a
+strip of them, and so does the master, and a routing from a modulator's
+output to a parameter says how far it moves it. A modulator reaches the
+parameters of its own channel, a group's those of the tracks that feed it
+too, and the master's every track's. The commands name a modulator by its
+id as `modulator`, a routing by its id as `routing`, and a Macro's knob or
+button by its number as `control`.
+
+| Command | Title | What it does | Default key | Live |
+|---|---|---|---|---|
+| `modulation.add` | Add Modulator | Adds a modulator of `kind` (`macro`, `lfo` or `envelope`) at `index` or the end of the strip of `track`, the selected track, or the master with `master`, called `name`, or its kind's name and the first number free on the strip, such as "LFO 2", with every parameter at its default and a Macro with one knob. Returns the new modulator | none | none |
+| `modulation.delete` | Delete Modulator | Deletes the modulator `modulator`, with its routings, the routings to its parameters and its lanes | none | none |
+| `modulation.move` | Move Modulator | Moves the modulator `modulator` to `index` in its strip, counting the strip without it | none | none |
+| `modulation.rename` | Rename Modulator | Names the modulator `modulator`, `name` | none | none |
+| `modulation.set_param` | Set Modulator Parameter | Sets parameter `param` of the modulator `modulator`, its number in an LFO's or an Envelope's table, from 0, as [project-format.md](project-format.md#modulation) numbers them, or a Macro's knob or button, to `value`, kept in its range and to its steps. It overrides the parameter's lane, as moving a control does | none | none |
+| `modulation.add_control` | Add Macro Control | Adds a control of `kind`, `knob`, `toggle` (a button each press turns on or off) or `momentary` (one that's on while it's held), a knob without it, to the Macro `modulator`, at `index` or the end, called `name`, or "Knob" or "Button" and the first number free on the Macro. Returns its number | none | none |
+| `modulation.delete_control` | Delete Macro Control | Deletes the knob or button `control` of the Macro `modulator`, with the routings from it and to it and its lane | none | none |
+| `modulation.rename_control` | Rename Macro Control | Names it `name` | none | none |
+| `modulation.add_routing` | Add Routing | Has output `output` of the modulator `modulator`, its first without it, move the parameter `param` by `amount`, straight, with no scale and no lag. The parameter must be one modulators can move, in the modulator's reach, and not one that output moves already. The amount is a share of the parameter's range, from -1 to 1, along its control, so 0.25 moves a cutoff a quarter of its octaves up while the output is at 1, or for a plugin's parameter in the plugin's own units. Returns the routing | none | none |
+| `modulation.delete_routing` | Delete Routing | Deletes the routing `routing` | none | none |
+| `modulation.set_amount` | Set Routing Amount | Sets its `amount` | none | none |
+| `modulation.set_curve` | Set Routing Curve | Sets how it bends its output, `curve`: `linear`, `exponential`, `logarithmic`, `s_curve`, `stepped` in `steps` (from 2 to 128, as many as it had, or 4, without it), `absolute`, `positive` or `negative` | none | none |
+| `modulation.set_scale` | Set Routing Scale | Has output `output` of the modulator `modulator`, on the routing's channel, multiply its amount, as velocity would, or nothing without `modulator` | none | none |
+| `modulation.set_lag` | Set Routing Lag | Sets how long it takes to follow its output, `lag`, in ms from 0, at once, to 10,000: about two thirds of the way in that time | none | none |
+| `modulation.set_bypass` | Set Routing Bypass | Bypasses it, so it moves nothing and keeps its settings, or brings it back with `bypassed` false | none | none |
+
+Each is a step in the undo history: adding is named after the kind, such
+as "Add LFO", "Add Knob" or "Add Button", and deleting and moving after
+the modulator or the control, such as "Delete LFO 2". Changing a
+modulator's parameter is "Change LFO 2", and a run of changes to one
+parameter merges into one step, as a control's drag does. A routing's
+steps are "Add Routing", "Set Routing Amount" and so on, and bypassing it
+"Bypass Routing" or "Bring Back Routing". Deleting a modulator, a control,
+a device, a send or a track deletes the routings from it and to its
+parameters as part of the same step, so undo puts them back. A routing
+whose parameter goes out of the modulator's reach, as when its track
+leaves the group, stays in the project and moves nothing until it's back.
+The engine plays modulators without a new graph for each change of a
+parameter or an amount ([engine.md](engine.md#modulation)). The app's
+modulator strip is still to come.
+
 ### Automation
 
 Automation moves a parameter through points over the song
 ([project-format.md](project-format.md#lane)). Each command names
 its parameter with an argument of type `param`, a `ParamAddress`, which
 scripts write as text: "track 3 volume", "master pan", "send 2",
-"device 4 param 17", "device 4 bypass" or "clip 5 transpose"
-(`param_text`). A built-in device's parameter is its number in its kind's
-table, a plugin's its id in the plugin, and a test device's is 0. Every
+"device 4 param 17", "device 4 bypass", "clip 5 transpose" or
+"modulator 6 param 3" (`param_text`). A built-in device's parameter is its
+number in its kind's table, a plugin's its id in the plugin, and a test
+device's is 0. A modulator's is its number in an LFO's or an Envelope's
+table, or a Macro's knob or button ([Modulation](#modulation)). Every
 device has a Bypass, whatever its kind, which steps between off, 0, and
 on, 1, where on is bypassed, as a plugin's own bypass parameter does. An audio clip's are its gain and its
 warp's settings, by their keys as Show Clip Lane takes them

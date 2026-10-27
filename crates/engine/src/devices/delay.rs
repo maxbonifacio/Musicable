@@ -63,6 +63,10 @@ impl Node for Delay {
         self.params.automate(param, automation)
     }
 
+    fn modulated(&mut self, param: ParamId) {
+        self.params.modulated(param);
+    }
+
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);
@@ -141,7 +145,8 @@ impl Echoes {
         }
         let (mut bpm, mut next_change) = tempo_at(ctx.tempo, position, ctx.sample_rate);
         let [shortest, longest] = time_range(sample_rate);
-        let modulation = f64::from(values.modulation(TIME)) * sample_rate / 1000.0;
+        // Modulation moves the time in ratios, as its scale is a log one.
+        let modulation = values.modulations(TIME);
         let steady_cuts = values.steady(LOW_CUT) && values.steady(HIGH_CUT);
         if steady_cuts {
             let (low, high) = (values.first(LOW_CUT), values.first(HIGH_CUT));
@@ -168,7 +173,11 @@ impl Echoes {
             let left = out.channel(0)[i];
             let x = [left, if stereo { out.channel(1)[i] } else { left }];
             let (now, next, take) = self.time.next(self.fade);
-            let at = |time: f64| (time + modulation).clamp(shortest, longest);
+            let ratio = match modulation[i] {
+                0.0 => 1.0,
+                m => f64::from(m).exp(),
+            };
+            let at = |time: f64| (time * ratio).clamp(shortest, longest);
             let echo = [0, 1].map(|c| {
                 let line = &self.lines[c * len..][..len];
                 let first = read(line, self.mask, self.write, at(now));
@@ -427,6 +436,13 @@ mod tests {
         signal.iter().position(|&s| s != 0.0)
     }
 
+    /// The first frame of `signal` louder than -60 dB: where an echo a
+    /// fraction of a frame off its time starts, past the tail its
+    /// interpolation leaves on the frame before.
+    fn first_loud(signal: &[f32]) -> Option<usize> {
+        signal.iter().position(|&s| s.abs() > 1e-3)
+    }
+
     /// Whether `signal` is silent, near enough: what's left of an echo
     /// once its cuts have stopped ringing.
     fn quiet(signal: &[f32]) -> bool {
@@ -650,18 +666,20 @@ mod tests {
 
     #[test]
     fn modulating_the_time_moves_the_echoes_at_once() {
-        // 10 ms more, from the first frame: no fade.
+        // A tenth longer, from the first frame: no fade. The time's scale
+        // is a log one, so modulation moves it in ratios.
+        let longer = |ratio: f64| modulation(0, TIME, ratio.ln());
         let output = run(&wet(100.0, &[]))
-            .render(&click(6000), &[modulation(0, TIME, 10.0)])
+            .render(&click(6000), &[longer(1.1)])
             .swap_remove(0);
-        assert_eq!(first_sound(&output), Some(5280));
-        // Synced too.
+        assert_eq!(first_loud(&output), Some(5280));
+        // Synced too: 125 ms, and 10 ms more.
         let mut settings = wet(100.0, &[(NOTE, 2.0)]);
         settings[0] = (SYNC, 1.0);
         let output = run(&settings)
-            .render(&click(7000), &[modulation(0, TIME, 10.0)])
+            .render(&click(7000), &[longer(1.08)])
             .swap_remove(0);
-        assert_eq!(first_sound(&output), Some(6480));
+        assert_eq!(first_loud(&output), Some(6480));
     }
 
     #[test]
@@ -687,7 +705,7 @@ mod tests {
         let input = noise(20_000);
         let events = [
             param(700, TIME, 12.5),
-            modulation(2300, TIME, -3.3),
+            modulation(2300, TIME, -0.5),
             param(5000, PING_PONG, 1.0),
             param(6001, HIGH_CUT, 2000.0),
             param(9000, SYNC, 1.0),
@@ -716,7 +734,7 @@ mod tests {
         let step =
             [(0, 100.0), (1, 100.0), (1, 200.0)].map(|(at, ms)| Point::new(Beats::new(at), ms));
         let lane = Automation::new(&step, NativeKind::Delay.params()[TIME].scale).unwrap();
-        assert!(delay.automate(ParamId(TIME as u32), lane).is_none());
+        assert!(delay.automate(ParamId(TIME as u64), lane).is_none());
         let automated = Run::new(Box::new(delay)).playing().render(&input, &[]);
         assert_eq!(automated, set);
         assert_ne!(automated, run(&settings).playing().render(&input, &[]));

@@ -7,8 +7,11 @@ use crate::graph::NodeKey;
 
 /// A node parameter, numbered by the node type. Each node documents its
 /// parameters as constants, such as [`Gain::GAIN`](crate::nodes::Gain::GAIN).
+/// A plugin's are the plugin's own ids, which are 32 bits, and a
+/// modulator's take 64: see
+/// [`keys::param`](crate::compile::keys::param).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ParamId(pub u32);
+pub struct ParamId(pub u64);
 
 /// An event for the engine, sent through
 /// [`EngineHandle::send`](crate::EngineHandle::send) or
@@ -100,9 +103,14 @@ pub struct NodeEvent {
 pub enum NodeEventKind {
     /// Takes effect from `offset` on. Nodes ignore parameters they don't have.
     Param { param: ParamId, value: f64 },
-    /// Offsets a parameter from its value by `amount`, in the parameter's
-    /// units, from `offset` on: what a modulator does, as CLAP's parameter
-    /// modulation does. The value itself stays as it was, so the offset never
+    /// Offsets a parameter from its value by `amount`, from `offset` on:
+    /// what a modulator does, as CLAP's parameter modulation does. A plugin
+    /// takes it in its own units. Musicable's own nodes take it along the
+    /// parameter's scale
+    /// ([`Scale::position`](musicable_model::param::Scale::position)), so
+    /// in its units on a linear one and in ratios on a log one, and ramp to
+    /// it over [`MODULATION_RAMP`](crate::automation::MODULATION_RAMP)
+    /// frames. The value itself stays as it was, so the offset never
     /// ends up in the project, and the next modulation of the parameter
     /// replaces this one rather than adding to it. With a `note`, it offsets
     /// the parameter for that note's voice alone, on top of the offset for
