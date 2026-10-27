@@ -13,6 +13,7 @@ use musicable_analysis::Analysis;
 use musicable_model::automation;
 use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId};
 use musicable_model::param::{ClipParam, ParamAddress};
+use musicable_model::routing::Wire;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{Chain, Device, DeviceId, Project, TrackId};
 use serde::{Deserialize, Serialize};
@@ -470,9 +471,19 @@ pub struct Devices {
 /// a plugin's state and all.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceClipboard {
-    /// In the order they played, each with the lanes that automated it:
-    /// its parameters' and its Bypass's.
-    pub devices: Vec<(Device, Vec<automation::Lane>)>,
+    /// In the order they played.
+    pub devices: Vec<TakenDevice>,
+}
+
+/// A device as copies take it, with what goes along with them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TakenDevice {
+    pub device: Device,
+    /// The lanes that automated it: its parameters' and its Bypass's.
+    pub lanes: Vec<automation::Lane>,
+    /// The wires into it, which its copies keep, each with the lane that
+    /// automated its gain, if one did.
+    pub wires: Vec<(Wire, Option<automation::Lane>)>,
 }
 
 /// What the Sample Editor edits: the audio clip it shows, its selected warp

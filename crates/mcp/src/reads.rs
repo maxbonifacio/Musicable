@@ -13,6 +13,7 @@ use musicable_model::mixer::Bus;
 use musicable_model::modulation::{Curve, Modulation, ModulatorId};
 use musicable_model::native::{NativeDevice, ParamInfo, Unit};
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::Beats;
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Track, TrackKind,
@@ -135,9 +136,9 @@ fn add_keys(entry: &mut Map<String, Json>, keymap: &Keymap, id: &CommandId) {
 
 /// The project, with everything's id: the tempo map, the loop, the tracks
 /// with their mixer settings, devices, modulators, routings and clips, the
-/// master, the locators, and which parameters are automated. Notes,
-/// devices' and modulators' parameters and automation points come from
-/// their own reads.
+/// master, the wires, the locators, and which parameters are automated.
+/// Notes, devices' and modulators' parameters and automation points come
+/// from their own reads.
 pub(crate) fn project(window: &impl Window) -> Json {
     let project = window.project();
     let tempo = &project.tempo;
@@ -191,6 +192,9 @@ pub(crate) fn project(window: &impl Window) -> Json {
             .map(|t| track(project, t))
             .collect::<Vec<_>>(),
         "master": master(project),
+        "wires": (project.wires.iter())
+            .map(|wire| wire_entry(project, wire))
+            .collect::<Vec<_>>(),
         "locators": locators,
         "automation": automation,
     })
@@ -325,6 +329,47 @@ fn add_modulation(entry: &mut Json, project: &Project, chain: Chain, modulation:
 
 fn clip_type(clip_type: ClipType) -> &'static str {
     musicable_commands::mixer::clip_type_name(clip_type)
+}
+
+/// A wire as the project lists it: its id, the tap it takes from and the
+/// port it feeds, each with its name, and its gain.
+fn wire_entry(project: &Project, wire: &Wire) -> Json {
+    json!({
+        "id": wire.id.0,
+        "from": tap_entry(project, wire.from),
+        "to": {
+            "device": wire.to.device().0,
+            "port": port_key(wire.to),
+            "name": project.port_name(wire.to),
+        },
+        "gain": short(wire.gain),
+    })
+}
+
+/// A tap as wire.connect's arguments name it, with its name:
+/// `{"track": 3, "tap": "post_fx", "name": "Kick Post FX"}`,
+/// `{"master": true, "tap": "post_fader", ...}`, or `{"after": 5, ...}`
+/// for what device 5 puts out.
+fn tap_entry(project: &Project, tap: Tap) -> Json {
+    let on = |chain, tap: &str| match chain {
+        Chain::Track(track) => json!({ "track": track.0, "tap": tap }),
+        Chain::Master => json!({ "master": true, "tap": tap }),
+    };
+    let mut entry = match tap {
+        Tap::PreFx(track) => on(Chain::Track(track), "pre_fx"),
+        Tap::Device(device) => json!({ "after": device.0 }),
+        Tap::PostFx(chain) => on(chain, "post_fx"),
+        Tap::PostFader(chain) => on(chain, "post_fader"),
+    };
+    entry["name"] = project.tap_name(tap).into();
+    entry
+}
+
+/// A port's key, as get_device lists it.
+fn port_key(port: Port) -> &'static str {
+    match port {
+        Port::Sidechain(_) => "sidechain",
+    }
 }
 
 /// A device as the project lists it: its id, name and kind, and whether
@@ -523,8 +568,8 @@ fn points(curve: &[Point]) -> Json {
     points.into()
 }
 
-/// One device: what it is, and each of its parameters' number, name,
-/// range, unit and value.
+/// One device: what it is, each of its parameters' number, name, range,
+/// unit and value, and its ports with the wires into each.
 pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String> {
     let project = window.project();
     let Some((chain, index, device)) = project.find_device(id) else {
@@ -577,6 +622,23 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
         }
         DeviceKind::TestGain { gain } => entry["gain"] = short(*gain),
         DeviceKind::TestInstrument { level } => entry["level"] = short(*level),
+    }
+    let ports: Vec<Json> = (project.ports(id).into_iter())
+        .map(|port| {
+            let wires: Vec<Json> = (project.wires_into(port))
+                .map(|wire| {
+                    json!({
+                        "id": wire.id.0,
+                        "from": tap_entry(project, wire.from),
+                        "gain": short(wire.gain),
+                    })
+                })
+                .collect();
+            json!({ "port": port_key(port), "name": port.name(), "wires": wires })
+        })
+        .collect();
+    if !ports.is_empty() {
+        entry["ports"] = ports.into();
     }
     Ok(entry)
 }

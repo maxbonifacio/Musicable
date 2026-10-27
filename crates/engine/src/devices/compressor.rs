@@ -6,13 +6,17 @@
 //! down off the static curve ([`gain_reduction`]), and smooths that amount
 //! with a one-pole filter: the attack's while it grows and the release's
 //! while it shrinks (their smooth branching detector, after the gain
-//! computer), so each is a time constant whatever the level.
+//! computer), so each is a time constant whatever the level. The level is
+//! the [key](super::key)'s, which is the input unless Sidechain or the key
+//! filters say otherwise.
 
 use musicable_model::native::NativeDevice;
 use musicable_model::native::compressor::{
-    ATTACK, DETECTOR, KNEE, MIX, OUTPUT, RATIO, RELEASE, THRESHOLD, gain_reduction,
+    ATTACK, DETECTOR, KEY_HIGH_PASS, KEY_LOW_PASS, KNEE, LISTEN, MIX, OUTPUT, RATIO, RELEASE,
+    SIDECHAIN, THRESHOLD, gain_reduction,
 };
 
+use super::key::{Key, KeyParams};
 use super::{Params, Span, Values};
 use crate::{AudioMut, Automation, EngineConfig, Inputs, Node, ParamId, ProcessContext};
 
@@ -21,10 +25,19 @@ const PARAMS: [usize; 8] = [
     THRESHOLD, RATIO, ATTACK, RELEASE, KNEE, OUTPUT, MIX, DETECTOR,
 ];
 
+/// Where the key's parameters are.
+const KEY: KeyParams = KeyParams {
+    sidechain: SIDECHAIN,
+    high_pass: KEY_HIGH_PASS,
+    low_pass: KEY_LOW_PASS,
+    listen: LISTEN,
+};
+
 /// The compressor's node.
 #[derive(Debug, Clone)]
 pub struct Compressor {
     params: Params,
+    key: Key,
     state: State,
     sample_rate: f64,
 }
@@ -33,6 +46,7 @@ impl Compressor {
     pub fn new(device: &NativeDevice) -> Self {
         Self {
             params: Params::new(device),
+            key: Key::new(device, KEY),
             state: State::default(),
             sample_rate: 48_000.0,
         }
@@ -42,6 +56,7 @@ impl Compressor {
 impl Node for Compressor {
     fn prepare(&mut self, config: &EngineConfig) {
         self.params.prepare(config);
+        self.key.prepare(config);
         self.sample_rate = f64::from(config.sample_rate);
     }
 
@@ -56,6 +71,7 @@ impl Node for Compressor {
     fn adopt(&mut self, previous: &mut dyn Node) {
         if let Some(previous) = previous.downcast_mut::<Self>() {
             self.params.take_over(&previous.params);
+            self.key.take_over(&previous.key);
             self.state = previous.state;
         }
     }
@@ -65,12 +81,14 @@ impl Node for Compressor {
         for input in inputs.iter() {
             output.add_from(input);
         }
+        self.key.take(&inputs, output.frames());
         let Self {
             params,
+            key,
             state,
             sample_rate,
         } = self;
-        params.run(ctx, |span| state.render(&span, output, *sample_rate));
+        params.run(ctx, |span| state.render(&span, output, key, *sample_rate));
     }
 
     fn flush(&mut self, ctx: &ProcessContext<'_>) {
@@ -79,6 +97,7 @@ impl Node for Compressor {
 
     fn reset(&mut self) {
         self.params.reset();
+        self.key.reset();
         self.state = State::default();
     }
 }
@@ -95,38 +114,51 @@ struct State {
 }
 
 impl State {
-    /// Compresses one span of the output, in place.
-    fn render(&mut self, span: &Span<'_>, output: &mut AudioMut<'_>, sample_rate: f64) {
+    /// Compresses one span of the output, in place, by the level of `key`.
+    fn render(
+        &mut self,
+        span: &Span<'_>,
+        output: &mut AudioMut<'_>,
+        key: &mut Key,
+        sample_rate: f64,
+    ) {
         let frames = span.frames.len();
         if frames == 0 {
             return;
         }
         let values = span.values;
+        let mut key = key.span(values, span.frames.clone());
         let mut out = output.range_mut(span.frames.clone());
         let mut channels = out.channels_mut();
         let Some(left) = channels.next() else {
             return;
         };
         let mut right = channels.next();
+        let count = if right.is_some() { 2 } else { 1 };
         let steady = PARAMS.iter().all(|&p| values.steady(p));
         let mut settings = Settings::at(values, 0, sample_rate);
         for i in 0..frames {
             if !steady && i > 0 {
                 settings = Settings::at(values, i, sample_rate);
             }
-            let gain = match &right {
-                Some(right) => self.gain(&settings, &[left[i], right[i]]),
-                None => self.gain(&settings, &[left[i]]),
-            };
+            let own = [left[i], right.as_ref().map_or(left[i], |right| right[i])];
+            let keyed = key.as_mut().map_or(own, |key| key.at(i, own));
+            let gain = self.gain(&settings, &keyed[..count]);
             left[i] = (f64::from(left[i]) * gain) as f32;
             if let Some(right) = &mut right {
                 right[i] = (f64::from(right[i]) * gain) as f32;
             }
+            if let Some(key) = &key {
+                key.listen(i, keyed[0], &mut left[i]);
+                if let Some(right) = &mut right {
+                    key.listen(i, keyed[1], &mut right[i]);
+                }
+            }
         }
     }
 
-    /// Takes in a frame, a sample for each channel, and returns its gain,
-    /// with the output gain and the mix.
+    /// Takes in a frame of the key, a sample for each channel, and returns
+    /// its gain, with the output gain and the mix.
     fn gain(&mut self, settings: &Settings, frame: &[f32]) -> f64 {
         let mut peak = 0.0_f64;
         let mut power = 0.0_f64;
@@ -215,13 +247,14 @@ fn linear(db: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::f64::consts::TAU;
+    use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 
     use musicable_model::native::NativeKind;
     use musicable_model::native::compressor::DETECTORS;
+    use musicable_model::native::eq::{Band, Shape};
 
     use super::*;
-    use crate::devices::testing::{Run, modulation, param};
+    use crate::devices::testing::{Run, db, gain_at, modulation, param};
 
     /// The sample rate [`Run`] renders at.
     const FS: f64 = 48_000.0;
@@ -259,6 +292,11 @@ mod tests {
             .zip(output)
             .map(|(&i, &o)| 20.0 * (f64::from(o) / f64::from(i)).log10())
             .collect()
+    }
+
+    /// `signal` on both channels.
+    fn both(signal: &[f32]) -> Vec<Vec<f32>> {
+        vec![signal.to_vec(), signal.to_vec()]
     }
 
     /// A sine at `freq` Hz, peaking at `size`.
@@ -542,5 +580,176 @@ mod tests {
         for i in 16_000..24_000 {
             assert!((switched[0][i] - all_along[0][i]).abs() < 1e-6, "{i}");
         }
+    }
+    /// With Sidechain on, it turns its input down as far as it would turn
+    /// its side input down on its own, frame by frame: a kick ducks a bass.
+    #[test]
+    fn sidechain_turns_the_input_down_by_the_side_inputs_level() {
+        let settings = [
+            (THRESHOLD, -30.0),
+            (KNEE, 0.0),
+            (ATTACK, 2.0),
+            (RELEASE, 40.0),
+        ];
+        // Loud, quiet, louder and quiet, under a bass too quiet to be
+        // compressed on its own.
+        let kick = steps(&[-6.0, -60.0, 0.0, -60.0], 4800);
+        let bass = steps(&[-36.0], kick.len());
+        let alone = run(&device(&settings)).render(&both(&kick), &[]);
+        let mut keyed = device(&settings);
+        keyed.set(SIDECHAIN, 1.0);
+        let ducked = run(&keyed).render_keyed(&both(&bass), Some(&both(&kick)), &[]);
+        assert_eq!(ducked[0], ducked[1]);
+        let expected = gains(&kick, &alone[0]);
+        let measured = gains(&bass, &ducked[0]);
+        for (i, (measured, expected)) in measured.iter().zip(&expected).enumerate() {
+            assert!(
+                (measured - expected).abs() < 1e-4,
+                "frame {i}: {measured} dB, {expected} dB on its own"
+            );
+        }
+        assert!((expected[4799] + 18.0).abs() < 1e-3, "{}", expected[4799]);
+    }
+
+    /// Its own input keys it where nothing is wired to its side input,
+    /// whatever Sidechain says, and with Sidechain off, what's wired to it
+    /// changes nothing.
+    #[test]
+    fn its_own_input_keys_it_unless_sidechain_has_a_side_input() {
+        let settings = [(THRESHOLD, -30.0), (ATTACK, 2.0), (RELEASE, 40.0)];
+        let input = noise(9000);
+        let side = steps(&[0.0], 9000);
+        let plain = run(&device(&settings)).render(&both(&input), &[]);
+        let mut on = device(&settings);
+        on.set(SIDECHAIN, 1.0);
+        assert_eq!(run(&on).render(&both(&input), &[]), plain);
+        let off = device(&settings);
+        let wired = run(&off).render_keyed(&both(&input), Some(&both(&side)), &[]);
+        assert_eq!(wired, plain);
+    }
+
+    /// Listen plays the key through its filters, a 12 dB per octave
+    /// Butterworth high-pass and low-pass, as an EQ's cuts are. At the ends
+    /// of their ranges, they leave it as it is.
+    #[test]
+    fn listen_plays_the_key_through_its_filters() {
+        let mut impulse = vec![0.0; 1 << 15];
+        impulse[0] = 1.0;
+        let band = |shape, freq| Band {
+            on: true,
+            shape,
+            freq,
+            gain: 0.0,
+            q: FRAC_1_SQRT_2,
+        };
+        for (high, low) in [(100.0, 5000.0), (1000.0, 20_000.0), (20.0, 300.0)] {
+            let compressor = device(&[(LISTEN, 1.0), (KEY_HIGH_PASS, high), (KEY_LOW_PASS, low)]);
+            let response = run(&compressor).render(&both(&impulse), &[]).swap_remove(0);
+            let mut freq = 20.0;
+            while freq < 20_000.0 {
+                let mut design = 1.0;
+                if high > 20.0 {
+                    design *= band(Shape::LowCut12, high).response(freq, FS);
+                }
+                if low < 20_000.0 {
+                    design *= band(Shape::HighCut12, low).response(freq, FS);
+                }
+                let measured = gain_at(&response, freq, FS);
+                // Far down a slope, as for the EQ's, the impulse's rounding
+                // to f32 shows.
+                let close = if design > 1e-3 {
+                    (db(measured) - db(design)).abs() < 1e-3
+                } else {
+                    (measured - design).abs() < 1e-6
+                };
+                assert!(close, "{high}, {low} at {freq:.0} Hz: {measured} {design}");
+                freq *= 1.05;
+            }
+        }
+        let input = noise(4000);
+        let listening = run(&device(&[(LISTEN, 1.0)])).render(&both(&input), &[]);
+        assert_eq!(listening, both(&input));
+        // And with Sidechain on, it's the side input.
+        let keyed = device(&[(LISTEN, 1.0), (SIDECHAIN, 1.0)]);
+        let side = sine(300.0, 0.5, 4000);
+        let listening = run(&keyed).render_keyed(&both(&input), Some(&both(&side)), &[]);
+        assert_eq!(listening, both(&side));
+    }
+
+    /// A key filter fades in as it comes off the end of its range, and out
+    /// as it gets back there, so the key doesn't jump, even where all a
+    /// high-pass would take out is a steady offset.
+    #[test]
+    fn a_key_filter_fades_in_and_out_at_the_end_of_its_range() {
+        let input = vec![0.5; 9000];
+        for (filter, freq, end) in [
+            (KEY_LOW_PASS, 1000.0, 20_000.0),
+            (KEY_HIGH_PASS, 500.0, 20.0),
+        ] {
+            let events = [param(1000, filter, freq), param(5000, filter, end)];
+            let compressor = device(&[(LISTEN, 1.0)]);
+            let output = run(&compressor)
+                .render(&both(&input), &events)
+                .swap_remove(0);
+            let jump = output
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0, f32::max);
+            assert!(jump < 5e-3, "{filter}: {jump}");
+            // It's all the way out again 10 ms after the ramp.
+            assert_eq!(output[5960..], input[5960..]);
+        }
+    }
+
+    #[test]
+    fn blocks_of_any_length_render_the_same_with_a_key() {
+        let compressor = device(&[(THRESHOLD, -30.0), (ATTACK, 2.0), (RELEASE, 40.0)]);
+        let input = noise(9000);
+        let side: Vec<f32> = sine(80.0, 0.9, 9000);
+        let events = [
+            param(500, SIDECHAIN, 1.0),
+            param(1700, KEY_HIGH_PASS, 200.0),
+            modulation(2300, KEY_HIGH_PASS, 300.0),
+            param(3100, KEY_LOW_PASS, 2000.0),
+            param(4000, LISTEN, 1.0),
+            param(5200, LISTEN, 0.0),
+            param(6001, SIDECHAIN, 0.0),
+            param(7000, KEY_LOW_PASS, 20_000.0),
+        ];
+        let render = |block| {
+            run(&compressor).with_block(block).render_keyed(
+                &both(&input),
+                Some(&both(&side)),
+                &events,
+            )
+        };
+        let reference = render(512);
+        for block in [1, 7, 64, 333] {
+            assert_eq!(render(block), reference, "blocks of {block}");
+        }
+    }
+
+    #[test]
+    fn a_new_node_carries_on_with_its_key_where_the_old_one_was() {
+        let compressor = device(&[
+            (THRESHOLD, -30.0),
+            (SIDECHAIN, 1.0),
+            (KEY_HIGH_PASS, 150.0),
+            (KEY_LOW_PASS, 3000.0),
+        ]);
+        let input = noise(4000);
+        let side = sine(500.0, 0.8, 4000);
+        let new = || Box::new(Compressor::new(&compressor));
+        let whole = Run::new(new()).render_keyed(&both(&input), Some(&both(&side)), &[]);
+        let mut run = Run::new(new());
+        let (first, second) = input.split_at(1500);
+        let (side_first, side_second) = side.split_at(1500);
+        let mut swapped = run.render_keyed(&both(first), Some(&both(side_first)), &[]);
+        run.swap(new());
+        let rest = run.render_keyed(&both(second), Some(&both(side_second)), &[]);
+        for (channel, rest) in swapped.iter_mut().zip(rest) {
+            channel.extend(rest);
+        }
+        assert_eq!(swapped, whole);
     }
 }

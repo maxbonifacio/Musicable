@@ -16,7 +16,8 @@ A lane's header names the parameter, with its value at the playhead, or
 
 - **▾** chooses the parameter the lane shows: the track's volume, pan and
   sends, then each device's parameters, in a submenu for each device, the
-  automated ones in red.
+  automated ones in red. A Compressor's or a Gate's submenu ends with the
+  gains of its sidechain's sources ([Sidechains](sidechains.md)).
 - **+** adds a lane for the next parameter.
 - **×** hides the lane.
 

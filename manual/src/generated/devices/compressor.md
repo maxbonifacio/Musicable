@@ -10,3 +10,10 @@
 | Output | -24.0 dB to +24.0 dB | 0.0 dB |
 | Mix | 0% to 100% | 100% |
 | Detector | Peak, RMS | Peak |
+
+| Sidechain | Range | Default |
+|---|---|---|
+| On | Off or On | Off |
+| High-Pass | 20.0 Hz to 20.0 kHz | 20.0 Hz |
+| Low-Pass | 20.0 Hz to 20.0 kHz | 20.0 kHz |
+| Listen | Off or On | Off |

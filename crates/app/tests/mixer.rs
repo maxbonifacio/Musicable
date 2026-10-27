@@ -1,14 +1,16 @@
 //! The mixer in the app: changes from the mixer's controls reach the engine,
-//! the meters move, the track commands add tracks, opening another project
-//! starts it afresh, and a mix plays the same with the parallel scheduler as
-//! with the reference renderer.
+//! the meters move, the track commands add tracks, a wire from one track
+//! keys a compressor on another, opening another project starts it afresh,
+//! and a mix plays the same with the parallel scheduler as with the
+//! reference renderer.
 
 use musicable_app::Session;
 use musicable_app::null_test::{self, Player, Render};
-use musicable_commands::Keymap;
 use musicable_commands::mixer::Change;
+use musicable_commands::{Args, CommandId, Keymap, Value, wire};
 use musicable_engine::{Engine, EngineConfig, ParallelOptions, rt};
-use musicable_model::{ClipType, Project, TestTone, TrackId, TrackKind};
+use musicable_model::native::{NativeDevice, NativeKind, compressor};
+use musicable_model::{Chain, ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -42,8 +44,16 @@ impl Rig {
     /// Makes `change`, and waits for the graph it needs, if any, as the
     /// app's next frames would.
     fn change(&mut self, change: Change) {
-        self.session.change_mixer(change);
+        self.session.change_mixer(change).unwrap();
         self.session.wait_for_graph();
+    }
+
+    /// Runs the command `id` with `args`, and waits for the graph it needs,
+    /// if any.
+    fn run(&mut self, id: &CommandId, args: Args) -> Value {
+        let value = self.session.run_with(id, &args).unwrap();
+        self.session.wait_for_graph();
+        value
     }
 
     /// Renders a fifth of a second as the audio thread would, ticking the
@@ -147,6 +157,44 @@ fn the_mixer_drives_the_engine() {
     assert!(level(reverb).rms[1] > 0.5, "{:?}", level(reverb));
     assert!(level(pad).rms[0] < 0.01, "{:?}", level(pad));
     assert!(meters.master().level().peak[1] > 0.9);
+}
+
+#[test]
+fn a_muted_kick_keys_a_compressor_on_the_bass() {
+    let mut project = Project::new();
+    let kick = tone_track(&mut project, "Kick", 55.0);
+    let bass = tone_track(&mut project, "Bass", 110.0);
+    // Loud after its fader, where the wire takes it, but muted.
+    let track = project.track_mut(kick).unwrap();
+    (track.gain, track.muted) = (4.0, true);
+    let mut native = NativeDevice::new(NativeKind::Compressor);
+    native.values[compressor::THRESHOLD] = 0.0;
+    native.values[compressor::ATTACK] = 0.1;
+    native.values[compressor::RELEASE] = 5.0;
+    let device = project.new_device(DeviceKind::Native(native));
+    let id = device.id;
+    project
+        .devices_mut(Chain::Track(bass))
+        .unwrap()
+        .push(device);
+    let mut rig = Rig::new(project);
+    assert!(rig.press("Space"));
+    // The bass alone stays under the threshold.
+    near(rig.peaks(), [0.5, 0.5]);
+
+    let from_kick = Args::new()
+        .with("track", kick)
+        .with("tap", "post_fader")
+        .with("device", id);
+    let Value::Wire(key) = rig.run(&wire::CONNECT, from_kick) else {
+        panic!("a wire");
+    };
+    let [left, right] = rig.peaks();
+    assert!(left < 0.4 && right < 0.4, "ducked: {left}, {right}");
+    // Turned down, the key is under the threshold too.
+    let gain = Args::new().with("wire", key).with("gain", 0.25);
+    rig.run(&wire::SET_GAIN, gain);
+    near(rig.peaks(), [0.5, 0.5]);
 }
 
 #[test]

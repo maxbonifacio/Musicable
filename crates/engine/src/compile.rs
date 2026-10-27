@@ -30,6 +30,12 @@
 //! channels add to them: see [`modulation`](crate::modulation). A MIDI
 //! track's node gets the track's notes.
 //!
+//! Wires take a tap's signal through a gain into a device's side input,
+//! such as a compressor's sidechain, once every strip is built, so they can
+//! join any two. Taps come before the output stage, where mute and solo
+//! cut, so a muted track's wires carry on. Delay compensation lines up a
+//! side input with the main input, as it does every path that meets.
+//!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
 //! song plays.
@@ -43,6 +49,7 @@ use std::thread::{self, JoinHandle};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::{ModulatorKind, Routing, envelope, lfo};
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::{self, Tap};
 use musicable_model::time::TempoMap;
 use musicable_model::{
     AudioInput, Chain, ClipType, ConsoleSettings, Device, DeviceId, DeviceKind, Input, Master,
@@ -57,7 +64,8 @@ use crate::modulation::Modulation;
 use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
 use crate::switch::Switch;
 use crate::{
-    Automation, EngineConfig, Graph, GraphError, Node, NodeId, NodeKey, ParamId, PreparedGraph,
+    Automation, EngineConfig, Graph, GraphError, InputPort, Node, NodeId, NodeKey, ParamId,
+    PreparedGraph,
 };
 
 /// The keys [`compile`] gives model objects' nodes.
@@ -71,10 +79,11 @@ use crate::{
 /// track whose id is `u32::MAX`, which no track has. Sends and devices have
 /// their own ids in the low 32 bits, with role 9 for sends and 10 for
 /// devices, and so does the slot in front of a device, with role 6, so it
-/// goes where the device goes. Keys with role 0 belong to no
-/// channel.
+/// goes where the device goes. Wires have theirs with role 14. Keys with
+/// role 0 belong to no channel.
 pub mod keys {
     use musicable_model::param::ParamAddress;
+    use musicable_model::routing::WireId;
     use musicable_model::{Chain, DeviceId, Project, SendId, TrackId};
 
     use super::Slot;
@@ -168,6 +177,12 @@ pub mod keys {
         }
     }
 
+    /// A wire, a [`Gain`](crate::nodes::Gain) at the wire's gain that feeds
+    /// a device's side input.
+    pub fn wire(wire: WireId) -> NodeKey {
+        NodeKey(14 << 32 | u64::from(wire.0))
+    }
+
     /// The master's fader, a [`Gain`](crate::nodes::Gain).
     pub fn master_gain() -> NodeKey {
         track_gain(MASTER_STRIP)
@@ -186,8 +201,8 @@ pub mod keys {
 
     /// The node with the parameter at `address` in `project`, and the
     /// parameter: a channel's fader's [`Gain::GAIN`] for its volume and
-    /// [`Gain::PAN`] for its pan, a send's [`Gain::GAIN`], a device's
-    /// parameter `n` as `ParamId(n)`, its Bypass as its switch's
+    /// [`Gain::PAN`] for its pan, a send's or a wire's [`Gain::GAIN`], a
+    /// device's parameter `n` as `ParamId(n)`, its Bypass as its switch's
     /// [`Switch::BYPASS`], and a modulator's parameter as its channel's
     /// [`modulation::param_id`]. A clip's parameters have none: its clip
     /// player follows the curves the clip keeps. Nor has a modulator the
@@ -205,6 +220,7 @@ pub mod keys {
             ParamAddress::Device(_, n) if ParamId(n.into()) == Switch::BYPASS => return None,
             ParamAddress::Device(device, n) => (self::device(device), ParamId(n.into())),
             ParamAddress::Bypass(device) => (self::device(device), Switch::BYPASS),
+            ParamAddress::Wire(wire) => (self::wire(wire), Gain::GAIN),
             ParamAddress::Clip(..) => return None,
             ParamAddress::Modulator(modulator, n) => {
                 let (chain, ..) = project.find_modulator(modulator)?;
@@ -592,6 +608,10 @@ fn build(
 
     let silenced = project.silenced();
     let mut tapped = HashMap::new();
+    // Where each tap's signal is, and the switch of each device a wire can
+    // feed, for the wires.
+    let mut points = HashMap::new();
+    let mut ports = HashMap::new();
     for track in &project.tracks {
         let player = clip_player(track, media, &project.tempo).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
@@ -630,11 +650,15 @@ fn build(
             _ => None,
         };
         let head = buses.get(&track.id).copied().or(monitor).or(player);
+        if let Some(head) = head {
+            points.insert(Tap::PreFx(track.id), head);
+        }
         let mut strip = Strip {
             graph: &mut graph,
             tail: head,
         };
         let taps = strip.channel(Channel::Track(track), devices, media, &mut stages);
+        taps.record(Chain::Track(track.id), &mut points, &mut ports);
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
         {
@@ -685,16 +709,36 @@ fn build(
         graph: &mut graph,
         tail: Some(master),
     };
-    strip.channel(
+    let taps = strip.channel(
         Channel::Master(&project.master),
         devices,
         media,
         &mut stages,
     );
+    taps.record(Chain::Master, &mut points, &mut ports);
     let output = Gain::new(1.0).with_meter(meters.master().clone());
     strip.push(keys::master_output(), Box::new(output));
     let output = strip.tail.expect("the master's strip has its output stage");
     graph.set_output(output).expect("the output was just added");
+
+    // Once every strip is built, so a wire can join any two. A wire into a
+    // device with no node in the signal, such as a deactivated one, has
+    // nothing to feed.
+    for wire in project.live_wires() {
+        let (Some(&from), Some(&to)) = (points.get(&wire.from), ports.get(&wire.to.device()))
+        else {
+            continue;
+        };
+        let gain = Gain::new(wire.gain).with_max_gain(routing::Wire::GAIN_MAX);
+        let gain = graph.add(keys::wire(wire.id), gain);
+        connect(&mut graph, from, gain);
+        let port = match wire.to {
+            routing::Port::Sidechain(_) => InputPort::Side(0),
+        };
+        graph
+            .connect_to(gain, to, port)
+            .expect("the model's routing rules leave no loops");
+    }
     graph.set_cue(cue).expect("the cue bus was just added");
     for node in stems.iter().filter_map(|track| tapped.get(track)) {
         graph
@@ -930,13 +974,41 @@ struct Strip<'a> {
 }
 
 /// Where a channel's sends take its signal: the last node before the
-/// fader, and the last one after the post-fader slot. `None` where the
-/// channel has no node yet. And the channel's first instrument, if it has
-/// one.
+/// fader, its Post FX, and the last one after the post-fader slot, its Post
+/// Fader. `None` where the channel has no node yet. And the channel's first
+/// instrument, if it has one, and where its devices are, for wires.
 struct Taps {
     pre_fader: Option<NodeId>,
     post_fader: Option<NodeId>,
     instrument: Option<NodeId>,
+    /// What each device puts out: its switch's output, or where it has no
+    /// node in the signal, what comes into it.
+    devices: Vec<(DeviceId, Option<NodeId>)>,
+    /// The switch of each device in the signal.
+    switches: Vec<(DeviceId, NodeId)>,
+}
+
+impl Taps {
+    /// Adds where the taps of `chain`, the channel's, are to `points`, but
+    /// for its Pre FX, and its devices' switches to `ports`.
+    fn record(
+        &self,
+        chain: Chain,
+        points: &mut HashMap<Tap, NodeId>,
+        ports: &mut HashMap<DeviceId, NodeId>,
+    ) {
+        let taps = [
+            (Tap::PostFx(chain), self.pre_fader),
+            (Tap::PostFader(chain), self.post_fader),
+        ];
+        let devices = self.devices.iter().map(|&(id, at)| (Tap::Device(id), at));
+        for (tap, at) in taps.into_iter().chain(devices) {
+            if let Some(at) = at {
+                points.insert(tap, at);
+            }
+        }
+        ports.extend(self.switches.iter().copied());
+    }
 }
 
 impl Strip<'_> {
@@ -969,6 +1041,7 @@ impl Strip<'_> {
             }
         };
         let mut instrument = None;
+        let (mut device_taps, mut switches) = (Vec::new(), Vec::new());
         for device in channel.devices() {
             slot(self, Slot::BeforeDevice(device.id));
             let key = keys::device(device.id);
@@ -980,6 +1053,10 @@ impl Strip<'_> {
                 Some(node) => Some(self.push(key, Box::new(Switch::new(node, device.bypassed)))),
                 None => None,
             };
+            if let Some(node) = node {
+                switches.push((device.id, node));
+            }
+            device_taps.push((device.id, self.tail));
             if device.kind.is_instrument() && instrument.is_none() {
                 instrument = Some(node);
             }
@@ -994,6 +1071,8 @@ impl Strip<'_> {
             pre_fader,
             post_fader,
             instrument: instrument.flatten(),
+            devices: device_taps,
+            switches,
         }
     }
 
@@ -1180,6 +1259,8 @@ mod tests {
     use musicable_model::automation::{Lane, Point};
     use musicable_model::clip::ClipContent;
     use musicable_model::modulation::{ModulatorId, Output};
+    use musicable_model::native::{NativeDevice, NativeKind, compressor};
+    use musicable_model::routing::{Port, WireId};
     use musicable_model::time::{BeatRange, Beats};
     use musicable_model::{DeviceId, Monitor, SendId, TestTone, TrackId, TrackKind};
 
@@ -2263,5 +2344,249 @@ mod tests {
             .unwrap();
         play(&mut engine, 64);
         assert!(play(&mut engine, 1000).iter().all(|&s| s == 0.0));
+    }
+
+    /// A kick, an impulse on frame 100, and a bass whose compressor is keyed
+    /// by the kick's Post FX through a wire and plays its key. The kick's
+    /// device is there for its slot, which [`latencies`] puts the impulse
+    /// in. The compressor's id, and the wire's.
+    fn keyed() -> (Project, DeviceId, WireId) {
+        let mut p = Project::new();
+        let kick = p.add_track("Kick", TrackKind::Audio);
+        let bass = p.add_track("Bass", TrackKind::Audio);
+        let device = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        p.track_mut(kick).unwrap().devices.push(device);
+        let mut native = NativeDevice::new(NativeKind::Compressor);
+        native.set(compressor::SIDECHAIN, 1.0);
+        native.set(compressor::LISTEN, 1.0);
+        let device = p.new_device(DeviceKind::Native(native));
+        let id = device.id;
+        p.track_mut(bass).unwrap().devices.push(device);
+        let wire = p.new_wire(Tap::PostFx(Chain::Track(kick)), Port::Sidechain(id));
+        let wire_id = wire.id;
+        p.wires.push(wire);
+        (p, id, wire_id)
+    }
+
+    /// The stages for a [`keyed`] project: the kick's impulse, with `kick`
+    /// frames of latency after it, and `bass` frames of latency in front of
+    /// the bass's compressor.
+    fn latencies(
+        kick: usize,
+        bass: usize,
+    ) -> impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>> {
+        move |channel, slot| {
+            let Channel::Track(track) = channel else {
+                return None;
+            };
+            let late = |frames: usize| {
+                (frames > 0).then(|| Box::new(Latent(Delay::new(frames))) as Box<dyn Node>)
+            };
+            match (track.name.as_str(), slot) {
+                ("Kick", Slot::BeforeDevice(_)) => Some(Box::new(Impulse { at: 100 })),
+                ("Kick", Slot::PreFader) => late(kick),
+                ("Bass", Slot::BeforeDevice(_)) => late(bass),
+                _ => None,
+            }
+        }
+    }
+
+    /// `p` compiled with the stages [`latencies`] gives it.
+    fn keyed_graph(p: &Project, kick: usize, bass: usize) -> PreparedGraph {
+        compile_with(
+            p,
+            &Meters::new(),
+            &Media::new(),
+            &Devices::new(),
+            &InputLayout::new(),
+            latencies(kick, bass),
+        )
+        .prepare(&CONFIG)
+        .unwrap()
+    }
+
+    /// The frames of `out`, interleaved stereo, that aren't silent, and
+    /// what's on them, which is the same on both channels.
+    fn loud(out: &[f32]) -> Vec<(usize, f32)> {
+        out.chunks(2)
+            .enumerate()
+            .filter(|(_, frame)| frame.iter().any(|&s| s != 0.0))
+            .map(|(i, frame)| {
+                assert_eq!(frame[0], frame[1], "frame {i}");
+                (i, frame[0])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wire_keys_a_device_on_another_track_lined_up_whatever_the_latency() {
+        let (p, ..) = keyed();
+        for (kick, bass) in [(0, 0), (37, 0), (0, 37), (20, 37)] {
+            let graph = keyed_graph(&p, kick, bass);
+            assert_eq!(graph.latency(), kick.max(bass));
+            // The kick, and the bass playing it as its key, on the same
+            // frame.
+            let out = render(graph, 400);
+            assert_eq!(loud(&out), [(100 + kick.max(bass), 2.0)], "{kick}, {bass}");
+        }
+    }
+
+    #[test]
+    fn a_muted_or_soloed_out_track_still_keys() {
+        let (mut p, ..) = keyed();
+        p.tracks[0].muted = true;
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.0)]);
+        p.tracks[0].muted = false;
+        p.tracks[1].solo = true;
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.0)]);
+    }
+
+    #[test]
+    fn a_bypassed_or_deactivated_device_plays_nothing_it_is_wired() {
+        let (mut p, ..) = keyed();
+        p.tracks[1].devices[0].bypassed = true;
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.0)]);
+        p.tracks[1].devices[0].bypassed = false;
+        p.tracks[1].devices[0].active = false;
+        let graph = keyed_graph(&p, 0, 0);
+        assert!(!graph.contains(keys::wire(p.wires[0].id)));
+        assert_eq!(loud(&render(graph, 400)), [(100, 1.0)]);
+    }
+
+    #[test]
+    fn wires_into_a_port_sum_at_their_gains_and_follow_their_lanes() {
+        let (mut p, id, wire) = keyed();
+        p.wire_mut(wire).unwrap().gain = 0.5;
+        // From after the kick's device as well, where its impulse is too.
+        let from = Tap::Device(p.tracks[0].devices[0].id);
+        let mut second = p.new_wire(from, Port::Sidechain(id));
+        second.gain = 0.25;
+        p.wires.push(second);
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.75)]);
+        let lane = Lane::new(
+            ParamAddress::Wire(wire),
+            vec![Point::new(Beats::ZERO, 0.125)],
+        );
+        p.automation.push(lane);
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.375)]);
+    }
+
+    #[test]
+    fn modulators_on_the_keyed_track_move_a_wires_gain_through_its_range() {
+        let (mut p, _, wire) = keyed();
+        let (kick, bass) = (Chain::Track(p.tracks[0].id), Chain::Track(p.tracks[1].id));
+        let gain = ParamAddress::Wire(wire);
+        // A wire's gain is on the track of the device it feeds.
+        assert!(p.in_reach(bass, gain));
+        assert!(!p.in_reach(kick, gain));
+        let mut macros = p.new_modulator(ModulatorKind::Macro, "Macro 1");
+        macros.set(0, 1.0);
+        let routing = p.new_routing(Output::new(macros.id, 0), gain, -1.0);
+        let modulation = p.modulation_mut(bass).unwrap();
+        modulation.modulators.push(macros);
+        modulation.routings.push(routing);
+        // All the way down, the compressor listens to nothing.
+        assert_eq!(loud(&render(keyed_graph(&p, 0, 0), 400)), [(100, 1.0)]);
+        // All the way up, to the wire's +24 dB rather than a fader's +6.
+        p.tracks[1].modulation.routings[0].amount = 1.0;
+        let out = loud(&render(keyed_graph(&p, 0, 0), 400));
+        let [(100, level)] = out[..] else {
+            panic!("{out:?}");
+        };
+        assert!(
+            (level - 1.0 - routing::Wire::GAIN_MAX).abs() < 1e-3,
+            "{level}"
+        );
+    }
+
+    /// With the compressor compressing, a kick turns a bass on another
+    /// track down from the very frame it comes out of the mix, whatever
+    /// the latency on either, muted or not.
+    #[test]
+    fn a_kick_ducks_a_bass_on_another_track_on_its_own_frame() {
+        for (kick, bass) in [(0, 0), (37, 0), (0, 37)] {
+            for muted in [false, true] {
+                let (mut p, ..) = keyed();
+                // A bass under the threshold, so only the kick turns it
+                // down.
+                p.tracks[1].tone = Some(TestTone {
+                    frequency: 55.0,
+                    level: 0.005,
+                });
+                let mut native = NativeDevice::new(NativeKind::Compressor);
+                native.set(compressor::SIDECHAIN, 1.0);
+                native.set(compressor::THRESHOLD, -40.0);
+                native.set(compressor::KNEE, 0.0);
+                native.set(compressor::ATTACK, 0.1);
+                p.tracks[1].devices[0].kind = DeviceKind::Native(native);
+                p.tracks[0].muted = muted;
+                let mut plain = p.clone();
+                plain.wires.clear();
+                let at = 100 + kick.max(bass);
+                if !muted {
+                    let mut kick_alone = plain.clone();
+                    kick_alone.tracks[1].muted = true;
+                    let out = render(keyed_graph(&kick_alone, kick, bass), 400);
+                    assert_eq!(loud(&out), [(at, 1.0)]);
+                }
+                let ducked = render(keyed_graph(&p, kick, bass), 400);
+                let plain = render(keyed_graph(&plain, kick, bass), 400);
+                assert_eq!(ducked[..2 * at], plain[..2 * at], "{kick}, {bass}, {muted}");
+                for c in 0..2 {
+                    let (ducked, plain) = (ducked[2 * at + c], plain[2 * at + c]);
+                    let kick = if muted { 0.0 } else { 1.0 };
+                    let (ducked, plain) = ((ducked - kick).abs(), (plain - kick).abs());
+                    assert!(ducked < plain * 0.9, "{ducked} {plain}");
+                }
+            }
+        }
+    }
+
+    /// An export renders on the parallel scheduler with the tracks'
+    /// stems: it plays the wires just as playback does.
+    #[test]
+    fn an_export_plays_wires_as_playback_does() {
+        let (p, ..) = keyed();
+        let (kick, bass) = (p.tracks[0].id, p.tracks[1].id);
+        let played = render(keyed_graph(&p, 37, 0), 400);
+        let graph = build(
+            &p,
+            &Meters::new(),
+            &Media::new(),
+            &Devices::new(),
+            &InputLayout::new(),
+            &[kick, bass],
+            latencies(37, 0),
+        )
+        .prepare(&CONFIG)
+        .unwrap();
+        let renderer = crate::ParallelRenderer::new(crate::ParallelOptions {
+            realtime: false,
+            inline_below: None,
+            ..crate::ParallelOptions::default()
+        });
+        let (mut engine, mut handle) = Engine::with_renderer(CONFIG, Box::new(renderer));
+        handle.swap_graph(graph).unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        let frames = 400;
+        let mut mix = vec![0.0; 2 * frames];
+        let mut stems = [vec![0.0; 2 * frames], vec![0.0; 2 * frames]];
+        let [kick_stem, bass_stem] = &mut stems;
+        engine.process_with_taps(
+            &mut AudioMut::from_planar(&mut mix, 2),
+            &mut [
+                AudioMut::from_planar(kick_stem, 2),
+                AudioMut::from_planar(bass_stem, 2),
+            ],
+        );
+        let interleave = |planar: &[f32]| -> Vec<f32> {
+            let (left, right) = planar.split_at(frames);
+            left.iter().zip(right).flat_map(|(&l, &r)| [l, r]).collect()
+        };
+        assert_eq!(interleave(&mix), played);
+        assert_eq!(loud(&interleave(kick_stem)), [(137, 1.0)]);
+        assert_eq!(loud(&interleave(bass_stem)), [(137, 1.0)]);
     }
 }

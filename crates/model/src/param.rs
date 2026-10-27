@@ -6,6 +6,7 @@
 use crate::clip::{ClipContent, ClipId};
 use crate::modulation::ModulatorId;
 use crate::native::ParamInfo;
+use crate::routing::{Wire, WireId};
 use crate::warp::{
     GranularSettings, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp, WarpMode,
 };
@@ -37,6 +38,9 @@ pub enum ParamAddress {
     /// Envelope's parameter in its kind's table, or of a Macro's control
     /// (see [`modulation`](crate::modulation)).
     Modulator(ModulatorId, u32),
+    /// A wire's gain, as linear gain. Its lane is with the parameters of
+    /// the device the wire feeds.
+    Wire(WireId),
 }
 
 impl ParamAddress {
@@ -49,7 +53,8 @@ impl ParamAddress {
             | Self::Pan(_)
             | Self::Send(_)
             | Self::Clip(..)
-            | Self::Modulator(..) => None,
+            | Self::Modulator(..)
+            | Self::Wire(_) => None,
         }
     }
 
@@ -71,7 +76,8 @@ impl ParamAddress {
             | Self::Pan(_)
             | Self::Send(_)
             | Self::Clip(..)
-            | Self::Modulator(..) => None,
+            | Self::Modulator(..)
+            | Self::Wire(_) => None,
         }
     }
 }
@@ -391,6 +397,18 @@ impl ParamSpec {
         }
     }
 
+    /// The gain of a wire from `from`, a tap's name: from silence to +24
+    /// dB.
+    pub fn wire(from: &str) -> Self {
+        Self {
+            name: format!("Sidechain from {from}"),
+            min: 0.0,
+            max: f64::from(Wire::GAIN_MAX),
+            default: 1.0,
+            scale: Scale::Fader,
+        }
+    }
+
     /// `value` within the range.
     pub fn clamp(&self, value: f64) -> f64 {
         value.clamp(self.min.min(self.max), self.max.max(self.min))
@@ -431,6 +449,9 @@ impl Project {
                     default: info.default,
                     scale: info.scale,
                 })
+            }
+            ParamAddress::Wire(wire) => {
+                Some(ParamSpec::wire(&self.tap_name(self.wire(wire)?.from)?))
             }
             ParamAddress::Device(device, n) => {
                 if let Some(info) = self.native_param(address) {
@@ -481,16 +502,17 @@ impl Project {
     }
 
     /// Whether the project has the parameter at `address`: the channel,
-    /// send, device or modulator it belongs to, and for a built-in device
-    /// or a modulator, a parameter it has, and for a test device, parameter
-    /// 0, its only one. Which parameters a plugin has is the plugin's to
-    /// say, so any of a plugin's counts.
+    /// send, wire, device or modulator it belongs to, and for a built-in
+    /// device or a modulator, a parameter it has, and for a test device,
+    /// parameter 0, its only one. Which parameters a plugin has is the
+    /// plugin's to say, so any of a plugin's counts.
     pub fn has_param(&self, address: ParamAddress) -> bool {
         self.param_chain(address).is_some()
     }
 
     /// The channel the parameter at `address` is on: the track or the
-    /// master whose fader, send, device or modulator it belongs to.
+    /// master whose fader, send, device or modulator it belongs to, or for
+    /// a wire's gain, the device it feeds.
     pub fn param_chain(&self, address: ParamAddress) -> Option<Chain> {
         match address {
             ParamAddress::Volume(Chain::Master) | ParamAddress::Pan(Chain::Master) => {
@@ -513,6 +535,7 @@ impl Project {
                 let (chain, _, modulator) = self.find_modulator(modulator)?;
                 modulator.param(n).map(|_| chain)
             }
+            ParamAddress::Wire(wire) => self.port_chain(self.wire(wire)?.to),
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
                 let known = match &device.kind {
@@ -526,9 +549,9 @@ impl Project {
     }
 
     /// The parameter's own value, which applies where automation doesn't:
-    /// a channel's gain or pan, a send's level, a built-in or test device's
-    /// setting, a modulator's, or a plugin parameter set since the plugin
-    /// last saved its state.
+    /// a channel's gain or pan, a send's level or a wire's gain, a built-in
+    /// or test device's setting, a modulator's, or a plugin parameter set
+    /// since the plugin last saved its state.
     /// `None` for a plugin parameter that keeps the value its state gives
     /// it, and for parameters the project hasn't.
     pub fn param_value(&self, address: ParamAddress) -> Option<f64> {
@@ -557,6 +580,7 @@ impl Project {
                 Some(if device.bypassed { 1.0 } else { 0.0 })
             }
             ParamAddress::Modulator(modulator, n) => self.find_modulator(modulator)?.2.value(n),
+            ParamAddress::Wire(wire) => self.wire(wire).map(|w| f64::from(w.gain)),
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {

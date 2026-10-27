@@ -45,7 +45,7 @@ pub mod timeline;
 mod transport;
 
 pub use automation::Automation;
-pub use buffer::{AudioBuffer, AudioMut, AudioRef, Inputs};
+pub use buffer::{AudioBuffer, AudioMut, AudioRef, InputPort, Inputs};
 pub use compile::{
     Compiled, Compiler, Devices, InputChannels, InputLayout, MidiSource, NodeMaker, compile,
     compile_metered, compile_with_devices, compile_with_inputs, compile_with_media,

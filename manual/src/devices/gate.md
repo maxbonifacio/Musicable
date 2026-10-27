@@ -10,6 +10,10 @@ It fades open over the **Attack** and closed over the **Release**. A floor
 of -80 dB is all but silent, and a higher one lets some of the signal
 through.
 
+Its **Sidechain** column has it open on another signal instead, such as a
+snare's own microphone opening a room microphone's gate. The column picks
+where that comes from and filters it ([Sidechains](../using/sidechains.md)).
+
 ## Controls
 
 {{#include ../generated/devices/gate.md}}

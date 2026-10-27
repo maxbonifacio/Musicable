@@ -436,8 +436,8 @@ mod tests {
         });
         assert!(!setup.applies(&RE_ENABLE));
 
-        crate::mixer::change(&mut setup.document, crate::mixer::Change::Gain(track, 0.25));
-        crate::mixer::change(&mut setup.document, crate::mixer::Change::MasterPan(-0.25));
+        crate::mixer::change(&mut setup.document, crate::mixer::Change::Gain(track, 0.25)).unwrap();
+        crate::mixer::change(&mut setup.document, crate::mixer::Change::MasterPan(-0.25)).unwrap();
         let project = setup.document.project();
         assert!(!project.is_automated(volume) && !project.is_automated(master));
         assert_eq!(project.track(track).unwrap().gain, 0.25);

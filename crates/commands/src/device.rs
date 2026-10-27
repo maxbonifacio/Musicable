@@ -14,14 +14,15 @@ use musicable_model::automation::Lane;
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::routing::{Tap, Wire};
 use musicable_model::{
     Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId, TrackKind,
 };
 
-use crate::editor::{DeviceClipboard, Editor, Focus, Selection};
+use crate::editor::{DeviceClipboard, Editor, Focus, Selection, TakenDevice};
 use crate::{
-    Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Transaction, Type,
-    Value, When,
+    Args, Command, CommandError, CommandId, Context, Loop, Param, Registry, Request, Transaction,
+    Type, Value, When, wire,
 };
 
 /// Adds one of Musicable's own devices to a track's devices, or the
@@ -167,15 +168,15 @@ pub fn register(registry: &mut Registry) {
             if id.is_empty() {
                 return Err(CommandError::invalid("a plugin's id can't be empty"));
             }
-            let plugin = PluginDevice {
+            let kind = DeviceKind::Plugin(PluginDevice {
                 format,
                 id,
                 name: args.get("name")?,
                 instrument: args.opt("instrument")?.unwrap_or(false),
                 settings: PluginSettings::default(),
-            };
-            let name = format!("Add {}", plugin_name(&plugin));
-            add(ctx, args, DeviceKind::Plugin(plugin), &name)
+            });
+            let name = format!("Add {}", kind.name());
+            add(ctx, args, kind, &name)
         },
     );
     registry.add(
@@ -410,11 +411,14 @@ pub fn register(registry: &mut Registry) {
             let devices = devices(ctx, args)?;
             let (chain, index) = place(ctx, args, "devices")?;
             let name = step_name(ctx, &devices, "Move");
-            let chain = ctx.document.transact(&name, |tx| {
-                let chain = chain.unwrap_or_else(|| new_track(tx, &devices));
-                move_devices(tx, &devices, chain, index);
-                chain
+            let moved = ctx.document.transact(&name, |tx| {
+                tx.at_once(|tx| {
+                    let chain = chain.unwrap_or_else(|| new_track(tx, &devices));
+                    move_devices(tx, &devices, chain, index)?;
+                    Ok(chain)
+                })
             });
+            let chain = moved.map_err(|refused| wire::refused(ctx.document.project(), refused))?;
             select_devices(ctx, chain, &devices);
             Ok(Value::None)
         },
@@ -426,7 +430,7 @@ pub fn register(registry: &mut Registry) {
         registry.add(
             Command::new(id, title).when(When::DevicesSelected),
             move |ctx, _| {
-                nudge(ctx, left);
+                nudge(ctx, left)?;
                 Ok(Value::None)
             },
         );
@@ -718,10 +722,17 @@ fn set_bypass(ctx: &mut Context<'_>, devices: &[DeviceId], bypassed: bool) {
 }
 
 /// Moves `devices`, in the order they play, to `index` in `chain`, counting
-/// the chain without them, side by side.
-fn move_devices(tx: &mut Transaction<'_>, devices: &[DeviceId], chain: Chain, index: usize) {
+/// the chain without them, side by side, unless a move closes a loop
+/// through a wire: run it [at once](Transaction::at_once), so that's
+/// checked once they've all moved.
+fn move_devices(
+    tx: &mut Transaction<'_>,
+    devices: &[DeviceId],
+    chain: Chain,
+    index: usize,
+) -> Result<(), Loop> {
     let Some(others) = tx.project().devices(chain) else {
-        return;
+        return Ok(());
     };
     // The device they go in front of, if they don't go at the end.
     let before = (others.iter())
@@ -735,18 +746,20 @@ fn move_devices(tx: &mut Transaction<'_>, devices: &[DeviceId], chain: Chain, in
                 .filter(|other| other.id != device)
                 .position(|other| other.id == before)
         });
-        tx.move_device(device, chain, at.unwrap_or(usize::MAX));
+        tx.move_device(device, chain, at.unwrap_or(usize::MAX))?;
     }
+    Ok(())
 }
 
 /// Moves each run of the selected devices one place along their chain:
 /// past the device before it with `left`, or else past the one after it.
-/// A run at that end of the chain stays.
-fn nudge(ctx: &mut Context<'_>, left: bool) {
+/// A run at that end of the chain stays. Moves that would close a loop
+/// through a wire are refused, all of them.
+fn nudge(ctx: &mut Context<'_>, left: bool) -> Result<(), CommandError> {
     let selected = selected(ctx);
     let project = ctx.document.project();
     let Some(chain) = ctx.document.editor().selected_track else {
-        return;
+        return Ok(());
     };
     let ids: Vec<DeviceId> = (project.devices(chain).unwrap_or_default().iter())
         .map(|device| device.id)
@@ -775,18 +788,23 @@ fn nudge(ctx: &mut Context<'_>, left: bool) {
         }
     }
     let name = step_name(ctx, &moving, "Move");
-    ctx.document.transact(&name, |tx| {
-        for (device, index) in moves {
-            tx.move_device(device, chain, index);
-        }
+    let moved = ctx.document.transact(&name, |tx| {
+        tx.at_once(|tx| {
+            for (device, index) in moves {
+                tx.move_device(device, chain, index)?;
+            }
+            Ok(())
+        })
     });
+    moved.map_err(|refused| wire::refused(ctx.document.project(), refused))?;
     select_devices(ctx, chain, &selected);
+    Ok(())
 }
 
-/// `devices` as copies take them, each with the lanes that automate it: a
-/// plugin's state taken afresh, as Save as Preset takes it, since a change
-/// made in its window can reach the project late.
-fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<(Device, Vec<Lane>)> {
+/// `devices` as copies take them, each with the lanes that automate it and
+/// the wires into it: a plugin's state taken afresh, as Save as Preset
+/// takes it, since a change made in its window can reach the project late.
+fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<TakenDevice> {
     let mut taken = Vec::with_capacity(devices.len());
     for &id in devices {
         let state = ctx.library.plugin_state(id);
@@ -802,7 +820,15 @@ fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<(Device, Vec<Lane>)
             .filter(|lane| lane.param.device() == Some(id))
             .cloned()
             .collect();
-        taken.push((device, lanes));
+        let wires = (project.wires.iter())
+            .filter(|wire| wire.to.device() == id)
+            .map(|wire| (*wire, project.lane(ParamAddress::Wire(wire.id)).cloned()))
+            .collect();
+        taken.push(TakenDevice {
+            device,
+            lanes,
+            wires,
+        });
     }
     taken
 }
@@ -811,17 +837,29 @@ fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<(Device, Vec<Lane>)
 /// is past it, side by side, and returns their ids. Each is a new device
 /// with the original's settings, and with `lanes`, lanes of its own with
 /// the original's points.
+///
+/// Each copy keeps the wires into the original, so a copied compressor
+/// keeps its key: from the same taps, or from the copy of a device copied
+/// with it. A wire that would close a loop, as into a copy put before the
+/// device it's keyed after, is left out.
 fn add_copies(
     tx: &mut Transaction<'_>,
-    taken: Vec<(Device, Vec<Lane>)>,
+    taken: Vec<TakenDevice>,
     chain: Chain,
     index: usize,
     lanes: bool,
 ) -> Vec<DeviceId> {
     let mut copies = Vec::with_capacity(taken.len());
-    for (original, its_lanes) in taken {
+    // Each original's id, its copy's, and the wires into it.
+    let mut copied = Vec::with_capacity(taken.len());
+    for TakenDevice {
+        device: original,
+        lanes: its_lanes,
+        wires,
+    } in taken
+    {
         let Device {
-            id: _,
+            id: original,
             kind,
             bypassed,
             active,
@@ -841,6 +879,34 @@ fn add_copies(
         for lane in its_lanes.into_iter().filter(|_| lanes) {
             if let Some(param) = lane.param.with_device(id) {
                 tx.add_lane(usize::MAX, Lane { param, ..lane });
+            }
+        }
+        copied.push((original, id, wires));
+    }
+    let copy_of = |device| {
+        (copied.iter()).find_map(|&(original, copy, _)| (original == device).then_some(copy))
+    };
+    for (_, copy, wires) in &copied {
+        for (wire, lane) in wires {
+            let from = match wire.from {
+                Tap::Device(device) => Tap::Device(copy_of(device).unwrap_or(device)),
+                tap => tap,
+            };
+            let new = Wire {
+                gain: wire.gain,
+                ..tx.new_wire(from, wire.to.on(*copy))
+            };
+            if tx.add_wire(usize::MAX, new).is_ok()
+                && let Some(lane) = lane.as_ref().filter(|_| lanes)
+            {
+                let param = ParamAddress::Wire(new.id);
+                tx.add_lane(
+                    usize::MAX,
+                    Lane {
+                        param,
+                        ..lane.clone()
+                    },
+                );
             }
         }
     }
@@ -900,7 +966,7 @@ pub(crate) fn paste(ctx: &mut Context<'_>) {
     let index = (editor.selected_devices(project).first())
         .and_then(|&first| project.find_device(first))
         .map_or(usize::MAX, |(_, index, _)| index);
-    let kinds: Vec<&DeviceKind> = clipboard.devices.iter().map(|(d, _)| &d.kind).collect();
+    let kinds: Vec<&DeviceKind> = (clipboard.devices.iter()).map(|t| &t.device.kind).collect();
     let name = named("Paste", &kinds);
     let taken = clipboard.devices.clone();
     let lanes = editor.behaviour.copies_take_automation;
@@ -955,19 +1021,7 @@ fn no_device(device: DeviceId) -> CommandError {
 /// What the browser and the Edit menu call a device: a built-in device by
 /// its kind, such as "EQ", and a plugin by its name.
 pub fn device_name(kind: &DeviceKind) -> &str {
-    match kind {
-        DeviceKind::Native(native) => native.kind.name(),
-        DeviceKind::Plugin(plugin) => plugin_name(plugin),
-        _ => "Device",
-    }
-}
-
-/// What the Edit menu calls a plugin.
-fn plugin_name(plugin: &PluginDevice) -> &str {
-    match plugin.name.trim() {
-        "" => "Plugin",
-        name => name,
-    }
+    kind.name()
 }
 
 #[cfg(test)]
@@ -1939,7 +1993,7 @@ mod tests {
         assert!(setup.document.project().find_device(compressor).is_none());
         let clipboard = setup.document.editor().devices.clipboard.clone().unwrap();
         assert_eq!(clipboard.devices.len(), 1);
-        assert_eq!(clipboard.devices[0].0.id, compressor);
+        assert_eq!(clipboard.devices[0].device.id, compressor);
         // Delete deletes them all, as one step.
         setup.select_devices(&[eq, delay]);
         setup.run(&edit::DELETE);

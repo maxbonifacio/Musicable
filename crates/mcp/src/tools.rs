@@ -159,11 +159,12 @@ pub fn list() -> Vec<Tool> {
             "Get Project",
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
              tracks with their mixer settings, devices and clips, and their modulators and \
-             routings if they have any, the master, the locators, and which parameters are \
-             automated, each with its id. A device that's bypassed says \"bypassed\": true, and \
-             one that's deactivated \"active\": false. A clip's notes, a device's or a \
-             modulator's parameters and a lane's points come from get_clip, get_device, \
-             get_modulator and get_automation.",
+             routings if they have any, the master, the wires, each taking a tap's signal into a \
+             device's side input, the locators, and which parameters are automated, each with \
+             its id. A wire's tap is named as wire.connect takes it. A device that's bypassed \
+             says \"bypassed\": true, and one that's deactivated \"active\": false. A clip's \
+             notes, a device's or a modulator's parameters and a lane's points come from \
+             get_clip, get_device, get_modulator and get_automation.",
             object(json!({}), &[]),
         ),
         read(
@@ -179,9 +180,10 @@ pub fn list() -> Vec<Tool> {
             GET_DEVICE,
             "Get Device",
             "Reads one device: what it is, where it is, whether it's bypassed or deactivated, \
-             and each of its parameters' number, name, range, unit and value, for \
+             each of its parameters' number, name, range, unit and value, for \
              device.set_param and automation, which name a device's parameter as \"device 4 \
-             param 2\" and its Bypass as \"device 4 bypass\".",
+             param 2\" and its Bypass as \"device 4 bypass\", and a Compressor's or a Gate's \
+             Sidechain port, with the wires into it.",
             object(
                 json!({ "device": id_number("The device's id.") }),
                 &["device"],
@@ -210,8 +212,8 @@ pub fn list() -> Vec<Tool> {
                     "param": {
                         "type": "string",
                         "description": "The parameter, as get_project names it: \"track 3 volume\", \
-                                        \"master pan\", \"send 2\", \"device 4 param 17\" or \
-                                        \"modulator 6 param 2\".",
+                                        \"master pan\", \"send 2\", \"device 4 param 17\", \
+                                        \"wire 1\" or \"modulator 6 param 2\".",
                     }
                 }),
                 &["param"],

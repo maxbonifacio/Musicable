@@ -53,7 +53,8 @@ Each routing has its own settings:
 
 Modulation moves a control from its value, or from what its automation
 gives it at the time, and keeps it within its range. Modulators move the
-mixer's faders, pans and sends, the controls of built-in devices that turn
+mixer's faders, pans and sends, the gains of
+[sidechains](sidechains.md), the controls of built-in devices that turn
 smoothly, a CLAP plugin's parameters, and other modulators' controls. They
 don't move switches, choices, Bypass, clips' settings, or a VST3 plugin's
 parameters.
@@ -64,11 +65,12 @@ Macro's knob turning an envelope's decay.
 
 ## What a modulator reaches
 
-A modulator moves the controls on its own channel: its devices, its mixer
-strip and its other modulators. A group's modulators also reach the tracks
-that feed the group, and the master's reach every track. A routing to a
-control that's out of reach, after its track leaves the group, say, moves
-nothing until the track is back.
+A modulator moves the controls on its own channel: its devices, with the
+gains of their sidechains, its mixer strip and its other modulators. A
+group's modulators also reach the tracks that feed the group, and the
+master's reach every track. A routing to a control that's out of reach,
+after its track leaves the group, say, moves nothing until the track is
+back.
 
 ## Notes and triggers
 

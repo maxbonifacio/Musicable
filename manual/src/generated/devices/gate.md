@@ -8,3 +8,10 @@
 | Hold | 0.00 ms to 1.00 s | 10.0 ms |
 | Release | 1.00 ms to 3.00 s | 100 ms |
 | Floor | -80.0 dB to 0.0 dB | -80.0 dB |
+
+| Sidechain | Range | Default |
+|---|---|---|
+| On | Off or On | Off |
+| High-Pass | 20.0 Hz to 20.0 kHz | 20.0 Hz |
+| Low-Pass | 20.0 Hz to 20.0 kHz | 20.0 kHz |
+| Listen | Off or On | Off |

@@ -740,6 +740,74 @@ fn reads_give_modulators_and_their_routings() {
 }
 
 #[test]
+fn reads_give_the_wires_and_each_device_s_side_input() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_audio_track"},
+            {"id": "track.rename", "args": {"track": 0, "name": "Kick"}},
+            {"id": "track.new_audio_track"},
+            {"id": "track.rename", "args": {"track": 1, "name": "Bass"}},
+            {"id": "device.add", "args": {"kind": "compressor", "track": 1}},
+            {"id": "device.add", "args": {"kind": "eq", "track": 0}},
+            {"id": "wire.connect", "args": {"device": 0, "track": 0}},
+            {"id": "wire.connect", "args": {"device": 0, "after": 1, "gain": 0.5}},
+            {"id": "automation.add_point", "args": {"param": "wire 1", "at": 2, "value": 0.25}},
+        ]}),
+    )
+    .unwrap();
+
+    let project = rig.call("get_project", json!({})).unwrap();
+    let kick = json!({"track": 0, "tap": "post_fx", "name": "Kick Post FX"});
+    let after_eq = json!({"after": 1, "name": "Kick after EQ"});
+    let to = json!({"device": 0, "port": "sidechain", "name": "Compressor on Bass"});
+    assert_eq!(
+        project["wires"],
+        json!([
+            {"id": 0, "from": kick, "to": to, "gain": 1.0},
+            {"id": 1, "from": after_eq, "to": to, "gain": 0.5},
+        ])
+    );
+    assert_eq!(project["automation"][0]["param"], "wire 1");
+
+    let compressor = rig.call("get_device", json!({"device": 0})).unwrap();
+    assert_eq!(
+        compressor["ports"],
+        json!([{"port": "sidechain", "name": "Sidechain", "wires": [
+            {"id": 0, "from": kick, "gain": 1.0},
+            {"id": 1, "from": after_eq, "gain": 0.5},
+        ]}])
+    );
+    // Connecting turned the Sidechain on.
+    let sidechain = &compressor["params"][8];
+    assert_eq!(
+        (&sidechain["name"], &sidechain["value"]),
+        (&json!("Sidechain On"), &json!(1.0))
+    );
+    let eq = rig.call("get_device", json!({"device": 1})).unwrap();
+    assert_eq!(eq.get("ports"), None);
+
+    let lane = rig
+        .call("get_automation", json!({"param": "wire 1"}))
+        .unwrap();
+    assert_eq!(lane["points"], json!([{"at": 2, "value": 0.25}]));
+
+    // From the master: the bass feeds it, so that would close a loop.
+    assert_eq!(
+        rig.call(
+            "run_command",
+            json!({"id": "wire.connect", "args": {"device": 0, "master": true}})
+        ),
+        Err(
+            "That would make a loop: what the Compressor on Bass puts out reaches Master Post \
+             FX."
+            .into()
+        )
+    );
+}
+
+#[test]
 fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
     let mut project = Project::new();
     let track = project.add_track("Voice", TrackKind::Audio);

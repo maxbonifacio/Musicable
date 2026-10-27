@@ -34,6 +34,10 @@ group of them, such as one of the EQ's bands:
 - **A button** for each switch, lit while it's on.
 - **A menu** for each choice, such as a band's shape.
 
+The Compressor's and the Gate's **Sidechain** columns start with the
+sources they follow, from other tracks or earlier on their own
+([Sidechains](../using/sidechains.md)).
+
 Every change is a step in the undo history, named after the device, such as
 "Change EQ", and a whole drag is one step. Changes are smoothed, so they
 don't click.

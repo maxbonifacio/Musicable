@@ -679,16 +679,19 @@ impl Project {
 
     /// Whether modulators can move the parameter at `param`, wherever they
     /// are: one the project has that changes smoothly. The mixer's faders,
-    /// pans and sends can, and so can the test devices' parameters and
-    /// any plugin parameter: a plugin ignores modulation of parameters it
-    /// doesn't take it for. Built-in devices' and modulators' parameters
+    /// pans and sends can, and so can wires' gains, the test devices'
+    /// parameters and any plugin parameter: a plugin ignores modulation of
+    /// parameters it doesn't take it for. Built-in devices' and modulators' parameters
     /// can if their tables say so. Bypasses and clips' parameters can't.
     pub fn can_modulate(&self, param: ParamAddress) -> bool {
         if !self.has_param(param) {
             return false;
         }
         match param {
-            ParamAddress::Volume(_) | ParamAddress::Pan(_) | ParamAddress::Send(_) => true,
+            ParamAddress::Volume(_)
+            | ParamAddress::Pan(_)
+            | ParamAddress::Send(_)
+            | ParamAddress::Wire(_) => true,
             ParamAddress::Device(..) => self.native_param(param).is_none_or(|p| p.modulated),
             ParamAddress::Modulator(modulator, n) => {
                 let (_, _, modulator) = self.find_modulator(modulator).expect("has the param");

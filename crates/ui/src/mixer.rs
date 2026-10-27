@@ -1854,7 +1854,9 @@ mod tests {
                 for action in &actions {
                     match action {
                         Action::Mixer(change) => {
-                            mixer::change(&mut state.document, change.clone());
+                            if let Err(error) = mixer::change(&mut state.document, change.clone()) {
+                                state.errors.push(error);
+                            }
                         }
                         Action::BeginGesture => state.document.begin_gesture(),
                         Action::EndGesture => state.document.end_gesture(),

@@ -14,6 +14,7 @@ use std::fmt;
 use musicable_model::clip::{ClipId, NoteId};
 use musicable_model::modulation::{ModulatorId, RoutingId};
 use musicable_model::param::{ClipParam, ParamAddress};
+use musicable_model::routing::WireId;
 use musicable_model::time::Beats;
 use musicable_model::{Chain, DeviceId, LocatorId, SendId, TakeId, TrackId};
 
@@ -41,6 +42,7 @@ pub enum Value {
     Modulator(ModulatorId),
     /// A modulator's output moving a parameter.
     Routing(RoutingId),
+    Wire(WireId),
     /// A parameter anywhere in the project.
     Param(ParamAddress),
     List(Vec<Value>),
@@ -62,6 +64,7 @@ pub enum Type {
     Take,
     Modulator,
     Routing,
+    Wire,
     Param,
     List(&'static Type),
     /// One of these words, as text.
@@ -96,6 +99,7 @@ impl Type {
             Type::Take => TakeId::from_value(value).is_some(),
             Type::Modulator => ModulatorId::from_value(value).is_some(),
             Type::Routing => RoutingId::from_value(value).is_some(),
+            Type::Wire => WireId::from_value(value).is_some(),
             Type::Param => ParamAddress::from_value(value).is_some(),
             Type::List(item) => {
                 matches!(value, Value::List(values) if values.iter().all(|v| item.accepts(v)))
@@ -123,9 +127,10 @@ impl fmt::Display for Type {
             Type::Take => f.write_str("a take"),
             Type::Modulator => f.write_str("a modulator"),
             Type::Routing => f.write_str("a routing"),
+            Type::Wire => f.write_str("a wire"),
             Type::Param => f.write_str(
                 "a parameter, such as \"track 3 volume\", \"master pan\", \"send 2\", \
-                 \"device 4 param 17\" or \"modulator 5 param 3\"",
+                 \"wire 1\", \"device 4 param 17\" or \"modulator 5 param 3\"",
             ),
             Type::List(item) => write!(f, "a list, each {item}"),
             Type::Choice(choices) => match choices {
@@ -364,14 +369,15 @@ id_from_value!(DeviceId, Device);
 id_from_value!(TakeId, Take);
 id_from_value!(ModulatorId, Modulator);
 id_from_value!(RoutingId, Routing);
+id_from_value!(WireId, Wire);
 
 impl FromValue for ParamAddress {
     const TYPE: Type = Type::Param;
 
     /// A parameter, or one written as a script would: "track 3 volume",
-    /// "track 3 pan", "master volume", "master pan", "send 2", "device 4
-    /// param 17", "device 4 bypass", "clip 5 gain" or "modulator 6 param
-    /// 3".
+    /// "track 3 pan", "master volume", "master pan", "send 2", "wire 1",
+    /// "device 4 param 17", "device 4 bypass", "clip 5 gain" or "modulator 6
+    /// param 3".
     fn from_value(value: &Value) -> Option<Self> {
         match value {
             Value::Param(param) => Some(*param),
@@ -401,6 +407,7 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
         ["track", track, what] => fader(Chain::Track(TrackId(id(track)?)), what),
         ["master", what] => fader(Chain::Master, what),
         ["send", send] => Some(ParamAddress::Send(SendId(id(send)?))),
+        ["wire", wire] => Some(ParamAddress::Wire(WireId(id(wire)?))),
         ["device", device, "param", n] => Some(ParamAddress::Device(DeviceId(id(device)?), id(n)?)),
         ["device", device, "bypass"] => Some(ParamAddress::Bypass(DeviceId(id(device)?))),
         ["clip", clip, what] => Some(ParamAddress::Clip(
@@ -415,8 +422,8 @@ fn parse_param(text: &str) -> Option<ParamAddress> {
 }
 
 /// A parameter as scripts write it: "track 3 volume", "master pan", "send
-/// 2", "device 4 param 17", "device 4 bypass", "clip 5 gain", "modulator 6
-/// param 3".
+/// 2", "wire 1", "device 4 param 17", "device 4 bypass", "clip 5 gain",
+/// "modulator 6 param 3".
 pub fn param_text(param: ParamAddress) -> String {
     let chain = |chain| match chain {
         Chain::Track(track) => format!("track {}", track.0),
@@ -426,6 +433,7 @@ pub fn param_text(param: ParamAddress) -> String {
         ParamAddress::Volume(on) => format!("{} volume", chain(on)),
         ParamAddress::Pan(on) => format!("{} pan", chain(on)),
         ParamAddress::Send(send) => format!("send {}", send.0),
+        ParamAddress::Wire(wire) => format!("wire {}", wire.0),
         ParamAddress::Device(device, n) => format!("device {} param {n}", device.0),
         ParamAddress::Bypass(device) => format!("device {} bypass", device.0),
         ParamAddress::Clip(clip, param) => format!("clip {} {}", clip.0, param.key()),
@@ -614,6 +622,7 @@ mod tests {
             ParamAddress::Volume(Chain::Master),
             ParamAddress::Pan(Chain::Master),
             ParamAddress::Send(SendId(2)),
+            ParamAddress::Wire(WireId(1)),
             ParamAddress::Device(DeviceId(4), 17),
             ParamAddress::Modulator(ModulatorId(5), 3),
         ];
@@ -628,6 +637,7 @@ mod tests {
             "track volume",
             "track -1 pan",
             "send",
+            "wire",
             "master gain",
             "device 4 17",
             "modulator 5",

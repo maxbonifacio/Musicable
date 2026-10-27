@@ -21,6 +21,7 @@ mod delay;
 mod eq;
 mod gate;
 mod instrument;
+mod key;
 mod params;
 mod reverb;
 mod sampler;
@@ -80,7 +81,8 @@ pub(crate) mod testing {
 
     use crate::event::{NodeEvent, NodeEventKind, ParamId};
     use crate::{
-        AudioBuffer, AudioRef, EngineConfig, Inputs, Node, ProcessContext, TransportState, rt,
+        AudioBuffer, AudioRef, EngineConfig, InputPort, Inputs, Node, ProcessContext,
+        TransportState, rt,
     };
 
     /// 120 bpm in 4/4.
@@ -215,6 +217,17 @@ pub(crate) mod testing {
         /// the output, a `Vec` for each of the node's channels. Another
         /// call carries on from where this one ends.
         pub(crate) fn render(&mut self, input: &[Vec<f32>], events: &[NodeEvent]) -> Vec<Vec<f32>> {
+            self.render_keyed(input, None, events)
+        }
+
+        /// Renders as [`render`](Self::render) does, with `side` into side
+        /// input 0, if there's one, as long as `input`.
+        pub(crate) fn render_keyed(
+            &mut self,
+            input: &[Vec<f32>],
+            side: Option<&[Vec<f32>]>,
+            events: &[NodeEvent],
+        ) -> Vec<Vec<f32>> {
             let frames = input.first().map_or(0, Vec::len);
             let channels = self.node.channels();
             if !self.prepared {
@@ -223,12 +236,16 @@ pub(crate) mod testing {
             }
             let mut output = vec![Vec::with_capacity(frames); channels];
             let mut planar = vec![0.0; input.len() * self.block];
+            let mut side_planar = vec![0.0; side.map_or(0, <[_]>::len) * self.block];
             let mut buffer = AudioBuffer::new(channels, self.block);
             let mut start = 0;
             while start < frames {
                 let len = self.block.min(frames - start);
                 for (c, channel) in input.iter().enumerate() {
                     planar[c * len..][..len].copy_from_slice(&channel[start..start + len]);
+                }
+                for (c, channel) in side.into_iter().flatten().enumerate() {
+                    side_planar[c * len..][..len].copy_from_slice(&channel[start..start + len]);
                 }
                 let block_events: Vec<NodeEvent> = events
                     .iter()
@@ -251,15 +268,19 @@ pub(crate) mod testing {
                     events: &block_events,
                     ..context(len, &[])
                 };
-                let views = [AudioRef::from_planar(
-                    &planar[..input.len() * len],
-                    input.len(),
-                )];
+                let main = AudioRef::from_planar(&planar[..input.len() * len], input.len());
+                let views = match side {
+                    Some(side) => vec![
+                        main,
+                        AudioRef::from_planar(&side_planar[..side.len() * len], side.len()),
+                    ],
+                    None => vec![main],
+                };
+                let ports = [InputPort::Main, InputPort::Side(0)];
+                let inputs = Inputs::from_views_on(&views, &ports[..views.len()]);
                 let mut out = buffer.view_mut(len);
                 let node = &mut self.node;
-                rt::scope(|| {
-                    rt::flush_denormals(|| node.process(&ctx, Inputs::from_views(&views), &mut out))
-                });
+                rt::scope(|| rt::flush_denormals(|| node.process(&ctx, inputs, &mut out)));
                 for (c, channel) in output.iter_mut().enumerate() {
                     channel.extend_from_slice(out.channel(c));
                 }

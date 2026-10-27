@@ -749,11 +749,12 @@ impl Session {
 
     /// Makes a change from the mixer's controls, through the command it
     /// names, then sends the engine what it changed. See
-    /// [`mixer::Change::command`].
-    pub fn change_mixer(&mut self, change: mixer::Change) {
+    /// [`mixer::Change::command`]. The mixer's controls only name tracks
+    /// the project has, so it fails only for an output or a send that
+    /// would close a loop through a wire.
+    pub fn change_mixer(&mut self, change: mixer::Change) -> Result<(), CommandError> {
         let (id, args) = change.command();
-        // The mixer's controls only name tracks the project has.
-        let _ = self.run_with(&id, &args);
+        self.run_with(&id, &args).map(|_| ())
     }
 
     /// The level meters of the project's tracks and of the master, as the
@@ -1083,6 +1084,7 @@ impl Session {
                         param(keys::track_gain(track), Gain::PAN, to);
                     }
                     Edit::SendLevel { send, to, .. } => param(keys::send(send), Gain::GAIN, to),
+                    Edit::WireGain { wire, to, .. } => param(keys::wire(wire), Gain::GAIN, to),
                     Edit::MasterGain { to, .. } => param(keys::master_gain(), Gain::GAIN, to),
                     Edit::MasterPan { to, .. } => param(keys::master_gain(), Gain::PAN, to),
                     Edit::TrackMuted { .. }
@@ -1164,7 +1166,10 @@ impl Session {
                     | Edit::AddDevice { .. }
                     | Edit::RemoveDevice { .. }
                     | Edit::MoveDevice { .. }
-                    | Edit::DeviceActive { .. } => recompile = true,
+                    | Edit::DeviceActive { .. }
+                    | Edit::AddWire { .. }
+                    | Edit::RemoveWire { .. }
+                    | Edit::WireFrom { .. } => recompile = true,
                     // So is automation, and the plugins leave what it moves
                     // to the engine.
                     Edit::AddLane { .. }

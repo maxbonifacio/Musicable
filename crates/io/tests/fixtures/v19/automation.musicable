@@ -1,0 +1,350 @@
+{
+  "format": "musicable-project",
+  "version": 19,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 90.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 3,
+  "next_send_id": 1,
+  "next_device_id": 4,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Bass",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.125,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [
+        {
+          "id": 0,
+          "to": 2,
+          "level": 0.0,
+          "pre_fader": false
+        }
+      ],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "test_gain": {
+              "gain": 0.5
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Synth",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 1,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "test_instrument": {
+              "level": 0.8
+            }
+          }
+        },
+        {
+          "id": 2,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.filter",
+              "name": "Filter",
+              "instrument": false,
+              "state": null,
+              "params": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "eq",
+              "sample": null,
+              "params": {
+                "band1_on": 0.0,
+                "band1_shape": 1.0,
+                "band1_freq": 30.0,
+                "band1_gain": 0.0,
+                "band1_q": 0.7071067811865476,
+                "band2_on": 1.0,
+                "band2_shape": 3.0,
+                "band2_freq": 100.0,
+                "band2_gain": 0.0,
+                "band2_q": 0.7071067811865476,
+                "band3_on": 1.0,
+                "band3_shape": 4.0,
+                "band3_freq": 250.0,
+                "band3_gain": 0.0,
+                "band3_q": 0.7071067811865476,
+                "band4_on": 1.0,
+                "band4_shape": 4.0,
+                "band4_freq": 800.0,
+                "band4_gain": 0.0,
+                "band4_q": 0.7071067811865476,
+                "band5_on": 1.0,
+                "band5_shape": 4.0,
+                "band5_freq": 2500.0,
+                "band5_gain": 0.0,
+                "band5_q": 0.7071067811865476,
+                "band6_on": 1.0,
+                "band6_shape": 4.0,
+                "band6_freq": 6000.0,
+                "band6_gain": 0.0,
+                "band6_q": 0.7071067811865476,
+                "band7_on": 1.0,
+                "band7_shape": 6.0,
+                "band7_freq": 10000.0,
+                "band7_gain": 0.0,
+                "band7_q": 0.7071067811865476,
+                "band8_on": 0.0,
+                "band8_shape": 8.0,
+                "band8_freq": 18000.0,
+                "band8_gain": 0.0,
+                "band8_q": 0.7071067811865476,
+                "output": 0.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Reverb",
+      "kind": "return",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [
+    {
+      "param": {
+        "volume": {
+          "track": 0
+        }
+      },
+      "points": [
+        [0, 0.0],
+        [1290240, 1.0],
+        [2580480, 1.0],
+        [2580480, 0.25],
+        [4999680, 1.9952623149688795]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "pan": {
+          "track": 0
+        }
+      },
+      "points": [
+        [0, -0.5],
+        [2580480, 0.5]
+      ],
+      "overridden": true
+    },
+    {
+      "param": {
+        "send": 0
+      },
+      "points": [
+        [215040, 0.1]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "volume": "master"
+      },
+      "points": [
+        [0, 0.8]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "pan": "master"
+      },
+      "points": [
+        [1290240, -1.0],
+        [1290240, 1.0],
+        [3870720, -0.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 0,
+          "param": 0
+        }
+      },
+      "points": [
+        [0, 5e-324],
+        [322560, -2.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 2,
+          "param": 4294967295
+        }
+      },
+      "points": [
+        [80640, 1e+300],
+        [161280, -1e-300],
+        [241920, 20000.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 3,
+          "param": 2
+        }
+      },
+      "points": [
+        [0, 10.0],
+        [5160960, 22000.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "device": {
+          "id": 3,
+          "param": 1
+        }
+      },
+      "points": [
+        [1290240, 4.0],
+        [1290240, 9.0]
+      ],
+      "overridden": false
+    }
+  ],
+  "wires": [],
+  "workspace": null
+}

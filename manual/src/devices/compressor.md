@@ -11,6 +11,10 @@ signal's peaks (Peak), or its power over the attack time (RMS), which
 responds a little more slowly. **Output** comes after, and **Mix** blends
 the compressed signal with what came in, for parallel compression.
 
+Its **Sidechain** column has it follow another signal instead, such as a
+kick on another track, so the kick ducks what comes through it. The column
+picks where that comes from and filters it ([Sidechains](../using/sidechains.md)).
+
 ## Controls
 
 {{#include ../generated/devices/compressor.md}}
