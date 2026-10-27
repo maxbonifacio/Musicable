@@ -16,7 +16,7 @@ use musicable_model::modulation::{
 };
 use musicable_model::native::NativeKind;
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
-use musicable_model::plugin::PluginSettings;
+use musicable_model::plugin::{PluginInput, PluginSettings};
 use musicable_model::routing::{Port, Tap, Wire, WireError, WireId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
@@ -559,6 +559,55 @@ impl Transaction<'_> {
                 device,
                 from,
                 to: settings,
+            });
+        }
+    }
+
+    /// Sets the side inputs of the plugin device with id `device` to the
+    /// ones its plugin says it has, `inputs`, in its order. An input it no
+    /// longer has stays, after them, while a wire goes into it, so no wire
+    /// loses its port. Two inputs with one id do nothing, and so does a
+    /// device that isn't a plugin.
+    pub fn set_plugin_inputs(&mut self, device: DeviceId, mut inputs: Vec<PluginInput>) {
+        let wired: Vec<u32> = (self.project.wires.iter())
+            .filter_map(|wire| match wire.to {
+                Port::PluginInput(to, input) if to == device => Some(input),
+                _ => None,
+            })
+            .collect();
+        let found = self.project.find_device(device);
+        let Some(plugin) = found.and_then(|(_, _, d)| d.kind.plugin()) else {
+            return;
+        };
+        for input in &plugin.inputs {
+            let gone = !inputs.iter().any(|i| i.id == input.id);
+            if gone && wired.contains(&input.id) {
+                inputs.push(input.clone());
+            }
+        }
+        let mut ids: Vec<u32> = inputs.iter().map(|input| input.id).collect();
+        ids.sort_unstable();
+        if ids.windows(2).all(|pair| pair[0] != pair[1]) {
+            self.put_plugin_inputs(device, inputs);
+        }
+    }
+
+    /// Sets the side inputs of the plugin device with id `device` to
+    /// `inputs` as they are, as undo and redo do.
+    fn put_plugin_inputs(&mut self, device: DeviceId, inputs: Vec<PluginInput>) {
+        let Some(plugin) = self
+            .project
+            .device_mut(device)
+            .and_then(|d| d.kind.plugin_mut())
+        else {
+            return;
+        };
+        if plugin.inputs != inputs {
+            let from = std::mem::replace(&mut plugin.inputs, inputs.clone());
+            self.edits.push(Edit::PluginInputs {
+                device,
+                from,
+                to: inputs,
             });
         }
     }
@@ -2193,6 +2242,7 @@ impl Transaction<'_> {
             Edit::PluginSettings { device, to, .. } => {
                 self.set_plugin_settings(*device, to.clone())
             }
+            Edit::PluginInputs { device, to, .. } => self.put_plugin_inputs(*device, to.clone()),
             Edit::NativeParam {
                 device, param, to, ..
             } => self.set_native_param(*device, *param, *to),
@@ -2642,6 +2692,13 @@ pub enum Edit {
         from: PluginSettings,
         to: PluginSettings,
     },
+    /// The side inputs of the plugin device with id `device` changed, as
+    /// its plugin said.
+    PluginInputs {
+        device: DeviceId,
+        from: Vec<PluginInput>,
+        to: Vec<PluginInput>,
+    },
     /// Parameter `param` of the built-in device with id `device` changed.
     NativeParam {
         device: DeviceId,
@@ -3073,6 +3130,11 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::PluginInputs { device, from, to } => Edit::PluginInputs {
+                device,
+                from: to,
+                to: from,
+            },
             Edit::NativeParam {
                 device,
                 param,
@@ -3481,6 +3543,14 @@ impl Edit {
                 },
             ) if device == other => to.clone_from(next),
             (
+                Edit::PluginInputs { device, to, .. },
+                Edit::PluginInputs {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => to.clone_from(next),
+            (
                 Edit::NativeParam {
                     device, param, to, ..
                 },
@@ -3622,6 +3692,7 @@ impl Edit {
                 | Edit::DeviceActive { .. }
                 | Edit::PluginParam { .. }
                 | Edit::PluginSettings { .. }
+                | Edit::PluginInputs { .. }
                 | Edit::NativeParam { .. }
                 | Edit::NativeSample { .. }
                 | Edit::AddWire { .. }
@@ -3716,6 +3787,7 @@ impl Edit {
             Edit::LocatorAt { from, to, .. } => from == to,
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,
+            Edit::PluginInputs { from, to, .. } => from == to,
             Edit::NativeParam { from, to, .. } => from == to,
             Edit::NativeSample { from, to, .. } => from == to,
             Edit::LanePoints { from, to, .. } => from == to,
@@ -3791,6 +3863,7 @@ mod tests {
             id: "org.example.synth".into(),
             name: "Synth".into(),
             instrument: true,
+            inputs: Vec::new(),
             settings: PluginSettings::default(),
         }));
         project
@@ -3881,6 +3954,7 @@ mod tests {
             id: "org.example.synth".into(),
             name: "Synth".into(),
             instrument: true,
+            inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: Vec::new(),

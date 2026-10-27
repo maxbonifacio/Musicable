@@ -699,6 +699,16 @@ hear the pickers as "Compressor Sidechain Source", then "Source 2" and on,
 the gains as "Compressor Sidechain Gain", and the + as "Add a Source to
 Compressor Sidechain".
 
+A plugin's box has the same, a row for each of its side inputs, as its
+device lists them (`PluginDevice::inputs`), under the plugin's name for
+each, or "Side Input" if it has none (`Project::input_name`), and the
+pickers as wide as the box. Picking runs `wire.connect` with
+the input's id ([commands.md](commands.md#wires)), and screen readers hear
+"Pro-C 2 Sidechain Source" and "Pro-C 2 Sidechain Gain", with the plugin's
+name for the input. With No Input, a plugin's side input is off
+([plugins.md](plugins.md#side-inputs)), so the picker's hover text says
+so, where the Compressor's says it keys from its own input.
+
 A sampler reads the whole of its file when the graph is next built, and
 samplers playing the same file share it. Loading and removing a sample are
 steps in the undo history: "Load Sample" and "Remove Sample". Every control

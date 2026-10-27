@@ -24,7 +24,9 @@ use musicable_model::native::{
     NativeDevice, NativeKind, ParamInfo, Unit, compressor, eq, gate, sampler, synth, utility,
 };
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
-use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::plugin::{
+    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+};
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
@@ -60,6 +62,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("bypass", bypass()),
         ("modulation", modulation()),
         ("sidechain", sidechain()),
+        ("plugin-inputs", plugin_inputs()),
     ]
 }
 
@@ -374,6 +377,7 @@ fn plugins() -> Project {
             id: id.into(),
             name: name.into(),
             instrument,
+            inputs: Vec::new(),
             settings,
         })
     };
@@ -686,6 +690,7 @@ fn automation() -> Project {
         id: "com.example.filter".into(),
         name: "Filter".into(),
         instrument: false,
+        inputs: Vec::new(),
         settings: PluginSettings::default(),
     });
     let filter = project.new_device(filter);
@@ -1156,6 +1161,7 @@ fn bypass() -> Project {
         id: "ABCDEF0123456789ABCDEF0123456789".into(),
         name: "Limiter".into(),
         instrument: false,
+        inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
     limiter.bypassed = true;
@@ -1191,6 +1197,7 @@ fn modulation() -> Project {
         id: "com.example.filter".into(),
         name: "Filter".into(),
         instrument: false,
+        inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
     let plugin_id = plugin.id;
@@ -1326,6 +1333,64 @@ fn sidechain() -> Project {
     let point = |at, value| automation::Point::new(Beats::new(at), value);
     let swell = vec![point(0, 0.25), point(8, 1.0)];
     project.automation = vec![Lane::new(ParamAddress::Wire(key), swell)];
+    project
+}
+
+/// Plugins' side inputs, from version 20: a VST3 vocoder on a pad with two,
+/// its carrier keyed by a synth's Post FX with a lane on the key's gain,
+/// and a CLAP ducker on the master with one it calls nothing, keyed by the
+/// vocoder, and an instrument with none.
+fn plugin_inputs() -> Project {
+    let mut project = Project::new();
+    let synth = project.add_track("Synth", TrackKind::Midi);
+    let pad = project.add_track("Pad", TrackKind::Audio);
+    let input = |id, name: &str| PluginInput {
+        id,
+        name: name.to_owned(),
+    };
+    let plugin = |format, id: &str, name: &str, instrument, inputs| PluginDevice {
+        format,
+        id: id.to_owned(),
+        name: name.to_owned(),
+        instrument,
+        inputs,
+        settings: PluginSettings::default(),
+    };
+    let vocoder = plugin(
+        PluginFormat::Vst3,
+        "0123456789ABCDEF0123456789ABCDEF",
+        "Vocoder",
+        false,
+        vec![input(1, "Carrier"), input(3, "Modulator \"B\"")],
+    );
+    let ducker = plugin(
+        PluginFormat::Clap,
+        "com.example.ducker",
+        "Ducker",
+        false,
+        vec![input(u32::MAX, "")],
+    );
+    let keys = plugin(PluginFormat::Clap, "com.example.keys", "Keys", true, vec![]);
+    let keys = project.new_device(DeviceKind::Plugin(keys));
+    let vocoder = project.new_device(DeviceKind::Plugin(vocoder));
+    let ducker = project.new_device(DeviceKind::Plugin(ducker));
+    let (vocoder_id, ducker_id) = (vocoder.id, ducker.id);
+    project.track_mut(synth).unwrap().devices = vec![keys];
+    project.track_mut(pad).unwrap().devices = vec![vocoder];
+    project.master.devices = vec![ducker];
+    let from_synth = project.new_wire(
+        Tap::PostFx(Chain::Track(synth)),
+        Port::PluginInput(vocoder_id, 1),
+    );
+    let mut from_vocoder = project.new_wire(
+        Tap::Device(vocoder_id),
+        Port::PluginInput(ducker_id, u32::MAX),
+    );
+    from_vocoder.gain = 0.75;
+    project.wires = vec![from_synth, from_vocoder];
+    let point = |at, value| automation::Point::new(Beats::new(at), value);
+    let swell = vec![point(0, 0.5), point(4, 2.0)];
+    project.automation = vec![Lane::new(ParamAddress::Wire(from_synth.id), swell)];
     project
 }
 

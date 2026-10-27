@@ -1,10 +1,10 @@
 //! The devices panel, under the arrangement: the devices of the selected
 //! track, which can be the master track, in the order they play, with the
-//! controls of Musicable's own. Clicks on their title bars select them, as
-//! the mouse map says, and drags move them along the chain, or onto a
-//! track or a mixer strip, or copy them there with Ctrl. And the browser's
-//! list of Musicable's own devices and the plugins installed, which adds
-//! them to the devices the panel shows.
+//! controls of Musicable's own and the side inputs of plugins. Clicks on
+//! their title bars select them, as the mouse map says, and drags move
+//! them along the chain, or onto a track or a mixer strip, or copy them
+//! there with Ctrl. And the browser's list of Musicable's own devices and
+//! the plugins installed, which adds them to the devices the panel shows.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project
 
 use crate::browser::{self, Destination, Dragged};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::native;
+use crate::native::{self, sidechain};
 use crate::search::score;
 use crate::shell::{Action, View, with_keys};
 use crate::theme::Theme;
@@ -290,12 +290,13 @@ impl DevicesPanel {
 }
 
 /// A device: its title bar, and a built-in device's controls, or a
-/// plugin's kind and how its plugin is doing, dimmed while it's off, and
-/// outlined while it's one of the devices selected, `selection`. A click on
-/// it that no control takes selects it, as one on its title bar does, and
-/// the title bar drags it. Its menu works on the selection if it's in it,
-/// and saves it as a preset, which `saving` asks the name of. A sampler
-/// takes a sample dragged onto it from the browser. Returns its box.
+/// plugin's kind, how its plugin is doing and its side inputs' sources,
+/// dimmed while it's off, and outlined while it's one of the devices
+/// selected, `selection`. A click on it that no control takes selects it,
+/// as one on its title bar does, and the title bar drags it. Its menu works
+/// on the selection if it's in it, and saves it as a preset, which `saving`
+/// asks the name of. A sampler takes a sample dragged onto it from the
+/// browser. Returns its box.
 #[allow(clippy::too_many_arguments)]
 fn device_box(
     ui: &mut Ui,
@@ -343,6 +344,7 @@ fn device_box(
                         DeviceKind::Plugin(_) => {
                             ui.add(kind);
                             plugin_status(ui, device.id, name, view, theme, actions);
+                            side_inputs(ui, device.id, name, view, theme, mouse, actions);
                         }
                         _ => {
                             ui.add(kind);
@@ -706,6 +708,30 @@ fn plugin_status(
     }
 }
 
+/// A row for each side input of the plugin device `device`, which the
+/// panel calls `name`: the plugin's name for it, over its sources, as the
+/// Compressor's Sidechain column has them.
+fn side_inputs(
+    ui: &mut Ui,
+    device: DeviceId,
+    name: &str,
+    view: &View<'_>,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    for port in view.project.ports(device) {
+        let Some(input) = view.project.input_name(port) else {
+            continue;
+        };
+        ui.push_id(port, |ui| {
+            let heading = ui.label(RichText::new(input).size(theme.small_text).weak());
+            sidechain::add(ui, heading.rect, port, name, view, theme, actions);
+            sidechain::sources(ui, port, name, view, theme, mouse, actions);
+        });
+    }
+}
+
 /// A device's name, and what kind of device it is.
 pub(crate) fn describe(device: &Device) -> (&str, String) {
     match &device.kind {
@@ -969,7 +995,7 @@ mod tests {
     use musicable_model::TrackKind;
     use musicable_model::mixer::Bus;
     use musicable_model::native::{NativeDevice, eq, synth, utility};
-    use musicable_model::plugin::{PluginDevice, PluginSettings};
+    use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
     use musicable_model::routing::{Port, Tap, Wire};
 
     use super::*;
@@ -986,6 +1012,7 @@ mod tests {
             id: id(name),
             name: name.to_owned(),
             instrument,
+            inputs: Vec::new(),
             settings: PluginSettings::default(),
         }))
     }
@@ -2124,6 +2151,100 @@ mod tests {
                 Action::RunWith(wire::CONNECT, pad_post_fader),
                 Action::RunWith(wire::SET_GAIN, on(Args::new()).with("gain", 0.25)),
             ]
+        );
+    }
+    #[test]
+    fn a_plugins_box_has_a_row_for_each_of_its_side_inputs() {
+        let mut project = Project::new();
+        let kick = project.add_track("Kick", TrackKind::Audio);
+        let mut vocoder = plugin(&mut project, "Vocoder", false);
+        let input = |id, name: &str| PluginInput {
+            id,
+            name: name.to_owned(),
+        };
+        let inputs = vec![input(7, "Sidechain"), input(9, "Carrier")];
+        vocoder.kind.plugin_mut().unwrap().inputs = inputs;
+        let reverb = plugin(&mut project, "Reverb", false);
+        let mut harness = showing(vec![vocoder.clone(), reverb], project);
+        let source = |harness: &Harness<'static, State>, label: &str| {
+            let picker = harness.get_by_role_and_label(Role::ComboBox, label);
+            picker.value()
+        };
+        let rect =
+            |harness: &Harness<'static, State>, label: &str| harness.get_by_label(label).rect();
+        // Each under the plugin's name for it, in the plugin's order.
+        let (sidechain, carrier) = ("Vocoder Sidechain Source", "Vocoder Carrier Source");
+        assert_eq!(source(&harness, sidechain).as_deref(), Some("No Input"));
+        assert_eq!(source(&harness, carrier).as_deref(), Some("No Input"));
+        assert!(rect(&harness, sidechain).bottom() < rect(&harness, carrier).top());
+        let heading = harness.get_by_label("Carrier").rect();
+        assert!(rect(&harness, sidechain).bottom() <= heading.top());
+        assert!(heading.bottom() <= rect(&harness, carrier).top());
+        // No gain without a wire, and nothing to add to. A plugin without
+        // side inputs has no rows.
+        assert!(harness.query_by_label("Vocoder Sidechain Gain").is_none());
+        assert!(
+            harness
+                .query_by_label("Add a Source to Vocoder Sidechain")
+                .is_none()
+        );
+        assert!(
+            harness
+                .query_by_label_contains("Reverb Sidechain")
+                .is_none()
+        );
+
+        // A tap from the menu wires it into that input.
+        harness
+            .get_by_role_and_label(Role::ComboBox, sidechain)
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Kick").hover();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::Button, "Post Fader")
+            .click();
+        harness.run();
+        let into = Args::new().with("device", vocoder.id).with("input", 7_i64);
+        let kick_post_fader = into.clone().with("track", kick).with("tap", "post_fader");
+        assert_eq!(
+            actions(&mut harness),
+            [Action::RunWith(wire::CONNECT, kick_post_fader)]
+        );
+
+        // With a wire, the picker shows its source, with its gain under it,
+        // and the + adds another source, but not the same one again.
+        let port = Port::PluginInput(vocoder.id, 7);
+        let project = &mut harness.state_mut().project;
+        let from_kick = Wire {
+            gain: 0.5,
+            ..project.new_wire(Tap::PostFader(Chain::Track(kick)), port)
+        };
+        project.wires = vec![from_kick];
+        harness.run();
+        assert_eq!(
+            source(&harness, sidechain).as_deref(),
+            Some("Kick, Post Fader")
+        );
+        assert_eq!(source(&harness, carrier).as_deref(), Some("No Input"));
+        let gain = harness.get_by_role_and_label(Role::Slider, "Vocoder Sidechain Gain");
+        assert_eq!(gain.accesskit_node().numeric_value(), Some(0.5));
+        harness
+            .get_by_label("Add a Source to Vocoder Sidechain")
+            .click();
+        harness.run();
+        harness.get_by_role_and_label(Role::Button, "Kick").hover();
+        harness.run();
+        let taken = harness.get_by_role_and_label(Role::Button, "Post Fader");
+        assert!(taken.accesskit_node().is_disabled());
+        harness
+            .get_by_role_and_label(Role::Button, "Pre FX")
+            .click();
+        harness.run();
+        let kick_pre_fx = into.with("track", kick).with("tap", "pre_fx");
+        assert_eq!(
+            actions(&mut harness),
+            [Action::RunWith(wire::CONNECT, kick_pre_fx)]
         );
     }
 }

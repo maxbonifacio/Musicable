@@ -380,6 +380,7 @@ mod tests {
             id: "org.surge-synth-team.surge-xt".to_owned(),
             name: "Surge XT".to_owned(),
             instrument: true,
+            inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(vec![1, 2, 3, 255])),
                 params: vec![PluginParam { id: 7, value: 0.25 }],

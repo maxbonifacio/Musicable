@@ -23,6 +23,10 @@ use clap_sys::ext::audio_ports::{
     CLAP_AUDIO_PORT_IS_MAIN, CLAP_EXT_AUDIO_PORTS, CLAP_PORT_STEREO, clap_audio_port_info,
     clap_plugin_audio_ports,
 };
+use clap_sys::ext::audio_ports_activation::{
+    CLAP_EXT_AUDIO_PORTS_ACTIVATION, CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT,
+    clap_plugin_audio_ports_activation,
+};
 use clap_sys::ext::gui::{
     CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
     clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window,
@@ -56,7 +60,7 @@ use clap_sys::process::{
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
-use crate::{ALIVE, MPE, gui, violation};
+use crate::{ALIVE, FIXED_PORTS, MPE, gui, violation};
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
 pub const SYNTH_ID: &CStr = c"org.musicable.test.synth";
@@ -140,6 +144,10 @@ pub const LATENCY: clap_id = 11;
 pub const BYPASS: clap_id = 12;
 pub const LEVEL: clap_id = 20;
 pub const THREADS: clap_id = 21;
+
+/// The gain's sidechain input port's id, far from its index, 1, so a host
+/// that mixes the two up feeds the wrong port.
+pub const SIDECHAIN: clap_id = 7;
 
 const GAIN_PARAMS: [Param; 3] = [
     Param {
@@ -310,8 +318,12 @@ struct Audio {
     /// The gain's.
     gain: f64,
     bypassed: bool,
+    /// Whether the sidechain was on as the plugin was activated, and how
+    /// late it's heard, as late as the input.
+    sidechain: bool,
     latency: usize,
     delay: [Vec<f32>; 2],
+    side_delay: [Vec<f32>; 2],
     position: usize,
     /// The synth's.
     level: f64,
@@ -352,6 +364,9 @@ pub(crate) struct TestPlugin {
     initialized: AtomicBool,
     active: AtomicBool,
     processing: AtomicBool,
+    /// Whether the gain's sidechain is on, as the host switched it with
+    /// audio-ports-activation. CLAP has every port on at first.
+    sidechain: AtomicBool,
     /// The parameters' values, as the main thread sees them, as bits.
     values: [AtomicU64; 3],
     /// How many times the host started the plugin processing, stopped it
@@ -437,6 +452,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         initialized: AtomicBool::new(false),
         active: AtomicBool::new(false),
         processing: AtomicBool::new(false),
+        sidechain: AtomicBool::new(kind == Kind::Gain),
         values: std::array::from_fn(|i| {
             AtomicU64::new(params.get(i).map_or(0.0, |p| p.default).to_bits())
         }),
@@ -458,8 +474,10 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
             max_frames: 0,
             gain: params[0].default,
             bypassed: false,
+            sidechain: false,
             latency: 0,
             delay: [Vec::new(), Vec::new()],
+            side_delay: [Vec::new(), Vec::new()],
             position: 0,
             level: params[0].default,
             threads: false,
@@ -539,6 +557,11 @@ impl TestPlugin {
         self.lifecycle
             .each_ref()
             .map(|count| count.load(Ordering::SeqCst))
+    }
+
+    /// Whether the gain's sidechain is on.
+    pub(crate) fn sidechain(&self) -> bool {
+        self.sidechain.load(Ordering::SeqCst)
     }
 
     fn count(&self, what: usize) {
@@ -996,6 +1019,12 @@ impl TestPlugin {
                 } else {
                     None
                 };
+                let side = if audio.sidechain && process.audio_inputs_count > 1 {
+                    // SAFETY: the caller's promise.
+                    unsafe { stereo(&*process.audio_inputs.add(1)) }
+                } else {
+                    None
+                };
                 let gain = if audio.bypassed {
                     1.0
                 } else {
@@ -1003,19 +1032,30 @@ impl TestPlugin {
                 };
                 for frame in start..end {
                     for (channel, out) in out.iter().enumerate() {
-                        let x = match &input {
-                            // SAFETY: the buffers are `end` frames long.
-                            Some(input) => unsafe { *input[channel].add(frame) },
-                            None => 0.0,
+                        // SAFETY: the buffers are `end` frames long.
+                        let read = |port: &Option<[*mut f32; 2]>| unsafe {
+                            port.map_or(0.0, |port| *port[channel].add(frame))
                         };
-                        let y = if audio.latency == 0 {
-                            x
+                        let (x, key) = (read(&input), read(&side));
+                        let (y, key) = if audio.latency == 0 {
+                            (x, key)
                         } else {
-                            let line = &mut audio.delay[channel];
-                            std::mem::replace(&mut line[audio.position], x)
+                            let at = audio.position;
+                            let line = &mut audio.delay[channel][at];
+                            let side_line = &mut audio.side_delay[channel][at];
+                            (
+                                std::mem::replace(line, x),
+                                std::mem::replace(side_line, key),
+                            )
+                        };
+                        // The sidechain ducks it, unless it's bypassed.
+                        let duck = if audio.bypassed {
+                            1.0
+                        } else {
+                            1.0 - f64::from(key.abs()).min(1.0)
                         };
                         // SAFETY: as above.
-                        unsafe { *out.add(frame) = (f64::from(y) * gain) as f32 };
+                        unsafe { *out.add(frame) = (f64::from(y) * gain * duck) as f32 };
                     }
                     if audio.latency > 0 {
                         audio.position = (audio.position + 1) % audio.latency;
@@ -1433,6 +1473,7 @@ unsafe extern "C" fn plugin_activate(
     audio.max_frames = max_frames;
     audio.gain = this.value(0);
     audio.bypassed = this.kind == Kind::Gain && this.value(2) >= 0.5;
+    audio.sidechain = this.sidechain();
     audio.level = this.value(0);
     audio.threads = this.value(1) >= 0.5;
     audio.modulation = 0.0;
@@ -1441,6 +1482,7 @@ unsafe extern "C" fn plugin_activate(
         Kind::Synth => 0,
     };
     audio.delay = [vec![0.0; audio.latency], vec![0.0; audio.latency]];
+    audio.side_delay = audio.delay.clone();
     audio.position = 0;
     audio.voices = [Voice::default(); VOICES];
     audio.buffers = std::array::from_fn(|_| vec![0.0; max_frames as usize]);
@@ -1511,7 +1553,7 @@ unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
     this.count(2);
     // SAFETY: the thread processing calls it.
     let audio = unsafe { &mut *this.audio.get() };
-    for line in &mut audio.delay {
+    for line in audio.delay.iter_mut().chain(&mut audio.side_delay) {
         line.fill(0.0);
     }
     audio.voices = [Voice::default(); VOICES];
@@ -1544,10 +1586,25 @@ unsafe extern "C" fn plugin_process(
             return CLAP_PROCESS_ERROR;
         }
     }
-    let inputs = usize::from(this.kind == Kind::Gain) as u32;
+    let inputs = if this.kind == Kind::Gain { 2 } else { 0 };
     if process.audio_inputs_count != inputs || process.audio_outputs_count != 1 {
         violation("process got the wrong number of audio ports");
         return CLAP_PROCESS_ERROR;
+    }
+    if this.kind == Kind::Gain && !this.sidechain() {
+        // SAFETY: the host passes two input ports, as just checked.
+        let side = unsafe { &*process.audio_inputs.add(1) };
+        // SAFETY: as above, `frames` long.
+        let silent = unsafe { stereo(side) }.is_some_and(|channels| {
+            (channels.iter()).all(|&c| {
+                unsafe { std::slice::from_raw_parts(c, frames) }
+                    .iter()
+                    .all(|&s| s == 0.0)
+            })
+        });
+        if side.constant_mask & 0b11 != 0b11 || !silent {
+            violation("process got a port the host turned off without silence marked constant");
+        }
     }
     // SAFETY: the host passes one output port.
     let output = unsafe { &*process.audio_outputs };
@@ -1630,6 +1687,12 @@ unsafe extern "C" fn plugin_get_extension(
         (&raw const STATE).cast()
     } else if id == CLAP_EXT_AUDIO_PORTS {
         (&raw const AUDIO_PORTS).cast()
+    } else if (id == CLAP_EXT_AUDIO_PORTS_ACTIVATION
+        || id == CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT)
+        && !synth
+        && !FIXED_PORTS.load(Ordering::SeqCst)
+    {
+        (&raw const PORTS_ACTIVATION).cast()
     } else if id == CLAP_EXT_GUI {
         (&raw const GUI).cast()
     } else if id == CLAP_EXT_LATENCY && !synth {
@@ -1874,7 +1937,8 @@ unsafe extern "C" fn audio_ports_count(plugin: *const clap_plugin, is_input: boo
     this.on_main("audio_ports.count");
     match (this.kind, is_input) {
         (Kind::Synth, true) => 0,
-        _ => 1,
+        (Kind::Gain, true) => 2,
+        (_, false) => 1,
     }
 }
 
@@ -1887,29 +1951,66 @@ unsafe extern "C" fn audio_ports_get(
     // SAFETY: the host calls back with its plugin.
     let this = unsafe { this(plugin) };
     this.on_main("audio_ports.get");
-    if index != 0 || (this.kind == Kind::Synth && is_input) {
-        return false;
-    }
+    let (port, id, flags) = match (this.kind, is_input, index) {
+        (Kind::Gain, true, 0) => ("In", 0, CLAP_AUDIO_PORT_IS_MAIN),
+        (Kind::Gain, true, 1) => ("Sidechain", SIDECHAIN, 0),
+        (_, false, 0) => ("Out", 1, CLAP_AUDIO_PORT_IS_MAIN),
+        _ => return false,
+    };
     let mut name = [0; 256];
     // SAFETY: the array holds as much as it says.
-    unsafe {
-        copy_str(
-            if is_input { "In" } else { "Out" },
-            name.as_mut_ptr(),
-            name.len(),
-        )
-    };
+    unsafe { copy_str(port, name.as_mut_ptr(), name.len()) };
     // SAFETY: the host passes somewhere to write.
     unsafe {
         info.write(clap_audio_port_info {
-            id: u32::from(!is_input),
+            id,
             name,
-            flags: CLAP_AUDIO_PORT_IS_MAIN,
+            flags,
             channel_count: 2,
             port_type: CLAP_PORT_STEREO.as_ptr(),
             in_place_pair: CLAP_INVALID_ID,
         });
     }
+    true
+}
+
+static PORTS_ACTIVATION: clap_plugin_audio_ports_activation = clap_plugin_audio_ports_activation {
+    can_activate_while_processing: Some(ports_activation_while_processing),
+    set_active: Some(ports_set_active),
+};
+
+unsafe extern "C" fn ports_activation_while_processing(plugin: *const clap_plugin) -> bool {
+    // SAFETY: the host calls back with its plugin.
+    let this = unsafe { this(plugin) };
+    this.on_main("audio_ports_activation.can_activate_while_processing");
+    false
+}
+
+/// Switches the gain's sidechain, as it can only while it's inactive: it
+/// takes no other port.
+unsafe extern "C" fn ports_set_active(
+    plugin: *const clap_plugin,
+    is_input: bool,
+    port_index: u32,
+    is_active: bool,
+    sample_size: u32,
+) -> bool {
+    // SAFETY: the host calls back with its plugin.
+    let this = unsafe { this(plugin) };
+    // While inactive, which is on the main thread.
+    this.on_main("audio_ports_activation.set_active");
+    if this.active.load(Ordering::SeqCst) {
+        violation("audio_ports_activation.set_active was called while the plugin was active");
+        return false;
+    }
+    if !matches!(sample_size, 0 | 32 | 64) {
+        violation("audio_ports_activation.set_active got a nonsense sample size");
+        return false;
+    }
+    if !is_input || port_index != 1 {
+        return false;
+    }
+    this.sidechain.store(is_active, Ordering::SeqCst);
     true
 }
 

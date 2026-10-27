@@ -579,8 +579,9 @@ until `Meter::clear_highest`.
 A wire (`musicable_model::routing::Wire`) takes the signal at a point on a
 channel, a tap, into a device's side input, a port, such as the
 compressor's and the gate's Sidechain ([Built-in
-devices](#built-in-devices)). `compile()` adds the wires once every strip
-is built, so a wire can join any two:
+devices](#built-in-devices)) or a plugin's side inputs
+([plugins.md](plugins.md#side-inputs)). `compile()` adds the wires once
+every strip is built, so a wire can join any two:
 
 - **Taps.** As it builds each strip, the compiler notes where each tap's
   signal is. A track's Pre FX is the head of its strip, its source. A
@@ -592,7 +593,10 @@ is built, so a wire can join any two:
   wires carry on: a muted ghost kick still ducks the bass. A MIDI track's
   Pre FX is notes, which no wire takes yet.
 - **The wire** (`keys::wire`) is a `Gain` at the wire's gain, fed by its
-  tap, and feeding its device's switch on side input 0. Its `Gain::GAIN`
+  tap, and feeding its device's switch on a side input: 0 for the
+  Compressor's or the Gate's Sidechain, and for a plugin's side input
+  (`Port::PluginInput`) the plugin's id for it, which its nodes mix into
+  that port. Its `Gain::GAIN`
   ramps as a send's does, a lane (`ParamAddress::Wire`) automates it, and
   modulators move it from silence to +24 dB (`Gain::with_max_gain`), from
   the channel of the device it feeds ([Modulation](#modulation)). Wires

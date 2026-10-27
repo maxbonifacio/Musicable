@@ -112,12 +112,16 @@ pub(crate) const CONTROLLERS: usize = Controller::MAX as usize + 1;
 /// The parameter each MIDI controller moves, by number.
 pub(crate) type Controllers = [Option<u32>; CONTROLLERS];
 
-/// A plugin's audio buses on one side: their channel counts, and which is
-/// the main one.
+/// A plugin's audio buses on one side: their channel counts and names,
+/// which is the main one, and which are on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BusInfo {
     pub(crate) channels: Vec<u32>,
+    pub(crate) names: Vec<String>,
     pub(crate) main: Option<usize>,
+    /// Whether the host turned each on: the main one, and a side input
+    /// while something's wired to it.
+    pub(crate) on: Vec<bool>,
 }
 
 /// The buffers for one side of a plugin's audio buses.
@@ -125,6 +129,12 @@ pub(crate) struct BusInfo {
 pub(crate) struct Buses {
     pub(crate) channels: Channels,
     buffers: Vec<AudioBusBuffers>,
+    /// Each bus's silence flags, which it's handed over with every block:
+    /// every channel of a bus that's off, which holds silence.
+    silence: Vec<u64>,
+    /// The side inputs that are on, by index, which is also the node's side
+    /// input they get.
+    sides: Vec<usize>,
 }
 
 impl Buses {
@@ -142,14 +152,32 @@ impl Buses {
                 },
             })
             .collect();
-        Self { channels, buffers }
+        let on = |bus| info.on.get(bus).copied().unwrap_or(false);
+        let silence = (info.channels.iter().enumerate())
+            .map(|(bus, &count)| {
+                if on(bus) {
+                    0
+                } else {
+                    u64::MAX >> (64 - count.clamp(1, 64))
+                }
+            })
+            .collect();
+        let sides = (0..info.channels.len())
+            .filter(|&bus| on(bus) && Some(bus) != info.main)
+            .collect();
+        Self {
+            channels,
+            buffers,
+            silence,
+            sides,
+        }
     }
 
     /// Silences every bus, and gets the buffers ready to hand over.
     fn clear(&mut self, frames: usize) {
         self.channels.clear(frames);
-        for buffer in &mut self.buffers {
-            buffer.silenceFlags = 0;
+        for (buffer, &silence) in self.buffers.iter_mut().zip(&self.silence) {
+            buffer.silenceFlags = silence;
         }
     }
 }
@@ -191,8 +219,9 @@ impl fmt::Debug for NodeSource {
 
 /// A VST3 plugin, as a node in the engine's graph.
 ///
-/// The node mixes its inputs into the plugin's main input bus and plays
-/// its main output bus. It sends the plugin its parameter changes and
+/// The node mixes its main input into the plugin's main input bus, and
+/// each side input into the plugin's bus of that index while it's on, and
+/// plays its main output bus. It sends the plugin its parameter changes and
 /// notes, and the transport. Until the plugin is active, while it's being
 /// set up, and if it fails, the node plays silence.
 ///
@@ -323,8 +352,14 @@ fn run(
     }
     audio.inputs.clear(frames);
     audio.outputs.clear(frames);
-    if let Some(main) = audio.inputs.channels.main() {
-        audio.inputs.channels.mix_into(main, inputs, frames);
+    let buses = &audio.inputs;
+    if let Some(main) = buses.channels.main() {
+        buses.channels.mix_into(main, inputs.iter(), frames);
+    }
+    for &bus in &buses.sides {
+        buses
+            .channels
+            .mix_into(bus, inputs.side(bus as u32), frames);
     }
     events_for_block(ctx, audio);
     audio.context = context(

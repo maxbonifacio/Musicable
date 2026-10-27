@@ -732,8 +732,11 @@ fn build(
         let gain = Gain::new(wire.gain).with_max_gain(routing::Wire::GAIN_MAX);
         let gain = graph.add(keys::wire(wire.id), gain);
         connect(&mut graph, from, gain);
+        // A plugin's node tells its side inputs apart by the plugin's ids
+        // for them.
         let port = match wire.to {
             routing::Port::Sidechain(_) => InputPort::Side(0),
+            routing::Port::PluginInput(_, input) => InputPort::Side(input),
         };
         graph
             .connect_to(gain, to, port)
@@ -1719,6 +1722,7 @@ mod tests {
             id: "org.example.plugin".into(),
             name: "Plugin".into(),
             instrument,
+            inputs: Vec::new(),
             settings: Default::default(),
         })
     }

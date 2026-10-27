@@ -6,7 +6,10 @@
 //!   0 to 2 and Latency from 0 to 48,000 frames in as many steps. Changing
 //!   the latency at the controller asks the host to restart the plugin, and
 //!   the processor takes the new latency as it's activated again. Peak is a
-//!   meter: the processor sets it to each block's peak.
+//!   meter: the processor sets it to each block's peak. Its second input
+//!   bus, Sidechain ([`VST3_SIDECHAIN`]), ducks it as the CLAP gain's does,
+//!   while the host has it on: VST3's buses start off, and the host turns
+//!   them on and off only while the plugin is inactive.
 //! - **Test Synth** is one object, component and controller at once. It
 //!   plays each note as the CLAP synth does, shaped by VST3's tuning and
 //!   brightness note expressions and its poly pressure. Its MIDI mapping
@@ -35,7 +38,7 @@ use vst3::Steinberg::PClassInfo_::ClassCardinality_::kManyInstances;
 use vst3::Steinberg::PFactoryInfo_::FactoryFlags_::kUnicode;
 use vst3::Steinberg::Vst::BusDirections_::kInput;
 use vst3::Steinberg::Vst::BusInfo_::BusFlags_::kDefaultActive;
-use vst3::Steinberg::Vst::BusTypes_::kMain;
+use vst3::Steinberg::Vst::BusTypes_::{kAux, kMain};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
     kNoteExpressionValueEvent, kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent,
 };
@@ -86,6 +89,10 @@ pub const VST3_SYNTH_ID: &str = "4D5553494341424C4554455354000003";
 
 /// Test Gain's meter, which its processor sets to each block's peak.
 pub const PEAK: u32 = 12;
+
+/// Test Gain's sidechain: its second audio input bus, by index, as hosts
+/// know VST3's buses.
+pub const VST3_SIDECHAIN: u32 = 1;
 
 /// The transport, as a VST3 test plugin last saw it: see
 /// [`musicable_test_vst3_transport`].
@@ -645,6 +652,9 @@ struct Gain {
     values: [AtomicU64; 2],
     /// The latency it took as it was last activated, in frames.
     latency: AtomicU32,
+    /// Whether the host turned its sidechain bus on. VST3's buses start
+    /// off.
+    sidechain: AtomicBool,
     label: Mutex<String>,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
     transport: Mutex<Option<Vst3Transport>>,
@@ -652,7 +662,10 @@ struct Gain {
 }
 
 struct GainAudio {
+    /// Whether the sidechain was on as the plugin was activated.
+    sidechain: bool,
     delay: [Vec<f32>; 2],
+    side_delay: [Vec<f32>; 2],
     position: usize,
     /// The block's parameter changes: see [`read_changes`].
     changes: Vec<(ParamID, i32, f64)>,
@@ -671,11 +684,14 @@ impl Gain {
             lifecycle: Lifecycle::default(),
             values: [AtomicU64::new(0.5f64.to_bits()), AtomicU64::new(0)],
             latency: AtomicU32::new(0),
+            sidechain: AtomicBool::new(false),
             label: Mutex::new(String::new()),
             peer: Mutex::new(None),
             transport: Mutex::new(None),
             audio: Mutex::new(GainAudio {
+                sidechain: false,
                 delay: Default::default(),
+                side_delay: Default::default(),
                 position: 0,
                 changes: Vec::with_capacity(BLOCK_INPUTS),
             }),
@@ -748,9 +764,17 @@ impl IComponentTrait for GainComponent {
         kResultOk
     }
 
-    unsafe fn getBusCount(&self, media: MediaType, _: BusDirection) -> int32 {
+    unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> int32 {
         self.0.checks.ui("getBusCount");
-        int32::from(media == kAudio as MediaType)
+        match (
+            media == kAudio as MediaType,
+            direction == kInput as BusDirection,
+        ) {
+            // Its input, and its sidechain.
+            (true, true) => 2,
+            (true, false) => 1,
+            (false, _) => 0,
+        }
     }
 
     unsafe fn getBusInfo(
@@ -761,16 +785,15 @@ impl IComponentTrait for GainComponent {
         bus: *mut BusInfo,
     ) -> tresult {
         self.0.checks.ui("getBusInfo");
-        if media != kAudio as MediaType || index != 0 {
-            return kInvalidArgument;
-        }
-        let name = if direction == kInput as BusDirection {
-            "Input"
-        } else {
-            "Output"
+        let input = direction == kInput as BusDirection;
+        let (name, main) = match (media == kAudio as MediaType, input, index) {
+            (true, true, 0) => ("Input", true),
+            (true, true, 1) => ("Sidechain", false),
+            (true, false, 0) => ("Output", true),
+            _ => return kInvalidArgument,
         };
         // SAFETY: the host passes somewhere to write, or null.
-        unsafe { write_bus(bus, media, direction, 2, name) }
+        unsafe { write_bus(bus, media, direction, 2, name, main) }
     }
 
     unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
@@ -780,16 +803,20 @@ impl IComponentTrait for GainComponent {
     unsafe fn activateBus(
         &self,
         media: MediaType,
-        _: BusDirection,
+        direction: BusDirection,
         index: int32,
-        _: TBool,
+        state: TBool,
     ) -> tresult {
         self.0.checks.ui("activateBus");
         self.0.lifecycle.check_inactive("activateBus");
-        if media == kAudio as MediaType && index == 0 {
-            kResultOk
-        } else {
-            kInvalidArgument
+        let input = direction == kInput as BusDirection;
+        match (media == kAudio as MediaType, input, index) {
+            (true, true, 1) => {
+                self.0.sidechain.store(state != 0, Ordering::SeqCst);
+                kResultOk
+            }
+            (true, _, 0) => kResultOk,
+            _ => kInvalidArgument,
         }
     }
 
@@ -799,7 +826,9 @@ impl IComponentTrait for GainComponent {
             let latency = latency_frames(gain.value(1));
             gain.latency.store(latency as u32, Ordering::SeqCst);
             let mut audio = lock(&gain.audio);
+            audio.sidechain = gain.sidechain.load(Ordering::SeqCst);
             audio.delay = [vec![0.0; latency], vec![0.0; latency]];
+            audio.side_delay = audio.delay.clone();
             audio.position = 0;
         }
         kResultOk
@@ -838,11 +867,14 @@ impl IAudioProcessorTrait for GainComponent {
     ) -> tresult {
         self.0.checks.ui("setBusArrangements");
         self.0.lifecycle.check_inactive("setBusArrangements");
-        // SAFETY: the host passes as many as it says.
-        let stereo = |list: *mut SpeakerArrangement, count| unsafe {
-            count == 1 && !list.is_null() && *list == kStereo
+        // Every bus stereo: its input and its sidechain, and its output.
+        let stereo = |list: *mut SpeakerArrangement, count: int32, buses: int32| {
+            count == buses
+                && !list.is_null()
+                // SAFETY: the host passes as many as it says.
+                && (0..count as usize).all(|bus| unsafe { *list.add(bus) } == kStereo)
         };
-        if stereo(inputs, inputs_count) && stereo(outputs, outputs_count) {
+        if stereo(inputs, inputs_count, 2) && stereo(outputs, outputs_count, 1) {
             kResultTrue
         } else {
             kResultFalse
@@ -851,11 +883,16 @@ impl IAudioProcessorTrait for GainComponent {
 
     unsafe fn getBusArrangement(
         &self,
-        _: BusDirection,
+        direction: BusDirection,
         index: int32,
         arrangement: *mut SpeakerArrangement,
     ) -> tresult {
-        if index != 0 || arrangement.is_null() {
+        let buses = if direction == kInput as BusDirection {
+            2
+        } else {
+            1
+        };
+        if !(0..buses).contains(&index) || arrangement.is_null() {
             return kInvalidArgument;
         }
         // SAFETY: checked non-null; the host passes somewhere to write.
@@ -913,14 +950,24 @@ impl IAudioProcessorTrait for GainComponent {
             }
             return kResultOk;
         }
+        // The host hands it every bus, those it turned off too.
         // SAFETY: the host passes as many buses as it says.
-        let (Some(input), Some(output)) =
-            (unsafe { stereo_bus(data.inputs, data.numInputs) }, unsafe {
-                stereo_bus(data.outputs, data.numOutputs)
-            })
-        else {
+        let (Some(input), Some(output)) = (
+            unsafe { stereo_bus(data.inputs, data.numInputs, 0) },
+            unsafe { stereo_bus(data.outputs, data.numOutputs, 0) },
+        ) else {
             violation("process got buses that aren't the plugin's");
             return kResultFalse;
+        };
+        if data.numInputs != 2 || data.numOutputs != 1 {
+            violation("process got buses that aren't the plugin's");
+            return kResultFalse;
+        }
+        let side = if audio.sidechain {
+            // SAFETY: as above.
+            unsafe { stereo_bus(data.inputs, data.numInputs, 1) }
+        } else {
+            None
         };
         let mut next = 0;
         let mut peak = 0.0f32;
@@ -935,12 +982,20 @@ impl IAudioProcessorTrait for GainComponent {
             for channel in 0..2 {
                 // SAFETY: the buffers are `frames` long.
                 let x = unsafe { *input[channel].add(frame) };
-                let y = if audio.delay[channel].is_empty() {
-                    x
+                // SAFETY: as above.
+                let key = side.map_or(0.0, |side| unsafe { *side[channel].add(frame) });
+                let (y, key) = if audio.delay[channel].is_empty() {
+                    (x, key)
                 } else {
-                    std::mem::replace(&mut audio.delay[channel][audio.position], x)
+                    let at = audio.position;
+                    (
+                        std::mem::replace(&mut audio.delay[channel][at], x),
+                        std::mem::replace(&mut audio.side_delay[channel][at], key),
+                    )
                 };
-                let y = (f64::from(y) * factor) as f32;
+                // The sidechain ducks it.
+                let duck = 1.0 - f64::from(key.abs()).min(1.0);
+                let y = (f64::from(y) * factor * duck) as f32;
                 peak = peak.max(y.abs());
                 // SAFETY: as above.
                 unsafe { *output[channel].add(frame) = y };
@@ -1623,7 +1678,7 @@ impl IComponentTrait for SynthComponent {
         }
         let (channels, name) = if input { (16, "Notes") } else { (2, "Output") };
         // SAFETY: the host passes somewhere to write, or null.
-        unsafe { write_bus(bus, media, direction, channels, name) }
+        unsafe { write_bus(bus, media, direction, channels, name, true) }
     }
 
     unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
@@ -1757,7 +1812,8 @@ impl IAudioProcessorTrait for SynthComponent {
             return kResultFalse;
         }
         // SAFETY: the host passes as many buses as it says.
-        let Some(output) = (unsafe { stereo_bus(data.outputs, data.numOutputs) }) else {
+        let output = unsafe { stereo_bus(data.outputs, data.numOutputs, 0) };
+        let Some(output) = output.filter(|_| data.numOutputs == 1) else {
             violation("process got outputs that aren't the synth's");
             return kResultFalse;
         };
@@ -2252,6 +2308,9 @@ fn write_param(
     info.flags = flags;
 }
 
+/// Describes a bus: a main one, which the host is to turn on, or an aux
+/// one, which it needn't.
+///
 /// # Safety
 ///
 /// `bus` must be somewhere to write, or null.
@@ -2261,6 +2320,7 @@ unsafe fn write_bus(
     direction: BusDirection,
     channels: int32,
     name: &str,
+    main: bool,
 ) -> tresult {
     // SAFETY: the caller's promise.
     let Some(bus) = (unsafe { bus.as_mut() }) else {
@@ -2272,8 +2332,12 @@ unsafe fn write_bus(
     bus.direction = direction;
     bus.channelCount = channels;
     write_utf16(&mut bus.name, name);
-    bus.busType = kMain as BusType;
-    bus.flags = kDefaultActive as uint32;
+    if main {
+        bus.busType = kMain as BusType;
+        bus.flags = kDefaultActive as uint32;
+    } else {
+        bus.busType = kAux as BusType;
+    }
     kResultOk
 }
 
@@ -2453,7 +2517,7 @@ unsafe fn read_events(list: *mut IEventList, frames: usize, events: &mut Vec<Eve
     }
 }
 
-/// A bus's two channels, if it's the only bus and stereo.
+/// Bus `index`'s two channels, if there's such a bus and it's stereo.
 ///
 /// # Safety
 ///
@@ -2461,12 +2525,13 @@ unsafe fn read_events(list: *mut IEventList, frames: usize, events: &mut Vec<Eve
 unsafe fn stereo_bus(
     buses: *mut vst3::Steinberg::Vst::AudioBusBuffers,
     count: int32,
+    index: int32,
 ) -> Option<[*mut f32; 2]> {
-    if count != 1 || buses.is_null() {
+    if !(0..count).contains(&index) || buses.is_null() {
         return None;
     }
     // SAFETY: the caller's promise.
-    let bus = unsafe { &*buses };
+    let bus = unsafe { &*buses.add(index as usize) };
     // SAFETY: a 32-bit bus, as the plugin was set up.
     let channels = unsafe { bus.__field0.channelBuffers32 };
     if bus.numChannels != 2 || channels.is_null() {
@@ -2908,6 +2973,25 @@ pub unsafe extern "C" fn musicable_test_vst3_lifecycle(
     };
     // SAFETY: the caller's promise.
     unsafe { counts.write(seen) };
+    true
+}
+
+/// Whether Test Gain's sidechain bus is on, as the host last turned it,
+/// into `on`. Returns whether `object` is Test Gain's component.
+///
+/// # Safety
+///
+/// As for [`musicable_test_vst3_gui`], and `on` must be valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_vst3_sidechain(object: *mut c_void, on: *mut bool) -> bool {
+    let Some(Object::Gain(gain)) = find(object) else {
+        return false;
+    };
+    let Some(gain) = gain.upgrade() else {
+        return false;
+    };
+    // SAFETY: the caller's promise.
+    unsafe { on.write(gain.sidechain.load(Ordering::SeqCst)) };
     true
 }
 

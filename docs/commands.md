@@ -653,14 +653,15 @@ opens again.
 ### Wires
 
 A wire takes the signal at a tap, a point on a track or the master, into a
-device's port, such as the Compressor's and the Gate's Sidechain, at a
-gain, and wires into the same port sum
+device's port, the Compressor's and the Gate's Sidechain or one of a
+plugin's side inputs, at a gain, and wires into the same port sum
 ([project-format.md](project-format.md#wire)). The devices panel's
-Sidechain column runs these ([app.md](app.md#the-devices-panel)).
+Sidechain column, and a plugin's rows for its side inputs, run these
+([app.md](app.md#the-devices-panel)).
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `wire.connect` | Connect Wire | Wires a tap into the side input of the Compressor or the Gate `device`, at `gain` (linear, 1 without it), and turns its Sidechain on. Returns the new wire | none | Audio From, in a compressor's Sidechain |
+| `wire.connect` | Connect Wire | Wires a tap into a side input of `device`, at `gain` (linear, 1 without it): the Sidechain of a Compressor or a Gate, which it turns on, or a plugin's side input `input`, by the plugin's id for it, its first without it. Returns the new wire | none | Audio From, in a compressor's Sidechain |
 | `wire.disconnect` | Disconnect Wire | Removes the wire `wire`, with the lane on its gain and the routings to it | none | No Input |
 | `wire.set_source` | Set Wire Source | Has the wire `wire` take its signal from another tap, keeping its gain, its lane and its place | none | Audio From |
 | `wire.set_gain` | Set Wire Gain | Sets the wire's `gain`, linear, from silence to about 15.85, +24 dB. It overrides the lane on it, as moving a control does | none | The sidechain's Gain |
@@ -677,7 +678,9 @@ send's level, as far as the wire's own range, and a modulator reaches it
 where it reaches the device the wire feeds ([Modulation](#modulation)).
 
 A wire is refused, with an error that says why, when the project hasn't
-got the tap or the port, when the tap is wired to the port already, and
+got the tap or the port, a plugin's side input among them if its device
+doesn't list it (`PluginDevice::inputs`, which the app keeps as the plugin
+lists its inputs), when the tap is wired to the port already, and
 when it would make a loop: when what the device puts out reaches the tap,
 as it does a group its track feeds, the master, or a point after itself,
 such as "That would make a loop: what the Compressor on Bass puts out
@@ -1030,8 +1033,9 @@ a track, its input and monitoring among them, a send and the master; adding
 and removing clips, and their timing, fades and names; adding and removing
 notes, and their timing, keys and velocities; adding, naming and removing
 takes; adding, moving, naming and removing locators; adding and removing
-devices, bypassing and deactivating them, and a plugin's parameters and
-settings; and each parameter's automation, and whether it's overridden.
+devices, bypassing and deactivating them, and a plugin's parameters,
+settings and side inputs; and each parameter's automation, and whether
+it's overridden.
 `Transaction::editor` reads the editor's state, such as the files' sample
 rates. Each setter records an `Edit` with the new value and the one it replaced. A
 setter that changes nothing records nothing, and a transaction with nothing

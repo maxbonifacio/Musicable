@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use musicable_engine::{EngineConfig, Graph};
+use musicable_model::plugin::PluginInput;
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::BusTypes_::kMain;
 use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
@@ -112,6 +113,9 @@ pub struct Instance {
     /// What the controller tells the host through.
     handler: ComWrapper<ComponentHandler>,
     params: Vec<ParamInfo>,
+    side_inputs: Vec<PluginInput>,
+    /// The side inputs wires go into, by index, which are on.
+    wired: Vec<u32>,
     /// The engine config it's active for.
     config: Option<EngineConfig>,
     to_audio: rtrb::Producer<ParamChange>,
@@ -163,6 +167,8 @@ impl Instance {
             _host: host,
             handler,
             params: Vec::new(),
+            side_inputs: Vec::new(),
+            wired: Vec::new(),
             config: None,
             to_audio,
             from_audio,
@@ -173,6 +179,7 @@ impl Instance {
         };
         instance.connect();
         instance.params = instance.read_params();
+        instance.side_inputs = side_inputs(&instance.buses(kInput as BusDirection));
         Ok(instance)
     }
 
@@ -430,9 +437,10 @@ impl Instance {
         if unsafe { parts.processor.canProcessSampleSize(kSample32 as int32) } != kResultOk {
             return Err(Error::new(format!("{name} can't process 32-bit audio")));
         }
-        let inputs = self.buses(kInput as BusDirection);
+        let mut inputs = self.buses(kInput as BusDirection);
         let outputs = self.buses(kOutput as BusDirection);
-        let takes_notes = self.activate_buses(&inputs, &outputs);
+        self.side_inputs = side_inputs(&inputs);
+        let takes_notes = self.activate_buses(&mut inputs, &outputs);
         let controllers = self.midi_mapping();
         let mut setup = ProcessSetup {
             processMode: kRealtime as int32,
@@ -529,7 +537,35 @@ impl Instance {
         self.shared.latency()
     }
 
-    /// The plugin's audio buses on one side.
+    // Side inputs.
+
+    /// The plugin's side inputs, as it last described them: its audio input
+    /// buses besides the main one, by their indexes.
+    pub fn side_inputs(&self) -> &[PluginInput] {
+        &self.side_inputs
+    }
+
+    /// Switches on the side inputs with ids in `wired`, the ones wires go
+    /// into, and off the others. An active plugin restarts if that changes
+    /// which are on: VST3 switches buses only while a plugin is inactive.
+    /// Says whether it restarted. Ids the plugin hasn't are left be, and
+    /// switch on if it comes to have them.
+    pub fn set_side_inputs(&mut self, wired: &[u32]) -> Result<bool, Error> {
+        let on = |wired: &[u32]| -> Vec<u32> {
+            (self.side_inputs.iter())
+                .map(|input| input.id)
+                .filter(|id| wired.contains(id))
+                .collect()
+        };
+        let changed = on(wired) != on(&self.wired);
+        self.wired = wired.to_vec();
+        match self.config {
+            Some(config) if changed => self.activate(config).map(|()| true),
+            _ => Ok(false),
+        }
+    }
+
+    /// The plugin's audio buses on one side, with the main one on.
     fn buses(&self, direction: BusDirection) -> BusInfo {
         let component = &self.parts.component;
         let media = kAudio as MediaType;
@@ -545,6 +581,9 @@ impl Instance {
                 unsafe { component.getBusInfo(media, direction, index, &mut bus) } == kResultOk;
             let channels = if ok { bus.channelCount.clamp(0, 64) } else { 0 };
             buses.channels.push(channels as u32);
+            buses
+                .names
+                .push(if ok { utf16(&bus.name) } else { String::new() });
             if ok && bus.busType == kMain as BusType && buses.main.is_none() {
                 buses.main = Some(index as usize);
             }
@@ -553,6 +592,9 @@ impl Instance {
         if buses.main.is_none() && !buses.channels.is_empty() {
             buses.main = Some(0);
         }
+        buses.on = (0..buses.channels.len())
+            .map(|bus| Some(bus) == buses.main)
+            .collect();
         buses
     }
 
@@ -576,17 +618,27 @@ impl Instance {
         mapping
     }
 
-    /// Turns on the buses the nodes use: the main audio ones, and the first
-    /// event input, for notes, if there is one. Says whether there is.
-    fn activate_buses(&self, inputs: &BusInfo, outputs: &BusInfo) -> bool {
+    /// Turns on the buses the nodes use, and off the others: the main audio
+    /// ones, the side inputs wires go into, which `inputs` says are on if
+    /// the plugin takes them, and the first event input, for notes, if
+    /// there is one. Says whether there is.
+    fn activate_buses(&self, inputs: &mut BusInfo, outputs: &BusInfo) -> bool {
         let component = &self.parts.component;
         let (audio, events) = (kAudio as MediaType, kEvent as MediaType);
         let input = kInput as BusDirection;
         // SAFETY: on the main thread, and inactive: every call.
         unsafe {
-            for (direction, buses) in [(input, inputs), (kOutput as BusDirection, outputs)] {
+            for (direction, buses) in [(input, &*inputs), (kOutput as BusDirection, outputs)] {
                 if let Some(main) = buses.main {
                     component.activateBus(audio, direction, main as i32, 1);
+                }
+            }
+            let main = inputs.main;
+            for (bus, on) in inputs.on.iter_mut().enumerate() {
+                if Some(bus) != main {
+                    let wired = self.wired.contains(&(bus as u32));
+                    let switched = component.activateBus(audio, input, bus as i32, wired.into());
+                    *on = wired && switched == kResultOk;
                 }
             }
             let takes_notes = component.getBusCount(events, input) > 0;
@@ -718,11 +770,12 @@ impl Instance {
                     }
                 }
                 // An inactive plugin restarts as it's activated, which needs
-                // to know it asked.
+                // to know it asked, and its side inputs are read now.
                 None => {
                     requests
                         .restart
                         .fetch_or(restart & RESTART, Ordering::AcqRel);
+                    self.side_inputs = side_inputs(&self.buses(kInput as BusDirection));
                 }
             }
         }
@@ -907,6 +960,22 @@ impl Drop for Instance {
             parts.component.terminate();
         }
     }
+}
+
+/// The side inputs among a plugin's input buses: all but the main one, by
+/// their indexes, named "Input 2" and so on where the plugin names them
+/// nothing.
+fn side_inputs(buses: &BusInfo) -> Vec<PluginInput> {
+    (buses.names.iter().enumerate())
+        .filter(|&(bus, _)| Some(bus) != buses.main)
+        .map(|(bus, name)| PluginInput {
+            id: bus as u32,
+            name: match name.trim() {
+                "" => format!("Input {}", bus + 1),
+                name => name.to_owned(),
+            },
+        })
+        .collect()
 }
 
 /// Makes the plugin of class `cid` and initializes it, with its controller

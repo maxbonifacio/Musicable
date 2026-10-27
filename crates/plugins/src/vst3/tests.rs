@@ -13,9 +13,12 @@ use musicable_engine::switch::Switch;
 use musicable_engine::{AudioMut, Engine, Graph, Node, NodeKey, NoteEvent, NoteId, TransportState};
 use musicable_model::PluginFormat;
 use musicable_model::clip::{Controller, Dimension};
+use musicable_model::plugin::PluginInput;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
-use musicable_test_plugins::vst3::{PEAK, VST3_GAIN_ID, VST3_SYNTH_ID, Vst3Transport};
+use musicable_test_plugins::vst3::{
+    PEAK, VST3_GAIN_ID, VST3_SIDECHAIN, VST3_SYNTH_ID, Vst3Transport,
+};
 use musicable_test_plugins::{GAIN, LATENCY, LEVEL, gui};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
@@ -31,7 +34,7 @@ use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
     Block, CONFIG, Impulse, assert_close, bypass, bypassed_at_256_and_back_at_1280, controller,
-    note, param, play, play_blocks, ramp, scaled, scan_path, sine, temp_dir,
+    ducked, note, param, play, play_blocks, play_keyed, ramp, scaled, scan_path, sine, temp_dir,
 };
 use crate::{ParentWindow, PluginEvent, Waker};
 
@@ -138,6 +141,12 @@ impl TestPlugins {
     fn lifecycle(&self, instance: &Instance) -> Lifecycle {
         // SAFETY: as above.
         unsafe { self.library.vst3_lifecycle(instance.raw_component()) }.unwrap()
+    }
+
+    /// Whether the gain's sidechain bus is on, as the plugin has it.
+    fn sidechain(&self, instance: &Instance) -> bool {
+        // SAFETY: as above.
+        unsafe { self.library.vst3_sidechain(instance.raw_component()) }.unwrap()
     }
 }
 
@@ -489,6 +498,70 @@ fn a_latency_set_before_the_plugin_activates_needs_no_restart() {
     play(&mut node, &ramp(64), &Block::default());
     assert_eq!(instance.poll(), []);
     drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_side_input_turns_on_with_a_restart_as_it_is_wired() {
+    let plugins = TestPlugins::new("sidechain");
+    let mut instance = plugins.gain();
+    let sidechain = PluginInput {
+        id: VST3_SIDECHAIN,
+        name: "Sidechain".into(),
+    };
+    assert_eq!(instance.side_inputs(), [sidechain]);
+    assert_eq!(instance.set_side_inputs(&[VST3_SIDECHAIN]), Ok(false));
+    instance.activate(CONFIG).unwrap();
+    assert!(plugins.sidechain(&instance), "on as it activated");
+    assert_eq!(instance.set_side_inputs(&[]), Ok(true));
+    assert!(!plugins.sidechain(&instance));
+    let mut node = instance.node_source().node();
+    let (input, key) = (vec![0.5; 64], ramp(64));
+    let keyed = Some((VST3_SIDECHAIN, key.as_slice()));
+    // Off, it hears nothing of its side input.
+    assert_eq!(
+        play_keyed(&mut node, &input, keyed, &Block::default())[0],
+        input
+    );
+    let starts = plugins.lifecycle(&instance).starts;
+
+    // Wired, it restarts with the bus on, which ducks it.
+    assert_eq!(instance.set_side_inputs(&[VST3_SIDECHAIN, 0, 7]), Ok(true));
+    assert!(plugins.sidechain(&instance));
+    assert_eq!(instance.set_side_inputs(&[VST3_SIDECHAIN]), Ok(false));
+    let [left, right] = play_keyed(&mut node, &input, keyed, &Block::default());
+    assert_close(&left, &ducked(&input, &key));
+    assert_close(&right, &scaled(&ducked(&input, &key), -1.0));
+    assert!(plugins.lifecycle(&instance).starts > starts, "it restarted");
+    assert_eq!(play(&mut node, &input, &Block::default())[0], input);
+
+    // A latent plugin hears it as late as its input.
+    instance.set_param(LATENCY, latency(37));
+    assert_eq!(
+        instance.poll(),
+        [PluginEvent::Restarted {
+            latency_changed: true
+        }]
+    );
+    assert!(plugins.sidechain(&instance), "still on");
+    let input = vec![0.5; 256];
+    let mut key = vec![0.0; 256];
+    key[100..110].fill(1.0);
+    let [left, _] = play_keyed(
+        &mut node,
+        &input,
+        Some((VST3_SIDECHAIN, &key)),
+        &Block::default(),
+    );
+    let mut expected = vec![0.5; 256];
+    expected[..37].fill(0.0);
+    expected[137..147].fill(0.0);
+    assert_eq!(left, expected);
+    // The synth has none.
+    let mut synth = plugins.synth();
+    assert_eq!(synth.side_inputs(), []);
+    assert_eq!(synth.set_side_inputs(&[VST3_SIDECHAIN]), Ok(false));
+    drop((node, instance, synth));
     plugins.assert_alright();
 }
 

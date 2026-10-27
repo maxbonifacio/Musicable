@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use musicable_engine::{EngineConfig, Node, NodeMaker};
 use musicable_model::PluginFormat;
+use musicable_model::plugin::PluginInput;
 
 use crate::{Error, ParamInfo, ParentWindow, PluginEvent, PluginInfo, Waker, clap, vst3};
 
@@ -123,6 +124,19 @@ impl Instance {
     /// The plugin's latency, in frames, as it last said when it activated.
     pub fn latency(&self) -> usize {
         either!(self, plugin => plugin.latency())
+    }
+
+    /// The plugin's side inputs, as it last described them: its audio
+    /// inputs besides the main one.
+    pub fn side_inputs(&self) -> &[PluginInput] {
+        either!(self, plugin => plugin.side_inputs())
+    }
+
+    /// Switches on the side inputs with ids in `wired`, the ones wires go
+    /// into, and off the others, restarting an active plugin if that changes
+    /// which are on. Says whether it restarted.
+    pub fn set_side_inputs(&mut self, wired: &[u32]) -> Result<bool, Error> {
+        either!(self, plugin => plugin.set_side_inputs(wired))
     }
 
     /// Whether the plugin has a state to save, besides its parameters.

@@ -907,6 +907,7 @@ mod tests {
             id: "org.example.plugin".into(),
             name: "Plugin".into(),
             instrument,
+            inputs: Vec::new(),
             settings: plugin::PluginSettings::default(),
         })
     }

@@ -973,6 +973,9 @@ impl Session {
                     tx.set_plugin_settings(device, settings);
                 }),
                 Change::Latency => latency = true,
+                Change::Inputs(inputs) => self.document.follow(&name, |tx| {
+                    tx.set_plugin_inputs(device, inputs);
+                }),
                 Change::Window(event) => self.window_events.push((device, event)),
                 Change::Failed(problem) => self.problems.push(problem),
             }
@@ -1170,6 +1173,14 @@ impl Session {
                     | Edit::AddWire { .. }
                     | Edit::RemoveWire { .. }
                     | Edit::WireFrom { .. } => recompile = true,
+                    // Which side inputs a plugin has says which wires into
+                    // it play. With none, the graph stays as it is, so a
+                    // plugin listing its inputs as it loads doesn't rebuild
+                    // it.
+                    Edit::PluginInputs { device, .. } => {
+                        let project = self.document.project();
+                        recompile |= project.wires.iter().any(|w| w.to.device() == device);
+                    }
                     // So is automation, and the plugins leave what it moves
                     // to the engine.
                     Edit::AddLane { .. }

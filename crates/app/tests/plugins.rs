@@ -8,9 +8,11 @@
 //! until someone turns them by hand. Its own Bypass is its device's. A
 //! missing plugin lets the sound through and says why. Delay compensation
 //! lines a latent plugin up with a dry track to the sample, also after the
-//! plugin's latency changes. And the app's binary scans each library in a
-//! process of its own, so a library that crashes takes only that process
-//! down.
+//! plugin's latency changes. A plugin's side inputs go into its device as
+//! it lists them, and a muted kick wired into one ducks a bass through the
+//! plugin, lined up to the sample whichever track has latency. And the
+//! app's binary scans each library in a process of its own, so a library
+//! that crashes takes only that process down.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,20 +20,20 @@ use std::process::Command;
 use std::{ptr, thread};
 
 use musicable_app::{PLUGIN_SETTLING, SCAN_PLUGIN, Session};
-use musicable_commands::{Args, Keymap, Value, automation, device, edit, transport};
+use musicable_commands::{Args, Keymap, Value, automation, device, edit, transport, wire};
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
 use musicable_model::clip::{AudioClip, ClipContent};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
 use musicable_plugins::scan::{self, Outcome};
 use musicable_plugins::{Instance, ParentWindow, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
-use musicable_test_plugins::vst3::VST3_GAIN_ID;
-use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, gui};
+use musicable_test_plugins::vst3::{VST3_GAIN_ID, VST3_SIDECHAIN};
+use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, SIDECHAIN, gui};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -112,6 +114,18 @@ impl TestPlugins {
         }
     }
 
+    /// Test Gain's side input, as its device lists it.
+    fn sidechain(&self) -> PluginInput {
+        let id = match self.format {
+            PluginFormat::Clap => SIDECHAIN,
+            PluginFormat::Vst3 => VST3_SIDECHAIN,
+        };
+        PluginInput {
+            id,
+            name: "Sidechain".into(),
+        }
+    }
+
     // SAFETY, for the hooks below: each is given the instance's plugin, of
     // this copy, on its main thread.
 
@@ -175,6 +189,7 @@ fn plugin(
         id: id.to_owned(),
         name: name.to_owned(),
         instrument: false,
+        inputs: Vec::new(),
         settings,
     }))
 }
@@ -264,6 +279,23 @@ impl Rig {
         let project = self.session.project();
         let (_, _, found) = project.find_device(device).unwrap();
         found.kind.plugin().unwrap().settings.clone()
+    }
+
+    fn inputs(&self, device: DeviceId) -> Vec<PluginInput> {
+        let project = self.session.project();
+        let (_, _, found) = project.find_device(device).unwrap();
+        found.kind.plugin().unwrap().inputs.clone()
+    }
+
+    /// Plays `frames` frames from the start of the song, and returns its
+    /// left channel and its right. It stops for a while first, so what
+    /// delay compensation held back of what played before is gone.
+    fn play_from_start(&mut self, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        self.session.run(&transport::STOP).unwrap();
+        self.render(4_800);
+        self.session.run(&transport::GO_TO_START).unwrap();
+        self.session.run(&transport::PLAY).unwrap();
+        channels(&self.render(frames))
     }
 }
 
@@ -770,6 +802,124 @@ fn delay_compensation_lines_it_up_with_a_dry_track(format: PluginFormat) {
     let latency = rig.settings(device.id).param(LATENCY);
     assert_eq!(latency, Some(plugins.latency(3_000)));
     assert_eq!(play(&mut rig), Some(3_000));
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_muted_kick_ducks_a_bass_through_a_clap_plugins_side_input() {
+    ducks_a_bass_through_a_side_input(PluginFormat::Clap);
+}
+
+#[test]
+fn a_muted_kick_ducks_a_bass_through_a_vst3_plugins_side_input() {
+    ducks_a_bass_through_a_side_input(PluginFormat::Vst3);
+}
+
+/// How many frames apart the kick's clicks are, and how long each is.
+const BEAT: usize = 4_800;
+const CLICK: usize = 10;
+
+fn ducks_a_bass_through_a_side_input(format: PluginFormat) {
+    // The kick clicks at full scale, muted. The bass holds a quarter
+    // through Test Gain, its ducker, whose side input the kick keys: where
+    // the kick clicks, the bass goes silent, to the sample, whichever
+    // track has latency. Two more Test Gains give the tracks latency.
+    let plugins = TestPlugins::new(format, "sidechain");
+    let dir = &plugins.dir;
+    let clicks: Vec<f32> = (0..48_000)
+        .map(|i| if i % BEAT < CLICK { 1.0 } else { 0.0 })
+        .collect();
+    let float = SampleFormat::Float32;
+    save_wav(&dir.join("Kick.wav"), 48_000, float, &[&clicks]).unwrap();
+    save_wav(&dir.join("Bass.wav"), 48_000, float, &[&[0.25; 48_000]]).unwrap();
+    let mut song = Project::new();
+    let kick = song.add_track("Kick", TrackKind::Audio);
+    let bass = song.add_track("Bass", TrackKind::Audio);
+    for (track, file) in [(kick, "Kick.wav"), (bass, "Bass.wav")] {
+        let range = BeatRange::new(Beats::ZERO, Beats::new(2));
+        let clip = song.new_clip(file, range, ClipContent::Audio(AudioClip::new(file)));
+        song.track_mut(track).unwrap().clips.push(clip);
+    }
+    let kick_latency = plugins.gain(&mut song, PluginSettings::default());
+    let bass_latency = plugins.gain(&mut song, PluginSettings::default());
+    let ducker = plugins.gain(&mut song, PluginSettings::default());
+    let track = song.track_mut(kick).unwrap();
+    track.muted = true;
+    track.devices.push(kick_latency.clone());
+    let track = song.track_mut(bass).unwrap();
+    track.devices.extend([bass_latency.clone(), ducker.clone()]);
+    let mut rig = Rig::new(song, Some(dir));
+    rig.install(&plugins);
+
+    // As it loads, the plugin lists its side input, which its device takes.
+    assert_eq!(rig.inputs(ducker.id), []);
+    rig.render(240);
+    assert_eq!(rig.inputs(ducker.id), [plugins.sidechain()]);
+    // What the bass plays, ducked or not, `latency` frames late.
+    let bass_with = |latency: usize, ducked: bool| -> Vec<f32> {
+        (0..24_000_usize)
+            .map(|i| match i.checked_sub(latency) {
+                Some(i) if !ducked || i % BEAT >= CLICK => 0.25,
+                _ => 0.0,
+            })
+            .collect()
+    };
+    let (left, right) = rig.play_from_start(24_000);
+    assert_eq!(
+        (&left, &right),
+        (&bass_with(0, false), &bass_with(0, false))
+    );
+
+    let from_kick = Args::new()
+        .with("track", kick)
+        .with("tap", "post_fader")
+        .with("device", ducker.id);
+    let Value::Wire(key) = rig.session.run_with(&wire::CONNECT, &from_kick).unwrap() else {
+        panic!("a wire");
+    };
+    rig.session.wait_for_graph();
+    let (left, right) = rig.play_from_start(24_000);
+    assert_eq!((&left, &right), (&bass_with(0, true), &bass_with(0, true)));
+
+    // Someone gives one track latency, then the other, in a Test Gain's
+    // window: the ducker hears the kick lined up all the same.
+    let set_latency = |rig: &mut Rig, device: DeviceId, frames: u32| {
+        let instance = rig.session.plugin(device).unwrap();
+        plugins.gui(instance, gui::BEGIN, LATENCY, 0.0);
+        plugins.gui(instance, gui::VALUE, LATENCY, plugins.latency(frames));
+        plugins.gui(instance, gui::END, LATENCY, 0.0);
+        rig.render(4_800);
+        rig.session.wait_for_graph();
+        rig.render(4_800);
+    };
+    for (device, other) in [
+        (kick_latency.id, bass_latency.id),
+        (bass_latency.id, kick_latency.id),
+    ] {
+        set_latency(&mut rig, other, 0);
+        set_latency(&mut rig, device, 37);
+        assert_eq!(rig.session.stats().latency, 37);
+        let (left, right) = rig.play_from_start(24_000);
+        assert_eq!(
+            (&left, &right),
+            (&bass_with(37, true), &bass_with(37, true))
+        );
+    }
+
+    // Disconnected, the side input is off again, and the bass plays on.
+    rig.session
+        .run_with(&wire::DISCONNECT, &Args::new().with("wire", key))
+        .unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(24_000);
+    assert_eq!(left, bass_with(37, false));
+    // Undone, the wire's back, and the side input with it.
+    rig.session.run(&edit::UNDO).unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(24_000);
+    assert_eq!(left, bass_with(37, true));
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
     drop(rig);
     plugins.assert_alright();
 }
