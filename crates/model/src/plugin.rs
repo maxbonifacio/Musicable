@@ -23,7 +23,29 @@ pub struct PluginDevice {
     /// Whether it plays notes. A MIDI track's notes go to its first
     /// instrument.
     pub instrument: bool,
+    /// Its side inputs, in its order, as the plugin said when it last
+    /// loaded, so wires into them keep their ports while it's missing. An
+    /// input it no longer had then stays, after the others, if a wire went
+    /// into it. Empty until it first loads.
+    pub inputs: Vec<PluginInput>,
     pub settings: PluginSettings,
+}
+
+impl PluginDevice {
+    /// The side input with the plugin's id `id`, if it has it.
+    pub fn input(&self, id: u32) -> Option<&PluginInput> {
+        self.inputs.iter().find(|input| input.id == id)
+    }
+}
+
+/// One of a plugin's side inputs: an audio input beyond its main one, such
+/// as a compressor's sidechain or a vocoder's carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginInput {
+    /// The plugin's id for it: a CLAP port's id, or a VST3 bus's index.
+    pub id: u32,
+    /// What the plugin calls it, such as "Sidechain".
+    pub name: String,
 }
 
 /// How a plugin is set: the state it last saved, and the values of the

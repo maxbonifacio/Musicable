@@ -3,13 +3,14 @@
 //! to drag for a number, a button for a switch and a menu for a choice.
 //! They stand in columns in the order of the device's table, a column for
 //! each group of parameters, such as an EQ's band. The Compressor's and the
-//! Gate's Sidechain column starts with its sources (see [`sidechain`]).
+//! Gate's Sidechain column starts with its sources (see [`sidechain`]),
+//! which a plugin's side inputs have too.
 //!
 //! A bar that modulators move shows how far they can move it, and where
 //! they have it, and takes a modulator's output dragged onto it
 //! ([`modulators`]). Its menu has what moves it.
 
-mod sidechain;
+pub(crate) mod sidechain;
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{

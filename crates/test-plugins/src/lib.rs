@@ -7,7 +7,13 @@
 //!   parameter, which it reports to the host as its latency. Changing the
 //!   latency asks the host to restart the plugin, as real plugins do. Its
 //!   Bypass parameter is the plugin's own bypass, as CLAP lets a plugin say:
-//!   on, it plays its input unchanged, but as late.
+//!   on, it plays its input unchanged, but as late. A second input, its
+//!   Sidechain (port [`SIDECHAIN`]), ducks it: each sample it plays is its
+//!   input's times one less the sidechain's size, up to 1, as late as each
+//!   other. The host switches the sidechain on and off with CLAP's
+//!   audio-ports-activation, which it can only while the plugin is
+//!   inactive, and hands it silence marked constant while it's off:
+//!   [`musicable_test_sidechain`] says whether it's on.
 //! - **Test Synth** (`org.musicable.test.synth`), an instrument that plays
 //!   each note as a sine at the note's pitch, shaped by CLAP's note
 //!   expressions for tuning, pressure and brightness. It can render its
@@ -34,7 +40,9 @@
 //! it crash as the host initializes it, `hang` makes it never return from
 //! initializing, and `refuse` makes it fail to initialize. A name starting
 //! with `mpe` makes the synth an MPE synth, which takes notes only as MIDI
-//! with MPE, as many do.
+//! with MPE, as many do. One starting with `fixed` gives the gain no
+//! audio-ports-activation, so its sidechain is always on, as with many
+//! plugins.
 //!
 //! The library is also a VST3 module with the same two plugins, which check
 //! VST3's rules, in the same count: see [`vst3`]. Tests make a VST3 bundle
@@ -58,7 +66,7 @@ mod plugin;
 pub mod testing;
 pub mod vst3;
 
-pub use plugin::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS};
+pub use plugin::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS};
 
 /// The CLAP entry point the host looks for.
 #[allow(non_upper_case_globals)]
@@ -77,6 +85,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Whether the synth takes notes only as MIDI with MPE: the library's file
 /// is named so.
 pub(crate) static MPE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the gain has no audio-ports-activation, so its sidechain is
+/// always on: the library's file is named so.
+pub(crate) static FIXED_PORTS: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     let name = if path.is_null() {
@@ -102,6 +114,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
         return false;
     }
     MPE.store(name.starts_with("mpe"), Ordering::SeqCst);
+    FIXED_PORTS.store(name.starts_with("fixed"), Ordering::SeqCst);
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         violation("the library was initialized twice without deinit in between");
     }
@@ -369,6 +382,17 @@ pub unsafe extern "C" fn musicable_test_lifecycle(
     let lifecycle = unsafe { plugin::from_clap(plugin) }.lifecycle();
     // SAFETY: the caller's promise.
     unsafe { counts.write(lifecycle) };
+}
+
+/// Whether the gain's sidechain is on, as the host last switched it.
+///
+/// # Safety
+///
+/// `plugin` must be a plugin of this library that isn't destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_sidechain(plugin: *const clap_plugin) -> bool {
+    // SAFETY: the caller's promise.
+    unsafe { plugin::from_clap(plugin) }.sidechain()
 }
 
 /// Counts the plugins of this library alive now, for tests that check the

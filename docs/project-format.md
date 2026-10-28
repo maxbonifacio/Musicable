@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 19,
+  "version": 20,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -861,6 +861,7 @@ A **plugin**'s settings say which plugin it is and how it's set:
 | `id` | string | The plugin's id in its format, which finds the plugin when the project opens: a CLAP plugin's id, such as `"org.surge-synth-team.surge-xt"`, or a VST3 plugin's class id. Not empty. |
 | `name` | string | The plugin's name when it was added, to show while it's missing. Any text, empty included. |
 | `instrument` | boolean | Whether it plays notes. |
+| `inputs` | array of inputs | The plugin's side inputs, its audio inputs beyond its main one, such as a compressor's sidechain, in the plugin's order, as it said when it last loaded. Empty until it first loads. |
 | `state` | string or `null` | The state the plugin last saved, in its own format, as base64 with padding (RFC 4648). `null` for a plugin as it starts, new. |
 | `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
 
@@ -871,6 +872,18 @@ whatever the state and `params` say. Musicable saves a fresh state from each plu
 usually empty in a file it writes. A plugin that isn't on the computer
 passes the signal through unchanged, and keeps its settings as they are, so
 the project still has them when it opens where the plugin is.
+
+A plugin's **input** is one of its side inputs, which wires can go into:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | whole number | The plugin's id for it, up to 4,294,967,295: a CLAP port's id, or a VST3 bus's index. No other input of the plugin has it. |
+| `name` | string | What the plugin calls it, such as `"Sidechain"`. Any text, empty included. |
+
+When a plugin loads, Musicable takes its inputs as the plugin lists them.
+An input the plugin no longer lists stays, after the others, while a wire
+goes into it, so that wire keeps its port, and plays nothing until the
+plugin has the input again.
 
 ### Master
 
@@ -1112,6 +1125,7 @@ A **port** is an object with one field:
 | Port | Meaning |
 |---|---|
 | `{"sidechain": id}` | The side input of the Compressor or the Gate with that id, which its detector hears while its `sidechain` parameter is on. |
+| `{"plugin_input": {"device": id, "input": input}}` | The side input of the plugin device with id `device` whose id is `input`, one of the device's `inputs`. The plugin hears it while a wire goes into it. |
 
 ## Versions
 
@@ -1136,6 +1150,7 @@ A **port** is an object with one field:
 | 17 | 2026-10-27 | Bypass and Deactivate: each device's `bypassed` and `active`, and Bypass lanes. Version 16 devices are all active, and none is bypassed. |
 | 18 | 2026-10-27 | Modulation: modulators on tracks and on the master, Macros, LFOs and Envelopes, with routings that move parameters, and lanes for their parameters. Version 17 channels have none. |
 | 19 | 2026-10-27 | Wires, from taps on channels into devices' ports, starting with the Compressor's and the Gate's sidechains, and lanes for their gains. Version 18 files have none. |
+| 20 | 2026-10-27 | Plugins' side inputs, and wires into them. Version 19 plugins have none until they next load. |
 
 ## Changing the format
 

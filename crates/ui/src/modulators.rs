@@ -1371,6 +1371,7 @@ mod tests {
                     id: name.to_lowercase(),
                     name: name.to_owned(),
                     instrument: false,
+                    inputs: Vec::new(),
                     settings: PluginSettings::default(),
                 }));
                 plugins.push(device.id);

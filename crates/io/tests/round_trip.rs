@@ -119,6 +119,7 @@ impl Random {
             id: format!("org.example.{}", self.below(100)),
             name: self.name(),
             instrument: self.one_in(2),
+            inputs: Vec::new(),
             settings: PluginSettings { state, params },
         })
     }

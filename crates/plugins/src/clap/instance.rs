@@ -12,6 +12,10 @@ use std::time::Instant;
 use clap_sys::ext::audio_ports::{
     CLAP_AUDIO_PORT_IS_MAIN, CLAP_EXT_AUDIO_PORTS, clap_audio_port_info, clap_plugin_audio_ports,
 };
+use clap_sys::ext::audio_ports_activation::{
+    CLAP_EXT_AUDIO_PORTS_ACTIVATION, CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT,
+    clap_plugin_audio_ports_activation,
+};
 use clap_sys::ext::gui::{
     CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
     clap_plugin_gui, clap_window, clap_window_handle,
@@ -32,6 +36,7 @@ use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_plugin_timer_sup
 use clap_sys::plugin::clap_plugin;
 use clap_sys::stream::{clap_istream, clap_ostream};
 use musicable_engine::{EngineConfig, Graph};
+use musicable_model::plugin::PluginInput;
 
 use super::events::{self, Event, OutEvent};
 use super::host::{NO_RESIZE, Shared};
@@ -85,6 +90,7 @@ struct Extensions {
     state: *const clap_plugin_state,
     latency: *const clap_plugin_latency,
     audio_ports: *const clap_plugin_audio_ports,
+    ports_activation: *const clap_plugin_audio_ports_activation,
     note_ports: *const clap_plugin_note_ports,
     gui: *const clap_plugin_gui,
     timer_support: *const clap_plugin_timer_support,
@@ -107,6 +113,9 @@ pub struct Instance {
     info: PluginInfo,
     ext: Extensions,
     params: Vec<ParamInfo>,
+    side_inputs: Vec<PluginInput>,
+    /// The side inputs wires go into, by id, which are on.
+    wired: Vec<u32>,
     /// The engine config it's active for.
     config: Option<EngineConfig>,
     to_audio: rtrb::Producer<ParamChange>,
@@ -172,6 +181,10 @@ impl Instance {
             state: get(CLAP_EXT_STATE).cast(),
             latency: get(CLAP_EXT_LATENCY).cast(),
             audio_ports: get(CLAP_EXT_AUDIO_PORTS).cast(),
+            ports_activation: match get(CLAP_EXT_AUDIO_PORTS_ACTIVATION) {
+                ext if ext.is_null() => get(CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT).cast(),
+                ext => ext.cast(),
+            },
             note_ports: get(CLAP_EXT_NOTE_PORTS).cast(),
             gui: get(CLAP_EXT_GUI).cast(),
             timer_support: get(CLAP_EXT_TIMER_SUPPORT).cast(),
@@ -189,6 +202,8 @@ impl Instance {
             info,
             ext,
             params: Vec::new(),
+            side_inputs: Vec::new(),
+            wired: Vec::new(),
             config: None,
             to_audio,
             from_audio,
@@ -197,6 +212,7 @@ impl Instance {
             _main_thread: PhantomData,
         };
         instance.params = instance.read_params();
+        instance.side_inputs = side_inputs(&instance.audio_ports(true));
         Ok(instance)
     }
 
@@ -417,8 +433,10 @@ impl Instance {
         let requests = &self.shared.requests;
         requests.restart.store(false, Ordering::Release);
         requests.ports_rescan.store(false, Ordering::Release);
-        let inputs = self.audio_ports(true);
+        let mut inputs = self.audio_ports(true);
         let outputs = self.audio_ports(false);
+        self.side_inputs = side_inputs(&inputs);
+        self.switch_side_inputs(&mut inputs);
         let note_port = self.note_port();
         let plugin = self.plugin();
         let busy = self.shared.enter()?;
@@ -523,7 +541,36 @@ impl Instance {
         (latency as usize).min(Graph::MAX_LATENCY)
     }
 
-    /// The plugin's audio ports on one side.
+    // Side inputs.
+
+    /// The plugin's side inputs, as it last described them: its audio input
+    /// ports besides the main one, by their ids.
+    pub fn side_inputs(&self) -> &[PluginInput] {
+        &self.side_inputs
+    }
+
+    /// Switches on the side inputs with ids in `wired`, the ones wires go
+    /// into, and off the others. An active plugin restarts if that changes
+    /// which are on: CLAP switches ports only while a plugin is inactive.
+    /// Says whether it restarted. Ids the plugin hasn't are left be, and
+    /// switch on if it comes to have them.
+    pub fn set_side_inputs(&mut self, wired: &[u32]) -> Result<bool, Error> {
+        let on = |wired: &[u32]| -> Vec<u32> {
+            (self.side_inputs.iter())
+                .map(|input| input.id)
+                .filter(|id| wired.contains(id))
+                .collect()
+        };
+        let changed = on(wired) != on(&self.wired);
+        self.wired = wired.to_vec();
+        match self.config {
+            Some(config) if changed => self.activate(config).map(|()| true),
+            _ => Ok(false),
+        }
+    }
+
+    /// The plugin's audio ports on one side, with the main input and every
+    /// output on.
     fn audio_ports(&self, inputs: bool) -> Vec<PortInfo> {
         let plugin = self.plugin();
         // SAFETY: the extension lives as long as the plugin.
@@ -536,7 +583,7 @@ impl Instance {
         };
         // SAFETY: on the main thread.
         let count = unsafe { count(plugin, inputs) };
-        (0..count)
+        let mut ports: Vec<PortInfo> = (0..count)
             .filter_map(|index| {
                 let mut info = MaybeUninit::<clap_audio_port_info>::zeroed();
                 // SAFETY: on the main thread, with somewhere to write. A
@@ -545,13 +592,42 @@ impl Instance {
                     get(plugin, index, inputs, info.as_mut_ptr()).then(|| info.assume_init())
                 }?;
                 Some(PortInfo {
+                    id: info.id,
+                    name: fixed_string(&info.name),
                     // More than any real port has: it guards against
                     // nonsense.
                     channels: info.channel_count.min(64),
                     main: info.flags & CLAP_AUDIO_PORT_IS_MAIN != 0,
+                    on: !inputs,
                 })
             })
-            .collect()
+            .collect();
+        // The port the plugin calls main, or the first.
+        let main = ports.iter().position(|p| p.main).unwrap_or(0);
+        for (index, port) in ports.iter_mut().enumerate() {
+            port.main = index == main;
+            port.on |= port.main;
+        }
+        ports
+    }
+
+    /// Switches each side input in `ports`, the plugin's inputs, on if a
+    /// wire goes into it and off if not, as audio-ports-activation has the
+    /// host do while the plugin is inactive. A plugin without it has every
+    /// port on, and gets silence in those nothing is wired to.
+    fn switch_side_inputs(&self, ports: &mut [PortInfo]) {
+        // SAFETY: the extension lives as long as the plugin.
+        let activation = unsafe { self.ext.ports_activation.as_ref() };
+        let set_active = activation.and_then(|a| a.set_active);
+        for (index, port) in ports.iter_mut().enumerate().filter(|(_, p)| !p.main) {
+            let wired = self.wired.contains(&port.id);
+            // SAFETY: on the main thread, and inactive, for buffers of 32-bit
+            // samples.
+            let switched = set_active.is_none_or(|set_active| unsafe {
+                set_active(self.plugin(), true, index as u32, wired, 32)
+            });
+            port.on = wired && switched;
+        }
     }
 
     /// Where notes go: the first note input, in CLAP's dialect if it takes
@@ -670,9 +746,10 @@ impl Instance {
             )));
         }
         let requests = &self.shared.requests;
+        let rescan = requests.ports_rescan.swap(false, Ordering::AcqRel);
         let restart = requests.restart.swap(false, Ordering::AcqRel)
             | requests.latency_changed.swap(false, Ordering::AcqRel)
-            | requests.ports_rescan.swap(false, Ordering::AcqRel);
+            | rescan;
         if restart && let Some(config) = self.config {
             let latency = self.latency();
             match self.activate(config) {
@@ -681,6 +758,10 @@ impl Instance {
                 }),
                 Err(e) => events.push(PluginEvent::Failed(e.to_string())),
             }
+        } else if rescan {
+            // An inactive plugin's ports are read as it's activated, and
+            // its side inputs now.
+            self.side_inputs = side_inputs(&self.audio_ports(true));
         }
         let requests = &self.shared.requests;
         if requests.params_rescan.swap(0, Ordering::AcqRel) != 0 {
@@ -928,6 +1009,22 @@ impl Drop for Instance {
         }
         self.shared.plugin.store(ptr::null_mut(), Ordering::Release);
     }
+}
+
+/// The side inputs among a plugin's input ports: all but the main one, by
+/// their ids, named "Input 2" and so on where the plugin names them
+/// nothing.
+fn side_inputs(ports: &[PortInfo]) -> Vec<PluginInput> {
+    (ports.iter().enumerate())
+        .filter(|(_, port)| !port.main)
+        .map(|(index, port)| PluginInput {
+            id: port.id,
+            name: match port.name.trim() {
+                "" => format!("Input {}", index + 1),
+                name => name.to_owned(),
+            },
+        })
+        .collect()
 }
 
 /// A C string in a fixed-size array, as CLAP's info structs hold them.

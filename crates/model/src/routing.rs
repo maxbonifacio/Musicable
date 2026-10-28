@@ -6,7 +6,8 @@
 //! and pan (Post Fader). The master has Post FX and Post Fader. Taps come
 //! before mute and solo, so what's taken from a muted track carries on: a
 //! muted ghost kick still keys a compressor. A [`Port`] takes a signal into
-//! a device, such as the Compressor's and the Gate's Sidechain. A [`Wire`]
+//! a device: the Compressor's and the Gate's Sidechain, or one of a
+//! plugin's side inputs. A [`Wire`]
 //! joins a tap to a port, with a gain, and wires into the same port sum.
 //! The project keeps one list of them.
 //!
@@ -53,20 +54,16 @@ pub enum Port {
     /// A Compressor's or a Gate's side input, which its detector hears
     /// while its Sidechain is on.
     Sidechain(DeviceId),
+    /// One of a plugin's side inputs, by the plugin's id for it
+    /// ([`PluginInput`](crate::plugin::PluginInput)).
+    PluginInput(DeviceId, u32),
 }
 
 impl Port {
     /// The device it takes the signal into.
     pub fn device(self) -> DeviceId {
         match self {
-            Self::Sidechain(device) => device,
-        }
-    }
-
-    /// What the port is called on its device: "Sidechain".
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Sidechain(_) => "Sidechain",
+            Self::Sidechain(device) | Self::PluginInput(device, _) => device,
         }
     }
 
@@ -75,6 +72,7 @@ impl Port {
     pub fn on(self, device: DeviceId) -> Self {
         match self {
             Self::Sidechain(_) => Self::Sidechain(device),
+            Self::PluginInput(_, input) => Self::PluginInput(device, input),
         }
     }
 }
@@ -203,15 +201,34 @@ impl Project {
         Some(format!("{channel} {}", self.tap_point_name(tap)?))
     }
 
+    /// What the port is called on its device: "Sidechain" on a Compressor
+    /// or a Gate, and a plugin's side input what the plugin calls it, or
+    /// "Side Input" where that's nothing. `None` for a port the project
+    /// hasn't.
+    pub fn input_name(&self, port: Port) -> Option<&str> {
+        let (_, _, device) = self.find_device(port.device())?;
+        match (port, &device.kind) {
+            (Port::Sidechain(_), _) => self.has_port(port).then_some("Sidechain"),
+            (Port::PluginInput(_, input), DeviceKind::Plugin(plugin)) => {
+                let name = plugin.input(input)?.name.trim();
+                Some(if name.is_empty() { "Side Input" } else { name })
+            }
+            (Port::PluginInput(..), _) => None,
+        }
+    }
+
     /// What the port is called anywhere: its device and its channel, such
-    /// as "Compressor on Bass". `None` for a device the project hasn't.
+    /// as "Compressor on Bass", and a plugin's side input's name after the
+    /// plugin's, such as "Pro-C 2 Sidechain on Bass". `None` for a device
+    /// the project hasn't, or a side input its plugin hasn't.
     pub fn port_name(&self, port: Port) -> Option<String> {
         let (chain, _, device) = self.find_device(port.device())?;
-        Some(format!(
-            "{} on {}",
-            device.kind.name(),
-            self.channel_name(chain)?
-        ))
+        let name = device.kind.name();
+        let device = match port {
+            Port::Sidechain(_) => name.to_owned(),
+            Port::PluginInput(..) => format!("{name} {}", self.input_name(port)?),
+        };
+        Some(format!("{device} on {}", self.channel_name(chain)?))
     }
 
     /// The name of the track with `chain`, or "Master".
@@ -223,7 +240,8 @@ impl Project {
     }
 
     /// The ports of the device with id `device`: a Compressor's or a Gate's
-    /// Sidechain. None for other devices, or a device the project hasn't.
+    /// Sidechain, or a plugin's side inputs, in the plugin's order. None
+    /// for other devices, or a device the project hasn't.
     pub fn ports(&self, device: DeviceId) -> Vec<Port> {
         let Some((_, _, found)) = self.find_device(device) else {
             return Vec::new();
@@ -234,6 +252,9 @@ impl Project {
             {
                 vec![Port::Sidechain(device)]
             }
+            DeviceKind::Plugin(plugin) => (plugin.inputs.iter())
+                .map(|input| Port::PluginInput(device, input.id))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -440,7 +461,8 @@ impl Flow {
 mod tests {
     use super::*;
     use crate::native::NativeDevice;
-    use crate::{Device, TrackKind};
+    use crate::plugin::{PluginDevice, PluginInput, PluginSettings};
+    use crate::{Device, PluginFormat, TrackKind};
 
     /// A kick, and a bass with a compressor and an EQ after it, and a
     /// group with a reverb return.
@@ -735,5 +757,83 @@ mod tests {
         assert!(m.project.live_wires().is_empty());
         assert_eq!(m.project.wire_in_a_loop(), None);
         assert_eq!(m.project.wire(key).map(|w| w.gain), Some(1.0));
+    }
+
+    #[test]
+    fn plugins_side_inputs_are_ports() {
+        let mut m = mix();
+        let input = |id, name: &str| PluginInput {
+            id,
+            name: name.into(),
+        };
+        let vocoder = m.project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Vst3,
+            id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            name: "Vocoder".into(),
+            instrument: false,
+            inputs: vec![input(1, "Carrier"), input(3, "Aux")],
+            settings: PluginSettings::default(),
+        }));
+        let vocoder_id = vocoder.id;
+        m.project.track_mut(m.bass).unwrap().devices.push(vocoder);
+        let carrier = Port::PluginInput(vocoder_id, 1);
+        assert_eq!(
+            m.project.ports(vocoder_id),
+            [carrier, Port::PluginInput(vocoder_id, 3)],
+            "in the plugin's order"
+        );
+        assert_eq!(m.project.input_name(carrier), Some("Carrier"));
+        assert_eq!(
+            m.project.port_name(carrier).as_deref(),
+            Some("Vocoder Carrier on Bass")
+        );
+        assert_eq!(carrier.on(m.eq), Port::PluginInput(m.eq, 1));
+        let compressor = Port::Sidechain(m.compressor);
+        assert_eq!(m.project.input_name(compressor), Some("Sidechain"));
+        for missing in [
+            Port::PluginInput(vocoder_id, 2),
+            Port::Sidechain(vocoder_id),
+            Port::PluginInput(m.compressor, 1),
+            Port::Sidechain(m.eq),
+        ] {
+            assert_eq!(m.project.input_name(missing), None, "{missing:?}");
+            let from = Tap::PostFx(Chain::Track(m.kick));
+            assert_eq!(m.project.check_wire(from, missing), Err(WireError::NoPort));
+        }
+        // A side input the plugin hasn't has no name, but a device without
+        // a Sidechain is still the device.
+        assert_eq!(m.project.port_name(Port::PluginInput(vocoder_id, 2)), None);
+        assert_eq!(
+            m.project.port_name(Port::Sidechain(m.eq)).as_deref(),
+            Some("EQ on Bass")
+        );
+        m.wire(Tap::PostFx(Chain::Track(m.kick)), carrier);
+        // What comes out of the vocoder reaches the bass's Post FX, but not
+        // what goes into it.
+        assert_eq!(
+            m.project
+                .check_wire(Tap::PostFx(Chain::Track(m.bass)), carrier),
+            Err(WireError::Loop)
+        );
+        assert_eq!(m.project.check_wire(Tap::Device(m.eq), carrier), Ok(()));
+        let vocal = m.project.add_track("Vocal", TrackKind::Audio);
+        m.wire(Tap::PostFader(Chain::Track(vocal)), carrier);
+        assert_eq!(m.project.wires_into(carrier).count(), 2);
+        assert_eq!(m.project.wires_of_device(vocoder_id).len(), 2);
+        // The commands keep an input while wires go into it, but if the
+        // plugin's list loses it, its wires don't play.
+        let device = m.project.device_mut(vocoder_id).unwrap();
+        device.kind.plugin_mut().unwrap().inputs = vec![input(3, "Aux")];
+        assert!(m.project.live_wires().is_empty());
+        assert_eq!(m.project.wire_in_a_loop(), None);
+        // One the plugin names nothing still has a name.
+        let device = m.project.device_mut(vocoder_id).unwrap();
+        device.kind.plugin_mut().unwrap().inputs.push(input(5, " "));
+        let unnamed = Port::PluginInput(vocoder_id, 5);
+        assert_eq!(m.project.input_name(unnamed), Some("Side Input"));
+        assert_eq!(
+            m.project.port_name(unnamed).as_deref(),
+            Some("Vocoder Side Input on Bass")
+        );
     }
 }

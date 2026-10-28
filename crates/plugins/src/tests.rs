@@ -19,14 +19,17 @@ use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use musicable_engine::nodes::Sum;
 use musicable_engine::switch::Switch;
 use musicable_engine::{
-    AudioMut, AudioRef, Engine, EngineConfig, Event, Graph, Inputs, Node, NodeEvent, NodeEventKind,
-    NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId, ProcessContext,
-    TransportState, rt,
+    AudioMut, AudioRef, Engine, EngineConfig, Event, Graph, InputPort, Inputs, Node, NodeEvent,
+    NodeEventKind, NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId,
+    ProcessContext, TransportState, rt,
 };
 use musicable_model::clip::{Controller, Dimension};
+use musicable_model::plugin::PluginInput;
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
-use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SYNTH_ID, THREADS, gui};
+use musicable_test_plugins::{
+    BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS, gui,
+};
 
 use crate::clap::Instance;
 use crate::scan::{self, Outcome};
@@ -136,6 +139,12 @@ impl TestPlugins {
         unsafe { self.library.lifecycle(instance.raw()) }
     }
 
+    /// Whether the gain's sidechain is on, as the plugin has it.
+    fn sidechain(&self, instance: &Instance) -> bool {
+        // SAFETY: as above.
+        unsafe { self.library.sidechain(instance.raw()) }
+    }
+
     fn gain(&self) -> Instance {
         Instance::new(&self.path, GAIN_ID.to_str().unwrap(), None).unwrap()
     }
@@ -158,12 +167,28 @@ pub(crate) struct Block<'a> {
 /// Plays one block of `node`, with `input` on the left and its negative on
 /// the right, and returns both channels. It mustn't allocate.
 pub(crate) fn play(node: &mut impl Node, input: &[f32], block: &Block<'_>) -> [Vec<f32>; 2] {
+    play_keyed(node, input, None, block)
+}
+
+/// Plays one block of `node` as [`play`] does, with `key`, if there is one,
+/// into side input `side` too, in mono.
+pub(crate) fn play_keyed(
+    node: &mut impl Node,
+    input: &[f32],
+    key: Option<(u32, &[f32])>,
+    block: &Block<'_>,
+) -> [Vec<f32>; 2] {
     let frames = input.len();
     let planar_in: Vec<f32> = input
         .iter()
         .copied()
         .chain(input.iter().map(|s| -s))
         .collect();
+    let (side, key) = key.unwrap_or((0, &[]));
+    assert!(
+        key.is_empty() || key.len() == frames,
+        "a key as long as the block"
+    );
     let mut planar_out = vec![f32::NAN; frames * 2];
     let ctx = ProcessContext {
         frames,
@@ -176,8 +201,16 @@ pub(crate) fn play(node: &mut impl Node, input: &[f32], block: &Block<'_>) -> [V
         midi: &[],
     };
     {
-        let views = [AudioRef::from_planar(&planar_in, 2)];
-        let inputs = Inputs::from_views(&views);
+        let views = [
+            AudioRef::from_planar(&planar_in, 2),
+            AudioRef::from_planar(key, 1),
+        ];
+        let ports = [InputPort::Main, InputPort::Side(side)];
+        let inputs = if key.is_empty() {
+            Inputs::from_views(&views[..1])
+        } else {
+            Inputs::from_views_on(&views, &ports)
+        };
         let mut output = AudioMut::from_planar(&mut planar_out, 2);
         rt::scope(|| node.process(&ctx, inputs, &mut output));
     }
@@ -454,6 +487,116 @@ fn a_latency_set_before_the_plugin_activates_needs_no_restart() {
     let mut node = instance.node_source().node();
     play(&mut node, &ramp(64), &Block::default());
     assert_eq!(instance.poll(), []);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+/// `input` ducked by `key`, as the test gains duck: each sample times one
+/// less the key's size.
+pub(crate) fn ducked(input: &[f32], key: &[f32]) -> Vec<f32> {
+    input.iter().zip(key).map(|(x, k)| x * (1.0 - k)).collect()
+}
+
+#[test]
+fn a_side_input_switches_on_with_a_restart_as_it_is_wired() {
+    let plugins = TestPlugins::new("sidechain");
+    let mut instance = plugins.gain();
+    let sidechain = PluginInput {
+        id: SIDECHAIN,
+        name: "Sidechain".into(),
+    };
+    assert_eq!(instance.side_inputs(), [sidechain]);
+    // Inactive, it takes the side inputs as it activates.
+    assert_eq!(instance.set_side_inputs(&[SIDECHAIN]), Ok(false));
+    assert!(plugins.sidechain(&instance), "on, as CLAP has it at first");
+    assert_eq!(instance.set_side_inputs(&[]), Ok(false));
+    instance.activate(CONFIG).unwrap();
+    assert!(!plugins.sidechain(&instance), "off with nothing wired");
+    let mut node = instance.node_source().node();
+    let (input, key) = (vec![0.5; 64], ramp(64));
+    let keyed = Some((SIDECHAIN, key.as_slice()));
+    // Off, it hears nothing of its side input.
+    assert_eq!(
+        play_keyed(&mut node, &input, keyed, &Block::default())[0],
+        input
+    );
+    assert_eq!(plugins.lifecycle(&instance).starts, 1);
+
+    // Wired, it restarts with the side input on, which ducks it.
+    assert_eq!(instance.set_side_inputs(&[SIDECHAIN, 99]), Ok(true));
+    assert!(plugins.sidechain(&instance));
+    assert_eq!(instance.set_side_inputs(&[99, SIDECHAIN]), Ok(false));
+    let [left, right] = play_keyed(&mut node, &input, keyed, &Block::default());
+    assert_close(&left, &ducked(&input, &key));
+    assert_close(&right, &scaled(&ducked(&input, &key), -1.0));
+    assert_eq!(plugins.lifecycle(&instance).starts, 2, "it restarted");
+    // Its main input still plays without a key.
+    assert_eq!(play(&mut node, &input, &Block::default())[0], input);
+
+    // Unwired, it restarts with it off again.
+    assert_eq!(instance.set_side_inputs(&[]), Ok(true));
+    assert!(!plugins.sidechain(&instance));
+    assert_eq!(
+        play_keyed(&mut node, &input, keyed, &Block::default())[0],
+        input
+    );
+    assert_eq!(plugins.lifecycle(&instance).starts, 3);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_side_input_the_plugin_cant_switch_gets_only_what_is_wired() {
+    // This copy's gain has no audio-ports-activation: its sidechain is on
+    // all along, as many plugins' are.
+    let plugins = TestPlugins::new("fixed-ports");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let (input, key) = (vec![0.5; 64], ramp(64));
+    let keyed = Some((SIDECHAIN, key.as_slice()));
+    assert_eq!(
+        play_keyed(&mut node, &input, keyed, &Block::default())[0],
+        input
+    );
+    assert_eq!(instance.set_side_inputs(&[SIDECHAIN]), Ok(true));
+    let [left, _] = play_keyed(&mut node, &input, keyed, &Block::default());
+    assert_close(&left, &ducked(&input, &key));
+    assert_eq!(instance.set_side_inputs(&[]), Ok(true));
+    assert_eq!(
+        play_keyed(&mut node, &input, keyed, &Block::default())[0],
+        input
+    );
+    assert!(plugins.sidechain(&instance), "never switched");
+    // The synth has no side inputs.
+    let mut synth = plugins.synth();
+    assert_eq!(synth.side_inputs(), []);
+    assert_eq!(synth.set_side_inputs(&[SIDECHAIN]), Ok(false));
+    drop((node, instance, synth));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_latent_plugin_hears_its_side_input_as_late_as_its_input() {
+    let plugins = TestPlugins::new("sidechain-latency");
+    let mut instance = plugins.gain();
+    instance.set_param(LATENCY, 37.0);
+    instance.set_side_inputs(&[SIDECHAIN]).unwrap();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let input = vec![0.5; 256];
+    let mut key = vec![0.0; 256];
+    key[100..110].fill(1.0);
+    let [left, _] = play_keyed(
+        &mut node,
+        &input,
+        Some((SIDECHAIN, &key)),
+        &Block::default(),
+    );
+    let mut expected = vec![0.5; 256];
+    expected[..37].fill(0.0);
+    expected[137..147].fill(0.0);
+    assert_eq!(left, expected);
     drop((node, instance));
     plugins.assert_alright();
 }

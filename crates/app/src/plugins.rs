@@ -24,6 +24,10 @@
 //! are the automation's, which don't go into the project. Moving one in the
 //! plugin's window overrides its automation, as moving any control does.
 //!
+//! A plugin's side inputs go into the project as the plugin lists them, so
+//! wires can go into them, and those wires switch them on: see
+//! [`Plugins::sync`].
+//!
 //! A plugin's own bypass parameter, if it has one, is its device's Bypass:
 //! it follows the device's `bypassed`, rather than the plugin's settings,
 //! and clicking it in the plugin's window bypasses the device. Musicable
@@ -39,7 +43,8 @@ use std::time::{Duration, Instant};
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings, PluginState};
+use musicable_model::routing::Port;
 use musicable_model::{DeviceId, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
@@ -81,6 +86,9 @@ pub(crate) enum Change {
     /// The plugin restarted with another latency, so the graph needs
     /// building again for delay compensation.
     Latency,
+    /// The plugin's side inputs, as it lists them now, for its device to
+    /// take.
+    Inputs(Vec<PluginInput>),
     /// The plugin's window asks to be another size, or closed.
     Window(PluginEvent),
     /// Something went wrong with the plugin.
@@ -136,6 +144,9 @@ struct Hosted {
     /// The settings the plugin has: the device's, as last given to it, with
     /// the changes the plugin made since.
     applied: PluginSettings,
+    /// The side inputs the device has from the plugin, as it last listed
+    /// them.
+    inputs: Vec<PluginInput>,
     /// Each parameter's value in the state the plugin last loaded, or as it
     /// started.
     base: BTreeMap<u32, f64>,
@@ -196,16 +207,24 @@ impl Plugins {
 
     /// Brings the instances in line with `project`'s plugin devices: loads
     /// the plugins of new ones, drops the instances of ones that went, and
-    /// gives each plugin the settings that changed. Returns whether that
-    /// needs a new graph: a device gained or lost its instance, or a plugin
-    /// with automation loaded a state, which moves the automated parameters
-    /// too, so the engine sends it their values afresh.
+    /// gives each plugin the settings that changed. Each plugin's side
+    /// inputs that wires go into are on, and the others off, which restarts
+    /// a plugin as they change. Returns whether that needs a new graph: a
+    /// device gained or lost its instance, a plugin with automation loaded a
+    /// state, which moves the automated parameters too, so the engine sends
+    /// it their values afresh, or a plugin restarted with another latency.
     pub fn sync(&mut self, project: &Project) -> bool {
         let devices: BTreeMap<DeviceId, (&PluginDevice, bool)> = project
             .chains()
             .flat_map(|(_, devices)| devices)
             .filter_map(|d| Some((d.id, (d.kind.plugin()?, d.bypassed))))
             .collect();
+        let mut wired: BTreeMap<DeviceId, Vec<u32>> = BTreeMap::new();
+        for wire in project.live_wires() {
+            if let Port::PluginInput(device, input) = wire.to {
+                wired.entry(device).or_default().push(input);
+            }
+        }
         let mut automated: BTreeMap<DeviceId, BTreeSet<u32>> = BTreeMap::new();
         let mut bypass_lanes = BTreeSet::new();
         for lane in project.automation.iter().filter(|lane| !lane.overridden) {
@@ -229,13 +248,24 @@ impl Plugins {
                 bypassed,
                 lane: bypass_lanes.contains(&id),
             };
+            let wired = wired.remove(&id).unwrap_or_default();
             if let Some(hosted) = self.hosted.get_mut(&id) {
                 match hosted.apply(&plugin.settings, automated, bypass) {
                     Ok(loaded) => changed |= loaded && !hosted.automated.is_empty(),
                     Err(problem) => self.problems.push(problem),
                 }
+                let latency = hosted.instance.latency();
+                match hosted.instance.set_side_inputs(&wired) {
+                    Ok(restarted) => {
+                        if restarted {
+                            hosted.settle();
+                            changed |= hosted.instance.latency() != latency;
+                        }
+                    }
+                    Err(e) => self.problems.push(format!("{e}: it plays nothing")),
+                }
             } else if self.installed.is_some() && !self.failed.contains_key(&id) {
-                match self.load(plugin, automated, bypass) {
+                match self.load(plugin, automated, bypass, &wired) {
                     Ok(hosted) => {
                         self.hosted.insert(id, hosted);
                         changed = true;
@@ -251,12 +281,14 @@ impl Plugins {
     }
 
     /// Loads `plugin` and gives it its settings, but for the `automated`
-    /// parameters, and its device's Bypass.
+    /// parameters, and its device's Bypass, with the side inputs `wired`
+    /// on.
     fn load(
         &mut self,
         plugin: &PluginDevice,
         automated: BTreeSet<u32>,
         bypass: Bypass,
+        wired: &[u32],
     ) -> Result<Hosted, String> {
         let name = display_name(plugin);
         let Some(info) = self
@@ -281,6 +313,7 @@ impl Plugins {
             instance,
             name,
             applied: PluginSettings::default(),
+            inputs: plugin.inputs.clone(),
             fresh,
             automated: BTreeSet::new(),
             bypassed: false,
@@ -293,6 +326,10 @@ impl Plugins {
         hosted.bypassed = hosted.own_bypass();
         if let Err(problem) = hosted.apply(&plugin.settings, automated, bypass) {
             self.problems.push(problem);
+        }
+        // Before it's active, so it starts with them.
+        if let Err(e) = hosted.instance.set_side_inputs(wired) {
+            self.problems.push(e.to_string());
         }
         if let Err(e) = hosted.instance.activate(self.config) {
             self.problems.push(format!("{e}: it plays nothing"));
@@ -597,6 +634,11 @@ impl Hosted {
         // Its node may have stopped since, or the plugin moved its bypass
         // when it wasn't to.
         self.link_bypass();
+        // As it loads, and as it restarts with other ports.
+        if self.instance.side_inputs() != self.inputs {
+            self.inputs = self.instance.side_inputs().to_vec();
+            changes.push(Change::Inputs(self.inputs.clone()));
+        }
         changes
     }
 

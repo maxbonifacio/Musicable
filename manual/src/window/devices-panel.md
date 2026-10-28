@@ -122,6 +122,10 @@ and:
   load, or the scan that finds it hasn't finished. A device whose plugin
   isn't playing lets the signal through as it is, and keeps its settings for
   when the plugin is there.
+- A row for each of its side inputs, such as a compressor's sidechain or a
+  vocoder's carrier, under the plugin's name for it: where its signal comes
+  from, with a gain for each source, and a **+** to add another
+  ([Sidechains](../using/sidechains.md#plugins-side-inputs)).
 
 ## Presets
 

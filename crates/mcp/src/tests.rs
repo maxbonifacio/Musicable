@@ -13,9 +13,10 @@ use musicable_commands::{
     Context, Document, Editor, Keymap, NoLibrary, Registry, Request, Steps, Transport,
 };
 use musicable_model::clip::{AudioClip, ClipContent, Offset, Warping};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::Warp;
-use musicable_model::{Project, TrackKind};
+use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
     ProgressNotificationParam,
@@ -804,6 +805,72 @@ fn reads_give_the_wires_and_each_device_s_side_input() {
              FX."
             .into()
         )
+    );
+}
+
+#[test]
+fn a_plugins_side_inputs_are_its_ports_by_its_ids_for_them() {
+    let mut project = Project::new();
+    project.add_track("Kick", TrackKind::Audio);
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    let input = |id, name: &str| PluginInput {
+        id,
+        name: name.into(),
+    };
+    let vocoder = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Vst3,
+        id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        name: "Vocoder".into(),
+        instrument: false,
+        inputs: vec![input(1, "Carrier"), input(3, "Aux")],
+        settings: PluginSettings::default(),
+    }));
+    project.track_mut(bass).unwrap().devices.push(vocoder);
+    let mut rig = Rig::new(project);
+    rig.call(
+        "run_commands",
+        json!({"name": "Key", "commands": [
+            {"id": "wire.connect", "args": {"device": 0, "track": 0}},
+            {"id": "wire.connect", "args": {"device": 0, "input": 3, "track": 0, "tap": "pre_fx",
+                                             "gain": 0.5}},
+        ]}),
+    )
+    .unwrap();
+
+    // Without an input, the first.
+    let project = rig.call("get_project", json!({})).unwrap();
+    let post_fx = json!({"track": 0, "tap": "post_fx", "name": "Kick Post FX"});
+    let pre_fx = json!({"track": 0, "tap": "pre_fx", "name": "Kick Pre FX"});
+    let carrier = json!({"device": 0, "port": "input", "input": 1,
+                         "name": "Vocoder Carrier on Bass"});
+    let aux = json!({"device": 0, "port": "input", "input": 3, "name": "Vocoder Aux on Bass"});
+    assert_eq!(
+        project["wires"],
+        json!([
+            {"id": 0, "from": post_fx, "to": carrier, "gain": 1.0},
+            {"id": 1, "from": pre_fx, "to": aux, "gain": 0.5},
+        ])
+    );
+    let vocoder = rig.call("get_device", json!({"device": 0})).unwrap();
+    assert_eq!(
+        vocoder["ports"],
+        json!([
+            {"port": "input", "input": 1, "name": "Carrier", "wires": [
+                {"id": 0, "from": post_fx, "gain": 1.0},
+            ]},
+            {"port": "input", "input": 3, "name": "Aux", "wires": [
+                {"id": 1, "from": pre_fx, "gain": 0.5},
+            ]},
+        ])
+    );
+    // Only into the inputs it lists.
+    let into = |input: i64| {
+        json!({"id": "wire.connect", "args": {"device": 0, "input": input, "track": 0,
+                                              "tap": "post_fader"}})
+    };
+    assert_eq!(
+        rig.call("run_command", into(2)),
+        Err("Vocoder has no side input 2.".into())
     );
 }
 

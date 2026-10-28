@@ -2,14 +2,15 @@
 //! into the side input of the Compressor on the bass, so the kick ducks it.
 //!
 //! A wire joins a [`Tap`] to a [`Port`], at a gain, and wires into the same
-//! port sum. One that would close a loop is refused, and so is a move, an
-//! output or a send that would close one through a wire: see
+//! port sum. The ports are the Compressor's and the Gate's Sidechain and
+//! plugins' side inputs. One that would close a loop is refused, and so is
+//! a move, an output or a send that would close one through a wire: see
 //! [`musicable_model::routing`].
 
 use musicable_model::native::{NativeKind, compressor, gate};
 use musicable_model::param::ParamAddress;
 use musicable_model::routing::{Port, Tap, Wire, WireError, WireId};
-use musicable_model::{Chain, DeviceId, Project, TrackId};
+use musicable_model::{Chain, DeviceId, DeviceKind, Project, TrackId};
 
 use crate::{Args, Command, CommandError, CommandId, Context, Loop, Param, Registry, Type, Value};
 
@@ -55,8 +56,14 @@ pub fn register(registry: &mut Registry) {
             Param::required(
                 "device",
                 Type::Device,
-                "The device the signal goes into, at its side input: a Compressor or a Gate, \
-                 whose Sidechain this turns on.",
+                "The device the signal goes into, at a side input: a Compressor's or a \
+                 Gate's Sidechain, which this turns on, or a plugin's.",
+            ),
+            Param::optional(
+                "input",
+                Type::Int,
+                "Which of a plugin's side inputs, by the plugin's id for it, as get_device \
+                 lists them: its first without it. A Compressor or a Gate has one.",
             ),
             TRACK,
             MASTER,
@@ -71,11 +78,11 @@ pub fn register(registry: &mut Registry) {
         ]),
         |ctx, args| {
             let from = tap(ctx, args)?;
-            let device: DeviceId = args.get("device")?;
-            if ctx.document.project().find_device(device).is_none() {
-                return Err(no_device(device));
-            }
-            let to = Port::Sidechain(device);
+            let to = port(
+                ctx.document.project(),
+                args.get("device")?,
+                args.opt("input")?,
+            )?;
             let gain = args.opt::<f64>("gain")?.map_or(1.0, |gain| gain as f32);
             let made = ctx.document.transact("Connect Wire", |tx| {
                 let wire = Wire {
@@ -179,6 +186,49 @@ fn tap(ctx: &Context<'_>, args: &Args) -> Result<Tap, CommandError> {
     }
 }
 
+/// The port of the device with id `device` that [`CONNECT`] wires into: a
+/// plugin's side input with the plugin's id `input`, or its first, or a
+/// Compressor's or a Gate's Sidechain.
+fn port(project: &Project, device: DeviceId, input: Option<i64>) -> Result<Port, CommandError> {
+    let Some((_, _, found)) = project.find_device(device) else {
+        return Err(no_device(device));
+    };
+    let DeviceKind::Plugin(plugin) = &found.kind else {
+        return match input {
+            Some(_) => Err(CommandError::invalid(
+                "only a plugin's side inputs have ids: leave out input",
+            )),
+            None => Ok(Port::Sidechain(device)),
+        };
+    };
+    let name = found.kind.name();
+    let id = match input {
+        Some(input) => u32::try_from(input)
+            .ok()
+            .filter(|&id| plugin.input(id).is_some()),
+        None => plugin.inputs.first().map(|input| input.id),
+    };
+    match (id, input) {
+        (Some(id), _) => Ok(Port::PluginInput(device, id)),
+        (None, Some(input)) => Err(CommandError::invalid(format!(
+            "{name} has no side input {input}"
+        ))),
+        (None, None) => Err(CommandError::invalid(format!(
+            "{name} has no side input: it has none, or hasn't loaded yet"
+        ))),
+    }
+}
+
+/// `args` with the arguments that name `port`, as [`CONNECT`] takes them.
+pub fn with_port(args: Args, port: Port) -> Args {
+    match port {
+        Port::Sidechain(device) => args.with("device", device),
+        Port::PluginInput(device, input) => {
+            args.with("device", device).with("input", i64::from(input))
+        }
+    }
+}
+
 /// `args` with the arguments that name `tap`, as [`CONNECT`] and
 /// [`SET_SOURCE`] take them.
 pub fn with_tap(args: Args, tap: Tap) -> Args {
@@ -195,7 +245,7 @@ pub fn with_tap(args: Args, tap: Tap) -> Args {
 }
 
 /// The switch that has `port`'s device hear what comes into it: the
-/// Compressor's and the Gate's Sidechain.
+/// Compressor's and the Gate's Sidechain. A plugin's switches are its own.
 pub fn switch(project: &Project, port: Port) -> Option<ParamAddress> {
     match port {
         Port::Sidechain(device) => {
@@ -207,6 +257,7 @@ pub fn switch(project: &Project, port: Port) -> Option<ParamAddress> {
             };
             Some(ParamAddress::Device(device, n as u32))
         }
+        Port::PluginInput(..) => None,
     }
 }
 
@@ -261,8 +312,9 @@ pub(crate) fn refused(project: &Project, Loop(wire): Loop) -> CommandError {
 mod tests {
     use musicable_model::mixer::Bus;
     use musicable_model::native::NativeDevice;
+    use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
     use musicable_model::time::Beats;
-    use musicable_model::{DeviceKind, TrackKind};
+    use musicable_model::{PluginFormat, TrackKind};
 
     use super::*;
     use crate::testing::Setup;
@@ -759,5 +811,154 @@ mod tests {
         };
         assert_eq!(m.wired()[5..], [(kick, Port::Sidechain(compressor_3))]);
         assert_eq!(m.devices(bass)[..2], [compressor_3, eq]);
+    }
+
+    fn input(id: u32, name: &str) -> PluginInput {
+        PluginInput {
+            id,
+            name: name.into(),
+        }
+    }
+
+    /// Adds a plugin called `name`, with side inputs `inputs`, to the end of
+    /// `chain`, as one step.
+    fn add_plugin(m: &mut Mix, chain: Chain, name: &str, inputs: Vec<PluginInput>) -> DeviceId {
+        let kind = DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: format!("org.example.{name}"),
+            name: name.into(),
+            instrument: false,
+            inputs,
+            settings: PluginSettings::default(),
+        });
+        let index = m.project().devices(chain).unwrap().len();
+        let id = m.setup.document.transact("Add Plugin", |tx| {
+            let device = tx.new_device(kind);
+            let id = device.id;
+            tx.add_device(chain, index, device);
+            id
+        });
+        m.setup.committed_names();
+        id
+    }
+
+    #[test]
+    fn wires_go_into_a_plugins_side_inputs_by_its_ids() {
+        let mut m = mix();
+        let (kick, bass, compressor) = (m.kick, m.bass, m.compressor);
+        let inputs = vec![input(1, "Carrier"), input(3, "Aux")];
+        let vocoder = add_plugin(&mut m, Chain::Track(bass), "Vocoder", inputs);
+        let effect = add_plugin(&mut m, Chain::Master, "Effect", Vec::new());
+        let connect = |m: &mut Mix, device: DeviceId, input: Option<i64>| {
+            let args = Args::new().with("track", kick).with("device", device);
+            let args = match input {
+                Some(input) => args.with("input", input),
+                None => args,
+            };
+            m.setup.run_with(&CONNECT, args)
+        };
+        // Into its first without an input.
+        connect(&mut m, vocoder, None).unwrap();
+        connect(&mut m, vocoder, Some(3)).unwrap();
+        let from = Tap::PostFx(Chain::Track(kick));
+        let [carrier, aux] = [1, 3].map(|id| Port::PluginInput(vocoder, id));
+        assert_eq!(m.wired(), [(from, carrier), (from, aux)]);
+        // The plugin's own switches turn it on, so it's one edit.
+        assert_eq!(m.setup.committed_names(), ["Connect Wire", "Connect Wire"]);
+        let error = |m: &mut Mix, device, input| connect(m, device, input).unwrap_err().to_string();
+        assert_eq!(
+            error(&mut m, vocoder, Some(2)),
+            "Vocoder has no side input 2"
+        );
+        assert_eq!(
+            error(&mut m, vocoder, Some(-1)),
+            "Vocoder has no side input -1"
+        );
+        assert_eq!(
+            error(&mut m, effect, None),
+            "Effect has no side input: it has none, or hasn't loaded yet"
+        );
+        assert_eq!(
+            error(&mut m, compressor, Some(1)),
+            "only a plugin's side inputs have ids: leave out input"
+        );
+        assert_eq!(
+            error(&mut m, vocoder, Some(1)),
+            "Kick Post FX is wired to the Vocoder Carrier on Bass already, by wire 0"
+        );
+        let after = Args::new().with("after", vocoder).with("device", vocoder);
+        assert_eq!(
+            m.setup.run_with(&CONNECT, after).unwrap_err().to_string(),
+            "that would make a loop: what the Vocoder Carrier on Bass puts out reaches Bass \
+             after Vocoder"
+        );
+        assert!(m.setup.committed_names().is_empty());
+        // Deleting the plugin takes its wires with it.
+        let delete = Args::new().with("device", vocoder);
+        m.setup.run_with(&device::DELETE, delete).unwrap();
+        assert!(m.project().wires.is_empty());
+        assert!(m.setup.document.undo());
+        assert_eq!(m.wired(), [(from, carrier), (from, aux)]);
+    }
+
+    #[test]
+    fn a_plugins_inputs_follow_the_plugin_but_keep_the_wired_ones() {
+        let mut m = mix();
+        let (kick, bass) = (m.kick, m.bass);
+        let inputs = vec![input(1, "Carrier"), input(3, "Aux")];
+        let vocoder = add_plugin(&mut m, Chain::Track(bass), "Vocoder", inputs);
+        m.key(kick, vocoder);
+        m.setup.committed_names();
+        let follow = |m: &mut Mix, inputs: Vec<PluginInput>| {
+            (m.setup.document).follow("Change Vocoder", |tx| tx.set_plugin_inputs(vocoder, inputs));
+        };
+        let listed = |m: &Mix| {
+            let device = m.project().find_device(vocoder).unwrap().2;
+            device.kind.plugin().unwrap().inputs.clone()
+        };
+        // An update of the plugin drops the carrier and adds a key: the
+        // carrier stays while the kick goes into it.
+        follow(&mut m, vec![input(3, "Aux"), input(4, "Key")]);
+        let kept = vec![input(3, "Aux"), input(4, "Key"), input(1, "Carrier")];
+        assert_eq!(listed(&m), kept);
+        assert_eq!(m.setup.committed_names(), ["Change Vocoder"]);
+        // Two inputs with one id are the plugin's mistake: nothing changes.
+        follow(&mut m, vec![input(3, "Aux"), input(3, "Key")]);
+        assert_eq!(listed(&m), kept);
+        assert!(m.setup.committed_names().is_empty());
+        // No step to undo: undo takes the wire back.
+        assert!(m.setup.document.undo());
+        assert!(m.project().wires.is_empty());
+        assert_eq!(listed(&m), kept);
+        // Unwired, the carrier goes when the plugin next says.
+        follow(&mut m, vec![input(3, "Aux"), input(4, "Key")]);
+        assert_eq!(listed(&m), [input(3, "Aux"), input(4, "Key")]);
+        // So redo can't bring back the wire into it, and changes nothing.
+        assert!(m.setup.document.redo());
+        assert!(m.project().wires.is_empty());
+        assert_eq!(
+            m.setup.committed_names(),
+            ["Undo Connect Wire", "Change Vocoder"]
+        );
+        // Back in a later version, it takes wires again.
+        follow(&mut m, vec![input(1, "Carrier"), input(3, "Aux")]);
+        assert_eq!(listed(&m), [input(1, "Carrier"), input(3, "Aux")]);
+        let again = m.key(kick, vocoder);
+        assert_eq!(
+            m.project().wire(again).unwrap().to,
+            Port::PluginInput(vocoder, 1)
+        );
+        // Other devices have no inputs to set.
+        let compressor = m.compressor;
+        follow_other(&mut m, compressor);
+        assert_eq!(
+            m.setup.committed_names(),
+            ["Change Vocoder", "Connect Wire"]
+        );
+
+        fn follow_other(m: &mut Mix, device: DeviceId) {
+            let inputs = vec![input(1, "Sidechain")];
+            (m.setup.document).follow("Change", |tx| tx.set_plugin_inputs(device, inputs));
+        }
     }
 }

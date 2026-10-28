@@ -36,6 +36,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     bypass,
     modulation,
     wires,
+    plugin_inputs,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -334,6 +335,36 @@ fn modulation(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 fn wires(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     add(file, "", "next_wire_id", json!(0))?;
     add(file, "", "wires", json!([]))
+}
+
+/// Version 20 added plugins' side inputs, which wires can go into. Version
+/// 19 plugins have none until they next load.
+fn plugin_inputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        no_inputs(track.get_mut("devices"), &format!("tracks[{i}].devices"))?;
+    }
+    let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
+    no_inputs(master, "master.devices")
+}
+
+/// Gives each plugin in `devices`, a list at `path`, no side inputs.
+fn no_inputs(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let devices = devices.and_then(Value::as_array_mut);
+    for (j, device) in devices.into_iter().flatten().enumerate() {
+        let plugin = (device.get_mut("kind"))
+            .and_then(|kind| kind.get_mut("plugin"))
+            .and_then(Value::as_object_mut);
+        if let Some(plugin) = plugin {
+            add(
+                plugin,
+                &format!("{path}[{j}].kind.plugin"),
+                "inputs",
+                json!([]),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// A change to a warp in a file, given the warp and its path.
@@ -825,6 +856,41 @@ mod tests {
             run(&STEPS[..17], &mut file, 17).unwrap_err().path,
             "tracks[0].modulation",
             "a track's modulation in a version 17 file"
+        );
+    }
+
+    #[test]
+    fn version_18_files_have_no_wires() {
+        let mut file = json!({"version": 18, "tracks": []});
+        run(&STEPS[..18], &mut file, 18).unwrap();
+        assert_eq!(file["wires"], json!([]));
+        assert_eq!(file["next_wire_id"], json!(0));
+        assert_eq!(file["version"], json!(19));
+    }
+
+    #[test]
+    fn version_19_plugins_have_no_side_inputs() {
+        let plugin = || json!({"kind": {"plugin": {"id": "org.example.plugin"}}});
+        let native = json!({"kind": {"native": {"kind": "eq"}}});
+        let mut file = json!({
+            "version": 19,
+            "tracks": [{"devices": [plugin(), native.clone()]}, "not a track"],
+            "master": {"devices": [plugin()]},
+        });
+        run(&STEPS[..19], &mut file, 19).unwrap();
+        let inputs = |device: &Value| device["kind"]["plugin"]["inputs"].clone();
+        assert_eq!(inputs(&file["tracks"][0]["devices"][0]), json!([]));
+        assert_eq!(file["tracks"][0]["devices"][1], native);
+        assert_eq!(inputs(&file["master"]["devices"][0]), json!([]));
+        assert_eq!(file["version"], json!(20));
+        let mut file = json!({
+            "version": 19,
+            "tracks": [{"devices": [{"kind": {"plugin": {"inputs": []}}}]}],
+        });
+        assert_eq!(
+            run(&STEPS[..19], &mut file, 19).unwrap_err().path,
+            "tracks[0].devices[0].kind.plugin.inputs",
+            "a plugin's inputs in a version 19 file"
         );
     }
 
