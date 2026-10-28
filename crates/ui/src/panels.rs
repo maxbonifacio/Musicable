@@ -1,9 +1,8 @@
 //! The panels the window docks: the arrangement, the mixer, the devices,
-//! the piano roll, the Sample Editor, the browser and the history. Each
-//! kind of panel
-//! registers its id, its title, where it goes in the default layout and how
-//! it's drawn, and the dock lays them out by id: the shell doesn't name
-//! them.
+//! the piano roll, the Sample Editor, the browser, the history and the
+//! routing. Each kind of panel registers its id, its title, where it goes in
+//! the default layout and how it's drawn, and the dock lays them out by id:
+//! the shell doesn't name them.
 
 use std::fmt;
 
@@ -14,7 +13,7 @@ use crate::arrangement::Arrangement;
 use crate::browser::BrowserPanel;
 use crate::devices::DevicesPanel;
 use crate::history::HistoryPanel;
-use crate::mixer::{self, Choices};
+use crate::mixer::{self, Choices, RoutingPanel};
 use crate::mouse::MouseMap;
 use crate::parts::Parts;
 use crate::piano_roll::PianoRoll;
@@ -25,7 +24,7 @@ use crate::theme::Theme;
 // The panels' ids, which the focus and the keymaps' panel tables know them
 // by too.
 pub use musicable_commands::panel::{
-    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, SAMPLE_EDITOR,
+    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
 };
 
 /// Where a panel goes in the default layout, and in a layout that doesn't
@@ -208,6 +207,22 @@ impl Registry {
                 });
             },
         });
+        registry.register(Panel {
+            id: ROUTING,
+            title: "Routing",
+            // As Live's In/Out section is the mixer's.
+            place: Place::With(MIXER),
+            // It waits to be asked for.
+            shown: false,
+            size: |theme| theme.mixer.panel,
+            hides: true,
+            show: |panels, ui, cx| {
+                framed(ui, |ui| {
+                    let (view, theme, mouse, parts) = (cx.view, cx.theme, cx.mouse, cx.parts);
+                    (panels.routing).show(ui, view, theme, mouse, parts, cx.actions);
+                });
+            },
+        });
         registry
     }
 
@@ -243,6 +258,7 @@ pub(crate) struct Panels {
     pub sample_editor: SampleEditor,
     pub browser: BrowserPanel,
     pub history: HistoryPanel,
+    pub routing: RoutingPanel,
 }
 
 /// What the panels draw from, and what they hand back.

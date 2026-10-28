@@ -73,6 +73,10 @@ version = 1
 # Live has no list of the undo history. Its key follows the other panels'.
 "view.toggle_history" = ["Ctrl+Alt+H"]
 
+# Live's key for the mixer's In/Out section, which the Routing panel stands in
+# for, for the whole project.
+"view.toggle_routing" = ["Ctrl+Alt+I"]
+
 # Live's key for Draw Mode in its MIDI note editor, which works everywhere.
 # The arrow keys are the piano roll's own, under [panels.piano_roll] below.
 "notes.toggle_draw" = ["B"]

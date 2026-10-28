@@ -170,6 +170,7 @@ const LAST_MENUS: [MenuSpec; 4] = [
         "view",
         &[
             Some(view::TOGGLE_MIXER),
+            Some(view::TOGGLE_ROUTING),
             Some(view::TOGGLE_DEVICES),
             Some(view::TOGGLE_PIANO_ROLL),
             Some(view::TOGGLE_SAMPLE_EDITOR),

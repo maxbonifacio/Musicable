@@ -41,6 +41,9 @@ The **+** by the column's name adds another source under the first, such
 as a snare beside a kick, both ducking a pad. The keys of all the sources
 add up, each at its own gain.
 
+The [Routing panel](../window/routing.md) lists every source of every side
+input in the project under **Keys**, with its menu and its gain.
+
 ## Plugins' side inputs
 
 A plugin with side inputs, such as a compressor's sidechain or a vocoder's

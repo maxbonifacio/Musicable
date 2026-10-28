@@ -1072,9 +1072,14 @@ mod tests {
         // arrangement has selected.
         setup.document.editor_mut().focus = Focus::MIXER;
         assert!(setup.applies(&COPY) && setup.applies(&SELECT_ALL));
-        // The devices, the browser and the history have nothing the edit
-        // commands take.
-        for focus in [Focus::DEVICES, Focus::BROWSER, Focus::HISTORY] {
+        // The devices, the browser, the history and the routing have
+        // nothing the edit commands take.
+        for focus in [
+            Focus::DEVICES,
+            Focus::BROWSER,
+            Focus::HISTORY,
+            Focus::ROUTING,
+        ] {
             setup.document.editor_mut().focus = focus;
             for id in [&CUT, &COPY, &DUPLICATE, &DELETE, &SPLIT, &SELECT_ALL] {
                 assert!(!setup.applies(id), "{id:?} in {focus:?}");

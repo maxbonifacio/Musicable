@@ -16,6 +16,7 @@
   - [The piano roll](window/piano-roll.md)
   - [The Sample Editor](window/sample-editor.md)
   - [The mixer](window/mixer.md)
+  - [The Routing panel](window/routing.md)
   - [The devices panel](window/devices-panel.md)
   - [The browser](window/browser.md)
   - [The History panel](window/history.md)

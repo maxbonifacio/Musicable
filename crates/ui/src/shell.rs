@@ -28,7 +28,8 @@ use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::panels::{
-    self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels, SAMPLE_EDITOR,
+    self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels, ROUTING,
+    SAMPLE_EDITOR,
 };
 use crate::parts::{Parts, Views};
 use crate::shortcuts::Shortcuts;
@@ -467,6 +468,11 @@ impl Shell {
         if let Some((panel, at)) = self.ghost {
             let title = self.registry.get(panel).map_or(panel, |panel| panel.title);
             ghost::show(&ctx, title, at);
+        }
+        // A device clicked in the Routing panel comes into sight in the
+        // devices panel, which shows it selected.
+        if let Some(device) = self.panels.routing.take_revealed() {
+            self.show_device(device);
         }
         // Add Device shows the browser's devices.
         if browse {
@@ -1334,6 +1340,7 @@ fn command_button(
         id if *id == view::TOGGLE_CLIP_EDITOR => Some(shown.contains(view.editor.clip_editor)),
         id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
         id if *id == view::TOGGLE_HISTORY => Some(shown.contains(HISTORY)),
+        id if *id == view::TOGGLE_ROUTING => Some(shown.contains(ROUTING)),
         _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
         id => toggled(view, id),
     };
@@ -1961,10 +1968,16 @@ mod tests {
             PIANO_ROLL.into(),
             SAMPLE_EDITOR.into(),
             HISTORY.into(),
+            ROUTING.into(),
         ];
+        // The routing, hidden, stays where the mixer was.
+        let routing = Layout::panel(ROUTING);
         let expected = WindowLayout {
             hidden: hidden.clone(),
-            layout: across(vec![browser.clone(), down(vec![beside, devices])]),
+            layout: across(vec![
+                browser.clone(),
+                down(vec![beside, routing.clone(), devices]),
+            ]),
             ..WindowLayout::default()
         };
         assert_eq!(layout(&harness), expected);
@@ -1980,6 +1993,7 @@ mod tests {
                 browser,
                 down(vec![
                     Layout::panel(ARRANGEMENT),
+                    routing,
                     tabs(&[DEVICES, PIANO_ROLL, SAMPLE_EDITOR, MIXER], MIXER),
                 ]),
             ]),
@@ -2048,7 +2062,7 @@ mod tests {
         assert!(harness.query_by_label("Mixer panel").is_none());
         assert_eq!(
             layout(&harness).hidden,
-            [BROWSER, MIXER, PIANO_ROLL, SAMPLE_EDITOR, HISTORY]
+            [BROWSER, MIXER, PIANO_ROLL, SAMPLE_EDITOR, HISTORY, ROUTING]
         );
         // The arrangement's tab has no close button.
         let tab = harness.get_by_label("Arrangement panel").rect();
@@ -2143,13 +2157,25 @@ mod tests {
     fn workspaces_lay_the_panels_out() {
         let mut harness = harness(Project::new());
         let window = WindowLayout {
-            hidden: vec![MIXER.into(), SAMPLE_EDITOR.into(), HISTORY.into()],
+            hidden: vec![
+                MIXER.into(),
+                SAMPLE_EDITOR.into(),
+                HISTORY.into(),
+                ROUTING.into(),
+            ],
             layout: across(vec![
                 down(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]),
                 Layout {
                     size: Some(300),
                     ..tabs(
-                        &[BROWSER, DEVICES, PIANO_ROLL, SAMPLE_EDITOR, HISTORY],
+                        &[
+                            BROWSER,
+                            DEVICES,
+                            PIANO_ROLL,
+                            SAMPLE_EDITOR,
+                            HISTORY,
+                            ROUTING,
+                        ],
                         DEVICES,
                     )
                 },

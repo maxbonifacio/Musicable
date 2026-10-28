@@ -7,11 +7,11 @@
 //!
 //! The window has a menu bar and a transport bar over the panels, docked in
 //! splits and tabs the user drags about: the arrangement in the middle,
-//! with the mixer and the devices or the piano roll under it and the
-//! browser or the history beside it. The command palette goes over them,
-//! and so does the app's Settings window, whose Keys page the shell draws.
-//! The transport bar, the track headers and the mixer strips are made of
-//! parts the user can hide, move and resize. The layout and the parts are
+//! with the mixer or the routing and the devices or the piano roll under it
+//! and the browser or the history beside it. The command palette goes over
+//! them, and so does the app's Settings window, whose Keys page the shell
+//! draws. The transport bar, the track headers and the mixer strips are made
+//! of parts the user can hide, move and resize. The layout and the parts are
 //! one of the user's [`Workspace`]s, which the app saves and switches
 //! between, and panels move out to windows of their own, which it keeps
 //! too. Views draw from a [`Theme`], and look mouse gestures up in a
@@ -58,7 +58,9 @@ pub use mouse::{
     Gesture, MouseAction, MouseFileError, MouseMap, MouseMapFile, MouseProblem, Target,
     modifier_sets,
 };
-pub use panels::{ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, SAMPLE_EDITOR};
+pub use panels::{
+    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
+};
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use shell::{
     Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,

@@ -89,32 +89,66 @@ pub(crate) fn sources(
         };
         ui.push_id(wire.id, |ui| {
             let label = format!("{name} {input} Source{number}");
-            let on = |args: Args| args.with("wire", wire.id);
             let current = Some(wire.from);
-            match picker(ui, project, port, chain, current, &label, width, theme) {
-                Some(Pick::NoInput) => {
-                    actions.push(Action::RunWith(wire::DISCONNECT, on(Args::new())));
-                }
-                Some(Pick::Tap(tap)) => {
-                    let args = wire::with_tap(on(Args::new()), tap);
-                    actions.push(Action::RunWith(wire::SET_SOURCE, args));
-                }
-                None => {}
-            }
-            let setting = Setting::WireGain(wire.id);
-            let playhead = view.playback.playhead;
-            let own = f64::from(wire.gain);
-            let value = automated_value(project, setting.address(), playhead, own);
-            let control = Control {
-                setting,
-                info: gain,
-                name: gain.name,
-                label: format!("{name} {input} {}{number}", gain.name),
-                project,
-                levels: view.levels,
-            };
-            control.show(ui, gain.clamp(value), width, theme, mouse, actions);
+            let picked = picker(ui, project, port, chain, current, &label, width, theme);
+            actions.extend(picked.map(|pick| change_source(wire, pick)));
+            let label = format!("{name} {input} {}{number}", gain.name);
+            self::gain(ui, wire, label, width, view, theme, mouse, actions);
         });
+    }
+}
+
+/// The gain of `wire`, as the bar under its picker shows it, `width` wide
+/// and called `label`: the Routing panel shows it too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gain(
+    ui: &mut Ui,
+    wire: &Wire,
+    label: String,
+    width: f32,
+    view: &View<'_>,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    let info = match wire.to {
+        Port::Sidechain(_) => &GAIN,
+        Port::PluginInput(..) => &INPUT_GAIN,
+    };
+    let setting = Setting::WireGain(wire.id);
+    let playhead = view.playback.playhead;
+    let own = f64::from(wire.gain);
+    let value = automated_value(view.project, setting.address(), playhead, own);
+    let control = Control {
+        setting,
+        info,
+        name: info.name,
+        label,
+        project: view.project,
+        levels: view.levels,
+    };
+    control.show(ui, info.clamp(value), width, theme, mouse, actions);
+}
+
+/// The menu of what `wire` can take from, as its picker has it: No Input,
+/// which takes the wire away, then the other tracks, each opening to its
+/// taps, then This track. Asks for the change the user picked: the
+/// Routing panel shows it beside the wire's source.
+pub(crate) fn source_menu(ui: &mut Ui, project: &Project, wire: &Wire, actions: &mut Vec<Action>) {
+    let Some(chain) = project.port_chain(wire.to) else {
+        return;
+    };
+    let picked = menu(ui, project, wire.to, chain, Some(wire.from), true);
+    actions.extend(picked.map(|pick| change_source(wire, pick)));
+}
+
+/// The command that gives `wire` the source the user picked, or takes it
+/// away.
+fn change_source(wire: &Wire, pick: Pick) -> Action {
+    let args = Args::new().with("wire", wire.id);
+    match pick {
+        Pick::NoInput => Action::RunWith(wire::DISCONNECT, args),
+        Pick::Tap(tap) => Action::RunWith(wire::SET_SOURCE, wire::with_tap(args, tap)),
     }
 }
 

@@ -160,8 +160,8 @@ devices ([Device](#device)). Split always acts on clips, and applies only
 while the arrangement or the mixer has the focus. The mixer shows the
 arrangement's tracks, so while it has the focus they act on the
 arrangement's selection, as Live's mixer does in its Arrangement View. The
-browser and the History panel have nothing they take, so there they don't
-apply. Quantize moves the piano roll's notes while it
+browser, the History panel and the Routing panel have nothing they take, so
+there they don't apply. Quantize moves the piano roll's notes while it
 has the focus, the Sample Editor's transients while it has it
 ([Transients](#transients)), and else those of the selected clips, MIDI and
 warped audio, at the zoom of the panel they're in.
@@ -895,6 +895,7 @@ other. They push a `Request`, as the file commands do.
 | `options.next_profile` | Switch to Next Profile | Switches to the next profile, in the Profiles page's order, and from the last back to Default, saving the workspace in use first | none | none |
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
+| `view.toggle_routing` | Routing | Shows or hides the Routing panel, in a tab beside the mixer | Ctrl+Alt+I | Ctrl+Alt+I (the mixer's In/Out) |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
 | `view.toggle_clip_editor` | Clip Editor | Shows or hides the editor that fits the clip selected or opened last: the piano roll, or the Sample Editor for an audio clip | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
 | `view.switch_devices_piano_roll` | Switch Devices and Clip Editor | Brings that editor in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |
@@ -919,19 +920,17 @@ other. They push a `Request`, as the file commands do.
 `view.set_viewport` (`start`, `zoom`, `top`, `width`) and
 `view.set_track_height` (`track`? or `master`?, `height`) carry the
 arrangement's scrolling, zooming and the heights of its tracks and of the
-master's row, `view.set_piano_roll_viewport`
-(`start`, `zoom`, `top`, `width`, `height`, `key_height`?) the piano
-roll's, with how tall its rows of keys are, and
-`view.set_sample_editor_viewport` (`start`, `zoom`, `width`) the Sample
-Editor's. `view.set_focus` gives a panel the focus (`panel`:
-`arrangement`, `mixer`, `devices`, `piano_roll`, `sample_editor`,
-`browser` or `history`), the piano roll and the Sample Editor only while
-they show a clip. They and the take
-lanes change the editor's state, not the project, so undo leaves them
-alone. Live has no command palette. Ctrl+Shift+P is the usual key for one
-in other apps. Live 12 also switches between its clip view and its device
-view with Shift+Tab; here Shift+Tab moves the keyboard focus back, as it
-does everywhere else.
+master's row, `view.set_piano_roll_viewport` (`start`, `zoom`, `top`,
+`width`, `height`, `key_height`?) the piano roll's, with how tall its rows
+of keys are, and `view.set_sample_editor_viewport` (`start`, `zoom`,
+`width`) the Sample Editor's. `view.set_focus` gives a panel the focus
+(`panel`: `arrangement`, `mixer`, `devices`, `piano_roll`, `sample_editor`,
+`browser`, `history` or `routing`), the piano roll and the Sample Editor
+only while they show a clip. They and the take lanes change the editor's
+state, not the project, so undo leaves them alone. Live has no command
+palette. Ctrl+Shift+P is the usual key for one in other apps. Live 12 also
+switches between its clip view and its device view with Shift+Tab; here
+Shift+Tab moves the keyboard focus back, as it does everywhere else.
 
 ### Workspace
 
@@ -986,18 +985,18 @@ for the behaviour settings.
 - **Track heights** in points, between `view::MIN_TRACK_HEIGHT` and
   `MAX_TRACK_HEIGHT`, for the tracks whose height was changed, and the
   master's row, by their `Chain`.
-- **The focus** (`Focus`): the panel the keys and the edit commands act
-  in, by its id (`crates/commands/src/panel.rs`): the arrangement, the
-  mixer, the devices, the piano roll, the Sample Editor, the browser or
-  the history. `Focus::edits` says what the edit commands act on there
+- **The focus** (`Focus`): the panel the keys and the edit commands act in,
+  by its id (`crates/commands/src/panel.rs`): the arrangement, the mixer,
+  the devices, the piano roll, the Sample Editor, the browser, the history
+  or the routing. `Focus::edits` says what the edit commands act on there
   (`Edits`): the arrangement's selection in the arrangement and the mixer,
   the notes in the piano roll, the warp markers in the Sample Editor, the
-  selected devices in the devices panel, and nothing in the others. The zoom acts on the piano roll or the Sample
-  Editor while it has the focus, and on the arrangement otherwise.
-  Clicking in a panel or on its tab gives it the focus
-  ([app.md](app.md#the-panels)), and so do the selection commands of the
-  arrangement, the piano roll, the Sample Editor and the devices panel. A panel's own keys
-  work while it has it ([below](#the-keymap-file)).
+  selected devices in the devices panel, and nothing in the others. The zoom
+  acts on the piano roll or the Sample Editor while it has the focus, and on
+  the arrangement otherwise. Clicking in a panel or on its tab gives it the
+  focus ([app.md](app.md#the-panels)), and so do the selection commands of
+  the arrangement, the piano roll, the Sample Editor and the devices panel.
+  A panel's own keys work while it has it ([below](#the-keymap-file)).
 - **The piano roll** (`editor::PianoRoll`): the MIDI clip it shows, its
   selected notes, its own viewport (song positions across, as the
   arrangement's, so the start marker, the playhead and the grid line up,

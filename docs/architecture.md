@@ -357,7 +357,9 @@ where a part has started, what's built.
   output's channels out for a strip of its own. In the model, a track feeds the
   master or a group (`Track::output`) and records from an input
   (`Track::input`), and flexible routing adds to both, such as another
-  track's output as an input.
+  track's output as an input. The Routing panel lists every output, send,
+  input from a tap and wire, a row each, with the strips' and the Sidechain
+  column's controls ([app.md](app.md#the-routing-panel)).
 - **Per-app loopback on Windows 11.** System loopback is an input of its
   own kind (`musicable_audio::InputKind::Loopback`, whose id `loopback_id`
   makes), lined up with the output and resampled when its device runs on

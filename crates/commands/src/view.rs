@@ -37,6 +37,10 @@ pub const TOGGLE_CLIP_EDITOR: CommandId = CommandId::new("view.toggle_clip_edito
 /// Shows or hides the History panel, which lists the steps of the undo
 /// history, in a tab beside the browser.
 pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
+/// Shows or hides the Routing panel, which lists every connection in the
+/// project, in a tab beside the mixer: Live's In/Out section, for the whole
+/// project.
+pub const TOGGLE_ROUTING: CommandId = CommandId::new("view.toggle_routing");
 /// Brings the editor that fits the clip selected or opened last, the piano
 /// roll or the Sample Editor, in front of the devices, or the devices in
 /// front of it: Live's Toggle Between Device/Clip View.
@@ -137,7 +141,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 11] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 9] = [
+const REQUESTS: [(CommandId, &str, Request); 10] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -157,6 +161,11 @@ const REQUESTS: [(CommandId, &str, Request); 9] = [
         Request::TogglePanel(panel::SAMPLE_EDITOR),
     ),
     (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
+    (
+        TOGGLE_ROUTING,
+        "Routing",
+        Request::TogglePanel(panel::ROUTING),
+    ),
     (
         MOVE_TO_NEW_WINDOW,
         "Move Panel to New Window",

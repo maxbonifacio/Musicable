@@ -218,7 +218,8 @@ the views' parts. Behind them:
 ### The panels
 
 The arrangement, the mixer, the devices panel, the piano roll, the Sample
-Editor, the browser and the History panel are docked panels, laid out in splits and tabs
+Editor, the browser, the History panel and the Routing panel are docked
+panels, laid out in splits and tabs
 ([egui_tiles](https://docs.rs/egui_tiles), `crates/ui/src/dock.rs`). The
 shell's panel registry (`crates/ui/src/panels.rs`) holds each with its id,
 such as `musicable_ui::MIXER` and `PIANO_ROLL`, its title, its place and
@@ -513,6 +514,30 @@ notes, and nothing that carries sound. The output menu has the buses
 `Project::buses_for` gives the track, Sends Only last. They run
 `mixer.set_input` and `mixer.set_output`
 ([commands.md](commands.md#the-mixers-controls)).
+
+## The Routing panel
+
+[The Routing panel](../manual/src/window/routing.md) in the manual says what
+it lists. It's a child of the mixer's module
+(`crates/ui/src/mixer/routing.rs`), so a row's controls are the strips' own:
+the output menu's buses (`Mixer::bus_items`), the input menu's tracks and
+Resampling (`Mixer::tap_items`), a send's level with its Pre switch
+(`Mixer::send_in`), and a track's fader as a bar across, up to +6 dB
+(`Mixer::volume_bar`). A key's source menu and gain are the Sidechain
+column's (`native::sidechain::source_menu` and `gain`). So they hand back
+the same `mixer::Change`s and `wire.*` commands, and they're named as the
+strips' are, such as "Kick Output", with a key's named after its track, its
+device and the side input, such as "Bass Compressor Sidechain Source". The
+rows are listed from the project each frame: outputs, sends and inputs in
+the tracks' order, then keys in the order of the devices they go into. Only
+the rows in sight are drawn, but every row's names are measured, so that
+each end's column is as wide as the widest name in it, a strip's width at
+least (`Columns::across`), and the rows read across however wide the panel
+is. Clicking an end runs `edit.select_tracks`, `edit.select_master` or
+`device.select`, and the shell brings a device clicked into sight in the
+devices panel (`Shell::show_device`). Its panel's id is
+`musicable_ui::ROUTING`, in a tab beside the mixer, and
+`view.toggle_routing` shows or hides it.
 
 ## Recording
 
