@@ -4,12 +4,12 @@
 //! A wire joins a [`Tap`] to a [`Port`], at a gain, and wires into the same
 //! port sum. The ports are the Compressor's and the Gate's Sidechain and
 //! plugins' side inputs. One that would close a loop is refused, and so is
-//! a move, an output or a send that would close one through a wire: see
-//! [`musicable_model::routing`].
+//! a move, an output, a send or an input that would close one through a
+//! wire: see [`musicable_model::routing`].
 
 use musicable_model::native::{NativeKind, compressor, gate};
 use musicable_model::param::ParamAddress;
-use musicable_model::routing::{Port, Tap, Wire, WireError, WireId};
+use musicable_model::routing::{Port, Route, Tap, Wire, WireError, WireId};
 use musicable_model::{Chain, DeviceId, DeviceKind, Project, TrackId};
 
 use crate::{Args, Command, CommandError, CommandId, Context, Loop, Param, Registry, Type, Value};
@@ -46,8 +46,9 @@ const AFTER: Param = Param::optional(
     "Takes what this device puts out instead, on any track.",
 );
 
-/// The points on a track that a wire takes from, as the commands name them.
-const TAPS: &[&str] = &["pre_fx", "post_fx", "post_fader"];
+/// The points on a track that a wire or a track's input takes from, as the
+/// commands name them.
+pub(crate) const TAPS: &[&str] = &["pre_fx", "post_fx", "post_fader"];
 
 /// Registers the wire commands.
 pub fn register(registry: &mut Registry) {
@@ -296,16 +297,30 @@ fn wire_error(project: &Project, from: Tap, to: Port, error: WireError) -> Comma
 }
 
 /// The error for an edit refused because it would close a loop through a
-/// wire, naming the wire.
-pub(crate) fn refused(project: &Project, Loop(wire): Loop) -> CommandError {
-    let ends = project
-        .wire(wire)
-        .and_then(|w| Some((project.tap_name(w.from)?, project.port_name(w.to)?)));
-    let wire = match ends {
-        Some((from, to)) => format!("the wire from {from} to the {to}"),
-        None => format!("wire {}", wire.0),
+/// track's input or a wire, naming it.
+pub(crate) fn refused(project: &Project, Loop(route): Loop) -> CommandError {
+    let route = match route {
+        Route::Wire(wire) => {
+            let ends = project
+                .wire(wire)
+                .and_then(|w| Some((project.tap_name(w.from)?, project.port_name(w.to)?)));
+            match ends {
+                Some((from, to)) => format!("the wire from {from} to the {to}"),
+                None => format!("wire {}", wire.0),
+            }
+        }
+        Route::Input(track) => {
+            let input = project.track(track).and_then(|t| {
+                let tap = t.input.as_ref()?.tap()?;
+                Some((t.name.as_str(), project.tap_name(tap)?))
+            });
+            match input {
+                Some((name, tap)) => format!("{name}'s input from {tap}"),
+                None => format!("track {}'s input", track.0),
+            }
+        }
     };
-    CommandError::invalid(format!("that would make a loop, through {wire}"))
+    CommandError::invalid(format!("that would make a loop, through {route}"))
 }
 
 #[cfg(test)]

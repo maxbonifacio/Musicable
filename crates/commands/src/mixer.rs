@@ -8,8 +8,10 @@
 
 use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::{InputError, Tap};
 use musicable_model::{
-    AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, SendId, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, DeviceId, Input, MidiInput, Monitor, Project, SendId, TrackId,
+    TrackKind,
 };
 
 use crate::{
@@ -29,7 +31,8 @@ pub const SET_SOLO: CommandId = CommandId::new("mixer.set_solo");
 pub const SET_SOLO_SAFE: CommandId = CommandId::new("mixer.set_solo_safe");
 /// Arms a track for recording, or disarms it.
 pub const SET_ARM: CommandId = CommandId::new("mixer.set_arm");
-/// Sets what a track records from.
+/// Sets what a track records from: an interface's input, or another
+/// track's tap.
 pub const SET_INPUT: CommandId = CommandId::new("mixer.set_input");
 /// Sets when a track plays its input: its monitoring.
 pub const SET_MONITOR: CommandId = CommandId::new("mixer.set_monitor");
@@ -137,6 +140,29 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
                 Type::Bool,
                 "Whether an audio input takes two channels: true without it.",
             ),
+            Param::optional(
+                "from",
+                Type::Track,
+                "Another track to take the input from, at its tap, in place of an interface's: \
+                 an audio track monitors it In and records it.",
+            ),
+            Param::optional(
+                "tap",
+                Type::Choice(wire::TAPS),
+                "Where on that track: what comes into its devices, what comes out of the last \
+                 of them, or what comes out of its fader. post_fx without it.",
+            ),
+            Param::optional(
+                "after",
+                Type::Device,
+                "Takes what this device, on another track, puts out instead.",
+            ),
+            Param::optional(
+                "resampling",
+                Type::Bool,
+                "Takes the master's Post Fader: Resampling. The track records the mix, and plays \
+                 nothing while it does, so it isn't in it.",
+            ),
             Param::optional("none", Type::Bool, "Whether it records from nothing."),
         ],
         |args, project| Ok(Change::Input(args.get("track")?, input(args, project)?)),
@@ -160,9 +186,24 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
                 Type::Track,
                 "The group track it feeds: the master without it.",
             ),
+            Param::optional(
+                "sends_only",
+                Type::Bool,
+                "Feeds nothing: the track is heard through its sends, and what other tracks take \
+                 from it, alone.",
+            ),
         ],
         |args, _| {
-            let bus = args.opt("group")?.map_or(Bus::Master, Bus::Group);
+            let group = args.opt("group")?;
+            let bus = match (args.opt("sends_only")?.unwrap_or(false), group) {
+                (true, Some(_)) => {
+                    return Err(CommandError::invalid(
+                        "give a group to feed, or sends_only, not both",
+                    ));
+                }
+                (true, None) => Bus::SendsOnly,
+                (false, group) => group.map_or(Bus::Master, Bus::Group),
+            };
             Ok(Change::Output(args.get("track")?, bus))
         },
     ),
@@ -269,10 +310,14 @@ pub fn clip_type_name(clip_type: ClipType) -> &'static str {
 }
 
 /// The input the arguments of [`SET_INPUT`] name: one of the kind the track
-/// records, or none.
+/// records, a tap on another track it can take, or none.
 fn input(args: &Args, project: &Project) -> Result<Option<Input>, CommandError> {
     if args.opt("none")?.unwrap_or(false) {
         return Ok(None);
+    }
+    if let Some(tap) = tap(args, project)? {
+        check_tap(project, args.get("track")?, tap)?;
+        return Ok(Some(Input::Tap(tap)));
     }
     let device = args.opt("device")?.unwrap_or_default();
     let name = args.opt("name")?.unwrap_or_default();
@@ -304,6 +349,123 @@ fn input(args: &Args, project: &Project) -> Result<Option<Input>, CommandError> 
             stereo: args.opt("stereo")?.unwrap_or(true),
         }),
     }))
+}
+
+/// The tap the arguments of [`SET_INPUT`] name, if they name one: a point
+/// on another track, what a device puts out, or the master's Post Fader,
+/// for Resampling.
+fn tap(args: &Args, project: &Project) -> Result<Option<Tap>, CommandError> {
+    let from: Option<TrackId> = args.opt("from")?;
+    let point: Option<String> = args.opt("tap")?;
+    let after: Option<DeviceId> = args.opt("after")?;
+    let resampling = args.opt("resampling")?.unwrap_or(false);
+    let ways = [
+        from.is_some() || point.is_some(),
+        after.is_some(),
+        resampling,
+    ];
+    match ways.iter().filter(|&&given| given).count() {
+        0 => return Ok(None),
+        1 => {}
+        _ => {
+            return Err(CommandError::invalid(
+                "give a track to take the input from, a device to take it after, or \
+                 resampling, only one",
+            ));
+        }
+    }
+    let interface = ["device", "name", "channel", "stereo"];
+    if interface.iter().any(|name| args.value(name).is_some()) {
+        return Err(CommandError::invalid(
+            "give an interface's input or another track's tap, not both",
+        ));
+    }
+    if resampling {
+        return Ok(Input::RESAMPLING.tap());
+    }
+    if let Some(device) = after {
+        return match project.find_device(device) {
+            Some(_) => Ok(Some(Tap::Device(device))),
+            None => Err(CommandError::invalid(format!(
+                "there's no device {}",
+                device.0
+            ))),
+        };
+    }
+    let Some(from) = from else {
+        return Err(CommandError::invalid(
+            "give the track to take the input from, as from",
+        ));
+    };
+    if project.track(from).is_none() {
+        return Err(CommandError::invalid(format!(
+            "there's no track {}",
+            from.0
+        )));
+    }
+    let on = Chain::Track(from);
+    Ok(Some(match point.as_deref().unwrap_or("post_fx") {
+        "pre_fx" => Tap::PreFx(from),
+        "post_fader" => Tap::PostFader(on),
+        _ => Tap::PostFx(on),
+    }))
+}
+
+/// Whether `track` can take its input from `tap`, with an error that says
+/// why not if it can't.
+fn check_tap(project: &Project, track: TrackId, tap: Tap) -> Result<(), CommandError> {
+    let tap_name = || {
+        project
+            .tap_name(tap)
+            .unwrap_or_else(|| "that tap".to_owned())
+    };
+    // MIDI From comes with the Routing panel.
+    if project
+        .track(track)
+        .is_some_and(|t| t.kind == TrackKind::Midi)
+    {
+        return Err(CommandError::invalid(
+            "a MIDI track can't take its input from another track yet",
+        ));
+    }
+    let error = match project.check_input(track, tap) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    Err(CommandError::invalid(match error {
+        InputError::NoTrack => format!("there's no track {}", track.0),
+        InputError::NoTap => format!("the project has no {}", tap_name()),
+        InputError::Bus => "a group or a return track takes what feeds it, not an input".into(),
+        InputError::Notes => format!("{} is notes: an audio track takes sound", tap_name()),
+        InputError::Sound => format!(
+            "{} is sound: a MIDI track takes another MIDI track's notes",
+            tap_name()
+        ),
+        InputError::Master => {
+            "the master's one tap for an input is its Post Fader: give resampling".into()
+        }
+        InputError::Loop => {
+            let name = project
+                .track(track)
+                .map_or("the track", |t| t.name.as_str());
+            format!(
+                "that would make a loop: what comes out of {name} reaches {}",
+                tap_name()
+            )
+        }
+    }))
+}
+
+/// `args` with the arguments that name `tap` as [`SET_INPUT`] takes it:
+/// the master's taps as Resampling, the one it has for an input.
+pub fn with_input_tap(args: Args, tap: Tap) -> Args {
+    match tap {
+        Tap::PreFx(track) => args.with("from", track).with("tap", "pre_fx"),
+        Tap::Device(device) => args.with("after", device),
+        Tap::PostFx(Chain::Track(track)) => args.with("from", track).with("tap", "post_fx"),
+        Tap::PostFader(Chain::Track(track)) => args.with("from", track).with("tap", "post_fader"),
+        Tap::PostFx(Chain::Master) | Tap::PostFader(Chain::Master) => args.with("resampling", true),
+    }
 }
 
 /// The monitoring the argument `monitor` names.
@@ -342,17 +504,20 @@ pub enum Change {
     SoloSafe(TrackId, bool),
     Armed(TrackId, bool),
     /// What the track records from. Inputs the track can't take are left
-    /// alone: see [`Transaction::set_track_input`].
+    /// alone, and a tap that would close a loop is refused: see
+    /// [`Transaction::set_track_input`]. A track that takes another's tap
+    /// in place of what it took monitors In, but for Resampling, which it
+    /// never monitors.
     Input(TrackId, Option<Input>),
     Monitor(TrackId, Monitor),
     /// Where the track's output goes. Buses the track can't feed are left
     /// alone: see [`Project::can_feed`](musicable_model::Project::can_feed).
-    /// One that would close a loop through a wire is refused.
+    /// One that would close a loop through an input or a wire is refused.
     Output(TrackId, Bus),
     ClipType(TrackId, ClipType),
     /// The level of `track`'s send to the return track `to`, linear. A
     /// track with no send there gets one, after the fader, unless it would
-    /// close a loop through a wire.
+    /// close a loop through an input or a wire.
     SendLevel {
         track: TrackId,
         to: TrackId,
@@ -369,8 +534,8 @@ pub enum Change {
         track: TrackId,
         to: TrackId,
     },
-    /// Deletes the track. Tracks feeding it feed the master instead, and
-    /// sends to it go.
+    /// Deletes the track. Tracks feeding it feed the master instead, sends
+    /// to it go, and tracks taking their input from it go to No Input.
     Delete(TrackId),
     MasterGain(f32),
     MasterPan(f32),
@@ -405,6 +570,10 @@ impl Change {
                     args.set("channel", i64::from(channel));
                 }
                 (id, args)
+            }
+            Self::Input(track, Some(Input::Tap(tap))) => {
+                let (id, args) = on(SET_INPUT, track);
+                (id, with_input_tap(args, tap))
             }
             Self::Monitor(track, monitor) => {
                 let (id, args) = on(SET_MONITOR, track);
@@ -442,6 +611,10 @@ impl Change {
             Self::Output(track, Bus::Group(group)) => {
                 let (id, args) = on(SET_OUTPUT, track);
                 (id, args.with("group", group))
+            }
+            Self::Output(track, Bus::SendsOnly) => {
+                let (id, args) = on(SET_OUTPUT, track);
+                (id, args.with("sends_only", true))
             }
             Self::ClipType(track, clip_type) => {
                 let (id, args) = on(SET_CLIP_TYPE, track);
@@ -499,8 +672,9 @@ impl Change {
 
 /// Makes `change` to the document's project, as one transaction. Moving an
 /// automated fader, pan or send overrides its automation, as moving it by
-/// hand does. An output or a new send that would close a loop through a
-/// wire is refused, with an error naming the wire, and changes nothing.
+/// hand does. An input, an output or a new send that would close a loop is
+/// refused, with an error naming the input or the wire it would close it
+/// through, and changes nothing.
 pub fn change(document: &mut Document, change: Change) -> Result<(), CommandError> {
     let by_hand = |tx: &mut Transaction<'_>, param, value: f32| {
         tx.set_param_by_hand(param, f64::from(value));
@@ -533,7 +707,21 @@ pub fn change(document: &mut Document, change: Change) -> Result<(), CommandErro
             }
             Change::SoloSafe(track, solo_safe) => tx.set_track_solo_safe(track, solo_safe),
             Change::Armed(track, armed) => tx.set_track_armed(track, armed),
-            Change::Input(track, input) => tx.set_track_input(track, input),
+            Change::Input(track, input) => {
+                let input_of =
+                    |tx: &Transaction<'_>| tx.project().track(track).map(|t| t.input.clone());
+                let before = input_of(tx);
+                tx.set_track_input(track, input)?;
+                let after = input_of(tx);
+                // On Auto, it would be heard only while it's armed.
+                let plays = after
+                    .as_ref()
+                    .and_then(|input| input.as_ref()?.tap())
+                    .is_some_and(|tap| !Input::Tap(tap).is_resampling());
+                if before != after && plays {
+                    tx.set_track_monitor(track, Monitor::In);
+                }
+            }
             Change::Monitor(track, monitor) => tx.set_track_monitor(track, monitor),
             Change::Output(track, output) => tx.set_track_output(track, output)?,
             Change::ClipType(track, clip_type) => tx.set_track_clip_type(track, clip_type),
@@ -590,7 +778,7 @@ fn send_to(project: &Project, track: TrackId, to: TrackId) -> Option<SendId> {
 
 /// Adds a silent send after the fader from `track` to the return track `to`,
 /// if `track` can send there, and returns its id, unless it would close a
-/// loop through a wire.
+/// loop through an input or a wire.
 fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Result<Option<SendId>, Loop> {
     if !tx.project().can_send(track, to) {
         return Ok(None);
@@ -602,7 +790,8 @@ fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Result<Opt
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::{Project, Send, TrackKind};
+    use musicable_model::native::{NativeDevice, NativeKind};
+    use musicable_model::{DeviceKind, Project, Send, TrackKind};
 
     use super::*;
     use crate::Edit;
@@ -883,9 +1072,16 @@ mod tests {
                     stereo: false,
                 })),
             ),
+            Change::Input(
+                drums,
+                Some(Input::Tap(Tap::PostFader(Chain::Track(reverb)))),
+            ),
+            Change::Input(drums, Some(Input::Tap(Tap::PreFx(reverb)))),
+            Change::Input(drums, Some(Input::RESAMPLING)),
             Change::Input(drums, None),
             Change::Input(drums, Some(Input::Audio(AudioInput::default()))),
             Change::Monitor(drums, Monitor::Off),
+            Change::Output(drums, Bus::SendsOnly),
             Change::Output(drums, Bus::Master),
             Change::ClipType(group, ClipType::Soft),
             Change::SendLevel {
@@ -932,5 +1128,218 @@ mod tests {
             setup.run_with(&SET_MASTER_CLIP_TYPE, wrong),
             Err(CommandError::invalid("there's no clip type called Warm"))
         );
+    }
+
+    /// A kick with an EQ feeding a group, a print, a MIDI track and a
+    /// return track, and the EQ's id.
+    fn printing() -> (Setup, [TrackId; 5], DeviceId) {
+        let mut project = Project::new();
+        let kick = project.add_track("Kick", TrackKind::Audio);
+        let print = project.add_track("Print", TrackKind::Audio);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let group = project.add_track("Group", TrackKind::Group);
+        let reverb = project.add_track("Reverb", TrackKind::Return);
+        let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+        let eq_id = eq.id;
+        let track = project.track_mut(kick).unwrap();
+        track.devices.push(eq);
+        track.output = Bus::Group(group);
+        (
+            Setup::new(project),
+            [kick, print, keys, group, reverb],
+            eq_id,
+        )
+    }
+
+    fn set_input(setup: &mut Setup, track: TrackId, args: Args) -> Result<Value, CommandError> {
+        setup.run_with(&SET_INPUT, args.with("track", track))
+    }
+
+    fn track(setup: &Setup, track: TrackId) -> &musicable_model::Track {
+        setup.document.project().track(track).unwrap()
+    }
+
+    #[test]
+    fn audio_tracks_take_other_tracks_taps_and_monitor_them() {
+        let (mut setup, [kick, print, _, group, _], eq) = printing();
+        // Post FX without a tap, which the print then monitors.
+        set_input(&mut setup, print, Args::new().with("from", kick)).unwrap();
+        let taken = track(&setup, print);
+        let post_fx = Tap::PostFx(Chain::Track(kick));
+        assert_eq!(taken.input, Some(Input::Tap(post_fx)));
+        assert_eq!(taken.monitor, Monitor::In);
+        let monitor = Args::new().with("track", print).with("monitor", "Off");
+        setup.run_with(&SET_MONITOR, monitor).unwrap();
+        let from = |track: TrackId, tap: &str| Args::new().with("from", track).with("tap", tap);
+        for (args, tap) in [
+            (from(kick, "pre_fx"), Tap::PreFx(kick)),
+            (from(kick, "post_fader"), Tap::PostFader(Chain::Track(kick))),
+            (Args::new().with("after", eq), Tap::Device(eq)),
+            (
+                from(group, "post_fader"),
+                Tap::PostFader(Chain::Track(group)),
+            ),
+        ] {
+            set_input(&mut setup, print, args).unwrap();
+            assert_eq!(track(&setup, print).input, Some(Input::Tap(tap)));
+            assert_eq!(track(&setup, print).monitor, Monitor::In, "{tap:?}");
+        }
+        // Resampling leaves the monitoring alone: the track never plays it.
+        let monitor = Args::new().with("track", print).with("monitor", "Auto");
+        setup.run_with(&SET_MONITOR, monitor).unwrap();
+        let resampling = Args::new().with("resampling", true);
+        set_input(&mut setup, print, resampling).unwrap();
+        assert_eq!(track(&setup, print).input, Some(Input::RESAMPLING));
+        assert_eq!(track(&setup, print).monitor, Monitor::Auto);
+        // A tap and the monitoring it sets are one step.
+        let names = setup.committed_names();
+        assert_eq!(names.iter().filter(|name| *name == "Input").count(), 6);
+        assert_eq!(names.len(), 8);
+    }
+
+    #[test]
+    fn inputs_from_taps_are_refused_where_they_dont_fit() {
+        let (mut setup, [kick, print, keys, group, _], _) = printing();
+        let invalid = |message: &str| Err(CommandError::invalid(message));
+        let from = |track: TrackId| Args::new().with("from", track);
+        assert_eq!(
+            set_input(&mut setup, keys, from(kick)),
+            invalid("a MIDI track can't take its input from another track yet")
+        );
+        assert_eq!(
+            set_input(&mut setup, group, from(kick)),
+            invalid("a group or a return track takes what feeds it, not an input")
+        );
+        assert_eq!(
+            set_input(&mut setup, print, from(keys).with("tap", "pre_fx")),
+            invalid("Keys Pre FX is notes: an audio track takes sound")
+        );
+        // From itself, or round a loop: what the kick feeds.
+        assert_eq!(
+            set_input(&mut setup, kick, from(kick)),
+            invalid("that would make a loop: what comes out of Kick reaches Kick Post FX")
+        );
+        assert_eq!(
+            set_input(&mut setup, kick, from(group).with("tap", "pre_fx")),
+            invalid("that would make a loop: what comes out of Kick reaches Group Pre FX")
+        );
+        let both = from(kick).with("device", "rme");
+        assert_eq!(
+            set_input(&mut setup, print, both),
+            invalid("give an interface's input or another track's tap, not both")
+        );
+        assert_eq!(
+            set_input(&mut setup, print, Args::new().with("tap", "pre_fx")),
+            invalid("give the track to take the input from, as from")
+        );
+        assert_eq!(
+            set_input(&mut setup, print, from(kick).with("resampling", true)),
+            invalid(
+                "give a track to take the input from, a device to take it after, or \
+                 resampling, only one"
+            )
+        );
+        assert_eq!(
+            set_input(&mut setup, print, from(TrackId(99))),
+            invalid("there's no track 99")
+        );
+        let after = Args::new().with("after", DeviceId(99));
+        assert_eq!(
+            set_input(&mut setup, print, after),
+            invalid("there's no device 99")
+        );
+        assert_eq!(setup.committed_names(), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn routes_that_would_loop_through_an_input_are_refused_naming_it() {
+        let (mut setup, [kick, print, _, group, reverb], eq) = printing();
+        let refused = |through: &str| {
+            Err(CommandError::invalid(format!(
+                "that would make a loop, through Print's input from {through}"
+            )))
+        };
+        // An output into the group it takes.
+        let group_out = Args::new().with("from", group).with("tap", "post_fader");
+        set_input(&mut setup, print, group_out).unwrap();
+        let output = Args::new().with("track", print).with("group", group);
+        let made = setup.run_with(&SET_OUTPUT, output);
+        assert_eq!(made, refused("Group Post Fader"));
+        // A send to the return it takes.
+        let reverb_out = Args::new().with("from", reverb);
+        set_input(&mut setup, print, reverb_out).unwrap();
+        let send = Args::new()
+            .with("track", print)
+            .with("to", reverb)
+            .with("level", 0.5);
+        let made = setup.run_with(&SET_SEND_LEVEL, send);
+        assert_eq!(made, refused("Reverb Post FX"));
+        // A device it takes, moved onto it.
+        set_input(&mut setup, print, Args::new().with("after", eq)).unwrap();
+        let moved = Args::new().with("devices", vec![eq]).with("track", print);
+        let made = setup.run_with(&crate::device::MOVE, moved);
+        assert_eq!(made, refused("Kick after EQ"));
+        let project = setup.document.project();
+        assert_eq!(
+            project.find_device(eq).map(|(chain, ..)| chain),
+            Some(Chain::Track(kick))
+        );
+        assert!(track(&setup, print).sends.is_empty());
+        assert_eq!(track(&setup, print).output, Bus::Master);
+    }
+
+    #[test]
+    fn a_track_goes_to_sends_only_and_back() {
+        let (mut setup, [kick, _, _, group, _], _) = printing();
+        let sends_only = Args::new().with("track", kick).with("sends_only", true);
+        setup.run_with(&SET_OUTPUT, sends_only).unwrap();
+        assert_eq!(track(&setup, kick).output, Bus::SendsOnly);
+        let both = Args::new()
+            .with("track", kick)
+            .with("sends_only", true)
+            .with("group", group);
+        assert_eq!(
+            setup.run_with(&SET_OUTPUT, both),
+            Err(CommandError::invalid(
+                "give a group to feed, or sends_only, not both"
+            ))
+        );
+        setup
+            .run_with(&SET_OUTPUT, Args::new().with("track", kick))
+            .unwrap();
+        assert_eq!(track(&setup, kick).output, Bus::Master);
+    }
+
+    #[test]
+    fn deleting_what_tracks_take_their_inputs_from_leaves_them_none() {
+        let (mut setup, [kick, print, ..], eq) = printing();
+        set_input(&mut setup, print, Args::new().with("after", eq)).unwrap();
+        setup.document.take_committed();
+        let deleted = Args::new().with("device", eq);
+        setup.run_with(&crate::device::DELETE, deleted).unwrap();
+        assert_eq!(track(&setup, print).input, None);
+        let committed = setup.document.take_committed();
+        let step = committed.last().unwrap();
+        assert!(
+            matches!(
+                step.edits[..],
+                [Edit::TrackInput { track, to: None, .. }, Edit::RemoveDevice { .. }]
+                    if track == print
+            ),
+            "{:?}",
+            step.edits
+        );
+        // Undo brings back the input with the device.
+        setup.run_with(&crate::edit::UNDO, Args::new()).unwrap();
+        assert_eq!(
+            track(&setup, print).input,
+            Some(Input::Tap(Tap::Device(eq)))
+        );
+        // And deleting the track takes the input from it too.
+        let kick_out = Args::new().with("from", kick).with("tap", "post_fader");
+        set_input(&mut setup, print, kick_out).unwrap();
+        let deleted = Args::new().with("tracks", vec![kick]);
+        setup.run_with(&crate::track::DELETE, deleted).unwrap();
+        assert_eq!(track(&setup, print).input, None);
     }
 }

@@ -637,15 +637,17 @@ and the status bar says why. A new device starts with the plugin's own
 defaults. Its settings fill
 in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 
-Deleting a track or a device deletes the wires to and from it, as edits of
-their own in the same step, so undo brings them back ([Wires](#wires)). A
+Deleting a track or a device deletes the wires to and from it, and sets
+the tracks that take their input from it to No Input, as edits of their own
+in the same step, so undo brings them back ([Wires](#wires),
+[The mixer's controls](#the-mixers-controls)). A
 copy of a device keeps the wires into it, at their gains and with their
 lanes when the copy takes its original's, so a copied compressor keeps its
 key: from the same taps, or from the copy of a device copied with it. A
 wire whose copy would close a loop, as into a copy put before the device
 it's keyed after, is left out, and the wires from a device's tap don't
-come with its copy. A move that would close a loop through a wire is
-refused, with an error naming the wire, and changes nothing. Moving
+come with its copy. A move that would close a loop through a wire or a
+track's input is refused, with an error naming it, and changes nothing. Moving
 several devices is checked once they've all moved
 (`Transaction::at_once`), as one move can close a loop that the next
 opens again.
@@ -687,10 +689,12 @@ such as "That would make a loop: what the Compressor on Bass puts out
 reaches Master Post FX". The check follows the signal point to point
 (`Project::check_wire`), so two tracks can key each other from their Pre
 FX. Moving a device, an output or a send can close a loop through a wire
-too, and a `Transaction` refuses one that does, with the wire in the way:
-`move_device`, `set_track_output` and `add_send` give back a `Loop`, which
-`wire::refused` makes the command's error, such as "That would make a
-loop, through the wire from Kick Post FX to the Compressor on Bass".
+too, or through a track's input from a tap, and a `Transaction` refuses one
+that does, with the `Route` in the way: `move_device`, `set_track_output`,
+`add_send` and `set_track_input` give back a `Loop`, which `wire::refused`
+makes the command's error, such as "That would make a loop, through the
+wire from Kick Post FX to the Compressor on Bass" or "That would make a
+loop, through Print's input from Kick Post FX".
 Undo and redo go back to how the project was, so `Transaction::apply`
 never refuses.
 
@@ -830,24 +834,27 @@ Edit menu:
 | `Solo` | Solos or unsolos a track; `exclusive` unsolos the others | Solo, Unsolo |
 | `SoloSafe` | Leaves a track playing while others are soloed | Solo-Safe |
 | `Armed` | Arms a track for recording | Arm, Disarm |
-| `Input` | Sets what a track records from, or nothing | Input |
+| `Input` | Sets what a track records from: an interface's input, another track's tap, Resampling, or nothing | Input |
 | `Monitor` | Sets when a track plays its input instead of its clips: In, Auto or Off | Monitor |
-| `Output` | Sends a track's output to the master or a group it can feed | Output |
+| `Output` | Sends a track's output to the master, a group it can feed, or nowhere: Sends Only | Output |
 | `ClipType`, `MasterClipType` | Sets a channel's clip stage | Clip Type |
 | `SendLevel` | Sets a send's level, adding the send if there isn't one | Send Level |
 | `SendPreFader` | Takes a send before or after the fader | Pre/Post |
 | `RemoveSend` | Removes a send | Remove Send |
-| `Delete` | Deletes a track; what fed it feeds the master, and sends to it go | Delete Track |
+| `Delete` | Deletes a track; what fed it feeds the master, sends to it go, and tracks taking their input from it go to No Input | Delete Track |
 
 The commands are `mixer.set_volume`, `set_pan`, `set_mute`, `set_solo`,
 `set_solo_safe`, `set_arm`, `set_input`, `set_monitor`, `set_output`,
 `set_clip_type`, `set_send_level`, `set_send_pre_fader`, `remove_send`,
 `set_master_volume`, `set_master_pan` and `set_master_clip_type`; deleting a
 track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
-(left) to 1. A change the routing rules don't allow, such as an output that
-would make a loop, does nothing. An output or a new send that would close a
-loop through a wire is refused, with an error naming the wire
-([Wires](#wires)), which the app shows in its status bar.
+(left) to 1. A change the routing rules don't allow, such as an output to
+a group that feeds the track, does nothing. An input, an output or a new
+send that would close a loop through a track's input or a wire is refused,
+with an error naming it ([Wires](#wires)), which the app shows in its
+status bar. `mixer.set_output` feeds the master without `group`, and
+nothing with `sends_only`: the track is heard through its sends and the
+tracks that take its sound alone.
 
 `mixer.set_input` takes an input of the kind the track records: the input's
 `device` id, as the audio settings list it, or the default input without
@@ -856,6 +863,20 @@ one, and its `name`, to show while it's missing. On an audio track,
 the next one too (it does without it). On a MIDI track, `channel` is the
 one MIDI channel to take, from 0 to 15, or every channel without it.
 `none` records from nothing. Buses take no input.
+
+An audio track can take another track's tap instead, as a wire does
+([Wires](#wires)): `from`, a track, with `tap`, `pre_fx`, `post_fx`
+without it, or `post_fader`, or `after`, a device on another track, for
+what it puts out. `resampling` takes the master's Post Fader, the one tap
+of the master's a track can take: the track records the mix and plays
+nothing while it does. A track that takes a tap in place of what it took
+monitors In, in the same step, so it plays what it takes, but for
+Resampling, which leaves its monitoring alone. A MIDI track's Pre FX is
+notes, which an audio track can't take, and a MIDI track can't take
+another track's notes yet. An input that would close a loop, from a track
+the track's own sound reaches, is refused with an error that says so, such
+as "That would make a loop: what comes out of Print reaches Kick Post FX"
+(`Project::check_input`). Resampling never closes one.
 
 ### Options and View
 

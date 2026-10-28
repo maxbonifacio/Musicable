@@ -730,7 +730,7 @@ impl Project {
             match self.output_of(track) {
                 crate::mixer::Bus::Group(next) if next == group => return true,
                 crate::mixer::Bus::Group(next) => at = next,
-                crate::mixer::Bus::Master => return false,
+                crate::mixer::Bus::Master | crate::mixer::Bus::SendsOnly => return false,
             }
         }
         false

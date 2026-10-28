@@ -20,8 +20,8 @@ use musicable_model::warp::{
     WarpMode,
 };
 use musicable_model::{
-    AudioInput, Chain, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project, TakeId,
-    TestTone, TrackId, TrackKind,
+    AudioInput, Chain, DeviceId, DeviceKind, Input, LocatorId, Monitor, PluginFormat, Project,
+    TakeId, TestTone, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -372,7 +372,13 @@ fn values_must_have_the_right_type() {
             json!("tape"),
             "unknown variant `tape`",
         ),
-        ("tracks", 1, "output", json!("master"), "expected u32"),
+        (
+            "tracks",
+            1,
+            "output",
+            json!("master"),
+            "expected a group track's id, \"sends_only\" or null",
+        ),
         ("tracks", 1, "solo", json!(null), "expected a boolean"),
         ("tracks", 1, "muted", json!(1), "expected a boolean"),
         ("tracks", 0, "gain", json!(1e39), "out of range"),
@@ -619,7 +625,12 @@ fn outputs_feed_group_tracks_without_loops() {
         (0, json!(1), "track 1 isn't a group track"),
         (0, json!(4), "track 4 isn't a group track"),
         (2, json!(2), "can't be the track's own id"),
-        (4, json!(2), "must be null: return tracks feed the master"),
+        (
+            4,
+            json!(2),
+            "must be null or \"sends_only\": return tracks feed the master",
+        ),
+        (0, json!("nowhere"), "expected a group track's id"),
     ];
     for (track, output, message) in cases {
         let file = edited_from(&mix(), |f| f["tracks"][track]["output"] = output);
@@ -636,6 +647,124 @@ fn outputs_feed_group_tracks_without_loops() {
     assert_eq!(
         load(&file).unwrap().tracks[1].output,
         Bus::Group(TrackId(2))
+    );
+    // Any track, a return too, can feed nothing.
+    let file = edited_from(&mix(), |f| {
+        f["tracks"][3]["output"] = json!("sends_only");
+        f["tracks"][4]["output"] = json!("sends_only");
+    });
+    let project = load(&file).unwrap();
+    assert_eq!(project.tracks[3].output, Bus::SendsOnly);
+    assert_eq!(project.tracks[4].output, Bus::SendsOnly);
+}
+
+/// A kick feeding a group, a print of the kick's Post FX, a MIDI track
+/// doubling another's notes, and a track resampling the master, with a
+/// Compressor on the kick. The tracks' ids are their places in the list.
+fn tapped() -> Project {
+    let mut project = Project::new();
+    let kick = project.add_track("Kick", TrackKind::Audio);
+    let print = project.add_track("Print", TrackKind::Audio);
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let double = project.add_track("Double", TrackKind::Midi);
+    let drums = project.add_track("Drums", TrackKind::Group);
+    let resample = project.add_track("Resample", TrackKind::Audio);
+    project.track_mut(kick).unwrap().output = Bus::Group(drums);
+    let compressor = project.new_device(DeviceKind::Native(NativeDevice::new(
+        NativeKind::Compressor,
+    )));
+    project.track_mut(kick).unwrap().devices.push(compressor);
+    let take = |project: &mut Project, track, input| {
+        project.track_mut(track).unwrap().input = Some(input);
+    };
+    take(
+        &mut project,
+        print,
+        Input::Tap(Tap::PostFx(Chain::Track(kick))),
+    );
+    take(&mut project, double, Input::Tap(Tap::PreFx(keys)));
+    take(&mut project, resample, Input::RESAMPLING);
+    project
+}
+
+#[test]
+fn inputs_from_taps_suit_their_tracks_without_loops() {
+    assert_eq!(load(&edited_from(&tapped(), |_| ())).unwrap(), tapped());
+    let take = |track: usize, tap: Value| {
+        edited_from(&tapped(), |f| {
+            f["tracks"][track]["input"] = json!({"tap": tap})
+        })
+    };
+    let cases = [
+        (
+            1,
+            json!({"post_fx": {"track": 9}}),
+            "there's no track with id 9",
+        ),
+        (1, json!({"device": 9}), "there's no device with id 9"),
+        (
+            1,
+            json!({"pre_fx": 2}),
+            "is MIDI track 2's Pre FX, which is notes: an audio track takes sound",
+        ),
+        (
+            3,
+            json!({"post_fx": {"track": 0}}),
+            "must be another MIDI track's Pre FX: a MIDI track takes notes",
+        ),
+        (
+            1,
+            json!({"post_fx": "master"}),
+            "must be the master's Post Fader, for Resampling",
+        ),
+    ];
+    for (track, tap, message) in cases {
+        refused(
+            &take(track, tap),
+            &format!("tracks[{track}].input.tap"),
+            message,
+        );
+    }
+    refused(
+        &take(4, json!({"pre_fx": 0})),
+        "tracks[4].input",
+        "must be null: buses record nothing",
+    );
+    // From itself, from the group it feeds, or round another track's, where
+    // the later of the two in the list makes the loop.
+    for (track, tap, in_a_loop) in [
+        (1, json!({"post_fx": {"track": 1}}), 1),
+        (0, json!({"post_fader": {"track": 4}}), 0),
+        (0, json!({"pre_fx": 1}), 1),
+        (2, json!({"pre_fx": 3}), 3),
+    ] {
+        refused(
+            &take(track, tap),
+            &format!("tracks[{in_a_loop}].input"),
+            "makes a loop: what comes out of the track reaches its tap",
+        );
+    }
+    // A wire that closes a loop with an input: the print keying the kick.
+    let mut project = tapped();
+    let key = project.new_wire(
+        Tap::PostFx(Chain::Track(TrackId(1))),
+        Port::Sidechain(DeviceId(0)),
+    );
+    project.wires.push(key);
+    refused_saving(
+        &project,
+        "wires[0]",
+        "makes a loop: what comes out of the device it feeds reaches its tap",
+    );
+    // Taking what the kick's Compressor puts out, and Resampling, as an
+    // audio track's input.
+    let file = take(1, json!({"device": 0}));
+    let tap = Tap::Device(DeviceId(0));
+    assert_eq!(load(&file).unwrap().tracks[1].input, Some(Input::Tap(tap)));
+    let file = take(1, json!({"post_fader": "master"}));
+    assert_eq!(
+        load(&file).unwrap().tracks[1].input,
+        Some(Input::RESAMPLING)
     );
 }
 

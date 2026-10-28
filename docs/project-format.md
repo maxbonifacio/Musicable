@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 20,
+  "version": 21,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -336,7 +336,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 18 for this page. |
+| `version` | whole number | The format version: 21 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -409,9 +409,9 @@ change starts at must start within the position limit.
 | `solo` | boolean | Whether the track is soloed. |
 | `solo_safe` | boolean | Whether the track keeps playing while other tracks are soloed. |
 | `armed` | boolean | Whether the track is armed for recording. Only audio and MIDI tracks can be. |
-| `input` | input or `null` | What the track records from: an audio input on an audio track, a MIDI input on a MIDI track, or `null` for nothing. Return and group tracks record nothing, so theirs is `null`. |
-| `monitor` | string | When the track plays what comes into its input instead of its clips: `"in"`, always; `"auto"`, while it's armed and the transport is stopped or recording it; or `"off"`, never. |
-| `output` | whole number or `null` | The id of the group track the track feeds, or `null` for the master. |
+| `input` | input or `null` | What the track records from: an audio input on an audio track, a MIDI input on a MIDI track, a tap on another track, or `null` for nothing. Return and group tracks record nothing, so theirs is `null`. |
+| `monitor` | string | When the track plays what comes into its input instead of its clips: `"in"`, always; `"auto"`, while it's armed and the transport is stopped or recording it; or `"off"`, never. A track resampling the master never plays it, whatever this says. |
+| `output` | whole number, string or `null` | Where the track's output goes: the id of the group track it feeds, `"sends_only"` for nowhere, so it's heard only through its sends and what other tracks take from it, or `null` for the master. |
 | `sends` | array of sends | The track's sends to return tracks. |
 | `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. It plays along with the track's clips, and on a group or return track with what feeds the track. |
 | `clips` | array of clips | What the track plays: audio clips on an audio track, MIDI clips on a MIDI track, in any order. Return and group tracks have none. |
@@ -429,8 +429,18 @@ A **test tone** is a sine wave that sounds while the transport plays:
 | `level` | float | Linear amplitude: 1.0 is full scale. |
 
 An **input** is an object with one field: `audio`, holding an audio
-input, or `midi`, holding a MIDI input. An **audio input** is some channels
-of an audio device's input:
+input, `midi`, holding a MIDI input, or `tap`, holding a tap on another
+track, as a wire's `from` has it (see Wire), such as
+`{"tap": {"post_fx": {"track": 3}}}`. An audio track takes any tap on
+another track that carries sound, but not a MIDI track's Pre FX, which is
+its notes, and it takes the master's Post Fader,
+`{"tap": {"post_fader": "master"}}`, for **Resampling**: it records the
+mix, but never plays it, and plays nothing while it records, so it isn't
+in the mix it records. The master has no other tap for an input. A MIDI
+track takes another MIDI track's Pre FX, its notes. An input from a tap
+can't close a loop (see Routing).
+
+An **audio input** is some channels of an audio device's input:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1082,8 +1092,9 @@ up.
 
 Signal flows from tracks to buses without loops:
 
-- A track's `output` feeds the master or a group track. Return tracks
-  always feed the master, so theirs is `null`.
+- A track's `output` feeds the master, a group track or, with
+  `"sends_only"`, nothing. Return tracks feed the master or nothing, so
+  theirs is `null` or `"sends_only"`.
 - Groups can feed other groups, but not themselves, through any number of
   other groups.
 - Sends feed return tracks only, at most one from each track to each
@@ -1096,6 +1107,13 @@ Signal flows from tracks to buses without loops:
   can't reach its tap. So a compressor can't be keyed from after itself,
   from the group its track feeds, or from the master, which every track
   reaches, but two tracks can key each other from their Pre FX.
+- A track's input from a tap can't close a loop either: what comes out of
+  the track can't reach its tap, through the outputs, the sends, the other
+  inputs and the wires. So a track can't take its input from itself, from
+  the group it feeds or from a track that takes its own. Resampling is the
+  exception, since the track never plays the master it records.
+- A file with a loop is refused at the first input or wire in it: the
+  inputs come first, in track order, then the wires, in theirs.
 
 ### Wire
 
@@ -1115,7 +1133,7 @@ where its wires take it.
 
 | Tap | Meaning |
 |---|---|
-| `{"pre_fx": id}` | What comes into the devices of the track with that id: its clips and its input, or on a group or a return track, what feeds it. Not a MIDI track's, whose is its notes. |
+| `{"pre_fx": id}` | What comes into the devices of the track with that id: its clips and its input, or on a group or a return track, what feeds it. A MIDI track's is its notes, which no wire takes, only another MIDI track's input. |
 | `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. |
 | `{"post_fx": channel}` | What comes out of a channel's last device, where its pre-fader sends take their signal. |
 | `{"post_fader": channel}` | What comes out of a channel's fader and pan, where its post-fader sends take their signal. |
@@ -1151,6 +1169,7 @@ A **port** is an object with one field:
 | 18 | 2026-10-27 | Modulation: modulators on tracks and on the master, Macros, LFOs and Envelopes, with routings that move parameters, and lanes for their parameters. Version 17 channels have none. |
 | 19 | 2026-10-27 | Wires, from taps on channels into devices' ports, starting with the Compressor's and the Gate's sidechains, and lanes for their gains. Version 18 files have none. |
 | 20 | 2026-10-27 | Plugins' side inputs, and wires into them. Version 19 plugins have none until they next load. |
+| 21 | 2026-10-28 | Tracks taking their input from other tracks' taps, Resampling the master among them, and `"sends_only"` outputs. Version 20 files have neither. |
 
 ## Changing the format
 

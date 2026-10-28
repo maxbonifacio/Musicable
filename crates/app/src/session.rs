@@ -1,5 +1,6 @@
 //! The open project, wired to the engine.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,14 +18,15 @@ use musicable_engine::modulation;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
-    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Meters,
-    NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError, TransportCommand,
-    compile_with_inputs, compile_with_stems,
+    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout,
+    MAX_WRITERS, Meters, NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError,
+    TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
 };
 use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
 use musicable_model::modulation::Routing;
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::Tap;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::WarpMode;
 use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
@@ -33,7 +35,7 @@ use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
 use crate::plugins::{Change, Plugins};
-use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report};
+use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report, TapInput, Taps};
 
 /// Builds the graph for a project, with its meters, its audio files, its
 /// plugins' nodes and the audio inputs it monitors, on the compiler's
@@ -64,7 +66,9 @@ const RECORDINGS: &str = "Recordings";
 /// Armed audio tracks record from the audio inputs the session is told the
 /// stream opened ([`set_inputs`](Self::set_inputs)) while the transport
 /// records, into files in a `Recordings` folder by the project's file, or
-/// for a project that isn't saved, in the user's music folder. Armed MIDI
+/// for a project that isn't saved, in the user's music folder. Those that
+/// take their input from another track's tap, or resample the master,
+/// record what the engine writes of the tap for the recorder. Armed MIDI
 /// tracks record the notes their MIDI inputs play. When recording stops,
 /// what each track recorded becomes takes, in one step of the undo
 /// history.
@@ -94,6 +98,9 @@ pub struct Session {
     recording_offset: i64,
     /// Counts the projects opened, to tell a recording of an earlier one.
     opened: u64,
+    /// The buffers the engine writes the taps that armed tracks take into,
+    /// and with Capture on, those that held tracks take, for the recorder.
+    taps: Taps,
     /// What the plugins' windows asked for, oldest first.
     window_events: Vec<(DeviceId, PluginEvent)>,
     /// What went wrong with plugins as they played.
@@ -252,6 +259,7 @@ impl Session {
             capture_seconds: 0,
             recording_offset: 0,
             opened: 0,
+            taps: Taps::new(),
             window_events: Vec::new(),
             problems: Vec::new(),
             requests: Vec::new(),
@@ -293,6 +301,8 @@ impl Session {
         editor.sample_rate = self.engine.handle.config().sample_rate;
         self.revision += 1;
         self.opened += 1;
+        // The new project's taps are other tracks', even with the same ids.
+        self.restart_taps();
         self.arm();
     }
 
@@ -325,6 +335,8 @@ impl Session {
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
         self.engine.handle.set_preview_gain(self.preview_gain);
+        // The new engine writes no taps yet.
+        self.restart_taps();
         self.arm();
         old
     }
@@ -443,15 +455,16 @@ impl Session {
     }
 
     /// Tells the recorder which tracks to record from the next recording
-    /// on, and where, and which inputs to hold for Capture.
+    /// on, and where, and which inputs to hold for Capture, and has the
+    /// engine write the taps they take for it.
     fn arm(&mut self) {
         let project = self.document.project();
         let audio_offset = self.recording_offset;
-        let tracks = |held: bool| {
+        let tracks = |held: bool| -> Vec<Armed> {
             (project.tracks.iter())
                 .filter(move |track| track.armed || (held && track.monitor == Monitor::In))
                 .filter_map(move |track| match (&track.input, track.kind) {
-                    (Some(input @ Input::Audio(_)), TrackKind::Audio)
+                    (Some(input @ (Input::Audio(_) | Input::Tap(_))), TrackKind::Audio)
                     | (Some(input @ Input::Midi(_)), TrackKind::Midi) => Some((track, input)),
                     _ => None,
                 })
@@ -461,13 +474,21 @@ impl Session {
                     input: input.clone(),
                     offset: match input {
                         Input::Audio(_) => audio_offset,
-                        Input::Midi(_) => 0,
+                        Input::Midi(_) | Input::Tap(_) => 0,
                     },
                 })
                 .collect()
         };
         let armed = tracks(false);
         let held = tracks(true);
+        // Capture holds the tracks monitoring In too, but only when it's on.
+        let taking = if self.capture_seconds > 0 {
+            &held
+        } else {
+            &armed
+        };
+        let taps: BTreeSet<Tap> = taking.iter().filter_map(|t| t.input.tap()).collect();
+        self.write_taps(taps);
         let place = match &self.engine.folder {
             Some(folder) => Some(Place {
                 folder: folder.join(RECORDINGS),
@@ -479,8 +500,46 @@ impl Session {
             }),
         };
         let rate = self.engine.handle.config().sample_rate;
+        // The taps first, so the tracks find them.
+        self.recorder.set_taps(self.taps.clone());
         self.recorder.set_tracks(rate, armed, place, self.opened);
         self.recorder.set_held(held, self.capture_seconds);
+    }
+
+    /// Has the engine write `taps` into buffers for the recorder, those it
+    /// doesn't yet into new ones, and stop writing the others. The most it
+    /// can write: past that, tracks taking the others record nothing.
+    fn write_taps(&mut self, taps: BTreeSet<Tap>) {
+        let taps: BTreeSet<Tap> = taps.into_iter().take(MAX_WRITERS).collect();
+        let gone: Vec<Tap> = (self.taps.keys())
+            .filter(|tap| !taps.contains(tap))
+            .copied()
+            .collect();
+        for tap in gone {
+            self.taps.remove(&tap);
+            self.engine.push(Message::Writer(keys::record(tap), None));
+        }
+        let rate = self.engine.handle.config().sample_rate;
+        for tap in taps {
+            if let Entry::Vacant(entry) = self.taps.entry(tap) {
+                let (buffer, writer) = TapInput::new(rate);
+                entry.insert(buffer);
+                let writer: Box<dyn TapWriter> = Box::new(writer);
+                self.engine
+                    .push(Message::Writer(keys::record(tap), Some(writer)));
+            }
+        }
+    }
+
+    /// Starts the taps the engine writes for the recorder over, as for a
+    /// new project, whose taps are other tracks', or a new engine: what
+    /// waited for the engine is gone, the engine stops writing the taps it
+    /// has, and arming gives those wanted new buffers.
+    fn restart_taps(&mut self) {
+        for key in self.engine.handle.writers().to_vec() {
+            self.engine.push(Message::Writer(key, None));
+        }
+        self.taps.clear();
     }
 
     pub fn project(&self) -> &Project {
@@ -1352,6 +1411,9 @@ enum Message {
     },
     Tempo(TempoMap),
     Graph(Box<PreparedGraph>),
+    /// A writer for the record taps with this key, or `None` to stop
+    /// writing them.
+    Writer(NodeKey, Option<Box<dyn TapWriter>>),
     /// Holds back everything after it until the graph of this job, or of a
     /// newer one, comes back from the compiler, and becomes that graph.
     WaitForGraph(u64),
@@ -1500,6 +1562,14 @@ impl EngineLink {
                     unreachable!("graphs are prepared for the engine's config")
                 }
             }),
+            // The session asks for no more writers than the engine takes, so
+            // only a full queue gives one back.
+            Message::Writer(key, Some(writer)) => (self.handle)
+                .add_writer(key, writer)
+                .map_err(|writer| Message::Writer(key, Some(writer))),
+            Message::Writer(key, None) => (self.handle)
+                .remove_writer(key)
+                .map_err(|QueueFull(key)| Message::Writer(key, None)),
             Message::WaitForGraph(job) => Err(Message::WaitForGraph(job)),
         }
     }

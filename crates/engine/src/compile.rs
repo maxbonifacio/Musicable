@@ -36,6 +36,17 @@
 //! cut, so a muted track's wires carry on. Delay compensation lines up a
 //! side input with the main input, as it does every path that meets.
 //!
+//! An audio track taking its input from another track's tap
+//! ([`Input::Tap`]) has the tap's signal come into its input monitor's side
+//! input, which the monitor plays as it would an interface input's. One
+//! resampling the master has no connection: it never plays the master, so
+//! it can't feed itself. While it records, its monitor cuts what goes into
+//! its devices and a [`ResamplingCut`] after them what they ring on with,
+//! so none of the track is in the mix. Each tap an audio track takes its
+//! input from has a record tap ([`Graph::add_record`]) keyed
+//! [`keys::record`], which the engine hands to the tap's writer for the
+//! recorder. A track that goes to Sends Only feeds nothing but its sends.
+//!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
 //! song plays.
@@ -61,7 +72,9 @@ use crate::media::Media;
 use crate::meter::Meters;
 use crate::midi::MidiMonitor;
 use crate::modulation::Modulation;
-use crate::nodes::{Clipper, Gain, InputMonitor, Metronome, Sine, Sum, TestInstrument};
+use crate::nodes::{
+    Clipper, Gain, InputMonitor, Metronome, ResamplingCut, Sine, Sum, TestInstrument,
+};
 use crate::switch::Switch;
 use crate::{
     Automation, EngineConfig, Graph, GraphError, InputPort, Node, NodeId, NodeKey, ParamId,
@@ -74,16 +87,20 @@ use crate::{
 /// in the 16 bits above: 1 for the fader, 2 for the test tone, 3 to 5 for
 /// the built-in slots after the devices, 7 for the output stage, 8 for a
 /// group's or a return's bus, 11 for an audio or MIDI track's clip player,
-/// 12 for a track's input monitor and 13 for its modulators' node. The
+/// 12 for a track's input monitor, 13 for its modulators' node and 19 for
+/// the cut after the devices of a track resampling the master. The
 /// master's strip has the keys of a
 /// track whose id is `u32::MAX`, which no track has. Sends and devices have
 /// their own ids in the low 32 bits, with role 9 for sends and 10 for
 /// devices, and so does the slot in front of a device, with role 6, so it
 /// goes where the device goes. Wires have theirs with role 14. Keys with
-/// role 0 belong to no channel.
+/// role 0 belong to no channel. The record taps of the taps tracks take
+/// their inputs from have keys too, which no node has: role 15 with a
+/// track's id for its Pre FX, 16 with a device's for what it puts out, and
+/// 17 and 18 with a channel's for its Post FX and its Post Fader.
 pub mod keys {
     use musicable_model::param::ParamAddress;
-    use musicable_model::routing::WireId;
+    use musicable_model::routing::{Tap, WireId};
     use musicable_model::{Chain, DeviceId, Project, SendId, TrackId};
 
     use super::Slot;
@@ -156,6 +173,12 @@ pub mod keys {
         track_key(12, track)
     }
 
+    /// The [`ResamplingCut`](crate::nodes::ResamplingCut) after the
+    /// devices of an audio track resampling the master.
+    pub fn track_cut(track: TrackId) -> NodeKey {
+        track_key(19, track)
+    }
+
     /// A send, a [`Gain`](crate::nodes::Gain) at the send's level that feeds
     /// a return track's bus.
     pub fn send(send: SendId) -> NodeKey {
@@ -181,6 +204,22 @@ pub mod keys {
     /// a device's side input.
     pub fn wire(wire: WireId) -> NodeKey {
         NodeKey(14 << 32 | u64::from(wire.0))
+    }
+
+    /// The record tap ([`Graph::add_record`](crate::Graph::add_record)) of
+    /// `tap`, for a track that takes its input from it: the key of the
+    /// [`TapWriter`](crate::TapWriter) it goes to. No node has it.
+    pub fn record(tap: Tap) -> NodeKey {
+        let chain = |chain| match chain {
+            Chain::Track(track) => track,
+            Chain::Master => MASTER_STRIP,
+        };
+        match tap {
+            Tap::PreFx(track) => track_key(15, track),
+            Tap::Device(device) => NodeKey(16 << 32 | u64::from(device.0)),
+            Tap::PostFx(on) => track_key(17, chain(on)),
+            Tap::PostFader(on) => track_key(18, chain(on)),
+        }
     }
 
     /// The master's fader, a [`Gain`](crate::nodes::Gain).
@@ -609,9 +648,13 @@ fn build(
     let silenced = project.silenced();
     let mut tapped = HashMap::new();
     // Where each tap's signal is, and the switch of each device a wire can
-    // feed, for the wires.
+    // feed, for the wires and the inputs from taps.
     let mut points = HashMap::new();
     let mut ports = HashMap::new();
+    // The inputs from taps that play, and the audio tracks' monitors that
+    // take them.
+    let live_inputs: HashMap<TrackId, Tap> = project.live_inputs().into_iter().collect();
+    let mut taking = Vec::new();
     for track in &project.tracks {
         let player = clip_player(track, media, &project.tempo).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
@@ -622,17 +665,45 @@ fn build(
             }
             player
         });
+        let tap = live_inputs.get(&track.id).copied();
+        let resamples = tap.is_some_and(|tap| Input::Tap(tap).is_resampling());
         let monitor = match (&track.input, player) {
-            (Some(Input::Audio(input)), Some(player)) if track.kind == TrackKind::Audio => {
+            (Some(input @ (Input::Audio(_) | Input::Tap(_))), Some(player))
+                if track.kind == TrackKind::Audio =>
+            {
                 let mut monitor = InputMonitor::new(track.monitor, track.armed);
-                if let Some(channels) = inputs.find(input) {
-                    monitor = monitor.with_input(channels.first, channels.count);
+                match (input, tap) {
+                    (Input::Audio(input), _) => {
+                        if let Some(channels) = inputs.find(input) {
+                            monitor = monitor.with_input(channels.first, channels.count);
+                        }
+                    }
+                    (_, Some(_)) if resamples => monitor = monitor.resampling(),
+                    (_, Some(_)) => monitor = monitor.with_side_input(),
+                    // An input that doesn't play is silent.
+                    (_, None) => {}
                 }
-                let monitor = graph.add(keys::track_input(track.id), monitor);
-                connect(&mut graph, player, monitor);
-                Some(monitor)
+                Some((monitor, player))
             }
             _ => None,
+        };
+        // A track resampling the master cuts what comes out of its devices
+        // as well as what goes into them, so what they ring on with is cut
+        // too. The master feeds neither.
+        let mut cut = None;
+        let monitor = match monitor {
+            Some((mut monitor, player)) => {
+                if resamples {
+                    cut = Some(monitor.cut());
+                }
+                let node = graph.add(keys::track_input(track.id), monitor);
+                connect(&mut graph, player, node);
+                if let Some(tap) = tap.filter(|_| !resamples) {
+                    taking.push((tap, node));
+                }
+                Some(node)
+            }
+            None => None,
         };
         // A MIDI track's input joins its clips' notes on their way to its
         // instrument. A track without one has a monitor too, so the notes
@@ -657,7 +728,7 @@ fn build(
             graph: &mut graph,
             tail: head,
         };
-        let taps = strip.channel(Channel::Track(track), devices, media, &mut stages);
+        let taps = strip.channel(Channel::Track(track), devices, media, &mut stages, cut);
         taps.record(Chain::Track(track.id), &mut points, &mut ports);
         if track.kind == TrackKind::Midi
             && let (Some(player), Some(instrument)) = (player, taps.instrument)
@@ -683,11 +754,12 @@ fn build(
             .with_muted(silenced.output(track.id))
             .with_meter(meter);
         strip.push(keys::track_output(track.id), Box::new(output));
-        let bus = match project.output_of(track) {
-            Bus::Master => master,
-            Bus::Group(group) => buses[&group],
-        };
-        strip.feed(bus);
+        // A track that goes to Sends Only still meters what it would feed.
+        match project.output_of(track) {
+            Bus::Master => strip.feed(master),
+            Bus::Group(group) => strip.feed(buses[&group]),
+            Bus::SendsOnly => {}
+        }
         for send in project.sends_of(track) {
             let node = Gain::new(send.level)
                 .with_max_gain(1.0)
@@ -714,6 +786,7 @@ fn build(
         devices,
         media,
         &mut stages,
+        None,
     );
     taps.record(Chain::Master, &mut points, &mut ports);
     let output = Gain::new(1.0).with_meter(meters.master().clone());
@@ -742,11 +815,32 @@ fn build(
             .connect_to(gain, to, port)
             .expect("the model's routing rules leave no loops");
     }
+    // Once every strip is built too, so a track can take any other's tap.
+    for &(tap, monitor) in &taking {
+        if let Some(&from) = points.get(&tap) {
+            graph
+                .connect_to(from, monitor, InputPort::Side(0))
+                .expect("the model's routing rules leave no loops");
+        }
+    }
     graph.set_cue(cue).expect("the cue bus was just added");
     for node in stems.iter().filter_map(|track| tapped.get(track)) {
         graph
             .add_tap(*node)
             .expect("the stems' nodes were just added");
+    }
+    // After the stems, so theirs keep their numbers. Each tap once, however
+    // many tracks take it. A MIDI track's input from another's notes has
+    // none.
+    let recorded = (project.tracks.iter())
+        .filter(|t| t.kind == TrackKind::Audio)
+        .filter_map(|t| live_inputs.get(&t.id));
+    for &tap in recorded {
+        if let Some(&node) = points.get(&tap) {
+            graph
+                .add_record(keys::record(tap), node)
+                .expect("the taps' nodes were just added");
+        }
     }
     modulate(project, meters, &mut graph);
 
@@ -1045,13 +1139,15 @@ impl Strip<'_> {
     /// it still there, and so does a deactivated one, whose switch is in
     /// the graph but not in the strip. An instrument without a node, or
     /// deactivated, still takes the notes, so they don't go to an
-    /// instrument after it.
+    /// instrument after it. A track resampling the master has its `cut`
+    /// after its devices.
     fn channel(
         &mut self,
         channel: Channel<'_>,
         devices: &Devices,
         media: &Media,
         stages: &mut impl FnMut(Channel<'_>, Slot) -> Option<Box<dyn Node>>,
+        cut: Option<ResamplingCut>,
     ) -> Taps {
         let mut slot = |strip: &mut Self, at: Slot| {
             if let Some(stage) = stages(channel, at) {
@@ -1078,6 +1174,9 @@ impl Strip<'_> {
             if device.kind.is_instrument() && instrument.is_none() {
                 instrument = Some(node);
             }
+        }
+        if let (Some(cut), Channel::Track(track)) = (cut, channel) {
+            self.push(keys::track_cut(track.id), Box::new(cut));
         }
         slot(self, Slot::PreFader);
         let pre_fader = self.tail;
@@ -2626,5 +2725,272 @@ mod tests {
         assert_eq!(interleave(&mix), played);
         assert_eq!(loud(&interleave(kick_stem)), [(137, 1.0)]);
         assert_eq!(loud(&interleave(bass_stem)), [(137, 1.0)]);
+    }
+
+    /// A kick, an impulse on frame 100, and a print of it: an audio track
+    /// monitoring its input from the tap on the kick that `tap` gives, from
+    /// the kick's id and its device's. The device is there for its slot,
+    /// which [`printed_graph`] puts the impulse in.
+    fn printed(tap: impl FnOnce(TrackId, DeviceId) -> Tap) -> Project {
+        let mut p = Project::new();
+        let kick = p.add_track("Kick", TrackKind::Audio);
+        let print = p.add_track("Print", TrackKind::Audio);
+        let device = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        let id = device.id;
+        p.track_mut(kick).unwrap().devices.push(device);
+        let track = p.track_mut(print).unwrap();
+        track.input = Some(Input::Tap(tap(kick, id)));
+        track.monitor = Monitor::In;
+        p
+    }
+
+    /// `p` compiled with the kick's impulse, `kick` frames of latency after
+    /// it, and `print` frames of latency in front of the print's fader.
+    fn printed_graph(p: &Project, kick: usize, print: usize) -> PreparedGraph {
+        let stages = move |channel: Channel<'_>, slot: Slot| {
+            let Channel::Track(track) = channel else {
+                return None;
+            };
+            let late = |frames: usize| {
+                (frames > 0).then(|| Box::new(Latent(Delay::new(frames))) as Box<dyn Node>)
+            };
+            match (track.name.as_str(), slot) {
+                ("Kick", Slot::BeforeDevice(_)) => Some(Box::new(Impulse { at: 100 }) as _),
+                ("Kick", Slot::PreFader) => late(kick),
+                ("Print", Slot::PreFader) => late(print),
+                _ => None,
+            }
+        };
+        let inputs = InputLayout::new();
+        compile_with(
+            p,
+            &Meters::new(),
+            &Media::new(),
+            &Devices::new(),
+            &inputs,
+            stages,
+        )
+        .prepare(&CONFIG)
+        .unwrap()
+    }
+
+    /// Hands on what a record tap carries, its first channel, with silence
+    /// as zeros.
+    struct Kept(rtrb::Producer<f32>);
+
+    impl crate::TapWriter for Kept {
+        fn write(&mut self, _: u64, audio: crate::AudioRef<'_>) {
+            for i in 0..audio.frames() {
+                let sample = if audio.channels() > 0 {
+                    audio.channel(0)[i]
+                } else {
+                    0.0
+                };
+                self.0.push(sample).unwrap();
+            }
+        }
+    }
+
+    /// A [`Kept`] with room for 400 frames, and what it hands on.
+    fn kept() -> (Box<dyn crate::TapWriter>, rtrb::Consumer<f32>) {
+        let (samples, kept) = rtrb::RingBuffer::new(400);
+        (Box::new(Kept(samples)), kept)
+    }
+
+    fn drain(kept: &mut rtrb::Consumer<f32>) -> Vec<f32> {
+        std::iter::from_fn(|| kept.pop().ok()).collect()
+    }
+
+    #[test]
+    fn a_track_plays_another_tracks_tap_lined_up_whatever_the_latency() {
+        for (kick, print) in [(0, 0), (37, 0), (0, 37), (20, 37)] {
+            let p = printed(|kick, _| Tap::PostFader(Chain::Track(kick)));
+            let graph = printed_graph(&p, kick, print);
+            assert_eq!(graph.latency(), kick + print);
+            // The kick, and the print playing it, on the same frame.
+            let at = 100 + kick + print;
+            assert_eq!(loud(&render(graph, 400)), [(at, 2.0)], "{kick}, {print}");
+            // From after the device, before the kick's latency.
+            let p = printed(|_, device| Tap::Device(device));
+            let at = 100 + kick.max(print);
+            let out = render(printed_graph(&p, kick, print), 400);
+            assert_eq!(loud(&out), [(at, 2.0)], "{kick}, {print}");
+        }
+    }
+
+    #[test]
+    fn a_muted_track_carries_on_into_the_tracks_that_take_its_tap() {
+        let mut p = printed(|kick, _| Tap::PostFader(Chain::Track(kick)));
+        p.tracks[0].muted = true;
+        assert_eq!(loud(&render(printed_graph(&p, 0, 0), 400)), [(100, 1.0)]);
+        // Unless the print plays its clips, which are silent.
+        p.tracks[1].monitor = Monitor::Off;
+        assert!(loud(&render(printed_graph(&p, 0, 0), 400)).is_empty());
+        // Nor does it play a tap the project hasn't.
+        p.tracks[1].monitor = Monitor::In;
+        let gone = Tap::PostFader(Chain::Track(TrackId(99)));
+        p.tracks[1].input = Some(Input::Tap(gone));
+        let graph = printed_graph(&p, 0, 0);
+        assert!(graph.contains(keys::track_input(p.tracks[1].id)));
+        assert_eq!(graph.records().count(), 0);
+        assert!(loud(&render(graph, 400)).is_empty());
+    }
+
+    #[test]
+    fn a_track_records_the_tap_it_takes_as_the_mix_plays_it() {
+        let p = printed(|kick, _| Tap::PostFader(Chain::Track(kick)));
+        let key = keys::record(Tap::PostFader(Chain::Track(p.tracks[0].id)));
+        for (kick, print) in [(0, 0), (37, 0), (0, 37)] {
+            let graph = printed_graph(&p, kick, print);
+            assert!(graph.records().eq([key]));
+            let (mut engine, mut handle) = Engine::new(CONFIG);
+            let (writer, mut kept) = kept();
+            assert!(handle.add_writer(key, writer).is_ok());
+            handle.swap_graph(graph).unwrap();
+            play(&mut engine, 400);
+            // Lined up with the output, as the kick plays in the mix.
+            let at = 100 + kick + print;
+            let loud: Vec<(usize, f32)> = (drain(&mut kept).into_iter().enumerate())
+                .filter(|&(_, s)| s != 0.0)
+                .collect();
+            assert_eq!(loud, [(at, 1.0)], "{kick}, {print}");
+        }
+    }
+
+    #[test]
+    fn a_track_resampling_the_master_plays_nothing_while_it_records() {
+        let mut p = printed(|_, _| Input::RESAMPLING.tap().unwrap());
+        // The print's tone, sent on too.
+        let print = p.tracks[1].id;
+        let reverb = p.add_track("Reverb", TrackKind::Return);
+        let mut send = p.new_send(reverb);
+        send.level = 1.0;
+        let track = p.track_mut(print).unwrap();
+        track.tone = Some(TestTone {
+            frequency: 220.0,
+            level: 0.5,
+        });
+        track.armed = true;
+        track.sends.push(send);
+        // And taken by another track.
+        let copy = p.add_track("Copy", TrackKind::Audio);
+        let track = p.track_mut(copy).unwrap();
+        track.input = Some(Input::Tap(Tap::PreFx(print)));
+        track.monitor = Monitor::In;
+        let key = keys::record(Tap::PostFader(Chain::Master));
+        let copied = keys::record(Tap::PreFx(print));
+        assert!(printed_graph(&p, 0, 0).records().eq([key, copied]));
+        // Playing, it plays its tone, monitoring or not.
+        for monitor in [Monitor::In, Monitor::Auto, Monitor::Off] {
+            p.track_mut(print).unwrap().monitor = monitor;
+            let out = render(printed_graph(&p, 0, 0), 400);
+            assert!(loud(&out).len() > 300, "{monitor:?}");
+        }
+        // Recording, the master it records has the kick alone in it.
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let (writer, mut kept) = kept();
+        assert!(handle.add_writer(key, writer).is_ok());
+        handle.swap_graph(printed_graph(&p, 0, 0)).unwrap();
+        for command in [TransportCommand::Record(true), TransportCommand::Play] {
+            handle.send(Event::Transport(command)).unwrap();
+        }
+        let out = play(&mut engine, 400);
+        assert_eq!(loud(&out), [(100, 1.0)]);
+        let left: Vec<f32> = out.chunks(2).map(|frame| frame[0]).collect();
+        assert_eq!(drain(&mut kept), left);
+    }
+
+    /// Plays 0.25 on every channel from the first frame anything comes in
+    /// on, whatever comes in after, as a reverb's tail rings on.
+    struct Ringing(bool);
+
+    impl Node for Ringing {
+        fn process(
+            &mut self,
+            ctx: &ProcessContext<'_>,
+            inputs: Inputs<'_>,
+            out: &mut AudioMut<'_>,
+        ) {
+            out.clear();
+            let heard = |i: usize| inputs.iter().any(|input| input.iter().any(|c| c[i] != 0.0));
+            let from = if self.0 {
+                Some(0)
+            } else {
+                (0..ctx.frames).find(|&i| heard(i))
+            };
+            if let Some(from) = from {
+                self.0 = true;
+                for channel in out.channels_mut() {
+                    channel[from..].fill(0.25);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_track_resampling_the_master_cuts_what_its_devices_ring_on_with() {
+        let mut p = printed(|_, _| Input::RESAMPLING.tap().unwrap());
+        let print = p.tracks[1].id;
+        let device = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        let track = p.track_mut(print).unwrap();
+        track.tone = Some(TestTone {
+            frequency: 220.0,
+            level: 0.5,
+        });
+        track.armed = true;
+        track.devices.push(device);
+        // The print's tone sets off a device that rings on.
+        let stages = |channel: Channel<'_>, slot: Slot| {
+            let Channel::Track(track) = channel else {
+                return None;
+            };
+            match (track.name.as_str(), slot) {
+                ("Print", Slot::BeforeDevice(_)) => Some(Box::new(Ringing(false)) as _),
+                _ => None,
+            }
+        };
+        let inputs = InputLayout::new();
+        let graph = compile_with(
+            &p,
+            &Meters::new(),
+            &Media::new(),
+            &Devices::new(),
+            &inputs,
+            stages,
+        );
+        let key = keys::record(Tap::PostFader(Chain::Master));
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let (writer, mut kept) = kept();
+        assert!(handle.add_writer(key, writer).is_ok());
+        handle.swap_graph(graph.prepare(&CONFIG).unwrap()).unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        play(&mut engine, 200);
+        let playing = drain(&mut kept);
+        assert_eq!((playing[0], playing[1], playing[199]), (0.0, 0.25, 0.25));
+        // From the frame it starts recording, nothing of it is in the master.
+        handle
+            .send(Event::Transport(TransportCommand::Record(true)))
+            .unwrap();
+        play(&mut engine, 200);
+        assert_eq!(drain(&mut kept), [0.0; 200]);
+    }
+
+    #[test]
+    fn a_track_that_goes_to_sends_only_is_heard_through_its_sends_alone() {
+        let mut p = project();
+        let (drums, bass, reverb) = (p.tracks[0].id, p.tracks[1].id, p.tracks[2].id);
+        p.track_mut(bass).unwrap().muted = true;
+        let direct = render(compile(&p).prepare(&CONFIG).unwrap(), 256);
+        assert!(direct.iter().any(|&s| s != 0.0));
+        p.track_mut(drums).unwrap().output = Bus::SendsOnly;
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert!(graph.contains(keys::track_output(drums)), "its meter");
+        assert!(render(graph, 256).iter().all(|&s| s == 0.0));
+        let mut send = p.new_send(reverb);
+        send.level = 1.0;
+        p.track_mut(drums).unwrap().sends.push(send);
+        assert_eq!(render(compile(&p).prepare(&CONFIG).unwrap(), 256), direct);
     }
 }

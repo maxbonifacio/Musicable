@@ -37,7 +37,7 @@ use mixer::Bus;
 use modulation::Modulation;
 use native::NativeDevice;
 use plugin::PluginDevice;
-use routing::Wire;
+use routing::{Tap, Wire};
 use time::{BeatRange, Beats, TempoMap};
 
 /// Stable identifier for a track within a project.
@@ -225,11 +225,16 @@ pub struct Send {
 }
 
 /// Where a track records from: some channels of an audio input on an audio
-/// track, a MIDI input on a MIDI track.
+/// track, a MIDI input on a MIDI track, or another track's signal at a tap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Audio(AudioInput),
     Midi(MidiInput),
+    /// What another track carries at a tap: its sound for an audio track,
+    /// or another MIDI track's notes, its Pre FX, for a MIDI track. The
+    /// master's Post Fader is [`RESAMPLING`](Self::RESAMPLING). See
+    /// [`Project::check_input`].
+    Tap(Tap),
 }
 
 impl Input {
@@ -244,10 +249,27 @@ impl Input {
         }
     }
 
+    /// Recording the master's Post Fader: the mix, which a track records
+    /// but never plays, so it doesn't feed itself.
+    pub const RESAMPLING: Input = Input::Tap(Tap::PostFader(Chain::Master));
+
+    /// Whether it's [Resampling](Self::RESAMPLING).
+    pub fn is_resampling(&self) -> bool {
+        matches!(self, Self::Tap(Tap::PostFader(Chain::Master)))
+    }
+
     pub fn audio(&self) -> Option<&AudioInput> {
         match self {
             Self::Audio(input) => Some(input),
-            Self::Midi(_) => None,
+            Self::Midi(_) | Self::Tap(_) => None,
+        }
+    }
+
+    /// The tap it takes, for an input from another track.
+    pub fn tap(&self) -> Option<Tap> {
+        match *self {
+            Self::Tap(tap) => Some(tap),
+            Self::Audio(_) | Self::Midi(_) => None,
         }
     }
 }

@@ -4,8 +4,8 @@ Arm a track with its arm button, in its header or its strip, choose its
 input in the strip's input menu, and press **Record** (F9) in the transport
 bar. Playing starts from the start marker, as Space does, and every armed
 track records its input while the transport plays: an audio track what its
-audio input captures, a MIDI track the notes its MIDI input plays. Record
-while playing turns recording on or off there.
+audio input captures, or another track's sound, a MIDI track the notes its
+MIDI input plays. Record while playing turns recording on or off there.
 
 Stop ends the recording, and each pass of the playhead over the song becomes
 a take on its track: one take for a recording straight through, and one for
@@ -36,6 +36,10 @@ them open until the audio device changes. Opening one restarts the audio,
 so it waits while recording. An input that doesn't open, such as one
 another app has to itself, says so in the status bar, and a track taking it
 records nothing.
+
+After the inputs, the menu lists the other tracks, each opening to its
+points, and **Resampling**, the master: an audio track can record another
+track's sound, or the whole mix ([Routing](routing.md)).
 
 ### MIDI inputs
 
@@ -77,7 +81,8 @@ captured. The Settings window's **Recording** page sets it for the device
 playing, in its mode and at its rate, in frames and milliseconds: drag it,
 or type it and press Enter. Musicable keeps one for each device, mode and
 sample rate, and the next recording uses it, as Capture does. A MIDI
-message lands the same way as audio, without the offset.
+message lands the same way as audio, without the offset, and so does what a
+track takes from another track ([Printing a track](routing.md#printing-a-track)).
 
 To measure the offset, loop an output into an input with a cable, and run
 the record round trip example from Musicable's source folder, naming the
@@ -138,7 +143,7 @@ bar names its files.
 Transport menu, records what you just played without recording, as Live's
 Capture MIDI does, for audio tracks as well as MIDI tracks. Musicable holds
 the last few minutes of what the inputs of armed tracks, and of tracks
-monitoring In, bring. Capture makes what they played over the transport's
+monitoring In, bring, and of what they take from other tracks. Capture makes what they played over the transport's
 last run into takes, as if they had recorded it: the same files, passes and
 takes, a pass for each time round the loop, in one step of the undo history,
 named Capture.
@@ -155,7 +160,8 @@ is held, 5 minutes at first; 0 turns Capture off. At 48 kHz, 5 minutes of a
 stereo input take 128 MiB. A MIDI input holds 2,000 messages for each
 second: one that sends more than that on average, such as an MPE controller
 played throughout, holds less than the whole length. Tracks on the same
-input channels share what's held. The inputs held take 2 GiB at most
+input channels, or taking the same point on another track, share what's
+held. The inputs held take 2 GiB at most
 together: an input that would go past that isn't held, and the status bar
 names the tracks it's for.
 

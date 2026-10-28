@@ -1,0 +1,222 @@
+{
+  "format": "musicable-project",
+  "version": 21,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 2,
+  "next_send_id": 0,
+  "next_device_id": 3,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 2,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Synth",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.keys",
+              "name": "Keys",
+              "instrument": true,
+              "inputs": [],
+              "state": null,
+              "params": []
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Pad",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 1,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "vst3",
+              "id": "0123456789ABCDEF0123456789ABCDEF",
+              "name": "Vocoder",
+              "instrument": false,
+              "inputs": [
+                {
+                  "id": 1,
+                  "name": "Carrier"
+                },
+                {
+                  "id": 3,
+                  "name": "Modulator \"B\""
+                }
+              ],
+              "state": null,
+              "params": []
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [
+      {
+        "id": 2,
+        "bypassed": false,
+        "active": true,
+        "kind": {
+          "plugin": {
+            "format": "clap",
+            "id": "com.example.ducker",
+            "name": "Ducker",
+            "instrument": false,
+            "inputs": [
+              {
+                "id": 4294967295,
+                "name": ""
+              }
+            ],
+            "state": null,
+            "params": []
+          }
+        }
+      }
+    ],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [
+    {
+      "param": {
+        "wire": 0
+      },
+      "points": [
+        [0, 0.5],
+        [1290240, 2.0]
+      ],
+      "overridden": false
+    }
+  ],
+  "wires": [
+    {
+      "id": 0,
+      "from": {
+        "post_fx": {
+          "track": 0
+        }
+      },
+      "to": {
+        "plugin_input": {
+          "device": 1,
+          "input": 1
+        }
+      },
+      "gain": 1.0
+    },
+    {
+      "id": 1,
+      "from": {
+        "device": 1
+      },
+      "to": {
+        "plugin_input": {
+          "device": 2,
+          "input": 4294967295
+        }
+      },
+      "gain": 0.75
+    }
+  ],
+  "workspace": null
+}

@@ -3,6 +3,7 @@
 use std::f64::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::mixer::pan_gains;
@@ -13,8 +14,8 @@ use musicable_model::{ClipType, Monitor};
 use crate::automation::Param;
 use crate::meter::Meter;
 use crate::{
-    AudioMut, Automation, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId,
-    ParamId, ProcessContext, TransportState,
+    AudioMut, AudioRef, Automation, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind,
+    NoteEvent, NoteId, ParamId, ProcessContext, TransportState,
 };
 
 /// Sums its inputs. Used for buses and the master.
@@ -610,17 +611,36 @@ impl Node for Gain {
 /// the other in 10 ms ([`Smoothed`]), so switching doesn't click.
 ///
 /// The input is one or two of the engine's device inputs
-/// ([`ProcessContext::input`]). A mono input plays in both channels. A
-/// track whose input isn't open monitors silence.
+/// ([`ProcessContext::input`]), or another track's tap, which comes into
+/// its side input 0. A mono input plays in both channels. A track whose
+/// input isn't open monitors silence. A track resampling the master never
+/// plays it, whatever its monitoring: it plays its clips but while it's
+/// armed and the transport records, when it plays nothing, from the frame
+/// recording starts, so it isn't in the mix it records. Its
+/// [`ResamplingCut`] does the same after its devices.
 #[derive(Debug, Clone)]
 pub struct InputMonitor {
     monitor: Monitor,
     armed: bool,
-    /// The device input channels the track's input takes: the first, and
-    /// how many.
-    input: Option<(usize, usize)>,
+    input: Source,
     /// How much of the input plays: 0.0 the clips, 1.0 the input.
     mix: Smoothed,
+    /// Where it says whether the track is armed, for its cut.
+    cut: Option<Arc<AtomicBool>>,
+}
+
+/// Where an [`InputMonitor`]'s input comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Nowhere: the input isn't open, so it's silent.
+    None,
+    /// The engine's device input channels the track's input takes: the
+    /// first, and how many.
+    Device(usize, usize),
+    /// Side input 0: another track's tap.
+    Side,
+    /// The master, which it records and never plays.
+    Resampling,
 }
 
 impl InputMonitor {
@@ -635,16 +655,43 @@ impl InputMonitor {
         Self {
             monitor,
             armed,
-            input: None,
+            input: Source::None,
             mix: Smoothed::new(0.0),
+            cut: None,
         }
     }
 
     /// Takes `channels` device input channels from channel `first`: one
     /// or two.
     pub fn with_input(mut self, first: usize, channels: usize) -> Self {
-        self.input = Some((first, channels.clamp(1, 2)));
+        self.input = Source::Device(first, channels.clamp(1, 2));
         self
+    }
+
+    /// Takes what comes into its side input 0: another track's tap.
+    pub fn with_side_input(mut self) -> Self {
+        self.input = Source::Side;
+        self
+    }
+
+    /// Resamples the master: it never plays its input, and plays nothing
+    /// while it's armed and the transport records.
+    pub fn resampling(mut self) -> Self {
+        self.input = Source::Resampling;
+        self
+    }
+
+    /// The node that cuts what comes out of the track's devices while
+    /// this one cuts what comes into them, for a track resampling the
+    /// master, so what they ring on with is cut too. It follows this one's
+    /// arming.
+    pub fn cut(&mut self) -> ResamplingCut {
+        let armed = Arc::new(AtomicBool::new(self.armed));
+        self.cut = Some(Arc::clone(&armed));
+        ResamplingCut {
+            armed,
+            cut: Smoothed::new(0.0),
+        }
     }
 
     /// [`MONITOR`](Self::MONITOR)'s value for `monitor`.
@@ -656,8 +703,11 @@ impl InputMonitor {
         }
     }
 
+    /// Whether it plays its input in place of the clips: for a track
+    /// resampling the master, whether it plays silence.
     fn monitors(&self, transport: &TransportState) -> bool {
         match self.monitor {
+            _ if self.input == Source::Resampling => self.armed && transport.recording,
             Monitor::In => true,
             Monitor::Auto => self.armed && (!transport.playing || transport.recording),
             Monitor::Off => false,
@@ -684,25 +734,44 @@ impl InputMonitor {
         }
     }
 
-    /// Plays the input over `output`'s `frames` as far as the monitoring
-    /// says.
-    fn mix(&mut self, ctx: &ProcessContext<'_>, output: &mut AudioMut<'_>, frames: Range<usize>) {
+    /// Plays the input, from the device inputs or `side`, over `output`'s
+    /// `frames` as far as the monitoring says.
+    fn mix(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        side: Option<AudioRef<'_>>,
+        output: &mut AudioMut<'_>,
+        frames: Range<usize>,
+    ) {
         let monitors = self.monitors(&ctx.transport);
         self.mix.set(if monitors { 1.0 } else { 0.0 });
+        // A track resampling the master is out of it from the frame it
+        // starts recording, so none of it is in what it records. It comes
+        // back in without a click.
+        if monitors && self.input == Source::Resampling {
+            self.mix.settle();
+        }
         let len = frames.len();
         if self.mix.is_settled() && self.mix.value() == 0.0 {
             self.mix.skip(len);
             return;
         }
-        // An input the stream didn't open is silent.
-        let input = self
-            .input
-            .filter(|&(first, channels)| first + channels <= ctx.input.channels());
+        // An input the stream didn't open is silent, and so is a tap that
+        // feeds nothing in.
+        let input = match self.input {
+            Source::Device(first, channels) if first + channels <= ctx.input.channels() => {
+                Some((ctx.input, first, channels))
+            }
+            Source::Side => side
+                .filter(|side| side.channels() > 0)
+                .map(|side| (side, 0, side.channels())),
+            Source::Device(..) | Source::None | Source::Resampling => None,
+        };
         let settled = self.mix.is_settled();
         let mut part = output.range_mut(frames.clone());
         for (c, channel) in part.channels_mut().enumerate() {
-            let source = input.map(|(first, channels)| {
-                &ctx.input.channel(first + c.min(channels - 1))[frames.clone()]
+            let source = input.map(|(input, first, channels)| {
+                &input.channel(first + c.min(channels - 1))[frames.clone()]
             });
             match source {
                 Some(source) if settled => channel.copy_from_slice(source),
@@ -737,13 +806,71 @@ impl Node for InputMonitor {
         for input in inputs.iter() {
             output.add_from(input);
         }
+        let side = inputs.side(0).next();
         let mut start = 0;
         for event in ctx.events {
-            self.mix(ctx, output, start..event.offset);
+            self.mix(ctx, side, output, start..event.offset);
             self.apply(event);
             start = event.offset;
         }
-        self.mix(ctx, output, start..ctx.frames);
+        self.mix(ctx, side, output, start..ctx.frames);
+        // The cut comes after it in the graph, so it processes the block
+        // after this, armed as this ends it.
+        if let Some(cut) = &self.cut {
+            cut.store(self.armed, Ordering::Release);
+        }
+    }
+}
+
+/// Cuts what comes out of the devices of a track resampling the master
+/// while the track's [`InputMonitor`] cuts what comes into them: while
+/// the track is armed and the transport records, from the frame recording
+/// starts, so what they ring on with then isn't in the mix the track
+/// records either. It comes back on a 10 ms ramp, as the monitor does.
+/// [`InputMonitor::cut`] makes it.
+#[derive(Debug, Clone)]
+pub struct ResamplingCut {
+    /// Whether the track is armed, as its monitor says.
+    armed: Arc<AtomicBool>,
+    /// How much is cut: 0.0 nothing, 1.0 everything.
+    cut: Smoothed,
+}
+
+impl Node for ResamplingCut {
+    fn prepare(&mut self, config: &EngineConfig) {
+        self.cut.prepare(config.sample_rate);
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<ResamplingCut>() {
+            self.cut.take_over(&previous.cut);
+        }
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+        let cuts = self.armed.load(Ordering::Acquire) && ctx.transport.recording;
+        self.cut.set(if cuts { 1.0 } else { 0.0 });
+        if cuts {
+            self.cut.settle();
+        }
+        if self.cut.is_settled() {
+            if self.cut.value() == 1.0 {
+                output.clear();
+            }
+            self.cut.skip(ctx.frames);
+            return;
+        }
+        for channel in output.channels_mut() {
+            let mut cut = self.cut;
+            for sample in channel.iter_mut() {
+                *sample *= 1.0 - cut.next_value();
+            }
+        }
+        self.cut.skip(ctx.frames);
     }
 }
 
@@ -1383,7 +1510,7 @@ mod tests {
     use musicable_model::time::{TempoMap, TimeSignature};
 
     use super::*;
-    use crate::{AudioBuffer, AudioRef, TransportState, rt};
+    use crate::{AudioBuffer, InputPort, TransportState, rt};
 
     const CONFIG: EngineConfig = EngineConfig {
         sample_rate: 48_000,
@@ -1526,6 +1653,116 @@ mod tests {
                 [vec![0.0; 4], vec![0.0; 4]]
             );
         }
+    }
+
+    #[test]
+    fn input_monitors_play_another_tracks_tap_and_never_the_master_they_resample() {
+        let stopped = TransportState::default();
+        let playing = TransportState {
+            playing: true,
+            ..stopped
+        };
+        let recording = TransportState {
+            record: true,
+            recording: true,
+            ..playing
+        };
+        let tempo = TempoMap::default();
+        // On clips playing 0.5, with a tap of 0.25 and -0.25 into side
+        // input 0 if `tapped`.
+        let run = |node: &mut InputMonitor, transport: TransportState, tapped: bool| {
+            let clips = vec![0.5; 8];
+            let tap = [[0.25; 4], [-0.25; 4]].concat();
+            let views = [
+                AudioRef::from_planar(&clips, 2),
+                AudioRef::from_planar(&tap, 2),
+            ];
+            let ports = [InputPort::Main, InputPort::Side(0)];
+            let inputs = match tapped {
+                true => Inputs::from_views_on(&views, &ports),
+                false => Inputs::from_views(&views[..1]),
+            };
+            let ctx = ProcessContext {
+                transport,
+                ..context(4, &[], transport.playing, &tempo)
+            };
+            let mut out = vec![0.0; 8];
+            node.process(&ctx, inputs, &mut AudioMut::from_planar(&mut out, 2));
+            out
+        };
+        let mut tap = InputMonitor::new(Monitor::In, false).with_side_input();
+        tap.prepare(&CONFIG);
+        let tapped = [[0.25; 4], [-0.25; 4]].concat();
+        assert_eq!(run(&mut tap, playing, true), tapped);
+        assert_eq!(run(&mut tap, playing, false), [0.0; 8], "nothing tapped");
+        // Resampling plays the clips whatever the monitoring, and nothing
+        // while it records.
+        let cases = [
+            (Monitor::In, false, playing, true),
+            (Monitor::In, true, stopped, true),
+            (Monitor::Auto, true, stopped, true),
+            (Monitor::In, false, recording, true),
+            (Monitor::Off, true, recording, false),
+            (Monitor::In, true, recording, false),
+        ];
+        for (monitor, armed, transport, plays) in cases {
+            let mut node = InputMonitor::new(monitor, armed).resampling();
+            node.prepare(&CONFIG);
+            let expected = if plays { [0.5; 8] } else { [0.0; 8] };
+            assert_eq!(
+                run(&mut node, transport, true),
+                expected,
+                "{monitor:?}, armed {armed}, {transport:?}"
+            );
+        }
+        // Out on the frame it starts recording, and back in on a ramp.
+        let mut node = InputMonitor::new(Monitor::Auto, true).resampling();
+        node.prepare(&CONFIG);
+        assert_eq!(run(&mut node, playing, true), [0.5; 8]);
+        assert_eq!(run(&mut node, recording, true), [0.0; 8]);
+        let back = run(&mut node, playing, true);
+        assert!(back.iter().all(|&s| s > 0.0 && s < 0.1), "{back:?}");
+    }
+
+    #[test]
+    fn resampling_cuts_follow_their_monitors_arming() {
+        let tempo = TempoMap::default();
+        let recording = TransportState {
+            playing: true,
+            record: true,
+            recording: true,
+            ..TransportState::default()
+        };
+        let mut monitor = InputMonitor::new(Monitor::Auto, true).resampling();
+        let mut cut = monitor.cut();
+        monitor.prepare(&CONFIG);
+        cut.prepare(&CONFIG);
+        // On clips playing 0.5, through devices ringing on at 0.25.
+        let mut run = |events: &[NodeEvent]| {
+            let ctx = ProcessContext {
+                transport: recording,
+                ..context(4, events, true, &tempo)
+            };
+            let clips = vec![0.5; 8];
+            let mut monitored = vec![0.0; 8];
+            let inputs = [AudioRef::from_planar(&clips, 2)];
+            let output = &mut AudioMut::from_planar(&mut monitored, 2);
+            monitor.process(&ctx, Inputs::from_views(&inputs), output);
+            let ringing: Vec<f32> = monitored.iter().map(|s| s + 0.25).collect();
+            let ctx = ProcessContext { events: &[], ..ctx };
+            let mut out = vec![0.0; 8];
+            let inputs = [AudioRef::from_planar(&ringing, 2)];
+            cut.process(
+                &ctx,
+                Inputs::from_views(&inputs),
+                &mut AudioMut::from_planar(&mut out, 2),
+            );
+            out
+        };
+        assert_eq!(run(&[]), [0.0; 8]);
+        // Disarmed, both come back on their ramps.
+        let back = run(&[param(0, InputMonitor::ARMED, 0.0)]);
+        assert!(back.iter().all(|&s| s > 0.0 && s < 0.1), "{back:?}");
     }
 
     #[test]

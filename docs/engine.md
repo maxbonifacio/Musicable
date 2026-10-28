@@ -142,6 +142,21 @@ captured then ([Device inputs](#time-and-events)), so it belongs at `p`,
 the position the segment gives for `t`. That's the frame a player heard `p`
 on, however late the plugins made it.
 
+**Record taps.** A track that takes its input from another track's tap
+records what the engine renders there, which no input buffer has. The
+graph lines each record tap up with the output, as it does an export's
+stems (`Graph::add_record`, `PreparedGraph::record`), so frame `t + L` of
+it is what the output played at `t + L`, and belongs at `p` as an input's
+frame does. The engine hands each record tap's frames to its `TapWriter`
+after every block it renders, with the engine time they start at: a writer
+the control thread gives it for the tap's key (`EngineHandle::add_writer`,
+`compile::keys::record`), and takes back with `remove_writer`. A block
+without the tap, where the graph hasn't it or there's no graph yet, comes
+with no channels: silence. It writes to `MAX_WRITERS`, 256, at most, and
+a writer it replaces or drops goes back to the control thread with the
+garbage. The app's writers fill buffers like an input's for its recorder
+([app.md](app.md#recording)).
+
 **Monitoring inputs.** `compile_with_inputs` gives each audio track an
 `InputMonitor` after its clip player (key `compile::keys::track_input`),
 which plays the track's input in place of its clips: always with
@@ -149,10 +164,12 @@ which plays the track's input in place of its clips: always with
 stopped or recording, and never with `Off`, going over in 10 ms. An
 `InputLayout` says where each input is among the engine's device inputs,
 by the ids the audio backend gave them, and which input the default one is.
-A track whose input isn't laid out monitors silence. Arming and monitoring
-are the node's parameters (`InputMonitor::ARMED`, `MONITOR`), so changing
-them doesn't rebuild the graph. `compile` and `compile_with_devices` lay out
-no inputs.
+A track whose input isn't laid out monitors silence, and one taking
+another track's sound has it on the node's side input
+([Inputs from taps](#inputs-from-taps)). Arming and monitoring are the
+node's parameters (`InputMonitor::ARMED`, `MONITOR`), so changing them
+doesn't rebuild the graph. `compile` and `compile_with_devices` lay out no
+inputs.
 
 A MIDI track has a `MidiMonitor` instead, with the same key and parameters,
 between its clip player and its instrument, on the way the notes go. It
@@ -486,9 +503,11 @@ source → [before device 0] → device 0 → … → [pre-fader] → fader → 
   track's meter measures it. The master's output stage
   (`keys::master_output`) is the graph's output.
 - **Buses.** A track feeds the master or a group track
-  (`Project::output_of`). Every bus sums through the `compile::Summing` kind
-  the compiler picks, so console mode can add a modelled one; there's only
-  `Summing::Plain` so far.
+  (`Project::output_of`), or with `Bus::SendsOnly`, nothing: it's heard
+  through its sends and the tracks that take its taps alone, and its output
+  stage stays, metering what it would feed. Every bus sums through the
+  `compile::Summing` kind the compiler picks, so console mode can add a
+  modelled one; there's only `Summing::Plain` so far.
 - **Sends** (`keys::send`) are `Gain`s at the send's level, feeding a return
   track's bus. A pre-fader send takes the signal after the pre-fader slot,
   unpanned. A post-fader send takes it after the post-fader slot, so it
@@ -497,8 +516,9 @@ source → [before device 0] → device 0 → … → [pre-fader] → fader → 
   `Project::can_feed` and `can_send`. Groups can feed groups, but not ones
   that feed them; return tracks feed the master and have no sends; sends go
   to return tracks, one per return. `output_of` and `sends_of` leave out
-  what breaks the rules, so even a hand-edited file compiles. A wire can
-  close a loop with them, and has rules of its own ([Wires](#wires)).
+  what breaks the rules, so even a hand-edited file compiles. A wire, or a
+  track's input from a tap, can close a loop with them, and has rules of its
+  own ([Wires](#wires), [Inputs from taps](#inputs-from-taps)).
 - **Devices** (`Track::devices`, `Master::devices`) sit between the source
   and the pre-fader slot, in order, each keyed by its `DeviceId`
   (`keys::device`), so a device keeps its state when it moves. Plugins
@@ -639,12 +659,52 @@ feeds, from the master, or from after itself. `Project::check_wire`
 follows the signal point to point, not track to track, so two tracks can
 key each other from their Pre FX, which comes before either's devices. The
 commands refuse a wire that would close a loop, and an edit that moves a
-device, an output or a send takes itself back if `Project::wire_in_a_loop`
-finds one ([commands.md](commands.md#wires)).
+device, an output or a send takes itself back if `Project::route_in_a_loop`
+finds one, through a wire or a track's input ([commands.md](commands.md#wires)).
 
 **Edits.** A wire's gain is a parameter, sent to its `Gain` as a send's
 level is. Adding a wire, removing one or moving it to another tap changes
 the graph's shape and recompiles.
+
+## Inputs from taps
+
+An audio track's input can be a tap on another track (`Input::Tap`), the
+same points a wire takes, but for a MIDI track's Pre FX, which is notes, or
+the master's Post Fader, which is Resampling (`Input::RESAMPLING`). The
+compiler adds them once the strips and wires are built:
+
+- **Monitoring.** The track's `InputMonitor` takes the tap on its side
+  input 0 (`InputMonitor::with_side_input`) and plays it as it would an
+  interface's input, with the same monitoring. Delay compensation lines it
+  up, so the track plays the other track's sound in time with it, whatever
+  latency either has.
+- **Resampling.** The master's Post Fader feeds no node: the track records
+  it but never plays it (`InputMonitor::resampling`). It plays its clips
+  whatever its monitoring, and nothing while it's armed and the transport
+  records: its monitor cuts what goes into its devices, and a
+  `nodes::ResamplingCut` after them (`InputMonitor::cut`,
+  `keys::track_cut`) what they ring on with, so its output, its sends and a
+  track taking its Pre FX or its Post FX have none of it. A point after one
+  of its devices has only what the device rings on with. Both cut on the
+  frame recording starts, without the 10 ms ramp, so none of the track is
+  in what it records, and come back on a ramp after. The cut follows the
+  monitor's arming, which the monitor leaves it in an atomic after each
+  block, so it has no parameters of its own.
+- **Record taps.** Each audio track's tap gets a record tap, keyed by the
+  tap (`keys::record`), so tracks taking the same one share it
+  ([Recording](#recording)).
+- **Which inputs play.** `Project::live_inputs` gives the inputs the engine
+  plays: each whose ends the project has and whose tap carries what the
+  track takes, unless it would close a loop with the outputs, the sends and
+  the inputs before it, in track order. Resampling never closes one. The
+  wires come after them, so `live_wires` leaves out a wire that would close
+  a loop through an input. In a project the commands edit, that's all of
+  them, since they refuse an input that would make a loop
+  (`Project::check_input`).
+
+A MIDI track's input from another MIDI track's notes is in the model and
+the file, but the engine doesn't play it yet: it comes with the Routing
+panel.
 
 ## Clips
 

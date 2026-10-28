@@ -17,11 +17,14 @@ From the top, a strip has these parts, which can be hidden and moved
   header is. Hovering the name shows the track's kind and test tone.
   Right-clicking it has **Solo-Safe** and **Delete Track**.
 - **The input**, on audio and MIDI tracks: what the track records from
-  ([Recording and comping](../using/recording.md#inputs)).
+  ([Recording and comping](../using/recording.md#inputs)), and on an audio
+  track, another track's sound or Resampling, the master
+  ([Routing](../using/routing.md)).
 - **Monitoring**, on audio and MIDI tracks: **In**, **Auto** or **Off**
   ([Recording and comping](../using/recording.md#monitoring)).
-- **The output**: the master, or a group track the track can feed. Return
-  tracks always feed the master.
+- **The output**: the master, a group track the track can feed, or **Sends
+  Only**, nothing but its sends ([Routing](../using/routing.md#sends-only)).
+  Return tracks feed the master or Sends Only.
 - **A send to each return track**, from silence to 0 dB, with **Pre** to
   take the signal before the fader instead of after it. Dragging a send that
   isn't there yet adds it, and right-clicking one has **Remove Send**.

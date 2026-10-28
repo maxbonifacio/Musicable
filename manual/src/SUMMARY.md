@@ -25,6 +25,7 @@
 - [Editing clips]()
 - [Editing notes and MPE]()
 - [Mixing]()
+- [Routing](using/routing.md)
 - [Sidechains](using/sidechains.md)
 - [Automation](using/automation.md)
 - [Modulation](using/modulation.md)

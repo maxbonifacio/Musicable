@@ -44,8 +44,8 @@ use musicable_model::warp::{
     Onset, Onsets, Origin, Preserve, TransientLoop, Warp, WarpMarker, WarpMode,
 };
 use musicable_model::{
-    Chain, ClipType, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Take, Track, TrackId,
-    TrackKind,
+    Chain, ClipType, DeviceId, DeviceKind, Input, Monitor, PluginFormat, Project, Take, Track,
+    TrackId, TrackKind,
 };
 use proptest::prelude::*;
 
@@ -890,6 +890,32 @@ fn examples() -> Vec<Example> {
                     .with("channel", 9_i64),
             })
         }),
+        // Another track's tap, which it monitors In.
+        edits(mixer::SET_INPUT, |s| {
+            let p = project(s);
+            let audio = p.tracks.iter().filter(|t| t.kind == TrackKind::Audio);
+            let taps = audio.flat_map(|t| {
+                let others = p.tracks.iter().filter(move |other| other.id != t.id);
+                let taps = others.flat_map(|other| p.taps(Chain::Track(other.id)));
+                taps.map(move |tap| (t, tap))
+            });
+            let mut taps =
+                taps.filter(|&(t, tap)| p.can_take(t.id, tap) && t.input != Some(Input::Tap(tap)));
+            let (track, tap) = pick(s, taps.by_ref())?;
+            Some(mixer::with_input_tap(
+                Args::new().with("track", track.id),
+                tap,
+            ))
+        }),
+        // Resampling, or from Resampling to an interface's input.
+        edits(mixer::SET_INPUT, |s| {
+            let track = find_track(s, |t| t.kind == TrackKind::Audio)?;
+            let args = Args::new().with("track", track.id);
+            Some(match track.input {
+                Some(ref input) if input.is_resampling() => args.with("device", "in-1"),
+                _ => args.with("resampling", true),
+            })
+        }),
         edits(mixer::SET_MASTER_CLIP_TYPE, |s| {
             let clip_type = next_clip_type(project(s).master.clip_type);
             Some(Args::new().with("clip_type", clip_type))
@@ -926,7 +952,8 @@ fn examples() -> Vec<Example> {
             // Without a group, the master.
             Some(match track.output {
                 Bus::Master => args.with("group", group),
-                Bus::Group(_) => args,
+                Bus::Group(_) => args.with("sends_only", true),
+                Bus::SendsOnly => args,
             })
         }),
         edits(mixer::SET_PAN, |s| {

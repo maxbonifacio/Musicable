@@ -51,7 +51,9 @@ pub use compile::{
     compile_metered, compile_with_devices, compile_with_inputs, compile_with_media,
     compile_with_stems,
 };
-pub use engine::{Engine, EngineHandle, PreviewAt, QueueFull, Stats, SwapError};
+pub use engine::{
+    Engine, EngineHandle, MAX_WRITERS, PreviewAt, QueueFull, Stats, SwapError, TapWriter,
+};
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
 };
