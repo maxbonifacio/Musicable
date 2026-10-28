@@ -143,14 +143,16 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
             Param::optional(
                 "from",
                 Type::Track,
-                "Another track to take the input from, at its tap, in place of an interface's: \
-                 an audio track monitors it In and records it.",
+                "Another track to take the input from, at its tap, in place of an interface's, \
+                 which the track monitors In and records: its sound for an audio track, or for \
+                 a MIDI track, another MIDI track's notes, its pre_fx.",
             ),
             Param::optional(
                 "tap",
                 Type::Choice(wire::TAPS),
                 "Where on that track: what comes into its devices, what comes out of the last \
-                 of them, or what comes out of its fader. post_fx without it.",
+                 of them, or what comes out of its fader. post_fx without it, or pre_fx for a \
+                 MIDI track.",
             ),
             Param::optional(
                 "after",
@@ -353,7 +355,8 @@ fn input(args: &Args, project: &Project) -> Result<Option<Input>, CommandError> 
 
 /// The tap the arguments of [`SET_INPUT`] name, if they name one: a point
 /// on another track, what a device puts out, or the master's Post Fader,
-/// for Resampling.
+/// for Resampling. A point that isn't named is Post FX, or for a MIDI
+/// track, which takes notes, Pre FX.
 fn tap(args: &Args, project: &Project) -> Result<Option<Tap>, CommandError> {
     let from: Option<TrackId> = args.opt("from")?;
     let point: Option<String> = args.opt("tap")?;
@@ -404,7 +407,9 @@ fn tap(args: &Args, project: &Project) -> Result<Option<Tap>, CommandError> {
         )));
     }
     let on = Chain::Track(from);
-    Ok(Some(match point.as_deref().unwrap_or("post_fx") {
+    let notes = (project.track(args.get("track")?)).is_some_and(|t| t.kind == TrackKind::Midi);
+    let unnamed = if notes { "pre_fx" } else { "post_fx" };
+    Ok(Some(match point.as_deref().unwrap_or(unnamed) {
         "pre_fx" => Tap::PreFx(from),
         "post_fader" => Tap::PostFader(on),
         _ => Tap::PostFx(on),
@@ -419,15 +424,6 @@ fn check_tap(project: &Project, track: TrackId, tap: Tap) -> Result<(), CommandE
             .tap_name(tap)
             .unwrap_or_else(|| "that tap".to_owned())
     };
-    // MIDI From comes with the Routing panel.
-    if project
-        .track(track)
-        .is_some_and(|t| t.kind == TrackKind::Midi)
-    {
-        return Err(CommandError::invalid(
-            "a MIDI track can't take its input from another track yet",
-        ));
-    }
     let error = match project.check_input(track, tap) {
         Ok(()) => return Ok(()),
         Err(error) => error,
@@ -1198,13 +1194,38 @@ mod tests {
     }
 
     #[test]
+    fn midi_tracks_take_other_midi_tracks_notes_and_monitor_them() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let double = project.add_track("Double", TrackKind::Midi);
+        let mut setup = Setup::new(project);
+        // Pre FX without a tap: the notes.
+        set_input(&mut setup, double, Args::new().with("from", keys)).unwrap();
+        let taken = track(&setup, double);
+        assert_eq!(taken.input, Some(Input::Tap(Tap::PreFx(keys))));
+        assert_eq!(taken.monitor, Monitor::In);
+        assert_eq!(setup.committed_names(), ["Input"]);
+        let invalid = |message: &str| Err(CommandError::invalid(message));
+        let post_fx = Args::new().with("from", keys).with("tap", "post_fx");
+        assert_eq!(
+            set_input(&mut setup, double, post_fx),
+            invalid("Keys Post FX is sound: a MIDI track takes another MIDI track's notes")
+        );
+        // The Keys taking the notes the Double takes from them would loop.
+        assert_eq!(
+            set_input(&mut setup, keys, Args::new().with("from", double)),
+            invalid("that would make a loop: what comes out of Keys reaches Double Pre FX")
+        );
+    }
+
+    #[test]
     fn inputs_from_taps_are_refused_where_they_dont_fit() {
         let (mut setup, [kick, print, keys, group, _], _) = printing();
         let invalid = |message: &str| Err(CommandError::invalid(message));
         let from = |track: TrackId| Args::new().with("from", track);
         assert_eq!(
             set_input(&mut setup, keys, from(kick)),
-            invalid("a MIDI track can't take its input from another track yet")
+            invalid("Kick Pre FX is sound: a MIDI track takes another MIDI track's notes")
         );
         assert_eq!(
             set_input(&mut setup, group, from(kick)),

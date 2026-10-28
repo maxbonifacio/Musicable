@@ -330,15 +330,22 @@ impl Project {
         Ok(())
     }
 
+    /// Whether `tap` carries notes, not sound: a MIDI track's Pre FX.
+    pub fn carries_notes(&self, tap: Tap) -> bool {
+        match tap {
+            Tap::PreFx(track) => self.track(track).is_some_and(|t| t.kind == TrackKind::Midi),
+            Tap::Device(_) | Tap::PostFx(_) | Tap::PostFader(_) => false,
+        }
+    }
+
     /// Whether the project has the ends of a wire from `from` to `to`, and
     /// the tap carries sound.
     fn check_ends(&self, from: Tap, to: Port) -> Result<(), WireError> {
-        match from {
-            Tap::PreFx(track) if self.track(track).is_some_and(|t| t.kind == TrackKind::Midi) => {
-                return Err(WireError::Notes);
-            }
-            _ if self.tap_chain(from).is_none() => return Err(WireError::NoTap),
-            _ => {}
+        if self.carries_notes(from) {
+            return Err(WireError::Notes);
+        }
+        if self.tap_chain(from).is_none() {
+            return Err(WireError::NoTap);
         }
         if !self.has_port(to) {
             return Err(WireError::NoPort);
@@ -380,10 +387,7 @@ impl Project {
             return Err(InputError::Bus);
         }
         let chain = self.tap_chain(tap).ok_or(InputError::NoTap)?;
-        let notes = match tap {
-            Tap::PreFx(from) => self.track(from).is_some_and(|t| t.kind == TrackKind::Midi),
-            Tap::Device(_) | Tap::PostFx(_) | Tap::PostFader(_) => false,
-        };
+        let notes = self.carries_notes(tap);
         match taker.kind {
             TrackKind::Midi if !notes => Err(InputError::Sound),
             TrackKind::Midi => Ok(()),
@@ -758,6 +762,9 @@ mod tests {
     fn a_midi_tracks_pre_fx_is_notes() {
         let mut m = mix();
         let keys = m.project.add_track("Keys", TrackKind::Midi);
+        assert!(m.project.carries_notes(Tap::PreFx(keys)));
+        assert!(!m.project.carries_notes(Tap::PostFx(Chain::Track(keys))));
+        assert!(!m.project.carries_notes(Tap::PreFx(m.kick)));
         let key = Port::Sidechain(m.compressor);
         assert_eq!(
             m.project.check_wire(Tap::PreFx(keys), key),

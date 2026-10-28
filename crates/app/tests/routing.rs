@@ -2,7 +2,8 @@
 //! chosen as the session plays, prints that track's stem, as an export
 //! renders it, sample for sample, with a latent plugin on a third track,
 //! and Capture takes it the same way. A track resampling the master
-//! records the mixdown without itself in it.
+//! records the mixdown without itself in it, and a MIDI track recording
+//! another's notes records its clip's notes where they are.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -15,7 +16,7 @@ use musicable_app::export::{Bits, Export, ExportSettings, FileFormat, Job, Span,
 use musicable_commands::{Args, Editor, Keymap, mixer, transport};
 use musicable_engine::{EngineConfig, rt};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav};
-use musicable_model::clip::{AudioClip, ClipContent};
+use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
 use musicable_model::plugin::{PluginDevice, PluginSettings};
 use musicable_model::routing::Tap;
 use musicable_model::time::{BeatRange, Beats};
@@ -140,6 +141,20 @@ fn take(
     (record, track): (bool, TrackId),
     set_up: impl FnOnce(&mut Session),
 ) -> Vec<f32> {
+    let taken = recorded(project, dir, installed, (record, track), set_up);
+    let name = format!("{} 1.wav", taken.track(track).unwrap().name);
+    read(&dir.join("Recordings").join(name))
+}
+
+/// Plays `project` as [`take`] does, and returns the project once `track`
+/// has its take.
+fn recorded(
+    project: &Project,
+    dir: &Path,
+    installed: &[PluginInfo],
+    (record, track): (bool, TrackId),
+    set_up: impl FnOnce(&mut Session),
+) -> Project {
     let (mut engine, handle, _) = musicable_app::engine(CONFIG);
     let keymap = Keymap::default_keymap();
     let mut session = Session::offline(project.clone(), Some(dir), keymap, handle);
@@ -177,10 +192,10 @@ fn take(
     }
     assert_eq!(engine.stats().latency, LATE);
     assert_eq!(session.take_problems(), Vec::<String>::new());
-    let name = format!("{} 1.wav", session.project().track(track).unwrap().name);
+    let project = session.project().clone();
     // The engine goes before the session, and its plugins.
     drop(engine);
-    read(&dir.join("Recordings").join(name))
+    project
 }
 
 /// Exports `project`'s song, with stems of `stems`, into `dir` as floats,
@@ -314,5 +329,81 @@ fn a_track_resampling_the_master_records_the_mix_without_itself() {
     song.track_mut(print).unwrap().muted = true;
     let exported = export(&song, &dir, &installed, &[]);
     assert_same(&resampled, &exported[0], "the master, resampled");
+    library.assert_alright();
+}
+
+/// The song, with the Lead, a MIDI track playing a riff, which moves the
+/// mod wheel, and the Double, a MIDI track for taking its notes, with the
+/// bass's latency in the graph. The files go into `dir`.
+fn riff(dir: &Path) -> (Project, MidiClip, [TrackId; 2]) {
+    let (mut song, _) = song(dir, |_| None);
+    let lead = song.add_track("Lead", TrackKind::Midi);
+    let mut riff = MidiClip::default();
+    riff.add_note(Beats::from_f64(0.5), Beats::new(1), 60, 0.75);
+    riff.add_note(Beats::new(2), Beats::from_f64(1.5), 64, 0.5)
+        .release_velocity = 0.25;
+    let wheel = vec![
+        Point::new(Beats::new(1), 0.25),
+        Point::new(Beats::new(3), 0.75),
+    ];
+    riff.set_controller(Controller::MOD_WHEEL, wheel);
+    let whole = BeatRange::new(Beats::ZERO, Beats::new(4));
+    let clip = song.new_clip("Riff", whole, ClipContent::Midi(riff.clone()));
+    song.track_mut(lead).unwrap().clips.push(clip);
+    let double = song.add_track("Double", TrackKind::Midi);
+    (song, riff, [lead, double])
+}
+
+/// Whether `track`'s one clip in `project`, over the song, has the riff's
+/// notes and its mod wheel.
+#[track_caller]
+fn assert_doubled(project: &Project, track: TrackId, riff: &MidiClip) {
+    let track = project.track(track).unwrap();
+    assert_eq!(track.clips.len(), 1);
+    let clip = &track.clips[0];
+    assert_eq!((clip.start, clip.end()), (Beats::ZERO, Beats::new(4)));
+    let ClipContent::Midi(midi) = &clip.content else {
+        panic!("{clip:?}");
+    };
+    let notes = |clip: &MidiClip| -> Vec<_> {
+        (clip.notes.iter())
+            .map(|n| (n.start, n.length, n.key, n.velocity, n.release_velocity))
+            .collect()
+    };
+    assert_eq!(notes(midi), notes(riff));
+    let wheel = Controller::MOD_WHEEL;
+    assert_eq!(midi.controller(wheel), riff.controller(wheel));
+}
+
+#[test]
+fn a_midi_track_recording_anothers_notes_records_its_clips_notes() {
+    let dir = folder("notes");
+    let (library, installed) = plugins(&dir, "notes");
+    let (song, riff, [lead, double]) = riff(&dir);
+    let taken = recorded(&song, &dir, &installed, (true, double), |session| {
+        // Chosen in the mixer, which has it play the Lead's notes.
+        let args = Args::new().with("track", double).with("from", lead);
+        session.run_with(&mixer::SET_INPUT, &args).unwrap();
+        let track = session.project().track(double).unwrap();
+        assert_eq!(track.input, Some(Input::Tap(Tap::PreFx(lead))));
+        assert_eq!(track.monitor, Monitor::In);
+        let args = Args::new().with("track", double).with("armed", true);
+        session.run_with(&mixer::SET_ARM, &args).unwrap();
+    });
+    assert_doubled(&taken, double, &riff);
+    library.assert_alright();
+}
+
+#[test]
+fn capture_takes_the_notes_a_midi_track_took_from_another() {
+    let dir = folder("captured-notes");
+    let (library, installed) = plugins(&dir, "captured-notes");
+    let (mut song, riff, [lead, double]) = riff(&dir);
+    // Not armed: Capture holds it as it monitors In.
+    let track = song.track_mut(double).unwrap();
+    track.input = Some(Input::Tap(Tap::PreFx(lead)));
+    track.monitor = Monitor::In;
+    let taken = recorded(&song, &dir, &installed, (false, double), |_| {});
+    assert_doubled(&taken, double, &riff);
     library.assert_alright();
 }

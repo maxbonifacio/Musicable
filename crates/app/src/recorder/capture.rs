@@ -6,8 +6,9 @@
 //! As it goes, every 10 ms, the recorder copies what the stream's inputs
 //! bring into buffers of its own: an audio input's channels that the
 //! tracks take, at the engine frames the stream's buffer has them, a tap
-//! that they take, at those the engine wrote it at, and a MIDI input's
-//! messages, with the frames heard. A capture runs the
+//! that they take, at those the engine wrote it at, a MIDI input's
+//! messages, with the frames heard, and another track's notes, with the
+//! frames they played at. A capture runs the
 //! recording's own code over those, on the run's timeline as a recording
 //! would have had it: recording on throughout, and recording wherever the
 //! transport didn't.
@@ -17,10 +18,12 @@ use std::ops::Range;
 
 use musicable_audio::{InputBuffer, InputWriter, MidiBuffer, MidiReader, MidiWriter};
 use musicable_engine::{InputChannels, MidiSource, Segment};
+use musicable_model::routing::Tap;
 use musicable_model::{AudioInput, Input, MidiInput};
 
 use super::{
-    Armed, CHUNK, MidiTape, PATIENCE_SECONDS, Report, Running, Tape, TrackTape, find_audio,
+    Armed, CHUNK, MidiTape, NoteBuffer, NoteReader, NoteWriter, PATIENCE_SECONDS, Report, Running,
+    Tape, TrackTape, find_audio,
 };
 
 /// The most memory the held inputs take together, in bytes.
@@ -34,6 +37,10 @@ const MIDI_RATE: u64 = 2000;
 /// The memory a held MIDI message takes, in bytes: its slot in the
 /// buffer, with its sequence number, frame and bytes.
 const MIDI_MESSAGE_BYTES: u64 = 24;
+/// The memory a held event of another track's notes takes, in bytes: its
+/// slot, with its sequence number, frame and two words. A held tap of
+/// notes has room for as many a second as a MIDI input.
+const NOTE_EVENT_BYTES: u64 = 32;
 
 /// What Capture takes from: the inputs of the tracks it captures, each
 /// holding the newest of what it brought, and the timeline over as long.
@@ -47,6 +54,8 @@ pub(super) struct Held {
     pub(super) audio: Vec<HeldAudio>,
     /// The MIDI inputs they take.
     pub(super) midi: Vec<HeldMidi>,
+    /// The taps of other tracks' notes they take.
+    pub(super) notes: Vec<HeldNotes>,
     /// The timeline, from before the oldest frame held.
     segments: VecDeque<Segment>,
     /// Whether the stream's inputs are an old engine's, until the next
@@ -83,6 +92,28 @@ pub(super) struct HeldMidi {
     refused: bool,
 }
 
+/// Another track's notes that the MIDI tracks Capture takes take: a tap
+/// of notes.
+pub(super) struct HeldNotes {
+    tap: Tap,
+    /// Where the engine writes them, and how far it has been read.
+    source: Option<(NoteBuffer, NoteReader)>,
+    /// The newest of them, with the frames they played at, from when the
+    /// engine wrote them.
+    pub(super) held: Option<(NoteBuffer, NoteWriter)>,
+    /// Whether it would have taken the held inputs past their memory.
+    refused: bool,
+}
+
+impl Held {
+    /// The held notes a track taking `input` takes, if it takes another
+    /// track's notes.
+    fn notes_of(&self, input: &Input) -> Option<&HeldNotes> {
+        let tap = input.tap()?;
+        self.notes.iter().find(|held| held.tap == tap)
+    }
+}
+
 impl Tape {
     /// Holds the inputs of `tracks`, for Capture, the last `seconds` of
     /// each, from now on. An input that stays held keeps what it holds.
@@ -95,6 +126,7 @@ impl Tape {
         let audio: Vec<&Input> = (self.held.tracks.iter())
             .map(|track| &track.input)
             .filter(|input| matches!(input, Input::Audio(_) | Input::Tap(_)))
+            .filter(|input| self.find_notes(input).is_none())
             .collect();
         (self.held.audio).retain(|held| audio.iter().any(|&i| same_source(i, &held.input)));
         for input in audio {
@@ -112,6 +144,48 @@ impl Tape {
             }
         }
         self.hold_midi_inputs(false);
+        self.hold_note_taps(false);
+    }
+
+    /// Holds the taps of other tracks' notes that the held MIDI tracks
+    /// take, of those the engine writes, the ones held already from where
+    /// they got to, or with `renewed`, from the oldest of a new buffer the
+    /// engine writes one into. They're never stale: the session sends a new
+    /// engine's taps with it.
+    fn hold_note_taps(&mut self, renewed: bool) {
+        let mut taps: Vec<(Tap, NoteBuffer)> = Vec::new();
+        for track in &self.held.tracks {
+            if let (Some(tap), Some(buffer)) = (track.input.tap(), self.find_notes(&track.input))
+                && !taps.iter().any(|&(held, _)| held == tap)
+            {
+                taps.push((tap, buffer));
+            }
+        }
+        self.held
+            .notes
+            .retain(|held| taps.iter().any(|&(tap, _)| tap == held.tap));
+        for (tap, buffer) in taps {
+            let source = || {
+                let reader = buffer.reader();
+                Some((buffer.clone(), reader))
+            };
+            match self.held.notes.iter_mut().find(|held| held.tap == tap) {
+                Some(held) if renewed => {
+                    let reading = (held.source.as_ref())
+                        .is_some_and(|(reading, _)| reading.same_buffer(&buffer));
+                    if !reading {
+                        held.source = source();
+                    }
+                }
+                Some(_) => {}
+                None => self.held.notes.push(HeldNotes {
+                    tap,
+                    source: source(),
+                    held: None,
+                    refused: false,
+                }),
+            }
+        }
     }
 
     /// Holds the MIDI inputs the held MIDI tracks take, of those the
@@ -171,7 +245,9 @@ impl Tape {
         self.hold_midi_inputs(true);
     }
 
-    /// Goes on holding the taps from their new buffers, the same way.
+    /// Goes on holding the taps from their new buffers, the same way, and
+    /// the taps of other tracks' notes from where they got to, or from the
+    /// oldest of a new buffer.
     pub(super) fn hold_from_new_taps(&mut self) {
         let (layout, buffers, taps) = (&self.layout, &self.buffers.audio, &self.taps);
         for held in &mut self.held.audio {
@@ -179,6 +255,7 @@ impl Tape {
                 held.source = find_audio(layout, buffers, taps, &held.input);
             }
         }
+        self.hold_note_taps(true);
     }
 
     /// Forgets what the held inputs hold: they start again with what their
@@ -189,6 +266,10 @@ impl Tape {
             input.refused = false;
         }
         for input in &mut self.held.midi {
+            input.held = None;
+            input.refused = false;
+        }
+        for input in &mut self.held.notes {
             input.held = None;
             input.refused = false;
         }
@@ -203,6 +284,9 @@ impl Tape {
             input.source = None;
         }
         for input in &mut self.held.midi {
+            input.source = None;
+        }
+        for input in &mut self.held.notes {
             input.source = None;
         }
         self.held.stale = true;
@@ -238,7 +322,10 @@ impl Tape {
         let midi = (self.held.midi.iter())
             .filter_map(|input| input.held.as_ref())
             .map(|(buffer, _)| buffer.capacity() as u64 * MIDI_MESSAGE_BYTES);
-        let mut used: u64 = audio.chain(midi).sum();
+        let notes = (self.held.notes.iter())
+            .filter_map(|input| input.held.as_ref())
+            .map(|(buffer, _)| buffer.capacity() as u64 * NOTE_EVENT_BYTES);
+        let mut used: u64 = audio.chain(midi).chain(notes).sum();
         for input in &mut self.held.audio {
             let Some((source, channels)) = &input.source else {
                 continue;
@@ -297,6 +384,34 @@ impl Tape {
                 }
             }
         }
+        for input in &mut self.held.notes {
+            let Some((source, reader)) = &mut input.source else {
+                continue;
+            };
+            if input.held.is_none() && !input.refused {
+                let size = messages.next_power_of_two() * NOTE_EVENT_BYTES;
+                if used + size <= self.held_bytes {
+                    used += size;
+                    input.held = Some(NoteBuffer::new(messages as usize));
+                } else {
+                    input.refused = true;
+                    let tracks = (self.held.tracks.iter())
+                        .filter(|track| track.input == Input::Tap(input.tap));
+                    let refused = refusal(tracks, "input", self.held_bytes);
+                    self.reports.push(Report::Problem(refused));
+                }
+            }
+            if let Some((buffer, writer)) = &mut input.held {
+                let ended = source.has_ended();
+                let settled = source.settled();
+                while let Some((frame, words)) = reader.next_before(u64::MAX) {
+                    writer.push(frame, words);
+                }
+                if !ended {
+                    buffer.settle(settled);
+                }
+            }
+        }
     }
 
     /// Asks for a capture of what's held up to engine time `at`, which
@@ -341,8 +456,17 @@ impl Tape {
             .find(|segment| segment.time <= at)
             .map_or(0, |segment| segment.latency);
         let heard = |track: &Armed| i128::from(at) + i128::from(latency) + i128::from(track.offset);
-        stalled
-            || self.held.tracks.iter().all(|track| match &track.input {
+        let has = |track: &Armed| {
+            // Another track's notes are there as the engine played them.
+            if let Some(held) = self.held.notes_of(&track.input) {
+                return match (&held.source, &held.held) {
+                    (Some((source, _)), Some((buffer, _))) => {
+                        source.has_ended() || buffer.settled() >= at
+                    }
+                    _ => true,
+                };
+            }
+            match &track.input {
                 input @ (Input::Audio(_) | Input::Tap(_)) => (self.held.audio.iter())
                     .filter(|held| same_source(input, &held.input))
                     .all(|held| match (&held.source, &held.held) {
@@ -359,7 +483,9 @@ impl Tape {
                         }
                         _ => true,
                     }),
-            })
+            }
+        };
+        stalled || self.held.tracks.iter().all(has)
     }
 
     /// Records what the held inputs of the tracks Capture takes played over
@@ -397,6 +523,12 @@ impl Tape {
         let mut tracks = Vec::new();
         let mut notes = Vec::new();
         for track in &self.held.tracks {
+            if let Some(held) = self.held.notes_of(&track.input) {
+                if let Some((buffer, _)) = &held.held {
+                    notes.push(MidiTape::from_tap(track.clone(), buffer.clone(), start));
+                }
+                continue;
+            }
             match &track.input {
                 input @ (Input::Audio(_) | Input::Tap(_)) => {
                     let held = (self.held.audio.iter())

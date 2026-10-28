@@ -131,13 +131,39 @@ pub enum NodeEventKind {
     /// instrument, and holds until it moves again. Nodes that don't play
     /// notes ignore it.
     Controller { controller: Controller, value: f32 },
+    /// A note from the node's side input for notes
+    /// ([`Graph::send_side_notes`](crate::Graph::send_side_notes)), as
+    /// [`Note`](Self::Note) is from its main one: another track's notes
+    /// coming into a MIDI track's monitor as its input, say. Nodes without
+    /// one ignore it.
+    SideNote(NoteEvent),
+    /// A controller's move from the node's side input for notes, as
+    /// [`Controller`](Self::Controller) is from its main one.
+    SideController { controller: Controller, value: f32 },
 }
 
 impl NodeEventKind {
     /// Whether it's played as notes are, going where notes go: a note or a
-    /// controller.
+    /// controller, from a node's main input for notes or its side one.
     pub fn is_played(&self) -> bool {
-        matches!(self, Self::Note(_) | Self::Controller { .. })
+        matches!(
+            self,
+            Self::Note(_)
+                | Self::Controller { .. }
+                | Self::SideNote(_)
+                | Self::SideController { .. }
+        )
+    }
+
+    /// The same, as it comes into a node's side input for notes: a note or
+    /// a controller as a [`SideNote`](Self::SideNote) or a
+    /// [`SideController`](Self::SideController).
+    pub(crate) fn to_side(self) -> Self {
+        match self {
+            Self::Note(note) => Self::SideNote(note),
+            Self::Controller { controller, value } => Self::SideController { controller, value },
+            other => other,
+        }
     }
 }
 

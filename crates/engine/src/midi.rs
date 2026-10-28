@@ -1,7 +1,7 @@
 //! MIDI from devices: the messages the stream's MIDI inputs bring the
 //! engine ([`MidiMessage`]), turning them into notes ([`MidiNotes`]), and
 //! the node that plays a MIDI track's input on its instrument
-//! ([`MidiMonitor`]).
+//! ([`MidiMonitor`]), from a MIDI input or another track's notes.
 //!
 //! Notes from MIDI carry their expression as the engine's notes do, a note
 //! at a time: a channel's pitch bend, pressure and slide belong to the
@@ -12,6 +12,7 @@
 
 use musicable_model::Monitor;
 use musicable_model::clip::{Controller, Dimension};
+use musicable_model::routing::Tap;
 
 use crate::compile::MidiSource;
 use crate::{
@@ -390,6 +391,13 @@ impl MidiNotes {
         }
     }
 
+    /// An id no note it has played had.
+    fn fresh_id(&mut self) -> NoteId {
+        let note = NoteId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        note
+    }
+
     /// A control change on `channel`.
     fn control(
         &mut self,
@@ -546,8 +554,42 @@ impl MidiNotes {
 const LIVE_NOTES: u64 = 1 << 63;
 
 /// The most clip notes a [`MidiMonitor`] keeps track of at once, as a clip
-/// player does.
+/// player does, and the most notes from its side input.
 const MAX_CLIP_NOTES: usize = 1024;
+
+/// The notes a [`MidiMonitor`] plays on from its side input for notes, each
+/// under an id of its own, and the controllers, as the side input last
+/// moved them.
+struct Taken {
+    /// Each note sounding: its id as it came, and as it went on.
+    sounding: Vec<(NoteId, NoteId)>,
+    controllers: Held,
+}
+
+impl Taken {
+    fn new() -> Self {
+        Self {
+            sounding: Vec::with_capacity(MAX_CLIP_NOTES),
+            controllers: Held::NONE,
+        }
+    }
+
+    /// Ends every note sounding, as if let go at no particular speed, and
+    /// lets go of the switches held on, as
+    /// [`MidiNotes::release_all`] does.
+    fn release_all(&mut self, notes: &mut Notes<'_>) {
+        for (_, note) in self.sounding.drain(..) {
+            let off = NoteEvent::Off {
+                note,
+                velocity: RELEASE,
+            };
+            notes.send(0, off);
+        }
+        for controller in self.controllers.switches_on() {
+            notes.send_controller(0, controller, 0.0);
+        }
+    }
+}
 
 /// Plays what comes into a MIDI track's input on its instrument, as the
 /// track's input monitoring says: it sits between the track's clip player
@@ -570,17 +612,25 @@ const MAX_CLIP_NOTES: usize = 1024;
 ///
 /// The input's messages come from the MIDI inputs its [`MidiSource`] says,
 /// turned into notes by [`MidiNotes`], in the blocks the stream places them
-/// in ([`ProcessContext::midi`]).
+/// in ([`ProcessContext::midi`]). Or with a side input for notes, its input
+/// is the notes that come into that, another track's: it plays them as it
+/// would a MIDI input's, each under an id of its own, so they can't clash
+/// with its clips' notes.
 pub struct MidiMonitor {
     monitor: Monitor,
     armed: bool,
     /// Where the input's messages come from, or `None` if its MIDI input
     /// isn't open.
     source: Option<MidiSource>,
+    /// The tap whose notes come into its side input for notes, when that's
+    /// its input.
+    side: Option<Tap>,
     notes: MidiNotes,
+    taken: Taken,
     /// The notes held on the input a monitor it took over from had, when
     /// that was another: they end at the next block.
     retired: MidiNotes,
+    retired_taken: Taken,
     retiring: bool,
     /// The clips' notes it sent on that sound now.
     clip_notes: Vec<NoteId>,
@@ -608,8 +658,11 @@ impl MidiMonitor {
             monitor,
             armed,
             source: None,
+            side: None,
             notes: MidiNotes::new(None, LIVE_NOTES),
+            taken: Taken::new(),
             retired: MidiNotes::new(None, LIVE_NOTES),
+            retired_taken: Taken::new(),
             retiring: false,
             clip_notes: Vec::with_capacity(MAX_CLIP_NOTES),
             clip_controllers: Held::NONE,
@@ -622,6 +675,18 @@ impl MidiMonitor {
     pub fn with_source(mut self, source: MidiSource) -> Self {
         self.notes = MidiNotes::new(source.channel, LIVE_NOTES);
         self.source = Some(source);
+        self.side = None;
+        self
+    }
+
+    /// Takes the notes that come into its side input for notes
+    /// ([`Graph::send_side_notes`](crate::Graph::send_side_notes)) as its
+    /// input, in place of a MIDI input's: another track's notes, from
+    /// `from`. A monitor that takes over from one taking another tap's ends
+    /// the notes that one held, as it would a MIDI input's.
+    pub fn with_side_input(mut self, from: Tap) -> Self {
+        self.source = None;
+        self.side = Some(from);
         self
     }
 
@@ -656,6 +721,58 @@ impl MidiMonitor {
             }
         }
     }
+
+    /// Sends on a note from the side input, which plays, under an id of its
+    /// own.
+    fn take_note(&mut self, offset: usize, note: NoteEvent, notes: &mut Notes<'_>) {
+        let sounding = &mut self.taken.sounding;
+        let at = sounding.iter().position(|&(taken, _)| taken == note.note());
+        match note {
+            NoteEvent::On { key, velocity, .. } => {
+                // The same note starting again ends the last.
+                if let Some(i) = at {
+                    let (_, note) = sounding.swap_remove(i);
+                    let velocity = RELEASE;
+                    notes.send(offset, NoteEvent::Off { note, velocity });
+                }
+                if sounding.len() < MAX_CLIP_NOTES {
+                    let fresh = self.notes.fresh_id();
+                    let on = NoteEvent::On {
+                        note: fresh,
+                        key,
+                        velocity,
+                    };
+                    if notes.send(offset, on) {
+                        sounding.push((note.note(), fresh));
+                    }
+                }
+            }
+            NoteEvent::Expression {
+                dimension, value, ..
+            } => {
+                if let Some(i) = at {
+                    let note = sounding[i].1;
+                    let changed = NoteEvent::Expression {
+                        note,
+                        dimension,
+                        value,
+                    };
+                    notes.send(offset, changed);
+                }
+            }
+            NoteEvent::Off { velocity, .. } => {
+                if let Some(i) = at {
+                    let (_, note) = sounding.swap_remove(i);
+                    notes.send(offset, NoteEvent::Off { note, velocity });
+                }
+            }
+        }
+    }
+
+    /// Whether `previous` took the same input.
+    fn same_input(&self, previous: &MidiMonitor) -> bool {
+        (self.source, self.side) == (previous.source, previous.side)
+    }
 }
 
 impl Node for MidiMonitor {
@@ -672,14 +789,17 @@ impl Node for MidiMonitor {
         // nothing on its own input.
         if previous.retiring {
             std::mem::swap(&mut self.retired, &mut previous.retired);
+            std::mem::swap(&mut self.retired_taken, &mut previous.retired_taken);
             self.retiring = true;
         }
         // The notes held on the same input play on. Those held on another
         // end at the next block: a swap can't send notes.
-        if self.source == previous.source {
+        if self.same_input(previous) {
             std::mem::swap(&mut self.notes, &mut previous.notes);
+            std::mem::swap(&mut self.taken, &mut previous.taken);
         } else if !self.retiring {
             std::mem::swap(&mut self.retired, &mut previous.notes);
+            std::mem::swap(&mut self.retired_taken, &mut previous.taken);
             self.retiring = true;
         }
         // New notes take ids no note before had.
@@ -720,9 +840,14 @@ impl Node for MidiMonitor {
         let (input, clips) = self.plays(&ctx.transport);
         if std::mem::take(&mut self.retiring) {
             match self.playing_input {
-                true => self.retired.release_all(|played| send(notes, 0, played)),
+                true => {
+                    self.retired.release_all(|played| send(notes, 0, played));
+                    self.retired_taken.release_all(notes);
+                }
                 false => self.retired.forget_notes(),
             }
+            self.retired_taken.sounding.clear();
+            self.retired_taken.controllers = Held::NONE;
         }
         if !clips {
             for note in self.clip_notes.drain(..) {
@@ -750,9 +875,19 @@ impl Node for MidiMonitor {
         }
         self.playing_clips = clips;
         match (self.playing_input, input) {
-            (true, false) => self.notes.release_all(|played| send(notes, 0, played)),
-            // What's held now never played.
-            (false, true) => self.notes.forget_notes(),
+            (true, false) => {
+                self.notes.release_all(|played| send(notes, 0, played));
+                self.taken.release_all(notes);
+            }
+            // What's held now never played. The side input's notes held
+            // weren't kept, but its controllers go back to what it holds,
+            // as the clips' do.
+            (false, true) => {
+                self.notes.forget_notes();
+                for (controller, value) in self.taken.controllers.moved() {
+                    notes.send_controller(0, controller, value);
+                }
+            }
             _ => {}
         }
         self.playing_input = input;
@@ -779,6 +914,15 @@ impl Node for MidiMonitor {
                 NodeEventKind::Controller { controller, value } => {
                     self.clip_controllers.set(controller, value);
                     if clips {
+                        notes.send_controller(event.offset, controller, value);
+                    }
+                }
+                NodeEventKind::SideNote(note) if self.side.is_some() && input => {
+                    self.take_note(event.offset, note, notes);
+                }
+                NodeEventKind::SideController { controller, value } if self.side.is_some() => {
+                    self.taken.controllers.set(controller, value);
+                    if input {
                         notes.send_controller(event.offset, controller, value);
                     }
                 }

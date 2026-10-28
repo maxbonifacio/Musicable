@@ -5,7 +5,8 @@ input in the strip's input menu, and press **Record** (F9) in the transport
 bar. Playing starts from the start marker, as Space does, and every armed
 track records its input while the transport plays: an audio track what its
 audio input captures, or another track's sound, a MIDI track the notes its
-MIDI input plays. Record while playing turns recording on or off there.
+MIDI input plays, or another MIDI track's. Record while playing turns
+recording on or off there.
 
 Stop ends the recording, and each pass of the playhead over the song becomes
 a take on its track: one take for a recording straight through, and one for
@@ -48,7 +49,9 @@ channel or all sixteen. A new MIDI track takes every channel of every input,
 "All Inputs", as an MPE controller needs: its channels read as MPE, and a
 keyboard's single channel plays as it is. The input menu lists All Inputs
 and then each MIDI input plugged in, each with **All** and its channels 1 to
-16, and lists them again when it opens.
+16, and lists them again when it opens. After them, it lists the other
+MIDI tracks, whose notes a track can play and record
+([Taking another track's notes](routing.md#taking-another-tracks-notes)).
 
 Musicable opens the MIDI inputs that armed MIDI tracks and MIDI tracks
 monitoring In take, while they're plugged in. While tracks want any, it
@@ -82,7 +85,10 @@ playing, in its mode and at its rate, in frames and milliseconds: drag it,
 or type it and press Enter. Musicable keeps one for each device, mode and
 sample rate, and the next recording uses it, as Capture does. A MIDI
 message lands the same way as audio, without the offset, and so does what a
-track takes from another track ([Printing a track](routing.md#printing-a-track)).
+track takes from another track
+([Printing a track](routing.md#printing-a-track)): another track's notes
+land where Musicable played them
+([Recording the notes](routing.md#recording-the-notes)).
 
 To measure the offset, loop an output into an input with a cable, and run
 the record round trip example from Musicable's source folder, naming the
@@ -159,11 +165,11 @@ status bar says why.
 is held, 5 minutes at first; 0 turns Capture off. At 48 kHz, 5 minutes of a
 stereo input take 128 MiB. A MIDI input holds 2,000 messages for each
 second: one that sends more than that on average, such as an MPE controller
-played throughout, holds less than the whole length. Tracks on the same
-input channels, or taking the same point on another track, share what's
-held. The inputs held take 2 GiB at most
-together: an input that would go past that isn't held, and the status bar
-names the tracks it's for.
+played throughout, holds less than the whole length, and another track's
+notes are held the same way. Tracks on the same input channels, or taking
+the same point on another track, share what's held. The inputs held take
+2 GiB at most together: an input that would go past that isn't held, and
+the status bar names the tracks it's for.
 
 What's held is dropped when another project opens, when how long changes,
 and when new audio settings start. An input that no armed or monitoring-In

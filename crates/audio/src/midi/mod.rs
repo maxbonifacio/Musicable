@@ -25,7 +25,9 @@ mod winmm;
 use std::sync::Arc;
 
 pub(crate) use bus::MidiBus;
-pub use ring::{MidiBuffer, MidiEvent, MidiReader, MidiWriter};
+pub use ring::{
+    EventBuffer, EventReader, EventWriter, MidiBuffer, MidiEvent, MidiReader, MidiWriter,
+};
 
 use crate::input::Playback;
 

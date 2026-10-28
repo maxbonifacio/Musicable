@@ -647,7 +647,8 @@ impl Mixer<'_> {
     /// Where an audio track records from: a menu of the inputs, each a pair
     /// of channels or a channel at a time, with the default input first,
     /// then the other tracks, each opening to its taps, and Resampling. For
-    /// a MIDI track, a menu of the MIDI inputs.
+    /// a MIDI track, a menu of the MIDI inputs, then the other MIDI tracks,
+    /// each opening to its notes.
     fn input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
         if track.kind == TrackKind::Midi {
             self.midi_input(ui, track, actions);
@@ -734,11 +735,13 @@ impl Mixer<'_> {
         }
     }
 
-    /// The other tracks in an audio track's input menu, each opening to its
-    /// taps that carry sound, then Resampling, the master's Post Fader. A
-    /// tap that would close a loop is there but can't be picked, and a
-    /// track with none the track can take can't be opened. `current` is
-    /// ticked. Returns the input the user picked, if it's a change.
+    /// The other tracks in a track's input menu, each opening to its taps
+    /// that carry what the track takes, sound for an audio track and notes
+    /// for a MIDI track, then for an audio track, Resampling, the master's
+    /// Post Fader. A tap that would close a loop is there but can't be
+    /// picked, and a track with none the track can take can't be opened.
+    /// `current` is ticked. Returns the input the user picked, if it's a
+    /// change.
     fn tap_items(&self, ui: &mut Ui, track: &Track, current: Option<Tap>) -> Option<Input> {
         let project = self.project;
         let mut picked = None;
@@ -749,7 +752,7 @@ impl Mixer<'_> {
         let mut first = true;
         for other in project.tracks.iter().filter(|t| t.id != track.id) {
             let taps: Vec<Tap> = (project.taps(Chain::Track(other.id)).into_iter())
-                .filter(|&tap| refused(tap) != Some(InputError::Notes))
+                .filter(|&tap| !matches!(refused(tap), Some(InputError::Notes | InputError::Sound)))
                 .collect();
             if taps.is_empty() {
                 continue;
@@ -779,6 +782,9 @@ impl Mixer<'_> {
                     }
                 })
             });
+        }
+        if track.kind != TrackKind::Audio {
+            return picked;
         }
         ui.separator();
         let resampling = current.is_some_and(|tap| Input::Tap(tap).is_resampling());
@@ -823,14 +829,13 @@ impl Mixer<'_> {
     }
 
     /// Where a MIDI track records from: a menu of the MIDI inputs, every
-    /// one first, each with all its channels or one of them.
+    /// one first, each with all its channels or one of them, then the other
+    /// MIDI tracks' notes.
     fn midi_input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
         let current = match &track.input {
             Some(Input::Midi(input)) => Some(input),
             _ => None,
         };
-        // Another MIDI track's notes, which a file can have, though the
-        // menu doesn't offer them yet.
         let tapped = track.input.as_ref().and_then(Input::tap);
         let text = match (current, tapped) {
             (Some(input), _) => self.midi_input_name(input),
@@ -885,30 +890,40 @@ impl Mixer<'_> {
                                 WidgetInfo::selected(Role::Button, true, on, &label)
                             });
                             if button.on_hover_text(&label).clicked() {
-                                picked = Some(Some(input));
+                                picked = Some(Some(Input::Midi(input)));
                             }
                         }
                     });
+                }
+                if let Some(input) = self.tap_items(ui, track, tapped) {
+                    picked = Some(Some(input));
                 }
             });
         if menu.response.clicked() {
             actions.push(Action::ListInputs);
         }
         name_menu(&menu.response, format!("{} Input", track.name), &text);
-        let hint = if missing {
-            "Where the track records from. This MIDI input isn't there: it's not plugged in."
-        } else {
-            "Where the track records from: a MIDI input, or all of them, and one channel or \
-             all of them, as MPE controllers need"
+        let hint = match tapped {
+            _ if missing => {
+                "Where the track records from. This MIDI input isn't there: it's not plugged in."
+            }
+            Some(_) => "Where the track records from: another MIDI track's notes, which it plays",
+            None => {
+                "Where the track records from: a MIDI input, or all of them, and one channel or \
+                 all of them, as MPE controllers need"
+            }
         };
         menu.response.on_hover_text(hint);
-        let changed = match (&picked, current) {
-            (Some(None), _) => track.input.is_some(),
-            (Some(Some(input)), Some(current)) => !same_source(input, current),
+        let changed = match (&picked, &track.input) {
+            (Some(None), None) => false,
+            (Some(Some(Input::Midi(input))), Some(Input::Midi(current))) => {
+                !same_source(input, current)
+            }
+            (Some(Some(input)), Some(current)) => input != current,
             (picked, _) => picked.is_some(),
         };
         if let Some(input) = picked.filter(|_| changed) {
-            mix(actions, Change::Input(track.id, input.map(Input::Midi)));
+            mix(actions, Change::Input(track.id, input));
         }
     }
 
@@ -2744,9 +2759,43 @@ mod tests {
     }
 
     #[test]
+    fn midi_tracks_take_another_midi_tracks_notes() {
+        let (mut project, [_, keys, ..]) = project();
+        let pad = project.add_track("Pad", TrackKind::Midi);
+        let mut harness = harness(project);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys Input")
+            .click();
+        harness.run();
+        // The other MIDI tracks come after the MIDI inputs, with their
+        // notes: the Lead, an audio track, has sound, and nothing the
+        // master has is notes.
+        harness.get_by_label("Tracks").scroll_to_me();
+        harness.run();
+        assert!(
+            harness
+                .query_by_role_and_label(Role::Button, "Lead")
+                .is_none()
+        );
+        assert!(harness.query_by_label("Resampling").is_none());
+        harness.get_by_role_and_label(Role::Button, "Pad").hover();
+        harness.run();
+        assert!(harness.query_by_label("Post FX").is_none());
+        harness.get_by_label("Pre FX").click();
+        harness.run();
+        let input = harness.get_by_role_and_label(Role::ComboBox, "Keys Input");
+        assert_eq!(input.value().as_deref(), Some("from Pad, Pre FX"));
+        // It plays the notes it takes, as it would a keyboard's.
+        let project = harness.state().document.project();
+        assert_eq!(project.track(keys).unwrap().monitor, Monitor::In);
+        let notes = Input::Tap(Tap::PreFx(pad));
+        assert_eq!(mixed(&harness), [Change::Input(keys, Some(notes))]);
+    }
+
+    #[test]
     fn a_midi_track_shows_the_notes_it_takes_from_another_and_lets_them_go() {
         let (mut project, [_, keys, ..]) = project();
-        // From a file: the menu doesn't offer another track's notes yet.
         let pad = project.add_track("Pad", TrackKind::Midi);
         project.track_mut(keys).unwrap().input = Some(Input::Tap(Tap::PreFx(pad)));
         let mut harness = harness(project);

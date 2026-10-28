@@ -507,9 +507,12 @@ each opening to its taps as a sidechain picker's tracks do
 Post Fader, as the manual's [Routing](../manual/src/using/routing.md) page
 shows. A tap that would close a loop is listed but greyed out, and its
 hover text says why (`Project::check_input`); a MIDI track's Pre FX, which
-is notes, isn't listed. The output menu has the buses `Project::buses_for`
-gives the track, Sends Only last. Both run `mixer.set_input` and
-`mixer.set_output` ([commands.md](commands.md#the-mixers-controls)).
+is notes, isn't listed. A MIDI track's input menu lists the other MIDI
+tracks after the MIDI inputs the same way, each opening to its Pre FX, its
+notes, and nothing that carries sound. The output menu has the buses
+`Project::buses_for` gives the track, Sends Only last. They run
+`mixer.set_input` and `mixer.set_output`
+([commands.md](commands.md#the-mixers-controls)).
 
 ## Recording
 
@@ -544,10 +547,17 @@ tap, or resamples the master, records what the engine renders there
 write each tap that armed tracks take, and with Capture on, each that
 tracks monitoring In take, into a buffer like an input's
 (`recorder::TapInput`), lined up with the output as an input's buffer is,
-so the recorder reads it the same way, without the recording offset. It
-asks for `MAX_WRITERS` at most: a track taking a tap past those records
-nothing, and the status bar says so. A new project or a new engine starts
-the writers over, since its taps are other tracks'.
+so the recorder reads it the same way, without the recording offset. A
+MIDI track taking another's notes records what the engine played of them
+at that track's Pre FX, which it writes into a buffer like a MIDI input's
+(`recorder::TapNotes`): each note and controller move, packed in two
+words, with the engine frame it played at, 16,384 of them. They go where
+the song was as they played, without the latency, so the other track's
+clips' notes land on them, and the recorder reads them as it reads a MIDI
+input's, for recording and Capture. It asks for `MAX_WRITERS` at most: a
+track taking a tap past those records nothing, and the status bar says so.
+A new project or a new engine starts the writers over, since its taps are
+other tracks'.
 
 **The recorder** (`musicable-recorder`, a thread of its own) reads the
 engine's timeline and the inputs' buffers every 10 ms, and writes what the
@@ -578,11 +588,13 @@ take plays back into it as it played, to the sample;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping, for audio and MIDI
 tracks, the notes held over loops and punches, where the controllers
-start each pass, and recording and capturing from taps;
-`crates/app/tests/routing.rs` records another track's Post Fader, with a
-plugin's latency on a third, and checks it against that track's stem in an
-export, bit for bit, captures it the same way, and resamples the master
-and checks it against an export of the mix without the resampling track.
+start each pass, and recording and capturing from taps, of sound and of
+notes; `crates/app/tests/routing.rs` records another track's Post Fader,
+with a plugin's latency on a third, and checks it against that track's
+stem in an export, bit for bit, captures it the same way, resamples the
+master and checks it against an export of the mix without the resampling
+track, and records and captures a MIDI track's notes on another, checking
+they're its clip's notes and mod wheel exactly.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks

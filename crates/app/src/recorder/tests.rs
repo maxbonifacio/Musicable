@@ -2,6 +2,7 @@ use std::fs;
 
 use musicable_audio::InputWriter;
 use musicable_commands::take::{NotePass, PlayedNote};
+use musicable_engine::{NodeEventKind, NoteEvent, NoteId, Played};
 use musicable_io::audio::Decoder;
 use musicable_model::MidiInput;
 use musicable_model::clip::{Controller, Dimension, Note};
@@ -1310,7 +1311,7 @@ fn a_track_records_the_tap_it_takes_where_the_mix_played_it() {
     let (mic, _mic_writer) = input(0, 4000);
     let (tapped, _tap_writer) = input(0, 4000);
     let mut tape = tape(&folder, &mic, vec![print()]);
-    tape.set_taps(Taps::from([(kick(), tapped)]));
+    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
     // Song positions 5,000 to 7,000 played from engine time 1,000, and were
     // heard 64 frames later, which is where the tap has them: it has no
     // offset, as an input can.
@@ -1345,7 +1346,7 @@ fn capture_holds_the_taps_tracks_take() {
     // The taps come after the tracks to hold, as when Print takes the kick
     // as the engine starts writing it.
     let mut tape = holding(&folder, &mic, Vec::new(), vec![print()], 1);
-    tape.set_taps(Taps::from([(kick(), tapped)]));
+    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
     let segments = [stopped(0, 0), playing(1000, 5000, 64), stopped(3000, 7000)];
     assert!(run(&mut tape, &segments, 3100).is_empty());
     let (recorded, _) = taken(capture_at(&mut tape, 3200));
@@ -1365,7 +1366,7 @@ fn tracks_taking_the_same_tap_share_what_is_held() {
         ..print()
     };
     let mut tape = holding(&folder, &mic, Vec::new(), vec![print(), again], 1);
-    tape.set_taps(Taps::from([(kick(), tapped)]));
+    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
     let segments = [playing(0, 0, 0), stopped(100, 100)];
     assert!(run(&mut tape, &segments, 200).is_empty());
     assert_eq!(tape.held.audio.len(), 1);
@@ -1378,4 +1379,186 @@ fn tracks_taking_the_same_tap_share_what_is_held() {
     for name in names {
         assert_eq!(frames(&folder.join(name)), from(0, 100), "{name}");
     }
+}
+
+/// The Lead's notes, its Pre FX, which Double takes.
+fn lead_notes() -> Tap {
+    Tap::PreFx(TrackId(3))
+}
+
+/// Double, track 6, a MIDI track recording the Lead's notes.
+fn double() -> Armed {
+    Armed {
+        track: TrackId(6),
+        name: "Double".to_owned(),
+        input: Input::Tap(lead_notes()),
+        offset: 0,
+    }
+}
+
+/// The engine playing `notes` at a note tap from engine time `from` to
+/// `to`, in blocks of 128 frames: each with its engine time.
+fn play_notes(tap: &mut TapNotes, from: u64, to: u64, notes: &[(u64, NodeEventKind)]) {
+    for time in (from..to).step_by(128) {
+        let block: Vec<NodeEvent> = (notes.iter())
+            .filter(|&&(at, _)| (time..time + 128).contains(&at))
+            .map(|&(at, kind)| NodeEvent {
+                offset: (at - time) as usize,
+                kind,
+            })
+            .collect();
+        tap.write(time, AudioRef::empty(128));
+        tap.write_notes(time, 128, &block);
+    }
+}
+
+fn started(note: u64, key: u8) -> NodeEventKind {
+    NodeEventKind::Note(NoteEvent::On {
+        note: NoteId(note),
+        key,
+        velocity: 0.5,
+    })
+}
+
+fn ended(note: u64) -> NodeEventKind {
+    NodeEventKind::Note(NoteEvent::Off {
+        note: NoteId(note),
+        velocity: 0.25,
+    })
+}
+
+/// A note of the Lead's recorded from song position `start` to `end`, as
+/// [`started`] and [`ended`] play it.
+fn taken_note(start: u64, end: u64, key: u8) -> PlayedNote {
+    PlayedNote {
+        start,
+        end,
+        key,
+        velocity: 0.5,
+        release_velocity: 0.25,
+        expression: Vec::new(),
+    }
+}
+
+/// Double's passes.
+fn doubled(passes: Vec<NotePass>) -> Vec<Recorded> {
+    vec![Recorded::Midi {
+        track: TrackId(6),
+        passes,
+    }]
+}
+
+#[test]
+fn a_note_tap_holds_what_the_engine_played_at_its_frames() {
+    let (buffer, mut tap) = TapNotes::new();
+    assert!(buffer.capacity() >= TAP_NOTES);
+    let expression = NodeEventKind::Note(NoteEvent::Expression {
+        note: NoteId(u64::MAX),
+        dimension: Dimension::Timbre,
+        value: -0.75,
+    });
+    let pedal = NodeEventKind::Controller {
+        controller: Controller::SUSTAIN,
+        value: 1.0,
+    };
+    let param = NodeEventKind::Param {
+        param: musicable_engine::ParamId(1),
+        value: 0.5,
+    };
+    let notes = [
+        (1000, started(1 << 63, 60)),
+        (1010, expression),
+        (1010, pedal),
+        (1100, param),
+        (1200, ended(1 << 63)),
+    ];
+    play_notes(&mut tap, 1000, 1256, &notes);
+    assert_eq!(buffer.settled(), 1256, "up to the end of the last block");
+    let mut reader = buffer.reader();
+    let read: Vec<(u64, Played)> = std::iter::from_fn(|| reader.next_before(u64::MAX))
+        .map(|(frame, words)| (frame, midi::unpack(words).unwrap()))
+        .collect();
+    let played = |kind| match kind {
+        NodeEventKind::Note(note) => Played::Note(note),
+        NodeEventKind::Controller { controller, value } => Played::Controller { controller, value },
+        _ => unreachable!("only notes and controllers are played"),
+    };
+    // Everything but what isn't played as notes are, such as a parameter.
+    let expected: Vec<(u64, Played)> = (notes.iter())
+        .filter(|(_, kind)| kind.is_played())
+        .map(|&(at, kind)| (at, played(kind)))
+        .collect();
+    assert_eq!(read, expected);
+    drop(tap);
+    assert!(buffer.has_ended());
+}
+
+#[test]
+fn a_midi_track_records_the_notes_it_takes_where_they_played() {
+    let (buffer, mut tap) = TapNotes::new();
+    let mut tape = midi_tape(&MidiBuffer::new(1).0, vec![double()]);
+    let taps = Taps::from([(lead_notes(), TapBuffer::Notes(buffer.clone()))]);
+    tape.set_taps(taps.clone());
+    // Song positions 5,000 to 7,000 played from engine time 1,000, where
+    // the Lead's notes played as the engine rendered them, whatever the
+    // latency. One played before recording started isn't recorded, and one
+    // held as it stops ends there.
+    let pedal = NodeEventKind::Controller {
+        controller: Controller::SUSTAIN,
+        value: 1.0,
+    };
+    let notes = [
+        (500, started(1, 48)),
+        (600, ended(1)),
+        (900, pedal),
+        (1100, started(2, 60)),
+        (1500, ended(2)),
+        (2000, started(3, 64)),
+    ];
+    play_notes(&mut tap, 0, 3200, &notes);
+    let segments = [
+        stopped(0, 0),
+        recording(1000, 5000, 64),
+        stopped(3000, 7000),
+    ];
+    assert!(run(&mut tape, &segments[..2], 2000).is_empty());
+    // The same buffer again, as arming sends: it reads on from where it
+    // got to.
+    tape.set_taps(taps);
+    let (recorded, files) = finished(run(&mut tape, &segments[2..], 3100));
+    let notes = vec![taken_note(5100, 5500, 60), held(taken_note(6000, 7000, 64))];
+    let pass = NotePass {
+        controllers: vec![(5000, Controller::SUSTAIN, 1.0)],
+        ..pass(5000, 2000, notes)
+    };
+    assert_eq!(recorded, doubled(vec![pass]));
+    assert!(files.is_empty());
+}
+
+#[test]
+fn a_midi_track_whose_notes_arent_there_records_nothing() {
+    let mut tape = midi_tape(&MidiBuffer::new(1).0, vec![double()]);
+    let segments = [recording(0, 0, 0), stopped(100, 100)];
+    let (finished, problems) = split(run(&mut tape, &segments, 150));
+    assert!(finished.is_empty());
+    assert_eq!(problems, ["Double records nothing: its input isn't there."]);
+}
+
+#[test]
+fn capture_holds_the_notes_tracks_take() {
+    let (buffer, mut tap) = TapNotes::new();
+    let mut tape = holding_midi(&MidiBuffer::new(1).0, vec![double()], 1);
+    // A new engine's timeline, before its stream's inputs come, as when the
+    // session starts: the taps aren't stale, as the inputs are till then.
+    tape.restart_held();
+    // The taps come after the tracks to hold, as when Double takes the
+    // Lead's notes as the engine starts writing them.
+    tape.set_taps(Taps::from([(lead_notes(), TapBuffer::Notes(buffer))]));
+    assert_eq!(tape.held.notes.len(), 1);
+    play_notes(&mut tap, 0, 1000, &[(500, started(1, 48)), (600, ended(1))]);
+    let segments = [stopped(0, 0), playing(100, 5000, 64), stopped(900, 5800)];
+    assert!(run(&mut tape, &segments, 1000).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 1000));
+    let notes = vec![taken_note(5400, 5500, 48)];
+    assert_eq!(recorded, doubled(vec![pass(5000, 800, notes)]));
 }
