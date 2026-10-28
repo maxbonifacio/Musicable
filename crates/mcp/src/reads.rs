@@ -334,14 +334,13 @@ fn clip_type(clip_type: ClipType) -> &'static str {
 /// A wire as the project lists it: its id, the tap it takes from and the
 /// port it feeds, each with its name, and its gain.
 fn wire_entry(project: &Project, wire: &Wire) -> Json {
+    let mut to = port_entry(wire.to);
+    to["device"] = wire.to.device().0.into();
+    to["name"] = project.port_name(wire.to).into();
     json!({
         "id": wire.id.0,
         "from": tap_entry(project, wire.from),
-        "to": {
-            "device": wire.to.device().0,
-            "port": port_key(wire.to),
-            "name": project.port_name(wire.to),
-        },
+        "to": to,
         "gain": short(wire.gain),
     })
 }
@@ -365,10 +364,13 @@ fn tap_entry(project: &Project, tap: Tap) -> Json {
     entry
 }
 
-/// A port's key, as get_device lists it.
-fn port_key(port: Port) -> &'static str {
+/// A port as get_device lists it: `{"port": "sidechain"}` for a
+/// Compressor's or a Gate's, or `{"port": "input", "input": 2}` for the
+/// side input a plugin calls 2, as wire.connect takes it.
+fn port_entry(port: Port) -> Json {
     match port {
-        Port::Sidechain(_) => "sidechain",
+        Port::Sidechain(_) => json!({ "port": "sidechain" }),
+        Port::PluginInput(_, input) => json!({ "port": "input", "input": input }),
     }
 }
 
@@ -634,7 +636,10 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
                     })
                 })
                 .collect();
-            json!({ "port": port_key(port), "name": port.name(), "wires": wires })
+            let mut entry = port_entry(port);
+            entry["name"] = project.input_name(port).into();
+            entry["wires"] = wires.into();
+            entry
         })
         .collect();
     if !ports.is_empty() {

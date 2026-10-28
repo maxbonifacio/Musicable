@@ -58,7 +58,8 @@ whoever holds it has the plugin. A node that can't take the flag, or finds
 the plugin inactive, failed, or set up for a different sample rate or a
 shorter block, plays silence.
 
-- **Activating** reads the plugin's audio and note ports, allocates the
+- **Activating** reads the plugin's audio and note ports, switches its
+  side inputs on or off ([Side inputs](#side-inputs)), allocates the
   buffers, and reads its latency, up to `Graph::MAX_LATENCY`. Blocks can be
   any length from 1 frame to the engine's `max_block`.
 - **Deactivating** waits for a node that's processing the plugin to finish
@@ -166,6 +167,38 @@ Every block gives the plugin the transport at its first frame: the tempo,
 the position in beats and in seconds, the time signature and where the bar
 started, whether it's playing, and the loop.
 
+## Side inputs
+
+A plugin's audio inputs beyond its main one, such as a compressor's
+sidechain or a vocoder's carrier, are its side inputs. `side_inputs` lists
+them, with the plugin's ids and names for them, as it last described them:
+a CLAP plugin's audio input ports but its main one, by their ids, and a
+VST3 plugin's audio input buses but its main one, by their indexes. One
+without a name is called by its place, such as "Input 2". Wires feed them
+([engine.md](engine.md#wires)): the node mixes what comes into each into
+its port, as it mixes the main input into the main port, a mono port
+taking a stereo input's middle.
+
+A side input is on only while a wire goes into it, as decision 4 of the
+routing design has it, so a plugin that keys from its side input whenever
+it's on never keys from silence. `set_side_inputs` takes the ids wires go
+into, and every activation switches those on and the others off: CLAP's
+audio-ports-activation (`set_active`, on the main thread while the plugin
+is inactive) and VST3's `activateBus`. Both formats switch ports only
+while the plugin is inactive, so an active plugin restarts when the inputs
+that are on change, and `set_side_inputs` says it did, for the graph to be
+built again, as for a new latency. A port that's off still gets buffers,
+as CLAP asks, holding silence and marked constant, with CLAP's
+`constant_mask` and VST3's `silenceFlags`. A CLAP plugin without
+audio-ports-activation has all its ports on, so it gets silence, marked
+constant, in those nothing is wired to, and restarts as wires come and go
+all the same, as a node's ports are set as the plugin activates. Ids the
+plugin hasn't are left be, and switch on if it comes to have them.
+
+A plugin that changes its ports asks to restart (CLAP's `rescan`, VST3's
+`kIoChanged`), and `poll` reads its side inputs again then, which the app
+gives the device ([Plugins on tracks](#plugins-on-tracks)).
+
 ## State
 
 `save_state` asks the plugin for its state, in its own format, and
@@ -197,8 +230,11 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   connects them so they can talk through the host's messages, and gives the
   controller the component's state. VST3's UI thread is the main thread.
 - **Activating** sets the plugin up for the engine's sample rate and block
-  size, turns on its main audio buses and its first event input, activates
-  it and starts it processing, all on the main thread.
+  size, turns on its main audio buses, the side inputs wires go into
+  ([Side inputs](#side-inputs)) and its first event input, activates it
+  and starts it processing, all on the main thread. Every bus is in each
+  block, as VST3 asks: one that's off holds silence, flagged in
+  `silenceFlags`.
 - **Parameters** are normalized, from 0 to 1, whatever they stand for.
   `steps` is VST3's step count, and the module is the unit the parameter is
   in, with its parents', such as `Oscillators/Osc 1`. VST3 has no
@@ -302,6 +338,20 @@ open project, on a track or on the master:
   changed as they load, or as undo hands them one; were that a step, it
   would take the place of everything left to redo. A plugin that restarts
   with another latency gets a new graph, which compensates for it.
+- **Side inputs.** A plugin device lists its plugin's side inputs
+  (`PluginDevice::inputs`), for wires to go into
+  ([project-format.md](project-format.md#track)). As a plugin loads, and
+  as it restarts with other ports, `poll` says what it lists now
+  (`Change::Inputs`), and the session puts that into the project without a
+  step (`Transaction::set_plugin_inputs`), keeping an input that a wire
+  goes into and the plugin no longer has, after the others, so the wire
+  keeps its port. That rebuilds the graph only if a wire goes into the
+  device, so a plugin listing its inputs as it loads leaves the song
+  playing as it was. `Plugins::sync` switches on the side inputs the
+  project's live wires go into, and off the others ([Side
+  inputs](#side-inputs)): a plugin that's loading before it first
+  activates, and a playing one with a restart, which needs a new graph
+  only if its latency changed.
 - **Saving.** `Session::saved_project` is the project with a fresh state
   from each plugin that has one, which is what the app writes. So the file
   has everything the plugins keep, and `params` is usually empty there.
@@ -392,7 +442,11 @@ CLAP asks.
 `crates/test-plugins` builds a CLAP library with two plugins. Test Gain
 multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Its Bypass, marked as its
-bypass, plays its input unchanged, as late as its latency makes it. Test Synth plays each note as a
+bypass, plays its input unchanged, as late as its latency makes it. Its
+side input, Sidechain, ducks it, by as much as the side input is loud, and
+it says whether the host has the input on; a copy whose name starts with
+`fixed` has no audio-ports-activation, so its input is always on. Test
+Synth plays each note as a
 sine shaped by its note expression, as loud as its Level, which can be
 modulated for each note's voice, says when each voice ends, and can render
 its voices on the host's thread pool, noting which threads run them. It
@@ -440,9 +494,12 @@ The app's tests use the same plugins, in both formats:
 through the session, saves and opens them again, undoes changes made in
 their windows and redoes past the changes they make on their own, moves
 one to another track with its window open and copies it, plays a
-missing plugin, lines a latent plugin up with a dry
-track to the sample, also after its latency changes, and runs the app's
-binary as the scanner.
+missing plugin, lines a latent plugin up with a dry track to the sample,
+also after its latency changes, has a muted kick duck a bass through Test
+Gain's side input, lined up to the sample whichever track is late, and
+runs the app's binary as the scanner.
+[`crates/app/tests/export.rs`](../crates/app/tests/export.rs) exports the
+ducking too, in both formats.
 [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
 does it all in the app's window, with the mouse and the keys, and puts a
 VST3 plugin on a track and opens its window.
@@ -453,8 +510,10 @@ VST3 plugin on a track and opens its window.
   its window as it processes. If the audio device stops, they wait until
   it plays again, or until the project is saved, which saves the plugin's
   state.
-- Audio ports beyond the main ones (sidechains), 64-bit processing, notes
-  a plugin plays, and letting a quiet plugin sleep.
+- Outputs beyond the main ones (multi-output instruments, routing's M5),
+  switching a CLAP plugin's side inputs while it processes, for one that
+  says it can, 64-bit processing, notes a plugin plays, and letting a
+  quiet plugin sleep.
 - Per-note pitch bend, pressure and timbre for a CLAP plugin that takes
   only plain MIDI, without MPE, and for a VST3 plugin without note
   expression: the first get the channel's, the last none.

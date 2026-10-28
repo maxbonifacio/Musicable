@@ -351,7 +351,9 @@ mod tests {
     };
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::param::{ClipParam, ParamAddress};
-    use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+    use musicable_model::plugin::{
+        PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+    };
     use musicable_model::routing::{Port, Tap, Wire, WireId};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
     use musicable_model::warp::Warp;
@@ -371,6 +373,7 @@ mod tests {
             id: "org.example.plugin".into(),
             name: "Plugin".into(),
             instrument,
+            inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: vec![PluginParam { id: 1, value: 0.5 }],
@@ -830,6 +833,14 @@ mod tests {
                     params: Vec::new(),
                 },
             },
+            Edit::PluginInputs {
+                device: effect,
+                from: Vec::new(),
+                to: vec![PluginInput {
+                    id: 2,
+                    name: "Sidechain".to_owned(),
+                }],
+            },
             Edit::PluginParam {
                 device: effect,
                 param: 7,
@@ -968,7 +979,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 74;
+    const KINDS: usize = 75;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1048,6 +1059,7 @@ mod tests {
             Edit::RemoveWire { .. } => 71,
             Edit::WireGain { .. } => 72,
             Edit::WireFrom { .. } => 73,
+            Edit::PluginInputs { .. } => 74,
         }
     }
 

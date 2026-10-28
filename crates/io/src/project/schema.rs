@@ -416,11 +416,22 @@ struct PluginDevice {
     id: String,
     name: String,
     instrument: bool,
+    /// Its side inputs, as the plugin last said.
+    inputs: Vec<PluginInput>,
     /// Base64, or `None` for a plugin as new.
     #[serde(deserialize_with = "Option::deserialize")]
     state: Option<String>,
     /// Parameter ids and values, in order of id.
     params: Vec<(u32, f64)>,
+}
+
+/// One of a plugin's side inputs.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginInput {
+    /// The plugin's id for it.
+    id: u32,
+    name: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -574,12 +585,17 @@ enum Tap {
     PostFader(Channel),
 }
 
-/// Externally tagged: `{"sidechain": 7}` for device 7's Sidechain.
+/// Externally tagged: `{"sidechain": 7}` for device 7's Sidechain, or
+/// `{"plugin_input": {"device": 7, "input": 2}}` for the side input that
+/// the plugin of device 7 calls 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Port {
     /// A Compressor's or a Gate's, by the device's id.
     Sidechain(u32),
+    /// A plugin's side input, by the device's id and the plugin's id for
+    /// the input.
+    PluginInput { device: u32, input: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1038,10 +1054,16 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
             return Err(Invalid::new(format!("{path}.to"), no_device(device)));
         }
         if !project.has_port(wire.to) {
-            let message = format!(
-                "device {} has no sidechain: only a Compressor and a Gate have one",
-                device.0
-            );
+            let message = match wire.to {
+                routing::Port::Sidechain(_) => format!(
+                    "device {} has no sidechain: only a Compressor and a Gate have one",
+                    device.0
+                ),
+                routing::Port::PluginInput(_, input) => format!(
+                    "device {} has no side input {input}: a plugin's are those in its inputs",
+                    device.0
+                ),
+            };
             return Err(Invalid::new(format!("{path}.to"), message));
         }
         let same = |w: &routing::Wire| (w.from, w.to) == (wire.from, wire.to);
@@ -1075,6 +1097,10 @@ impl From<&routing::Wire> for Wire {
             },
             to: match to {
                 routing::Port::Sidechain(device) => Port::Sidechain(device.0),
+                routing::Port::PluginInput(device, input) => Port::PluginInput {
+                    device: device.0,
+                    input,
+                },
             },
             gain,
         }
@@ -1100,6 +1126,9 @@ impl Wire {
             },
             to: match to {
                 Port::Sidechain(device) => routing::Port::Sidechain(DeviceId(device)),
+                Port::PluginInput { device, input } => {
+                    routing::Port::PluginInput(DeviceId(device), input)
+                }
             },
             gain: finite(gain, || format!("{path}.gain"))?,
         })
@@ -2431,6 +2460,7 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             id,
             name,
             instrument,
+            inputs,
             settings,
         } = plugin;
         let model::plugin::PluginSettings { state, params } = settings;
@@ -2442,6 +2472,12 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             id: id.clone(),
             name: name.clone(),
             instrument: *instrument,
+            inputs: (inputs.iter())
+                .map(|input| PluginInput {
+                    id: input.id,
+                    name: input.name.clone(),
+                })
+                .collect(),
             state: state.as_ref().map(|state| BASE64.encode(state.bytes())),
             params: params.iter().map(|p| (p.id, p.value)).collect(),
         }
@@ -2455,11 +2491,18 @@ impl PluginDevice {
             id,
             name,
             instrument,
+            inputs,
             state,
             params,
         } = self;
         if id.is_empty() {
             return Err(Invalid::new(format!("{path}.id"), "must not be empty"));
+        }
+        for (k, input) in inputs.iter().enumerate() {
+            if let Some(first) = inputs[..k].iter().position(|i| i.id == input.id) {
+                let message = format!("has the id of inputs[{first}]: each input's is its own");
+                return Err(Invalid::new(format!("{path}.inputs[{k}].id"), message));
+            }
         }
         let state = match state {
             Some(text) => {
@@ -2487,6 +2530,12 @@ impl PluginDevice {
             id: id.clone(),
             name: name.clone(),
             instrument: *instrument,
+            inputs: (inputs.iter())
+                .map(|input| model::plugin::PluginInput {
+                    id: input.id,
+                    name: input.name.clone(),
+                })
+                .collect(),
             settings: model::plugin::PluginSettings {
                 state,
                 params: checked,

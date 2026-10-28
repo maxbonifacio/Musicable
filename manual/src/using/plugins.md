@@ -69,13 +69,22 @@ project opens, the device's Bypass wins over what the plugin's state says.
 A bypassed plugin still takes the changes made to it, from its window,
 automation or the project, so it comes back as you left it.
 
+## Side inputs
+
+Many plugins take a second signal, beside what comes into them: a
+compressor's sidechain, a vocoder's carrier, a gate's key. Each such input
+gets a row in the plugin's box in the devices panel, under the plugin's
+name for it, and takes its signal from a point on any track, as the
+Compressor's Sidechain does ([Sidechains](sidechains.md#plugins-side-inputs)).
+
 ## Undo, saving and timing
 
 Adding a plugin, moving it, copying it, deleting it and every change made
 in its window are steps in the undo history, named after the plugin, such
-as "Change Surge XT"; a whole drag of a knob is one. What a plugin changes on its own, as it loads,
-or with its window closed, goes into the project without a step. Saving the
-project saves each plugin's state as it is then.
+as "Change Surge XT"; a whole drag of a knob is one. What a plugin changes
+on its own, as it loads, or with its window closed, goes into the project
+without a step, as do the side inputs it lists. Saving the project saves
+each plugin's state as it is then.
 
 Delay compensation lines up every track with the latest one, so a plugin
 that looks ahead doesn't put its track out of time.

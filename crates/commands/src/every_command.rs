@@ -35,7 +35,9 @@ use musicable_model::modulation::{
 };
 use musicable_model::native::{NativeDevice, NativeKind, eq};
 use musicable_model::param::{ClipParam, ParamAddress};
-use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::plugin::{
+    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+};
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::{
@@ -795,6 +797,11 @@ fn examples() -> Vec<Example> {
         // From a track's Pre FX.
         edits(wire::CONNECT, |s| {
             let (tap, port) = find_wireable(s, |_, tap, _| matches!(tap, Tap::PreFx(_)))?;
+            Some(connect_args(tap, port))
+        }),
+        // Into a plugin's side input, by the plugin's id for it.
+        edits(wire::CONNECT, |s| {
+            let (tap, port) = find_wireable(s, |_, _, port| matches!(port, Port::PluginInput(..)))?;
             Some(connect_args(tap, port))
         }),
         edits(wire::DISCONNECT, |s| {
@@ -1933,7 +1940,7 @@ fn find_wireable(s: &Rig, keep: impl Fn(&Project, Tap, Port) -> bool) -> Option<
 
 /// The arguments of `wire.connect` for a wire from `tap` to `port`.
 fn connect_args(tap: Tap, port: Port) -> Args {
-    wire::with_tap(Args::new().with("device", port.device()), tap)
+    wire::with_tap(wire::with_port(Args::new(), port), tap)
 }
 
 /// `args` with `chain` as the device commands take a place: a track, or
@@ -2182,6 +2189,10 @@ fn fixture() -> Project {
         id: "org.example.effect".into(),
         name: "Effect".into(),
         instrument: false,
+        inputs: vec![PluginInput {
+            id: 2,
+            name: "Sidechain".into(),
+        }],
         settings: PluginSettings {
             state: Some(PluginState::new(*b"state")),
             params: vec![PluginParam { id: 1, value: 0.5 }],

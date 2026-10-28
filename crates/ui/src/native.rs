@@ -3,9 +3,9 @@
 //! a menu for a choice. They stand in columns in the order of the device's
 //! table, a column for each group of parameters, such as an EQ's band. The
 //! Compressor's and the Gate's Sidechain column starts with its sources
-//! (see [`sidechain`]).
+//! (see [`sidechain`]), which a plugin's side inputs have too.
 
-mod sidechain;
+pub(crate) mod sidechain;
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{

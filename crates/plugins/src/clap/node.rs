@@ -109,10 +109,18 @@ impl Audio {
 }
 
 /// An audio port, as the plugin describes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PortInfo {
+    /// The plugin's id for it.
+    pub(crate) id: u32,
+    pub(crate) name: String,
     pub(crate) channels: u32,
+    /// Whether it's the port audio goes in or comes out of: the one the
+    /// plugin calls main, or the first.
     pub(crate) main: bool,
+    /// Whether audio goes to it: an input's main port, and a side input
+    /// while something's wired to it. Every output is on.
+    pub(crate) on: bool,
 }
 
 /// The note port notes go to, and how they're sent.
@@ -130,16 +138,19 @@ pub(crate) struct NotePort {
 pub(crate) struct Ports {
     channels: Channels,
     buffers: Vec<clap_audio_buffer>,
+    /// Each port's constant mask, which it's handed over with every block:
+    /// every channel of a port that's off, which holds silence, as CLAP
+    /// wants for a port the host turned off.
+    constant: Vec<u64>,
+    /// The side inputs that are on, by index, with the plugin's ids for
+    /// them, which the node's side inputs are.
+    sides: Vec<(usize, u32)>,
 }
 
 impl Ports {
     fn new(ports: &[PortInfo], frames: usize) -> Self {
         let counts: Vec<u32> = ports.iter().map(|p| p.channels).collect();
-        // The port the plugin calls main, or the first.
-        let main = ports
-            .iter()
-            .position(|p| p.main)
-            .or((!ports.is_empty()).then_some(0));
+        let main = ports.iter().position(|p| p.main);
         let mut channels = Channels::new(&counts, main, frames);
         let buffers = ports
             .iter()
@@ -152,14 +163,32 @@ impl Ports {
                 constant_mask: 0,
             })
             .collect();
-        Self { channels, buffers }
+        let constant = (ports.iter())
+            .map(|p| {
+                if p.on {
+                    0
+                } else {
+                    u64::MAX >> (64 - p.channels.clamp(1, 64))
+                }
+            })
+            .collect();
+        let sides = (ports.iter().enumerate())
+            .filter(|(_, p)| p.on && !p.main)
+            .map(|(index, p)| (index, p.id))
+            .collect();
+        Self {
+            channels,
+            buffers,
+            constant,
+            sides,
+        }
     }
 
     /// Silences every port, and gets the buffers ready to hand over.
     fn clear(&mut self, frames: usize) {
         self.channels.clear(frames);
-        for buffer in &mut self.buffers {
-            buffer.constant_mask = 0;
+        for (buffer, &constant) in self.buffers.iter_mut().zip(&self.constant) {
+            buffer.constant_mask = constant;
         }
     }
 }
@@ -205,10 +234,11 @@ impl fmt::Debug for NodeSource {
 
 /// A plugin, as a node in the engine's graph.
 ///
-/// The node mixes its inputs into the plugin's main input port and plays
-/// its main output port. It sends the plugin its parameter and note events,
-/// and the transport. Until the plugin is active, while it's being set up,
-/// and if it fails, the node plays silence.
+/// The node mixes its main input into the plugin's main input port, and
+/// each side input into the plugin's side input with its id while that's
+/// on, and plays its main output port. It sends the plugin its parameter and
+/// note events, and the transport. Until the plugin is active, while it's
+/// being set up, and if it fails, the node plays silence.
 ///
 /// Stopping the node, as its device is bypassed, stops the plugin
 /// processing. Its parameter changes go to the plugin's `flush` meanwhile,
@@ -465,8 +495,12 @@ fn run(
 
     audio.inputs.clear(frames);
     audio.outputs.clear(frames);
-    if let Some(main) = audio.inputs.channels.main() {
-        audio.inputs.channels.mix_into(main, inputs, frames);
+    let ports = &audio.inputs;
+    if let Some(main) = ports.channels.main() {
+        ports.channels.mix_into(main, inputs.iter(), frames);
+    }
+    for &(port, id) in &ports.sides {
+        ports.channels.mix_into(port, inputs.side(id), frames);
     }
     events_for_block(ctx, audio, stale);
     *transport_event = transport(Some(ctx));

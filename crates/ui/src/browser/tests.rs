@@ -614,6 +614,7 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
         id: "org.example.vital".to_owned(),
         name: "Vital".to_owned(),
         instrument: true,
+        inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
     project.track_mut(keys).unwrap().devices.push(synth.clone());

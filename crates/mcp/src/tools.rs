@@ -161,10 +161,10 @@ pub fn list() -> Vec<Tool> {
              tracks with their mixer settings, devices and clips, and their modulators and \
              routings if they have any, the master, the wires, each taking a tap's signal into a \
              device's side input, the locators, and which parameters are automated, each with \
-             its id. A wire's tap is named as wire.connect takes it. A device that's bypassed \
-             says \"bypassed\": true, and one that's deactivated \"active\": false. A clip's \
-             notes, a device's or a modulator's parameters and a lane's points come from \
-             get_clip, get_device, get_modulator and get_automation.",
+             its id. A wire's tap and port are named as wire.connect takes them. A device \
+             that's bypassed says \"bypassed\": true, and one that's deactivated \"active\": \
+             false. A clip's notes, a device's or a modulator's parameters and a lane's points \
+             come from get_clip, get_device, get_modulator and get_automation.",
             object(json!({}), &[]),
         ),
         read(
@@ -182,8 +182,9 @@ pub fn list() -> Vec<Tool> {
             "Reads one device: what it is, where it is, whether it's bypassed or deactivated, \
              each of its parameters' number, name, range, unit and value, for \
              device.set_param and automation, which name a device's parameter as \"device 4 \
-             param 2\" and its Bypass as \"device 4 bypass\", and a Compressor's or a Gate's \
-             Sidechain port, with the wires into it.",
+             param 2\" and its Bypass as \"device 4 bypass\", and its ports, with the wires \
+             into each: a Compressor's or a Gate's Sidechain, or a plugin's side inputs, by the \
+             plugin's ids and names for them, as wire.connect takes them.",
             object(
                 json!({ "device": id_number("The device's id.") }),
                 &["device"],

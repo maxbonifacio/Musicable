@@ -4,7 +4,7 @@
 
 use std::slice;
 
-use musicable_engine::{AudioMut, Inputs, NoteId, ProcessContext};
+use musicable_engine::{AudioMut, AudioRef, NoteId, ProcessContext};
 use musicable_model::time::{Beats, TimeSignature};
 
 /// How many notes can sound on a plugin at once.
@@ -94,17 +94,23 @@ impl Channels {
         }
     }
 
-    /// Mixes the node's inputs into port `port`: a mono port gets stereo
-    /// inputs as their middle, and every channel gets a mono input.
-    pub(crate) fn mix_into(&self, port: usize, inputs: Inputs<'_>, frames: usize) {
+    /// Mixes a node's inputs, those into one of its ports, into port
+    /// `port`: a mono port gets stereo inputs as their middle, and every
+    /// channel gets a mono input.
+    pub(crate) fn mix_into<'a>(
+        &self,
+        port: usize,
+        inputs: impl IntoIterator<Item = AudioRef<'a>>,
+        frames: usize,
+    ) {
         debug_assert!(frames <= self.frames);
         let channels = self.port_channels(port);
         let mono = channels.len() == 1;
-        for (c, &channel) in channels.iter().enumerate() {
-            // SAFETY: the port's buffers hold `frames` samples, and the
-            // plugin isn't using them.
-            let channel = unsafe { slice::from_raw_parts_mut(channel, frames) };
-            for input in inputs.iter() {
+        for input in inputs {
+            for (c, &channel) in channels.iter().enumerate() {
+                // SAFETY: the port's buffers hold `frames` samples, and the
+                // plugin isn't using them.
+                let channel = unsafe { slice::from_raw_parts_mut(channel, frames) };
                 if mono && input.channels() > 1 {
                     for ((sample, left), right) in channel
                         .iter_mut()

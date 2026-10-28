@@ -10,7 +10,10 @@ use musicable_model::mixer::Bus;
 use musicable_model::modulation::{ControlKind, ModulatorKind, Output, lfo};
 use musicable_model::native::{NativeDevice, NativeKind, eq, sampler, synth};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
-use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::plugin::{
+    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+};
+use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::warp::{
     GranularSettings, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
@@ -103,6 +106,7 @@ fn plugged() -> Project {
         id: "org.example.synth".into(),
         name: "Synth".into(),
         instrument: true,
+        inputs: Vec::new(),
         settings: PluginSettings {
             state: Some(PluginState::new(*b"preset")),
             params: vec![
@@ -117,6 +121,7 @@ fn plugged() -> Project {
         id: "0123456789ABCDEF0123456789ABCDEF".into(),
         name: "Effect".into(),
         instrument: false,
+        inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
     project.master.devices.push(effect);
@@ -2616,6 +2621,155 @@ fn lanes_move_parameters_their_modulators_have() {
         "automation[0].points[0][1]",
         "must be a whole number from 0 to 3",
     );
+}
+
+/// Wires: the kick's Post FX keying the Compressor on the bass, and its
+/// Post Fader keying a plugin's second side input on the master.
+fn wired() -> Project {
+    let mut project = Project::new();
+    let kick = project.add_track("Kick", TrackKind::Audio);
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    project.add_track("Keys", TrackKind::Midi);
+    let squash = project.new_device(DeviceKind::Native(NativeDevice::new(
+        NativeKind::Compressor,
+    )));
+    let squash_id = squash.id;
+    project.track_mut(bass).unwrap().devices.push(squash);
+    let input = |id, name: &str| PluginInput {
+        id,
+        name: name.into(),
+    };
+    let ducker = project.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "org.example.ducker".into(),
+        name: "Ducker".into(),
+        instrument: false,
+        inputs: vec![input(2, "Sidechain"), input(5, "Aux")],
+        settings: PluginSettings::default(),
+    }));
+    let ducker_id = ducker.id;
+    project.master.devices.push(ducker);
+    let key = project.new_wire(Tap::PostFx(Chain::Track(kick)), Port::Sidechain(squash_id));
+    let aux = Port::PluginInput(ducker_id, 5);
+    let mut aux = project.new_wire(Tap::PostFader(Chain::Track(kick)), aux);
+    aux.gain = 0.5;
+    project.wires = vec![key, aux];
+    project
+}
+
+#[test]
+fn wires_join_taps_and_ports_the_project_has_without_loops() {
+    assert_eq!(load(&edited_from(&wired(), |_| ())).unwrap(), wired());
+    let edited = |edit: fn(&mut Value)| edited_from(&wired(), |f| edit(&mut f["wires"]));
+    refused(
+        &edited(|wires| wires[1]["id"] = json!(0)),
+        "wires[1].id",
+        "wires[0] has id 0 too",
+    );
+    refused(
+        &edited_from(&wired(), |f| f["next_wire_id"] = json!(1)),
+        "next_wire_id",
+        "a wire has id 1",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"post_fx": {"track": 9}})),
+        "wires[0].from",
+        "there's no track with id 9",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"pre_fx": 2})),
+        "wires[0].from",
+        "is MIDI track 2's Pre FX, which is notes",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"device": 9})),
+        "wires[0].from",
+        "there's no device with id 9",
+    );
+    refused(
+        &edited(|wires| wires[0]["to"] = json!({"sidechain": 9})),
+        "wires[0].to",
+        "there's no device with id 9",
+    );
+    refused(
+        &edited(|wires| wires[0]["to"] = json!({"sidechain": 1})),
+        "wires[0].to",
+        "device 1 has no sidechain: only a Compressor and a Gate have one",
+    );
+    refused(
+        &edited(|wires| wires[1]["to"]["plugin_input"]["input"] = json!(3)),
+        "wires[1].to",
+        "device 1 has no side input 3: a plugin's are those in its inputs",
+    );
+    refused(
+        &edited(|wires| wires[1]["to"] = json!({"plugin_input": {"device": 0, "input": 2}})),
+        "wires[1].to",
+        "device 0 has no side input 2",
+    );
+    refused(
+        &edited(|wires| wires[1]["to"] = json!({"plugin_input": {"wire": 1, "input": 2}})),
+        "wires[1].to.plugin_input.wire",
+        "unknown field `wire`",
+    );
+    refused(
+        &edited(|wires| {
+            wires[1]["from"] = wires[0]["from"].clone();
+            wires[1]["to"] = wires[0]["to"].clone();
+        }),
+        "wires[1]",
+        "wires[0] joins the same tap and port",
+    );
+    // What comes out of the bass's Compressor reaches the bass's Post FX,
+    // the Compressor itself, and the master.
+    for tap in [
+        json!({"post_fx": {"track": 1}}),
+        json!({"device": 0}),
+        json!({"post_fader": "master"}),
+    ] {
+        let file = edited_from(&wired(), |f| f["wires"][0]["from"] = tap);
+        refused(
+            &file,
+            "wires[0]",
+            "makes a loop: what comes out of the device it feeds reaches its tap",
+        );
+    }
+    // The bass's Pre FX comes before its Compressor.
+    let file = edited(|wires| wires[0]["from"] = json!({"pre_fx": 1}));
+    assert_eq!(load(&file).unwrap().wires[0].from, Tap::PreFx(TrackId(1)));
+    let mut project = wired();
+    project.wires[1].gain = f32::NAN;
+    refused_saving(&project, "wires[1].gain", "must be a finite number");
+}
+
+#[test]
+fn plugins_side_inputs_have_ids_of_their_own() {
+    const DUCKER: &str = "master.devices[0].kind.plugin";
+    let edited = |edit: fn(&mut Value)| {
+        edited_from(&wired(), |f| {
+            edit(&mut f["master"]["devices"][0]["kind"]["plugin"]["inputs"])
+        })
+    };
+    refused(
+        &edited(|inputs| inputs[1]["id"] = json!(2)),
+        &format!("{DUCKER}.inputs[1].id"),
+        "has the id of inputs[0]: each input's is its own",
+    );
+    refused(
+        &edited(|inputs| inputs[0]["channels"] = json!(2)),
+        &format!("{DUCKER}.inputs[0].channels"),
+        "unknown field `channels`",
+    );
+    // A wire goes into an input by its id.
+    refused(
+        &edited(|inputs| inputs[1]["id"] = json!(u32::MAX)),
+        "wires[1].to",
+        "device 1 has no side input 5",
+    );
+    // A plugin may leave an input without a name.
+    let file = edited(|inputs| inputs[0]["name"] = json!(""));
+    let mut project = wired();
+    project.master.devices[0].kind.plugin_mut().unwrap().inputs[0].name = String::new();
+    assert_eq!(load(&file).unwrap(), project);
 }
 
 #[test]

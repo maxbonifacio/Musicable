@@ -3,10 +3,11 @@
 A sidechain lets one track's sound set off a device on another: a kick
 that ducks the bass through the bass's Compressor, say, or a snare that
 opens a Gate on a room microphone. The [Compressor](../devices/compressor.md)
-and the [Gate](../devices/gate.md) each have a side input, and a wire takes a
-signal to it from a point on any track. While the device's Sidechain is on,
-its detector follows that signal, the key, instead of what comes into the
-device, and turns down what comes into it as before.
+and the [Gate](../devices/gate.md) each have a side input, as do many
+plugins, and a wire takes a signal to it from a point on any track. While
+the device's Sidechain is on, its detector follows that signal, the key,
+instead of what comes into the device, and turns down what comes into it as
+before.
 
 ## The Sidechain column
 
@@ -39,6 +40,26 @@ a compressor's sidechain filter usually does.
 The **+** by the column's name adds another source under the first, such
 as a snare beside a kick, both ducking a pad. The keys of all the sources
 add up, each at its own gain.
+
+## Plugins' side inputs
+
+A plugin with side inputs, such as a compressor's sidechain or a vocoder's
+carrier and modulator, has a row for each in its box in the devices panel,
+under the plugin's name for it. Each has the same source picker, a gain
+under each source and the **+** by its name, as the Sidechain column has.
+
+A plugin hears a side input only while it has a source. Picking the first
+switches the input on, and taking away the last, with **No Input**,
+switches it off. Plugins switch their inputs only while they're stopped,
+so the plugin restarts each time, with a moment's gap in its sound, as
+when its latency changes. With no source, the plugin hears nothing at
+that input, so a plugin that keys from its side input whenever it's on
+never keys from silence.
+
+A plugin's box shows its side inputs once it has loaded, and keeps them
+while the plugin is missing, so their sources stay. If an update of the
+plugin drops an input that has a source, the row stays, after the others,
+so the source does, though the plugin no longer hears it.
 
 ## What the key hears
 

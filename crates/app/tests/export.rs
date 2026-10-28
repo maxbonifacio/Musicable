@@ -6,8 +6,10 @@
 //! soloed, and with solo on the mix is as heard. The tail renders a
 //! release and leaves the quiet end off, normalising takes the peak to full
 //! scale, and FLAC and 16-bit files hold the same samples, rounded. A
-//! Bypass lane switches on the sample it asks for. A cancelled export, or
-//! one that fails, leaves no files behind.
+//! Bypass lane switches on the sample it asks for. A muted kick wired into
+//! a CLAP or a VST3 plugin's side input ducks a bass as it does live,
+//! whichever track is late. A cancelled export, or one that fails, leaves
+//! no files behind.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -27,14 +29,18 @@ use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Warping};
 use musicable_model::native::{NativeDevice, NativeKind, compressor};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
+use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::{Warp, WarpMode};
-use musicable_model::{Chain, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind};
+use musicable_model::{
+    Chain, Device, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind,
+};
 use musicable_plugins::PluginInfo;
 use musicable_plugins::scan;
 use musicable_test_plugins::testing::Library;
-use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY};
+use musicable_test_plugins::vst3::{VST3_GAIN_ID, VST3_SIDECHAIN};
+use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, SIDECHAIN};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -50,6 +56,14 @@ const PERIOD: usize = 441;
 
 /// Test Gain's latency on the bass, in frames.
 const BASS_LATENCY: u64 = 300;
+
+/// How many frames apart a kick's clicks are, and how long each is.
+const BEAT: usize = 4_800;
+const CLICK: usize = 10;
+
+/// The latency of the Test Gain that makes a track late, in frames, where a
+/// kick ducks a bass.
+const LATE: u64 = 120;
 
 /// A folder of its own for each test, made fresh.
 fn folder(name: &str) -> PathBuf {
@@ -144,6 +158,7 @@ fn song(dir: &Path) -> Project {
         id: GAIN_ID.to_str().unwrap().to_owned(),
         name: "Test Gain".into(),
         instrument: false,
+        inputs: Vec::new(),
         settings,
     }));
     let up = vec![Point::new(beats(1, 1), 0.5), Point::new(beats(3, 1), 1.0)];
@@ -411,6 +426,114 @@ fn a_bypass_lane_switches_on_the_sample_it_asks_for() {
     let (_, played) = live(&song, &dir, &installed, CONFIG, switched.len() / 2);
     assert_same(&switched, &played, "the bass");
     library.assert_alright();
+}
+
+/// Test Gain in `format`, `latency` frames late, its device listing
+/// `inputs`.
+fn test_gain(
+    project: &mut Project,
+    format: PluginFormat,
+    latency: u64,
+    inputs: Vec<PluginInput>,
+) -> Device {
+    let (id, latency) = match format {
+        PluginFormat::Clap => (GAIN_ID.to_str().unwrap(), latency as f64),
+        PluginFormat::Vst3 => (VST3_GAIN_ID, latency as f64 / 48_000.0),
+    };
+    let mut settings = PluginSettings::default();
+    settings.set_param(LATENCY, Some(latency));
+    project.new_device(DeviceKind::Plugin(PluginDevice {
+        format,
+        id: id.to_owned(),
+        name: "Test Gain".into(),
+        instrument: false,
+        inputs,
+        settings,
+    }))
+}
+
+/// Two beats at 120 BPM: a kick that clicks at full scale, muted, and a bass
+/// that holds a quarter, through Test Gain in `format`, whose side input
+/// the kick keys, so the bass goes silent where the kick clicks. A Test
+/// Gain on each track makes the one called `late` late. As the app saves
+/// it once the plugins have loaded: the ducker lists its side input, and
+/// the wire goes into it. The audio files go into `dir`.
+fn ducking(dir: &Path, format: PluginFormat, late: &str) -> Project {
+    let clicks: Vec<f32> = (0..48_000)
+        .map(|i| if i % BEAT < CLICK { 1.0 } else { 0.0 })
+        .collect();
+    let float = SampleFormat::Float32;
+    save_wav(&dir.join("Audio/Kick.wav"), 48_000, float, &[&clicks]).unwrap();
+    save_wav(
+        &dir.join("Audio/Bass.wav"),
+        48_000,
+        float,
+        &[&[0.25; 48_000]],
+    )
+    .unwrap();
+    let mut p = Project::new();
+    let kick = p.add_track("Kick", TrackKind::Audio);
+    let bass = p.add_track("Bass", TrackKind::Audio);
+    for (track, name) in [(kick, "Kick"), (bass, "Bass")] {
+        let audio = AudioClip::new(format!("Audio/{name}.wav"));
+        audio_clip(&mut p, track, Beats::ZERO, beats(2, 1), audio);
+        let latency = if name == late { LATE } else { 0 };
+        let gain = test_gain(&mut p, format, latency, Vec::new());
+        p.track_mut(track).unwrap().devices.push(gain);
+    }
+    let id = match format {
+        PluginFormat::Clap => SIDECHAIN,
+        PluginFormat::Vst3 => VST3_SIDECHAIN,
+    };
+    let sidechain = PluginInput {
+        id,
+        name: "Sidechain".into(),
+    };
+    let ducker = test_gain(&mut p, format, 0, vec![sidechain]);
+    let into = Port::PluginInput(ducker.id, id);
+    let wire = p.new_wire(Tap::PostFader(Chain::Track(kick)), into);
+    p.wires.push(wire);
+    p.track_mut(bass).unwrap().devices.push(ducker);
+    p.track_mut(kick).unwrap().muted = true;
+    p
+}
+
+#[test]
+fn a_muted_kick_ducks_a_bass_through_a_plugins_side_input_as_it_does_live() {
+    let dir = folder("sidechain");
+    let (clap, mut installed) = plugins(&dir, "sidechain");
+    let vst3 = Library::copy_vst3(&dir, "export-sidechain-vst3");
+    installed.extend(scan::scan_here(vst3.path()).unwrap());
+    // The bass, silent where the kick clicks, and lined up with it.
+    let ducked: Vec<f32> = (0..48_000)
+        .flat_map(|i| [if i % BEAT < CLICK { 0.0 } else { 0.25 }; 2])
+        .collect();
+    for format in [PluginFormat::Clap, PluginFormat::Vst3] {
+        for late in ["Kick", "Bass"] {
+            let what = format!("{format:?}, the {} late", late.to_lowercase());
+            let song = ducking(&dir, format, late);
+            let file = dir.join(format!("{format:?} {late}.wav"));
+            let report = export(job(
+                &song,
+                &dir,
+                &installed,
+                exact(),
+                &file,
+                &BTreeSet::new(),
+            ));
+            assert_eq!((report.failed.as_deref(), report.cancelled), (None, false));
+            assert_eq!(report.problems, Vec::<String>::new());
+            let (latency, played) = live(&song, &dir, &installed, CONFIG, 48_000);
+            assert_eq!(latency, LATE, "{what}");
+            if let Some(i) = played.iter().zip(&ducked).position(|(a, b)| a != b) {
+                let (got, due) = (played[i], ducked[i]);
+                panic!("{what}: frame {} plays {got} where {due} was due", i / 2);
+            }
+            assert_same(&read(&file).0, &played, &what);
+        }
+    }
+    clap.assert_alright();
+    vst3.assert_alright();
 }
 
 #[test]

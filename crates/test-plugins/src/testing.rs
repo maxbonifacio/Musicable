@@ -316,6 +316,18 @@ impl Library {
         }
     }
 
+    /// Whether the gain's sidechain is on, as the host last switched it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`request_callback`](Self::request_callback).
+    pub unsafe fn sidechain(&self, plugin: *const clap_plugin) -> bool {
+        let get = self
+            .hook::<unsafe extern "C" fn(*const clap_plugin) -> bool>("musicable_test_sidechain");
+        // SAFETY: the caller's promise.
+        unsafe { get(plugin) }
+    }
+
     /// The transport's flags, position in beats and tempo, as the plugin
     /// last saw them.
     ///
@@ -525,6 +537,21 @@ impl Library {
                 blocks,
             }
         })
+    }
+
+    /// Whether Test Gain's sidechain bus is on, as the host last turned it,
+    /// if `object` is Test Gain's component.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_label`](Self::vst3_label).
+    pub unsafe fn vst3_sidechain(&self, object: *mut c_void) -> Option<bool> {
+        let get = self.hook::<unsafe extern "C" fn(*mut c_void, *mut bool) -> bool>(
+            "musicable_test_vst3_sidechain",
+        );
+        let mut on = false;
+        // SAFETY: the caller's promise.
+        unsafe { get(object, &mut on) }.then_some(on)
     }
 
     /// Has a VST3 plugin ask the host to restart it with VST3's `flags`.

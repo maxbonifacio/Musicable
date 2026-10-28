@@ -337,17 +337,17 @@ where a part has started, what's built.
   from analysing the file, on the library's background queue
   (`musicable_library::Queue`), and the project keeps what playback reads,
   such as the onsets a slicing mode plays from.
-- **Sidechains, multi-output instruments and routing.** Sidechains have
-  started: format 19 adds wires (`musicable_model::routing`), which take
-  a tap's signal on any channel into a device's port, and the
-  Compressor's and the Gate's Sidechain ports take them into a side input
-  of their nodes (`Graph::connect_to`, `InputPort::Side`), which reads it
-  apart from the main input ([engine.md](engine.md#wires)). Plugins need
-  their audio ports beyond the main ones for it
-  ([plugins.md](plugins.md#not-done-yet)). A node's output is one buffer of
-  `Node::channels()` channels, so a multi-output instrument is a node with
-  more of them, and a node for each of its outputs picks that output's
-  channels out for a strip of its own. In the model, a track feeds the
+- **Sidechains, multi-output instruments and routing.** Sidechains are
+  in: format 19 adds wires (`musicable_model::routing`), which take a
+  tap's signal on any channel into a device's port, and the Compressor's
+  and the Gate's Sidechain ports take them into a side input of their
+  nodes (`Graph::connect_to`, `InputPort::Side`), which reads it apart
+  from the main input ([engine.md](engine.md#wires)). Format 20 adds
+  plugins' side inputs, the audio ports beyond their main ones, as ports
+  too ([plugins.md](plugins.md#side-inputs)). A node's output is one
+  buffer of `Node::channels()` channels, so a multi-output instrument is a
+  node with more of them, and a node for each of its outputs picks that
+  output's channels out for a strip of its own. In the model, a track feeds the
   master or a group (`Track::output`) and records from an input
   (`Track::input`), and flexible routing adds to both, such as another
   track's output as an input.

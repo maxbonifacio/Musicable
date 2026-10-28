@@ -105,6 +105,7 @@ impl Studio {
             id: SYNTH_ID.to_str().unwrap().to_owned(),
             name: "Test Synth".to_owned(),
             instrument: true,
+            inputs: Vec::new(),
             settings: PluginSettings::default(),
         }));
         let id = synth.id;
