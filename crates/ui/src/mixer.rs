@@ -21,6 +21,11 @@
 //! the automation, or re-enables it. One that modulators move shows how
 //! far they can move it, and where they have it, and its menu lists them
 //! ([`modulators`]). A modulator's output dragged onto one moves it.
+//!
+//! The Routing panel ([`routing`]) lists the strips' connections, and the
+//! keys wired into devices, a row each, with the strips' own controls.
+
+mod routing;
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -50,6 +55,8 @@ use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
 use crate::shell::Action;
 use crate::theme::{MixerSizes, Theme};
 use crate::widgets::{Face, toggle};
+
+pub(crate) use routing::RoutingPanel;
 
 /// A channel's meter readings, linear: 1.0 is full scale.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -617,22 +624,30 @@ impl Mixer<'_> {
             .width(self.sizes().inner())
             .truncate()
             .selected_text(text)
-            .show_ui(ui, |ui| {
-                for bus in self.project.buses_for(track.id) {
-                    let mut item = ui.selectable_label(bus == current, self.bus_name(bus));
-                    if bus == Bus::SendsOnly {
-                        item = item.on_hover_text(
-                            "Feeds nothing: the track is heard through its sends, and the tracks \
-                             that take its sound, alone",
-                        );
-                    }
-                    if item.clicked() && bus != current {
-                        picked = Some(bus);
-                    }
-                }
-            });
+            .show_ui(ui, |ui| picked = self.bus_items(ui, track));
         name_menu(&menu.response, format!("{} Output", track.name), text);
         menu.response.on_hover_text("Where the track's output goes");
+        picked
+    }
+
+    /// The items of the track's output menu: the master, the groups it can
+    /// feed and Sends Only, with the bus it feeds ticked. Returns the bus
+    /// the user picked, if it's a change.
+    fn bus_items(&self, ui: &mut Ui, track: &Track) -> Option<Bus> {
+        let current = self.project.output_of(track);
+        let mut picked = None;
+        for bus in self.project.buses_for(track.id) {
+            let mut item = ui.selectable_label(bus == current, self.bus_name(bus));
+            if bus == Bus::SendsOnly {
+                item = item.on_hover_text(
+                    "Feeds nothing: the track is heard through its sends, and the tracks that \
+                     take its sound, alone",
+                );
+            }
+            if item.clicked() && bus != current {
+                picked = Some(bus);
+            }
+        }
         picked
     }
 
@@ -1054,6 +1069,19 @@ fn channels_name(name: &str, input: &AudioInput) -> String {
     }
 }
 
+/// How a level that moves sideways goes: see [`Mixer::level_bar`].
+struct Bar<'a> {
+    /// The top of its scale, in dB.
+    top: f32,
+    /// The level a double-click gives it.
+    reset: f32,
+    /// What it says on it beside its value: a send's return track.
+    name: Option<&'a str>,
+    /// What screen readers call it.
+    label: &'a str,
+    width: f32,
+}
+
 /// Asks the app to make `change`.
 fn mix(actions: &mut Vec<Action>, change: Change) {
     actions.push(Action::Mixer(change));
@@ -1150,6 +1178,21 @@ impl Mixer<'_> {
     /// The track's send to the return track `to`: its level, and whether it
     /// takes the signal before the fader.
     fn send(&self, ui: &mut Ui, track: &Track, to: &Track, actions: &mut Vec<Action>) {
+        self.send_in(ui, track, to, self.sizes().inner(), true, actions);
+    }
+
+    /// The same, `width` wide, in a strip or, without the return track's
+    /// name on its level or the strips' parts in its menu, in a row of the
+    /// Routing panel.
+    fn send_in(
+        &self,
+        ui: &mut Ui,
+        track: &Track,
+        to: &Track,
+        width: f32,
+        strip: bool,
+        actions: &mut Vec<Action>,
+    ) {
         let sizes = self.sizes();
         let send = track.sends.iter().find(|send| send.to == to.id);
         let (level, pre_fader) = send.map_or((0.0, false), |send| {
@@ -1157,8 +1200,9 @@ impl Mixer<'_> {
             (level, send.pre_fader)
         });
         let label = format!("{} Send to {}", track.name, to.name);
-        let width = sizes.inner() - sizes.gap - sizes.pre_button;
-        let control = self.send_control(ui, level, &to.name, &label, width);
+        let width = width - sizes.gap - sizes.pre_button;
+        let name = strip.then_some(to.name.as_str());
+        let control = self.send_control(ui, level, &to.name, name, &label, width);
         if let Some(send) = send {
             let param = ParamAddress::Send(send.id);
             let at = height_of(level, SEND_TOP);
@@ -1177,8 +1221,10 @@ impl Mixer<'_> {
                 ui.separator();
                 self.automation_items(ui, param, actions);
                 modulators::routing_items(ui, self.project, param, actions);
-                ui.separator();
-                self.parts.menu_items(ui, MIXER_STRIP, Some("sends"));
+                if strip {
+                    ui.separator();
+                    self.parts.menu_items(ui, MIXER_STRIP, Some("sends"));
+                }
             });
         }
         moved(control, actions, |level| Change::SendLevel {
@@ -1484,28 +1530,75 @@ impl Mixer<'_> {
     }
 
     /// A send's level, from silence at the left to 0 dB at the right, with
-    /// the return track's name `to` on it. Returns the level the user moved
-    /// it to.
+    /// `name` on it, the return track's, if it has one: the send to `to`.
+    /// Returns it, and the level the user moved it to.
     fn send_control(
         &self,
         ui: &mut Ui,
         level: f32,
         to: &str,
+        name: Option<&str>,
         label: &str,
         width: f32,
     ) -> (Response, Option<f32>) {
-        let size = vec2(width, self.sizes().row - 4.0);
+        let bar = Bar {
+            top: SEND_TOP,
+            reset: 0.0,
+            name,
+            label,
+            width,
+        };
+        let control = self.level_bar(ui, level, bar);
+        let response = control.0.on_hover_text(format!(
+            "Send to {to}: {}\nDrag, or Ctrl-drag to move finely. Double-click to silence it.",
+            decibels(level)
+        ));
+        (response, control.1)
+    }
+
+    /// A channel's volume on its side, as the Routing panel shows a track's
+    /// output: from silence at the left to +6 dB at the right, as its fader
+    /// goes, with a mark at 0 dB.
+    fn volume_bar(
+        &self,
+        ui: &mut Ui,
+        gain: f32,
+        label: &str,
+        width: f32,
+    ) -> (Response, Option<f32>) {
+        let bar = Bar {
+            top: FADER_TOP,
+            reset: 1.0,
+            name: None,
+            label,
+            width,
+        };
+        let control = self.level_bar(ui, gain, bar);
+        let response = control.0.on_hover_text(format!(
+            "Volume: {}\nDrag, or Ctrl-drag to move finely. Double-click for 0 dB.",
+            decibels(gain)
+        ));
+        (response, control.1)
+    }
+
+    /// A level that moves sideways, `bar` says how, filled as far as
+    /// `level`, with its name, if it has one, and its value on it. A
+    /// double-click sets it to the bar's reset. Returns it, and the level
+    /// the user moved it to.
+    fn level_bar(&self, ui: &mut Ui, level: f32, bar: Bar<'_>) -> (Response, Option<f32>) {
+        let top = bar.top;
+        let size = vec2(bar.width, self.sizes().row - 4.0);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let db = decibels_of(level).max(FLOOR);
-        let range = f64::from(FLOOR)..=f64::from(SEND_TOP);
-        let mut moved =
-            slider_info(ui, &response, label, f64::from(db), range).map(|db| gain_of(db as f32));
-        let at = height_of(level, SEND_TOP);
+        let range = f64::from(FLOOR)..=f64::from(top);
+        let mut moved = slider_info(ui, &response, bar.label, f64::from(db), range)
+            .map(|db| gain_of(db as f32));
+        let at = height_of(level, top);
         if let Some(to) = self.dragged(ui, &response, at, rect.width(), false) {
-            moved = Some(gain_at(to, SEND_TOP));
+            moved = Some(gain_at(to, top));
         }
         if response.double_clicked() {
-            moved = Some(0.0);
+            moved = Some(bar.reset);
         }
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
@@ -1514,6 +1607,11 @@ impl Mixer<'_> {
             let mut filled = rect;
             filled.set_width(rect.width() * at);
             painter.rect_filled(filled, 2.0, ui.visuals().selection.bg_fill);
+            if top > 0.0 {
+                let unity = rect.left() + rect.width() * height_of(1.0, top);
+                let mark = ui.visuals().widgets.noninteractive.fg_stroke;
+                painter.vline(unity, rect.y_range(), Stroke::new(1.0, mark.color));
+            }
             let font = FontId::proportional(self.sizes().small_text);
             let color = visuals.text_color();
             let value = painter.text(
@@ -1523,20 +1621,18 @@ impl Mixer<'_> {
                 font.clone(),
                 color,
             );
-            let room = Rect::from_x_y_ranges(rect.left()..=value.left() - 2.0, rect.y_range());
-            painter.with_clip_rect(room).text(
-                rect.left_center() + vec2(3.0, 0.0),
-                Align2::LEFT_CENTER,
-                to,
-                font,
-                color,
-            );
+            if let Some(name) = bar.name {
+                let room = Rect::from_x_y_ranges(rect.left()..=value.left() - 2.0, rect.y_range());
+                painter.with_clip_rect(room).text(
+                    rect.left_center() + vec2(3.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    name,
+                    font,
+                    color,
+                );
+            }
             painter.rect_stroke(rect, 2.0, visuals.bg_stroke, StrokeKind::Inside);
         }
-        let response = response.on_hover_text(format!(
-            "Send to {to}: {}\nDrag, or Ctrl-drag to move finely. Double-click to silence it.",
-            decibels(level)
-        ));
         (response, moved.filter(|&new| new != level))
     }
 

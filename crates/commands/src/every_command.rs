@@ -1476,6 +1476,7 @@ fn examples() -> Vec<Example> {
         leaves(view::TOGGLE_HISTORY, bare),
         leaves(view::TOGGLE_MIXER, bare),
         leaves(view::TOGGLE_PIANO_ROLL, bare),
+        leaves(view::TOGGLE_ROUTING, bare),
         leaves(view::TOGGLE_SAMPLE_EDITOR, bare),
         leaves(view::TOGGLE_SNAP, bare),
         leaves(view::TOGGLE_TAKE_LANES, |s| {

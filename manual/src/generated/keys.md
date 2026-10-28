@@ -65,6 +65,7 @@
 | Ctrl+Shift+Down | Transport: Tempo Down |
 | Ctrl+Alt+B | View: Browser |
 | Ctrl+Alt+H | View: History |
+| Ctrl+Alt+I | View: Routing |
 | Ctrl+Alt+L | View: Devices |
 | Ctrl+Alt+M | View: Mixer |
 | Ctrl+Alt+T | Track: New Return Track |

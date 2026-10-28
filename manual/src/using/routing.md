@@ -6,6 +6,8 @@ its input from another track, to record it or to play it through devices
 of its own, a MIDI track can play and record another's notes, a track can
 resample the master, and a track can be heard through its sends alone. A
 key from one track into a device on another is a [sidechain](sidechains.md).
+The [Routing panel](../window/routing.md) lists them all, with their gains,
+and changes them as the strips do.
 
 ## Taking another track's sound
 

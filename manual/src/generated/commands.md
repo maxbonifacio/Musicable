@@ -129,6 +129,7 @@
 | Command | Keys | Id |
 |---|---|---|
 | Mixer | Ctrl+Alt+M | `view.toggle_mixer` |
+| Routing | Ctrl+Alt+I | `view.toggle_routing` |
 | Devices | Ctrl+Alt+L | `view.toggle_devices` |
 | Piano Roll |  | `view.toggle_piano_roll` |
 | Sample Editor |  | `view.toggle_sample_editor` |
