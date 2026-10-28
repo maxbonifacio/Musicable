@@ -4,7 +4,8 @@ The devices panel shows the devices of the selected track, which a click on
 its header or its mixer strip selects, in the order the signal goes through
 them, left to right, with the track's name over them. Clicking the master
 track's header, at the bottom of the arrangement, or the master's strip
-shows the master's. **Add Device** opens the browser's devices.
+shows the master's. **Add Device** opens the browser's devices, and **Add
+Modulator** adds a modulator to the track.
 
 ## Adding devices
 
@@ -93,6 +94,15 @@ one after it comes back is. A Bypass lane automates the button
 ([Automation](../using/automation.md#bypass)), and clicking it overrides the
 lane, as moving any control does. The Settings window's Mouse page changes
 what a click and an Alt-click do ([The mouse](../customising/mouse.md)).
+
+## Modulators
+
+A track's modulators have cards in its **modulator strip**, at the left of
+its devices, with a line between them, and the strip shows even when the
+track has no devices. Drag a card's handle onto a control, in the devices
+panel or the mixer, to have the modulator move it, and the control shows how
+far its modulators take it
+([Modulation](../using/modulation.md#the-modulator-strip)).
 
 ## Built-in devices
 

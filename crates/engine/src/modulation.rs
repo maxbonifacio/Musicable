@@ -28,6 +28,13 @@
 //! routing's amount is a share of its parameter's range
 //! ([`Routing::amount`]), so the node scales it by the range's length along
 //! the scale; a plugin's parameter takes it in the plugin's own units.
+//!
+//! At each tick, the node also sets the [`Reading`]s it was given, for the
+//! window to show: where its modulators' outputs are, and how far it moves
+//! the parameters of its own channel, all the routings to each together,
+//! as a share of the parameter's range.
+
+use std::sync::Arc;
 
 use musicable_model::modulation::{
     self as model, ModulatorId, ModulatorKind, NoteTrigger, Routing, RoutingId, envelope, lfo,
@@ -36,6 +43,7 @@ use musicable_model::native::ParamInfo;
 use musicable_model::time::{Beats, TempoMap};
 
 use crate::automation::Feed;
+use crate::meter::Reading;
 use crate::{
     AudioMut, Controls, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId,
     ParamId, ProcessContext,
@@ -103,6 +111,8 @@ struct Modulator {
     /// Its outputs' values as of the last tick: one for each control of a
     /// Macro, and one for the other kinds.
     outputs: Vec<f64>,
+    /// Where the window reads each output, if it does.
+    readings: Vec<Option<Arc<Reading>>>,
     /// Whether something besides notes moves its trigger or gate, so Auto
     /// acts as Never.
     trigger_moved: bool,
@@ -240,6 +250,9 @@ struct Target {
     sum: f64,
     /// The sum sent last, for a port's.
     sent: Option<f64>,
+    /// Where the window reads the sum, as a share of the parameter's range,
+    /// if it does, and the length of the range along its scale.
+    reading: Option<(Arc<Reading>, f64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -298,8 +311,27 @@ impl Modulation {
             to,
             sum: 0.0,
             sent: None,
+            reading: None,
         });
         self.targets.len() - 1
+    }
+
+    /// Has the node set `reading` to where its modulators' output `output`
+    /// is, at each tick. Returns whether it has the output.
+    pub fn read_output(&mut self, output: model::Output, reading: Arc<Reading>) -> bool {
+        let Some((m, o)) = self.output(output) else {
+            return false;
+        };
+        self.modulators[m].readings[o] = Some(reading);
+        true
+    }
+
+    /// Has the node set `reading` to how far it moves `target`, at each
+    /// tick: what it sends as a share of `span`, the length of the
+    /// parameter's range along its scale, or 1.0 for a plugin's parameter.
+    pub fn read_target(&mut self, target: usize, reading: Arc<Reading>, span: f64) {
+        assert!(target < self.targets.len(), "the node has the target");
+        self.targets[target].reading = Some((reading, span));
     }
 
     /// Has what another node sends with the returned parameter add to
@@ -439,6 +471,11 @@ impl Modulation {
         };
         for modulator in &mut self.modulators {
             modulator.advance(dt, &song, notes);
+            for (output, reading) in modulator.outputs.iter().zip(&modulator.readings) {
+                if let Some(reading) = reading {
+                    reading.set(*output as f32);
+                }
+            }
         }
 
         let Self {
@@ -473,6 +510,10 @@ impl Modulation {
             targets[relay.target].sum += relay.value;
         }
         for target in targets.iter_mut() {
+            if let Some((reading, span)) = &target.reading {
+                let share = if *span != 0.0 { target.sum / span } else { 0.0 };
+                reading.set(share as f32);
+            }
             match target.to {
                 To::Port(port) => {
                     if (*fresh || target.sent != Some(target.sum))
@@ -519,6 +560,7 @@ impl Modulator {
             id: modulator.id,
             kind,
             outputs: vec![0.0; modulator.outputs().len()],
+            readings: vec![None; modulator.outputs().len()],
             params,
             trigger_moved: false,
         }

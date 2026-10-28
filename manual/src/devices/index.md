@@ -55,6 +55,11 @@ by hand, which overrides the automation until you re-enable it. Right-click
 a control for **Show Automation**, **Re-Enable Automation** and **Clear
 Automation**.
 
+Modulators move a device's bars: right-click one for the routings that
+move it, and **Add Modulation**. A modulated bar has a green line along its
+foot, from as low to as high as its modulators can take it, and a dot where
+they have it ([Modulation](../using/modulation.md#routing-an-output)).
+
 ## The tables on these pages
 
 Each device's page lists its controls group by group, as the devices panel

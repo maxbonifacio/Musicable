@@ -13,6 +13,7 @@ use musicable_commands::{Args, CommandError, Focus, Keymap, Request, arrange, br
 use musicable_engine::{EngineHandle, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_library::Queue;
+use musicable_model::modulation;
 use musicable_model::param::{ParamSpec, Scale};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceId, Project, TrackId};
@@ -1674,10 +1675,21 @@ impl eframe::App for App {
             self.pending.get_or_insert(Request::Quit);
         }
         self.read_audio_files(ctx);
-        self.levels = levels(self.session.meters(), self.session.project());
+        let playing = self.output.info().is_some();
+        let mut levels = levels(self.session.meters(), self.session.project());
+        // Without a stream, nothing moves the modulators, and their
+        // readings are only where they stopped.
+        if !playing {
+            levels.outputs.clear();
+            levels.moved.clear();
+        }
+        // An LFO runs on whether the song plays or not, and a modulated
+        // control's dot with it.
+        let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
+        self.levels = levels;
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
-        let metering = self.output.info().is_some() && self.levels.moving();
+        let metering = playing && (self.levels.moving() || modulating);
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
@@ -1967,7 +1979,8 @@ fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
         .collect()
 }
 
-/// The readings of the meters of `project`'s channels, for the mixer.
+/// The readings of the meters of `project`'s channels, for the mixer, and of
+/// its modulators, for their outputs and the controls they move.
 fn levels(meters: &Meters, project: &Project) -> Levels {
     let read = |meter: &Meter| {
         let level = meter.level();
@@ -1982,9 +1995,27 @@ fn levels(meters: &Meters, project: &Project) -> Levels {
         .iter()
         .filter_map(|track| Some((track.id, read(meters.track(track.id)?))))
         .collect();
+    let (mut outputs, mut moved) = (BTreeMap::new(), BTreeMap::new());
+    for (_, strip) in project.modulations() {
+        for modulator in &strip.modulators {
+            for n in modulator.outputs() {
+                let output = modulation::Output::new(modulator.id, n);
+                if let Some(reading) = meters.output(output) {
+                    outputs.insert(output, reading.get());
+                }
+            }
+        }
+        for routing in &strip.routings {
+            if let Some(reading) = meters.moved(routing.to) {
+                moved.insert(routing.to, reading.get());
+            }
+        }
+    }
     Levels {
         tracks,
         master: read(meters.master()),
+        outputs,
+        moved,
     }
 }
 

@@ -192,9 +192,10 @@ impl ParamInfo {
         }
     }
 
-    /// Its name with its group's: "Band 1 Freq".
+    /// Its name with its group's: "Band 1 Freq". A parameter named after
+    /// its group, as an LFO's Rate is, is its name alone.
     pub fn full_name(&self) -> String {
-        if self.group.is_empty() {
+        if self.group.is_empty() || self.group == self.name {
             self.name.to_owned()
         } else {
             format!("{} {}", self.group, self.name)

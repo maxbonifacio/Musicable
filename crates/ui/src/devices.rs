@@ -1,7 +1,8 @@
 //! The devices panel, under the arrangement: the devices of the selected
 //! track, which can be the master track, in the order they play, with the
-//! controls of Musicable's own and the side inputs of plugins. Clicks on
-//! their title bars select them, as the mouse map says, and drags move
+//! controls of Musicable's own and the side inputs of plugins, and the
+//! track's modulators at their left ([`modulators`]). Clicks on the
+//! devices' title bars select them, as the mouse map says, and drags move
 //! them along the chain, or onto a track or a mixer strip, or copy them
 //! there with Ctrl. And the browser's list of Musicable's own devices and
 //! the plugins installed, which adds them to the devices the panel shows.
@@ -20,6 +21,7 @@ use musicable_model::param::ParamSpec;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::{self, Destination, Dragged};
+use crate::modulators;
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::native::{self, sidechain};
 use crate::search::score;
@@ -153,19 +155,25 @@ impl DevicesPanel {
                     .button("Add Device...")
                     .on_hover_text("Shows the browser")
                     .clicked();
+                if let Some(chain) = chain.filter(|_| name.is_some()) {
+                    modulators::add_menu(ui, chain, actions);
+                }
             });
         });
         ui.add_space(theme.devices.margin);
         self.boxes.clear();
         self.sight = None;
-        let devices = chain.and_then(|chain| project.devices(chain));
-        let Some(devices) = devices else {
+        let shown = chain.and_then(|chain| Some((chain, project.devices(chain)?)));
+        let Some((chain, devices)) = shown else {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new(NO_TRACK).weak());
             });
             return browse;
         };
-        if devices.is_empty() {
+        let modulators = project
+            .modulation(chain)
+            .is_some_and(|m| !m.modulators.is_empty());
+        if devices.is_empty() && !modulators {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new(NO_DEVICES).weak());
             });
@@ -179,6 +187,14 @@ impl DevicesPanel {
             let beside = ui.interact(ui.clip_rect(), ui.scope_id().with("beside"), Sense::click());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = theme.devices.gap;
+                // The modulators first, apart from the devices.
+                if modulators {
+                    modulators::strip(ui, chain, view, theme, mouse, actions);
+                    ui.separator();
+                }
+                if devices.is_empty() {
+                    ui.label(RichText::new(NO_DEVICES).weak());
+                }
                 for device in devices {
                     ui.push_id(device.id, |ui| {
                         let saving = &mut self.saving;

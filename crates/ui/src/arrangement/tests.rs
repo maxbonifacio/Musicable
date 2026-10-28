@@ -12,6 +12,7 @@ use musicable_commands::editor::{AudioFile, Selection};
 use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registry, Request};
 use musicable_model::automation::Lane;
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing, Warping};
+use musicable_model::modulation::{ModulatorKind, lfo};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::Warp;
 use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
@@ -1553,6 +1554,34 @@ fn an_automation_lanes_header_chooses_adds_and_hides_lanes() {
         .click();
     harness.run();
     assert_eq!(shown(&harness), [ParamAddress::Volume(chain)]);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn modulators_parameters_have_lanes_named_after_them() {
+    let (mut project, ids) = project();
+    let lfo = project.new_modulator(ModulatorKind::Lfo, "Wobble");
+    let rate = ParamAddress::Modulator(lfo.id, lfo::RATE as u32);
+    let track = project.track_mut(ids.drums).unwrap();
+    track.modulation.modulators.push(lfo);
+    let mut harness = harness(project);
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    // The chooser offers each modulator's parameters after the devices'.
+    harness
+        .get_by_label("Choose the parameter of Volume of Drums")
+        .click();
+    harness.run();
+    harness.get_by_label("Wobble").hover();
+    harness.run();
+    harness.get_by_label("Rate").click();
+    harness.run();
+    let automation = &harness.state().editor().automation;
+    assert_eq!(automation.get(&Chain::Track(ids.drums)), Some(&vec![rate]));
+    let header = harness.get_by_label("Wobble: Rate of Drums");
+    assert_eq!(header.value().as_deref(), Some("1.00 Hz"));
     assert!(harness.state().errors.is_empty());
 }
 

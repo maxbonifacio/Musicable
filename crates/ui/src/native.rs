@@ -1,24 +1,33 @@
-//! The controls of Musicable's own devices, in the devices panel. Each
-//! parameter has one: a bar to drag for a number, a button for a switch and
-//! a menu for a choice. They stand in columns in the order of the device's
-//! table, a column for each group of parameters, such as an EQ's band. The
-//! Compressor's and the Gate's Sidechain column starts with its sources
-//! (see [`sidechain`]), which a plugin's side inputs have too.
+//! The controls of Musicable's own devices, in the devices panel, and of
+//! the modulators in the strip beside them. Each parameter has one: a bar
+//! to drag for a number, a button for a switch and a menu for a choice.
+//! They stand in columns in the order of the device's table, a column for
+//! each group of parameters, such as an EQ's band. The Compressor's and the
+//! Gate's Sidechain column starts with its sources (see [`sidechain`]),
+//! which a plugin's side inputs have too.
+//!
+//! A bar that modulators move shows how far they can move it, and where
+//! they have it, and takes a modulator's output dragged onto it
+//! ([`modulators`]). Its menu has what moves it.
 
 pub(crate) mod sidechain;
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{
     Align2, Color32, ComboBox, FontId, Id, Key, Popup, Rangef, Rect, Response, RichText, Sense,
-    StrokeKind, TextEdit, Ui, vec2,
+    StrokeKind, TextEdit, Ui, pos2, vec2,
 };
-use musicable_commands::{Args, device, wire};
+use musicable_commands::{Args, device, edit, modulation, wire};
+use musicable_model::modulation::{ControlKind, Modulator, ModulatorId};
 use musicable_model::native::{NativeDevice, ParamInfo, Unit};
 use musicable_model::param::ParamAddress;
-use musicable_model::routing::WireId;
+use musicable_model::routing::{Port, WireId};
 use musicable_model::{DeviceId, Project};
 
-use crate::mixer::{automated_value, automation_items, automation_mark, name_menu, slider_info};
+use crate::mixer::{
+    Levels, automated_value, automation_items, automation_mark, name_menu, slider_info,
+};
+use crate::modulators::{self, Travel};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -56,7 +65,12 @@ fn columns(params: &[ParamInfo]) -> Vec<Vec<usize>> {
 
 /// How wide `device`'s controls are, side by side.
 pub(crate) fn width(device: &NativeDevice, theme: &Theme) -> f32 {
-    let columns = columns(device.params()).len() as f32;
+    table_width(device.params(), theme)
+}
+
+/// How wide the controls of a table of `params` are, side by side.
+pub(crate) fn table_width(params: &[ParamInfo], theme: &Theme) -> f32 {
+    let columns = columns(params).len() as f32;
     let sizes = &theme.devices;
     columns * sizes.control + (columns - 1.0).max(0.0) * sizes.gap
 }
@@ -76,72 +90,168 @@ pub(crate) fn controls(
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
 ) {
-    let params = device.params();
-    // A device without groups needs no headings.
-    let headed = params.iter().any(|info| !info.group.is_empty());
     // The side input whose sources the Sidechain column picks.
     let port = view.project.ports(id).first().copied();
-    let width = theme.devices.control;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = theme.devices.gap;
-        let mut group = None;
-        for column in columns(params) {
-            // A group's name heads its first column.
-            let title = params[column[0]].group;
-            let heading = if group == Some(title) { "" } else { title };
-            group = Some(title);
-            let port = port.filter(|_| heading == SIDECHAIN);
-            ui.vertical(|ui| {
-                ui.set_width(width);
-                if headed {
-                    let heading = ui.label(RichText::new(heading).size(theme.small_text).weak());
-                    if let Some(port) = port {
-                        sidechain::add(ui, heading.rect, port, name, view, theme, actions);
+    let table = Table {
+        name,
+        params: device.params(),
+        values: &device.values,
+        setting: &|index| Setting::Param(id, index),
+        port,
+    };
+    table.show(ui, view, theme, mouse, actions);
+}
+
+/// Shows the controls of `modulator`, an LFO or an Envelope, as a built-in
+/// device's are, and asks for the changes the user makes to it.
+pub(crate) fn modulator_controls(
+    ui: &mut Ui,
+    modulator: &Modulator,
+    view: &View<'_>,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    let id = modulator.id;
+    let table = Table {
+        name: &modulator.name,
+        params: modulator.kind.params(),
+        values: &modulator.values,
+        setting: &|index| Setting::Modulator(id, index as u32),
+        port: None,
+    };
+    table.show(ui, view, theme, mouse, actions);
+}
+
+/// Shows the control of a Macro's knob or button, `width` wide, and asks
+/// for the changes the user makes to it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn macro_control(
+    ui: &mut Ui,
+    modulator: &Modulator,
+    control: &musicable_model::modulation::Control,
+    width: f32,
+    view: &View<'_>,
+    theme: &Theme,
+    mouse: &MouseMap,
+    actions: &mut Vec<Action>,
+) {
+    let setting = Setting::Modulator(modulator.id, control.id);
+    let info = control.kind.param();
+    let playhead = view.playback.playhead;
+    let value = automated_value(view.project, setting.address(), playhead, control.value);
+    let shown = Control {
+        setting,
+        info,
+        name: &control.name,
+        label: format!("{} {}", modulator.name, control.name),
+        project: view.project,
+        levels: view.levels,
+    };
+    ui.push_id(control.id, |ui| {
+        shown.show(ui, info.clamp(value), width, theme, mouse, actions);
+    });
+}
+
+/// A table of parameters, as a built-in device or a modulator has.
+struct Table<'a> {
+    /// What the panel calls what they're the parameters of.
+    name: &'a str,
+    params: &'a [ParamInfo],
+    /// Their own values, in order.
+    values: &'a [f64],
+    /// What sets each, by its place in the table.
+    setting: &'a dyn Fn(usize) -> Setting,
+    /// A device's side input, whose sources its Sidechain column picks.
+    port: Option<Port>,
+}
+
+impl Table<'_> {
+    /// Shows the controls in their columns.
+    fn show(
+        &self,
+        ui: &mut Ui,
+        view: &View<'_>,
+        theme: &Theme,
+        mouse: &MouseMap,
+        actions: &mut Vec<Action>,
+    ) {
+        let Self {
+            name,
+            params,
+            values,
+            port,
+            ..
+        } = *self;
+        // A table without groups needs no headings.
+        let headed = params.iter().any(|info| !info.group.is_empty());
+        let width = theme.devices.control;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = theme.devices.gap;
+            let mut group = None;
+            for column in columns(params) {
+                // A group's name heads its first column.
+                let title = params[column[0]].group;
+                let heading = if group == Some(title) { "" } else { title };
+                group = Some(title);
+                let port = port.filter(|_| heading == SIDECHAIN);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    if headed {
+                        let heading =
+                            ui.label(RichText::new(heading).size(theme.small_text).weak());
+                        if let Some(port) = port {
+                            sidechain::add(ui, heading.rect, port, name, view, theme, actions);
+                        }
                     }
-                }
-                let show = |ui: &mut Ui, index: usize, width: f32, actions: &mut Vec<Action>| {
-                    let param = Setting::Param(id, index);
-                    let playhead = view.playback.playhead;
-                    let own = device.values[index];
-                    let automated = automated_value(view.project, param.address(), playhead, own);
-                    // Between points, a switch or a choice shows its
-                    // nearest value.
-                    let value = params[index].clamp(automated);
-                    let control = Control {
-                        setting: param,
-                        info: &params[index],
-                        label: format!("{name} {}", params[index].full_name()),
-                        project: view.project,
+                    let show =
+                        |ui: &mut Ui, index: usize, width: f32, actions: &mut Vec<Action>| {
+                            let param = (self.setting)(index);
+                            let playhead = view.playback.playhead;
+                            let own = values[index];
+                            let automated =
+                                automated_value(view.project, param.address(), playhead, own);
+                            // Between points, a switch or a choice shows its
+                            // nearest value.
+                            let value = params[index].clamp(automated);
+                            let control = Control {
+                                setting: param,
+                                info: &params[index],
+                                name: params[index].name,
+                                label: format!("{name} {}", params[index].full_name()),
+                                project: view.project,
+                                levels: view.levels,
+                            };
+                            ui.push_id(index, |ui| {
+                                control.show(ui, value, width, theme, mouse, actions)
+                            });
+                        };
+                    let Some(port) = port else {
+                        for index in column {
+                            show(ui, index, width, actions);
+                        }
+                        return;
                     };
-                    ui.push_id(index, |ui| {
-                        control.show(ui, value, width, theme, mouse, actions)
+                    sidechain::sources(ui, port, name, view, theme, mouse, actions);
+                    // Its switches are short, so they share a row, above its
+                    // filters.
+                    let (switches, others): (Vec<usize>, Vec<usize>) =
+                        (column.iter()).partition(|&&index| params[index].unit == Unit::Switch);
+                    ui.horizontal(|ui| {
+                        let gap = ui.spacing().item_spacing.x;
+                        let count = switches.len().max(1) as f32;
+                        let each = (width - gap * (count - 1.0)) / count;
+                        for index in switches {
+                            show(ui, index, each, actions);
+                        }
                     });
-                };
-                let Some(port) = port else {
-                    for index in column {
+                    for index in others {
                         show(ui, index, width, actions);
                     }
-                    return;
-                };
-                sidechain::sources(ui, port, name, view, theme, mouse, actions);
-                // Its switches are short, so they share a row, above its
-                // filters.
-                let (switches, others): (Vec<usize>, Vec<usize>) =
-                    (column.iter()).partition(|&&index| params[index].unit == Unit::Switch);
-                ui.horizontal(|ui| {
-                    let gap = ui.spacing().item_spacing.x;
-                    let count = switches.len().max(1) as f32;
-                    let each = (width - gap * (count - 1.0)) / count;
-                    for index in switches {
-                        show(ui, index, each, actions);
-                    }
                 });
-                for index in others {
-                    show(ui, index, width, actions);
-                }
-            });
-        }
-    });
+            }
+        });
+    }
 }
 
 /// What a control sets.
@@ -151,6 +261,9 @@ enum Setting {
     Param(DeviceId, usize),
     /// A wire's gain.
     WireGain(WireId),
+    /// Parameter `n` of a modulator: an LFO's or an Envelope's, by its place
+    /// in the kind's table, or a Macro's knob or button.
+    Modulator(ModulatorId, u32),
 }
 
 impl Setting {
@@ -159,6 +272,7 @@ impl Setting {
         match self {
             Self::Param(device, index) => ParamAddress::Device(device, index as u32),
             Self::WireGain(wire) => ParamAddress::Wire(wire),
+            Self::Modulator(modulator, n) => ParamAddress::Modulator(modulator, n),
         }
     }
 
@@ -176,6 +290,13 @@ impl Setting {
                 let args = Args::new().with("wire", wire).with("gain", value);
                 Action::RunWith(wire::SET_GAIN, args)
             }
+            Self::Modulator(modulator, n) => {
+                let args = Args::new()
+                    .with("modulator", modulator)
+                    .with("param", i64::from(n))
+                    .with("value", value);
+                Action::RunWith(modulation::SET_PARAM, args)
+            }
         }
     }
 }
@@ -184,10 +305,15 @@ impl Setting {
 struct Control<'a> {
     setting: Setting,
     info: &'a ParamInfo,
+    /// What it says on it: its name in its table, or a Macro's control's
+    /// own.
+    name: &'a str,
     /// What screen readers call it: "EQ Band 1 Freq".
     label: String,
-    /// The project, for the parameter's automation.
+    /// The project, for the parameter's automation and what modulates it.
     project: &'a Project,
+    /// Where modulators have it, for its dot.
+    levels: &'a Levels,
 }
 
 impl Control<'_> {
@@ -206,10 +332,22 @@ impl Control<'_> {
         match info.unit {
             Unit::Switch => {
                 let on = value >= 0.5;
-                let face = Face::Text(info.name);
-                let button = toggle(ui, face, on, theme.switch, &self.label, size, theme)
-                    .on_hover_text(format!("{}: {}", info.full_name(), info.format(value)));
-                if button.clicked() {
+                let face = Face::Text(self.name);
+                let button = toggle(ui, face, on, theme.switch, &self.label, size, theme);
+                let momentary =
+                    self.macro_control().map(|(_, c)| c.kind) == Some(ControlKind::Momentary);
+                let hint = match momentary {
+                    true => "\nOn while it's held.",
+                    false => "",
+                };
+                let button = button.on_hover_text(format!(
+                    "{}: {}{hint}",
+                    self.full_name(),
+                    info.format(value)
+                ));
+                if momentary {
+                    self.hold(ui, &button, actions);
+                } else if button.clicked() {
                     actions.push(self.set(if on { 0.0 } else { 1.0 }));
                 }
                 self.automated(ui, &button, theme, actions);
@@ -275,15 +413,72 @@ impl Control<'_> {
         self.setting.address()
     }
 
+    /// What its hover text and its menu call it: "Rate Note", or a Macro's
+    /// control's own name.
+    fn full_name(&self) -> String {
+        match self.macro_control() {
+            Some(_) => self.name.to_owned(),
+            None => self.info.full_name(),
+        }
+    }
+
+    /// The Macro and the knob or button, if it's one of a Macro's.
+    fn macro_control(&self) -> Option<(&Modulator, &musicable_model::modulation::Control)> {
+        let Setting::Modulator(id, n) = self.setting else {
+            return None;
+        };
+        let (_, _, modulator) = self.project.find_modulator(id)?;
+        Some((modulator, modulator.control(n)?))
+    }
+
+    /// Holds the momentary button `button` on while the pointer is held
+    /// down on it, as one gesture: letting go turns it off again, and the
+    /// step in the undo history goes with it.
+    fn hold(&self, ui: &Ui, button: &Response, actions: &mut Vec<Action>) {
+        let held = button.id.with("held");
+        let was = ui.data(|data| data.get_temp::<bool>(held)).unwrap_or(false);
+        let down = button.is_pointer_button_down_on();
+        if down && !was {
+            actions.extend([Action::BeginGesture, self.set(1.0)]);
+        } else if was && !down {
+            actions.extend([self.set(0.0), Action::EndGesture]);
+        }
+        ui.data_mut(|data| data.insert_temp(held, down));
+    }
+
     /// Marks the control `response` if the parameter has automation, and
-    /// gives it a menu of the automation's commands. The menu has an id of
-    /// its own, so it leaves a choice's own menu be.
+    /// gives it a menu of the automation's commands, and the rest of
+    /// [`menu_items`](Self::menu_items). The menu has an id of its own, so
+    /// it leaves a choice's own menu be.
     fn automated(&self, ui: &Ui, response: &Response, theme: &Theme, actions: &mut Vec<Action>) {
-        let param = self.param();
-        automation_mark(ui, theme, self.project, response, param);
+        automation_mark(ui, theme, self.project, response, self.param());
         Popup::context_menu(response)
             .id(response.id.with("automation"))
-            .show(|ui| automation_items(ui, self.project, param, actions));
+            .show(|ui| self.menu_items(ui, actions));
+    }
+
+    /// What the control's menu has besides a typed value: its automation's
+    /// commands, what modulates it, and for a Macro's knob or button,
+    /// renaming and deleting it.
+    fn menu_items(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let param = self.param();
+        automation_items(ui, self.project, param, actions);
+        modulators::routing_items(ui, self.project, param, actions);
+        let Some((modulator, control)) = self.macro_control() else {
+            return;
+        };
+        ui.separator();
+        let args = Args::new()
+            .with("modulator", modulator.id)
+            .with("control", i64::from(control.id));
+        if ui.button("Rename...").clicked() {
+            actions.push(Action::RunWith(edit::RENAME, args.clone()));
+            ui.close();
+        }
+        if ui.button(format!("Delete {}", control.name)).clicked() {
+            actions.push(Action::RunWith(modulation::DELETE_CONTROL, args));
+            ui.close();
+        }
     }
 
     /// The command that sets the parameter to `value`.
@@ -337,21 +532,35 @@ impl Control<'_> {
         if ui.is_rect_visible(rect) {
             self.paint(ui, &response, rect, value, at, theme);
         }
+        // Along its foot, how far modulators can move it.
+        let foot = rect.bottom() - 2.0;
+        let travel = Travel {
+            low: pos2(rect.left(), foot),
+            high: pos2(rect.right(), foot),
+        };
+        let param = self.param();
+        let shown = modulators::Shown {
+            project: self.project,
+            levels: self.levels,
+            param,
+        };
+        actions.extend(shown.on(ui, &response, travel, at, theme));
         let response = response.on_hover_text(format!(
             "{}: {}\nDrag, or Ctrl-drag to move finely. Double-click for the default, {}. \
              Right-click to type a value.",
-            info.full_name(),
+            self.full_name(),
             info.format(value),
             info.format(info.default),
         ));
         let typed_id = response.id.with("typed");
+        let name = self.full_name();
         let menu = response.context_menu(|ui| {
-            if let Some(typed) = typed(ui, typed_id, info, value, theme.small_text) {
+            if let Some(typed) = typed(ui, typed_id, info, &name, value, theme.small_text) {
                 moved = Some(typed);
                 ui.close();
             }
             ui.separator();
-            automation_items(ui, self.project, self.param(), actions);
+            self.menu_items(ui, actions);
         });
         // The menu starts from the value each time it opens.
         if menu.is_none() {
@@ -391,7 +600,7 @@ impl Control<'_> {
         painter.with_clip_rect(room).text(
             rect.left_center() + vec2(3.0, 0.0),
             Align2::LEFT_CENTER,
-            info.name,
+            self.name,
             font,
             color,
         );
@@ -399,14 +608,21 @@ impl Control<'_> {
     }
 }
 
-/// The right-click menu's field for typing a value, kept under `id` while
-/// the menu is open, with a hint under it in `small_text`. Returns the
-/// value typed, once Enter takes it.
-fn typed(ui: &mut Ui, id: Id, info: &ParamInfo, value: f64, small_text: f32) -> Option<f64> {
+/// The right-click menu's field for typing a value of the parameter called
+/// `name`, kept under `id` while the menu is open, with a hint under it in
+/// `small_text`. Returns the value typed, once Enter takes it.
+fn typed(
+    ui: &mut Ui,
+    id: Id,
+    info: &ParamInfo,
+    name: &str,
+    value: f64,
+    small_text: f32,
+) -> Option<f64> {
     let stored = ui.data(|data| data.get_temp::<String>(id));
     let first = stored.is_none();
     let mut text = stored.unwrap_or_else(|| info.format(value));
-    let name = ui.label(RichText::new(info.full_name()).weak());
+    let name = ui.label(RichText::new(name).weak());
     let width = ui.spacing().text_edit_width / 2.0;
     let field = ui
         .add(TextEdit::singleline(&mut text).desired_width(width))

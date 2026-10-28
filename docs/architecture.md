@@ -469,11 +469,14 @@ where a part has started, what's built.
   parameters say whether they can be modulated (`ParamInfo::modulated`),
   and add modulation frame by frame, after their smoothing
   (`automation::Param::modulate`). CLAP plugins get it as CLAP's parameter
-  modulation, for one note too. Still to come: the app's modulator strip,
-  more kinds, VST3 plugins, which keep their base values in the project to
-  get modulation as plain parameter changes, and modulators that run a copy
-  for each voice, for which CLAP plugins and the built-in instruments say
-  when their voices end (`Node::ended_voices`).
+  modulation, for one note too. The app's modulator strip draws them, and
+  routes them with a drag onto the controls they move, which show how far
+  they move them (`musicable_ui::modulators`;
+  [app.md](app.md#the-modulator-strip)). Still to come: more kinds, VST3
+  plugins, which keep their base values in the project to get modulation
+  as plain parameter changes, and modulators that run a copy for each
+  voice, for which CLAP plugins and the built-in instruments say when their
+  voices end (`Node::ended_voices`).
 - **Online sounds and services.** The browser's library keeps a `Record`
   for each file, with room for analysis: tags, measurements, and the
   embedding that searching with a sound compares.

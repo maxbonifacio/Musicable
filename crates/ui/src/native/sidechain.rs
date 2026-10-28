@@ -108,8 +108,10 @@ pub(crate) fn sources(
             let control = Control {
                 setting,
                 info: gain,
+                name: gain.name,
                 label: format!("{name} {input} {}{number}", gain.name),
                 project,
+                levels: view.levels,
             };
             control.show(ui, gain.clamp(value), width, theme, mouse, actions);
         });

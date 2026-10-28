@@ -47,7 +47,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use musicable_model::mixer::Bus;
-use musicable_model::modulation::{ModulatorKind, Routing, envelope, lfo};
+use musicable_model::modulation::{ModulatorKind, Output, Routing, envelope, lfo};
 use musicable_model::param::ParamAddress;
 use musicable_model::routing::{self, Tap};
 use musicable_model::time::TempoMap;
@@ -748,7 +748,7 @@ fn build(
             .add_tap(*node)
             .expect("the stems' nodes were just added");
     }
-    modulate(project, &mut graph);
+    modulate(project, meters, &mut graph);
 
     // A parameter whose node isn't in the graph, such as a missing
     // plugin's, has nothing to automate.
@@ -789,7 +789,9 @@ enum Port {
 /// channel's parameter goes through that channel's node, which relays it,
 /// and one to a parameter whose node isn't in the graph, such as a missing
 /// plugin's, moves nothing. A MIDI track's node gets the track's notes.
-fn modulate(project: &Project, graph: &mut Graph) {
+/// The nodes set the readings in `meters` of their modulators' outputs and
+/// of the parameters they move.
+fn modulate(project: &Project, meters: &Meters, graph: &mut Graph) {
     let routings: Vec<(Chain, &Routing)> = (project.modulations())
         .flat_map(|(chain, modulation)| modulation.routings.iter().map(move |r| (chain, r)))
         .filter(|&(chain, r)| !r.bypassed && project.routing_plays(chain, r))
@@ -799,10 +801,18 @@ fn modulate(project: &Project, graph: &mut Graph) {
             let moved = |&(_, r): &(Chain, &Routing)| project.param_chain(r.to) == Some(chain);
             !modulation.modulators.is_empty() || routings.iter().any(moved)
         })
-        .map(|(chain, modulation)| Plan {
-            chain,
-            node: Modulation::new(&modulation.modulators),
-            ports: Vec::new(),
+        .map(|(chain, modulation)| {
+            let mut node = Modulation::new(&modulation.modulators);
+            for modulator in &modulation.modulators {
+                for n in modulator.outputs() {
+                    let output = Output::new(modulator.id, n);
+                    if let Some(reading) = meters.output(output) {
+                        node.read_output(output, Arc::clone(reading));
+                    }
+                }
+            }
+            let ports = Vec::new();
+            Plan { chain, node, ports }
         })
         .collect();
     let plan = |plans: &[Plan], chain: Chain| {
@@ -836,6 +846,11 @@ fn modulate(project: &Project, graph: &mut Graph) {
         let span = project.param_spec(param).map_or(1.0, |spec| {
             spec.scale.position(spec.max) - spec.scale.position(spec.min)
         });
+        if let Some(reading) = meters.moved(param) {
+            plans[at]
+                .node
+                .read_target(target, Arc::clone(reading), span);
+        }
         let mut owners: Vec<Chain> = (routings.iter())
             .filter(|(_, r)| r.to == param)
             .map(|&(owner, _)| owner)
@@ -2283,6 +2298,25 @@ mod tests {
         knob_on(&mut p, Chain::Track(drums), drums, 1.0);
         knob_on(&mut p, Chain::Master, bass, 0.0);
         assert!(!silent(&p));
+    }
+
+    #[test]
+    fn the_nodes_read_out_their_outputs_and_what_they_move() {
+        let (mut p, drums, bass) = two_tones();
+        let on_drums = knob_on(&mut p, Chain::Track(drums), drums, 1.0);
+        // Through the bass's node, which reads out the sum there.
+        let on_master = knob_on(&mut p, Chain::Master, bass, 0.5);
+        let mut meters = Meters::new();
+        meters.follow(&p);
+        render(compile_metered(&p, &meters).prepare(&CONFIG).unwrap(), 128);
+        let output = |id| meters.output(Output::new(id, 0)).unwrap().get();
+        assert_eq!((output(on_drums), output(on_master)), (1.0, 0.5));
+        let moved = |track| {
+            (meters.moved(ParamAddress::Volume(Chain::Track(track))))
+                .unwrap()
+                .get()
+        };
+        assert_eq!((moved(drums), moved(bass)), (-1.0, -0.5));
     }
 
     #[test]

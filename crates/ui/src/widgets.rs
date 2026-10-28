@@ -142,8 +142,8 @@ pub(crate) fn meter(ui: &mut Ui, value: Option<f32>, size: Vec2, theme: &Theme) 
 
 /// How a toggle button shows what it does.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Face {
-    Text(&'static str),
+pub(crate) enum Face<'a> {
+    Text(&'a str),
     /// A dot, as record buttons have.
     Dot,
     /// A triangle pointing down, for a button that opens a menu.
@@ -157,7 +157,7 @@ pub(crate) enum Face {
 /// while `on`, named `label` for screen readers.
 pub(crate) fn toggle(
     ui: &mut Ui,
-    face: Face,
+    face: Face<'_>,
     on: bool,
     color: Color32,
     label: &str,
@@ -176,7 +176,7 @@ pub(crate) fn paint_toggle(
     ui: &Ui,
     rect: Rect,
     response: &Response,
-    face: Face,
+    face: Face<'_>,
     on: bool,
     color: Color32,
     theme: &Theme,

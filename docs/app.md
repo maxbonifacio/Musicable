@@ -661,6 +661,43 @@ lists it first among each device's parameters, and the lane's header says
 bypass parameter isn't listed, as the device's Bypass covers it
 ([plugins.md](plugins.md#plugins-on-tracks)).
 
+### The modulator strip
+
+[Modulation](../manual/src/using/modulation.md) in the manual has what the
+strip does. `modulators::strip` draws a card for each of the chain's
+modulators at the left of the devices panel, before a separator, and the
+panel shows it whenever the chain has modulators, devices or not. **Add
+Modulator**, in the panel's header, runs `modulation.add`. A Macro's card
+draws its knobs and buttons as `native::macro_control`s, and an LFO's or an
+Envelope's draws its parameters in the built-in devices' columns
+(`native::modulator_controls`), so their bars, menus and automation marks
+are the devices' own. A momentary button sends 1 when it's pressed and 0
+when it's let go, inside one gesture (`Action::BeginGesture`), so the two
+edits cancel out and the history keeps no step.
+
+Each output has a handle, filled to its reading. Dragging one carries a
+`browser::Dragged::Output` in egui's drag and drop, which the browser's
+drop targets ignore. Every control that modulators move checks for it as
+it's drawn (`modulators::Shown::on`): it's outlined while the output could
+move it, as `modulation.add_routing` would take it (in reach, a parameter
+that can be modulated, and not one the output moves already), and being let
+go over adds the routing at 25%. The devices' bars, the mixer's faders, pans
+and sends, and the sidechains' gains all go through `Shown`, which also
+draws the line from as low to as high as the routings can take the control
+(`modulators::reach`, adding up each routing's span after its curve and
+scale, times its amount) and the dot where the reading has it, in the
+theme's `modulation` colour. Each control's menu lists its routings
+(`modulators::routing_items`), each opening to its settings, and the
+handle's menu lists the output's, with **Route To**. Dragging a routing's
+Amount or Lag is a gesture, so the history keeps one step for it.
+
+The readings come from the engine's `Meters`, which the app follows with
+the project, as it does the meters ([engine.md](engine.md#built-in-devices)),
+and hands the window each frame in `mixer::Levels::outputs` and `moved`. It
+redraws at 60 frames a second while they change, and clears them while no
+audio plays, so a stopped engine's last readings don't linger: a Macro's
+handles then show its controls' own values.
+
 ## Built-in devices
 
 [Built-in devices](../manual/src/devices/index.md) in the manual has a page
@@ -1254,6 +1291,10 @@ can't compile wgpu's shaders). Wine's WASAPI plays into PulseAudio.
 - A plugin's parameters in the devices panel; crossfading the swap when a
   device moves while the song plays, which switches at once for now; and
   grouping the selected devices, which Ctrl+G is kept free for.
+- For modulators: Macro colours and snapshots, and routing to a VST3
+  plugin's parameters, which Route To leaves out until the engine moves
+  them. A plugin's parameters have no controls to drag a handle onto yet,
+  so Route To is the way to them.
 - In the browser: analysis, which will tag sounds by how they sound and
   find similar ones by an embedding; previews in time with the song;
   watching the library's folders, which are looked through at each start

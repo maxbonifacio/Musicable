@@ -20,6 +20,7 @@ use egui::{
 };
 use musicable_commands::{Args, browser, device};
 use musicable_library::{FileId, Index, Preset, PresetKind, Record};
+use musicable_model::modulation::Output;
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
 use musicable_model::{Chain, DeviceId, PluginFormat, TrackId};
@@ -131,6 +132,14 @@ pub(crate) enum Dragged {
         copy: bool,
         name: String,
     },
+    /// A modulator's output, by its handle on its card, from the strip of
+    /// `owner`: it goes onto a control, which it moves from then on. `name`
+    /// is the output's.
+    Output {
+        output: Output,
+        owner: Chain,
+        name: String,
+    },
 }
 
 /// Where something dragged is let go.
@@ -167,6 +176,7 @@ impl Dragged {
                 name, copy: true, ..
             } => format!("Copy {name}"),
             Self::Devices { name, .. } => name.clone(),
+            Self::Output { name, .. } => format!("Modulate with {name}"),
         }
     }
 
@@ -195,6 +205,8 @@ impl Dragged {
                 let command = if *copy { device::COPY } else { device::MOVE };
                 (command, Args::new().with("devices", devices.clone()))
             }
+            // Outputs go onto controls, which take them themselves.
+            Self::Output { .. } => return None,
         };
         let (command, args) = args;
         let args = match *target {

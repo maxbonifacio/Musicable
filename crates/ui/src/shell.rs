@@ -10,8 +10,8 @@ use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
 use musicable_commands::{
     Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Steps,
-    Value, arrange, controllers, edit, locator, notes, options, take, track, transport, view, warp,
-    workspace,
+    Value, arrange, controllers, edit, locator, modulation, notes, options, take, track, transport,
+    view, warp, workspace,
 };
 use musicable_model::clip::{ClipContent, ClipId};
 use musicable_model::native::NativeKind;
@@ -1063,41 +1063,51 @@ impl Shell {
         self.mouse = mouse;
     }
 
-    /// The box that renames a track, a clip, a locator or a take, while
-    /// one is renamed. Enter runs the command that renames it.
+    /// The box that renames a track, a clip, a locator, a take, a modulator
+    /// or a Macro's control, while one is renamed. Enter runs the command
+    /// that renames it.
     fn show_rename(&mut self, ctx: &egui::Context, view: &View<'_>, actions: &mut Vec<Action>) {
         let Some(rename) = &mut self.rename else {
             return;
         };
         let project = view.project;
-        let (title, current, command, arg, value): (_, _, _, _, Value) = match rename.named {
+        let on = |arg: &str, value: Value| Args::new().with(arg, value);
+        let (title, current, command, args) = match rename.named {
             Named::Track(id) => (
                 "Rename Track",
                 project.track(id).map(|t| t.name.clone()),
                 track::RENAME,
-                "track",
-                id.into(),
+                on("track", id.into()),
             ),
             Named::Clip(id) => (
                 "Rename Clip",
                 project.find_clip(id).map(|(_, c)| c.name.clone()),
                 arrange::RENAME,
-                "clip",
-                id.into(),
+                on("clip", id.into()),
             ),
             Named::Locator(id) => (
                 "Rename Locator",
                 project.locator(id).map(|l| l.name.clone()),
                 locator::RENAME,
-                "locator",
-                id.into(),
+                on("locator", id.into()),
             ),
             Named::Take(id) => (
                 "Rename Take",
                 project.find_take(id).map(|(_, t)| t.name.clone()),
                 take::RENAME,
-                "take",
-                id.into(),
+                on("take", id.into()),
+            ),
+            Named::Modulator(id) => (
+                "Rename Modulator",
+                project.find_modulator(id).map(|(_, _, m)| m.name.clone()),
+                modulation::RENAME,
+                on("modulator", id.into()),
+            ),
+            Named::Control(id, n) => (
+                "Rename Control",
+                (project.find_modulator(id)).and_then(|(_, _, m)| Some(m.control(n)?.name.clone())),
+                modulation::RENAME_CONTROL,
+                on("modulator", id.into()).with("control", i64::from(n)),
             ),
         };
         // It went while the box was open.
@@ -1112,8 +1122,7 @@ impl Shell {
         };
         let name = text.trim().to_owned();
         if confirmed && !name.is_empty() && name != current {
-            let args = Args::new().with(arg, value).with("name", name);
-            actions.push(Action::RunWith(command, args));
+            actions.push(Action::RunWith(command, args.with("name", name)));
         }
         self.rename = None;
     }

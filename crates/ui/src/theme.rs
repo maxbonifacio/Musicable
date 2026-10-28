@@ -150,6 +150,11 @@ pub struct Theme {
     pub automation: Color32,
     #[serde(with = "values::colour")]
     pub automation_off: Color32,
+    /// Modulation: the bands along controls that modulators move, from the
+    /// least to the most they can move them, the dots where they are, and
+    /// the modulators' outputs and cards.
+    #[serde(with = "values::colour")]
+    pub modulation: Color32,
     #[serde(with = "values::colour")]
     pub header: Color32,
     #[serde(with = "values::colour")]
@@ -629,6 +634,7 @@ impl Theme {
             automation_lane: Color32::from_gray(35),
             automation: Color32::from_rgb(240, 95, 85),
             automation_off: Color32::from_gray(125),
+            modulation: Color32::from_rgb(110, 210, 160),
             header: Color32::from_gray(46),
             header_selected: Color32::from_gray(62),
             header_text: Color32::from_gray(225),

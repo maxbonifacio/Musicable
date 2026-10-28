@@ -50,6 +50,13 @@ has **Show Automation**, which shows its lane in the arrangement,
 **Re-Enable Automation** and **Clear Automation**
 ([Automation](../using/automation.md)).
 
+Modulators move faders, sends and pans too. Drag a modulator's handle onto
+one of them to have the modulator move it, or right-click it for the
+routings that move it, and **Add Modulation**. One that's modulated has a
+green line, beside a fader or along the foot of a send or a pan, from as low
+to as high as its modulators can take it, and a dot where they have it
+([Modulation](../using/modulation.md#routing-an-output)).
+
 ## The meters
 
 Each strip's meter shows its channel's output, after mute and solo, left and
