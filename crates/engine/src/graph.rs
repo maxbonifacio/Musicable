@@ -72,8 +72,13 @@ pub struct Graph {
     /// The taps [`add_record`](Graph::add_record) added, by their writers'
     /// keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
-    /// Which nodes' notes go to which, from [`send_notes`](Graph::send_notes).
-    note_routes: Vec<(NodeId, NodeId)>,
+    /// The nodes whose notes [`add_note_record`](Graph::add_note_record)
+    /// records, by their writers' keys.
+    note_records: Vec<(NodeKey, NodeId)>,
+    /// Which nodes' notes go to which, and whether to its side input for
+    /// notes, from [`send_notes`](Graph::send_notes) and
+    /// [`send_side_notes`](Graph::send_side_notes).
+    note_routes: Vec<(NodeId, NodeId, bool)>,
     /// The automation nodes handed back, to send them as events.
     feeds: Vec<(NodeId, ParamId, Feed)>,
     /// The nodes whose [`Node::control`] runs each block, from
@@ -177,13 +182,28 @@ impl Graph {
     /// clip player and an instrument, but not around a loop: a route that
     /// would close one is refused.
     pub fn send_notes(&mut self, from: NodeId, to: NodeId) -> Result<(), GraphError> {
+        self.route_notes(from, to, false)
+    }
+
+    /// Sends the notes `from` plays to `to`'s side input for notes, as
+    /// [`send_notes`](Graph::send_notes) sends them to its main one. They
+    /// come to it as [`SideNote`](NodeEventKind::SideNote) and
+    /// [`SideController`](NodeEventKind::SideController) events, so it can
+    /// tell them from the others: a MIDI track's monitor takes another
+    /// track's notes as its input this way, beside its clips' notes. They
+    /// go through no node on the way, so they keep their ids.
+    pub fn send_side_notes(&mut self, from: NodeId, to: NodeId) -> Result<(), GraphError> {
+        self.route_notes(from, to, true)
+    }
+
+    fn route_notes(&mut self, from: NodeId, to: NodeId, side: bool) -> Result<(), GraphError> {
         self.check(from)?;
         self.check(to)?;
         if from == to || self.notes_reach(to, from) {
             return Err(GraphError::Cycle);
         }
-        if !self.note_routes.contains(&(from, to)) {
-            self.note_routes.push((from, to));
+        if !self.note_routes.contains(&(from, to, side)) {
+            self.note_routes.push((from, to, side));
         }
         Ok(())
     }
@@ -269,6 +289,21 @@ impl Graph {
         Ok(n)
     }
 
+    /// Records the notes `node` plays, block by block, for the engine to
+    /// hand to the [`TapWriter`](crate::TapWriter) with `key`, as
+    /// [`add_record`](Graph::add_record) records a node's output: what a
+    /// MIDI track records from another's notes. A node plays only notes
+    /// that go somewhere ([`send_notes`](Graph::send_notes)). Each node's
+    /// notes go to one writer, and each writer gets one node's: a record
+    /// of a node, or with a key, that has one already isn't added.
+    pub fn add_note_record(&mut self, key: NodeKey, node: NodeId) -> Result<(), GraphError> {
+        self.check(node)?;
+        if !(self.note_records.iter()).any(|&(k, n)| k == key || n == node) {
+            self.note_records.push((key, node));
+        }
+        Ok(())
+    }
+
     /// Calls [`Node::prepare`] on each node, compensates for their latency,
     /// orders them and allocates their buffers.
     ///
@@ -316,15 +351,29 @@ impl Graph {
         let schedule = Schedule::new(&self.inputs, &self.outputs, &order);
         self.note_routes.sort_unstable();
         let mut players: Vec<Player> = Vec::new();
-        for &(from, to) in &self.note_routes {
+        for &(from, to, side) in &self.note_routes {
             match players.last_mut() {
-                Some(player) if player.node == from => player.targets.push(to),
+                Some(player) if player.node == from => player.targets.push((to, side)),
                 _ => players.push(Player {
                     node: from,
-                    targets: vec![to],
+                    targets: vec![(to, side)],
+                    record: None,
                 }),
             }
         }
+        // A record of a node that plays no notes stays empty.
+        let note_records: Vec<NoteRecord> = (self.note_records.iter())
+            .enumerate()
+            .map(|(i, &(key, node))| {
+                if let Some(player) = players.iter_mut().find(|p| p.node == node) {
+                    player.record = Some(i);
+                }
+                NoteRecord {
+                    key,
+                    notes: Vec::with_capacity(Notes::CAPACITY),
+                }
+            })
+            .collect();
         // Each player after the players whose notes it gets. Notes don't go
         // around loops, so one is always ready.
         let routes = &self.note_routes;
@@ -334,7 +383,7 @@ impl Graph {
                 let from_waiting = |from: NodeId| players.iter().any(|q| q.node == from);
                 routes
                     .iter()
-                    .any(|&(from, to)| to == p.node && from_waiting(from))
+                    .any(|&(from, to, _)| to == p.node && from_waiting(from))
             };
             let ready = players.iter().position(|p| !waiting(p)).expect("no loops");
             ordered.push(players.remove(ready));
@@ -342,7 +391,7 @@ impl Graph {
         let mut plays_notes = vec![false; self.nodes.len()];
         let mut inbox = 0;
         for player in &ordered {
-            let routes_in = routes.iter().filter(|&&(_, to)| to == player.node).count();
+            let routes_in = (routes.iter()).filter(|r| r.1 == player.node).count();
             plays_notes[player.node.0] = true;
             inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY);
         }
@@ -354,7 +403,7 @@ impl Graph {
             is_controller[node.0] = true;
             // What comes to it: the engine's events, the notes, its
             // automation and the modulation of the nodes that modulate it.
-            let routes_in = routes.iter().filter(|&&(_, to)| to == node).count();
+            let routes_in = routes.iter().filter(|r| r.1 == node).count();
             let feeds_in = self.feeds.iter().filter(|f| f.0 == node).count();
             let ports_in = self.modulations.iter().filter(|m| m.1 == node).count();
             let notes_in = routes_in * Notes::CAPACITY;
@@ -378,6 +427,7 @@ impl Graph {
             cue: self.cue,
             taps: self.taps,
             records: self.records,
+            note_records,
             buffers,
             by_key,
             delays,
@@ -547,8 +597,8 @@ impl Graph {
                 return true;
             }
             if !std::mem::replace(&mut seen[n.0], true) {
-                let next = self.note_routes.iter().filter(|&&(from, _)| from == n);
-                stack.extend(next.map(|&(_, to)| to));
+                let next = self.note_routes.iter().filter(|r| r.0 == n);
+                stack.extend(next.map(|r| r.1));
             }
         }
         false
@@ -624,6 +674,9 @@ pub struct PreparedGraph {
     taps: Vec<NodeId>,
     /// The record taps, by their writers' keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
+    /// The notes each recorded node played in the current block, by their
+    /// writers' keys.
+    note_records: Vec<NoteRecord>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -688,10 +741,19 @@ pub(crate) struct Routed {
     pub event: NodeEvent,
 }
 
-/// A node that plays notes, and the nodes its notes go to.
+/// A node that plays notes, the nodes its notes go to, and whether to their
+/// side inputs for notes, and its note record, if it has one.
 struct Player {
     node: NodeId,
-    targets: Vec<NodeId>,
+    targets: Vec<(NodeId, bool)>,
+    record: Option<usize>,
+}
+
+/// The notes a node played in the current block, for the writer with
+/// `key`: see [`Graph::add_note_record`].
+struct NoteRecord {
+    key: NodeKey,
+    notes: Vec<NodeEvent>,
 }
 
 /// A node that modulates others, and the node and parameter each of its
@@ -705,7 +767,9 @@ struct Modulator {
 /// [`Node::play_notes`].
 pub struct Notes<'a> {
     routed: &'a mut Vec<Routed>,
-    targets: &'a [NodeId],
+    targets: &'a [(NodeId, bool)],
+    /// Where the node's notes are recorded, if they are.
+    record: Option<&'a mut Vec<NodeEvent>>,
     frames: usize,
     /// How many more notes the node can send this block.
     room: usize,
@@ -735,13 +799,17 @@ impl Notes<'_> {
             return false;
         }
         self.room -= 1;
-        for &node in self.targets {
+        for &(node, side) in self.targets {
             let order = self.routed.len() as u32;
+            let kind = if side { kind.to_side() } else { kind };
             self.routed.push(Routed {
                 node,
                 order,
                 event: NodeEvent { offset, kind },
             });
+        }
+        if let Some(record) = &mut self.record {
+            record.push(NodeEvent { offset, kind });
         }
         true
     }
@@ -891,6 +959,20 @@ impl PreparedGraph {
         self.records.iter().map(|&(key, _)| key)
     }
 
+    /// The notes the node the writer with `key` records played in the last
+    /// block, in order, each at its offset into the block, if the graph
+    /// has a note record with that key (see [`Graph::add_note_record`]).
+    pub fn record_notes(&self, key: NodeKey) -> Option<&[NodeEvent]> {
+        let record = self.note_records.iter().find(|r| r.key == key)?;
+        Some(&record.notes)
+    }
+
+    /// The keys of the writers the graph has note records for, in the
+    /// order they were added.
+    pub fn note_records(&self) -> impl Iterator<Item = NodeKey> + '_ {
+        self.note_records.iter().map(|r| r.key)
+    }
+
     /// How many frames late the output plays, after delay compensation: the
     /// latency of the latest path to it, or to the cue output, which every
     /// other path is lined up with ([`Graph::prepare`]). What the output
@@ -964,11 +1046,15 @@ impl PreparedGraph {
             routed,
             players,
             plays_notes,
+            note_records,
             inbox,
             inbox_events,
             ..
         } = self;
         let is_played = |r: &Routed| r.event.kind.is_played();
+        for record in note_records.iter_mut() {
+            record.notes.clear();
+        }
         let mut dropped = 0;
         for player in players.iter() {
             // The notes sent to it so far, which is all of them: the engine
@@ -986,6 +1072,7 @@ impl PreparedGraph {
             let mut notes = Notes {
                 routed,
                 targets: &player.targets,
+                record: player.record.map(|i| &mut note_records[i].notes),
                 frames: block.frames,
                 room: Notes::CAPACITY,
                 dropped: 0,
@@ -1348,6 +1435,88 @@ mod tests {
             .downcast_mut::<Pulse>()
             .unwrap();
         assert_eq!(pulse.0, 1);
+    }
+
+    /// Keeps the events it gets, with their offsets.
+    struct KeepAll(Vec<(usize, NodeEventKind)>);
+
+    impl Node for KeepAll {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            self.0.extend(ctx.events.iter().map(|e| (e.offset, e.kind)));
+            output.clear();
+        }
+    }
+
+    #[test]
+    fn side_notes_come_as_side_events_and_note_records_keep_what_a_node_plays() {
+        let mut g = Graph::new();
+        let pulse = g.add(NodeKey(0), Pulse::default());
+        let main = g.add(NodeKey(1), KeepAll(Vec::with_capacity(8)));
+        let side = g.add(NodeKey(2), KeepAll(Vec::with_capacity(8)));
+        g.send_notes(pulse, main).unwrap();
+        g.send_side_notes(pulse, side).unwrap();
+        assert_eq!(g.send_side_notes(side, pulse), Err(GraphError::Cycle));
+        g.add_note_record(NodeKey(9), pulse).unwrap();
+        // One writer for each node, and one node for each writer.
+        g.add_note_record(NodeKey(10), pulse).unwrap();
+        g.add_note_record(NodeKey(9), main).unwrap();
+        // A node that plays no notes has an empty record.
+        g.add_note_record(NodeKey(11), main).unwrap();
+        g.set_output(main).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        assert!(graph.note_records().eq([NodeKey(9), NodeKey(11)]));
+        let tempo = TempoMap::default();
+        let block = Block {
+            frames: 64,
+            time: 0,
+            transport: TransportState::default(),
+            tempo: &tempo,
+            input: AudioRef::empty(64),
+            midi: &[],
+        };
+        rt::scope(|| {
+            assert_eq!(graph.play_notes(&block), 0);
+            graph.load_routed();
+            ReferenceRenderer.render(&mut graph, &block);
+            graph.clear_routed();
+        });
+        let on = NoteEvent::On {
+            note: NoteId(0),
+            key: 60,
+            velocity: 1.0,
+        };
+        let off = NoteEvent::Off {
+            note: NoteId(0),
+            velocity: 0.5,
+        };
+        let mut kept = |node: NodeId| {
+            let node = graph.nodes[node.0].as_mut();
+            std::mem::take(&mut node.downcast_mut::<KeepAll>().unwrap().0)
+        };
+        assert_eq!(
+            kept(main),
+            [(0, NodeEventKind::Note(on)), (63, NodeEventKind::Note(off))]
+        );
+        assert_eq!(
+            kept(side),
+            [
+                (0, NodeEventKind::SideNote(on)),
+                (63, NodeEventKind::SideNote(off))
+            ]
+        );
+        let recorded = [
+            NodeEvent {
+                offset: 0,
+                kind: NodeEventKind::Note(on),
+            },
+            NodeEvent {
+                offset: 63,
+                kind: NodeEventKind::Note(off),
+            },
+        ];
+        assert_eq!(graph.record_notes(NodeKey(9)), Some(&recorded[..]));
+        assert_eq!(graph.record_notes(NodeKey(11)), Some(&[][..]));
+        assert_eq!(graph.record_notes(NodeKey(10)), None);
     }
 
     /// Sends the modulation it gets plus one, or one if it gets none,

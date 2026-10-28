@@ -3,9 +3,9 @@
 Each track's sound goes to the master, or to a group track that feeds it,
 and its sends take it to return tracks too. Beyond that, a track can take
 its input from another track, to record it or to play it through devices
-of its own, a track can resample the master, and a track can be heard
-through its sends alone. A key from one track into a device on another is a
-[sidechain](sidechains.md).
+of its own, a MIDI track can play and record another's notes, a track can
+resample the master, and a track can be heard through its sends alone. A
+key from one track into a device on another is a [sidechain](sidechains.md).
 
 ## Taking another track's sound
 
@@ -37,6 +37,27 @@ input needs ([Where it lands](recording.md#where-it-lands)). Capture holds
 what it takes too, while it's armed or monitors In, as it holds an input
 ([Capture](recording.md#capture)).
 
+## Taking another track's notes
+
+A MIDI track's input menu lists the other MIDI tracks after the MIDI
+inputs, under **Tracks**, each opening to **Pre FX**: its notes, from its
+clips and its input, with its controllers, such as the sustain pedal.
+Picking one has the track play those notes as it would a keyboard's, along
+with its own clips', and the strip reads, say, **from Lead, Pre FX**. It
+monitors **In**, as a track taking sound does, so a second instrument can
+double a part. A track without an instrument can still give its notes to
+one that has, and like sound, notes come before their track's mute and
+solo.
+
+### Recording the notes
+
+Arm the track and record, and it records the notes it takes. The other
+track's clips' notes land exactly where they are, with their velocities and
+the controllers' moves, as a clip of its own you can edit. Notes played
+live on the other track land where Musicable played them, a moment after
+that track's own take would have them: as long as monitoring them took.
+Capture holds them too, while the track is armed or monitors In.
+
 ## Resampling
 
 **Resampling**, at the end of an audio track's input menu, records the
@@ -63,9 +84,9 @@ that take its sound.
 
 Signal never goes round in a loop. A track can't take its input from a
 track its own sound reaches: a group it feeds, a return it sends to, or a
-track that takes its sound already. The input menu shows those greyed out.
-Resampling never makes one, since the track plays nothing while it
-records.
+track that takes its sound already, and two MIDI tracks can't take each
+other's notes. The input menu shows those greyed out. Resampling never
+makes one, since the track plays nothing while it records.
 
 A move, an output, a send or a wire that would close a loop through a
 track's input is refused, with a message naming the input in the way, such

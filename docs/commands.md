@@ -872,8 +872,9 @@ of the master's a track can take: the track records the mix and plays
 nothing while it does. A track that takes a tap in place of what it took
 monitors In, in the same step, so it plays what it takes, but for
 Resampling, which leaves its monitoring alone. A MIDI track's Pre FX is
-notes, which an audio track can't take, and a MIDI track can't take
-another track's notes yet. An input that would close a loop, from a track
+notes, which an audio track can't take, and which a MIDI track takes from
+another MIDI track, `from` without a `tap` taking it: a tap that carries
+sound is refused. An input that would close a loop, from a track
 the track's own sound reaches, is refused with an error that says so, such
 as "That would make a loop: what comes out of Print reaches Kick Post FX"
 (`Project::check_input`). Resampling never closes one.

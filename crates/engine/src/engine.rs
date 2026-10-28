@@ -28,15 +28,27 @@ pub(crate) const EVENT_CAPACITY: usize = 1024;
 pub const MAX_WRITERS: usize = 256;
 
 /// Where the engine writes what one of the graph's record taps carries
-/// ([`Graph::add_record`](crate::Graph::add_record)), block by block, as it
-/// renders: a buffer a recorder reads, as it reads an audio input's. It's
-/// called on the audio thread, so it must be real-time safe.
+/// ([`Graph::add_record`](crate::Graph::add_record)), or the notes a note
+/// record has ([`Graph::add_note_record`](crate::Graph::add_note_record)),
+/// block by block, as it renders: a buffer a recorder reads, as it reads an
+/// audio input's or a MIDI input's. It's called on the audio thread, so it
+/// must be real-time safe.
 pub trait TapWriter: Send {
     /// Takes the frames the engine rendered from engine time `time` on: the
     /// next ones, after those of the block before. A block without
     /// channels is silence, for where the graph hasn't the tap, or there's
     /// no graph yet.
     fn write(&mut self, time: u64, audio: AudioRef<'_>);
+
+    /// Takes the notes the node the note record records played in the
+    /// block of `frames` frames the engine rendered from engine time `time`
+    /// on, in order, each at its offset into the block: none where the
+    /// graph hasn't the record, or there's no graph yet. It comes after
+    /// [`write`](Self::write), for every block. A writer of a tap of sound
+    /// can pass over it.
+    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
+        let _ = (time, frames, notes);
+    }
 }
 
 enum Message {
@@ -440,8 +452,11 @@ impl Engine {
             write(done, block, self.graph.as_deref(), preview);
             let start = self.time - block as u64;
             for (key, writer) in &mut self.writers {
-                let tapped = self.graph.as_deref().and_then(|g| g.record(*key, block));
+                let graph = self.graph.as_deref();
+                let tapped = graph.and_then(|g| g.record(*key, block));
                 writer.write(start, tapped.unwrap_or(AudioRef::empty(block)));
+                let notes = graph.and_then(|g| g.record_notes(*key));
+                writer.write_notes(start, block, notes.unwrap_or_default());
             }
             done += block;
         }

@@ -1,6 +1,6 @@
-use musicable_model::Monitor;
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::time::TempoMap;
+use musicable_model::{Monitor, TrackId};
 
 use super::*;
 use crate::{
@@ -396,18 +396,25 @@ impl Node for Keep {
 }
 
 /// A clip player, a monitor and an instrument, rendered a block of 64
-/// frames at a time.
+/// frames at a time, and another track's notes coming into the monitor's
+/// side input, if it takes them.
 struct Rig {
     graph: PreparedGraph,
     time: u64,
     transport: TransportState,
     tempo: TempoMap,
+    /// What the other track plays, if the monitor takes it.
+    taken: Option<Vec<(u64, NodeEventKind)>>,
 }
 
 const MONITOR: NodeId = NodeId(1);
 const INSTRUMENT: NodeId = NodeId(2);
 
-fn graph(monitor: MidiMonitor, clips: Vec<(u64, NodeEventKind)>) -> PreparedGraph {
+fn graph(
+    monitor: MidiMonitor,
+    clips: Vec<(u64, NodeEventKind)>,
+    taken: Option<Vec<(u64, NodeEventKind)>>,
+) -> PreparedGraph {
     let mut g = Graph::new();
     let player = g.add(NodeKey(0), Clips(clips));
     let monitor = g.add(NodeKey(1), monitor);
@@ -415,6 +422,10 @@ fn graph(monitor: MidiMonitor, clips: Vec<(u64, NodeEventKind)>) -> PreparedGrap
     assert_eq!((monitor, instrument), (MONITOR, INSTRUMENT));
     g.send_notes(player, monitor).unwrap();
     g.send_notes(monitor, instrument).unwrap();
+    if let Some(taken) = taken {
+        let other = g.add(NodeKey(3), Clips(taken));
+        g.send_side_notes(other, monitor).unwrap();
+    }
     g.set_output(instrument).unwrap();
     g.prepare(&CONFIG).unwrap()
 }
@@ -429,10 +440,25 @@ impl Rig {
     /// With clips that play `clips`, notes and controllers.
     fn with_clips(monitor: MidiMonitor, clips: Vec<(u64, NodeEventKind)>) -> Self {
         Self {
-            graph: graph(monitor, clips),
+            graph: graph(monitor, clips, None),
             time: 0,
             transport: TransportState::default(),
             tempo: TempoMap::default(),
+            taken: None,
+        }
+    }
+
+    /// With clips that play `clips`, and another track that plays `taken`
+    /// into the monitor's side input.
+    fn taking(
+        monitor: MidiMonitor,
+        clips: Vec<(u64, NodeEventKind)>,
+        taken: Vec<(u64, NodeEventKind)>,
+    ) -> Self {
+        Self {
+            graph: graph(monitor, clips, Some(taken.clone())),
+            taken: Some(taken),
+            ..Self::with_clips(monitor_taking(Monitor::In, false), Vec::new())
         }
     }
 
@@ -463,9 +489,10 @@ impl Rig {
     }
 
     /// Puts in a graph with `monitor` in place of the monitor, without
-    /// clips, as a swap does.
+    /// clips, but with the other track's notes if it took them, as a swap
+    /// does.
     fn swap(&mut self, monitor: MidiMonitor) {
-        let mut new = graph(monitor, Vec::new());
+        let mut new = graph(monitor, Vec::new(), self.taken.clone());
         rt::scope(|| new.adopt_from(&mut self.graph));
         self.graph = new;
     }
@@ -497,6 +524,15 @@ fn monitor(monitor: Monitor, armed: bool) -> MidiMonitor {
         channel: None,
     };
     MidiMonitor::new(monitor, armed).with_source(source)
+}
+
+/// The lead's notes, and the pad's.
+const LEAD: Tap = Tap::PreFx(TrackId(1));
+const PAD: Tap = Tap::PreFx(TrackId(2));
+
+/// A monitor taking the lead's notes.
+fn monitor_taking(monitor: Monitor, armed: bool) -> MidiMonitor {
+    MidiMonitor::new(monitor, armed).with_side_input(LEAD)
 }
 
 fn playing(recording: bool) -> TransportState {
@@ -804,4 +840,134 @@ fn switches_held_are_let_go_when_what_holds_them_stops_playing() {
     rig.swap(from(Some(1)));
     rig.block(&[]);
     assert_eq!(rig.moved(), [(64, pedal, 0.0)]);
+}
+
+/// A note, as a clip player sends it.
+fn note(note: NoteEvent) -> NodeEventKind {
+    NodeEventKind::Note(note)
+}
+
+#[test]
+fn a_track_plays_another_tracks_notes_as_its_input_under_ids_of_its_own() {
+    let clips = vec![(5, note(on(1, 50, 1.0))), (20, note(off(1, 1.0)))];
+    // The other track's note has the same id as a clip's.
+    let pressure = |note| expression(note, Dimension::Pressure, 0.5);
+    let taken = vec![
+        (10, note(on(1, 60, 0.75))),
+        (15, note(pressure(1))),
+        (30, note(off(1, 0.25))),
+    ];
+    for (mode, armed, recording, input, clip) in [
+        (Monitor::Off, true, false, false, true),
+        (Monitor::In, false, false, true, false),
+        (Monitor::Auto, false, false, false, true),
+        (Monitor::Auto, true, false, true, true),
+        (Monitor::Auto, true, true, true, false),
+    ] {
+        let monitor = monitor_taking(mode, armed);
+        let mut rig = Rig::taking(monitor, clips.clone(), taken.clone());
+        rig.transport = playing(recording);
+        rig.block(&[]);
+        let mut expected = Vec::new();
+        if clip {
+            expected.push((5, on(1, 50, 1.0)));
+        }
+        if input {
+            expected.push((10, on(LIVE_NOTES, 60, 0.75)));
+            expected.push((15, pressure(LIVE_NOTES)));
+        }
+        expected.push((20, off(1, 1.0)));
+        if input {
+            expected.push((30, off(LIVE_NOTES, 0.25)));
+        }
+        assert_eq!(
+            rig.kept(),
+            expected,
+            "{mode:?}, armed {armed}, recording {recording}"
+        );
+    }
+
+    // A monitor without a side input passes over what comes into one.
+    let mut rig = Rig::taking(monitor(Monitor::In, false), Vec::new(), taken);
+    rig.block(&[]);
+    assert_eq!(rig.kept(), []);
+}
+
+#[test]
+fn notes_taken_end_when_the_input_stops_playing_and_their_controllers_come_back() {
+    let pedal = Controller::SUSTAIN;
+    let taken = vec![
+        (10, note(on(7, 60, 1.0))),
+        (20, controller(pedal, 1.0)),
+        (130, note(off(7, 1.0))),
+        (140, note(on(8, 62, 1.0))),
+        (330, note(off(8, 1.0))),
+        (340, note(on(9, 64, 1.0))),
+    ];
+    let mut rig = Rig::taking(monitor_taking(Monitor::Auto, true), Vec::new(), taken);
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(10, on(LIVE_NOTES, 60, 1.0))]);
+    assert_eq!(rig.moved(), [(20, pedal, 1.0)]);
+    // Disarming takes effect from the next block, letting go of the pedal.
+    rig.set(MidiMonitor::ARMED, 0.0);
+    rig.block(&[]);
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(128, off(LIVE_NOTES, RELEASE))]);
+    assert_eq!(rig.moved(), [(128, pedal, 0.0)]);
+
+    // What was held while it didn't play stays silent once it plays again,
+    // but the pedal goes back down.
+    rig.block(&[]);
+    rig.set(MidiMonitor::ARMED, 1.0);
+    rig.block(&[]);
+    rig.block(&[]);
+    assert_eq!(rig.moved(), [(320, pedal, 1.0)]);
+    assert_eq!(rig.kept(), [(340, on(LIVE_NOTES + 1, 64, 1.0))]);
+}
+
+#[test]
+fn a_swap_keeps_the_notes_taken_and_ends_them_when_the_input_changes() {
+    let pedal = Controller::SUSTAIN;
+    let taken = vec![
+        (10, note(on(7, 60, 1.0))),
+        (20, controller(pedal, 1.0)),
+        (70, note(off(7, 1.0))),
+        (130, note(on(8, 62, 1.0))),
+        (260, note(on(9, 64, 1.0))),
+    ];
+    let mut rig = Rig::taking(monitor_taking(Monitor::In, false), Vec::new(), taken);
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(10, on(LIVE_NOTES, 60, 1.0))]);
+    // Taking the same notes, the note plays on until it's let go.
+    rig.swap(monitor_taking(Monitor::In, false));
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(70, off(LIVE_NOTES, 1.0))]);
+
+    // Taking another track's notes, the notes held end as the new graph
+    // starts, and the pedal is let go.
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(130, on(LIVE_NOTES + 1, 62, 1.0))]);
+    rig.moved();
+    rig.swap(MidiMonitor::new(Monitor::In, false).with_side_input(PAD));
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(192, off(LIVE_NOTES + 1, RELEASE))]);
+    assert_eq!(rig.moved(), [(192, pedal, 0.0)]);
+
+    // Taking a MIDI input, the same, and the input's notes take new ids.
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(260, on(LIVE_NOTES + 2, 64, 1.0))]);
+    rig.swap(monitor(Monitor::In, false));
+    rig.block(&[message(330, 0, [0x90, 65, 127])]);
+    assert_eq!(
+        rig.kept(),
+        [
+            (320, off(LIVE_NOTES + 2, RELEASE)),
+            (330, on(LIVE_NOTES + 3, 65, 1.0))
+        ]
+    );
+
+    // And back: the input's notes end the same way.
+    rig.swap(monitor_taking(Monitor::In, false));
+    rig.block(&[]);
+    assert_eq!(rig.kept(), [(384, off(LIVE_NOTES + 3, RELEASE))]);
 }

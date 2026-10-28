@@ -157,6 +157,17 @@ a writer it replaces or drops goes back to the control thread with the
 garbage. The app's writers fill buffers like an input's for its recorder
 ([app.md](app.md#recording)).
 
+A MIDI track that takes another's notes records what that track's
+`MidiMonitor` plays: its clips' notes and its input's. The graph keeps them
+for each block in a note record with the same key (`Graph::add_note_record`,
+`PreparedGraph::record_notes`), and the engine hands them to the writer's
+`write_notes` after its frames, each at its offset into the block, the
+block's notes empty where the graph hasn't the record. A note played at
+`t` left the clips then, so it belongs at `p`, without the latency: the
+notes of the other track's clips land on them, and those played live on it
+where the engine played them, later than that track's own take has them by
+as long as monitoring them took.
+
 **Monitoring inputs.** `compile_with_inputs` gives each audio track an
 `InputMonitor` after its clip player (key `compile::keys::track_input`),
 which plays the track's input in place of its clips: always with
@@ -176,8 +187,11 @@ between its clip player and its instrument, on the way the notes go. It
 turns the messages its input takes into notes ([MIDI input](#notes)) and
 plays them as players expect of an instrument track: always with `In`,
 while the track is armed with `Auto`, whether the transport plays or not,
-and never with `Off`. The clips play too, except with `In` and while an
-armed `Auto` track records over them. The notes sounding end when either
+and never with `Off`. A track taking another's notes has them come into
+the monitor's side input for notes instead
+(`MidiMonitor::with_side_input`), and plays them the same way. The clips
+play too, except with `In` and while an armed `Auto` track records over
+them. The notes sounding end when either
 stops playing. Controllers go on from whichever plays, as their notes do:
 when one stops, the switches it held on, such as the sustain pedal, are let
 go, and when the clips play again, their controllers go back to what the
@@ -346,9 +360,10 @@ late its output is: `Node::latency`, read once the node is prepared.
   does, needs a new graph, and the new graph compensates for the new
   latency.
 
-Two things aren't delayed. Notes sent with `Graph::send_notes` arrive at an
-instrument when they're due, so its sound lines up as long as nothing latent
-comes before it on its track, which is the usual chain. And meters measure
+Two things aren't delayed. Notes sent with `Graph::send_notes` or
+`send_side_notes` arrive at an instrument when they're due, so its sound
+lines up as long as nothing latent comes before it on its track, which is
+the usual chain. And meters measure
 where they are, before the delays at the buses, so a latent track's meter
 moves later than a dry one's.
 
@@ -670,8 +685,9 @@ the graph's shape and recompiles.
 
 An audio track's input can be a tap on another track (`Input::Tap`), the
 same points a wire takes, but for a MIDI track's Pre FX, which is notes, or
-the master's Post Fader, which is Resampling (`Input::RESAMPLING`). The
-compiler adds them once the strips and wires are built:
+the master's Post Fader, which is Resampling (`Input::RESAMPLING`). A MIDI
+track's can be another MIDI track's Pre FX: its notes, from its clips and
+its input. The compiler adds them once the strips and wires are built:
 
 - **Monitoring.** The track's `InputMonitor` takes the tap on its side
   input 0 (`InputMonitor::with_side_input`) and plays it as it would an
@@ -690,8 +706,16 @@ compiler adds them once the strips and wires are built:
   in what it records, and come back on a ramp after. The cut follows the
   monitor's arming, which the monitor leaves it in an atomic after each
   block, so it has no parameters of its own.
+- **Notes.** A MIDI track taking another's notes has that track's
+  `MidiMonitor` send them to its own monitor's side input for notes
+  (`Graph::send_side_notes`), which plays them with its clips' as it would
+  a MIDI input's, with the same monitoring. The other track's clip player
+  sends its notes to its monitor even if it has no instrument, so a track
+  can play one that has none. They're taken before mute and solo, as a tap
+  is.
 - **Record taps.** Each audio track's tap gets a record tap, keyed by the
-  tap (`keys::record`), so tracks taking the same one share it
+  tap (`keys::record`), so tracks taking the same one share it, and each
+  MIDI track's a note record of the notes it takes, keyed the same way
   ([Recording](#recording)).
 - **Which inputs play.** `Project::live_inputs` gives the inputs the engine
   plays: each whose ends the project has and whose tap carries what the
@@ -701,10 +725,6 @@ compiler adds them once the strips and wires are built:
   a loop through an input. In a project the commands edit, that's all of
   them, since they refuse an input that would make a loop
   (`Project::check_input`).
-
-A MIDI track's input from another MIDI track's notes is in the model and
-the file, but the engine doesn't play it yet: it comes with the Routing
-panel.
 
 ## Clips
 
@@ -1041,6 +1061,14 @@ for either), in order with them, and takes room in a block as a note does.
   and any from outside the graph, in `ctx.events`, so a MIDI effect between
   a clip player and an instrument can play them on, changed. A route that
   would make a loop is refused.
+- `Graph::send_side_notes(from, to)` sends them to the node's side input
+  for notes instead, as `NodeEventKind::SideNote` and `SideController`,
+  which a node without one passes over: another track's notes coming into
+  a MIDI track's monitor ([Inputs from taps](#inputs-from-taps)).
+- `Graph::add_note_record(key, node)` keeps what a node plays in each
+  block, for the `TapWriter` with the key (`PreparedGraph::record_notes`):
+  a MIDI track's notes, for the tracks recording them
+  ([Recording](#recording)).
 - A node whose notes go nowhere, such as an instrument, gets the notes sent
   to it with its other events, in `process`.
 - An instrument's voice can ring on after its note is let go. A node says
@@ -1100,7 +1128,11 @@ can start with them where they are.
 
 A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
 a swap gives a track another input, the notes held on the old one end at
-the next block. The monitor passes the clips' note ends and expression on
+the next block. Another track's notes come into its side input with their
+own ids, which it gives new ones from the same count, so they can't clash
+with its clips' or each other's, and it ends them, and lets go of the
+switches they held, when it stops playing its input, as it does a MIDI
+input's. The monitor passes the clips' note ends and expression on
 whether the clips play or not, since instruments pass over notes they don't
 know, so a note started before the monitor came along still ends.
 

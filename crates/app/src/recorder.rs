@@ -20,6 +20,12 @@
 //! goes where the song was at `w` minus the latency, as an input's frame
 //! does, without a calibration offset.
 //!
+//! A MIDI track that takes another track's notes records what the engine
+//! played of them, which it writes as it renders into a buffer like a MIDI
+//! input's ([`TapNotes`]): each note event and controller move with the
+//! engine frame it played at. They go where the song was then, so the
+//! notes of the other track's clips land on them.
+//!
 //! For Capture, it also holds the last few minutes of what the inputs of
 //! armed tracks, and of those monitoring In, brought, and the timeline over
 //! as long. Capturing records what they held over the transport's last
@@ -35,12 +41,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use musicable_audio::{InputBuffer, InputWriter, MidiBuffer, ReadError};
+use musicable_audio::{
+    EventBuffer, EventReader, EventWriter, InputBuffer, InputWriter, MidiBuffer, ReadError,
+};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::take::{Pass, Recorded};
 use musicable_engine::timeline::Read;
 use musicable_engine::{
-    AudioRef, InputChannels, InputLayout, MidiSource, Segment, TapWriter, Timeline,
+    AudioRef, InputChannels, InputLayout, MidiSource, NodeEvent, Segment, TapWriter, Timeline,
 };
 use musicable_io::audio::WavWriter;
 use musicable_model::routing::Tap;
@@ -64,6 +72,9 @@ const PATIENCE_SECONDS: u64 = 2;
 /// How long the buffer of a tap that tracks record from holds what the
 /// engine wrote of it, in seconds, at least: as long as an audio input's.
 const TAP_SECONDS: u64 = 8;
+/// How many events the buffer of another track's notes holds: as many as
+/// a MIDI input's.
+const TAP_NOTES: usize = 16_384;
 /// A track to record when the transport records: an armed audio or MIDI
 /// track.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +82,8 @@ pub(crate) struct Armed {
     pub track: TrackId,
     /// The track's name, which its files are named after.
     pub name: String,
-    /// An audio input or a tap for an audio track, a MIDI input for a MIDI
-    /// track.
+    /// An audio input or a tap of sound for an audio track, a MIDI input
+    /// or another MIDI track's notes for a MIDI track.
     pub input: Input,
     /// How many frames late the input buffer has what the input captured:
     /// the input's calibration, beyond the latency its driver reports. 0
@@ -82,7 +93,23 @@ pub(crate) struct Armed {
 
 /// The buffers the engine writes the taps that tracks record from into,
 /// by their taps.
-pub(crate) type Taps = BTreeMap<Tap, InputBuffer>;
+pub(crate) type Taps = BTreeMap<Tap, TapBuffer>;
+
+/// The buffer the engine writes a tap that tracks record from into.
+#[derive(Clone)]
+pub(crate) enum TapBuffer {
+    /// The tap's sound, which audio tracks take, as an audio input's.
+    Sound(InputBuffer),
+    /// A MIDI track's notes, its Pre FX, which other MIDI tracks take.
+    Notes(NoteBuffer),
+}
+
+/// What the engine played of a MIDI track's notes, for the MIDI tracks
+/// that take them: each note's start, change and end, and each move of a
+/// controller, packed in two words, with the engine frame it played at.
+pub(crate) type NoteBuffer = EventBuffer<2>;
+type NoteReader = EventReader<2>;
+type NoteWriter = EventWriter<2>;
 
 /// Writes what the engine renders of a record tap into an [`InputBuffer`],
 /// on the audio thread, as an audio input's capture writes what it
@@ -140,6 +167,37 @@ impl TapWriter for TapInput {
             writer.append(part);
             start += n;
         }
+    }
+}
+
+/// Writes the notes the engine plays at a record tap, a MIDI track's
+/// Pre FX, into a [`NoteBuffer`], on the audio thread, as a MIDI input
+/// writes what it brings: each at the engine frame it played at, and the
+/// buffer settled up to the end of each block.
+pub(crate) struct TapNotes {
+    writer: NoteWriter,
+}
+
+impl TapNotes {
+    /// A buffer for a tap of notes, and the writer to give the engine for
+    /// it.
+    pub fn new() -> (NoteBuffer, TapNotes) {
+        let (buffer, writer) = NoteBuffer::new(TAP_NOTES);
+        (buffer, TapNotes { writer })
+    }
+}
+
+impl TapWriter for TapNotes {
+    /// A tap of notes has no sound.
+    fn write(&mut self, _time: u64, _audio: AudioRef<'_>) {}
+
+    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
+        for event in notes {
+            if let Some(words) = midi::pack(event.kind) {
+                self.writer.push(time + event.offset as u64, words);
+            }
+        }
+        self.writer.settle(time + frames as u64);
     }
 }
 
@@ -519,8 +577,7 @@ impl Tape {
                 if let Input::Midi(input) = &track.armed.input
                     && let Some(source) = layout.find_midi(input)
                 {
-                    track.source = source;
-                    track.set_inputs(midi_buffers(source, &buffers.midi));
+                    track.set_inputs(source, midi_buffers(source, &buffers.midi));
                 }
             }
         }
@@ -538,9 +595,16 @@ impl Tape {
         if let Some(running) = &mut self.running {
             for track in &mut running.tracks {
                 if let Input::Tap(tap) = track.input
-                    && let Some(buffer) = taps.get(&tap)
+                    && let Some(TapBuffer::Sound(buffer)) = taps.get(&tap)
                 {
                     track.buffer = buffer.clone();
+                }
+            }
+            for track in &mut running.notes {
+                if let Input::Tap(tap) = track.armed.input
+                    && let Some(TapBuffer::Notes(buffer)) = taps.get(&tap)
+                {
+                    track.set_tap(buffer.clone());
                 }
             }
         }
@@ -552,6 +616,12 @@ impl Tape {
     /// channels are in it: see [`find_audio`].
     fn find_audio(&self, input: &Input) -> Option<(InputBuffer, InputChannels)> {
         find_audio(&self.layout, &self.buffers.audio, &self.taps, input)
+    }
+
+    /// The buffer of another track's notes a MIDI track taking `input`
+    /// records from, if it takes them: see [`find_notes`].
+    fn find_notes(&self, input: &Input) -> Option<NoteBuffer> {
+        find_notes(&self.taps, input)
     }
 
     /// Takes the segments the timeline published since the last read.
@@ -630,6 +700,10 @@ impl Tape {
         let mut tracks = Vec::new();
         let mut notes = Vec::new();
         for armed in &self.armed {
+            if let Some(buffer) = self.find_notes(&armed.input) {
+                notes.push(MidiTape::from_tap(armed.clone(), buffer, start));
+                continue;
+            }
             match &armed.input {
                 input @ (Input::Audio(_) | Input::Tap(_)) => match self.find_audio(input) {
                     Some((buffer, channels)) => tracks.push(TrackTape {
@@ -707,9 +781,9 @@ impl Tape {
         }
     }
 
-    /// Records what `track`'s MIDI inputs played, from where it got to up
-    /// to engine time `limit`, as far as they have brought every message,
-    /// or with `forced`, all the way.
+    /// Records what `track`'s MIDI inputs, or the track it takes the notes
+    /// of, played, from where it got to up to engine time `limit`, as far
+    /// as they have brought everything, or with `forced`, all the way.
     fn advance_notes(&self, track: &mut MidiTape, rate: u32, limit: u64, forced: bool) {
         while track.done < limit {
             let e = track.done;
@@ -720,9 +794,8 @@ impl Tape {
                 continue;
             };
             let mut until = (self.segments.get(index)).map_or(limit, |next| next.time.min(limit));
-            // How far its inputs have brought every message, in engine time.
-            let lag = i128::from(segment.latency) + i128::from(track.armed.offset);
-            let settled = i128::from(track.settled()) - lag;
+            // How far what it takes has brought everything, in engine time.
+            let settled = i128::from(track.settled()) - track.lag(&segment);
             let settled = u64::try_from(settled.max(0)).unwrap_or(u64::MAX);
             let stalled = self.until.saturating_sub(settled) > u64::from(rate) * PATIENCE_SECONDS;
             if settled < until && !forced && !stalled {
@@ -945,9 +1018,12 @@ impl Tape {
         for tape in running.notes {
             let lost = tape.lost();
             if lost > 0 {
+                let kind = match tape.takes_notes() {
+                    true => "notes and controller moves",
+                    false => "MIDI messages",
+                };
                 self.reports.push(Report::Problem(format!(
-                    "{lost} MIDI messages of {}'s recording are missing: the recorder fell \
-                     behind.",
+                    "{lost} {kind} of {}'s {what} are missing: the recorder fell behind.",
                     tape.armed.name
                 )));
             }
@@ -1075,7 +1151,10 @@ fn find_audio(
     match input {
         Input::Audio(input) => find(layout, buffers, input),
         Input::Tap(tap) => {
-            let buffer = taps.get(tap)?.clone();
+            let TapBuffer::Sound(buffer) = taps.get(tap)? else {
+                return None;
+            };
+            let buffer = buffer.clone();
             let channels = InputChannels {
                 index: 0,
                 channel: 0,
@@ -1085,6 +1164,18 @@ fn find_audio(
             Some((buffer, channels))
         }
         Input::Midi(_) => None,
+    }
+}
+
+/// The buffer of another track's notes a MIDI track taking `input` records
+/// from: the one of `taps` the engine writes a tap of notes into.
+fn find_notes(taps: &Taps, input: &Input) -> Option<NoteBuffer> {
+    match input {
+        Input::Tap(tap) => match taps.get(tap)? {
+            TapBuffer::Notes(buffer) => Some(buffer.clone()),
+            TapBuffer::Sound(_) => None,
+        },
+        Input::Audio(_) | Input::Midi(_) => None,
     }
 }
 

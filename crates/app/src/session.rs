@@ -35,7 +35,9 @@ use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
 use crate::plugins::{Change, Plugins};
-use crate::recorder::{self, Armed, Buffers, Place, Recorder, Recording, Report, TapInput, Taps};
+use crate::recorder::{
+    self, Armed, Buffers, Place, Recorder, Recording, Report, TapBuffer, TapInput, TapNotes, Taps,
+};
 
 /// Builds the graph for a project, with its meters, its audio files, its
 /// plugins' nodes and the audio inputs it monitors, on the compiler's
@@ -463,10 +465,18 @@ impl Session {
         let tracks = |held: bool| -> Vec<Armed> {
             (project.tracks.iter())
                 .filter(move |track| track.armed || (held && track.monitor == Monitor::In))
-                .filter_map(move |track| match (&track.input, track.kind) {
-                    (Some(input @ (Input::Audio(_) | Input::Tap(_))), TrackKind::Audio)
-                    | (Some(input @ Input::Midi(_)), TrackKind::Midi) => Some((track, input)),
-                    _ => None,
+                .filter_map(move |track| {
+                    let input = track.input.as_ref()?;
+                    // Sound for an audio track, notes for a MIDI track.
+                    let takes = match (input, track.kind) {
+                        (Input::Audio(_), TrackKind::Audio) | (Input::Midi(_), TrackKind::Midi) => {
+                            true
+                        }
+                        (Input::Tap(tap), TrackKind::Audio) => !project.carries_notes(*tap),
+                        (Input::Tap(tap), TrackKind::Midi) => project.carries_notes(*tap),
+                        _ => false,
+                    };
+                    takes.then_some((track, input))
                 })
                 .map(|(track, input)| Armed {
                     track: track.id,
@@ -507,7 +517,8 @@ impl Session {
     }
 
     /// Has the engine write `taps` into buffers for the recorder, those it
-    /// doesn't yet into new ones, and stop writing the others. The most it
+    /// doesn't yet into new ones, and stop writing the others: the sound of
+    /// a tap of sound, or the notes of a MIDI track's Pre FX. The most it
     /// can write: past that, tracks taking the others record nothing.
     fn write_taps(&mut self, taps: BTreeSet<Tap>) {
         let taps: BTreeSet<Tap> = taps.into_iter().take(MAX_WRITERS).collect();
@@ -520,11 +531,18 @@ impl Session {
             self.engine.push(Message::Writer(keys::record(tap), None));
         }
         let rate = self.engine.handle.config().sample_rate;
+        let project = self.document.project();
         for tap in taps {
             if let Entry::Vacant(entry) = self.taps.entry(tap) {
-                let (buffer, writer) = TapInput::new(rate);
-                entry.insert(buffer);
-                let writer: Box<dyn TapWriter> = Box::new(writer);
+                let writer: Box<dyn TapWriter> = if project.carries_notes(tap) {
+                    let (buffer, writer) = TapNotes::new();
+                    entry.insert(TapBuffer::Notes(buffer));
+                    Box::new(writer)
+                } else {
+                    let (buffer, writer) = TapInput::new(rate);
+                    entry.insert(TapBuffer::Sound(buffer));
+                    Box::new(writer)
+                };
                 self.engine
                     .push(Message::Writer(keys::record(tap), Some(writer)));
             }

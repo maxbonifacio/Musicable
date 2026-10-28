@@ -351,6 +351,12 @@ while let Some(MidiEvent { frame, bytes }) = reader.next_before(u64::MAX) {}
   each callback, since an input stamps a message as it comes in and writes
   it a moment later. Once the stream stops, the buffers end and every
   message is in.
+- A `MidiBuffer` is an `EventBuffer<1>`, a ring of events of any number of
+  64-bit words with a frame each, which one thread writes
+  (`EventWriter`, which ends the buffer when it's dropped) and any number
+  read, each with an `EventReader`. The app keeps another track's notes
+  in an `EventBuffer<2>` for its recorder, as the engine plays them
+  ([app.md](app.md#recording)).
 - Only channel messages come through: notes, aftertouch, controllers,
   program changes, channel pressure and pitch bend, three bytes each, as
   `MidiEvent::bytes`. MIDI clock, active sensing and SysEx don't.

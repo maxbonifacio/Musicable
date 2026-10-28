@@ -45,7 +45,12 @@
 //! so none of the track is in the mix. Each tap an audio track takes its
 //! input from has a record tap ([`Graph::add_record`]) keyed
 //! [`keys::record`], which the engine hands to the tap's writer for the
-//! recorder. A track that goes to Sends Only feeds nothing but its sends.
+//! recorder. A MIDI track taking another's notes, its Pre FX, has that
+//! track's [`MidiMonitor`] send them into its own monitor's side input for
+//! notes ([`Graph::send_side_notes`]), which plays them as it would a MIDI
+//! input's, and the tap has a note record ([`Graph::add_note_record`])
+//! keyed the same way. A track that goes to Sends Only feeds nothing but
+//! its sends.
 //!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
@@ -207,8 +212,10 @@ pub mod keys {
     }
 
     /// The record tap ([`Graph::add_record`](crate::Graph::add_record)) of
-    /// `tap`, for a track that takes its input from it: the key of the
-    /// [`TapWriter`](crate::TapWriter) it goes to. No node has it.
+    /// `tap`, for a track that takes its input from it, or for a MIDI
+    /// track's Pre FX, its note record
+    /// ([`Graph::add_note_record`](crate::Graph::add_note_record)): the key
+    /// of the [`TapWriter`](crate::TapWriter) it goes to. No node has it.
     pub fn record(tap: Tap) -> NodeKey {
         let chain = |chain| match chain {
             Chain::Track(track) => track,
@@ -652,9 +659,12 @@ fn build(
     let mut points = HashMap::new();
     let mut ports = HashMap::new();
     // The inputs from taps that play, and the audio tracks' monitors that
-    // take them.
+    // take them, and the MIDI tracks'. Each MIDI track's clip player and
+    // monitor, where its notes are, for the MIDI tracks taking them.
     let live_inputs: HashMap<TrackId, Tap> = project.live_inputs().into_iter().collect();
     let mut taking = Vec::new();
+    let mut taking_notes = Vec::new();
+    let mut note_points = HashMap::new();
     for track in &project.tracks {
         let player = clip_player(track, media, &project.tempo).map(|player| {
             let player = graph.add_boxed(keys::track_clips(track.id), player);
@@ -706,17 +716,28 @@ fn build(
             None => None,
         };
         // A MIDI track's input joins its clips' notes on their way to its
-        // instrument. A track without one has a monitor too, so the notes
-        // held on an input it had end when the input goes.
+        // instrument: a MIDI input's, or another track's notes, which come
+        // into its monitor's side input. A track without one has a monitor
+        // too, so the notes held on an input it had end when the input
+        // goes.
         let midi_monitor = match (track.kind, player) {
-            (TrackKind::Midi, Some(_)) => {
+            (TrackKind::Midi, Some(player)) => {
                 let mut monitor = MidiMonitor::new(track.monitor, track.armed);
-                if let Some(Input::Midi(input)) = &track.input
-                    && let Some(source) = inputs.find_midi(input)
-                {
-                    monitor = monitor.with_source(source);
+                match (&track.input, tap) {
+                    (Some(Input::Midi(input)), _) => {
+                        if let Some(source) = inputs.find_midi(input) {
+                            monitor = monitor.with_source(source);
+                        }
+                    }
+                    (_, Some(tap)) => monitor = monitor.with_side_input(tap),
+                    (_, None) => {}
                 }
-                Some(graph.add(keys::track_input(track.id), monitor))
+                let monitor = graph.add(keys::track_input(track.id), monitor);
+                if let Some(tap) = tap {
+                    taking_notes.push((tap, monitor));
+                }
+                note_points.insert(Tap::PreFx(track.id), (player, monitor));
+                Some(monitor)
             }
             _ => None,
         };
@@ -823,6 +844,19 @@ fn build(
                 .expect("the model's routing rules leave no loops");
         }
     }
+    // A MIDI track takes another's notes from that one's monitor, on their
+    // way to its devices, so its clips' notes go there even if it has no
+    // instrument to play them.
+    for &(tap, monitor) in &taking_notes {
+        if let Some(&(player, from)) = note_points.get(&tap) {
+            graph
+                .send_notes(player, from)
+                .expect("notes go from the clips through the monitor");
+            graph
+                .send_side_notes(from, monitor)
+                .expect("the model's routing rules leave no loops");
+        }
+    }
     graph.set_cue(cue).expect("the cue bus was just added");
     for node in stems.iter().filter_map(|track| tapped.get(track)) {
         graph
@@ -830,16 +864,25 @@ fn build(
             .expect("the stems' nodes were just added");
     }
     // After the stems, so theirs keep their numbers. Each tap once, however
-    // many tracks take it. A MIDI track's input from another's notes has
-    // none.
-    let recorded = (project.tracks.iter())
-        .filter(|t| t.kind == TrackKind::Audio)
-        .filter_map(|t| live_inputs.get(&t.id));
-    for &tap in recorded {
+    // many tracks take it. A MIDI track's input from another's notes has a
+    // note record of the notes it takes.
+    let recorded = |kind| {
+        (project.tracks.iter())
+            .filter(move |t| t.kind == kind)
+            .filter_map(|t| live_inputs.get(&t.id))
+    };
+    for &tap in recorded(TrackKind::Audio) {
         if let Some(&node) = points.get(&tap) {
             graph
                 .add_record(keys::record(tap), node)
                 .expect("the taps' nodes were just added");
+        }
+    }
+    for &tap in recorded(TrackKind::Midi) {
+        if let Some(&(_, monitor)) = note_points.get(&tap) {
+            graph
+                .add_note_record(keys::record(tap), monitor)
+                .expect("the monitors were just added");
         }
     }
     modulate(project, meters, &mut graph);
@@ -1385,8 +1428,8 @@ mod tests {
     use crate::modulation;
     use crate::nodes::{Delay, Impulse, Latent};
     use crate::{
-        AudioMut, Block, Engine, Event, Inputs, MidiMessage, ProcessContext, ReferenceRenderer,
-        Renderer, TransportCommand, TransportState,
+        AudioMut, Block, Engine, Event, Inputs, MidiMessage, NodeEvent, NodeEventKind, NoteEvent,
+        ProcessContext, ReferenceRenderer, Renderer, TransportCommand, TransportState,
     };
 
     const CONFIG: EngineConfig = EngineConfig {
@@ -2992,5 +3035,113 @@ mod tests {
         send.level = 1.0;
         p.track_mut(drums).unwrap().sends.push(send);
         assert_eq!(render(compile(&p).prepare(&CONFIG).unwrap(), 256), direct);
+    }
+
+    /// A Lead MIDI track playing a note from its clip, with no instrument,
+    /// and a Double MIDI track taking the Lead's notes, monitoring In, with
+    /// an instrument to play them.
+    fn doubled() -> Project {
+        let mut p = Project::new();
+        let lead = p.add_track("Lead", TrackKind::Midi);
+        let mut notes = musicable_model::clip::MidiClip::default();
+        notes.add_note(Beats::ZERO, Beats::new(1), 69, 1.0);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let clip = p.new_clip("Note", range, ClipContent::Midi(notes));
+        p.track_mut(lead).unwrap().clips.push(clip);
+        let double = p.add_track("Double", TrackKind::Midi);
+        let synth = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let track = p.track_mut(double).unwrap();
+        track.devices = vec![synth];
+        track.input = Some(Input::Tap(Tap::PreFx(lead)));
+        track.monitor = Monitor::In;
+        p
+    }
+
+    #[test]
+    fn a_midi_track_plays_another_tracks_notes_on_its_instrument() {
+        let mut p = doubled();
+        let (lead, double) = (p.tracks[0].id, p.tracks[1].id);
+        let played = render(compile(&p).prepare(&CONFIG).unwrap(), 256);
+        assert!(
+            played[..8].iter().any(|&s| s != 0.0),
+            "from the note's start"
+        );
+        // Taken before mute and solo, as a key is.
+        p.track_mut(lead).unwrap().muted = true;
+        let muted = render(compile(&p).prepare(&CONFIG).unwrap(), 256);
+        assert_eq!(muted, played);
+        // Off, the Double plays its own clips, which are silent.
+        p.track_mut(double).unwrap().monitor = Monitor::Off;
+        let off = render(compile(&p).prepare(&CONFIG).unwrap(), 256);
+        assert!(off.iter().all(|&s| s == 0.0));
+        // A Double taking a tap the project hasn't plays none.
+        let track = p.track_mut(double).unwrap();
+        track.monitor = Monitor::In;
+        track.input = Some(Input::Tap(Tap::PreFx(TrackId(99))));
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert_eq!(graph.note_records().count(), 0);
+        assert!(render(graph, 256).iter().all(|&s| s == 0.0));
+    }
+
+    /// Hands on the notes a note record carries, at their engine times.
+    struct KeptNotes(rtrb::Producer<(u64, NodeEventKind)>);
+
+    impl crate::TapWriter for KeptNotes {
+        fn write(&mut self, _: u64, audio: crate::AudioRef<'_>) {
+            assert_eq!(audio.channels(), 0, "a note record has no sound");
+        }
+
+        fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
+            for event in notes {
+                assert!(event.offset < frames);
+                let at = time + event.offset as u64;
+                self.0.push((at, event.kind)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_midi_track_records_the_notes_it_takes_as_they_play() {
+        let p = doubled();
+        let lead = p.tracks[0].id;
+        let key = keys::record(Tap::PreFx(lead));
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert!(graph.note_records().eq([key]));
+        assert_eq!(graph.records().count(), 0);
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let (notes, mut kept) = rtrb::RingBuffer::new(8);
+        assert!(handle.add_writer(key, Box::new(KeptNotes(notes))).is_ok());
+        handle.swap_graph(graph).unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        // Half a second at 120 beats a minute: the beat-long note ends.
+        play(&mut engine, 24_100);
+        let clip = &p.tracks[0].clips[0];
+        let ClipContent::Midi(midi) = &clip.content else {
+            unreachable!("the lead's clip is a MIDI clip");
+        };
+        let note = crate::clips::note_id(clip.id, midi.notes[0].id);
+        let kept: Vec<_> = std::iter::from_fn(|| kept.pop().ok()).collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    0,
+                    NodeEventKind::Note(NoteEvent::On {
+                        note,
+                        key: 69,
+                        velocity: 1.0
+                    })
+                ),
+                (
+                    24_000,
+                    NodeEventKind::Note(NoteEvent::Off {
+                        note,
+                        velocity: musicable_model::clip::Note::RELEASE_VELOCITY
+                    })
+                )
+            ]
+        );
     }
 }

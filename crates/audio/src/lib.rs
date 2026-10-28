@@ -67,7 +67,10 @@ pub use input::{
     loopback_id, loopback_of,
 };
 use input::{Playback, StreamInput};
-pub use midi::{MidiBuffer, MidiEvent, MidiInputDevice, MidiInputInfo, MidiReader, MidiWriter};
+pub use midi::{
+    EventBuffer, EventReader, EventWriter, MidiBuffer, MidiEvent, MidiInputDevice, MidiInputInfo,
+    MidiReader, MidiWriter,
+};
 use midi::{MidiBus, MidiInputs};
 pub use stats::StreamStats;
 

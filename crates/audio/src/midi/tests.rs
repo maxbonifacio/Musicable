@@ -109,6 +109,40 @@ fn readers_never_see_messages_torn_by_the_writer() {
 }
 
 #[test]
+fn events_of_several_words_are_never_torn_either() {
+    let (buffer, mut writer) = EventBuffer::<2>::new(64);
+    let done = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let mut reader = buffer.reader();
+        let done = done.clone();
+        thread::spawn(move || {
+            let mut read = 0u64;
+            loop {
+                let finished = done.load(Ordering::Acquire);
+                while let Some((frame, [a, b])) = reader.next_before(u64::MAX) {
+                    assert_eq!((a, b), (frame, !frame), "every word from the same event");
+                    read += 1;
+                }
+                if finished {
+                    return (read, reader.lost());
+                }
+            }
+        })
+    };
+    let total = 200_000;
+    for n in 0..total {
+        writer.push(n, [n, !n]);
+    }
+    writer.settle(total);
+    assert_eq!(buffer.settled(), total, "the writer settles it too");
+    assert!(buffer.same_buffer(&buffer.clone()));
+    assert!(!buffer.same_buffer(&EventBuffer::new(64).0));
+    done.store(true, Ordering::Release);
+    let (read, lost) = reader.join().unwrap();
+    assert_eq!(read + lost, total);
+}
+
+#[test]
 fn a_buffer_settles_as_it_says_and_ends_with_its_writer() {
     let (buffer, writer) = MidiBuffer::new(16);
     assert_eq!(buffer.settled(), 0);
