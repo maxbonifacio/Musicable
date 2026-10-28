@@ -13,13 +13,20 @@
 //! goes where the song was at `w` minus the latency, and minus the input's
 //! own calibration offset, and a MIDI message the same way.
 //!
+//! An audio track that takes its input from another track's tap, or
+//! resamples the master, records what the engine writes of the tap as it
+//! renders, into a buffer like an input's ([`TapInput`]): frame `w` is what
+//! the tap carried, lined up with the output as engine frame `w` played. It
+//! goes where the song was at `w` minus the latency, as an input's frame
+//! does, without a calibration offset.
+//!
 //! For Capture, it also holds the last few minutes of what the inputs of
 //! armed tracks, and of those monitoring In, brought, and the timeline over
 //! as long. Capturing records what they held over the transport's last
 //! run, where it didn't record, as if they had recorded it then.
 //! `docs/app.md` describes it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
@@ -28,12 +35,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use musicable_audio::{InputBuffer, MidiBuffer, ReadError};
+use musicable_audio::{InputBuffer, InputWriter, MidiBuffer, ReadError};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::take::{Pass, Recorded};
 use musicable_engine::timeline::Read;
-use musicable_engine::{InputChannels, InputLayout, MidiSource, Segment, Timeline};
+use musicable_engine::{
+    AudioRef, InputChannels, InputLayout, MidiSource, Segment, TapWriter, Timeline,
+};
 use musicable_io::audio::WavWriter;
+use musicable_model::routing::Tap;
 use musicable_model::{AudioInput, Input, TrackId};
 
 use self::capture::{HELD_BYTES, Held};
@@ -51,6 +61,9 @@ const FLUSH_SECONDS: u64 = 1;
 /// recording stops waiting for it and records silence in its place: an
 /// input that stalled.
 const PATIENCE_SECONDS: u64 = 2;
+/// How long the buffer of a tap that tracks record from holds what the
+/// engine wrote of it, in seconds, at least: as long as an audio input's.
+const TAP_SECONDS: u64 = 8;
 /// A track to record when the transport records: an armed audio or MIDI
 /// track.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,11 +71,76 @@ pub(crate) struct Armed {
     pub track: TrackId,
     /// The track's name, which its files are named after.
     pub name: String,
-    /// An audio input for an audio track, a MIDI input for a MIDI track.
+    /// An audio input or a tap for an audio track, a MIDI input for a MIDI
+    /// track.
     pub input: Input,
     /// How many frames late the input buffer has what the input captured:
-    /// the input's calibration, beyond the latency its driver reports.
+    /// the input's calibration, beyond the latency its driver reports. 0
+    /// for a tap.
     pub offset: i64,
+}
+
+/// The buffers the engine writes the taps that tracks record from into,
+/// by their taps.
+pub(crate) type Taps = BTreeMap<Tap, InputBuffer>;
+
+/// Writes what the engine renders of a record tap into an [`InputBuffer`],
+/// on the audio thread, as an audio input's capture writes what it
+/// captured: frame `w` at engine frame `w`, lined up with the output, as
+/// the graph lines its record taps up. In stereo, as a channel is.
+pub(crate) struct TapInput {
+    writer: InputWriter,
+    /// Room to interleave a stretch of a block in.
+    interleaved: Box<[f32]>,
+}
+
+impl TapInput {
+    const CHANNELS: usize = 2;
+    /// How many frames it interleaves at a time.
+    const CHUNK: usize = 256;
+
+    /// A buffer for a tap of an engine that renders at `rate`, and the
+    /// writer to give the engine for it.
+    pub fn new(rate: u32) -> (InputBuffer, TapInput) {
+        let frames = u64::from(rate) * TAP_SECONDS;
+        let (buffer, writer) = InputBuffer::new(Self::CHANNELS, frames);
+        let interleaved = vec![0.0; Self::CHUNK * Self::CHANNELS].into_boxed_slice();
+        (
+            buffer,
+            TapInput {
+                writer,
+                interleaved,
+            },
+        )
+    }
+}
+
+impl TapWriter for TapInput {
+    fn write(&mut self, time: u64, audio: AudioRef<'_>) {
+        let writer = &mut self.writer;
+        if !writer.has_begun() {
+            writer.begin(time);
+        }
+        // The blocks follow on from each other, but a gap would be silent.
+        let gap = time.saturating_sub(writer.end());
+        if gap > 0 {
+            writer.append_silence(gap);
+        }
+        if audio.channels() == 0 {
+            writer.append_silence(audio.frames() as u64);
+            return;
+        }
+        let mut start = 0;
+        while start < audio.frames() {
+            let n = Self::CHUNK.min(audio.frames() - start);
+            let part = &mut self.interleaved[..n * Self::CHANNELS];
+            audio
+                .range(start..start + n)
+                .write_interleaved(part, Self::CHANNELS);
+            writer.append(part);
+            start += n;
+        }
+    }
 }
 
 /// Where recordings go.
@@ -106,6 +184,7 @@ pub struct Recording {
 enum Command {
     Timeline(Timeline),
     Inputs(InputLayout, Buffers),
+    Taps(Taps),
     Tracks {
         rate: u32,
         armed: Vec<Armed>,
@@ -158,6 +237,13 @@ impl Recorder {
     /// order `layout` has them, its inputs' and then its MIDI inputs'.
     pub fn set_inputs(&self, layout: InputLayout, buffers: Buffers) {
         self.send(Command::Inputs(layout, buffers));
+    }
+
+    /// Records the tracks that take their input from a tap from what the
+    /// engine writes of it into `taps` from now on. Tracks recording from a
+    /// tap that isn't there any more record silence.
+    pub fn set_taps(&self, taps: Taps) {
+        self.send(Command::Taps(taps));
     }
 
     /// Records `armed` at `rate` into files in `place` from the next
@@ -261,6 +347,7 @@ fn run(commands: &Receiver<Command>, reports: &Sender<Report>, live: &Mutex<Vec<
                     timeline = Some(new);
                 }
                 Command::Inputs(layout, buffers) => tape.set_inputs(layout, buffers),
+                Command::Taps(taps) => tape.set_taps(taps),
                 Command::Tracks {
                     rate,
                     armed,
@@ -287,8 +374,9 @@ pub(crate) struct Buffers {
     pub midi: Vec<Option<MidiBuffer>>,
 }
 
-/// What the recorder's thread keeps: the timeline so far, the inputs, the
-/// tracks to record, the recording running, and what Capture holds.
+/// What the recorder's thread keeps: the timeline so far, the inputs and
+/// the taps, the tracks to record, the recording running, and what Capture
+/// holds.
 struct Tape {
     rate: u32,
     armed: Vec<Armed>,
@@ -296,6 +384,7 @@ struct Tape {
     project: u64,
     layout: InputLayout,
     buffers: Buffers,
+    taps: Taps,
     /// The timeline, from the segment the recording running, or the
     /// transport, is in now.
     segments: VecDeque<Segment>,
@@ -351,7 +440,8 @@ impl Running {
 /// What one audio track records.
 struct TrackTape {
     armed: Armed,
-    input: AudioInput,
+    /// An audio input or a tap.
+    input: Input,
     buffer: InputBuffer,
     channels: InputChannels,
     /// The engine time it has recorded up to.
@@ -384,6 +474,7 @@ impl Tape {
             project: 0,
             layout: InputLayout::new(),
             buffers: Buffers::default(),
+            taps: Taps::new(),
             segments: VecDeque::new(),
             until: 0,
             running: None,
@@ -417,7 +508,9 @@ impl Tape {
         self.hold();
         if let Some(running) = &mut self.running {
             for track in &mut running.tracks {
-                if let Some((buffer, channels)) = find(&layout, &buffers.audio, &track.input) {
+                if let Input::Audio(input) = &track.input
+                    && let Some((buffer, channels)) = find(&layout, &buffers.audio, input)
+                {
                     track.buffer = buffer;
                     track.channels = channels;
                 }
@@ -434,6 +527,31 @@ impl Tape {
         self.layout = layout;
         self.buffers = buffers;
         self.hold_from_new_inputs();
+    }
+
+    /// Takes the buffers of the taps that tracks record from. Tracks
+    /// recording from a tap now go on from its new buffer, if it has one,
+    /// and the held taps the same way.
+    fn set_taps(&mut self, taps: Taps) {
+        // The last of what the old buffers have.
+        self.hold();
+        if let Some(running) = &mut self.running {
+            for track in &mut running.tracks {
+                if let Input::Tap(tap) = track.input
+                    && let Some(buffer) = taps.get(&tap)
+                {
+                    track.buffer = buffer.clone();
+                }
+            }
+        }
+        self.taps = taps;
+        self.hold_from_new_taps();
+    }
+
+    /// The buffer an audio track taking `input` records from, and where its
+    /// channels are in it: see [`find_audio`].
+    fn find_audio(&self, input: &Input) -> Option<(InputBuffer, InputChannels)> {
+        find_audio(&self.layout, &self.buffers.audio, &self.taps, input)
     }
 
     /// Takes the segments the timeline published since the last read.
@@ -513,7 +631,7 @@ impl Tape {
         let mut notes = Vec::new();
         for armed in &self.armed {
             match &armed.input {
-                Input::Audio(input) => match find(&self.layout, &self.buffers.audio, input) {
+                input @ (Input::Audio(_) | Input::Tap(_)) => match self.find_audio(input) {
                     Some((buffer, channels)) => tracks.push(TrackTape {
                         armed: armed.clone(),
                         input: input.clone(),
@@ -526,10 +644,12 @@ impl Tape {
                         lost: 0,
                         failed: None,
                     }),
-                    None => self.reports.push(Report::Problem(format!(
-                        "{} records nothing: its input isn't open.",
-                        armed.name
-                    ))),
+                    None => self.reports.push(Report::Problem(match input {
+                        Input::Tap(_) => {
+                            format!("{} records nothing: its input isn't there.", armed.name)
+                        }
+                        _ => format!("{} records nothing: its input isn't open.", armed.name),
+                    })),
                 },
                 Input::Midi(input) => {
                     let source = self.layout.find_midi(input);
@@ -940,6 +1060,31 @@ fn midi_buffers(source: MidiSource, buffers: &[Option<MidiBuffer>]) -> Vec<MidiB
     match source.input {
         Some(index) => buffers.get(index).cloned().flatten().into_iter().collect(),
         None => buffers.iter().flatten().cloned().collect(),
+    }
+}
+
+/// The buffer an audio track taking `input` records from, and where its
+/// channels are in it: one of the stream's audio inputs, as `layout` has
+/// them in `buffers`, or the one of `taps` the engine writes a tap into.
+fn find_audio(
+    layout: &InputLayout,
+    buffers: &[Option<InputBuffer>],
+    taps: &Taps,
+    input: &Input,
+) -> Option<(InputBuffer, InputChannels)> {
+    match input {
+        Input::Audio(input) => find(layout, buffers, input),
+        Input::Tap(tap) => {
+            let buffer = taps.get(tap)?.clone();
+            let channels = InputChannels {
+                index: 0,
+                channel: 0,
+                first: 0,
+                count: buffer.channels(),
+            };
+            Some((buffer, channels))
+        }
+        Input::Midi(_) => None,
     }
 }
 

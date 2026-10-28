@@ -24,6 +24,20 @@ const GARBAGE_CAPACITY: usize = 16;
 /// Events the engine holds until they are due, and the most one block takes,
 /// besides the notes the graph's own nodes play.
 pub(crate) const EVENT_CAPACITY: usize = 1024;
+/// The most [`TapWriter`]s the engine writes to at once.
+pub const MAX_WRITERS: usize = 256;
+
+/// Where the engine writes what one of the graph's record taps carries
+/// ([`Graph::add_record`](crate::Graph::add_record)), block by block, as it
+/// renders: a buffer a recorder reads, as it reads an audio input's. It's
+/// called on the audio thread, so it must be real-time safe.
+pub trait TapWriter: Send {
+    /// Takes the frames the engine rendered from engine time `time` on: the
+    /// next ones, after those of the block before. A block without
+    /// channels is silence, for where the graph hasn't the tap, or there's
+    /// no graph yet.
+    fn write(&mut self, time: u64, audio: AudioRef<'_>);
+}
 
 enum Message {
     /// `time: None` means as soon as possible.
@@ -41,6 +55,9 @@ enum Message {
     Tempo(Box<TempoMap>),
     /// A preview to play, or `None` to stop the one playing.
     Preview(Option<Box<Preview>>),
+    /// A writer for the record taps with this key, or `None` to stop
+    /// writing them.
+    Writer(NodeKey, Option<Box<dyn TapWriter>>),
 }
 
 /// What the engine hands back to be dropped off the audio thread.
@@ -48,6 +65,7 @@ enum Garbage {
     Graph(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
     Preview(Box<Preview>),
+    Writer(Box<dyn TapWriter>),
 }
 
 struct Pending {
@@ -173,6 +191,8 @@ pub struct Engine {
     counters: Arc<Counters>,
     timeline: TimelineWriter,
     previews: Previews,
+    /// The writers of the graph's record taps, by their keys.
+    writers: Vec<(NodeKey, Box<dyn TapWriter>)>,
 }
 
 impl Engine {
@@ -211,6 +231,7 @@ impl Engine {
             counters: counters.clone(),
             timeline,
             previews: Previews::new(config),
+            writers: Vec::with_capacity(MAX_WRITERS),
         };
         let handle = EngineHandle {
             config,
@@ -219,6 +240,7 @@ impl Engine {
             counters,
             params: BTreeMap::new(),
             timeline: Some(timeline_reader),
+            writers: Vec::new(),
         };
         (engine, handle)
     }
@@ -395,7 +417,7 @@ impl Engine {
     /// device inputs for them and `midi` the MIDI inputs' messages, handing
     /// each block's offset and length to `write`, with the graph that
     /// rendered it, if there is one yet, and what the previews played, if
-    /// one did.
+    /// one did. The record taps go to their writers.
     fn run(
         &mut self,
         input: AudioRef<'_>,
@@ -416,6 +438,11 @@ impl Engine {
             let block = self.render(input, &mut midi, done, frames - done);
             let preview = self.previews.play(block, gain);
             write(done, block, self.graph.as_deref(), preview);
+            let start = self.time - block as u64;
+            for (key, writer) in &mut self.writers {
+                let tapped = self.graph.as_deref().and_then(|g| g.record(*key, block));
+                writer.write(start, tapped.unwrap_or(AudioRef::empty(block)));
+            }
             done += block;
         }
         while !self.garbage.is_full()
@@ -443,6 +470,7 @@ impl Engine {
                 Ok(Message::Tempo(_)) if self.garbage.is_full() => break,
                 // Room for the two previews a new one can let go of.
                 Ok(Message::Preview(_)) if self.garbage.slots() < 2 => break,
+                Ok(Message::Writer(..)) if self.garbage.is_full() => break,
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -464,6 +492,26 @@ impl Engine {
                     for gone in self.previews.replace(preview).into_iter().flatten() {
                         // `receive` checked there is room.
                         let returned = self.garbage.push(Garbage::Preview(gone));
+                        debug_assert!(returned.is_ok(), "the garbage queue has room");
+                    }
+                }
+                Ok(Message::Writer(key, writer)) => {
+                    let at = self.writers.iter().position(|(k, _)| *k == key);
+                    let gone = match (at, writer) {
+                        (Some(at), Some(writer)) => {
+                            Some(std::mem::replace(&mut self.writers[at].1, writer))
+                        }
+                        (Some(at), None) => Some(self.writers.swap_remove(at).1),
+                        // The handle sends no more than there's room for.
+                        (None, Some(writer)) if self.writers.len() < MAX_WRITERS => {
+                            self.writers.push((key, writer));
+                            None
+                        }
+                        (None, writer) => writer,
+                    };
+                    if let Some(gone) = gone {
+                        // `receive` checked there is room.
+                        let returned = self.garbage.push(Garbage::Writer(gone));
                         debug_assert!(returned.is_ok(), "the garbage queue has room");
                     }
                 }
@@ -627,6 +675,8 @@ pub struct EngineHandle {
     /// anything sent while the graph was being compiled.
     params: BTreeMap<(NodeKey, ParamId), LastValue>,
     timeline: Option<Timeline>,
+    /// The keys of the writers sent, and not removed since.
+    writers: Vec<NodeKey>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -771,10 +821,55 @@ impl EngineHandle {
         self.counters.preview_gain.store(gain.to_bits(), Relaxed);
     }
 
-    /// Drops the graphs, tempo maps and previews the engine has replaced or
-    /// finished with, and returns how many there were. Call it regularly,
-    /// for example once per UI frame: the engine holds off swaps while too
-    /// many are waiting.
+    /// Has the engine write the record taps with `key` to `writer`, in
+    /// place of the writer it had for them, from the start of its next
+    /// `process` call: see [`TapWriter`]. Gives the writer back if the
+    /// message queue is full, or the engine writes to as many writers as it
+    /// can already.
+    pub fn add_writer(
+        &mut self,
+        key: NodeKey,
+        writer: Box<dyn TapWriter>,
+    ) -> Result<(), Box<dyn TapWriter>> {
+        let new = !self.writers.contains(&key);
+        if new && self.writers.len() >= MAX_WRITERS {
+            return Err(writer);
+        }
+        match self.messages.push(Message::Writer(key, Some(writer))) {
+            Ok(()) => {
+                if new {
+                    self.writers.push(key);
+                }
+                Ok(())
+            }
+            Err(rtrb::PushError::Full(Message::Writer(_, Some(writer)))) => Err(writer),
+            Err(_) => unreachable!("the message pushed was a writer"),
+        }
+    }
+
+    /// Has the engine stop writing the record taps with `key`, and drop
+    /// their writer.
+    pub fn remove_writer(&mut self, key: NodeKey) -> Result<(), QueueFull<NodeKey>> {
+        if !self.writers.contains(&key) {
+            return Ok(());
+        }
+        self.messages
+            .push(Message::Writer(key, None))
+            .map_err(|_| QueueFull(key))?;
+        self.writers.retain(|&k| k != key);
+        Ok(())
+    }
+
+    /// The keys of the writers the engine has, or will have once it takes
+    /// what was sent, in the order they were added.
+    pub fn writers(&self) -> &[NodeKey] {
+        &self.writers
+    }
+
+    /// Drops the graphs, tempo maps, previews and writers the engine has
+    /// replaced or finished with, and returns how many there were. Call it
+    /// regularly, for example once per UI frame: the engine holds off swaps
+    /// while too many are waiting.
     pub fn collect_garbage(&mut self) -> usize {
         let mut dropped = 0;
         while let Ok(garbage) = self.garbage.pop() {
@@ -782,6 +877,7 @@ impl EngineHandle {
                 Garbage::Graph(graph) => drop(graph),
                 Garbage::Tempo(tempo) => drop(tempo),
                 Garbage::Preview(preview) => drop(preview),
+                Garbage::Writer(writer) => drop(writer),
             }
             dropped += 1;
         }
@@ -1065,6 +1161,88 @@ mod tests {
         assert_eq!(output, count(0.5), "without the cue");
         assert_eq!(taps[0], count(1.0));
         assert!(taps[1].iter().all(|&s| s == 0.0), "no second tap");
+    }
+
+    /// Hands on each block it's written: its time and length, and its first
+    /// channel, with silence as zeros.
+    struct Kept {
+        blocks: rtrb::Producer<(u64, usize)>,
+        samples: rtrb::Producer<f32>,
+    }
+
+    impl TapWriter for Kept {
+        fn write(&mut self, time: u64, audio: AudioRef<'_>) {
+            self.blocks.push((time, audio.frames())).unwrap();
+            for i in 0..audio.frames() {
+                let sample = if audio.channels() > 0 {
+                    audio.channel(0)[i]
+                } else {
+                    0.0
+                };
+                self.samples.push(sample).unwrap();
+            }
+        }
+    }
+
+    type Blocks = rtrb::Consumer<(u64, usize)>;
+
+    /// A [`Kept`] with room for a test's blocks, and what it hands on.
+    fn kept() -> (Box<dyn TapWriter>, Blocks, rtrb::Consumer<f32>) {
+        let (blocks, blocks_rx) = RingBuffer::new(64);
+        let (samples, samples_rx) = RingBuffer::new(1024);
+        (Box::new(Kept { blocks, samples }), blocks_rx, samples_rx)
+    }
+
+    fn drain<T>(queue: &mut rtrb::Consumer<T>) -> Vec<T> {
+        std::iter::from_fn(|| queue.pop().ok()).collect()
+    }
+
+    #[test]
+    fn record_taps_go_to_their_writers_block_by_block() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let (writer, mut blocks, mut samples) = kept();
+        let key = NodeKey(7);
+        assert!(handle.add_writer(key, writer).is_ok());
+        assert_eq!(handle.writers(), [key]);
+        // Silence, before the graph.
+        render(&mut engine, 100, &[100]);
+        let mut g = Graph::new();
+        let counter = g.add(NodeKey(0), Counter(0.0));
+        let half = g.add(NodeKey(1), Level(0.5));
+        g.connect(counter, half).unwrap();
+        g.set_output(half).unwrap();
+        assert_eq!(g.add_record(key, counter), Ok(0));
+        assert_eq!(g.add_record(key, half), Ok(0), "one tap for a key");
+        let g = g.prepare(&CONFIG).unwrap();
+        assert!(g.records().eq([key]));
+        handle.swap_graph(g).unwrap();
+        render(&mut engine, 200, &[7, 64, 129]);
+        // Each block from where the one before ended.
+        let mut time = 0;
+        for (at, frames) in drain(&mut blocks) {
+            assert_eq!(at, time);
+            time += frames as u64;
+        }
+        assert_eq!(time, 300);
+        let written = drain(&mut samples);
+        let count: Vec<f32> = (0..200).map(|i| i as f32).collect();
+        assert_eq!(written[..100], [0.0; 100]);
+        assert_eq!(written[100..], count);
+        // Another writer for the key takes over, and the first one is
+        // dropped on the control thread, as is the last one once removed.
+        let (writer, mut other, _) = kept();
+        assert!(handle.add_writer(key, writer).is_ok());
+        render(&mut engine, 10, &[10]);
+        assert!(blocks.is_empty());
+        assert_eq!(drain(&mut other), [(300, 10)]);
+        assert!(!blocks.is_abandoned());
+        assert_eq!(handle.collect_garbage(), 1);
+        assert!(blocks.is_abandoned());
+        handle.remove_writer(key).unwrap();
+        assert!(handle.writers().is_empty());
+        render(&mut engine, 10, &[10]);
+        assert_eq!(handle.collect_garbage(), 1);
+        assert!(other.is_abandoned());
     }
 
     #[test]

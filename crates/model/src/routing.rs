@@ -11,20 +11,26 @@
 //! joins a tap to a port, with a gain, and wires into the same port sum.
 //! The project keeps one list of them.
 //!
+//! A track's input can be a tap on another track too ([`Input::Tap`]): an
+//! audio track records and monitors another's sound, and a MIDI track
+//! another MIDI track's notes, at its Pre FX. The master's Post Fader is
+//! [Resampling](Input::RESAMPLING), which a track records but never plays.
+//!
 //! Signal never flows in a loop. Outputs and sends can't make one on their
-//! own (see [`mixer`](crate::mixer)), but a wire can close one with them,
-//! such as a compressor keyed from the group its own track feeds, or from a
-//! device after it. The check follows points, not tracks, so two tracks can
-//! key each other from their Pre FX. [`Project::check_wire`] says whether a
-//! wire can join the project, and [`Project::wire_in_a_loop`] finds the
-//! wire that closes a loop, after an edit that moves devices, outputs or
-//! sends.
+//! own (see [`mixer`](crate::mixer)), but an input or a wire can close one
+//! with them, such as a compressor keyed from the group its own track
+//! feeds, or from a device after it, or a track taking its input from a
+//! group it feeds. The check follows points, not tracks, so two tracks can
+//! key each other from their Pre FX. [`Project::check_wire`] and
+//! [`Project::check_input`] say whether a wire or an input can join the
+//! project, and [`Project::route_in_a_loop`] finds the route that closes a
+//! loop, after an edit that moves devices, outputs or sends.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::mixer::Bus;
 use crate::native::NativeKind;
-use crate::{Chain, DeviceId, DeviceKind, Project, TrackId, TrackKind, next_id};
+use crate::{Chain, DeviceId, DeviceKind, Input, Project, TrackId, TrackKind, next_id};
 
 /// Stable identifier for a wire, unique within a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -35,7 +41,8 @@ pub struct WireId(pub u32);
 pub enum Tap {
     /// What comes into a track's devices: its clips and its input, or on a
     /// group or a return track, what feeds it. A MIDI track's is its
-    /// notes, which no wire takes yet. The master has none.
+    /// notes, which only another MIDI track's input takes. The master has
+    /// none.
     PreFx(TrackId),
     /// What a device puts out. A deactivated device is out of the signal,
     /// so its tap has what comes into it.
@@ -113,6 +120,40 @@ pub enum WireError {
     /// Signal from the port's device reaches the tap already, so the wire
     /// would close a loop.
     Loop,
+}
+
+/// Why a track can't take its input from a tap: see
+/// [`Project::check_input`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputError {
+    /// The project hasn't the track.
+    NoTrack,
+    /// The project hasn't the tap's track or device.
+    NoTap,
+    /// The track is a group or a return track, which takes what feeds it,
+    /// not an input.
+    Bus,
+    /// The tap is a MIDI track's Pre FX, which is notes, and the track is
+    /// an audio track.
+    Notes,
+    /// The tap carries sound, and the track is a MIDI track, which takes
+    /// another MIDI track's notes alone.
+    Sound,
+    /// The tap is on the master, but not its Post Fader, which is the
+    /// master's one tap for an input: Resampling.
+    Master,
+    /// Signal from the track reaches the tap already, so the input would
+    /// close a loop.
+    Loop,
+}
+
+/// A route between channels that can close a loop with the outputs and
+/// the sends: a track's input from a tap, or a wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Route {
+    /// The input of the track with this id.
+    Input(TrackId),
+    Wire(WireId),
 }
 
 impl Project {
@@ -279,8 +320,11 @@ impl Project {
         if let Some(wired) = self.wires.iter().find(|w| (w.from, w.to) == (from, to)) {
             return Err(WireError::Wired(wired.id));
         }
-        let flow = Flow::new(self, self.live_wires().iter().copied());
-        if flow.reaches(Point::port(to), Point::tap(from)) {
+        if self
+            .live(None)
+            .flow
+            .reaches(Point::port(to), Point::tap(from))
+        {
             return Err(WireError::Loop);
         }
         Ok(())
@@ -302,42 +346,152 @@ impl Project {
         Ok(())
     }
 
-    /// The wires the engine plays, in the order the project lists them:
-    /// each whose ends the project has and whose tap carries sound, unless
-    /// it would close a loop with the outputs, the sends and the wires
-    /// before it. That's all of them in a project the commands edit, which
-    /// refuse a wire that would make a loop.
-    pub fn live_wires(&self) -> Vec<&Wire> {
-        let mut flow = Flow::new(self, []);
-        let mut live = Vec::with_capacity(self.wires.len());
-        for wire in &self.wires {
-            let (from, to) = (Point::tap(wire.from), Point::port(wire.to));
-            if self.check_ends(wire.from, wire.to).is_ok() && !flow.reaches(to, from) {
-                flow.add(from, to);
-                live.push(wire);
-            }
-        }
-        live
+    /// Whether the track with id `track` can take its input from `tap`:
+    /// see [`check_input`](Self::check_input).
+    pub fn can_take(&self, track: TrackId, tap: Tap) -> bool {
+        self.check_input(track, tap).is_ok()
     }
 
-    /// The first wire, in the order the project lists them, that closes a
-    /// loop with the outputs, the sends and the wires before it, if there's
-    /// a loop. Outputs and sends can't make one on their own, so any loop
-    /// runs through a wire. An edit that moves a device, an output or a
-    /// send checks it, to take itself back if it made a loop.
-    pub fn wire_in_a_loop(&self) -> Option<WireId> {
-        let mut flow = Flow::new(self, []);
+    /// Whether the track with id `track` can take its input from `tap`, in
+    /// place of the input it has, and if not, why not. An audio track takes
+    /// sound: any tap on another track but a MIDI track's Pre FX, or the
+    /// master's Post Fader, which is [Resampling](Input::RESAMPLING). A
+    /// MIDI track takes another MIDI track's Pre FX: its notes. Group and
+    /// return tracks take no input. The signal from the track can't reach
+    /// the tap, so the input makes no loop, but for Resampling, which the
+    /// track records and never plays.
+    pub fn check_input(&self, track: TrackId, tap: Tap) -> Result<(), InputError> {
+        self.check_input_ends(track, tap)?;
+        if Input::Tap(tap).is_resampling() {
+            return Ok(());
+        }
+        let head = Point::Head(Chain::Track(track));
+        if self.live(Some(track)).flow.reaches(head, Point::tap(tap)) {
+            return Err(InputError::Loop);
+        }
+        Ok(())
+    }
+
+    /// Whether the project has the track with id `track` and `tap`, and the
+    /// tap carries what the track takes.
+    fn check_input_ends(&self, track: TrackId, tap: Tap) -> Result<(), InputError> {
+        let taker = self.track(track).ok_or(InputError::NoTrack)?;
+        if taker.kind.is_bus() {
+            return Err(InputError::Bus);
+        }
+        let chain = self.tap_chain(tap).ok_or(InputError::NoTap)?;
+        let notes = match tap {
+            Tap::PreFx(from) => self.track(from).is_some_and(|t| t.kind == TrackKind::Midi),
+            Tap::Device(_) | Tap::PostFx(_) | Tap::PostFader(_) => false,
+        };
+        match taker.kind {
+            TrackKind::Midi if !notes => Err(InputError::Sound),
+            TrackKind::Midi => Ok(()),
+            _ if notes => Err(InputError::Notes),
+            _ if chain == Chain::Master && tap != Tap::PostFader(Chain::Master) => {
+                Err(InputError::Master)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The inputs from taps the engine plays, as each track with one and
+    /// its tap, in track order: each whose ends the project has and whose
+    /// tap carries what the track takes, unless it would close a loop with
+    /// the outputs, the sends and the inputs before it. Resampling never
+    /// closes one: the track records it but never plays it. That's all of
+    /// them in a project the commands edit, which refuse an input that
+    /// would make a loop.
+    pub fn live_inputs(&self) -> Vec<(TrackId, Tap)> {
+        self.live(None).inputs
+    }
+
+    /// The wires the engine plays, in the order the project lists them:
+    /// each whose ends the project has and whose tap carries sound, unless
+    /// it would close a loop with the outputs, the sends, the inputs the
+    /// engine plays and the wires before it. That's all of them in a
+    /// project the commands edit, which refuse a wire that would make a
+    /// loop.
+    pub fn live_wires(&self) -> Vec<&Wire> {
+        self.live(None).wires
+    }
+
+    /// The first route that closes a loop with the outputs, the sends and
+    /// the routes before it, if there's a loop: the tracks' inputs from
+    /// taps first, in track order, then the wires, in the order the project
+    /// lists them. Outputs and sends can't make one on their own, so any
+    /// loop runs through an input or a wire. An edit that moves a device,
+    /// an output or a send checks it, to take itself back if it made a
+    /// loop.
+    pub fn route_in_a_loop(&self) -> Option<Route> {
+        self.live(None).in_a_loop
+    }
+
+    /// The inputs from taps and the wires the engine plays, with the flow
+    /// through them, as [`live_inputs`](Self::live_inputs) and
+    /// [`live_wires`](Self::live_wires) take them, and the first route that
+    /// closes a loop, as [`route_in_a_loop`](Self::route_in_a_loop) finds
+    /// it. Without the input of `skip`, the track whose input is checked,
+    /// if there is one.
+    fn live(&self, skip: Option<TrackId>) -> Live<'_> {
+        let mut flow = Flow::new(self);
+        let mut live = Live::default();
+        for track in self.tracks.iter().filter(|t| Some(t.id) != skip) {
+            let Some(tap) = track.input.as_ref().and_then(Input::tap) else {
+                continue;
+            };
+            if self.check_input_ends(track.id, tap).is_err() {
+                continue;
+            }
+            let (from, to) = (Point::tap(tap), Point::Head(Chain::Track(track.id)));
+            if Input::Tap(tap).is_resampling() {
+                live.inputs.push((track.id, tap));
+            } else if flow.reaches(to, from) {
+                live.in_a_loop.get_or_insert(Route::Input(track.id));
+            } else {
+                flow.add(from, to);
+                live.inputs.push((track.id, tap));
+            }
+        }
         for wire in &self.wires {
             if self.check_ends(wire.from, wire.to).is_err() {
                 continue;
             }
             let (from, to) = (Point::tap(wire.from), Point::port(wire.to));
             if flow.reaches(to, from) {
-                return Some(wire.id);
+                live.in_a_loop.get_or_insert(Route::Wire(wire.id));
+            } else {
+                flow.add(from, to);
+                live.wires.push(wire);
             }
-            flow.add(from, to);
         }
-        None
+        live.flow = flow;
+        live
+    }
+
+    /// The tracks that take their input from a tap on the track with id
+    /// `track`, or on one of its devices, in track order.
+    pub fn inputs_from_track(&self, track: TrackId) -> Vec<TrackId> {
+        let chain = Some(Chain::Track(track));
+        let on_track = |tap: Tap| match tap {
+            Tap::PreFx(t) => t == track,
+            Tap::Device(_) | Tap::PostFx(_) | Tap::PostFader(_) => self.tap_chain(tap) == chain,
+        };
+        self.tracks_taking(on_track)
+    }
+
+    /// The tracks that take their input from what the device with id
+    /// `device` puts out, in track order.
+    pub fn inputs_from_device(&self, device: DeviceId) -> Vec<TrackId> {
+        self.tracks_taking(|tap| tap == Tap::Device(device))
+    }
+
+    /// The tracks whose input is a tap where `taken` holds, in track order.
+    fn tracks_taking(&self, taken: impl Fn(Tap) -> bool) -> Vec<TrackId> {
+        (self.tracks.iter())
+            .filter(|t| t.input.as_ref().and_then(Input::tap).is_some_and(&taken))
+            .map(|t| t.id)
+            .collect()
     }
 
     /// The wires to and from the track with id `track`: from its taps and
@@ -393,15 +547,25 @@ impl Point {
 }
 
 /// Where the signal flows, point by point.
+#[derive(Default)]
 struct Flow {
     next: HashMap<Point, Vec<Point>>,
 }
 
+/// What [`Project::live`] finds.
+#[derive(Default)]
+struct Live<'a> {
+    flow: Flow,
+    inputs: Vec<(TrackId, Tap)>,
+    wires: Vec<&'a Wire>,
+    in_a_loop: Option<Route>,
+}
+
 impl Flow {
     /// The project's channels, from their heads through their devices to
-    /// Post Fader, its tracks' outputs and sends as the engine plays them,
-    /// and `wires`.
-    fn new<'a>(project: &Project, wires: impl IntoIterator<Item = &'a Wire>) -> Self {
+    /// Post Fader, and its tracks' outputs and sends as the engine plays
+    /// them.
+    fn new(project: &Project) -> Self {
         let mut flow = Self {
             next: HashMap::new(),
         };
@@ -417,10 +581,13 @@ impl Flow {
         for track in &project.tracks {
             let chain = Chain::Track(track.id);
             let bus = match project.output_of(track) {
-                Bus::Master => Chain::Master,
-                Bus::Group(group) => Chain::Track(group),
+                Bus::Master => Some(Chain::Master),
+                Bus::Group(group) => Some(Chain::Track(group)),
+                Bus::SendsOnly => None,
             };
-            flow.add(Point::PostFader(chain), Point::Head(bus));
+            if let Some(bus) = bus {
+                flow.add(Point::PostFader(chain), Point::Head(bus));
+            }
             for send in project.sends_of(track) {
                 let from = if send.pre_fader {
                     Point::PostFx(chain)
@@ -429,9 +596,6 @@ impl Flow {
                 };
                 flow.add(from, Point::Head(Chain::Track(send.to)));
             }
-        }
-        for wire in wires {
-            flow.add(Point::tap(wire.from), Point::port(wire.to));
         }
         flow
     }
@@ -507,6 +671,16 @@ mod tests {
             let wire = self.project.new_wire(from, to);
             self.project.wires.push(wire);
             wire.id
+        }
+
+        /// Has the track take its input from `tap`.
+        fn take(&mut self, track: TrackId, tap: Tap) {
+            assert_eq!(self.project.check_input(track, tap), Ok(()), "{tap:?}");
+            self.project.track_mut(track).unwrap().input = Some(Input::Tap(tap));
+        }
+
+        fn input(&self, track: TrackId, tap: Tap) -> Result<(), InputError> {
+            self.project.check_input(track, tap)
         }
     }
 
@@ -674,7 +848,7 @@ mod tests {
                 .check_wire(Tap::Device(gate_id), Port::Sidechain(m.compressor)),
             Err(WireError::Loop)
         );
-        assert_eq!(m.project.wire_in_a_loop(), None);
+        assert_eq!(m.project.route_in_a_loop(), None);
         assert_eq!(m.project.live_wires().len(), 3);
     }
 
@@ -686,10 +860,10 @@ mod tests {
             Port::Sidechain(m.compressor),
         );
         let other = m.wire(Tap::PreFx(m.kick), Port::Sidechain(m.compressor));
-        assert_eq!(m.project.wire_in_a_loop(), None);
+        assert_eq!(m.project.route_in_a_loop(), None);
         // The bass feeding the group closes the loop through the key.
         m.project.track_mut(m.bass).unwrap().output = Bus::Group(m.group);
-        assert_eq!(m.project.wire_in_a_loop(), Some(key));
+        assert_eq!(m.project.route_in_a_loop(), Some(Route::Wire(key)));
         // The engine leaves it out, and plays the rest.
         let live: Vec<WireId> = m.project.live_wires().iter().map(|w| w.id).collect();
         assert_eq!(live, [other]);
@@ -706,7 +880,7 @@ mod tests {
         let devices = &mut m.project.track_mut(m.bass).unwrap().devices;
         let gate = devices.pop().unwrap();
         devices.insert(0, gate);
-        assert_eq!(m.project.wire_in_a_loop(), Some(key));
+        assert_eq!(m.project.route_in_a_loop(), Some(Route::Wire(key)));
     }
 
     #[test]
@@ -755,7 +929,7 @@ mod tests {
         assert_eq!(m.project.live_wires().len(), 1);
         m.project.tracks.retain(|t| t.id != m.kick);
         assert!(m.project.live_wires().is_empty());
-        assert_eq!(m.project.wire_in_a_loop(), None);
+        assert_eq!(m.project.route_in_a_loop(), None);
         assert_eq!(m.project.wire(key).map(|w| w.gain), Some(1.0));
     }
 
@@ -825,7 +999,7 @@ mod tests {
         let device = m.project.device_mut(vocoder_id).unwrap();
         device.kind.plugin_mut().unwrap().inputs = vec![input(3, "Aux")];
         assert!(m.project.live_wires().is_empty());
-        assert_eq!(m.project.wire_in_a_loop(), None);
+        assert_eq!(m.project.route_in_a_loop(), None);
         // One the plugin names nothing still has a name.
         let device = m.project.device_mut(vocoder_id).unwrap();
         device.kind.plugin_mut().unwrap().inputs.push(input(5, " "));
@@ -835,5 +1009,193 @@ mod tests {
             m.project.port_name(unnamed).as_deref(),
             Some("Vocoder Side Input on Bass")
         );
+    }
+
+    #[test]
+    fn an_audio_track_takes_another_tracks_sound_at_any_tap() {
+        let mut m = mix();
+        let print = m.project.add_track("Print", TrackKind::Audio);
+        let chains = [m.kick, m.bass, m.group, m.reverb].map(Chain::Track);
+        for tap in chains.into_iter().flat_map(|chain| m.project.taps(chain)) {
+            assert_eq!(m.input(print, tap), Ok(()), "{tap:?}");
+        }
+        // The master's Post Fader is Resampling, its one tap for an input.
+        let resampling = Input::RESAMPLING.tap().unwrap();
+        assert_eq!(m.input(print, resampling), Ok(()));
+        assert_eq!(
+            m.input(print, Tap::PostFx(Chain::Master)),
+            Err(InputError::Master)
+        );
+        let limiter = device(&mut m.project, NativeKind::Compressor);
+        let limiter_id = limiter.id;
+        m.project.master.devices.push(limiter);
+        assert_eq!(
+            m.input(print, Tap::Device(limiter_id)),
+            Err(InputError::Master)
+        );
+        let kick = Tap::PostFx(Chain::Track(m.kick));
+        assert_eq!(
+            m.input(print, Tap::PostFx(Chain::Track(TrackId(99)))),
+            Err(InputError::NoTap)
+        );
+        assert_eq!(
+            m.input(print, Tap::Device(DeviceId(99))),
+            Err(InputError::NoTap)
+        );
+        assert_eq!(m.input(TrackId(99), kick), Err(InputError::NoTrack));
+        // Buses take what feeds them.
+        assert_eq!(m.input(m.group, kick), Err(InputError::Bus));
+        assert_eq!(m.input(m.reverb, kick), Err(InputError::Bus));
+        assert!(m.project.can_take(print, kick));
+        assert!(!m.project.can_take(m.group, kick));
+    }
+
+    #[test]
+    fn a_midi_track_takes_another_midi_tracks_notes() {
+        let mut m = mix();
+        let keys = m.project.add_track("Keys", TrackKind::Midi);
+        let pad = m.project.add_track("Pad", TrackKind::Midi);
+        assert_eq!(m.input(pad, Tap::PreFx(keys)), Ok(()));
+        // Sound is for audio tracks.
+        for tap in [
+            Tap::PostFx(Chain::Track(keys)),
+            Tap::PreFx(m.kick),
+            Input::RESAMPLING.tap().unwrap(),
+        ] {
+            assert_eq!(m.input(pad, tap), Err(InputError::Sound), "{tap:?}");
+        }
+        assert_eq!(m.input(m.kick, Tap::PreFx(keys)), Err(InputError::Notes));
+        assert_eq!(m.input(m.kick, Tap::PostFx(Chain::Track(keys))), Ok(()));
+        // Not from itself, nor round a loop.
+        assert_eq!(m.input(keys, Tap::PreFx(keys)), Err(InputError::Loop));
+        m.take(pad, Tap::PreFx(keys));
+        assert_eq!(m.input(keys, Tap::PreFx(pad)), Err(InputError::Loop));
+        assert_eq!(m.project.live_inputs(), [(pad, Tap::PreFx(keys))]);
+    }
+
+    #[test]
+    fn inputs_that_would_loop_are_refused() {
+        let mut m = mix();
+        let kick = Chain::Track(m.kick);
+        // From itself.
+        for tap in m.project.taps(kick) {
+            assert_eq!(m.input(m.kick, tap), Err(InputError::Loop), "{tap:?}");
+        }
+        // From the group it feeds and the return it sends to.
+        let send = m.project.new_send(m.reverb);
+        let track = m.project.track_mut(m.kick).unwrap();
+        track.output = Bus::Group(m.group);
+        track.sends.push(send);
+        for chain in [m.group, m.reverb].map(Chain::Track) {
+            for tap in m.project.taps(chain) {
+                assert_eq!(m.input(m.kick, tap), Err(InputError::Loop), "{tap:?}");
+            }
+        }
+        // From a track that takes its own sound.
+        m.take(m.bass, Tap::PostFx(kick));
+        let bass = Chain::Track(m.bass);
+        assert_eq!(m.input(m.kick, Tap::PostFx(bass)), Err(InputError::Loop));
+        assert_eq!(m.input(m.kick, Tap::PreFx(m.bass)), Err(InputError::Loop));
+        // Replacing the bass's input, which the check leaves out.
+        m.take(m.bass, Tap::PreFx(m.kick));
+        // Round a wire: a print of the bass can't key the bass's compressor,
+        // nor can a track take what comes out of a compressor it keys.
+        let print = m.project.add_track("Print", TrackKind::Audio);
+        let key = Port::Sidechain(m.compressor);
+        m.take(print, Tap::PostFx(bass));
+        let from = Tap::PostFader(Chain::Track(print));
+        assert_eq!(m.project.check_wire(from, key), Err(WireError::Loop));
+        let vocal = m.project.add_track("Vocal", TrackKind::Audio);
+        m.wire(Tap::PostFx(Chain::Track(vocal)), key);
+        assert_eq!(
+            m.input(vocal, Tap::Device(m.compressor)),
+            Err(InputError::Loop)
+        );
+        assert_eq!(m.project.route_in_a_loop(), None);
+    }
+
+    #[test]
+    fn resampling_takes_the_master_that_the_track_feeds() {
+        let mut m = mix();
+        let resampling = Input::RESAMPLING.tap().unwrap();
+        m.take(m.kick, resampling);
+        // The track records it but never plays it, so it closes no loop.
+        assert_eq!(m.project.live_inputs(), [(m.kick, resampling)]);
+        assert_eq!(m.project.route_in_a_loop(), None);
+        assert!(Input::RESAMPLING.is_resampling());
+        assert!(!Input::Tap(Tap::PostFx(Chain::Master)).is_resampling());
+        // Nor does a key into the master from the track.
+        let limiter = device(&mut m.project, NativeKind::Compressor);
+        let limiter_id = limiter.id;
+        m.project.master.devices.push(limiter);
+        m.wire(
+            Tap::PostFx(Chain::Track(m.kick)),
+            Port::Sidechain(limiter_id),
+        );
+    }
+
+    #[test]
+    fn an_output_that_closes_a_loop_through_an_input_finds_it() {
+        let mut m = mix();
+        let print = m.project.add_track("Print", TrackKind::Audio);
+        m.take(print, Tap::PostFader(Chain::Track(m.group)));
+        let key = m.wire(Tap::PreFx(m.kick), Port::Sidechain(m.compressor));
+        assert_eq!(m.project.route_in_a_loop(), None);
+        // The print feeding the group closes a loop through its input,
+        // which the engine leaves out.
+        m.project.track_mut(print).unwrap().output = Bus::Group(m.group);
+        assert_eq!(m.project.route_in_a_loop(), Some(Route::Input(print)));
+        assert!(m.project.live_inputs().is_empty());
+        let live: Vec<WireId> = m.project.live_wires().iter().map(|w| w.id).collect();
+        assert_eq!(live, [key]);
+        // Where an input and a wire close a loop together, the input plays:
+        // the kick taking the bass, which its Pre FX keys.
+        m.project.track_mut(print).unwrap().output = Bus::Master;
+        let bass = Tap::PostFx(Chain::Track(m.bass));
+        m.project.track_mut(m.kick).unwrap().input = Some(Input::Tap(bass));
+        assert_eq!(m.project.route_in_a_loop(), Some(Route::Wire(key)));
+        let inputs = m.project.live_inputs();
+        assert_eq!(
+            inputs,
+            [
+                (m.kick, bass),
+                (print, Tap::PostFader(Chain::Track(m.group)))
+            ]
+        );
+        assert!(m.project.live_wires().is_empty());
+    }
+
+    #[test]
+    fn inputs_belong_to_the_tracks_and_devices_they_take_from() {
+        let mut m = mix();
+        let [a, b, c, d] =
+            ["A", "B", "C", "D"].map(|name| m.project.add_track(name, TrackKind::Audio));
+        m.take(a, Tap::Device(m.eq));
+        m.take(b, Tap::PreFx(m.bass));
+        m.take(c, Tap::PostFader(Chain::Track(m.kick)));
+        m.take(d, Input::RESAMPLING.tap().unwrap());
+        assert_eq!(m.project.inputs_from_track(m.bass), [a, b]);
+        assert_eq!(m.project.inputs_from_track(m.kick), [c]);
+        assert!(m.project.inputs_from_track(m.group).is_empty());
+        assert_eq!(m.project.inputs_from_device(m.eq), [a]);
+        assert!(m.project.inputs_from_device(m.compressor).is_empty());
+        // An input from a track the project hasn't doesn't play.
+        m.project.tracks.retain(|t| t.id != m.kick);
+        let live: Vec<TrackId> = m.project.live_inputs().iter().map(|&(t, _)| t).collect();
+        assert_eq!(live, [a, b, d]);
+    }
+
+    #[test]
+    fn a_sends_only_track_feeds_nothing_downstream() {
+        let mut m = mix();
+        let key = Port::Sidechain(m.compressor);
+        let master = Tap::PostFx(Chain::Master);
+        // The bass feeds the master, so the master can't key it, until it
+        // goes to Sends Only.
+        assert_eq!(m.project.check_wire(master, key), Err(WireError::Loop));
+        m.project.track_mut(m.bass).unwrap().output = Bus::SendsOnly;
+        assert_eq!(m.project.check_wire(master, key), Ok(()));
+        let print = m.project.add_track("Print", TrackKind::Audio);
+        m.take(print, Tap::PostFader(Chain::Track(m.bass)));
     }
 }

@@ -37,6 +37,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     modulation,
     wires,
     plugin_inputs,
+    tracks_from_tracks,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -346,6 +347,13 @@ fn plugin_inputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     }
     let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
     no_inputs(master, "master.devices")
+}
+
+/// Version 21 added inputs from other tracks' taps, Resampling among them,
+/// and outputs to nothing, Sends Only. Version 20 files have neither, so
+/// they need nothing.
+fn tracks_from_tracks(_: &mut Map<String, Value>) -> Result<(), Invalid> {
+    Ok(())
 }
 
 /// Gives each plugin in `devices`, a list at `path`, no side inputs.

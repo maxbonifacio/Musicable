@@ -2,12 +2,13 @@
 //! the master's on the right.
 //!
 //! A strip has, from the top: the track's name, where an audio or MIDI
-//! track records from and when it plays its input, where its output goes,
-//! a send to each return track, the pan, the fader beside the meter, the
-//! gain and the highest peak, mute, solo and arm, and the clip stage. Each
-//! is a part the user can hide or move, and every strip shows the same
-//! parts, so their faders line up. Its controls hand back [`Change`]s for
-//! the app to make.
+//! track records from, an interface's input or for an audio track another
+//! track's tap or Resampling, and when it plays its input, where its output
+//! goes, a bus or Sends Only, a send to each return track, the pan, the
+//! fader beside the meter, the gain and the highest peak, mute, solo and
+//! arm, and the clip stage. Each is a part the user can hide or move, and
+//! every strip shows the same parts, so their faders line up. Its controls
+//! hand back [`Change`]s for the app to make.
 //!
 //! Clicking a strip where it has no control selects its track, or the
 //! master, as clicking its header in the arrangement does, and a selected
@@ -26,9 +27,9 @@ use std::ops::RangeInclusive;
 
 use egui::accesskit::{Action as Request, ActionData};
 use egui::{
-    Align, Align2, AsIdSalt, Color32, ComboBox, DragValue, FontId, Frame, Label, Layout, Painter,
-    Rangef, Rect, Response, RichText, Role, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2, WidgetInfo, pos2, vec2,
+    Align, Align2, AsIdSalt, Button, Color32, ComboBox, DragValue, FontId, Frame, Label, Layout,
+    Painter, Rangef, Rect, Response, RichText, Role, ScrollArea, Sense, Stroke, StrokeKind, Ui,
+    UiBuilder, Vec2, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::Editor;
 use musicable_commands::mixer::Change;
@@ -36,6 +37,7 @@ use musicable_commands::{Args, automation, edit};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::Output;
 use musicable_model::param::ParamAddress;
+use musicable_model::routing::{InputError, Tap};
 use musicable_model::time::Beats;
 use musicable_model::{
     AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
@@ -604,32 +606,27 @@ impl Mixer<'_> {
         }
     }
 
-    /// Where the track's output goes: a menu of the master and the groups
-    /// it can feed. Returns the bus the user picked.
+    /// Where the track's output goes: a menu of the master, the groups it
+    /// can feed, which a return track can't, and Sends Only. Returns the bus
+    /// the user picked.
     fn output(&self, ui: &mut Ui, track: &Track) -> Option<Bus> {
         let current = self.project.output_of(track);
         let text = self.bus_name(current);
-        let sizes = self.sizes();
-        if track.kind == TrackKind::Return {
-            ui.add_sized(
-                [sizes.inner(), sizes.row],
-                Label::new(RichText::new(text).weak()).truncate(),
-            )
-            .on_hover_text("Return tracks feed the master.");
-            return None;
-        }
         let mut picked = None;
         let menu = ComboBox::from_id_salt(("output", track.id))
-            .width(sizes.inner())
+            .width(self.sizes().inner())
             .truncate()
             .selected_text(text)
             .show_ui(ui, |ui| {
                 for bus in self.project.buses_for(track.id) {
-                    if ui
-                        .selectable_label(bus == current, self.bus_name(bus))
-                        .clicked()
-                        && bus != current
-                    {
+                    let mut item = ui.selectable_label(bus == current, self.bus_name(bus));
+                    if bus == Bus::SendsOnly {
+                        item = item.on_hover_text(
+                            "Feeds nothing: the track is heard through its sends, and the tracks \
+                             that take its sound, alone",
+                        );
+                    }
+                    if item.clicked() && bus != current {
                         picked = Some(bus);
                     }
                 }
@@ -643,12 +640,14 @@ impl Mixer<'_> {
         match bus {
             Bus::Master => "Master",
             Bus::Group(id) => self.project.track(id).map_or("?", |t| t.name.as_str()),
+            Bus::SendsOnly => "Sends Only",
         }
     }
 
     /// Where an audio track records from: a menu of the inputs, each a pair
-    /// of channels or a channel at a time, with the default input first.
-    /// For a MIDI track, a menu of the MIDI inputs.
+    /// of channels or a channel at a time, with the default input first,
+    /// then the other tracks, each opening to its taps, and Resampling. For
+    /// a MIDI track, a menu of the MIDI inputs.
     fn input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
         if track.kind == TrackKind::Midi {
             self.midi_input(ui, track, actions);
@@ -660,7 +659,12 @@ impl Mixer<'_> {
             Some(Input::Audio(input)) => Some(input),
             _ => None,
         };
-        let text = current.map_or("No Input".to_owned(), |input| self.input_name(input));
+        let tapped = track.input.as_ref().and_then(Input::tap);
+        let text = match (current, tapped) {
+            (Some(input), _) => self.input_name(input),
+            (None, Some(tap)) => self.tap_input_name(tap),
+            (None, None) => "No Input".to_owned(),
+        };
         let missing = current.is_some_and(|input| {
             !input.device.is_empty() && !self.inputs.audio.iter().any(|c| c.id == input.device)
         });
@@ -675,7 +679,10 @@ impl Mixer<'_> {
             .truncate()
             .selected_text(shown)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "No Input").clicked() {
+                if ui
+                    .selectable_label(track.input.is_none(), "No Input")
+                    .clicked()
+                {
                     picked = Some(None);
                 }
                 let default = InputChoice {
@@ -690,29 +697,115 @@ impl Mixer<'_> {
                         let on = current.is_some_and(|c| same_channels(c, &input));
                         let label = channels_name(&choice.name, &input);
                         if ui.selectable_label(on, label).clicked() {
-                            picked = Some(Some(input));
+                            picked = Some(Some(Input::Audio(input)));
                         }
                     }
+                }
+                if let Some(input) = self.tap_items(ui, track, tapped) {
+                    picked = Some(Some(input));
                 }
             });
         if menu.response.clicked() {
             actions.push(Action::ListInputs);
         }
         name_menu(&menu.response, format!("{} Input", track.name), &text);
-        let hint = if missing {
-            "Where the track records from. This input isn't there: it's not plugged in."
-        } else {
-            "Where the track records from"
+        let hint = match tapped {
+            _ if missing => {
+                "Where the track records from. This input isn't there: it's not plugged in."
+            }
+            Some(tap) if Input::Tap(tap).is_resampling() => {
+                "Where the track records from: the master, without this track in it, which it \
+                 never plays"
+            }
+            Some(_) => "Where the track records from: another track's sound, which it plays",
+            None => "Where the track records from",
         };
         menu.response.on_hover_text(hint);
-        let changed = match (&picked, current) {
+        let changed = match (&picked, &track.input) {
             (Some(None), None) => false,
-            (Some(Some(input)), Some(current)) => !same_channels(input, current),
+            (Some(Some(Input::Audio(input))), Some(Input::Audio(current))) => {
+                !same_channels(input, current)
+            }
+            (Some(Some(input)), Some(current)) => input != current,
             (picked, _) => picked.is_some(),
         };
         if let Some(input) = picked.filter(|_| changed) {
-            mix(actions, Change::Input(track.id, input.map(Input::Audio)));
+            mix(actions, Change::Input(track.id, input));
         }
+    }
+
+    /// The other tracks in an audio track's input menu, each opening to its
+    /// taps that carry sound, then Resampling, the master's Post Fader. A
+    /// tap that would close a loop is there but can't be picked, and a
+    /// track with none the track can take can't be opened. `current` is
+    /// ticked. Returns the input the user picked, if it's a change.
+    fn tap_items(&self, ui: &mut Ui, track: &Track, current: Option<Tap>) -> Option<Input> {
+        let project = self.project;
+        let mut picked = None;
+        let refused = |tap: Tap| match current == Some(tap) {
+            true => None,
+            false => project.check_input(track.id, tap).err(),
+        };
+        let mut first = true;
+        for other in project.tracks.iter().filter(|t| t.id != track.id) {
+            let taps: Vec<Tap> = (project.taps(Chain::Track(other.id)).into_iter())
+                .filter(|&tap| refused(tap) != Some(InputError::Notes))
+                .collect();
+            if taps.is_empty() {
+                continue;
+            }
+            if std::mem::take(&mut first) {
+                ui.separator();
+                ui.label(RichText::new("Tracks").weak());
+            }
+            let open = taps.iter().any(|&tap| refused(tap).is_none());
+            ui.add_enabled_ui(open, |ui| {
+                ui.menu_button(other.name.as_str(), |ui| {
+                    for &tap in &taps {
+                        let on = current == Some(tap);
+                        let point = project.tap_point_name(tap).unwrap_or_default();
+                        let refusal = refused(tap);
+                        let item = ui.add_enabled(refusal.is_none(), Button::selectable(on, point));
+                        let item = match refusal {
+                            Some(why) => item.on_disabled_hover_text(why_not(why)),
+                            None => item,
+                        };
+                        if item.clicked() {
+                            if !on {
+                                picked = Some(Input::Tap(tap));
+                            }
+                            ui.close();
+                        }
+                    }
+                })
+            });
+        }
+        ui.separator();
+        let resampling = current.is_some_and(|tap| Input::Tap(tap).is_resampling());
+        let item = ui.selectable_label(resampling, RESAMPLING).on_hover_text(
+            "Records the master, without this track in it. The track never plays it, and \
+             plays nothing while it records.",
+        );
+        if item.clicked() && !resampling {
+            picked = Some(Input::RESAMPLING);
+        }
+        picked
+    }
+
+    /// What a track's input menu calls its input from `tap`: "from Kick,
+    /// Post FX", or Resampling for the master's Post Fader.
+    fn tap_input_name(&self, tap: Tap) -> String {
+        if Input::Tap(tap).is_resampling() {
+            return RESAMPLING.to_owned();
+        }
+        let project = self.project;
+        let point = project.tap_point_name(tap).unwrap_or_default();
+        let channel = match project.tap_chain(tap) {
+            Some(Chain::Track(track)) => project.track(track).map_or("?", |t| t.name.as_str()),
+            Some(Chain::Master) => "Master",
+            None => "?",
+        };
+        format!("from {channel}, {point}")
     }
 
     /// What an input menu calls `input`.
@@ -736,7 +829,14 @@ impl Mixer<'_> {
             Some(Input::Midi(input)) => Some(input),
             _ => None,
         };
-        let text = current.map_or("No Input".to_owned(), |input| self.midi_input_name(input));
+        // Another MIDI track's notes, which a file can have, though the
+        // menu doesn't offer them yet.
+        let tapped = track.input.as_ref().and_then(Input::tap);
+        let text = match (current, tapped) {
+            (Some(input), _) => self.midi_input_name(input),
+            (None, Some(tap)) => self.tap_input_name(tap),
+            (None, None) => "No Input".to_owned(),
+        };
         let missing = current.is_some_and(|input| {
             !input.device.is_empty() && !self.inputs.midi.iter().any(|c| c.id == input.device)
         });
@@ -751,7 +851,10 @@ impl Mixer<'_> {
             .truncate()
             .selected_text(shown)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "No Input").clicked() {
+                if ui
+                    .selectable_label(track.input.is_none(), "No Input")
+                    .clicked()
+                {
                     picked = Some(None);
                 }
                 let every = MidiChoice {
@@ -800,7 +903,7 @@ impl Mixer<'_> {
         };
         menu.response.on_hover_text(hint);
         let changed = match (&picked, current) {
-            (Some(None), None) => false,
+            (Some(None), _) => track.input.is_some(),
             (Some(Some(input)), Some(current)) => !same_source(input, current),
             (picked, _) => picked.is_some(),
         };
@@ -864,6 +967,22 @@ impl Mixer<'_> {
 
 /// What the input menus call the default input.
 const DEFAULT_INPUT: &str = "Default";
+
+/// What an audio track's input menu calls the master's Post Fader.
+const RESAMPLING: &str = "Resampling";
+
+/// Why an audio track can't take a tap, for its item's hover text.
+fn why_not(why: InputError) -> &'static str {
+    match why {
+        InputError::Loop => "That would make a loop: what comes out of this track reaches it.",
+        InputError::NoTrack
+        | InputError::NoTap
+        | InputError::Bus
+        | InputError::Notes
+        | InputError::Sound
+        | InputError::Master => "This track can't take it.",
+    }
+}
 
 /// What the MIDI input menus call every MIDI input.
 const ALL_MIDI_INPUTS: &str = "All Inputs";
@@ -2003,7 +2122,7 @@ mod tests {
             assert_eq!(harness.query_by_label(&label).is_some(), armable, "{name}");
         }
         assert!(harness.query_by_label("Arm Reverb").is_none());
-        // Return tracks feed the master, and the others choose.
+        // Every track chooses where its output goes.
         let output = |name: &str| {
             let label = format!("{name} Output");
             harness
@@ -2012,7 +2131,7 @@ mod tests {
         };
         assert_eq!(output("Lead").as_deref(), Some("Master"));
         assert_eq!(output("Keys").as_deref(), Some("Drums"));
-        assert!(harness.query_by_label("Reverb Output").is_none());
+        assert_eq!(output("Reverb").as_deref(), Some("Master"));
         assert!(harness.query_by_label_contains("No tracks yet").is_none());
     }
 
@@ -2492,9 +2611,87 @@ mod tests {
             .get_by_role_and_label(Role::ComboBox, "Lead Input")
             .click();
         harness.run();
+        // The menu is still scrolled down to the interface's channels.
+        harness.get_by_label("No Input").scroll_to_me();
+        harness.run();
         harness.get_by_label("No Input").click();
         harness.run();
         assert_eq!(input(&harness).as_deref(), Some("No Input"));
+    }
+
+    #[test]
+    fn audio_tracks_take_another_tracks_sound_or_resample() {
+        let (project, [lead, keys, ..]) = project();
+        let mut harness = harness(project);
+        harness.run();
+        let open = |harness: &mut Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Lead Input")
+                .click();
+            harness.run();
+        };
+        let input = |harness: &Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Lead Input")
+                .value()
+        };
+        open(&mut harness);
+        // Lead sends to the reverb, so taking the reverb's sound would make
+        // a loop.
+        let reverb = harness.get_by_role_and_label(Role::Button, "Reverb");
+        assert!(reverb.accesskit_node().is_disabled());
+        // Keys is a MIDI track, whose Pre FX is notes, not sound.
+        harness.get_by_role_and_label(Role::Button, "Keys").hover();
+        harness.run();
+        assert!(harness.query_by_label("Pre FX").is_none());
+        harness.get_by_label("Post Fader");
+        harness.get_by_label("Post FX").click();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("from Keys, Post FX"));
+        // It plays what it takes, which on Auto it would only while armed.
+        let project = harness.state().document.project();
+        assert_eq!(project.track(lead).unwrap().monitor, Monitor::In);
+
+        // Resampling is at the bottom, after the tracks.
+        open(&mut harness);
+        harness.get_by_label("Resampling").scroll_to_me();
+        harness.run();
+        harness.get_by_label("Resampling").click();
+        harness.run();
+        assert_eq!(input(&harness).as_deref(), Some("Resampling"));
+        let keys = Input::Tap(Tap::PostFx(Chain::Track(keys)));
+        assert_eq!(
+            mixed(&harness),
+            [
+                Change::Input(lead, Some(keys)),
+                Change::Input(lead, Some(Input::RESAMPLING)),
+            ]
+        );
+    }
+
+    #[test]
+    fn tracks_and_returns_can_feed_sends_only() {
+        let (project, [lead, .., reverb]) = project();
+        let mut harness = harness(project);
+        harness.run();
+        for name in ["Reverb", "Lead"] {
+            let label = format!("{name} Output");
+            harness
+                .get_by_role_and_label(Role::ComboBox, &label)
+                .click();
+            harness.run();
+            harness.get_by_label("Sends Only").click();
+            harness.run();
+            let output = harness.get_by_role_and_label(Role::ComboBox, &label);
+            assert_eq!(output.value().as_deref(), Some("Sends Only"));
+        }
+        assert_eq!(
+            mixed(&harness),
+            [
+                Change::Output(reverb, Bus::SendsOnly),
+                Change::Output(lead, Bus::SendsOnly),
+            ]
+        );
     }
 
     #[test]
@@ -2544,6 +2741,31 @@ mod tests {
         harness.state_mut().midi.clear();
         harness.run();
         assert_eq!(input(&harness).as_deref(), Some("Keystep, Ch. 10"));
+    }
+
+    #[test]
+    fn a_midi_track_shows_the_notes_it_takes_from_another_and_lets_them_go() {
+        let (mut project, [_, keys, ..]) = project();
+        // From a file: the menu doesn't offer another track's notes yet.
+        let pad = project.add_track("Pad", TrackKind::Midi);
+        project.track_mut(keys).unwrap().input = Some(Input::Tap(Tap::PreFx(pad)));
+        let mut harness = harness(project);
+        harness.run();
+        let input = |harness: &Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Keys Input")
+                .value()
+        };
+        assert_eq!(input(&harness).as_deref(), Some("from Pad, Pre FX"));
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys Input")
+            .click();
+        harness.run();
+        harness.get_by_label("No Input").scroll_to_me();
+        harness.run();
+        harness.get_by_label("No Input").click();
+        harness.run();
+        assert_eq!(mixed(&harness), [Change::Input(keys, None)]);
     }
 
     #[test]

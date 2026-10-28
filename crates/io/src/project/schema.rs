@@ -118,11 +118,11 @@ struct Track {
     #[serde(deserialize_with = "Option::deserialize")]
     input: Option<Input>,
     monitor: Monitor,
-    /// The group track the output feeds, or `None` for the master.
+    /// Where the output goes, or `None` for the master.
     // Required like every other field: serde would read a missing `Option`
     // as `None`, but not through `deserialize_with`.
     #[serde(deserialize_with = "Option::deserialize")]
-    output: Option<u32>,
+    output: Option<TrackOutput>,
     sends: Vec<Send>,
     #[serde(deserialize_with = "Option::deserialize")]
     tone: Option<TestTone>,
@@ -153,12 +153,61 @@ struct Send {
     pre_fader: bool,
 }
 
-/// Externally tagged, `{"audio": {..}}`, like [`ClipContent`].
+/// Where a track's output goes, if not to the master: a group track, by
+/// its id, or `"sends_only"`, nowhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackOutput {
+    Group(u32),
+    SendsOnly,
+}
+
+impl Serialize for TrackOutput {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match *self {
+            Self::Group(group) => serializer.serialize_u32(group),
+            Self::SendsOnly => serializer.serialize_str("sends_only"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TrackOutput {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl de::Visitor<'_> for Visitor {
+            type Value = TrackOutput;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a group track's id, \"sends_only\" or null")
+            }
+
+            fn visit_u64<E: de::Error>(self, id: u64) -> Result<TrackOutput, E> {
+                u32::try_from(id)
+                    .map(TrackOutput::Group)
+                    .map_err(|_| E::invalid_value(de::Unexpected::Unsigned(id), &self))
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<TrackOutput, E> {
+                match name {
+                    "sends_only" => Ok(TrackOutput::SendsOnly),
+                    _ => Err(E::invalid_value(de::Unexpected::Str(name), &self)),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Externally tagged, `{"audio": {..}}`, like [`ClipContent`], or
+/// `{"tap": <a tap>}` for another track's signal, as a wire's `from` has
+/// it.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Input {
     Audio(AudioInput),
     Midi(MidiInput),
+    Tap(Tap),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -905,7 +954,9 @@ impl File {
         };
         check_loops(&project)?;
         check_routings(&project)?;
+        check_inputs(&project)?;
         check_wires(&project)?;
+        check_route_loops(&project)?;
         // Which parameters a device has depends on its kind, and a built-in
         // device's take the values its own do.
         for (i, lane) in project.automation.iter().enumerate() {
@@ -1006,7 +1057,7 @@ fn check_loops(project: &model::Project) -> Result<(), Invalid> {
     for (i, track) in project.tracks.iter().enumerate() {
         if project.output_of(track) != track.output {
             let Bus::Group(group) = track.output else {
-                unreachable!("the master is always a valid output");
+                unreachable!("the master and Sends Only are always valid outputs");
             };
             let message = if group == track.id {
                 "can't be the track's own id".to_owned()
@@ -1072,29 +1123,115 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
             return Err(Invalid::new(path, message));
         }
     }
-    if let Some(wire) = project.wire_in_a_loop() {
-        let i = project.wire_index(wire).expect("the wire is the project's");
-        let message = "makes a loop: what comes out of the device it feeds reaches its tap";
-        return Err(Invalid::new(format!("wires[{i}]"), message));
+    Ok(())
+}
+
+/// Refuses inputs from taps that don't suit their tracks: from a track or a
+/// device the file hasn't, a MIDI track's Pre FX, which is notes, on an
+/// audio track, anything but another MIDI track's Pre FX on a MIDI track,
+/// and a tap on the master other than its Post Fader, Resampling. Loops
+/// are left to [`check_route_loops`].
+fn check_inputs(project: &model::Project) -> Result<(), Invalid> {
+    for (i, track) in project.tracks.iter().enumerate() {
+        let Some(tap) = track.input.as_ref().and_then(model::Input::tap) else {
+            continue;
+        };
+        let message = match project.check_input(track.id, tap) {
+            Ok(()) | Err(routing::InputError::Loop) => continue,
+            Err(routing::InputError::NoTap) => match tap {
+                routing::Tap::Device(device) => format!("there's no device with id {}", device.0),
+                routing::Tap::PreFx(id)
+                | routing::Tap::PostFx(Chain::Track(id))
+                | routing::Tap::PostFader(Chain::Track(id)) => no_track(id.0),
+                routing::Tap::PostFx(Chain::Master) | routing::Tap::PostFader(Chain::Master) => {
+                    unreachable!("the file always has the master")
+                }
+            },
+            Err(routing::InputError::Notes) => {
+                let routing::Tap::PreFx(id) = tap else {
+                    unreachable!("only a Pre FX is notes");
+                };
+                format!(
+                    "is MIDI track {}'s Pre FX, which is notes: an audio track takes sound",
+                    id.0
+                )
+            }
+            Err(routing::InputError::Sound) => {
+                "must be another MIDI track's Pre FX: a MIDI track takes notes".to_owned()
+            }
+            Err(routing::InputError::Master) => "must be the master's Post Fader, for \
+                                                 Resampling: the master has no other tap \
+                                                 for an input"
+                .to_owned(),
+            Err(routing::InputError::NoTrack | routing::InputError::Bus) => {
+                unreachable!("the track is the file's, and buses' inputs were refused")
+            }
+        };
+        return Err(Invalid::new(format!("tracks[{i}].input.tap"), message));
     }
     Ok(())
+}
+
+/// Refuses an input from a tap or a wire that closes a loop: the first,
+/// as the engine finds them ([`Project::route_in_a_loop`]).
+///
+/// [`Project::route_in_a_loop`]: model::Project::route_in_a_loop
+fn check_route_loops(project: &model::Project) -> Result<(), Invalid> {
+    match project.route_in_a_loop() {
+        Some(routing::Route::Input(track)) => {
+            let i = (project.tracks.iter())
+                .position(|t| t.id == track)
+                .expect("the track is the project's");
+            let message = "makes a loop: what comes out of the track reaches its tap";
+            Err(Invalid::new(format!("tracks[{i}].input"), message))
+        }
+        Some(routing::Route::Wire(wire)) => {
+            let i = project.wire_index(wire).expect("the wire is the project's");
+            let message = "makes a loop: what comes out of the device it feeds reaches its tap";
+            Err(Invalid::new(format!("wires[{i}]"), message))
+        }
+        None => Ok(()),
+    }
+}
+
+impl From<routing::Tap> for Tap {
+    fn from(tap: routing::Tap) -> Self {
+        let channel = |chain| match chain {
+            Chain::Track(track) => Channel::Track(track.0),
+            Chain::Master => Channel::Master,
+        };
+        match tap {
+            routing::Tap::PreFx(track) => Self::PreFx(track.0),
+            routing::Tap::Device(device) => Self::Device(device.0),
+            routing::Tap::PostFx(chain) => Self::PostFx(channel(chain)),
+            routing::Tap::PostFader(chain) => Self::PostFader(channel(chain)),
+        }
+    }
+}
+
+impl Tap {
+    /// The tap, with the ids it names as they are: which tracks and devices
+    /// the file has is checked once they're all read.
+    fn to_model(self) -> routing::Tap {
+        let chain = |channel| match channel {
+            Channel::Track(id) => Chain::Track(TrackId(id)),
+            Channel::Master => Chain::Master,
+        };
+        match self {
+            Self::PreFx(track) => routing::Tap::PreFx(TrackId(track)),
+            Self::Device(device) => routing::Tap::Device(DeviceId(device)),
+            Self::PostFx(channel) => routing::Tap::PostFx(chain(channel)),
+            Self::PostFader(channel) => routing::Tap::PostFader(chain(channel)),
+        }
+    }
 }
 
 impl From<&routing::Wire> for Wire {
     fn from(wire: &routing::Wire) -> Self {
         let routing::Wire { id, from, to, gain } = *wire;
-        let channel = |chain| match chain {
-            Chain::Track(track) => Channel::Track(track.0),
-            Chain::Master => Channel::Master,
-        };
         Self {
             id: id.0,
-            from: match from {
-                routing::Tap::PreFx(track) => Tap::PreFx(track.0),
-                routing::Tap::Device(device) => Tap::Device(device.0),
-                routing::Tap::PostFx(chain) => Tap::PostFx(channel(chain)),
-                routing::Tap::PostFader(chain) => Tap::PostFader(channel(chain)),
-            },
+            from: Tap::from(from),
             to: match to {
                 routing::Port::Sidechain(device) => Port::Sidechain(device.0),
                 routing::Port::PluginInput(device, input) => Port::PluginInput {
@@ -1112,18 +1249,9 @@ impl Wire {
     /// devices the file has is checked once they're all read.
     fn to_model(&self, path: &str) -> Result<routing::Wire, Invalid> {
         let Self { id, from, to, gain } = *self;
-        let chain = |channel| match channel {
-            Channel::Track(id) => Chain::Track(TrackId(id)),
-            Channel::Master => Chain::Master,
-        };
         Ok(routing::Wire {
             id: WireId(id),
-            from: match from {
-                Tap::PreFx(track) => routing::Tap::PreFx(TrackId(track)),
-                Tap::Device(device) => routing::Tap::Device(DeviceId(device)),
-                Tap::PostFx(channel) => routing::Tap::PostFx(chain(channel)),
-                Tap::PostFader(channel) => routing::Tap::PostFader(chain(channel)),
-            },
+            from: from.to_model(),
             to: match to {
                 Port::Sidechain(device) => routing::Port::Sidechain(DeviceId(device)),
                 Port::PluginInput { device, input } => {
@@ -1307,7 +1435,8 @@ impl From<&model::Track> for Track {
             },
             output: match output {
                 Bus::Master => None,
-                Bus::Group(group) => Some(group.0),
+                Bus::Group(group) => Some(TrackOutput::Group(group.0)),
+                Bus::SendsOnly => Some(TrackOutput::SendsOnly),
             },
             sends: sends.iter().map(Send::from).collect(),
             tone: tone.map(|model::TestTone { frequency, level }| TestTone { frequency, level }),
@@ -1408,7 +1537,8 @@ impl Track {
             },
             output: match output {
                 None => Bus::Master,
-                Some(group) => Bus::Group(TrackId(*group)),
+                Some(TrackOutput::Group(group)) => Bus::Group(TrackId(*group)),
+                Some(TrackOutput::SendsOnly) => Bus::SendsOnly,
             },
             sends,
             tone,
@@ -1421,14 +1551,14 @@ impl Track {
         })
     }
 
-    /// Checks that the output feeds a group track and the sends feed return
-    /// tracks. `kinds` has the kind of every track, by id. Loops through
-    /// groups are left to [`check_loops`].
+    /// Checks that the output feeds a group track, if it names one, and the
+    /// sends feed return tracks. `kinds` has the kind of every track, by
+    /// id. Loops through groups are left to [`check_loops`].
     fn check_routing(&self, path: &str, kinds: &HashMap<u32, TrackKind>) -> Result<(), Invalid> {
-        if let Some(output) = self.output {
+        if let Some(TrackOutput::Group(output)) = self.output {
             let path = format!("{path}.output");
             if self.kind == TrackKind::Return {
-                let message = "must be null: return tracks feed the master";
+                let message = "must be null or \"sends_only\": return tracks feed the master";
                 return Err(Invalid::new(path, message));
             }
             match kinds.get(&output) {
@@ -1486,6 +1616,7 @@ impl From<&model::Input> for Input {
                 name: name.clone(),
                 channel: *channel,
             }),
+            model::Input::Tap(tap) => Input::Tap(Tap::from(*tap)),
         }
     }
 }
@@ -1532,6 +1663,8 @@ impl Input {
                     channel: *channel,
                 }))
             }
+            // Which taps suit the track is checked once every track is read.
+            (Self::Tap(tap), _) => Ok(model::Input::Tap(tap.to_model())),
             (Self::Audio(_), _) => Err(Invalid::new(
                 path,
                 "must be a MIDI input: MIDI tracks record MIDI",

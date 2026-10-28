@@ -161,7 +161,9 @@ pub fn list() -> Vec<Tool> {
              tracks with their mixer settings, devices and clips, and their modulators and \
              routings if they have any, the master, the wires, each taking a tap's signal into a \
              device's side input, the locators, and which parameters are automated, each with \
-             its id. A wire's tap and port are named as wire.connect takes them. A device \
+             its id. A wire's tap and port are named as wire.connect takes them, and a track's \
+             input from another track's tap, or Resampling, as mixer.set_input takes it. A \
+             track whose output is \"sends_only\" feeds nothing but its sends. A device \
              that's bypassed says \"bypassed\": true, and one that's deactivated \"active\": \
              false. A clip's notes, a device's or a modulator's parameters and a lane's points \
              come from get_clip, get_device, get_modulator and get_automation.",

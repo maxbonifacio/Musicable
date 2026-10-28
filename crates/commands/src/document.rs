@@ -17,7 +17,7 @@ use musicable_model::modulation::{
 use musicable_model::native::NativeKind;
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{PluginInput, PluginSettings};
-use musicable_model::routing::{Port, Tap, Wire, WireError, WireId};
+use musicable_model::routing::{InputError, Port, Route, Tap, Wire, WireError, WireId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Input, Locator, LocatorId, Monitor, Project,
@@ -413,13 +413,17 @@ impl Transaction<'_> {
     }
 
     /// Removes the device with id `device` from its chain, and returns it.
-    /// The wires to and from it, the routings to its parameters and the
-    /// lanes that automate them and its Bypass go first, each as an edit of
-    /// its own.
+    /// The wires to and from it, the inputs of the tracks that take what it
+    /// puts out, which go to No Input, the routings to its parameters and
+    /// the lanes that automate them and its Bypass go first, each as an
+    /// edit of its own.
     pub fn remove_device(&mut self, device: DeviceId) -> Option<Device> {
         self.project.find_device(device)?;
         for wire in self.project.wires_of_device(device) {
             self.remove_wire(wire);
+        }
+        for track in self.project.inputs_from_device(device) {
+            let _ = self.set_track_input(track, None);
         }
         self.remove_routings(|_, _, routing| routing.to.device() == Some(device));
         self.remove_lanes(|param| param.device() == Some(device));
@@ -462,12 +466,12 @@ impl Transaction<'_> {
         if (from, at) == (chain, index) {
             return Ok(());
         }
-        if let Some(wire) = self.closed_loop() {
+        if let Some(route) = self.closed_loop() {
             let devices = self.project.devices_mut(chain).expect("it just went in");
             let moved = devices.remove(index);
             let devices = self.project.devices_mut(from).expect("it just came out");
             devices.insert(at, moved);
-            return Err(Loop(wire));
+            return Err(Loop(route));
         }
         self.edits.push(Edit::MoveDevice {
             device,
@@ -681,14 +685,18 @@ impl Transaction<'_> {
 
     /// Removes the track with id `id` and returns it. What refers to it goes
     /// first, each as an edit of its own: the wires to and from it and its
-    /// devices go, tracks feeding it feed the master instead, sends to it
-    /// go, and so do the routings on other channels to its parameters, and
-    /// the lanes that automate its parameters, its sends', its devices' and
-    /// its modulators'.
+    /// devices go, tracks taking their input from it or its devices go to No
+    /// Input, tracks feeding it feed the master instead, sends to it go, and
+    /// so do the routings on other channels to its parameters, and the lanes
+    /// that automate its parameters, its sends', its devices' and its
+    /// modulators'.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
         self.project.track(id)?;
         for wire in self.project.wires_of_track(id) {
             self.remove_wire(wire);
+        }
+        for track in self.project.inputs_from_track(id) {
+            let _ = self.set_track_input(track, None);
         }
         let feeding: Vec<TrackId> = self
             .project
@@ -821,12 +829,13 @@ impl Transaction<'_> {
     }
 
     /// Sets what the track records from. An input of the other kind from
-    /// the track, any input on a bus, and one a file couldn't hold (a stereo
+    /// the track, any input on a bus, one a file couldn't hold (a stereo
     /// audio input from the last channel there can be, a MIDI channel past
-    /// 15) do nothing.
-    pub fn set_track_input(&mut self, track: TrackId, input: Option<Input>) {
+    /// 15) and a tap the track can't take (see [`Project::check_input`]) do
+    /// nothing. A tap that would close a loop is refused.
+    pub fn set_track_input(&mut self, track: TrackId, input: Option<Input>) -> Result<(), Loop> {
         let Some(kind) = self.project.track(track).map(|t| t.kind) else {
-            return;
+            return Ok(());
         };
         let fits = match &input {
             None => true,
@@ -836,9 +845,17 @@ impl Transaction<'_> {
             Some(Input::Midi(midi)) => {
                 kind == TrackKind::Midi && midi.channel.is_none_or(|channel| channel <= 15)
             }
+            Some(Input::Tap(tap)) => match self.project.check_input(track, *tap) {
+                Ok(()) => true,
+                Err(InputError::Loop) if self.checks_loops => {
+                    return Err(Loop(Route::Input(track)));
+                }
+                Err(InputError::Loop) => true,
+                Err(_) => false,
+            },
         };
         if !fits {
-            return;
+            return Ok(());
         }
         if let Some(from) = self.replace(track, |t| &mut t.input, input.clone()) {
             self.edits.push(Edit::TrackInput {
@@ -847,6 +864,7 @@ impl Transaction<'_> {
                 to: input,
             });
         }
+        Ok(())
     }
 
     pub fn set_track_monitor(&mut self, track: TrackId, monitor: Monitor) {
@@ -861,7 +879,7 @@ impl Transaction<'_> {
 
     /// Feeds the track's output to `output`, if the track can feed it: see
     /// [`Project::can_feed`]. Otherwise it does nothing. An output that
-    /// would close a loop through a wire is refused.
+    /// would close a loop through an input or a wire is refused.
     pub fn set_track_output(&mut self, track: TrackId, output: Bus) -> Result<(), Loop> {
         if !self.project.can_feed(track, output) {
             return Ok(());
@@ -869,9 +887,9 @@ impl Transaction<'_> {
         let Some(from) = self.replace(track, |t| &mut t.output, output) else {
             return Ok(());
         };
-        if let Some(wire) = self.closed_loop() {
+        if let Some(route) = self.closed_loop() {
             self.replace(track, |t| &mut t.output, from);
-            return Err(Loop(wire));
+            return Err(Loop(route));
         }
         self.edits.push(Edit::TrackOutput {
             track,
@@ -894,7 +912,7 @@ impl Transaction<'_> {
     /// Puts `send` at `index` in the track's sends, or at the end if `index`
     /// is past them, if the track can send to the send's return track: see
     /// [`Project::can_send`]. Otherwise it does nothing. A send that would
-    /// close a loop through a wire is refused.
+    /// close a loop through an input or a wire is refused.
     pub fn add_send(&mut self, track: TrackId, index: usize, send: Send) -> Result<(), Loop> {
         if !self.project.can_send(track, send.to) {
             return Ok(());
@@ -904,13 +922,13 @@ impl Transaction<'_> {
         };
         let index = index.min(t.sends.len());
         t.sends.insert(index, send);
-        if let Some(wire) = self.closed_loop() {
+        if let Some(route) = self.closed_loop() {
             let t = self
                 .project
                 .track_mut(track)
                 .expect("it just took the send");
             t.sends.remove(index);
-            return Err(Loop(wire));
+            return Err(Loop(route));
         }
         self.edits.push(Edit::AddSend { track, index, send });
         Ok(())
@@ -2088,8 +2106,8 @@ impl Transaction<'_> {
     }
 
     /// Makes the edits `edit` makes as one change, checking that they
-    /// close no loop through a wire once they're all made, rather than as
-    /// each is made: what moving several devices takes, as one move can
+    /// close no loop through an input or a wire once they're all made,
+    /// rather than as each is made: what moving several devices takes, as one move can
     /// close a loop that the next opens again. If they end with a loop, or
     /// `edit` gives up, they're all taken back.
     pub fn at_once<R>(
@@ -2101,9 +2119,9 @@ impl Transaction<'_> {
         let mut made = edit(self);
         self.checks_loops = checks;
         if made.is_ok()
-            && let Some(wire) = self.closed_loop()
+            && let Some(route) = self.closed_loop()
         {
-            made = Err(Loop(wire));
+            made = Err(Loop(route));
         }
         if made.is_err() {
             self.take_back(start);
@@ -2111,11 +2129,11 @@ impl Transaction<'_> {
         made
     }
 
-    /// The wire in a loop, if there is one and loops are checked as edits
+    /// The route in a loop, if there is one and loops are checked as edits
     /// are made: see [`at_once`](Self::at_once).
-    fn closed_loop(&self) -> Option<WireId> {
+    fn closed_loop(&self) -> Option<Route> {
         self.checks_loops
-            .then(|| self.project.wire_in_a_loop())
+            .then(|| self.project.route_in_a_loop())
             .flatten()
     }
 
@@ -2167,7 +2185,9 @@ impl Transaction<'_> {
             Edit::TrackSolo { track, to, .. } => self.set_track_solo(*track, *to),
             Edit::TrackSoloSafe { track, to, .. } => self.set_track_solo_safe(*track, *to),
             Edit::TrackArmed { track, to, .. } => self.set_track_armed(*track, *to),
-            Edit::TrackInput { track, to, .. } => self.set_track_input(*track, to.clone()),
+            Edit::TrackInput { track, to, .. } => {
+                let _ = self.set_track_input(*track, to.clone());
+            }
             Edit::TrackMonitor { track, to, .. } => self.set_track_monitor(*track, *to),
             Edit::TrackOutput { track, to, .. } => {
                 let _ = self.set_track_output(*track, *to);
@@ -2310,10 +2330,10 @@ impl Transaction<'_> {
     }
 }
 
-/// Why an edit was refused: it would have closed a loop through the wire
-/// with this id. See [`Project::wire_in_a_loop`].
+/// Why an edit was refused: it would have closed a loop through this route,
+/// a track's input from a tap or a wire. See [`Project::route_in_a_loop`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Loop(pub WireId);
+pub struct Loop(pub Route);
 
 /// `gain` kept from silence to [`Wire::GAIN_MAX`], if it's a finite number.
 fn wire_gain(gain: f32) -> Option<f32> {

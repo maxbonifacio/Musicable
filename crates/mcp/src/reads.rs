@@ -16,7 +16,8 @@ use musicable_model::param::ParamAddress;
 use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::Beats;
 use musicable_model::{
-    Chain, ClipType, Device, DeviceId, DeviceKind, Monitor, PluginFormat, Project, Track, TrackKind,
+    Chain, ClipType, Device, DeviceId, DeviceKind, Input, Monitor, PluginFormat, Project, Track,
+    TrackId, TrackKind,
 };
 use serde_json::{Map, Value as Json, json};
 
@@ -210,6 +211,7 @@ fn track(project: &Project, track: &Track) -> Json {
     let output = match track.output {
         Bus::Master => json!("master"),
         Bus::Group(group) => json!({ "group": group.0 }),
+        Bus::SendsOnly => json!("sends_only"),
     };
     let monitor = match track.monitor {
         Monitor::In => "in",
@@ -245,6 +247,9 @@ fn track(project: &Project, track: &Track) -> Json {
         "devices": track.devices.iter().map(device_entry).collect::<Vec<_>>(),
         "clips": clips.into_iter().map(clip_entry).collect::<Vec<_>>(),
     });
+    if let Some(tap) = track.input.as_ref().and_then(Input::tap) {
+        entry["input"] = input_entry(project, tap);
+    }
     if !track.takes.is_empty() {
         let takes: Vec<Json> = (track.takes.iter())
             .map(|take| {
@@ -359,6 +364,26 @@ fn tap_entry(project: &Project, tap: Tap) -> Json {
         Tap::Device(device) => json!({ "after": device.0 }),
         Tap::PostFx(chain) => on(chain, "post_fx"),
         Tap::PostFader(chain) => on(chain, "post_fader"),
+    };
+    entry["name"] = project.tap_name(tap).into();
+    entry
+}
+
+/// A track's input from a tap as mixer.set_input's arguments name it, with
+/// the tap's name: `{"from": 3, "tap": "post_fx", "name": "Kick Post FX"}`,
+/// `{"after": 5, ...}` for what device 5 puts out, or `{"resampling": true,
+/// "name": "Master Post Fader"}`.
+fn input_entry(project: &Project, tap: Tap) -> Json {
+    let from = |track: TrackId, tap: &str| json!({ "from": track.0, "tap": tap });
+    let mut entry = match tap {
+        Tap::PreFx(track) => from(track, "pre_fx"),
+        Tap::Device(device) => json!({ "after": device.0 }),
+        Tap::PostFx(Chain::Track(track)) => from(track, "post_fx"),
+        Tap::PostFader(Chain::Track(track)) => from(track, "post_fader"),
+        Tap::PostFader(Chain::Master) => json!({ "resampling": true }),
+        // No track takes it: the master's one tap for an input is its
+        // Post Fader.
+        Tap::PostFx(Chain::Master) => json!({ "master": true, "tap": "post_fx" }),
     };
     entry["name"] = project.tap_name(tap).into();
     entry

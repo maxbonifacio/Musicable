@@ -84,7 +84,8 @@ Pre FX, though, since that comes before either device.
 A move, an output or a send that would close a loop through a wire is
 refused, with a message naming the wire in the way, such as "That would
 make a loop, through the wire from Kick Post FX to the Compressor on
-Bass."
+Bass." A track's input from another track counts as well
+([Loops](routing.md#loops)).
 
 ## Undoing, deleting and copying
 

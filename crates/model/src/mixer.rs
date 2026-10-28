@@ -2,21 +2,25 @@
 //! mute and solo silence.
 //!
 //! Signal flows from tracks to buses without loops. A track's output feeds
-//! the master or a group track, and its sends feed return tracks. Return
-//! tracks feed the master and have no sends, so sends can't make a loop, and
-//! a group can't feed itself through other groups.
+//! the master or a group track, or with Sends Only, nothing, and its sends
+//! feed return tracks. Return tracks feed the master and have no sends, so
+//! sends can't make a loop, and a group can't feed itself through other
+//! groups.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Project, Send, SendId, Track, TrackId, TrackKind};
+use crate::{Chain, Project, Send, SendId, Track, TrackId, TrackKind};
 
-/// A bus a track's output can feed.
+/// Where a track's output goes: a bus it feeds, or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum Bus {
     #[default]
     Master,
     /// A group track's bus.
     Group(TrackId),
+    /// No bus: the track is heard only through its sends, and through what
+    /// other tracks take from it, such as a ghost kick that keys a bass.
+    SendsOnly,
 }
 
 /// The gains the balance control applies to the left and right channels,
@@ -63,13 +67,14 @@ impl Silenced {
 impl Project {
     /// Whether the track with id `track` can feed `bus`: the master, or a
     /// group track that doesn't feed `track` itself, directly or through
-    /// other groups. Return tracks only feed the master.
+    /// other groups. Return tracks only feed the master. Any track can feed
+    /// nothing, with Sends Only.
     pub fn can_feed(&self, track: TrackId, bus: Bus) -> bool {
         let Some(from) = self.track(track) else {
             return false;
         };
         match bus {
-            Bus::Master => true,
+            Bus::Master | Bus::SendsOnly => true,
             Bus::Group(group) => {
                 from.kind != TrackKind::Return
                     && self
@@ -80,8 +85,8 @@ impl Project {
         }
     }
 
-    /// The buses the track with id `track` can feed: the master, then the
-    /// groups it can feed, in track order.
+    /// Where the track with id `track` can send its output: the master,
+    /// then the groups it can feed, in track order, then Sends Only.
     pub fn buses_for(&self, track: TrackId) -> Vec<Bus> {
         let groups = self
             .tracks
@@ -89,7 +94,9 @@ impl Project {
             .filter(|t| t.kind == TrackKind::Group)
             .map(|t| Bus::Group(t.id))
             .filter(|&bus| self.can_feed(track, bus));
-        std::iter::once(Bus::Master).chain(groups).collect()
+        (std::iter::once(Bus::Master).chain(groups))
+            .chain([Bus::SendsOnly])
+            .collect()
     }
 
     /// Whether the track with id `from` can send to the track with id `to`:
@@ -103,12 +110,13 @@ impl Project {
             && source.sends.iter().all(|send| send.to != to)
     }
 
-    /// The bus `track`'s output really feeds. It's [`Track::output`] where
+    /// Where `track`'s output really goes. It's [`Track::output`] where
     /// [`can_feed`](Self::can_feed) allows it, and the master where a
     /// project breaks the rules, so the signal never loops.
     pub fn output_of(&self, track: &Track) -> Bus {
         match track.output {
             Bus::Group(group) if self.can_feed(track.id, Bus::Group(group)) => track.output,
+            Bus::SendsOnly => Bus::SendsOnly,
             _ => Bus::Master,
         }
     }
@@ -150,28 +158,33 @@ impl Project {
     /// The track outputs and sends that mute and solo cut.
     ///
     /// A muted track's output and all its sends, pre-fader ones included,
-    /// are cut. While no track is soloed, that's all. While any track is,
-    /// only the signal paths through a soloed track are heard:
+    /// are cut. What other tracks take from it at its taps carries on, as an
+    /// input or a key. While no track is soloed, that's all. While any track
+    /// is, only the signal paths through a soloed track are heard:
     ///
     /// - A soloed group solos every track that feeds it.
     /// - A soloed track's output and sends pass, and so does everything
-    ///   downstream of it: its group, the returns it sends to, and theirs.
+    ///   downstream of it: its group, the returns it sends to, the tracks
+    ///   that take their input from it, and theirs.
     /// - Everything that feeds a soloed track passes into it. Soloing a
     ///   return plays what the sends put into it, without the tracks' own
     ///   outputs: the wet signal alone.
     /// - A solo-safe track passes, with whatever is downstream of it, as if
     ///   it were soloed, but it doesn't start soloing. Tracks feeding it are
     ///   cut as usual.
+    ///
+    /// A track that only keys another's device, through a wire, isn't
+    /// downstream of it: soloing the keyed track leaves it cut.
     pub fn silenced(&self) -> Silenced {
         let tracks = &self.tracks;
         let index: BTreeMap<TrackId, usize> =
             tracks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
         // Every track's output and sends, as edges between track indexes.
-        // `None` is the master.
+        // `None` is the master, or with Sends Only, nothing.
         let outputs: Vec<Option<usize>> = tracks
             .iter()
             .map(|t| match self.output_of(t) {
-                Bus::Master => None,
+                Bus::Master | Bus::SendsOnly => None,
                 Bus::Group(group) => index.get(&group).copied(),
             })
             .collect();
@@ -183,6 +196,15 @@ impl Project {
                     .collect()
             })
             .collect();
+        // The tracks taking their input from each track's taps. Taps come
+        // before mute and solo, so these edges are never cut.
+        let mut takers = vec![Vec::new(); tracks.len()];
+        for (track, tap) in self.live_inputs() {
+            let from = self.tap_chain(tap).and_then(Chain::track);
+            if let (Some(from), Some(&to)) = (from.and_then(|t| index.get(&t)), index.get(&track)) {
+                takers[*from].push(to);
+            }
+        }
 
         let mut silenced = Silenced::default();
         let soloing = tracks.iter().any(|t| t.solo);
@@ -200,9 +222,9 @@ impl Project {
             })
             .collect();
         let next = |i: usize| {
-            outputs[i]
-                .into_iter()
+            (outputs[i].into_iter())
                 .chain(sends[i].iter().map(|&(_, to)| to))
+                .chain(takers[i].iter().copied())
         };
         // Downstream of a soloed or solo-safe track.
         let upstream_open = reach(
@@ -277,6 +299,9 @@ fn reach(
 mod tests {
     use super::*;
     use crate::TrackKind::{Audio, Group, Midi, Return};
+    use crate::native::{NativeDevice, NativeKind};
+    use crate::routing::{Port, Tap};
+    use crate::{DeviceKind, Input};
 
     /// Track names to ids.
     struct Mix {
@@ -501,13 +526,18 @@ mod tests {
         assert!(!p.can_feed(TrackId(99), Bus::Master), "no such track");
         assert_eq!(
             p.buses_for(drums),
-            [Bus::Master, Bus::Group(band), Bus::Group(vox)]
+            [
+                Bus::Master,
+                Bus::Group(band),
+                Bus::Group(vox),
+                Bus::SendsOnly
+            ]
         );
 
         mix.route("Vox", "Band");
         let p = &mix.project;
         assert!(!p.can_feed(band, Bus::Group(vox)), "a loop");
-        assert_eq!(p.buses_for(band), [Bus::Master]);
+        assert_eq!(p.buses_for(band), [Bus::Master, Bus::SendsOnly]);
         // Soloing the outer group solos the inner one and its tracks.
         mix.set("Band", |t| t.solo = true);
         assert!(!mix.heard().contains(&"Keys".to_owned()));
@@ -555,6 +585,76 @@ mod tests {
         assert!(!mix.project.silenced().send(stray));
         mix.set("Keys", |t| t.muted = true);
         assert!(mix.project.silenced().send(stray));
+    }
+
+    #[test]
+    fn a_sends_only_track_is_heard_through_its_sends() {
+        let mut mix = mix();
+        let keys = mix.id("Keys");
+        assert!(mix.project.can_feed(mix.id("Reverb"), Bus::SendsOnly));
+        mix.set("Keys", |t| t.output = Bus::SendsOnly);
+        let track = mix.project.track(keys).unwrap();
+        assert_eq!(mix.project.output_of(track), Bus::SendsOnly);
+        // Its output stage passes, feeding nothing, and solo treats it as
+        // any other track.
+        assert_eq!(mix.heard(), EVERYTHING);
+        mix.set("Keys", |t| t.solo = true);
+        assert_eq!(mix.heard(), ["Keys", "Keys>Reverb", "Reverb", "Delay"]);
+    }
+
+    #[test]
+    fn tracks_taking_a_tracks_sound_follow_its_solo_but_not_its_mute() {
+        let mut mix = mix();
+        let print = mix.track("Print", Audio);
+        let band = Chain::Track(mix.id("Band"));
+        mix.set("Print", |t| {
+            t.input = Some(Input::Tap(Tap::PostFader(band)))
+        });
+        // What the print takes comes before the band's mute.
+        mix.set("Band", |t| t.muted = true);
+        assert!(mix.heard().contains(&"Print".to_owned()));
+        mix.set("Band", |t| t.muted = false);
+        // Soloing the drums lets the print through, downstream of them.
+        mix.set("Drums", |t| t.solo = true);
+        assert_eq!(
+            mix.heard(),
+            [
+                "Drums",
+                "Drums>Reverb",
+                "Drums>Delay",
+                "Band",
+                "Reverb",
+                "Delay",
+                "Print"
+            ]
+        );
+        // Soloing the print plays what feeds it, into the band, but not the
+        // band itself.
+        mix.set("Drums", |t| t.solo = false);
+        mix.set("Print", |t| t.solo = true);
+        assert_eq!(mix.heard(), ["Drums", "Bass", "Reverb", "Delay", "Print"]);
+        // Resampling takes no track's sound.
+        mix.set("Print", |t| t.input = Some(Input::RESAMPLING));
+        assert_eq!(mix.heard(), ["Reverb", "Delay", "Print"]);
+        assert_eq!(
+            mix.project.live_inputs(),
+            [(print, Tap::PostFader(Chain::Master))]
+        );
+    }
+
+    #[test]
+    fn a_track_that_only_keys_another_stays_cut_while_that_one_is_soloed() {
+        let mut mix = mix();
+        let compressor = mix.project.new_device(DeviceKind::Native(NativeDevice::new(
+            NativeKind::Compressor,
+        )));
+        let port = Port::Sidechain(compressor.id);
+        mix.set("Vocal", |t| t.devices.push(compressor));
+        let from = Tap::PostFx(Chain::Track(mix.id("Drums")));
+        let wire = mix.project.new_wire(from, port);
+        mix.project.wires.push(wire);
+        mix.set("Vocal", |t| t.solo = true);
+        assert!(!mix.heard().contains(&"Drums".to_owned()));
     }
 
     #[test]

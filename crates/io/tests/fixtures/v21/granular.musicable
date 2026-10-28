@@ -1,0 +1,356 @@
+{
+  "format": "musicable-project",
+  "version": 21,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 6,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Vocal",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Vox",
+          "start": 0,
+          "length": 2580480,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "granular",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "Bass",
+          "start": 2580480,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Bass.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "granular",
+                "tempo": 96.0,
+                "transpose": -7,
+                "detune": 33,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 500.0,
+                  "fluctuation": 0.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Pad",
+          "start": 3870720,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Pad.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "granular",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": false,
+                  "grain_size": 5.0,
+                  "fluctuation": 0.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "Wide",
+          "start": 5160960,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Pad.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "granular",
+                "tempo": 96.0,
+                "transpose": 12,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": false,
+                  "grain_size": 137.5,
+                  "fluctuation": 100.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "Kept",
+          "start": 6451200,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Pad.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": false,
+                  "grain_size": 72.25,
+                  "fluctuation": 62.5
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 5,
+          "name": "Moving",
+          "start": 7741440,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Pad.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "granular",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": false,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": [
+                {
+                  "param": "transpose",
+                  "points": [
+                    [0, 0.0],
+                    [1290240, -12.0]
+                  ]
+                },
+                {
+                  "param": "grain_size",
+                  "points": [
+                    [0, 5.0],
+                    [645120, 60.0],
+                    [1290240, 500.0]
+                  ]
+                },
+                {
+                  "param": "fluctuation",
+                  "points": [
+                    [0, 100.0],
+                    [1290240, 0.0]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null
+}

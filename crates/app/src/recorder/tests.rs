@@ -1243,3 +1243,139 @@ fn a_midi_capture_without_notes_takes_nothing() {
                    tracks' inputs didn't play then.";
     assert_eq!(problems, [nothing]);
 }
+
+/// The kick's Post Fader, which Print takes.
+fn kick() -> Tap {
+    Tap::PostFader(musicable_model::Chain::Track(TrackId(2)))
+}
+
+/// Print, track 4, recording the kick's Post Fader.
+fn print() -> Armed {
+    Armed {
+        track: TrackId(4),
+        name: "Print".to_owned(),
+        input: Input::Tap(kick()),
+        offset: 0,
+    }
+}
+
+/// Print's passes, in the one file it recorded.
+fn printed(file: &str, start: u64, frames: u64) -> Vec<Recorded> {
+    let pass = Pass {
+        start,
+        frames,
+        file: file.to_owned(),
+        offset: 0,
+    };
+    vec![Recorded::Audio {
+        track: TrackId(4),
+        passes: vec![pass],
+    }]
+}
+
+#[test]
+fn a_tap_input_holds_what_the_engine_rendered_at_its_frames() {
+    let (buffer, mut tap) = TapInput::new(RATE);
+    assert!(buffer.capacity() >= u64::from(RATE) * TAP_SECONDS);
+    assert_eq!(buffer.channels(), 2);
+    // A stereo block from engine time 1,000, a block without the tap, and
+    // a mono one longer than the stretch it interleaves at a time.
+    let stereo: Vec<f32> = (0..2)
+        .flat_map(|c| (1000..1128).map(move |w| captured(w, c)))
+        .collect();
+    tap.write(1000, AudioRef::from_planar(&stereo, 2));
+    tap.write(1128, AudioRef::empty(128));
+    let mono: Vec<f32> = (1256..1856).map(|w| captured(w, 0)).collect();
+    tap.write(1256, AudioRef::from_planar(&mono, 1));
+    assert_eq!(buffer.frames(), 1000..1856);
+    let mut read = vec![0.0; 2 * 856];
+    buffer.read(1000, &mut read).unwrap();
+    let expected: Vec<f32> = (1000..1856)
+        .flat_map(|w| match w {
+            ..1128 => [captured(w, 0), captured(w, 1)],
+            1128..1256 => [0.0; 2],
+            _ => [captured(w, 0); 2],
+        })
+        .collect();
+    assert_eq!(read, expected);
+    // Dropping the writer, as the engine does once it's done with it, ends
+    // the buffer.
+    drop(tap);
+    assert!(buffer.has_ended());
+}
+
+#[test]
+fn a_track_records_the_tap_it_takes_where_the_mix_played_it() {
+    let folder = folder("tap");
+    let (mic, _mic_writer) = input(0, 4000);
+    let (tapped, _tap_writer) = input(0, 4000);
+    let mut tape = tape(&folder, &mic, vec![print()]);
+    tape.set_taps(Taps::from([(kick(), tapped)]));
+    // Song positions 5,000 to 7,000 played from engine time 1,000, and were
+    // heard 64 frames later, which is where the tap has them: it has no
+    // offset, as an input can.
+    let segments = [
+        stopped(0, 0),
+        recording(1000, 5000, 64),
+        stopped(3000, 7000),
+    ];
+    let (recorded, files) = finished(run(&mut tape, &segments, 3100));
+    let name = "Recordings/Print 1.wav";
+    assert_eq!(recorded, printed(name, 5000, 2000));
+    assert_eq!(files, stereo(name, 2000));
+    assert_eq!(frames(&folder.join(name)), from(1064, 2000));
+}
+
+#[test]
+fn an_armed_track_whose_tap_isnt_there_records_nothing() {
+    let folder = folder("no-tap");
+    let (mic, _writer) = input(0, 1000);
+    let mut tape = tape(&folder, &mic, vec![print()]);
+    let segments = [recording(0, 0, 0), stopped(100, 100)];
+    let (finished, problems) = split(run(&mut tape, &segments, 150));
+    assert!(finished.is_empty());
+    assert_eq!(problems, ["Print records nothing: its input isn't there."]);
+}
+
+#[test]
+fn capture_holds_the_taps_tracks_take() {
+    let folder = folder("capture-tap");
+    let (mic, _mic_writer) = input(0, 4000);
+    let (tapped, _tap_writer) = input(0, 4000);
+    // The taps come after the tracks to hold, as when Print takes the kick
+    // as the engine starts writing it.
+    let mut tape = holding(&folder, &mic, Vec::new(), vec![print()], 1);
+    tape.set_taps(Taps::from([(kick(), tapped)]));
+    let segments = [stopped(0, 0), playing(1000, 5000, 64), stopped(3000, 7000)];
+    assert!(run(&mut tape, &segments, 3100).is_empty());
+    let (recorded, _) = taken(capture_at(&mut tape, 3200));
+    let name = "Recordings/Print 1.wav";
+    assert_eq!(recorded, printed(name, 5000, 2000));
+    assert_eq!(frames(&folder.join(name)), from(1064, 2000));
+}
+
+#[test]
+fn tracks_taking_the_same_tap_share_what_is_held() {
+    let folder = folder("capture-shared-tap");
+    let (mic, _mic_writer) = input(0, 1000);
+    let (tapped, _tap_writer) = input(0, 1000);
+    let again = Armed {
+        track: TrackId(5),
+        name: "Print Again".to_owned(),
+        ..print()
+    };
+    let mut tape = holding(&folder, &mic, Vec::new(), vec![print(), again], 1);
+    tape.set_taps(Taps::from([(kick(), tapped)]));
+    let segments = [playing(0, 0, 0), stopped(100, 100)];
+    assert!(run(&mut tape, &segments, 200).is_empty());
+    assert_eq!(tape.held.audio.len(), 1);
+    let (_, files) = taken(capture_at(&mut tape, 200));
+    let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Recordings/Print 1.wav", "Recordings/Print Again 1.wav"]
+    );
+    for name in names {
+        assert_eq!(frames(&folder.join(name)), from(0, 100), "{name}");
+    }
+}

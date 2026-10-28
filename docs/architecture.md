@@ -344,7 +344,11 @@ where a part has started, what's built.
   nodes (`Graph::connect_to`, `InputPort::Side`), which reads it apart
   from the main input ([engine.md](engine.md#wires)). Format 20 adds
   plugins' side inputs, the audio ports beyond their main ones, as ports
-  too ([plugins.md](plugins.md#side-inputs)). A node's output is one
+  too ([plugins.md](plugins.md#side-inputs)). Format 21 lets an audio
+  track take its input from a tap (`Input::Tap`), or resample the master,
+  and feed nothing but its sends (`Bus::SendsOnly`): the tap comes into
+  its input monitor's side input, and the engine writes it to the recorder
+  through a record tap ([engine.md](engine.md#inputs-from-taps)). A node's output is one
   buffer of `Node::channels()` channels, so a multi-output instrument is a
   node with more of them, and a node for each of its outputs picks that
   output's channels out for a strip of its own. In the model, a track feeds the

@@ -69,6 +69,9 @@ pub struct Graph {
     cue: Option<NodeId>,
     /// The nodes [`add_tap`](Graph::add_tap) tapped, in order.
     taps: Vec<NodeId>,
+    /// The taps [`add_record`](Graph::add_record) added, by their writers'
+    /// keys, with their numbers.
+    records: Vec<(NodeKey, usize)>,
     /// Which nodes' notes go to which, from [`send_notes`](Graph::send_notes).
     note_routes: Vec<(NodeId, NodeId)>,
     /// The automation nodes handed back, to send them as events.
@@ -252,6 +255,20 @@ impl Graph {
         Ok(self.taps.len() - 1)
     }
 
+    /// Taps `node`'s output, as [`add_tap`](Graph::add_tap) does, for the
+    /// engine to hand to the [`TapWriter`](crate::TapWriter) with `key` as
+    /// it renders, block by block: what a track records from another's tap.
+    /// A tap whose key is taken already isn't added. Returns the tap's
+    /// number.
+    pub fn add_record(&mut self, key: NodeKey, node: NodeId) -> Result<usize, GraphError> {
+        if let Some(&(_, n)) = self.records.iter().find(|(k, _)| *k == key) {
+            return Ok(n);
+        }
+        let n = self.add_tap(node)?;
+        self.records.push((key, n));
+        Ok(n)
+    }
+
     /// Calls [`Node::prepare`] on each node, compensates for their latency,
     /// orders them and allocates their buffers.
     ///
@@ -360,6 +377,7 @@ impl Graph {
             output,
             cue: self.cue,
             taps: self.taps,
+            records: self.records,
             buffers,
             by_key,
             delays,
@@ -604,6 +622,8 @@ pub struct PreparedGraph {
     pub(crate) cue: Option<NodeId>,
     /// The nodes whose outputs are the taps, lined up with the output.
     taps: Vec<NodeId>,
+    /// The record taps, by their writers' keys, with their numbers.
+    records: Vec<(NodeKey, usize)>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -856,6 +876,19 @@ impl PreparedGraph {
     /// How many taps the graph has.
     pub fn taps(&self) -> usize {
         self.taps.len()
+    }
+
+    /// The record tap for the writer with `key`'s most recent `frames`
+    /// frames, if the graph has one (see [`Graph::add_record`]).
+    pub fn record(&self, key: NodeKey, frames: usize) -> Option<AudioRef<'_>> {
+        let &(_, n) = self.records.iter().find(|(k, _)| *k == key)?;
+        self.tap(n, frames)
+    }
+
+    /// The keys of the writers the graph has record taps for, in the order
+    /// they were added.
+    pub fn records(&self) -> impl Iterator<Item = NodeKey> + '_ {
+        self.records.iter().map(|&(key, _)| key)
     }
 
     /// How many frames late the output plays, after delay compensation: the

@@ -501,6 +501,16 @@ frame, and the window redraws at 60 frames a second while any of them shows
 a signal, so they fall all the way back after you stop. The **Track** menu
 adds tracks ([commands.md](commands.md#track)).
 
+An audio track's input menu lists the other tracks after the audio inputs,
+each opening to its taps as a sidechain picker's tracks do
+([The devices panel](#the-devices-panel)), then Resampling, the master's
+Post Fader, as the manual's [Routing](../manual/src/using/routing.md) page
+shows. A tap that would close a loop is listed but greyed out, and its
+hover text says why (`Project::check_input`); a MIDI track's Pre FX, which
+is notes, isn't listed. The output menu has the buses `Project::buses_for`
+gives the track, Sends Only last. Both run `mixer.set_input` and
+`mixer.set_output` ([commands.md](commands.md#the-mixers-controls)).
+
 ## Recording
 
 [Recording and comping](../manual/src/using/recording.md) in the manual says
@@ -527,6 +537,17 @@ the driver doesn't report is made up for by the device's recording offset,
 which the [settings](#settings-and-your-keymap) keep for each device, mode
 and sample rate. A MIDI message lands the same way as audio, without
 the offset: the backend stamps each with the frame heard as it came in.
+
+**From another track.** A track that takes its input from another track's
+tap, or resamples the master, records what the engine renders there
+([engine.md](engine.md#inputs-from-taps)). The session has the engine
+write each tap that armed tracks take, and with Capture on, each that
+tracks monitoring In take, into a buffer like an input's
+(`recorder::TapInput`), lined up with the output as an input's buffer is,
+so the recorder reads it the same way, without the recording offset. It
+asks for `MAX_WRITERS` at most: a track taking a tap past those records
+nothing, and the status bar says so. A new project or a new engine starts
+the writers over, since its taps are other tracks'.
 
 **The recorder** (`musicable-recorder`, a thread of its own) reads the
 engine's timeline and the inputs' buffers every 10 ms, and writes what the
@@ -556,8 +577,12 @@ and the mod wheel, into a synth that takes only MPE MIDI, and checks the
 take plays back into it as it played, to the sample;
 `crates/app/src/recorder/tests.rs` checks the recorder's passes, punching,
 waiting for and giving up on inputs, and stopping, for audio and MIDI
-tracks, the notes held over loops and punches, and where the controllers
-start each pass.
+tracks, the notes held over loops and punches, where the controllers
+start each pass, and recording and capturing from taps;
+`crates/app/tests/routing.rs` records another track's Post Fader, with a
+plugin's latency on a third, and checks it against that track's stem in an
+export, bit for bit, captures it the same way, and resamples the master
+and checks it against an export of the mix without the resampling track.
 
 The record round trip example records on real devices as the app does,
 through its own `Output`, `Session` and recorder. One track plays clicks
@@ -597,7 +622,8 @@ changes, and when new audio settings replace the engine.
 
 Every 10 ms, the recorder copies each held audio input's channels from the
 stream's 8-second buffer into a buffer of its own, at the same engine
-frames, and each held MIDI input's messages, with the frames heard. It
+frames, each held tap's from the buffer the engine writes it into, and each
+held MIDI input's messages, with the frames heard. It
 keeps the engine's timeline as far back as that and a minute more, for the
 plugins' latency. Capturing runs the recording's own code over what's
 held, on the run's timeline as a recording would have had it: recording on

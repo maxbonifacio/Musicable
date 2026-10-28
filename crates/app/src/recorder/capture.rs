@@ -5,8 +5,9 @@
 //!
 //! As it goes, every 10 ms, the recorder copies what the stream's inputs
 //! bring into buffers of its own: an audio input's channels that the
-//! tracks take, at the engine frames the stream's buffer has them, and a
-//! MIDI input's messages, with the frames heard. A capture runs the
+//! tracks take, at the engine frames the stream's buffer has them, a tap
+//! that they take, at those the engine wrote it at, and a MIDI input's
+//! messages, with the frames heard. A capture runs the
 //! recording's own code over those, on the run's timeline as a recording
 //! would have had it: recording on throughout, and recording wherever the
 //! transport didn't.
@@ -18,7 +19,9 @@ use musicable_audio::{InputBuffer, InputWriter, MidiBuffer, MidiReader, MidiWrit
 use musicable_engine::{InputChannels, MidiSource, Segment};
 use musicable_model::{AudioInput, Input, MidiInput};
 
-use super::{Armed, CHUNK, MidiTape, PATIENCE_SECONDS, Report, Running, Tape, TrackTape, find};
+use super::{
+    Armed, CHUNK, MidiTape, PATIENCE_SECONDS, Report, Running, Tape, TrackTape, find_audio,
+};
 
 /// The most memory the held inputs take together, in bytes.
 pub(super) const HELD_BYTES: u64 = 2 << 30;
@@ -40,25 +43,27 @@ pub(super) struct Held {
     seconds: u64,
     /// The tracks Capture takes: armed tracks and those monitoring In.
     tracks: Vec<Armed>,
-    /// The audio inputs they take, by their channels.
+    /// The audio inputs they take, by their channels, and the taps.
     pub(super) audio: Vec<HeldAudio>,
     /// The MIDI inputs they take.
     pub(super) midi: Vec<HeldMidi>,
     /// The timeline, from before the oldest frame held.
     segments: VecDeque<Segment>,
     /// Whether the stream's inputs are an old engine's, until the next
-    /// stream's come: they're on other times.
+    /// stream's come: they're on other times. The taps never are: the
+    /// session sends the new engine's with it.
     stale: bool,
 }
 
-/// An audio input of the tracks Capture takes, by its channels.
+/// An audio input of the tracks Capture takes, by its channels, or a tap.
 pub(super) struct HeldAudio {
-    input: AudioInput,
-    /// Where the stream's input captures it: a buffer and its channels
-    /// there.
+    /// An audio input or a tap.
+    input: Input,
+    /// Where the stream's input captures it, or the engine writes the tap:
+    /// a buffer and its channels there.
     source: Option<(InputBuffer, InputChannels)>,
-    /// The newest frames of it, at the stream buffer's engine frames, once
-    /// it has captured any.
+    /// The newest frames of it, at the source buffer's engine frames, once
+    /// it has any.
     pub(super) held: Option<(InputBuffer, InputWriter)>,
     /// Whether it would have taken the held inputs past their memory: it
     /// holds nothing then.
@@ -87,18 +92,16 @@ impl Tape {
             self.drop_held();
         }
         self.held.tracks = tracks;
-        let audio: Vec<&AudioInput> = (self.held.tracks.iter())
-            .filter_map(|track| match &track.input {
-                Input::Audio(input) => Some(input),
-                Input::Midi(_) => None,
-            })
+        let audio: Vec<&Input> = (self.held.tracks.iter())
+            .map(|track| &track.input)
+            .filter(|input| matches!(input, Input::Audio(_) | Input::Tap(_)))
             .collect();
-        (self.held.audio).retain(|held| audio.iter().any(|&i| same_channels(i, &held.input)));
+        (self.held.audio).retain(|held| audio.iter().any(|&i| same_source(i, &held.input)));
         for input in audio {
-            if !(self.held.audio.iter()).any(|held| same_channels(input, &held.input)) {
-                let source = match self.held.stale {
-                    true => None,
-                    false => find(&self.layout, &self.buffers.audio, input),
+            if !(self.held.audio.iter()).any(|held| same_source(input, &held.input)) {
+                let source = match (input, self.held.stale) {
+                    (Input::Audio(_), true) => None,
+                    _ => self.find_audio(input),
                 };
                 self.held.audio.push(HeldAudio {
                     input: input.clone(),
@@ -159,10 +162,23 @@ impl Tape {
     /// between.
     pub(super) fn hold_from_new_inputs(&mut self) {
         self.held.stale = false;
+        let (layout, buffers, taps) = (&self.layout, &self.buffers.audio, &self.taps);
         for held in &mut self.held.audio {
-            held.source = find(&self.layout, &self.buffers.audio, &held.input);
+            if let Input::Audio(_) = held.input {
+                held.source = find_audio(layout, buffers, taps, &held.input);
+            }
         }
         self.hold_midi_inputs(true);
+    }
+
+    /// Goes on holding the taps from their new buffers, the same way.
+    pub(super) fn hold_from_new_taps(&mut self) {
+        let (layout, buffers, taps) = (&self.layout, &self.buffers.audio, &self.taps);
+        for held in &mut self.held.audio {
+            if let Input::Tap(_) = held.input {
+                held.source = find_audio(layout, buffers, taps, &held.input);
+            }
+        }
     }
 
     /// Forgets what the held inputs hold: they start again with what their
@@ -262,7 +278,7 @@ impl Tape {
                     input.refused = true;
                     let tracks = (self.held.tracks.iter()).filter(|track| match &track.input {
                         Input::Midi(midi) => takes_midi(midi, &input.id),
-                        Input::Audio(_) => false,
+                        Input::Audio(_) | Input::Tap(_) => false,
                     });
                     let refused = refusal(tracks, "MIDI input", self.held_bytes);
                     self.reports.push(Report::Problem(refused));
@@ -327,8 +343,8 @@ impl Tape {
         let heard = |track: &Armed| i128::from(at) + i128::from(latency) + i128::from(track.offset);
         stalled
             || self.held.tracks.iter().all(|track| match &track.input {
-                Input::Audio(input) => (self.held.audio.iter())
-                    .filter(|held| same_channels(input, &held.input))
+                input @ (Input::Audio(_) | Input::Tap(_)) => (self.held.audio.iter())
+                    .filter(|held| same_source(input, &held.input))
                     .all(|held| match (&held.source, &held.held) {
                         (Some((source, _)), Some((buffer, _))) => {
                             source.has_ended() || i128::from(buffer.frames().end) >= heard(track)
@@ -382,9 +398,9 @@ impl Tape {
         let mut notes = Vec::new();
         for track in &self.held.tracks {
             match &track.input {
-                Input::Audio(input) => {
+                input @ (Input::Audio(_) | Input::Tap(_)) => {
                     let held = (self.held.audio.iter())
-                        .find(|held| same_channels(input, &held.input))
+                        .find(|held| same_source(input, &held.input))
                         .and_then(|held| held.held.as_ref());
                     let Some((buffer, _)) = held else {
                         continue;
@@ -469,15 +485,24 @@ fn refusal<'a>(tracks: impl Iterator<Item = &'a Armed>, kind: &str, limit: u64) 
     )
 }
 
-/// Whether two track inputs take the same channels of the same input, so
-/// one held input serves both.
+/// Whether two audio tracks' inputs take the same channels of the same
+/// input, or the same tap, so one held input serves both.
+fn same_source(a: &Input, b: &Input) -> bool {
+    match (a, b) {
+        (Input::Audio(a), Input::Audio(b)) => same_channels(a, b),
+        (Input::Tap(a), Input::Tap(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether two track inputs take the same channels of the same input.
 fn same_channels(a: &AudioInput, b: &AudioInput) -> bool {
     (&a.device, a.channel, a.stereo) == (&b.device, b.channel, b.stereo)
 }
 
-/// Whether `track` takes the held audio input `input`.
-fn takes_input(track: &Armed, input: &AudioInput) -> bool {
-    matches!(&track.input, Input::Audio(taken) if same_channels(taken, input))
+/// Whether `track` takes the held audio input or tap `input`.
+fn takes_input(track: &Armed, input: &Input) -> bool {
+    same_source(&track.input, input)
 }
 
 /// Whether a track taking `input` takes the MIDI input `id`.

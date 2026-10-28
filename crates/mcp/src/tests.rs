@@ -809,6 +809,55 @@ fn reads_give_the_wires_and_each_device_s_side_input() {
 }
 
 #[test]
+fn reads_give_the_inputs_tracks_take_from_other_tracks() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_audio_track"},
+            {"id": "track.rename", "args": {"track": 0, "name": "Kick"}},
+            {"id": "track.new_audio_track"},
+            {"id": "track.rename", "args": {"track": 1, "name": "Print"}},
+            {"id": "track.new_audio_track"},
+            {"id": "track.new_audio_track"},
+            {"id": "device.add", "args": {"kind": "eq", "track": 0}},
+            {"id": "mixer.set_input", "args": {"track": 1, "from": 0, "tap": "post_fader"}},
+            {"id": "mixer.set_input", "args": {"track": 2, "resampling": true}},
+            {"id": "mixer.set_input", "args": {"track": 3, "after": 0}},
+            {"id": "mixer.set_output", "args": {"track": 0, "sends_only": true}},
+        ]}),
+    )
+    .unwrap();
+
+    let project = rig.call("get_project", json!({})).unwrap();
+    let tracks = project["tracks"].as_array().unwrap();
+    assert_eq!(
+        tracks[1]["input"],
+        json!({"from": 0, "tap": "post_fader", "name": "Kick Post Fader"})
+    );
+    assert_eq!(tracks[1]["monitor"], "in");
+    assert_eq!(
+        tracks[2]["input"],
+        json!({"resampling": true, "name": "Master Post Fader"})
+    );
+    assert_eq!(
+        tracks[3]["input"],
+        json!({"after": 0, "name": "Kick after EQ"})
+    );
+    // An interface's input isn't listed.
+    assert_eq!(tracks[0].get("input"), None);
+    assert_eq!(tracks[0]["output"], "sends_only");
+    // The print takes what comes out of the kick.
+    assert_eq!(
+        rig.call(
+            "run_command",
+            json!({"id": "mixer.set_input", "args": {"track": 0, "from": 1}})
+        ),
+        Err("That would make a loop: what comes out of Kick reaches Print Post FX.".into())
+    );
+}
+
+#[test]
 fn a_plugins_side_inputs_are_its_ports_by_its_ids_for_them() {
     let mut project = Project::new();
     project.add_track("Kick", TrackKind::Audio);

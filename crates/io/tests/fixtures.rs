@@ -63,6 +63,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("modulation", modulation()),
         ("sidechain", sidechain()),
         ("plugin-inputs", plugin_inputs()),
+        ("tracks-from-tracks", tracks_from_tracks()),
     ]
 }
 
@@ -1391,6 +1392,41 @@ fn plugin_inputs() -> Project {
     let point = |at, value| automation::Point::new(Beats::new(at), value);
     let swell = vec![point(0, 0.5), point(4, 2.0)];
     project.automation = vec![Lane::new(ParamAddress::Wire(from_synth.id), swell)];
+    project
+}
+
+/// Tracks taking their inputs from other tracks, from version 21: a print
+/// of a kick's Post Fader monitoring In, one of what the kick's EQ puts out,
+/// a ghost kick on Sends Only, a track resampling the master, armed, and a
+/// MIDI track doubling another's notes.
+fn tracks_from_tracks() -> Project {
+    let mut project = Project::new();
+    let kick = project.add_track("Kick", TrackKind::Audio);
+    let print = project.add_track("Kick Print", TrackKind::Audio);
+    let after_eq = project.add_track("Kick EQ", TrackKind::Audio);
+    let ghost = project.add_track("Ghost Kick", TrackKind::Audio);
+    let resample = project.add_track("Resample", TrackKind::Audio);
+    let pad = project.add_track("Pad", TrackKind::Midi);
+    let double = project.add_track("Double", TrackKind::Midi);
+    let reverb = project.add_track("Reverb", TrackKind::Return);
+    let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    let eq_id = eq.id;
+    project.track_mut(kick).unwrap().devices.push(eq);
+    let take = |project: &mut Project, track, tap| {
+        let track = project.track_mut(track).unwrap();
+        track.input = Some(Input::Tap(tap));
+        track.monitor = Monitor::In;
+    };
+    take(&mut project, print, Tap::PostFader(Chain::Track(kick)));
+    take(&mut project, after_eq, Tap::Device(eq_id));
+    take(&mut project, double, Tap::PreFx(pad));
+    let send = project.new_send(reverb);
+    let ghost = project.track_mut(ghost).unwrap();
+    ghost.output = Bus::SendsOnly;
+    ghost.sends.push(send);
+    let resample = project.track_mut(resample).unwrap();
+    resample.input = Some(Input::RESAMPLING);
+    resample.armed = true;
     project
 }
 
