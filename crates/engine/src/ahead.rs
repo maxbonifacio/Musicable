@@ -571,8 +571,11 @@ pub(crate) enum Applied {
     },
     Swap,
     Tempo,
-    /// It rendered a block this long.
-    Block(usize),
+    /// It rendered a block this long, as the device asked or ahead.
+    Block {
+        frames: usize,
+        live: bool,
+    },
     /// It took what was sent and applied the transport changes due, but
     /// rendered nothing.
     Held,
@@ -666,12 +669,15 @@ impl Core {
     /// the control thread has sent first.
     pub(crate) fn render(&mut self, shared: &Shared, drive: Drive<'_, '_>) -> Option<usize> {
         #[cfg(test)]
-        let start = self.time;
+        let (start, live) = (self.time, matches!(drive, Drive::Live { .. }));
         // Like the nodes, on any thread, so the notes they play and the
         // modulation they send come out the same on every one.
         let rendered = rt::flush_denormals(|| self.render_block(shared, drive));
         #[cfg(test)]
-        self.log(start, rendered.map_or(Applied::Held, Applied::Block));
+        self.log(
+            start,
+            rendered.map_or(Applied::Held, |frames| Applied::Block { frames, live }),
+        );
         rendered
     }
 
@@ -695,6 +701,11 @@ impl Core {
         }
         self.apply_transport(self.time);
         self.transport.wrap();
+        self.aim(shared)
+    }
+
+    /// Says what lead to aim for now, and returns it.
+    fn aim(&self, shared: &Shared) -> u64 {
         let target = self.target();
         shared.target.store(target, Relaxed);
         if target == 0 {
@@ -859,6 +870,9 @@ impl Core {
         self.transport.advance(frames as u64);
         self.timeline.until(end);
         self.counters.furthest.store(end, Relaxed);
+        // The block may have changed what's live, by arming a track, say,
+        // or fading out the last input: the lead to aim for after it.
+        self.aim(shared);
         // Pairs with the live side's load: what's in the rings for the
         // block is there before it reads them.
         shared.rendered.store(end, Release);

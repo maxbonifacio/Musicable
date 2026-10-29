@@ -22,9 +22,9 @@ use super::*;
 use crate::media::{AudioData, Source};
 use crate::nodes::{Constant, Delay, InputMonitor, Latent, Spin};
 use crate::{
-    AudioBuffer, Engine, EngineHandle, Graph, Inputs, Node, NodeId, NoteEvent, NoteId, Notes,
-    ParallelOptions, ParallelRenderer, ParamId, Preview, ProcessContext, ReferenceRenderer, Stats,
-    TapWriter, TransportCommand,
+    AudioBuffer, Engine, EngineHandle, Graph, Inputs, MidiMonitor, MidiSource, Node, NodeId,
+    NoteEvent, NoteId, Notes, ParallelOptions, ParallelRenderer, ParamId, Preview, ProcessContext,
+    ReferenceRenderer, Stats, TapWriter, TransportCommand,
 };
 
 const CONFIG: EngineConfig = EngineConfig {
@@ -520,6 +520,34 @@ fn arming_a_track_renders_it_live_from_the_frame_it_arms_until_its_input_fades_o
     assert!(out[disarmed_at + fade..].iter().all(|&s| s == 0.0));
 }
 
+/// Plays a callback of 256 frames, checks the engine aims for a lead
+/// exactly while nothing in its graph is live, and says whether anything is.
+fn live_after_a_callback(engine: &mut Engine, handle: &EngineHandle) -> bool {
+    render(engine, 256, 256);
+    let live = engine.with_core(|core, _| core.graph.as_deref().is_some_and(|g| g.is_live()));
+    assert_eq!(handle.stats().lead_target == 0, live);
+    live
+}
+
+#[test]
+fn the_lead_fills_from_the_callback_where_nothing_is_live_any_more() {
+    let (mut engine, mut handle) = with_lead(Lead::Normal);
+    handle.swap_graph(track()).unwrap();
+    handle.send(armed(true)).unwrap();
+    for _ in 0..4 {
+        assert!(live_after_a_callback(&mut engine, &handle));
+    }
+    // Disarmed, it fades the input out over 480 frames, and then fills
+    // the lead at the end of the callback that ends the fade.
+    handle.send(armed(false)).unwrap();
+    let mut callbacks = 0;
+    while live_after_a_callback(&mut engine, &handle) {
+        callbacks += 1;
+    }
+    assert_eq!(callbacks, 1);
+    assert_eq!(handle.stats().lead, 512);
+}
+
 #[test]
 fn blocks_rendered_where_the_lead_ran_out_count_as_short() {
     // Callbacks longer than the lead use it up, every one after the first.
@@ -535,6 +563,49 @@ fn blocks_rendered_where_the_lead_ran_out_count_as_short() {
     handle.send(play()).unwrap();
     render(&mut engine, 256 * 40, 256);
     assert_eq!(handle.stats().short_blocks, 0);
+}
+
+/// Plays 1.0 on each frame a MIDI message it's given plays at.
+struct Heard;
+
+impl Node for Heard {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        for message in ctx.midi {
+            let at = (message.time.saturating_sub(ctx.time) as usize).min(ctx.frames - 1);
+            output.channel_mut(0)[at] += 1.0;
+        }
+    }
+}
+
+#[test]
+fn midi_for_frames_played_from_ahead_goes_nowhere() {
+    let (mut engine, mut handle) = with_lead(Lead::Short);
+    handle.swap_graph(single(Heard)).unwrap();
+    handle.send(play()).unwrap();
+    render(&mut engine, 64, 64);
+    let start = engine.time();
+    let ahead = handle.stats().lead as usize;
+    assert!(ahead > 0);
+    // A callback longer than the lead plays what was rendered ahead, and
+    // renders the rest itself, with the messages for it.
+    let frames = ahead + 500;
+    let message = |at: usize| MidiMessage {
+        time: start + at as u64,
+        input: 0,
+        bytes: [0x90, 60, 100],
+    };
+    let midi = [message(10), message(ahead + 200)];
+    let mut out = vec![0.0; frames];
+    let mut output = AudioMut::from_planar(&mut out, 1);
+    engine.process_with_input(AudioRef::empty(frames), &midi, &mut output);
+    assert_eq!(handle.stats().short_blocks, 1);
+    let heard: Vec<usize> = (0..frames).filter(|&i| out[i] != 0.0).collect();
+    assert_eq!(heard, [ahead + 200]);
 }
 
 #[test]
@@ -719,6 +790,58 @@ fn workers_render_ahead_between_callbacks() {
     assert_eq!(handle.stats().short_blocks, 0);
 }
 
+/// One of two nodes that wait for each other in every block, for up to a
+/// second, and count the blocks they found themselves alone in.
+struct Meet {
+    me: usize,
+    started: Arc<[AtomicU64; 2]>,
+    alone: Arc<AtomicU64>,
+}
+
+impl Node for Meet {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        let block = ctx.time + 1;
+        self.started[self.me].store(block, Release);
+        let until = Instant::now() + Duration::from_secs(1);
+        while self.started[1 - self.me].load(Acquire) < block {
+            if Instant::now() > until {
+                self.alone.fetch_add(1, Relaxed);
+                return;
+            }
+            spin_loop();
+        }
+    }
+}
+
+#[test]
+fn a_worker_rendering_ahead_has_as_many_threads_on_a_block_as_it_can_use() {
+    let (mut engine, mut handle) = parallel(Lead::Normal);
+    let started = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    let alone = Arc::new(AtomicU64::new(0));
+    // Two nodes that can run at once, and wait for each other to.
+    let mut g = Graph::new();
+    let meet = |me| Meet {
+        me,
+        started: started.clone(),
+        alone: alone.clone(),
+    };
+    let (a, b) = (g.add(NodeKey(0), meet(0)), g.add(NodeKey(1), meet(1)));
+    let mix = g.add(NodeKey(2), Probe::new(0, 1));
+    g.connect(a, mix).unwrap();
+    g.connect(b, mix).unwrap();
+    g.set_output(mix).unwrap();
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    render(&mut engine, 64, 64);
+    // A worker fills the lead, starting each block from its own lane.
+    assert!(eventually(|| engine.shared().lead() >= 512));
+    assert_eq!(alone.load(Relaxed), 0);
+}
+
 /// Panics in the first block it renders from engine time 1024 on.
 #[derive(Default)]
 struct PanicsLater {
@@ -796,6 +919,12 @@ enum Kind {
         first: usize,
         channels: usize,
     },
+    /// A MIDI track's monitor, taking every MIDI input's messages: a live
+    /// source while it can play them. Its notes go to the node after it.
+    Midi {
+        monitor: Monitor,
+        armed: bool,
+    },
 }
 
 impl Kind {
@@ -811,15 +940,23 @@ impl Kind {
                 first,
                 channels,
             } => Box::new(InputMonitor::new(monitor, armed).with_input(first, channels)),
+            Kind::Midi { monitor, armed } => {
+                let every = MidiSource {
+                    input: None,
+                    channel: None,
+                };
+                Box::new(MidiMonitor::new(monitor, armed).with_source(every))
+            }
         }
     }
 }
 
 /// A node whose output depends on everything a block gives it but the
-/// device inputs: its inputs, its events, the block's time, length and
-/// transport, the tempo, and its own history, which it takes over from the
-/// probe it replaces. A difference in any of them carries on through its
-/// output. It only uses arithmetic that IEEE 754 rounds exactly.
+/// device inputs and the MIDI inputs: its inputs, its events, notes
+/// included, the block's time, length and transport, the tempo, and its
+/// own history, which it takes over from the probe it replaces. A
+/// difference in any of them carries on through its output. It only uses
+/// arithmetic that IEEE 754 rounds exactly.
 struct Probe {
     channels: usize,
     seed: f32,
@@ -867,9 +1004,12 @@ impl Node for Probe {
         let mut events = ctx.events.iter().peekable();
         for frame in 0..ctx.frames {
             while let Some(event) = events.next_if(|e| e.offset == frame) {
-                if let NodeEventKind::Param { param, value } = event.kind {
-                    self.state += (param.0 as f32 + 1.0) * value as f32;
-                }
+                self.state += match event.kind {
+                    NodeEventKind::Param { param, value } => (param.0 as f32 + 1.0) * value as f32,
+                    NodeEventKind::Note(note) => weight(note),
+                    NodeEventKind::Controller { value, .. } => 0.25 * value,
+                    _ => 0.0,
+                };
             }
             for c in 0..self.channels {
                 let mut acc = self.state + block;
@@ -882,6 +1022,19 @@ impl Node for Probe {
                 self.state = 0.9 * self.state + 0.1 * y;
             }
         }
+    }
+}
+
+/// What a note adds to a [`Probe`]'s state.
+fn weight(note: NoteEvent) -> f32 {
+    match note {
+        NoteEvent::On {
+            note,
+            key,
+            velocity,
+        } => (note.0 % 8) as f32 * 0.5 + f32::from(key) * 1e-2 + velocity,
+        NoteEvent::Expression { value, .. } => 0.5 * value,
+        NoteEvent::Off { velocity, .. } => -velocity,
     }
 }
 
@@ -909,9 +1062,12 @@ impl Spec {
         let ids: Vec<NodeId> = (self.nodes.iter().enumerate())
             .map(|(i, (kind, _))| g.add_boxed(NodeKey(i as u64), kind.node()))
             .collect();
-        for (i, (_, inputs)) in self.nodes.iter().enumerate() {
+        for (i, (kind, inputs)) in self.nodes.iter().enumerate() {
             for &input in inputs {
                 g.connect(ids[input], ids[i]).unwrap();
+            }
+            if let (Kind::Midi { .. }, Some(&next)) = (kind, ids.get(i + 1)) {
+                g.send_notes(ids[i], next).unwrap();
             }
         }
         g.set_output(ids[self.output]).unwrap();
@@ -970,18 +1126,22 @@ impl Run {
     }
 }
 
-fn kind() -> impl Strategy<Value = Kind> {
-    let channels = prop_oneof![3 => Just(1usize), 3 => Just(2), 1 => Just(3)];
-    let monitor = prop_oneof![
+fn monitor() -> impl Strategy<Value = Monitor> {
+    prop_oneof![
         1 => Just(Monitor::In),
         2 => Just(Monitor::Auto),
         2 => Just(Monitor::Off),
-    ];
+    ]
+}
+
+fn kind() -> impl Strategy<Value = Kind> {
+    let channels = prop_oneof![3 => Just(1usize), 3 => Just(2), 1 => Just(3)];
+    let armed = || prop::bool::weighted(0.25);
     prop_oneof![
         8 => (any::<u8>(), channels).prop_map(|(seed, channels)| Kind::Probe { seed, channels }),
         1 => (0..40usize, 1..=2usize)
             .prop_map(|(frames, channels)| Kind::Latent { frames, channels }),
-        2 => (monitor, prop::bool::weighted(0.25), 0..2usize, 1..=2usize).prop_map(
+        2 => (monitor(), armed(), 0..2usize, 1..=2usize).prop_map(
             |(monitor, armed, first, channels)| Kind::Monitor {
                 monitor,
                 armed,
@@ -989,6 +1149,7 @@ fn kind() -> impl Strategy<Value = Kind> {
                 channels,
             }
         ),
+        1 => (monitor(), armed()).prop_map(|(monitor, armed)| Kind::Midi { monitor, armed }),
     ]
 }
 
@@ -1127,15 +1288,36 @@ fn device_input(t: u64, c: usize) -> f32 {
     ((t * (c as u64 + 3)) % 101) as f32 / 128.0 - 0.375
 }
 
+/// The MIDI inputs' message on engine time `t`, if there's one: a note
+/// starting every 23 frames and ending 7 frames later, and the sustain
+/// pedal going down and up every 101.
+fn midi_input(t: u64) -> Option<MidiMessage> {
+    let key = (t / 23 % 128) as u8;
+    let bytes = match (t % 23, t % 101) {
+        (0, _) => [0x90, key, 100],
+        (7, _) => [0x80, key, 64],
+        (_, 50) => [0xb0, 64, 127],
+        (_, 100) => [0xb0, 64, 0],
+        _ => return None,
+    };
+    Some(MidiMessage {
+        time: t,
+        input: 0,
+        bytes,
+    })
+}
+
 /// Plays a device callback of `frames` frames with `channels` channels on
 /// `engine`, into a planar buffer or an interleaved one, with two channels
-/// of [`device_input`] from the engine's time on, and puts what it played
-/// on the end of `output`, interleaved.
+/// of [`device_input`] from the engine's time on, and the messages of
+/// [`midi_input`] if `midi`, and puts what it played on the end of
+/// `output`, interleaved.
 fn callback(
     engine: &mut Engine,
     frames: usize,
     channels: usize,
     planar: bool,
+    midi: bool,
     output: &mut Vec<f32>,
 ) {
     let mut input = AudioBuffer::new(2, frames);
@@ -1146,16 +1328,23 @@ fn callback(
             *x = device_input(time + i as u64, c);
         }
     }
+    let messages: Vec<MidiMessage> = match midi {
+        true => (time..time + frames as u64)
+            .filter_map(midi_input)
+            .collect(),
+        false => Vec::new(),
+    };
     let start = output.len();
     output.resize(start + frames * channels, 0.0);
     let out = &mut output[start..];
+    let input = input.view(frames);
     match planar {
         true => {
             let mut buffer = AudioBuffer::new(channels, frames);
-            engine.process_with_input(input.view(frames), &[], &mut buffer.view_mut(frames));
+            engine.process_with_input(input, &messages, &mut buffer.view_mut(frames));
             buffer.view(frames).write_interleaved(out, channels);
         }
-        false => engine.process_interleaved_with_input(input.view(frames), &[], out, channels),
+        false => engine.process_interleaved_with_input(input, &messages, out, channels),
     }
 }
 
@@ -1215,6 +1404,7 @@ fn ahead(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Ahead {
                     frames,
                     run.channels,
                     planar,
+                    true,
                     &mut played.output,
                 );
                 handle.collect_garbage();
@@ -1295,8 +1485,11 @@ fn replay(run: &Run, ahead: &Ahead) -> Result<Replayed, TestCaseError> {
                 let tempo = tempos.next().expect("a tempo map for each");
                 handle.send_message(CoreMessage::Tempo(Box::new(tempo.clone())));
             }
-            Applied::Block(frames) => {
-                callback(&mut engine, frames, run.channels, false, &mut played.output);
+            // With the MIDI messages for its frames if the other rendered
+            // it as the device asked, and none, as the other had, if ahead.
+            Applied::Block { frames, live } => {
+                let output = &mut played.output;
+                callback(&mut engine, frames, run.channels, false, live, output);
             }
             Applied::Held => {
                 // As the other did, it takes what was sent and applies the
@@ -1319,6 +1512,17 @@ fn replay(run: &Run, ahead: &Ahead) -> Result<Replayed, TestCaseError> {
     })
 }
 
+/// What a log says was applied, whether its blocks rendered live or ahead:
+/// the replay renders them all live.
+fn either_side(log: &[(u64, Applied)]) -> Vec<(u64, Applied)> {
+    (log.iter())
+        .map(|&(time, applied)| match applied {
+            Applied::Block { frames, .. } => (time, Applied::Block { frames, live: true }),
+            applied => (time, applied),
+        })
+        .collect()
+}
+
 /// Where `a` first differs from the start of `b`, bit for bit.
 fn difference(a: &[f32], b: &[f32]) -> Option<usize> {
     let b = &b[..a.len().min(b.len())];
@@ -1337,7 +1541,7 @@ fn check(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Result<(), Te
         stats,
     } = replay(run, &ahead)?;
     prop_assert!(
-        applied == ahead.applied,
+        either_side(&applied) == either_side(&ahead.applied),
         "the replay applied something else"
     );
     let played = &ahead.played;
