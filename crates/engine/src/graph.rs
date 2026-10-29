@@ -433,6 +433,16 @@ impl Graph {
         let feeds = self.feeds.len() * room;
         let ports = self.modulations.len() * room;
         let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds + ports;
+        // The nodes that can be live sources, for the engine to ask before
+        // each block, and their keys, for the events it sends them.
+        let live: Vec<NodeId> = (0..self.nodes.len())
+            .filter(|&n| self.nodes[n].live().is_some())
+            .map(NodeId)
+            .collect();
+        let mut live_keys: Vec<NodeKey> = (live.iter())
+            .filter_map(|id| self.keys.get(id.0).copied())
+            .collect();
+        live_keys.sort_unstable();
         Ok(PreparedGraph {
             config: *config,
             event_ranges: vec![(0, 0); self.nodes.len()],
@@ -460,6 +470,8 @@ impl Graph {
             is_controller,
             schedule,
             loads: Arc::new(NodeLoads::new(loads)),
+            live,
+            live_keys,
         })
     }
 
@@ -732,6 +744,10 @@ pub struct PreparedGraph {
     pub(crate) schedule: Schedule,
     /// How long each node takes.
     pub(crate) loads: Arc<NodeLoads>,
+    /// The nodes that can be live sources ([`Node::live`]).
+    live: Vec<NodeId>,
+    /// Their keys, sorted.
+    live_keys: Vec<NodeKey>,
 }
 
 /// Where delay compensation put a delay. A delay takes over from the delay
@@ -1009,6 +1025,26 @@ impl PreparedGraph {
     /// [`NodeLoads::installed`] says so.
     pub fn loads(&self) -> Arc<NodeLoads> {
         self.loads.clone()
+    }
+
+    /// Whether any node is a live source now ([`Node::live`]).
+    pub(crate) fn is_live(&self) -> bool {
+        (self.live.iter()).any(|id| self.nodes[id.0].live() == Some(true))
+    }
+
+    /// Whether the node with `key` can be a live source.
+    pub(crate) fn can_be_live(&self, key: NodeKey) -> bool {
+        self.live_keys.binary_search(&key).is_ok()
+    }
+
+    /// How many channels the output has.
+    pub(crate) fn output_channels(&self) -> usize {
+        self.buffers[self.output.0].channels()
+    }
+
+    /// How many channels the cue output has: none without one.
+    pub(crate) fn cue_channels(&self) -> usize {
+        self.cue.map_or(0, |cue| self.buffers[cue.0].channels())
     }
 
     pub(crate) fn find(&self, key: NodeKey) -> Option<NodeId> {

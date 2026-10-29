@@ -3,8 +3,8 @@
 use musicable_model::time::TempoMap;
 
 use crate::{
-    AudioRef, Inputs, MidiMessage, NodeEvent, PreparedGraph, ProcessContext, TransportState, load,
-    rt,
+    AheadWaker, AheadWork, AudioRef, Inputs, MidiMessage, NodeEvent, PreparedGraph, ProcessContext,
+    TransportState, load, rt,
 };
 
 /// One block, as a renderer sees it.
@@ -52,6 +52,18 @@ pub trait Renderer: Send {
     /// ([`rt::flush_denormals`]), whichever thread runs them, and each one's
     /// time goes into its load ([`PreparedGraph::loads`]).
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>);
+
+    /// Has the renderer's own threads render the engine ahead of the audio
+    /// device with `work`, whenever the engine asks through the waker this
+    /// returns ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)).
+    /// The engine calls it once, as it takes the renderer. `None`, the
+    /// default, for a renderer without threads of its own, such as the
+    /// reference renderer: the audio thread renders ahead itself then, at
+    /// the end of each device callback.
+    fn render_ahead(&mut self, work: AheadWork) -> Option<AheadWaker> {
+        let _ = work;
+        None
+    }
 }
 
 /// Processes one node at a time in topological order, on the calling thread.

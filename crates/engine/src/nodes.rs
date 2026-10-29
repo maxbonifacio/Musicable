@@ -865,6 +865,22 @@ impl Node for InputMonitor {
             cut.store(self.armed, Ordering::Release);
         }
     }
+
+    /// A track whose input is the audio devices' is live while it can
+    /// monitor them, whether the transport lets it now or not, and while
+    /// it's still fading them out.
+    fn live(&self) -> Option<bool> {
+        let Source::Device(..) = self.input else {
+            return None;
+        };
+        let can = match self.monitor {
+            Monitor::In => true,
+            Monitor::Auto => self.armed,
+            Monitor::Off => false,
+        };
+        let silent = self.mix.is_settled() && self.mix.value() == 0.0;
+        Some(can || !silent)
+    }
 }
 
 /// Cuts what comes out of the devices of a track resampling the master

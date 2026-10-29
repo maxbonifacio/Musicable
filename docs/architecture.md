@@ -307,12 +307,13 @@ where a part has started, what's built.
   plugin that plays its regions itself takes their clips' place, so the
   compiler leaves those clips out of the track's clip player.
 - **Hybrid buffering, CPU meters per plugin, and multithreaded export.**
-  [engine.md](engine.md#parallel-rendering) sketches hybrid buffering: the
-  tracks nobody hears live render ahead in larger blocks on the same
-  workers, into lock-free queues that the live graph reads. Nothing times
-  nodes yet: a time for each node, kept in atomics as `Meters` keeps
-  levels, would give each plugin its meter. Exports render on the parallel
-  scheduler's workers already, in the app engine's block size
+  Both renderers time every node, and each device shows what it takes
+  ([engine.md](engine.md#node-timing)). Hybrid buffering has started: while
+  nothing in the graph is played live, the whole graph renders ahead of the
+  device on the parallel scheduler's workers, and the callback plays it
+  ([engine.md](engine.md#rendering-ahead)). Next, the tracks nobody hears
+  live render ahead while the rest renders as the device asks. Exports
+  render on the workers already, in the app engine's block size
   (`export::Job`).
 - **Plugin sandboxing.** Scanning loads each new library in a process of
   its own already (`plugins::scan`). Hosting a plugin in another process is

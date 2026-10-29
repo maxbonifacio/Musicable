@@ -33,7 +33,9 @@ of Musicable, and where Tier 1 work plugs in.
   `Engine::process_interleaved` once per device callback, or their
   `_with_input` forms with the audio devices' inputs.
 - With the `ParallelRenderer`, **worker threads** help the audio thread
-  render each block (see [Parallel rendering](#parallel-rendering)).
+  render each block (see [Parallel rendering](#parallel-rendering)), and
+  with a lead set, render ahead of it between callbacks (see
+  [Rendering ahead](#rendering-ahead)).
 - The **disk thread** (`musicable-disk`) reads the audio files that stream
   ahead of the clips that play them (see [Clips](#clips)).
 
@@ -57,6 +59,12 @@ or frees.
    the renderer and copies the output to the device buffer, then adds the
    cue output (see below) on top.
 
+A call for no frames does step 1 alone, so `Stats` says what the next
+frame plays with: an export calls one first, to learn the latency to skip.
+With a lead set, steps 2 and 3 happen before the callback asks, on the
+workers, and the callback copies what they rendered (see
+[Rendering ahead](#rendering-ahead)).
+
 ## Time and events
 
 **Engine time** counts the frames rendered since the engine started. It never
@@ -67,7 +75,8 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
 `Stats::playing` report it to the control thread.
 
 - `EngineHandle::send` applies an event as soon as possible: at the start of
-  the engine's next `process` call.
+  the engine's next `process` call, or while the engine renders ahead, at
+  the furthest frame it has rendered ([Rendering ahead](#rendering-ahead)).
 - `EngineHandle::send_at(time, ..)` applies it at that engine time, exactly on
   its frame. An event for a time already past applies at the start of the next
   `process` call and counts in `Stats::events_late`.
@@ -148,7 +157,7 @@ graph lines each record tap up with the output, as it does an export's
 stems (`Graph::add_record`, `PreparedGraph::record`), so frame `t + L` of
 it is what the output played at `t + L`, and belongs at `p` as an input's
 frame does. The engine hands each record tap's frames to its `TapWriter`
-after every block it renders, with the engine time they start at: a writer
+as they play, after each block, with the engine time they start at: a writer
 the control thread gives it for the tap's key (`EngineHandle::add_writer`,
 `compile::keys::record`), and takes back with `remove_writer`. A block
 without the tap, where the graph hasn't it or there's no graph yet, comes
@@ -1031,6 +1040,8 @@ allocates what it needs, from a `Source` read whole or streaming, and
   clip does.
 - `EngineHandle::set_preview_gain` sets how loud previews play. A change
   ramps over a block; the first block plays at the gain set.
+- A preview starts on the next callback, whatever the lead: the engine
+  plays previews as the device asks, on top of what it rendered ahead.
 - `Stats::preview` says which preview is playing, by the id it was made
   with, and the frame of its file it's at, for the browser's playhead.
 - A preview that has finished or faded out goes back through the garbage
@@ -1533,13 +1544,15 @@ doesn't have to. Then each block:
 1. The audio thread publishes the block and wakes the workers. It wakes two,
    each of those wakes two more, and so on, so no thread makes more than two
    wake-up calls, and only as many workers wake as the graph can keep busy.
+   A worker rendering ahead starts its blocks the same way, from its own
+   place in the tree as well as the audio thread's.
 2. Threads take nodes without inputs from a shared counter, longest path
    first. A thread that finishes a node counts it off the nodes it feeds. Of
    those that are now ready, it runs the one with the longest path itself
    and puts the rest on its own queue. A thread with nothing to do steals
    from another thread's queue.
-3. The block ends when every node has run. The audio thread keeps working
-   until then.
+3. The block ends when every node has run. The thread that started it keeps
+   working until then.
 
 **Between blocks.** A worker with nothing to do spins for
 `ParallelOptions::spin` (20 µs by default), then sleeps until the next block
@@ -1561,8 +1574,9 @@ thread alone too.
 
 **Failures.** Workers are real-time threads: each runs its share of a block
 inside `rt::scope`. A panic in a node on any thread, including a real-time
-violation, is caught, the rest of the block runs, and the audio thread
-raises the panic again when the block ends.
+violation, is caught, the rest of the block runs, and the thread that
+started the block raises the panic again when it ends: the audio thread,
+or a worker rendering ahead, which hands it on to the audio thread.
 
 **Tasks.** A node can split its own work into tasks with
 `tasks::run(count, &task)`, as a plugin using CLAP's thread pool splits its
@@ -1598,12 +1612,127 @@ per signal path, on 1: 5.7 times faster. Graphs with plenty to share ran 6.7
 to 8.1 times faster on 12 threads than on one, and spinning longer than
 20 µs between blocks didn't make blocks any faster.
 
-**Hybrid buffering (Tier 2).** Tracks that aren't monitored live can render
-ahead in larger blocks. The compiler would split their part of the graph
-off, the same worker pool would render it between live blocks into
-lock-free queues, and source nodes in the live graph would read those. The
-pool then needs a second kind of work, which workers take when no live
-block needs them and put down when one does.
+**Rendering ahead.** With a lead set, the workers also render the engine
+ahead of the device between callbacks: a second kind of work, which a
+worker takes on when the engine asks and puts down when the audio thread
+needs the engine ([Rendering ahead](#rendering-ahead)).
+
+## Rendering ahead
+
+With a lead (`EngineHandle::set_lead`), the engine renders the graph ahead
+of the audio device while nothing in it is played live, and each device
+callback plays what was rendered. The device waits on a copy, whatever the
+mix costs, while the workers render it between callbacks in longer blocks,
+with the lead to spare. So a mix too heavy for a 64-frame period can still
+play at one.
+
+```rust
+handle.set_lead(Lead::Normal); // Off, the default, Short, Normal or Long
+```
+
+**The lead.** `Lead::Short` is about 20 ms, `Normal` about 50 ms and `Long`
+about 200 ms, in whole frames (`Lead::frames`). While the transport plays,
+the engine renders up to the lead ahead. While it stands still, it keeps
+512 frames ahead, so Play starts within about 12 ms. It renders each block
+as the device asks for it instead while the lead is off, before the first
+graph, while the output or the cue output has more than two channels,
+which is all its rings hold, and while anything in the graph is live
+(below). `Stats::lead` is how far ahead it was at the end of the last
+callback, and `Stats::lead_target` how far ahead it aims to be.
+
+**Two sides.** `ahead.rs` splits the engine in two. The ahead side holds the
+graph, the renderer, the transport and the events not yet due, and renders
+blocks as the engine always has. One thread holds it at a time: a worker
+rendering ahead, or the audio thread when it renders a block itself. The
+live side is the audio thread's own: the previews, the record taps'
+writers, and what it plays from. Blocks rendered ahead go into rings for
+the live side to play: the output and the cue output, each writer's record
+tap and notes, and the transport's course, an entry wherever it doesn't
+run on, from which the live side reports `Stats::position`, `playing` and
+`latency` for what it plays. Each ring holds the longest lead and a block,
+so the ahead side never writes where the live side reads.
+
+**Who renders ahead.** At the end of each callback, if the lead is short,
+the engine asks the renderer's workers for more (`Renderer::render_ahead`).
+One worker takes it on, starts each block from its own lane as the audio
+thread does from lane 0, and the others help as they would with any block,
+until the lead is whole. A renderer without workers, such as
+`ReferenceRenderer`, has the audio thread render ahead at the end of each
+callback instead. When a callback needs frames that aren't rendered yet,
+the audio thread takes the ahead side and renders the next block itself,
+as the device asks. If a worker is in a block then, the audio thread works
+on that block until it ends, and plays it first. `Stats::short_blocks`
+counts the blocks the audio thread rendered because the lead ran out,
+which is what a callback that drops out has been doing.
+
+**Block lengths.** Ahead, the engine renders in blocks of `AHEAD_BLOCK`,
+1024 frames, where `EngineConfig::max_block` allows it and the lead is at
+least twice as long. Shorter leads take blocks of 512 and 128 frames, and
+then the device's period, so a worker is never long in a block the device
+waits for. An app that renders ahead makes `max_block` at least
+`AHEAD_BLOCK`. The `realtime` benchmark's ahead table (`cargo bench -p
+musicable-engine --bench realtime -- ahead`) chose the length: on four
+threads of a cloud machine, the 64-track project with sends took 288 ms to
+render a second of audio in blocks of 1024 frames, against about 300 ms in
+blocks of 256 or 512 and 350 ms in blocks of 64, while a chain of 64
+devices took the same at every length, and four tracks the same at every
+length from 128 on. ARA's renderers prefer 1024 too.
+
+**What applies when.** What the ahead side has rendered can't be taken
+back, so what's sent for as soon as possible applies at the furthest frame
+it has rendered: transport commands, tempo maps, graphs, and events sent
+with `send`. They're heard up to the lead, and a block, later than with the
+lead off. An event sent for a time (`send_at`) lands on its frame, unless
+that frame is rendered already: then it applies at the furthest frame, and
+counts in `Stats::events_late`. The parameters a swap sends again apply at
+the furthest frame too, or at their own time if that's later.
+
+**Live sources.** A node says whether it's a live source now with
+`Node::live`: whether it plays what comes in from outside the graph as it
+comes, which a block rendered ahead hasn't got. An `InputMonitor` is one
+while it can monitor the device inputs, whether the transport lets it now
+or not, and until it has faded them out, and a `MidiMonitor` while it can
+monitor a MIDI input. The graph asks the nodes that can be live before each
+block. The ahead side renders no event for one of them, such as arming a
+track: a block ahead ends before it, and the audio thread renders the
+block it's due in, with the device inputs, so the track arms on the frame
+the event was sent for. From then on the audio thread renders every block
+as the device asks, as with the lead off, until nothing is live, and then
+the lead fills again. Blocks rendered ahead have no device inputs, and the
+MIDI messages for frames played from them go nowhere, since no node plays
+them while nothing is live. A `MidiMonitor` that isn't monitoring misses
+them too, so it doesn't know what the input held meanwhile.
+
+**Previews and writers.** Previews play on the live side, from the next
+callback whatever the lead, on top of what was rendered. A record tap's
+writer gets each frame as it plays, in order: straight from the graph in a
+block the audio thread rendered, and from its ring in one rendered ahead.
+A writer added while the engine is ahead gets silence for the frames
+rendered before it came, and one that replaces a writer with the same key
+carries on where that one left off. Notes go through a queue for each
+writer, and the ahead side renders a block only while each queue has room
+for a block's notes (`Notes::CAPACITY`), so a dense part shortens the lead
+rather than lose notes. `Engine::process_with_taps` gets its taps only in
+blocks it renders itself, so an offline render leaves the lead off.
+
+**Short loops.** The course queue holds 1,024 entries, a few for each lead,
+unless a loop shorter than a block plays, which makes one at each jump.
+When it's full, the ahead side stops, and the audio thread renders as the
+device asks until there's room.
+
+**Failures and stopping.** A worker renders ahead inside `rt::scope`, as it
+renders its share of a block. A panic there is caught, the ahead side
+stops, and the audio thread raises the panic at the start of its next
+callback, as it would one in a block it rendered. Dropping the engine waits
+for any worker rendering ahead to stop.
+
+**Tests.** `ahead/tests.rs` checks each of these, and a proptest checks the
+whole: random graphs of probes, delays and monitored tracks, with random
+callback lengths, leads, events, jumps, swaps and tempo maps, rendered
+ahead, on workers and on the audio thread, against an engine with the lead
+off that replays what the first applied, block for block. The two play the
+same, bit for bit: the output, the writers' frames and notes, the timeline
+and the counters.
 
 ## Node timing
 
@@ -1708,7 +1837,8 @@ block, though never on two at once, so keep no state in thread-locals.
   their own. It can't see an uncontended Rust lock either.
   What real-time code does on purpose that RTSan would stop at runs in
   `rt::allowed`: waking a sleeping worker or the disk thread, and yielding
-  while waiting for one, which are system calls that don't block, and
+  while waiting for one or for a worker rendering ahead, which are system
+  calls that don't block, and
   Rust's allocations, which the allocation checker records itself.
   `crates/engine/src/rt.rs` has the command that runs it.
 
@@ -1745,6 +1875,8 @@ thread, but node code shouldn't rely on denormals either way.
 | Clips' notes sounding through a MIDI monitor | 1,024 | It doesn't pass more on |
 | Notes the test instrument plays at once | `TestInstrument::VOICES`, 32 | A new note takes the place of the one that started longest ago |
 | Latency delay compensation lines up | `Graph::MAX_LATENCY`, 262,144 frames (5.5 s at 48 kHz) | Later paths are lined up as if they were that late |
+| Changes in the transport's course rendered ahead | 1,024 | The engine stops rendering ahead until the audio thread plays some |
+| Notes rendered ahead for a writer | 1,024, with room kept for `Notes::CAPACITY` | The engine stops rendering ahead until the audio thread plays some |
 
 A swap takes one queue slot, plus one for each remembered parameter of the new
 graph. The handle remembers every parameter it has sent until

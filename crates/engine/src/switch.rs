@@ -409,6 +409,10 @@ impl Node for Switch {
     fn ended_voices(&self) -> &[NoteId] {
         self.device.ended_voices()
     }
+
+    fn live(&self) -> Option<bool> {
+        self.device.live()
+    }
 }
 
 /// Whether `event` bypasses the device or brings it back, if it's a

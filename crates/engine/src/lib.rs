@@ -14,6 +14,11 @@
 //! runs each node as soon as its inputs are done, on a pool of worker threads
 //! and the audio thread.
 //!
+//! With a [`Lead`] set ([`EngineHandle::set_lead`]), the engine renders the
+//! graph ahead of the audio device while nothing in it is played live, on
+//! the parallel renderer's workers between device callbacks, and a callback
+//! plays what was rendered.
+//!
 //! `docs/engine.md` describes the threads, the message flow and the real-time
 //! rules.
 
@@ -21,6 +26,7 @@ use std::any::Any;
 
 use musicable_model::time::TempoMap;
 
+mod ahead;
 pub mod automation;
 pub mod buffer;
 pub mod clips;
@@ -45,6 +51,7 @@ pub mod tasks;
 pub mod timeline;
 mod transport;
 
+pub use ahead::{AHEAD_BLOCK, AheadWork, Lead};
 pub use automation::Automation;
 pub use buffer::{AudioBuffer, AudioMut, AudioRef, InputPort, Inputs};
 pub use compile::{
@@ -62,7 +69,7 @@ pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, Prep
 pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
 pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
-pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
+pub use parallel::{AheadWaker, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use preview::Preview;
 pub use render::{Block, ReferenceRenderer, Renderer};
 pub use timeline::{Segment, Timeline};
@@ -206,6 +213,25 @@ pub trait Node: Any + Send {
     /// the audio thread before the first block it renders again. A plugin
     /// resets its processing state.
     fn reset(&mut self) {}
+
+    /// Whether the node is a live source now: it plays what comes in from
+    /// outside the graph as it comes, from the audio devices' inputs
+    /// ([`ProcessContext::input`]) or the MIDI inputs
+    /// ([`ProcessContext::midi`]), as a track monitoring its input does.
+    /// While any node is, the engine renders each block as the device asks
+    /// for it, rather than ahead ([`EngineHandle::set_lead`]): blocks it
+    /// renders ahead have no inputs.
+    ///
+    /// `None`, the default, for a node that never is; `Some(false)` for
+    /// one that can be but isn't now, such as a track's monitor that isn't
+    /// monitoring. The graph asks each node once as it's prepared, and asks
+    /// the ones that can be before each block, on the audio thread or a
+    /// worker, so it must be quick and real-time safe. The engine renders
+    /// an event for such a node in a block it renders as the device asks,
+    /// so a parameter that makes it live, such as arming, applies in time.
+    fn live(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl dyn Node {
