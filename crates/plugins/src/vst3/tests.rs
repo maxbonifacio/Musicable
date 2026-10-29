@@ -28,7 +28,7 @@ use vst3::Steinberg::Vst::ProcessModes_::{kPrefetch, kRealtime};
 use vst3::Steinberg::Vst::RestartFlags_::{
     kIoChanged, kLatencyChanged, kParamTitlesChanged, kParamValuesChanged, kReloadComponent,
 };
-use vst3::Steinberg::uint32;
+use vst3::Steinberg::{int32, uint32};
 
 use super::Instance;
 use super::preset::{self, Preset};
@@ -935,10 +935,12 @@ fn blocks_rendered_ahead_come_in_prefetch_mode() {
         ..Block::default()
     };
     play(&mut node, &ramp(16), &ahead);
-    assert_eq!(plugins.transport(&instance).unwrap().mode, kPrefetch as i32);
+    let mode = plugins.transport(&instance).unwrap().mode;
+    assert_eq!(mode, kPrefetch as int32);
     // A block the device asks for, as in an export, comes in real time.
     play(&mut node, &ramp(16), &Block::default());
-    assert_eq!(plugins.transport(&instance).unwrap().mode, kRealtime as i32);
+    let mode = plugins.transport(&instance).unwrap().mode;
+    assert_eq!(mode, kRealtime as int32);
     drop((node, instance));
     plugins.assert_alright();
 }
