@@ -218,8 +218,8 @@ the views' parts. Behind them:
 ### The panels
 
 The arrangement, the mixer, the devices panel, the piano roll, the Sample
-Editor, the browser, the History panel and the Routing panel are docked
-panels, laid out in splits and tabs
+Editor, the browser, the History panel, the Routing panel and the
+Performance panel are docked panels, laid out in splits and tabs
 ([egui_tiles](https://docs.rs/egui_tiles), `crates/ui/src/dock.rs`). The
 shell's panel registry (`crates/ui/src/panels.rs`) holds each with its id,
 such as `musicable_ui::MIXER` and `PIANO_ROLL`, its title, its place and
@@ -499,8 +499,11 @@ the mouse map, as the arrangement's do. The faders, sends, pans, buttons,
 menus and meters are named for screen readers, such as "Lead Volume", which
 is how the tests drive them. The meters read the engine's `Meters` every
 frame, and the window redraws at 60 frames a second while any of them shows
-a signal, so they fall all the way back after you stop. The **Track** menu
-adds tracks ([commands.md](commands.md#track)).
+a signal, so they fall all the way back after you stop. The CPU part
+(`cpu`) shows the channel's share of a core from the view's `Performance`
+([CPU figures](#cpu-figures)), as a meter named such as "Lead CPU", and
+"--" while there are no figures. The **Track** menu adds tracks
+([commands.md](commands.md#track)).
 
 An audio track's input menu lists the other tracks after the audio inputs,
 each opening to its taps as a sidechain picker's tracks do
@@ -538,6 +541,28 @@ is. Clicking an end runs `edit.select_tracks`, `edit.select_master` or
 devices panel (`Shell::show_device`). Its panel's id is
 `musicable_ui::ROUTING`, in a tab beside the mixer, and
 `view.toggle_routing` shows or hides it.
+
+## The Performance panel
+
+[The Performance panel](../manual/src/window/performance.md) in the manual
+says what it lists. It draws the view's `musicable_ui::Performance`, the
+figures the app worked out last ([CPU figures](#cpu-figures)): a `Cpu`,
+the average and the longest block, for each `Row`, which is a device, a
+channel's clips, modulators or mixer, or the metronome
+(`crates/ui/src/performance.rs`). Each frame it lists the rows busiest
+first (`Performance::busiest`), leaving out any whose device or track has
+gone since, but while the pointer is over the panel the rows keep the
+order they had, with any new ones at the foot, so a click lands on the row
+it was aimed at as the figures change. Only the rows in sight are drawn,
+over a Total line that stays in sight. The columns' headings say what the
+figures mean in their tooltips, and each row is a list item named after its
+channel and its part, such as "Bass, Drive", with its average as its value,
+which is how the tests read it. Clicking a row runs `device.select` for a
+device, and `edit.select_tracks` or `edit.select_master` for the rest of a
+channel, and the shell brings a device clicked into sight in the devices
+panel (`Shell::show_device`), as the Routing panel's clicks do. Its panel's
+id is `musicable_ui::PERFORMANCE`, in a tab beside the mixer, and
+`view.toggle_performance` shows or hides it.
 
 ## Recording
 
@@ -689,7 +714,12 @@ opacity, and still work, and a deactivated one says so beside its name.
 The name's menu has Bypass, ticked while the device is bypassed, and
 Deactivate or Activate. Screen readers hear the button as "EQ Bypass",
 on while the device is bypassed, and the name with the device's state,
-such as "Device EQ, bypassed, selected".
+such as "Device EQ, bypassed, selected". After its delete button, an
+active device's title bar has its share of a core from the view's
+`Performance` ([CPU figures](#cpu-figures)), amber over
+`performance::BUSY`, a quarter of a core, and red over `VERY_BUSY`, half
+of one, as a meter named such as "EQ CPU", with its longest block in its
+tooltip. A deactivated device doesn't render, so it has none.
 
 A click on a device's title bar, or on its box where no control takes it,
 selects the device (`device.select`), as the mouse map's `DeviceTitle`
@@ -1216,12 +1246,63 @@ uses it, as does Capture.
 - **CPU**: the share of the time the audio thread spent in its wake-ups,
   rendering included, over the last quarter of a second. Near 100%, wake-ups
   start running late and dropouts follow. It comes from
-  `StreamStats::busy`. The tooltip adds the longest wake-up, and how many
-  threads the parallel scheduler kept busy at once while it shared blocks.
+  `StreamStats::busy`. The tooltip adds the longest wake-up, how many
+  threads the parallel scheduler kept busy at once while it shared blocks,
+  and, while there are CPU figures, the project's share of a core, which
+  is the Performance panel's total ([CPU figures](#cpu-figures)).
 - **Dropouts**: `StreamStats::underruns` since the stream started. Click to
   count from zero again. The tooltip has the audio lost, how many of the
   dropouts were in the system's audio engine or driver, and the late
   wake-ups.
+
+### CPU figures
+
+The engine times every node it renders
+([engine.md](engine.md#node-timing)), and `Figures`
+(`crates/app/src/performance.rs`) works out from those times the CPU
+figures the views show: each device's, each channel's and the project's
+share of a core, and each one's longest block. The app hands it the
+running graph's loads (`Session::loads`) each frame, after the levels:
+
+- **Four times a second** it reads every node's load: the time the node
+  has taken, and its longest block since the reading before, with the
+  engine's time, the frames it has rendered. It keeps the readings that
+  span at least the last second of audio rendered, and works the figures
+  out from the oldest of them and the newest.
+- **Each node goes in a row**, by what its key belongs to
+  (`compile::keys::owner`): a device's node in the device's row, a track's
+  clips, input and clip type in its Clips row, and a channel's modulation
+  in its Modulators row. Everything else of a channel's goes in its Mixer
+  row: its fader, pan and slots, its sends, its bus, the wires into its
+  devices' side inputs, and the delays that delay compensation added after
+  its nodes. The project says which channel a device, a send or a wire is
+  on (`Places`).
+- **A row's average** is the time its nodes took between the oldest
+  reading and the newest, over the audio the engine rendered meanwhile. The
+  difference is each node's, so a node new since the oldest reading counts
+  all the time it took, and one gone since counts nothing, and a row
+  doesn't drop to nothing for a second when one of its nodes goes, as
+  when a send is deleted. Each delay is a node of its own here, by where
+  it is (`LoadKey::Delay`), so the same goes for one of the delays after a
+  node. A channel's figure adds up its rows, and the total adds up them
+  all.
+- **A row's longest block** is the longest any of its nodes took in the
+  readings after the oldest, over the stream's period.
+- While no stream plays there are no figures, so the views show none, and
+  a graph the engine hasn't installed yet waits until it has
+  (`NodeLoads::installed`): until then its loads read nothing, or only
+  some of what they carry on from the graph before, and a reading of a
+  node's load that hadn't carried on yet would count all its time for a
+  second, once that reading was the oldest. Another engine, or one with
+  another sample rate or period, starts the readings again.
+
+The `View` carries the figures as a `musicable_ui::Performance`, which the
+devices' title bars ([The devices panel](#the-devices-panel)), the mixer's
+CPU part ([The mixer](#the-mixer)), the CPU meter's tooltip and the
+Performance panel ([The Performance panel](#the-performance-panel)) show,
+and agents read them with `get_performance`
+([agents.md](agents.md#the-tools)). The window redraws at least four
+times a second, so they keep up.
 
 ## How it's built
 

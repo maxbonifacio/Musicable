@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange};
 use musicable_mcp::pipe::Address;
-use musicable_mcp::{Host, Reply, Run};
+use musicable_mcp::{CpuPart, CpuRow, Host, Performance, Reply, Run};
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project, TrackId};
+use musicable_ui::Row;
 use serde_json::json;
 
 use super::{App, with_extension};
@@ -424,6 +425,31 @@ impl musicable_mcp::Window for Agent<'_> {
                 .map(|param| (param.id, param.spec.clone()))
                 .collect(),
         )
+    }
+
+    fn performance(&self) -> Performance {
+        let (output, figures) = (&self.app.output, self.app.performance.performance());
+        let rows = (figures.busiest().into_iter())
+            .map(|(row, cpu)| CpuRow {
+                part: match row {
+                    Row::Device(device) => CpuPart::Device(device),
+                    Row::Clips(track) => CpuPart::Clips(track),
+                    Row::Modulators(chain) => CpuPart::Modulators(chain),
+                    Row::Mixer(chain) => CpuPart::Mixer(chain),
+                    Row::Metronome => CpuPart::Metronome,
+                },
+                average: cpu.average,
+                longest: cpu.longest,
+            })
+            .collect();
+        Performance {
+            playing: output.info().is_some(),
+            audio: output.summary(),
+            load: output.load(),
+            dropouts: output.dropouts(),
+            rows,
+            total: figures.total,
+        }
     }
 
     fn run(&mut self, run: Run, reply: Reply) {

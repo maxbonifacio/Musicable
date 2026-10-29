@@ -41,6 +41,10 @@ pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
 /// project, in a tab beside the mixer: Live's In/Out section, for the whole
 /// project.
 pub const TOGGLE_ROUTING: CommandId = CommandId::new("view.toggle_routing");
+/// Shows or hides the Performance panel, which lists what each device and
+/// each track's mixer take of the CPU, busiest first, in a tab beside the
+/// mixer.
+pub const TOGGLE_PERFORMANCE: CommandId = CommandId::new("view.toggle_performance");
 /// Brings the editor that fits the clip selected or opened last, the piano
 /// roll or the Sample Editor, in front of the devices, or the devices in
 /// front of it: Live's Toggle Between Device/Clip View.
@@ -141,7 +145,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 11] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 10] = [
+const REQUESTS: [(CommandId, &str, Request); 11] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -165,6 +169,11 @@ const REQUESTS: [(CommandId, &str, Request); 10] = [
         TOGGLE_ROUTING,
         "Routing",
         Request::TogglePanel(panel::ROUTING),
+    ),
+    (
+        TOGGLE_PERFORMANCE,
+        "Performance",
+        Request::TogglePanel(panel::PERFORMANCE),
     ),
     (
         MOVE_TO_NEW_WINDOW,

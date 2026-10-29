@@ -245,6 +245,58 @@ pub mod keys {
         track_output(MASTER_STRIP)
     }
 
+    /// What a node belongs to, by its key: see [`owner`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum Owner {
+        /// A device's node: its switch, with the device inside.
+        Device(DeviceId),
+        /// The native stage in front of a device, which is part of the
+        /// strip of the channel the device is on.
+        BeforeDevice(DeviceId),
+        /// What a track plays: its clip player, its input monitor and its
+        /// test tone.
+        Clips(TrackId),
+        /// A channel's modulators.
+        Modulators(Chain),
+        /// The rest of a channel's strip: its fader, its built-in slots,
+        /// its output stage, its bus, and the cut after the devices of a
+        /// track resampling the master. The master's bus, where tracks
+        /// sum, is the master's.
+        Strip(Chain),
+        /// A send, which is part of the strip of the track that sends.
+        Send(SendId),
+        /// A wire, which feeds a side input of the device it runs to.
+        Wire(WireId),
+        /// The metronome, and the cue bus it plays into.
+        Metronome,
+    }
+
+    /// What the node with `key` belongs to, if `key` is one this module
+    /// gives a node: for telling whose time each node takes.
+    pub fn owner(key: NodeKey) -> Option<Owner> {
+        match key {
+            MASTER => return Some(Owner::Strip(Chain::Master)),
+            METRONOME | CUE => return Some(Owner::Metronome),
+            _ => {}
+        }
+        let id = key.0 as u32;
+        let chain = match TrackId(id) {
+            MASTER_STRIP => Chain::Master,
+            track => Chain::Track(track),
+        };
+        let track = chain.track();
+        Some(match key.0 >> 32 {
+            1 | 3 | 4 | 5 | 7 | 8 | 19 => Owner::Strip(chain),
+            2 | 11 | 12 => Owner::Clips(track?),
+            6 => Owner::BeforeDevice(DeviceId(id)),
+            9 => Owner::Send(SendId(id)),
+            10 => Owner::Device(DeviceId(id)),
+            13 => Owner::Modulators(chain),
+            14 => Owner::Wire(WireId(id)),
+            _ => return None,
+        })
+    }
+
     /// The node with the parameter at `address` in `project`, and the
     /// parameter: a channel's fader's [`Gain::GAIN`] for its volume and
     /// [`Gain::PAN`] for its pan, a send's or a wire's [`Gain::GAIN`], a
@@ -1616,6 +1668,51 @@ mod tests {
                 assert!(seen.insert(key), "{key:?} is taken");
             }
         }
+    }
+
+    #[test]
+    fn keys_say_what_their_nodes_belong_to() {
+        use keys::Owner;
+        let (track, device) = (TrackId(3), DeviceId(4));
+        let on = Chain::Track(track);
+        let owned = [
+            (keys::MASTER, Owner::Strip(Chain::Master)),
+            (keys::METRONOME, Owner::Metronome),
+            (keys::CUE, Owner::Metronome),
+            (keys::master_gain(), Owner::Strip(Chain::Master)),
+            (keys::master_output(), Owner::Strip(Chain::Master)),
+            (
+                keys::master_slot(Slot::PostFader),
+                Owner::Strip(Chain::Master),
+            ),
+            (
+                keys::modulation(Chain::Master),
+                Owner::Modulators(Chain::Master),
+            ),
+            (keys::track_gain(track), Owner::Strip(on)),
+            (keys::track_slot(track, Slot::PreFader), Owner::Strip(on)),
+            (keys::track_slot(track, Slot::BusFeed), Owner::Strip(on)),
+            (keys::track_output(track), Owner::Strip(on)),
+            (keys::track_bus(track), Owner::Strip(on)),
+            (keys::track_cut(track), Owner::Strip(on)),
+            (keys::track_tone(track), Owner::Clips(track)),
+            (keys::track_clips(track), Owner::Clips(track)),
+            (keys::track_input(track), Owner::Clips(track)),
+            (keys::modulation(on), Owner::Modulators(on)),
+            (keys::device(device), Owner::Device(device)),
+            (
+                keys::track_slot(track, Slot::BeforeDevice(device)),
+                Owner::BeforeDevice(device),
+            ),
+            (keys::send(SendId(5)), Owner::Send(SendId(5))),
+            (keys::wire(WireId(6)), Owner::Wire(WireId(6))),
+        ];
+        for (key, owner) in owned {
+            assert_eq!(keys::owner(key), Some(owner), "{key:?}");
+        }
+        // Record taps have keys no node has.
+        let tap = keys::record(musicable_model::routing::Tap::PreFx(track));
+        assert_eq!(keys::owner(tap), None);
     }
 
     #[test]

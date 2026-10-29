@@ -160,11 +160,11 @@ devices ([Device](#device)). Split always acts on clips, and applies only
 while the arrangement or the mixer has the focus. The mixer shows the
 arrangement's tracks, so while it has the focus they act on the
 arrangement's selection, as Live's mixer does in its Arrangement View. The
-browser, the History panel and the Routing panel have nothing they take, so
-there they don't apply. Quantize moves the piano roll's notes while it
-has the focus, the Sample Editor's transients while it has it
-([Transients](#transients)), and else those of the selected clips, MIDI and
-warped audio, at the zoom of the panel they're in.
+browser, the History panel, the Routing panel and the Performance panel
+have nothing they take, so there they don't apply. Quantize moves the piano
+roll's notes while it has the focus, the Sample Editor's transients while
+it has it ([Transients](#transients)), and else those of the selected
+clips, MIDI and warped audio, at the zoom of the panel they're in.
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
@@ -896,6 +896,7 @@ other. They push a `Request`, as the file commands do.
 | `view.command_palette` | Command Palette... | Shows the command palette | Ctrl+Shift+P | none |
 | `view.toggle_mixer` | Mixer | Shows or hides the mixer under the arrangement | Ctrl+Alt+M | Ctrl+Alt+M |
 | `view.toggle_routing` | Routing | Shows or hides the Routing panel, in a tab beside the mixer | Ctrl+Alt+I | Ctrl+Alt+I (the mixer's In/Out) |
+| `view.toggle_performance` | Performance | Shows or hides the Performance panel, which lists what each device and each track's strip take of the CPU, in a tab beside the mixer | Ctrl+Alt+C | none |
 | `view.toggle_devices` | Devices | Shows or hides the devices panel | Ctrl+Alt+L | Ctrl+Alt+L (Detail View) |
 | `view.toggle_clip_editor` | Clip Editor | Shows or hides the editor that fits the clip selected or opened last: the piano roll, or the Sample Editor for an audio clip | Ctrl+Alt+3 | Ctrl+Alt+3 (Clip View) |
 | `view.switch_devices_piano_roll` | Switch Devices and Clip Editor | Brings that editor in front of the devices, or the devices in front of it | F12 | F12, Shift+Tab |

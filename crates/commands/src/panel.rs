@@ -1,7 +1,7 @@
 //! The window's panels, by id: the arrangement, the mixer, the devices, the
-//! piano roll, the Sample Editor, the browser, the history and the routing.
-//! The UI docks them by these ids, the focus is on one of them, and a keymap
-//! can bind keys in one of them only.
+//! piano roll, the Sample Editor, the browser, the history, the routing and
+//! the performance. The UI docks them by these ids, the focus is on one of
+//! them, and a keymap can bind keys in one of them only.
 
 /// The arrangement's panel, in the middle of the window.
 pub const ARRANGEMENT: &str = "arrangement";
@@ -22,9 +22,12 @@ pub const HISTORY: &str = "history";
 /// The Routing panel, which lists every connection in the project, in a tab
 /// beside the mixer.
 pub const ROUTING: &str = "routing";
+/// The Performance panel, which lists what each device and each track's
+/// mixer take of the CPU, in a tab beside the mixer.
+pub const PERFORMANCE: &str = "performance";
 
 /// Every panel's id.
-pub const ALL: [&str; 8] = [
+pub const ALL: [&str; 9] = [
     ARRANGEMENT,
     MIXER,
     DEVICES,
@@ -33,6 +36,7 @@ pub const ALL: [&str; 8] = [
     BROWSER,
     HISTORY,
     ROUTING,
+    PERFORMANCE,
 ];
 
 /// The id `id` as [`ALL`] has it, if it's a panel's.

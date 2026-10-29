@@ -28,10 +28,11 @@ use crate::mixer::{InputChoice, Levels, MidiChoice};
 use crate::mouse::MouseMap;
 use crate::palette::Palette;
 use crate::panels::{
-    self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PIANO_ROLL, Panels, ROUTING,
-    SAMPLE_EDITOR,
+    self, ARRANGEMENT, BROWSER, Cx, DEVICES, HISTORY, MIXER, PERFORMANCE, PIANO_ROLL, Panels,
+    ROUTING, SAMPLE_EDITOR,
 };
 use crate::parts::{Parts, Views};
+use crate::performance::Performance;
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::transport_bar;
@@ -67,6 +68,9 @@ pub struct View<'a> {
     pub recordings: &'a [Recording],
     /// The meters' readings, as the engine last measured them.
     pub levels: &'a Levels,
+    /// What the project's devices and channels cost the CPU, as the app
+    /// last worked it out.
+    pub performance: &'a Performance,
     /// The audio inputs tracks can record from, for the mixer's input
     /// menus.
     pub inputs: &'a [InputChoice],
@@ -469,9 +473,10 @@ impl Shell {
             let title = self.registry.get(panel).map_or(panel, |panel| panel.title);
             ghost::show(&ctx, title, at);
         }
-        // A device clicked in the Routing panel comes into sight in the
-        // devices panel, which shows it selected.
-        if let Some(device) = self.panels.routing.take_revealed() {
+        // A device clicked in the Routing panel or the Performance panel
+        // comes into sight in the devices panel, which shows it selected.
+        let revealed = self.panels.routing.take_revealed();
+        if let Some(device) = self.panels.performance.take_revealed().or(revealed) {
             self.show_device(device);
         }
         // Add Device shows the browser's devices.
@@ -1341,6 +1346,7 @@ fn command_button(
         id if *id == view::TOGGLE_BROWSER => Some(shown.contains(BROWSER)),
         id if *id == view::TOGGLE_HISTORY => Some(shown.contains(HISTORY)),
         id if *id == view::TOGGLE_ROUTING => Some(shown.contains(ROUTING)),
+        id if *id == view::TOGGLE_PERFORMANCE => Some(shown.contains(PERFORMANCE)),
         _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
         id => toggled(view, id),
     };
@@ -1969,9 +1975,11 @@ mod tests {
             SAMPLE_EDITOR.into(),
             HISTORY.into(),
             ROUTING.into(),
+            PERFORMANCE.into(),
         ];
-        // The routing, hidden, stays where the mixer was.
-        let routing = Layout::panel(ROUTING);
+        // The routing and the performance, hidden, stay where the mixer
+        // was.
+        let routing = Layout::new(Split::Tabs(vec![ROUTING.into(), PERFORMANCE.into()]));
         let expected = WindowLayout {
             hidden: hidden.clone(),
             layout: across(vec![
@@ -2062,7 +2070,15 @@ mod tests {
         assert!(harness.query_by_label("Mixer panel").is_none());
         assert_eq!(
             layout(&harness).hidden,
-            [BROWSER, MIXER, PIANO_ROLL, SAMPLE_EDITOR, HISTORY, ROUTING]
+            [
+                BROWSER,
+                MIXER,
+                PIANO_ROLL,
+                SAMPLE_EDITOR,
+                HISTORY,
+                ROUTING,
+                PERFORMANCE
+            ]
         );
         // The arrangement's tab has no close button.
         let tab = harness.get_by_label("Arrangement panel").rect();
@@ -2162,6 +2178,7 @@ mod tests {
                 SAMPLE_EDITOR.into(),
                 HISTORY.into(),
                 ROUTING.into(),
+                PERFORMANCE.into(),
             ],
             layout: across(vec![
                 down(vec![Layout::panel(ARRANGEMENT), Layout::panel(MIXER)]),
@@ -2175,6 +2192,7 @@ mod tests {
                             SAMPLE_EDITOR,
                             HISTORY,
                             ROUTING,
+                            PERFORMANCE,
                         ],
                         DEVICES,
                     )

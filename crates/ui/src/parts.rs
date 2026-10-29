@@ -509,7 +509,7 @@ fn read_lineup(registry: &Registry, view: &str, lineup: &Lineup) -> Vec<Entry> {
 /// ```toml
 /// [views.mixer_strip]
 /// hidden = ["monitor"]
-/// parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
+/// parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type", "cpu"]
 ///
 /// [views.track_header.sizes]
 /// meter = 14
@@ -800,6 +800,7 @@ mod tests {
                 ("readouts", true),
                 ("buttons", true),
                 ("clip_type", true),
+                ("cpu", true),
             ]
         );
         // Only parts that can be resized keep a size, within limits.
@@ -863,6 +864,7 @@ mod tests {
                     "readouts",
                     "buttons",
                     "clip_type",
+                    "cpu",
                 ],
             };
             assert_eq!(parts, expected, "{view}");

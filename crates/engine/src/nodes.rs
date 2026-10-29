@@ -230,6 +230,51 @@ impl Node for Impulse {
     }
 }
 
+/// Spins for a while, for tests of the loads: for `render` in each block it
+/// renders, split into `tasks` tasks ([`tasks::run`](crate::tasks::run))
+/// when there's more than one, and for `before` as it plays its notes or
+/// modulates, if it does. It adds the time it spun, as it measured it, to
+/// `spun`, in nanoseconds, and outputs silence.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Spin {
+    pub render: std::time::Duration,
+    pub tasks: u32,
+    pub before: std::time::Duration,
+    pub spun: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(test)]
+impl Spin {
+    fn spin(spun: &std::sync::atomic::AtomicU64, time: std::time::Duration) {
+        let started = std::time::Instant::now();
+        let mut elapsed = started.elapsed();
+        while elapsed < time {
+            std::hint::spin_loop();
+            elapsed = started.elapsed();
+        }
+        spun.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+impl Node for Spin {
+    fn play_notes(&mut self, _: &ProcessContext<'_>, _: &mut crate::Notes<'_>) {
+        Self::spin(&self.spun, self.before);
+    }
+
+    fn control(&mut self, _: &ProcessContext<'_>, _: &mut crate::Controls<'_>) {
+        Self::spin(&self.spun, self.before);
+    }
+
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        let tasks = self.tasks.max(1);
+        let (spun, time) = (&*self.spun, self.render / tasks);
+        crate::tasks::run(tasks, &|_| Self::spin(spun, time));
+        output.clear();
+    }
+}
+
 /// A parameter that ramps to each new value instead of jumping to it, so
 /// changing a gain doesn't click.
 ///

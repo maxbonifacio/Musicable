@@ -77,8 +77,9 @@ counter:
 - **CPU** is how much of the time the audio thread spent working, rendering
   the song included, over the last quarter of a second. Near 100%, it
   starts running late, and dropouts follow. Its tooltip adds the longest it
-  took to wake up and render, and how many threads Musicable kept busy at
-  once.
+  took to wake up and render, how many threads Musicable kept busy at once,
+  and the share of a core the project took, which the
+  [Performance panel](../window/performance.md) breaks down by device.
 - **Dropouts** counts the times the device ran out of audio since it
   started, which you hear as clicks or gaps. Click it to count from zero
   again. Its tooltip says how much audio they lost, how many of them were

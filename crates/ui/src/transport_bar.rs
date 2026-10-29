@@ -10,6 +10,7 @@ use musicable_commands::{CommandId, transport};
 use musicable_model::time::TempoMap;
 
 use crate::parts::{Draw, Part, Parts, Registry, Size, TRANSPORT_BAR};
+use crate::performance::percent;
 use crate::shell::{Action, View, chords};
 use crate::theme::Theme;
 use crate::widgets::{Icon, clock, icon_button, meter, position};
@@ -240,10 +241,22 @@ fn cpu(ui: &mut Ui, bar: &Bar<'_, '_>, width: Option<f32>, actions: &mut Vec<Act
     let load = audio.load.map_or("CPU --".to_owned(), |load| {
         format!("CPU {:.0}%", load * 100.0)
     });
+    // What the project's devices and mixers took, which the Performance
+    // panel lists.
+    let performance = bar.view.performance;
+    let details = match performance.rows.is_empty() {
+        true => audio.details.to_owned(),
+        false => format!(
+            "{}\n\nThe project took {} of a core over the last second, adding up what View > \
+             Performance lists.",
+            audio.details,
+            percent(performance.total)
+        ),
+    };
     ui.label(RichText::new(load).monospace())
-        .on_hover_text(audio.details);
+        .on_hover_text(&details);
     let size = vec2(width.unwrap_or(theme.cpu_meter.x), theme.cpu_meter.y);
-    meter(ui, audio.load, size, theme).on_hover_text(audio.details);
+    meter(ui, audio.load, size, theme).on_hover_text(&details);
     ui.separator();
     let dropouts = if audio.dropouts == 0 {
         RichText::new("No dropouts")
@@ -253,10 +266,7 @@ fn cpu(ui: &mut Ui, bar: &Bar<'_, '_>, width: Option<f32>, actions: &mut Vec<Act
     };
     let counter = ui
         .add(Button::new(dropouts).frame(false))
-        .on_hover_text(format!(
-            "{}\n\nClick to count from zero again.",
-            audio.details
-        ));
+        .on_hover_text(format!("{details}\n\nClick to count from zero again."));
     if counter.clicked() {
         actions.push(Action::ResetDropouts);
     }

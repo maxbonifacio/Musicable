@@ -127,6 +127,7 @@ impl RoutingPanel {
             },
             playhead: view.playback.playhead,
             levels: view.levels,
+            performance: view.performance,
             fader: 0.0,
             theme,
             mouse,

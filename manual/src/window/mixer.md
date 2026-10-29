@@ -38,6 +38,10 @@ From the top, a strip has these parts, which can be hidden and moved
   audio and MIDI tracks have. Clicking S solos that track alone, as in Live;
   Ctrl-click solos it along with the others.
 - **The clip stage**: Off, Hard or Soft.
+- **CPU**: the share of a core the track took over the last second, its
+  devices' and the rest of its strip's together, while an audio device
+  plays: amber over 25% of a core, and red over 50%
+  ([The Performance panel](performance.md)).
 
 ## Moving the controls
 

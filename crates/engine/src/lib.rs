@@ -29,6 +29,7 @@ pub mod devices;
 mod engine;
 pub mod event;
 pub mod graph;
+pub mod load;
 pub mod media;
 pub mod meter;
 pub mod midi;
@@ -57,7 +58,8 @@ pub use engine::{
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
 };
-pub use graph::{Controls, Graph, GraphError, NodeId, NodeKey, Notes, PreparedGraph};
+pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, PreparedGraph};
+pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
 pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
 pub use parallel::{ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};

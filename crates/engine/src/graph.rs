@@ -2,12 +2,14 @@
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::Arc;
 
 use musicable_model::clip::Controller;
 
 use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef, InputPort};
 use crate::engine::EVENT_CAPACITY;
+use crate::load::{self, LoadKey, NodeLoads};
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
 use crate::{Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, ParamId};
@@ -349,6 +351,21 @@ impl Graph {
             .collect();
         let order = self.topological_order();
         let schedule = Schedule::new(&self.inputs, &self.outputs, &order);
+        // Each delay has one input, the node it comes after, which has a key,
+        // and one joint.
+        let mut joints = vec![None; self.nodes.len() - self.keys.len()];
+        for &(joint, delay) in &delays {
+            joints[delay.0 - self.keys.len()] = Some(joint);
+        }
+        let delayed = (self.keys.len()..)
+            .zip(joints)
+            .map(|(n, at)| LoadKey::Delay {
+                after: self.keys[self.inputs[n][0].0],
+                at: at.expect("each delay is at a joint"),
+            });
+        let loads = (self.keys.iter().map(|&key| LoadKey::Node(key)))
+            .chain(delayed)
+            .collect();
         self.note_routes.sort_unstable();
         let mut players: Vec<Player> = Vec::new();
         for &(from, to, side) in &self.note_routes {
@@ -442,6 +459,7 @@ impl Graph {
             controllers,
             is_controller,
             schedule,
+            loads: Arc::new(NodeLoads::new(loads)),
         })
     }
 
@@ -712,13 +730,15 @@ pub struct PreparedGraph {
     is_controller: Vec<bool>,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
+    /// How long each node takes.
+    pub(crate) loads: Arc<NodeLoads>,
 }
 
 /// Where delay compensation put a delay. A delay takes over from the delay
 /// at the same joint in the graph it replaces, as nodes with the same key
 /// do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Joint {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Joint {
     /// On the `nth` connection from `from` into `to`, counting from 0.
     Input {
         to: NodeKey,
@@ -982,6 +1002,15 @@ impl PreparedGraph {
         self.latency
     }
 
+    /// How long each node takes, for the control thread to read while the
+    /// graph runs: keep them, and hand the graph to the engine. Each node's
+    /// load carries on from the node it takes over from as the engine
+    /// installs the graph, so they're only whole once
+    /// [`NodeLoads::installed`] says so.
+    pub fn loads(&self) -> Arc<NodeLoads> {
+        self.loads.clone()
+    }
+
     pub(crate) fn find(&self, key: NodeKey) -> Option<NodeId> {
         self.by_key
             .binary_search_by_key(&key, |&(k, _)| k)
@@ -994,8 +1023,11 @@ impl PreparedGraph {
     /// thread.
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
         let (nodes, old_nodes) = (&mut self.nodes, &mut old.nodes);
-        let mut adopt =
-            |id: NodeId, old_id: NodeId| nodes[id.0].adopt(old_nodes[old_id.0].as_mut());
+        let (loads, old_loads) = (&self.loads, &old.loads);
+        let mut adopt = |id: NodeId, old_id: NodeId| {
+            nodes[id.0].adopt(old_nodes[old_id.0].as_mut());
+            loads.carry_on(id.0, old_loads, old_id.0);
+        };
         pairs(&self.by_key, &old.by_key, &mut adopt);
         pairs(&self.delays, &old.delays, &mut adopt);
     }
@@ -1049,6 +1081,7 @@ impl PreparedGraph {
             note_records,
             inbox,
             inbox_events,
+            loads,
             ..
         } = self;
         let is_played = |r: &Routed| r.event.kind.is_played();
@@ -1077,7 +1110,10 @@ impl PreparedGraph {
                 room: Notes::CAPACITY,
                 dropped: 0,
             };
+            let started = load::now();
             nodes[player.node.0].play_notes(&ctx, &mut notes);
+            let ticks = load::now().wrapping_sub(started);
+            loads.loads[player.node.0].add_before(ticks);
             dropped += notes.dropped;
         }
         // The players have had theirs.
@@ -1102,6 +1138,7 @@ impl PreparedGraph {
             is_controller,
             inbox,
             inbox_events,
+            loads,
             ..
         } = self;
         if controllers.is_empty() {
@@ -1125,7 +1162,10 @@ impl PreparedGraph {
                 room: controller.ports.len() * room,
                 dropped: 0,
             };
+            let started = load::now();
             nodes[controller.node.0].control(&ctx, &mut controls);
+            let ticks = load::now().wrapping_sub(started);
+            loads.loads[controller.node.0].add_before(ticks);
             dropped += controls.dropped;
         }
         // The controllers have had theirs.

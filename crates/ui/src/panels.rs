@@ -1,8 +1,8 @@
 //! The panels the window docks: the arrangement, the mixer, the devices,
-//! the piano roll, the Sample Editor, the browser, the history and the
-//! routing. Each kind of panel registers its id, its title, where it goes in
-//! the default layout and how it's drawn, and the dock lays them out by id:
-//! the shell doesn't name them.
+//! the piano roll, the Sample Editor, the browser, the history, the routing
+//! and the performance. Each kind of panel registers its id, its title,
+//! where it goes in the default layout and how it's drawn, and the dock lays
+//! them out by id: the shell doesn't name them.
 
 use std::fmt;
 
@@ -16,6 +16,7 @@ use crate::history::HistoryPanel;
 use crate::mixer::{self, Choices, RoutingPanel};
 use crate::mouse::MouseMap;
 use crate::parts::Parts;
+use crate::performance::PerformancePanel;
 use crate::piano_roll::PianoRoll;
 use crate::sample_editor::SampleEditor;
 use crate::shell::{Action, View};
@@ -24,7 +25,7 @@ use crate::theme::Theme;
 // The panels' ids, which the focus and the keymaps' panel tables know them
 // by too.
 pub use musicable_commands::panel::{
-    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
+    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PERFORMANCE, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
 };
 
 /// Where a panel goes in the default layout, and in a layout that doesn't
@@ -130,9 +131,19 @@ impl Registry {
                 framed(ui, |ui| {
                     let (project, levels, at) = (view.project, view.levels, view.playback.playhead);
                     let (theme, mouse, parts) = (cx.theme, cx.mouse, cx.parts);
-                    let editor = view.editor;
+                    let (editor, performance) = (view.editor, view.performance);
                     mixer::show(
-                        ui, project, editor, levels, inputs, at, theme, mouse, parts, cx.actions,
+                        ui,
+                        project,
+                        editor,
+                        levels,
+                        performance,
+                        inputs,
+                        at,
+                        theme,
+                        mouse,
+                        parts,
+                        cx.actions,
                     );
                 });
             },
@@ -223,6 +234,21 @@ impl Registry {
                 });
             },
         });
+        registry.register(Panel {
+            id: PERFORMANCE,
+            title: "Performance",
+            // Its rows are the mixer's channels and their devices.
+            place: Place::With(MIXER),
+            // It waits to be asked for.
+            shown: false,
+            size: |theme| theme.mixer.panel,
+            hides: true,
+            show: |panels, ui, cx| {
+                framed(ui, |ui| {
+                    (panels.performance).show(ui, cx.view, cx.theme, cx.actions);
+                });
+            },
+        });
         registry
     }
 
@@ -259,6 +285,7 @@ pub(crate) struct Panels {
     pub browser: BrowserPanel,
     pub history: HistoryPanel,
     pub routing: RoutingPanel,
+    pub performance: PerformancePanel,
 }
 
 /// What the panels draw from, and what they hand back.

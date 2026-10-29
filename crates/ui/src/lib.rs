@@ -7,15 +7,15 @@
 //!
 //! The window has a menu bar and a transport bar over the panels, docked in
 //! splits and tabs the user drags about: the arrangement in the middle,
-//! with the mixer or the routing and the devices or the piano roll under it
-//! and the browser or the history beside it. The command palette goes over
-//! them, and so does the app's Settings window, whose Keys page the shell
-//! draws. The transport bar, the track headers and the mixer strips are made
-//! of parts the user can hide, move and resize. The layout and the parts are
-//! one of the user's [`Workspace`]s, which the app saves and switches
-//! between, and panels move out to windows of their own, which it keeps
-//! too. Views draw from a [`Theme`], and look mouse gestures up in a
-//! [`MouseMap`]. `docs/app.md` describes it all.
+//! with the mixer, the routing or the performance and the devices or the
+//! piano roll under it and the browser or the history beside it. The
+//! command palette goes over them, and so does the app's Settings window,
+//! whose Keys page the shell draws. The transport bar, the track headers and
+//! the mixer strips are made of parts the user can hide, move and resize.
+//! The layout and the parts are one of the user's [`Workspace`]s, which the
+//! app saves and switches between, and panels move out to windows of their
+//! own, which it keeps too. Views draw from a [`Theme`], and look mouse
+//! gestures up in a [`MouseMap`]. `docs/app.md` describes it all.
 
 mod arrangement;
 mod browser;
@@ -35,6 +35,7 @@ mod native;
 mod palette;
 mod panels;
 mod parts;
+mod performance;
 mod piano_roll;
 mod sample_editor;
 mod search;
@@ -59,9 +60,10 @@ pub use mouse::{
     modifier_sets,
 };
 pub use panels::{
-    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
+    ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PERFORMANCE, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
 };
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
+pub use performance::{Cpu, Performance, Row};
 pub use shell::{
     Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
     Workspaces, ask_to_save,

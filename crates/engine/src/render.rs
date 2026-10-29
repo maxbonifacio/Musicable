@@ -3,7 +3,8 @@
 use musicable_model::time::TempoMap;
 
 use crate::{
-    AudioRef, Inputs, MidiMessage, NodeEvent, PreparedGraph, ProcessContext, TransportState, rt,
+    AudioRef, Inputs, MidiMessage, NodeEvent, PreparedGraph, ProcessContext, TransportState, load,
+    rt,
 };
 
 /// One block, as a renderer sees it.
@@ -48,7 +49,8 @@ pub trait Renderer: Send {
     /// `graph`.
     ///
     /// Nodes run with denormals flushed to zero
-    /// ([`rt::flush_denormals`]), whichever thread runs them.
+    /// ([`rt::flush_denormals`]), whichever thread runs them, and each one's
+    /// time goes into its load ([`PreparedGraph::loads`]).
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>);
 }
 
@@ -75,8 +77,12 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         buffers,
         events,
         event_ranges,
+        loads,
         ..
     } = graph;
+    // Each node's time runs from the end of the one before, so the clock is
+    // read once a node.
+    let mut last = load::now();
     for &node in order.iter() {
         // Take the node's buffer out so its inputs can be read alongside it.
         // No node feeds itself, and taking leaves an empty buffer, so nothing
@@ -87,6 +93,10 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         let inputs = Inputs::graph(buffers, &inputs[node.0], &ports[node.0], block.frames);
         nodes[node.0].process(&ctx, inputs, &mut output.view_mut(block.frames));
         buffers[node.0] = output;
+        let now = load::now();
+        // Its tasks ran here, if it had any.
+        loads.loads[node.0].add(now.wrapping_sub(last), 0, block.frames);
+        last = now;
     }
 }
 

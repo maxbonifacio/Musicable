@@ -1329,7 +1329,8 @@ impl Behavior<Pane> for Draw<'_, '_> {
 mod tests {
     use super::*;
     use crate::panels::{
-        ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
+        ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PERFORMANCE, PIANO_ROLL, ROUTING,
+        SAMPLE_EDITOR,
     };
 
     fn layout(dock: &Dock) -> WindowLayout {
@@ -1344,9 +1345,9 @@ mod tests {
     }
 
     /// Today's layout: the browser on the left, with the history in a tab
-    /// beside it, and the arrangement over the mixer, with the routing in a
-    /// tab beside it, and the devices, with the piano roll in a tab beside
-    /// them.
+    /// beside it, and the arrangement over the mixer, with the routing and
+    /// the performance in tabs beside it, and the devices, with the piano
+    /// roll in a tab beside them.
     fn default_layout() -> WindowLayout {
         let tabs = Split::Tabs(vec![
             DEVICES.into(),
@@ -1360,6 +1361,7 @@ mod tests {
                 SAMPLE_EDITOR.into(),
                 HISTORY.into(),
                 ROUTING.into(),
+                PERFORMANCE.into(),
             ],
             layout: Layout::new(Split::Across(vec![
                 Layout {
@@ -1370,7 +1372,11 @@ mod tests {
                     Layout::panel(ARRANGEMENT),
                     Layout {
                         front: Some(MIXER.into()),
-                        ..Layout::new(Split::Tabs(vec![MIXER.into(), ROUTING.into()]))
+                        ..Layout::new(Split::Tabs(vec![
+                            MIXER.into(),
+                            ROUTING.into(),
+                            PERFORMANCE.into(),
+                        ]))
                     },
                     Layout {
                         front: Some(DEVICES.into()),
@@ -1412,6 +1418,7 @@ mod tests {
             SAMPLE_EDITOR.into(),
             HISTORY.into(),
             ROUTING.into(),
+            PERFORMANCE.into(),
         ];
         assert_eq!(layout(&dock), expected);
         assert!(dock.take_changed());
@@ -1432,6 +1439,7 @@ mod tests {
                 SAMPLE_EDITOR.into(),
                 HISTORY.into(),
                 ROUTING.into(),
+                PERFORMANCE.into(),
             ],
             layout: Layout::new(Split::Down(vec![
                 Layout::new(Split::Across(vec![
@@ -1449,6 +1457,7 @@ mod tests {
                             SAMPLE_EDITOR.into(),
                             HISTORY.into(),
                             ROUTING.into(),
+                            PERFORMANCE.into(),
                         ]))
                     },
                 ),
@@ -1479,8 +1488,8 @@ mod tests {
         let dock = Dock::from_layout(&window, &registry, &theme);
         // The browser goes on the left, with the history beside it, the
         // devices under the arrangement, with the piano roll and the Sample
-        // Editor beside them, and the routing beside the mixer, all hidden.
-        // The arrangement can't be hidden.
+        // Editor beside them, and the routing and the performance beside
+        // the mixer, all hidden. The arrangement can't be hidden.
         let expected = WindowLayout {
             hidden: vec![
                 BROWSER.into(),
@@ -1489,6 +1498,7 @@ mod tests {
                 SAMPLE_EDITOR.into(),
                 HISTORY.into(),
                 ROUTING.into(),
+                PERFORMANCE.into(),
             ],
             layout: Layout::new(Split::Across(vec![
                 Layout {
@@ -1508,7 +1518,11 @@ mod tests {
                 ])),
                 Layout {
                     front: Some(MIXER.into()),
-                    ..Layout::new(Split::Tabs(vec![MIXER.into(), ROUTING.into()]))
+                    ..Layout::new(Split::Tabs(vec![
+                        MIXER.into(),
+                        ROUTING.into(),
+                        PERFORMANCE.into(),
+                    ]))
                 },
             ])),
             ..WindowLayout::default()

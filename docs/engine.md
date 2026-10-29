@@ -1605,6 +1605,62 @@ lock-free queues, and source nodes in the live graph would read those. The
 pool then needs a second kind of work, which workers take when no live
 block needs them and put down when one does.
 
+## Node timing
+
+Both renderers time every node, every block, for the CPU figures the app
+shows per device and per track ([app.md](app.md#cpu-figures)).
+`PreparedGraph::loads` hands the control thread an `Arc<NodeLoads>`: a
+`Load` for each node, by its key (`LoadKey::Node`), and for each delay that
+delay compensation added, by the key of the node it comes after and the
+`Joint` it's at (`LoadKey::Delay`), since a node can have several delays
+after it. A `Load` keeps the time the node took, the frames it rendered,
+and its longest block since the control thread last took it, in atomics
+on a cache line of their own. Only the thread running the node
+writes them, with plain loads and stores, so timing costs no locked
+instructions, apart from the longest block when it grows.
+
+**The clock** is the cheapest the CPU has: the time-stamp counter on
+x86-64, and the virtual counter on ARM64. Its rate is found once, as the
+first graph is prepared (`load::ticks_per_second`): on ARM64 the system
+keeps it in `CNTFRQ_EL0`, and on x86-64 it's measured against `Instant`
+over 10 ms, between two readings of the counter that each take the
+closest together of a few pairs of `Instant` readings around it, so that
+neither a thread preempted mid-reading nor the computer sleeping skews it.
+Other targets, and Miri, read `Instant` itself. On a 4-core Xeon VM a
+reading took 8 ns, against 53 ns for `Instant::now` and `elapsed`.
+
+**One reading a node.** A thread reads the clock once as it starts on a
+block's nodes, and once after each node, so each node's time runs from the
+end of the one before it on that thread, taking it from its queue
+included. `Node::play_notes` and `Node::control` are timed on their own
+and go towards the node's next block.
+
+**Tasks.** A node's tasks that other threads take count towards the node:
+each thread adds the time its task took to the node's load, which the
+node's thread published with the tasks. The node's thread's wait for those
+tasks counts towards its longest block, since the block lasts as long, but
+not towards its time, which is the CPU the node took.
+
+**Graph swaps.** As a new graph takes over on the audio thread
+([Graph swaps](#graph-swaps)), each node's load carries on from the node
+with the same key in the old graph, and each delay's from the delay at the
+same joint, as their state does, so the figures don't jump. A delay at the
+same joint after another node, such as the one after a tap when the taps
+change, has another `LoadKey`, and starts again. Until a new graph's loads
+have all carried on they read nothing, or only some of what they carry on,
+so the engine then marks them installed (`NodeLoads::installed`), with a
+release store that the control thread's acquire load pairs with, and the
+app reads none before.
+
+**What it costs.** The scheduler benchmark's 64-track project with every
+channel strip slot filled, 463 nodes, took about 3.7 µs of its 1.40 ms
+block to time on that VM, 0.26%, and the scheduler benchmarks didn't move
+beyond their noise, so every block is timed. The tests
+`each_node_reads_the_time_it_takes` (in `load.rs`) and
+`nodes_read_the_time_they_take_on_any_thread` (in `parallel/tests.rs`)
+check that a node that spins for a known time reads it within 5%, on each
+renderer.
+
 ## Real-time rules
 
 `Node::process`, `Node::adopt`, `Node::play_notes` and `Node::control` run

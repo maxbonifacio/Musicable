@@ -28,7 +28,7 @@ use musicable_commands::{
 use musicable_model::clip::ClipId;
 use musicable_model::modulation::ModulatorId;
 use musicable_model::param::{ParamAddress, ParamSpec};
-use musicable_model::{DeviceId, Project};
+use musicable_model::{Chain, DeviceId, Project, TrackId};
 use serde_json::{Map, Value as Json};
 use tokio::sync::oneshot;
 
@@ -67,6 +67,8 @@ enum Asked {
     Automation(ParamAddress),
     Editor,
     History,
+    /// What the project costs the CPU.
+    Performance,
     Run(Run),
 }
 
@@ -196,6 +198,52 @@ fn sentence(text: &str) -> String {
     sentence
 }
 
+/// What the project costs the CPU, as the Performance panel and the
+/// transport bar show it: see [`Window::performance`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Performance {
+    /// Whether an audio device plays. Without one, nothing renders, and
+    /// there are no figures.
+    pub playing: bool,
+    /// What plays, as the status bar says it, such as "48 kHz · 128
+    /// samples · 5.3 ms", or why nothing does.
+    pub audio: String,
+    /// The share of the time the audio thread was busy lately, as the
+    /// transport bar's meter shows it: over 1.0, it can't keep up.
+    pub load: Option<f32>,
+    /// Dropouts since the device started or the count was reset.
+    pub dropouts: u64,
+    /// Each device's figures, and those of each channel's clips,
+    /// modulators and mixer, and the metronome's, busiest first.
+    pub rows: Vec<CpuRow>,
+    /// The whole project's share of a core: 1.5 is a core and a half.
+    pub total: f32,
+}
+
+/// What something in the project costs the CPU, over the last second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuRow {
+    pub part: CpuPart,
+    /// The share of one core it takes to keep up. Shares add up.
+    pub average: f32,
+    /// Its longest block, as a share of the audio device's buffer.
+    pub longest: f32,
+}
+
+/// Something in the project that takes CPU time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuPart {
+    Device(DeviceId),
+    /// What a track plays: its clips, and the input it monitors.
+    Clips(TrackId),
+    /// A channel's modulators.
+    Modulators(Chain),
+    /// A channel's strip, but for its devices: its fader and pan, its
+    /// sends, its bus and what lines its paths up.
+    Mixer(Chain),
+    Metronome,
+}
+
 /// What the tools read and run, on the window's thread.
 pub trait Window {
     /// Every command, as the window runs them.
@@ -215,6 +263,11 @@ pub trait Window {
     /// `None` while it isn't loaded.
     fn plugin_params(&self, _device: DeviceId) -> Option<Vec<(u32, ParamSpec)>> {
         None
+    }
+
+    /// What the project costs the CPU, as last worked out.
+    fn performance(&self) -> Performance {
+        Performance::default()
     }
 
     /// Runs `run`, as the agent `reply` names asked, and answers with
@@ -241,6 +294,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Automation(param) => reads::automation(window, param),
         Asked::Editor => Ok(reads::editor(window)),
         Asked::History => Ok(reads::history(window)),
+        Asked::Performance => Ok(reads::performance(window)),
     };
     reply.send(answer);
 }

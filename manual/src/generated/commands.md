@@ -130,6 +130,7 @@
 |---|---|---|
 | Mixer | Ctrl+Alt+M | `view.toggle_mixer` |
 | Routing | Ctrl+Alt+I | `view.toggle_routing` |
+| Performance | Ctrl+Alt+C | `view.toggle_performance` |
 | Devices | Ctrl+Alt+L | `view.toggle_devices` |
 | Piano Roll |  | `view.toggle_piano_roll` |
 | Sample Editor |  | `view.toggle_sample_editor` |

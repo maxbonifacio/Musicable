@@ -1,7 +1,7 @@
 //! The tools agents call: a few general ones that cover every command, so
 //! a new command reaches agents with no change here, and reads of the
 //! project, a clip, a device, a modulator, a lane of automation, the
-//! editor's state and the undo history.
+//! editor's state, the undo history and what the project costs the CPU.
 //!
 //! A call's arguments are checked on the server's thread, against the
 //! commands' parameters for the commands it runs. The window then answers
@@ -37,6 +37,7 @@ pub const GET_MODULATOR: &str = "get_modulator";
 pub const GET_AUTOMATION: &str = "get_automation";
 pub const GET_EDITOR: &str = "get_editor";
 pub const GET_HISTORY: &str = "get_history";
+pub const GET_PERFORMANCE: &str = "get_performance";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -238,6 +239,19 @@ pub fn list() -> Vec<Tool> {
              Those after them were undone, and redo makes them again.",
             object(json!({}), &[]),
         ),
+        read(
+            GET_PERFORMANCE,
+            "Get Performance",
+            "Reads what the project costs the CPU while an audio device plays, as the \
+             Performance panel lists it, busiest first: each device's share of one core over \
+             the last second, and its longest block as a share of the device's buffer, and the \
+             same for each channel's clips, modulators and mixer, and the metronome. Shares add \
+             up, to the project's total: 1.5 is a core and a half. A device whose longest block \
+             nears 1 can cause dropouts by itself, whatever its share. It also gives the \
+             transport bar's figures: what plays, the audio thread's load, over 1 when it can't \
+             keep up, and the dropouts.",
+            object(json!({}), &[]),
+        ),
     ]
 }
 
@@ -305,7 +319,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_DEVICE => &["device"],
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
-        GET_PROJECT | GET_EDITOR | GET_HISTORY => &[],
+        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
     };
     if let Some(unknown) = arguments
@@ -367,6 +381,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         }
         GET_EDITOR => Asked::Editor,
         GET_HISTORY => Asked::History,
+        GET_PERFORMANCE => Asked::Performance,
         _ => unreachable!("every tool is matched above"),
     };
     Ok(asked)
@@ -646,6 +661,7 @@ mod tests {
             Ok(Asked::Modulator(ModulatorId(6)))
         );
         assert_eq!(call(GET_HISTORY, json!({})), Ok(Asked::History));
+        assert_eq!(call(GET_PERFORMANCE, json!({})), Ok(Asked::Performance));
         assert_eq!(
             call("get_mood", json!({})),
             Err(Refused::NoTool("get_mood".into()))
@@ -655,7 +671,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());
