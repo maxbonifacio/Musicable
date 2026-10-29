@@ -99,4 +99,6 @@ as "That would make a loop, through Print's input from Kick Post FX."
 Choosing an input is a step in the undo history, **Input**, with the
 monitoring it sets in the same step. Deleting a track, or a device whose
 point another track takes, sets that track's input to **No Input** in the
-same step, so undoing brings it back.
+same step, so undoing brings it back. So does moving such a device onto the
+master, as the one point on the master a track can take is its Post Fader,
+for [Resampling](#resampling).

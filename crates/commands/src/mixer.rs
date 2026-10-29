@@ -1363,4 +1363,47 @@ mod tests {
         setup.run_with(&crate::track::DELETE, deleted).unwrap();
         assert_eq!(track(&setup, print).input, None);
     }
+
+    #[test]
+    fn moving_what_tracks_take_onto_the_master_leaves_them_none() {
+        let (mut setup, [kick, print, ..], eq) = printing();
+        set_input(&mut setup, print, Args::new().with("after", eq)).unwrap();
+        setup.document.take_committed();
+        let moved = Args::new().with("devices", vec![eq]).with("master", true);
+        setup.run_with(&crate::device::MOVE, moved).unwrap();
+        // The master's one tap for an input is its Post Fader, so the
+        // project would no longer save with the input from the EQ.
+        assert_eq!(track(&setup, print).input, None);
+        musicable_io::project::to_string(setup.document.project()).unwrap();
+        let committed = setup.document.take_committed();
+        let step = committed.last().unwrap();
+        assert!(
+            matches!(
+                step.edits[..],
+                [Edit::TrackInput { track, to: None, .. }, Edit::MoveDevice { .. }]
+                    if track == print
+            ),
+            "{:?}",
+            step.edits
+        );
+        // Undo brings back the input with the device where it was, and
+        // redo takes it away again.
+        setup.run_with(&crate::edit::UNDO, Args::new()).unwrap();
+        let project = setup.document.project();
+        assert_eq!(
+            project.find_device(eq).map(|(chain, ..)| chain),
+            Some(Chain::Track(kick))
+        );
+        assert_eq!(
+            track(&setup, print).input,
+            Some(Input::Tap(Tap::Device(eq)))
+        );
+        setup.run_with(&crate::edit::REDO, Args::new()).unwrap();
+        assert_eq!(track(&setup, print).input, None);
+        let project = setup.document.project();
+        assert_eq!(
+            project.find_device(eq).map(|(chain, ..)| chain),
+            Some(Chain::Master)
+        );
+    }
 }

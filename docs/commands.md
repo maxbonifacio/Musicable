@@ -640,7 +640,10 @@ in as the plugin changes them ([plugins.md](plugins.md#plugins-on-tracks)).
 Deleting a track or a device deletes the wires to and from it, and sets
 the tracks that take their input from it to No Input, as edits of their own
 in the same step, so undo brings them back ([Wires](#wires),
-[The mixer's controls](#the-mixers-controls)). A
+[The mixer's controls](#the-mixers-controls)). Moving a device onto the
+master sets the tracks that take what it puts out to No Input the same
+way, as edits before the move's, since the master's one tap for an input
+is its Post Fader, for Resampling. A
 copy of a device keeps the wires into it, at their gains and with their
 lanes when the copy takes its original's, so a copied compressor keeps its
 key: from the same taps, or from the copy of a device copied with it. A

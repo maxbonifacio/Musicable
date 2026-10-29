@@ -53,17 +53,20 @@ so selecting another track forgets them.
   works on the selected devices if the device is one of them, or else on
   the device alone, which it selects.
 
-A moved device takes everything with it: its settings, its automation, and
-a plugin's own window, open if it was. While the song plays, it's heard in
-its new place at once. A copy is a device of its own, with its original's
-settings, a plugin's state as its window has it, and its automation, in
-lanes of its own with the same points, as in Live. Turn off **Copies of
-devices take their automation** on the Settings window's Behaviour page for
-copies that start without any ([Settings](../customising/settings.md)).
-Pasted and duplicated devices are copies too, and copies come selected, so
-Ctrl+D again makes more. Each move or copy is one step in the undo history,
-such as "Move EQ" or "Copy 2 Devices". The Settings window's Mouse page
-changes what the clicks and drags do ([The mouse](../customising/mouse.md)).
+A moved device takes everything with it: its settings, its automation, and a
+plugin's own window, open if it was. Moved onto the master, it leaves a
+track that took the point after it with **No Input**, as deleting it does
+([Routing](../using/routing.md#undoing-and-deleting)). While the song plays,
+it's heard in its new place at once. A copy is a device of its own, with its
+original's settings, a plugin's state as its window has it, and its
+automation, in lanes of its own with the same points, as in Live. Turn off
+**Copies of devices take their automation** on the Settings window's
+Behaviour page for copies that start without any
+([Settings](../customising/settings.md)). Pasted and duplicated devices are
+copies too, and copies come selected, so Ctrl+D again makes more. Each move
+or copy is one step in the undo history, such as "Move EQ" or "Copy 2
+Devices". The Settings window's Mouse page changes what the clicks and drags
+do ([The mouse](../customising/mouse.md)).
 
 ## Bypassing and deactivating
 

@@ -442,7 +442,10 @@ impl Transaction<'_> {
     /// its lanes and its wires, which name it by its id, go with it, and so
     /// do its plugin and its node's sound. A device the project hasn't got,
     /// or a chain whose track isn't there, is left alone, and a move that
-    /// would close a loop through a wire is refused.
+    /// would close a loop through a wire is refused. Onto the master, whose
+    /// one tap for an input is its Post Fader, the inputs of the tracks
+    /// that take what it puts out go to No Input first, each as an edit of
+    /// its own, as when it's removed.
     pub fn move_device(
         &mut self,
         device: DeviceId,
@@ -472,6 +475,11 @@ impl Transaction<'_> {
             let devices = self.project.devices_mut(from).expect("it just came out");
             devices.insert(at, moved);
             return Err(Loop(route));
+        }
+        if chain == Chain::Master {
+            for track in self.project.inputs_from_device(device) {
+                let _ = self.set_track_input(track, None);
+            }
         }
         self.edits.push(Edit::MoveDevice {
             device,
