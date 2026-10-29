@@ -20,8 +20,8 @@ use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, Project, TrackKind};
 use musicable_ui::{
-    Action, Audio, KeymapStatus, Level, Levels, Library, MIXER, PeaksBuilder, Playback, Plugins,
-    Shell, View, Waveforms, Workspaces,
+    Action, Audio, KeymapStatus, Level, Levels, Library, MIXER, PeaksBuilder, Performance,
+    Playback, Plugins, Shell, View, Waveforms, Workspaces,
 };
 
 const TRACKS: usize = 100;
@@ -231,6 +231,7 @@ impl Bench {
                 },
                 recordings: &[],
                 levels: &self.levels,
+                performance: &Performance::default(),
                 inputs: &[],
                 midi_inputs: &[],
                 audio: Audio {

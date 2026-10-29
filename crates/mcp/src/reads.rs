@@ -1,7 +1,8 @@
 //! What the read tools give back, as JSON: the commands, the project, a
-//! clip, a device, a modulator, a lane of automation, the editor's state
-//! and the undo history. Positions and lengths are numbers of beats, gains are linear,
-//! and ids are whole numbers, as commands take them.
+//! clip, a device, a modulator, a lane of automation, the editor's state,
+//! the undo history and what the project costs the CPU. Positions and
+//! lengths are numbers of beats, gains are linear, and ids are whole
+//! numbers, as commands take them.
 
 use musicable_commands::editor::Lane as PianoRollLane;
 use musicable_commands::{
@@ -21,7 +22,7 @@ use musicable_model::{
 };
 use serde_json::{Map, Value as Json, json};
 
-use crate::Window;
+use crate::{CpuPart, Window};
 
 /// Every command agents can run, as `musicable api` prints them: each one's
 /// id, title, arguments as JSON Schema and keys in `keymap`, and whether it
@@ -885,6 +886,51 @@ pub(crate) fn history(window: &impl Window) -> Json {
         "undo": steps.undo_name(),
         "redo": steps.redo_name(),
     })
+}
+
+/// What the project costs the CPU, busiest first, and the transport bar's
+/// figures. A row whose device or track has gone since the figures were
+/// worked out is left out.
+pub(crate) fn performance(window: &impl Window) -> Json {
+    let performance = window.performance();
+    let project = window.project();
+    let rows: Vec<Json> = (performance.rows.iter())
+        .filter_map(|row| {
+            // Only for a track the project has.
+            let part = |part: &str, chain: Chain| {
+                (project.devices(chain))
+                    .map(|_| json!({ "part": part, "chain": chain_entry(chain) }))
+            };
+            let mut entry = match row.part {
+                CpuPart::Device(id) => {
+                    let (chain, _, device) = project.find_device(id)?;
+                    let name = device::device_name(&device.kind);
+                    json!({ "device": id.0, "name": name, "chain": chain_entry(chain) })
+                }
+                CpuPart::Clips(track) => part("clips", Chain::Track(track))?,
+                CpuPart::Modulators(chain) => part("modulators", chain)?,
+                CpuPart::Mixer(chain) => part("mixer", chain)?,
+                CpuPart::Metronome => json!({ "part": "metronome" }),
+            };
+            entry["average"] = share(row.average);
+            entry["longest"] = share(row.longest);
+            Some(entry)
+        })
+        .collect();
+    json!({
+        "playing": performance.playing,
+        "audio": performance.audio,
+        "load": performance.load.map(share),
+        "dropouts": performance.dropouts,
+        "total": share(performance.total),
+        "rows": rows,
+    })
+}
+
+/// A share, such as of a core, to a thousandth: `0.342`.
+fn share(share: f32) -> Json {
+    let share = (f64::from(share) * 1000.0).round() / 1000.0;
+    json::to_json(&Value::Number(share))
 }
 
 fn beats(beats: Beats) -> Json {

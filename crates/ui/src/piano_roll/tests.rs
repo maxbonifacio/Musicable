@@ -208,6 +208,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         },
                         recordings: &[],
                         levels: &state.levels,
+                        performance: &crate::Performance::default(),
                         inputs: &[],
                         midi_inputs: &[],
                         audio: Audio {

@@ -94,6 +94,10 @@ Other agents' apps start `musicable mcp` the same way. It passes their
 calls on to the Musicable that's running, and only your account on your
 computer can connect to it.
 
+Agents can read what each device costs the CPU too, as the
+[Performance panel](../window/performance.md) lists it, to say which plugin
+to freeze or take out.
+
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
 so they work while Musicable is closed or doesn't let agents in, and they

@@ -64,6 +64,7 @@
 | Ctrl+Shift+Up | Transport: Tempo Up |
 | Ctrl+Shift+Down | Transport: Tempo Down |
 | Ctrl+Alt+B | View: Browser |
+| Ctrl+Alt+C | View: Performance |
 | Ctrl+Alt+H | View: History |
 | Ctrl+Alt+I | View: Routing |
 | Ctrl+Alt+L | View: Devices |

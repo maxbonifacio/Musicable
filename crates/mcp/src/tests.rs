@@ -16,7 +16,7 @@ use musicable_model::clip::{AudioClip, ClipContent, Offset, Warping};
 use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::Warp;
-use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
+use musicable_model::{Chain, DeviceId, DeviceKind, PluginFormat, Project, TrackId, TrackKind};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
     ProgressNotificationParam,
@@ -31,7 +31,7 @@ use crate::bridge::{self, Bridge};
 use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
-use crate::{Call, Host, Reply, Run, Window, answer, host};
+use crate::{Call, CpuPart, CpuRow, Host, Performance, Reply, Run, Window, answer, host};
 
 /// A transport that plays along, and does nothing else.
 #[derive(Default)]
@@ -82,6 +82,8 @@ struct TestWindow {
     requests: Vec<Request>,
     /// The agents whose calls it ran, in turn.
     agents: Vec<String>,
+    /// What the CPU figures say.
+    performance: Performance,
 }
 
 impl TestWindow {
@@ -95,6 +97,7 @@ impl TestWindow {
             transport: StubTransport::default(),
             requests: Vec::new(),
             agents: Vec::new(),
+            performance: Performance::default(),
         }
     }
 }
@@ -126,6 +129,10 @@ impl Window for TestWindow {
 
     fn is_modified(&self) -> bool {
         self.document.is_modified()
+    }
+
+    fn performance(&self) -> Performance {
+        self.performance.clone()
     }
 
     fn run(&mut self, run: Run, reply: Reply) {
@@ -292,6 +299,7 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_automation",
             "get_editor",
             "get_history",
+            "get_performance",
         ]
     );
     let server = rig
@@ -963,6 +971,71 @@ fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
 }
 
 #[test]
+fn the_performance_says_what_each_device_costs_the_cpu() {
+    let mut project = Project::new();
+    let bass = project.add_track("Bass", TrackKind::Audio);
+    let drive = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+    let id = drive.id;
+    project.track_mut(bass).unwrap().devices.push(drive);
+    let mut rig = Rig::new(project);
+    // Without a device playing, there's nothing to say.
+    let nothing = rig.call("get_performance", json!({})).unwrap();
+    assert_eq!(
+        nothing,
+        json!({
+            "playing": false,
+            "audio": "",
+            "load": null,
+            "dropouts": 0,
+            "total": 0.0,
+            "rows": [],
+        })
+    );
+    let row = |part, average, longest| CpuRow {
+        part,
+        average,
+        longest,
+    };
+    rig.window.performance = Performance {
+        playing: true,
+        audio: "48 kHz · 128 samples · 2.7 ms".into(),
+        load: Some(0.25),
+        dropouts: 2,
+        rows: vec![
+            row(CpuPart::Device(id), 0.342_17, 0.61),
+            row(CpuPart::Mixer(Chain::Track(bass)), 0.004, 0.012),
+            row(CpuPart::Modulators(Chain::Master), 0.001, 0.002),
+            // A track and a device deleted since.
+            row(CpuPart::Clips(TrackId(9)), 0.1, 0.1),
+            row(CpuPart::Device(DeviceId(9)), 0.1, 0.1),
+            row(CpuPart::Metronome, 0.0, 0.0),
+        ],
+        total: 0.547,
+    };
+    let performance = rig.call("get_performance", json!({})).unwrap();
+    assert_eq!(
+        performance,
+        json!({
+            "playing": true,
+            "audio": "48 kHz · 128 samples · 2.7 ms",
+            "load": 0.25,
+            "dropouts": 2,
+            "total": 0.547,
+            "rows": [
+                {"device": id.0, "name": "Device", "chain": {"track": bass.0}, "average": 0.342, "longest": 0.61},
+                {"part": "mixer", "chain": {"track": bass.0}, "average": 0.004, "longest": 0.012},
+                {"part": "modulators", "chain": "master", "average": 0.001, "longest": 0.002},
+                {"part": "metronome", "average": 0.0, "longest": 0.0},
+            ],
+        })
+    );
+    assert_eq!(
+        rig.call("get_performance", json!({"track": 1})),
+        Err("get_performance takes no argument called track.".into())
+    );
+}
+
+#[test]
 fn a_call_the_agent_gave_up_on_runs_nothing() {
     let mut window = TestWindow::new(Project::new());
     let (reply, answer_waiting) = Reply::new("tests".into());
@@ -1154,11 +1227,11 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     // They come after the app's tools, as read-only as they are.
     let listed = runtime.block_on(client.list_all_tools()).unwrap();
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 13, "{names:?}");
-    assert_eq!(names[11..], ["audio_echo", "audio_wait"]);
+    assert_eq!(names.len(), 14, "{names:?}");
+    assert_eq!(names[12..], ["audio_echo", "audio_wait"]);
     let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
-    assert_eq!((read_only(11), read_only(12)), (Some(true), Some(false)));
-    assert!(listed[11].output_schema.is_some());
+    assert_eq!((read_only(12), read_only(13)), (Some(true), Some(false)));
+    assert!(listed[12].output_schema.is_some());
     let server = client.peer_info().expect("the server introduced itself");
     let instructions = server.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("undo"), "{instructions}");

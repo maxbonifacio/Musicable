@@ -77,6 +77,10 @@ version = 1
 # for, for the whole project.
 "view.toggle_routing" = ["Ctrl+Alt+I"]
 
+# Live has no list of what each device takes of the CPU, and its Ctrl+Alt+P
+# shows and hides the plugin windows. C is for CPU, and Live leaves it free.
+"view.toggle_performance" = ["Ctrl+Alt+C"]
+
 # Live's key for Draw Mode in its MIDI note editor, which works everywhere.
 # The arrow keys are the piano roll's own, under [panels.piano_roll] below.
 "notes.toggle_draw" = ["B"]

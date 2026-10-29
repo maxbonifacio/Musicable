@@ -52,6 +52,7 @@ use crate::browser::{self, Destination};
 use crate::modulators::{self, Travel};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
+use crate::performance::{self, Performance};
 use crate::shell::Action;
 use crate::theme::{MixerSizes, Theme};
 use crate::widgets::{Face, toggle};
@@ -146,15 +147,17 @@ const NO_TRACKS: &str = "No tracks yet. Track > New Audio Track adds one, and Fi
                          Project has a dozen test tones.";
 
 /// Shows the mixer for `project`, with the strips of the tracks `editor`
-/// selects lit, the meters reading `levels`, the input menus offering
-/// `inputs`, automated controls where `playhead` has them and the strips'
-/// parts as `parts` has them, and adds what the user changed to `actions`.
+/// selects lit, the meters reading `levels`, the CPU rows `performance`,
+/// the input menus offering `inputs`, automated controls where `playhead`
+/// has them and the strips' parts as `parts` has them, and adds what the
+/// user changed to `actions`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show(
     ui: &mut Ui,
     project: &Project,
     editor: &Editor,
     levels: &Levels,
+    performance: &Performance,
     inputs: Choices<'_>,
     playhead: Beats,
     theme: &Theme,
@@ -175,6 +178,7 @@ pub(crate) fn show(
         inputs,
         playhead,
         levels,
+        performance,
         fader: 0.0,
         theme,
         mouse,
@@ -344,6 +348,15 @@ pub(crate) fn register(registry: &mut Registry) {
             mixer.row(ui, |ui| mixer.clip_type(ui, channel, actions));
         },
     ));
+    registry.register(part(
+        "cpu",
+        "CPU",
+        Size::Natural,
+        one,
+        |ui, mixer, channel, _| {
+            mixer.row(ui, |ui| mixer.cpu(ui, channel));
+        },
+    ));
 }
 
 /// A part of the mixer's strips, shown at first, that takes `rows` of a
@@ -378,6 +391,8 @@ pub(crate) struct Mixer<'a> {
     playhead: Beats,
     /// Where modulators have the controls they move.
     levels: &'a Levels,
+    /// What each channel costs the CPU.
+    performance: &'a Performance,
     /// How tall the faders are.
     fader: f32,
     theme: &'a Theme,
@@ -611,6 +626,38 @@ impl Mixer<'_> {
                 }
             }
         }
+    }
+
+    /// The share of a core the channel takes: its devices', its clips', its
+    /// modulators' and its mixer's. Amber or red when it's busy.
+    fn cpu(&self, ui: &mut Ui, channel: &Channel<'_>) {
+        let share = self.performance.channel(channel.chain());
+        let figure = share.map_or("--".to_owned(), performance::percent);
+        let size = vec2(self.sizes().inner(), self.sizes().row);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        response.widget_info(|| WidgetInfo {
+            value: share.map(f64::from),
+            current_text_value: Some(figure.clone()),
+            ..WidgetInfo::labeled(Role::Meter, true, format!("{} CPU", channel.name()))
+        });
+        if ui.is_rect_visible(rect) {
+            let colour = share.and_then(|share| performance::colour(share, self.theme));
+            let colour = colour.unwrap_or_else(|| ui.visuals().weak_text_color());
+            let font = FontId::monospace(self.theme.small_text);
+            let text = format!("CPU {figure}");
+            ui.painter()
+                .text(rect.center(), Align2::CENTER_CENTER, text, font, colour);
+        }
+        response.on_hover_ui(|ui| {
+            ui.label(match share {
+                Some(_) => format!(
+                    "{} took {figure} of a core over the last second: its devices, clips, \
+                     modulators and mixer.",
+                    channel.name()
+                ),
+                None => "CPU figures show while a device plays.".to_owned(),
+            });
+        });
     }
 
     /// Where the track's output goes: a menu of the master, the groups it
@@ -2079,6 +2126,7 @@ mod tests {
         commands: musicable_commands::Registry,
         player: Player,
         levels: Levels,
+        performance: Performance,
         inputs: Vec<InputChoice>,
         midi: Vec<MidiChoice>,
         playhead: Beats,
@@ -2110,6 +2158,7 @@ mod tests {
             commands,
             player: Player::default(),
             levels,
+            performance: Performance::default(),
             inputs: vec![interface],
             midi: vec![keystep],
             playhead: Beats::ZERO,
@@ -2136,6 +2185,7 @@ mod tests {
                     project,
                     state.document.editor(),
                     &state.levels,
+                    &state.performance,
                     inputs,
                     state.playhead,
                     &theme,
@@ -2620,6 +2670,32 @@ mod tests {
         harness.get_by_label("Master Highest Peak").click();
         harness.run();
         assert_eq!(harness.state().actions, [Action::ClearPeaks]);
+    }
+
+    #[test]
+    fn the_cpu_rows_read_each_channels_share_of_a_core() {
+        let (project, [lead, keys, ..]) = project();
+        let mut harness = harness(project);
+        let cpu = |harness: &Harness<'_, State>, name: &str| {
+            let label = format!("{name} CPU");
+            harness.get_by_role_and_label(Role::Meter, &label).value()
+        };
+        // Without a device playing, there are no figures.
+        assert_eq!(cpu(&harness, "Lead").as_deref(), Some("--"));
+        let channels = &mut harness.state_mut().performance.channels;
+        channels.insert(Chain::Track(lead), 0.3);
+        channels.insert(Chain::Track(keys), 0.002);
+        channels.insert(Chain::Master, 0.05);
+        harness.run();
+        assert_eq!(cpu(&harness, "Lead").as_deref(), Some("30%"));
+        assert_eq!(cpu(&harness, "Keys").as_deref(), Some("<1%"));
+        assert_eq!(cpu(&harness, "Master").as_deref(), Some("5%"));
+        // The part menu hides the row, as it does the others.
+        (harness.get_by_role_and_label(Role::Meter, "Lead CPU")).click_secondary();
+        harness.run();
+        harness.get_by_label("Hide CPU").click();
+        harness.run();
+        assert!(harness.query_by_label("Master CPU").is_none());
     }
 
     #[test]

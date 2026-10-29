@@ -18,6 +18,7 @@ mod mouse_file;
 mod mouse_page;
 pub mod null_test;
 mod output;
+mod performance;
 mod plugin_scan;
 mod plugin_windows;
 mod plugins;

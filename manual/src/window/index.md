@@ -4,7 +4,7 @@ Musicable's window has the menu bar and the transport bar along its top,
 the status bar along its foot, and panels in between: the arrangement in
 the middle, with the mixer, the devices panel, the piano roll and the
 Sample Editor under it, and the browser and the History panel on the left
-and the Routing panel beside the mixer once you show them.
+and the Routing and Performance panels beside the mixer once you show them.
 
 ## The menu bar
 
@@ -23,7 +23,9 @@ The transport bar has go to start, play, stop, record, Capture, loop, punch
 in and punch out, the metronome, the tempo, the time signature, and the
 playhead in bars, beats and sixteenths and in minutes and seconds. At its
 right end are the CPU meter and the dropout counter ([Setting up
-audio](../getting-started/audio.md#the-cpu-meter-and-the-dropouts)).
+audio](../getting-started/audio.md#the-cpu-meter-and-the-dropouts)), and
+the CPU meter's tooltip has what the whole project took of a core
+([The Performance panel](performance.md)).
 Hovering a button shows its command and keys, hovering Loop shows the loop
 region, and hovering Punch In and Punch Out shows where they punch
 ([Recording and comping](../using/recording.md#punching-in-and-out)).
@@ -47,6 +49,10 @@ The transport bar's parts can be hidden, moved and resized
   Routing** (Ctrl+Alt+I) shows it: every output, send, input from another
   track and key in the project, a row each, with its gain
   ([The Routing panel](routing.md)).
+- **The Performance panel** is in a tab beside the mixer too, hidden until
+  **View > Performance** (Ctrl+Alt+C) shows it: what each device and each
+  track's strip cost the CPU, busiest first
+  ([The Performance panel](performance.md)).
 - **The devices panel** is under the mixer: the selected track's devices,
   or the master's while the master track is selected
   ([The devices panel](devices-panel.md)). **View > Devices** (Ctrl+Alt+L)
@@ -104,7 +110,8 @@ The keys and the edit commands act where the focus is. Copy and Delete take
 the notes selected in the piano roll while it has the focus, the devices
 selected in the devices panel while it has it, the clips, time or tracks
 selected in the arrangement while the arrangement or the mixer has it, and
-nothing in the browser, the History panel and the Routing panel.
+nothing in the browser, the History panel, the Routing panel and the
+Performance panel.
 Delete and Select All act on the Sample Editor's warp markers while it has
 the focus. The piano roll and the Sample Editor take the focus once they
 show a clip. A panel's own keys,

@@ -17,6 +17,7 @@
   - [The Sample Editor](window/sample-editor.md)
   - [The mixer](window/mixer.md)
   - [The Routing panel](window/routing.md)
+  - [The Performance panel](window/performance.md)
   - [The devices panel](window/devices-panel.md)
   - [The browser](window/browser.md)
   - [The History panel](window/history.md)

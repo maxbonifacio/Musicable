@@ -319,6 +319,7 @@ impl Focus {
     pub const BROWSER: Self = Self(panel::BROWSER);
     pub const HISTORY: Self = Self(panel::HISTORY);
     pub const ROUTING: Self = Self(panel::ROUTING);
+    pub const PERFORMANCE: Self = Self(panel::PERFORMANCE);
 
     /// The focus on the panel with id `id`, if there's one.
     pub fn on(id: &str) -> Option<Self> {

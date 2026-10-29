@@ -183,6 +183,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         },
                         recordings: &[],
                         levels: &state.levels,
+                        performance: &crate::Performance::default(),
                         inputs: &[],
                         midi_inputs: &[],
                         audio: Audio {

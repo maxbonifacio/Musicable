@@ -58,7 +58,7 @@ resized:
 | --- | --- |
 | The transport bar (`transport_bar`) | Go to Start (`go_to_start`) · Play and Stop (`play_stop`) · Record (`record`) · Capture (`capture`) · Loop and Punch (`loop_punch`) · Metronome (`metronome`) · Tempo (`tempo`) · Time Signature (`signature`) · Position (`position`) · Flexible Space (`space`) · CPU Meter (`cpu`) |
 | The track headers (`track_header`) | Colour (`colour`) · Name (`name`) · Automation Button, A (`automation`) · Mute, Solo and Arm (`buttons`) · Meter (`meter`) |
-| The mixer strips (`mixer_strip`) | Name (`name`) · Input (`input`) · Monitoring (`monitor`) · Output (`output`) · Sends (`sends`) · Pan (`pan`) · Fader and Meter (`fader`) · Gain and Peak (`readouts`) · Mute, Solo and Arm (`buttons`) · Clip Type (`clip_type`) |
+| The mixer strips (`mixer_strip`) | Name (`name`) · Input (`input`) · Monitoring (`monitor`) · Output (`output`) · Sends (`sends`) · Pan (`pan`) · Fader and Meter (`fader`) · Gain and Peak (`readouts`) · Mute, Solo and Arm (`buttons`) · Clip Type (`clip_type`) · CPU (`cpu`) |
 
 The names in brackets are what the workspace file calls them.
 
@@ -86,7 +86,7 @@ slot = 2
 
 [views.mixer_strip]
 hidden = ["monitor"]
-parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type"]
+parts = ["name", "output", "input", "monitor", "sends", "pan", "fader", "readouts", "buttons", "clip_type", "cpu"]
 
 [views.track_header.sizes]
 meter = 14

@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use egui::{
-    Align, Button, CursorIcon, Frame, Id, Label, LayerId, Layout, Order, Rect, Response, RichText,
-    Role, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder,
-    Vec2, WidgetInfo, WidgetText, pos2, vec2,
+    Align, Button, CursorIcon, FontId, Frame, Id, Label, LayerId, Layout, Order, Rect, Response,
+    RichText, Role, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextStyle, TextWrapMode, Ui,
+    UiBuilder, Vec2, WidgetInfo, WidgetText, pos2, vec2,
 };
 use musicable_commands::{Args, CommandId, device, edit};
 use musicable_model::native::NativeKind;
@@ -24,6 +24,7 @@ use crate::browser::{self, Destination, Dragged};
 use crate::modulators;
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
 use crate::native::{self, sidechain};
+use crate::performance::{self, Cpu};
 use crate::search::score;
 use crate::shell::{Action, View, with_keys};
 use crate::theme::Theme;
@@ -341,7 +342,8 @@ fn device_box(
                 ui.set_width(width);
                 // Top to bottom, whatever the row of boxes around it does.
                 ui.vertical(|ui| {
-                    let title = title_row(ui, device, name, theme, mouse, actions);
+                    let cpu = view.performance.device(device.id);
+                    let title = title_row(ui, device, name, cpu, theme, mouse, actions);
                     // A device that's off looks it, though its controls
                     // still work, so it can be set up before it comes back.
                     if device.bypassed || !device.active {
@@ -435,6 +437,7 @@ fn title_row(
     ui: &mut Ui,
     device: &Device,
     name: &str,
+    cpu: Option<Cpu>,
     theme: &Theme,
     mouse: &MouseMap,
     actions: &mut Vec<Action>,
@@ -447,6 +450,10 @@ fn title_row(
             if delete.clicked() {
                 let args = Args::new().with("device", device.id);
                 actions.push(Action::RunWith(device::DELETE, args));
+            }
+            // A deactivated device takes no time.
+            if let Some(cpu) = cpu.filter(|_| device.active) {
+                cpu_figure(ui, name, cpu, theme);
             }
             let native = device.kind.native();
             if let Some(sampler) = native.filter(|native| native.kind == NativeKind::Sampler) {
@@ -476,6 +483,32 @@ fn title_row(
         .inner
     })
     .inner
+}
+
+/// The share of a core the device called `name` takes, small, amber or
+/// red when it's busy, with its longest block in the tooltip.
+fn cpu_figure(ui: &mut Ui, name: &str, cpu: Cpu, theme: &Theme) {
+    let figure = performance::percent(cpu.average);
+    let colour = performance::colour(cpu.average, theme);
+    let colour = colour.unwrap_or_else(|| ui.visuals().weak_text_color());
+    let font = FontId::proportional(theme.small_text);
+    let galley = ui.painter().layout_no_wrap(figure.clone(), font, colour);
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    response.widget_info(|| WidgetInfo {
+        value: Some(f64::from(cpu.average)),
+        current_text_value: Some(figure.clone()),
+        ..WidgetInfo::labeled(Role::Meter, true, format!("{name} CPU"))
+    });
+    if ui.is_rect_visible(rect) {
+        ui.painter().galley(rect.min, galley, colour);
+    }
+    response.on_hover_ui(|ui| {
+        ui.label(format!(
+            "CPU: {} of a core over the last second. Its longest block took {} of a buffer.",
+            performance::percent(cpu.average),
+            performance::percent(cpu.longest),
+        ));
+    });
 }
 
 /// Drags `devices` by the title bar `title`, of the device called `name`,
@@ -1016,6 +1049,7 @@ mod tests {
 
     use super::*;
     use crate::panels::{BROWSER, DEVICES};
+    use crate::performance::Row;
     use crate::testing::{State, quick_harness as harness};
 
     fn id(name: &str) -> String {
@@ -1407,6 +1441,39 @@ mod tests {
                 set(&eq, band(1, eq::FREQ), 1200.0),
             ]
         );
+    }
+
+    #[test]
+    fn each_device_shows_its_share_of_a_core() {
+        let mut project = Project::new();
+        let reverb = plugin(&mut project, "Old Reverb", false);
+        let mut gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
+        let synth = plugin(&mut project, "Surge XT", true);
+        gain.active = false;
+        let devices = vec![synth.clone(), reverb.clone(), gain.clone()];
+        let mut harness = showing(devices, project);
+        harness.set_size(egui::vec2(1800.0, 600.0));
+        harness.run();
+        // Without figures, none shows.
+        assert!(harness.query_by_label("Old Reverb CPU").is_none());
+        let cpu = |average, longest| Cpu { average, longest };
+        harness.state_mut().performance.rows = BTreeMap::from([
+            (Row::Device(synth.id), cpu(0.6, 0.9)),
+            (Row::Device(reverb.id), cpu(0.12, 0.2)),
+            (Row::Device(gain.id), cpu(0.0, 0.0)),
+        ]);
+        harness.run();
+        let figure = |harness: &Harness<'static, State>, label| {
+            harness.get_by_role_and_label(Role::Meter, label).value()
+        };
+        assert_eq!(figure(&harness, "Surge XT CPU").as_deref(), Some("60%"));
+        assert_eq!(figure(&harness, "Old Reverb CPU").as_deref(), Some("12%"));
+        // In the title bar, right of the name.
+        let name = harness.get_by_label("Device Old Reverb").rect();
+        let at = harness.get_by_label("Old Reverb CPU").rect();
+        assert!(at.left() >= name.right() - 0.5 && (at.center().y - name.center().y).abs() < 4.0);
+        // A deactivated device takes no time.
+        assert!(harness.query_by_label("Test Gain CPU").is_none());
     }
 
     #[test]

@@ -19,8 +19,8 @@ use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout,
-    MAX_WRITERS, Meters, NodeKey, ParamId, PreparedGraph, Preview, QueueFull, Stats, SwapError,
-    TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
+    MAX_WRITERS, Meters, NodeKey, NodeLoads, ParamId, PreparedGraph, Preview, QueueFull, Stats,
+    SwapError, TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
 };
 use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
@@ -245,6 +245,7 @@ impl Session {
             outbox: VecDeque::new(),
             meters: Meters::new(),
             gates: BTreeMap::new(),
+            loads: None,
         };
         engine.set_up(&project);
         engine.flush();
@@ -326,6 +327,7 @@ impl Session {
         let old = std::mem::replace(&mut self.engine.handle, handle);
         self.engine.outbox.clear();
         self.engine.gates.clear();
+        self.engine.loads = None;
         self.engine.playing = false;
         self.engine.recording = false;
         self.plugins.set_config(self.engine.handle.config());
@@ -838,6 +840,13 @@ impl Session {
     /// engine last measured them.
     pub fn meters(&self) -> &Meters {
         &self.engine.meters
+    }
+
+    /// How long each node of the graph last sent to the engine takes, once
+    /// one has been sent. Until the engine installs it, its loads read
+    /// nothing.
+    pub fn loads(&self) -> Option<&NodeLoads> {
+        self.engine.loads.as_deref()
     }
 
     /// What went wrong reading the project's audio files and loading its
@@ -1409,6 +1418,8 @@ struct EngineLink {
     /// or built into a graph. Kept for nodes that have gone as well, since
     /// the engine sends their last value again if they come back.
     gates: BTreeMap<NodeKey, bool>,
+    /// The loads of the last graph sent to the engine.
+    loads: Option<Arc<NodeLoads>>,
 }
 
 impl Drop for EngineLink {
@@ -1574,12 +1585,19 @@ impl EngineLink {
                 .handle
                 .set_tempo_map(tempo)
                 .map_err(|QueueFull(tempo)| Message::Tempo(tempo)),
-            Message::Graph(graph) => self.handle.swap_graph(*graph).map_err(|error| match error {
-                SwapError::QueueFull(graph) => Message::Graph(graph),
-                SwapError::ConfigMismatch(_) => {
-                    unreachable!("graphs are prepared for the engine's config")
+            Message::Graph(graph) => {
+                let loads = graph.loads();
+                let sent = self.handle.swap_graph(*graph).map_err(|error| match error {
+                    SwapError::QueueFull(graph) => Message::Graph(graph),
+                    SwapError::ConfigMismatch(_) => {
+                        unreachable!("graphs are prepared for the engine's config")
+                    }
+                });
+                if sent.is_ok() {
+                    self.loads = Some(loads);
                 }
-            }),
+                sent
+            }
             // The session asks for no more writers than the engine takes, so
             // only a full queue gives one back.
             Message::Writer(key, Some(writer)) => (self.handle)

@@ -36,6 +36,7 @@ use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
+use crate::performance::Figures;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
@@ -106,6 +107,8 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
+    /// The CPU figures, as last worked out.
+    performance: Figures,
     /// Where the settings, the user's keymap, mouse map, themes, workspaces
     /// and profiles live.
     config_dir: Option<PathBuf>,
@@ -273,6 +276,7 @@ impl App {
             folder,
             messages,
             levels: Levels::default(),
+            performance: Figures::default(),
             config_dir,
             settings,
             profiles,
@@ -1687,6 +1691,10 @@ impl eframe::App for App {
         // control's dot with it.
         let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
         self.levels = levels;
+        let stats = self.session.stats();
+        let config = self.session.engine_config();
+        let (loads, project) = (self.session.loads(), self.session.project());
+        (self.performance).update(Instant::now(), loads, playing, stats.time, config, project);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
@@ -1764,6 +1772,7 @@ impl eframe::App for App {
             },
             recordings: &recordings,
             levels: &self.levels,
+            performance: self.performance.performance(),
             inputs: &self.input_choices,
             midi_inputs: &self.midi_choices,
             waveforms: self.audio_files.waveforms(),
