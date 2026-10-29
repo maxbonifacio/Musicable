@@ -263,9 +263,12 @@ impl ParallelRenderer {
         debug_assert!(shared.job.load(Relaxed).is_null(), "one block at a time");
         shared.job.store((&job as *const Job).cast_mut(), Relaxed);
         shared.remaining.store(graph.len(), Relaxed);
-        shared
-            .wanted
-            .store(graph.schedule.width.min(shared.lanes.len()), Relaxed);
+        // A worker starting the block works in place of lane 0, which is
+        // the audio thread's and idle unless it comes to help: one lane
+        // more keeps as many threads busy.
+        let width = graph.schedule.width;
+        let wanted = width + usize::from(lane != 0 && lane < width);
+        shared.wanted.store(wanted.min(shared.lanes.len()), Relaxed);
         let sources = graph.schedule.sources.len() as u64;
         shared.sources.store(tag(self.epoch) | sources, Release);
         // Wake the workers. SeqCst pairs with the check sleeping workers make
@@ -507,13 +510,16 @@ impl Shared {
         let mut awake = Awake::new(&self.counters.awake);
         loop {
             match self.wait(lane, seen, &mut awake) {
+                // The block may be over: the last it started rendering
+                // ahead, or one it slept through. Then there's nothing in
+                // it for this lane, or for the lanes it would wake.
                 Wake::Block(epoch) => {
                     seen = epoch;
-                    self.wake_children(lane);
-                    self.work(lane, epoch);
+                    if self.remaining.load(Acquire) > 0 {
+                        self.wake_children(lane);
+                        self.work(lane, epoch);
+                    }
                 }
-                // It doesn't count the blocks it starts as seen, so its next
-                // wait finds the last of them, done.
                 Wake::Ahead => self.render_ahead(lane),
                 Wake::Shutdown => break,
             }

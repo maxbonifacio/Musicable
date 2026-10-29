@@ -1545,7 +1545,10 @@ doesn't have to. Then each block:
    each of those wakes two more, and so on, so no thread makes more than two
    wake-up calls, and only as many workers wake as the graph can keep busy.
    A worker rendering ahead starts its blocks the same way, from its own
-   place in the tree as well as the audio thread's.
+   place in the tree as well as the audio thread's. The audio thread works
+   on such a block only if it comes to help, so the worker counts in its
+   place: as many threads work on the block as on one the audio thread
+   starts.
 2. Threads take nodes without inputs from a shared counter, longest path
    first. A thread that finishes a node counts it off the nodes it feeds. Of
    those that are now ready, it runs the one with the longest path itself
@@ -1556,7 +1559,9 @@ doesn't have to. Then each block:
 
 **Between blocks.** A worker with nothing to do spins for
 `ParallelOptions::spin` (20 µs by default), then sleeps until the next block
-wakes it. The spin covers blocks that follow each other within one device
+wakes it. A worker that finds the block it woke for over, such as the
+last one it started rendering ahead, waits again without waking any
+others. The spin covers blocks that follow each other within one device
 callback, such as at a loop end. Spinning through the gap between callbacks
 would save the wake-ups, but it keeps every core busy (see the benchmarks
 below).
@@ -1656,7 +1661,8 @@ so the ahead side never writes where the live side reads.
 the engine asks the renderer's workers for more (`Renderer::render_ahead`).
 One worker takes it on, starts each block from its own lane as the audio
 thread does from lane 0, and the others help as they would with any block,
-until the lead is whole. A renderer without workers, such as
+until the lead is whole. Every worker can help, since nothing renders live
+at the same time. A renderer without workers, such as
 `ReferenceRenderer`, has the audio thread render ahead at the end of each
 callback instead. When a callback needs frames that aren't rendered yet,
 the audio thread takes the ahead side and renders the next block itself,
@@ -1692,16 +1698,19 @@ the furthest frame too, or at their own time if that's later.
 comes, which a block rendered ahead hasn't got. An `InputMonitor` is one
 while it can monitor the device inputs, whether the transport lets it now
 or not, and until it has faded them out, and a `MidiMonitor` while it can
-monitor a MIDI input. The graph asks the nodes that can be live before each
-block. The ahead side renders no event for one of them, such as arming a
-track: a block ahead ends before it, and the audio thread renders the
-block it's due in, with the device inputs, so the track arms on the frame
-the event was sent for. From then on the audio thread renders every block
-as the device asks, as with the lead off, until nothing is live, and then
-the lead fills again. Blocks rendered ahead have no device inputs, and the
-MIDI messages for frames played from them go nowhere, since no node plays
-them while nothing is live. A `MidiMonitor` that isn't monitoring misses
-them too, so it doesn't know what the input held meanwhile.
+monitor a MIDI input. The graph asks the nodes that can be live before and
+after each block. The ahead side renders no event for one of them, such as
+arming a track: a block ahead ends before it, and the audio thread renders
+the block it's due in, with the device inputs, so the track arms as it does
+with the lead off: an audio track on the frame the event was sent for, a
+MIDI track from the next block ([Monitoring inputs](#recording)). From then
+on the audio thread renders every block as the device asks, until nothing
+is live, and the lead fills again from the end of the callback where that
+happens. Blocks rendered ahead have no device inputs, and the MIDI messages
+for frames played from them go nowhere, even when the callback renders the
+rest of its frames itself, since no node plays them while nothing is live.
+A `MidiMonitor` that isn't monitoring misses them too, so it doesn't know
+what the input held meanwhile.
 
 **Previews and writers.** Previews play on the live side, from the next
 callback whatever the lead, on top of what was rendered. A record tap's
@@ -1727,12 +1736,13 @@ callback, as it would one in a block it rendered. Dropping the engine waits
 for any worker rendering ahead to stop.
 
 **Tests.** `ahead/tests.rs` checks each of these, and a proptest checks the
-whole: random graphs of probes, delays and monitored tracks, with random
-callback lengths, leads, events, jumps, swaps and tempo maps, rendered
-ahead, on workers and on the audio thread, against an engine with the lead
-off that replays what the first applied, block for block. The two play the
-same, bit for bit: the output, the writers' frames and notes, the timeline
-and the counters.
+whole: random graphs of probes, delays, monitored audio tracks and MIDI
+tracks, with random callback lengths, leads, events, jumps, swaps and tempo
+maps, and MIDI input, rendered ahead, on workers and on the audio thread,
+against an engine with the lead off that replays what the first applied,
+block for block, with the MIDI input for the blocks the first rendered as
+the device asked. The two play the same, bit for bit: the output, the
+writers' frames and notes, the timeline and the counters.
 
 ## Node timing
 

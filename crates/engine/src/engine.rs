@@ -572,7 +572,12 @@ impl Engine {
             let played = match rendered > live.time {
                 true => {
                     let most = left.min((rendered - live.time) as usize);
-                    live.play_ahead(shared, most, gain, |n, played| write(done, n, played))
+                    let played =
+                        live.play_ahead(shared, most, gain, |n, played| write(done, n, played));
+                    // The MIDI messages for frames it played go nowhere: no
+                    // node played them as they rendered.
+                    midi = &midi[midi.partition_point(|m| m.time < live.time)..];
+                    played
                 }
                 false => {
                     let played = live.play_live(
