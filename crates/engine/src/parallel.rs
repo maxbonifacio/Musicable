@@ -29,6 +29,12 @@
 //! ([`ParallelOptions::inline_below`]), since waking workers would cost more
 //! than they save.
 //!
+//! When the engine renders ahead of the device
+//! ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)), the workers
+//! render its ahead side between callbacks, one block at a time, and the
+//! worker that takes it starts each block from its own lane, as the audio
+//! thread does from lane 0: see [`AheadWaker`].
+//!
 //! A node can split its own work into tasks ([`tasks::run`](crate::tasks)),
 //! as a plugin using CLAP's thread pool does. Its lane puts them in its
 //! [`Tasks`], wakes up to two sleeping workers, and takes tasks itself until
@@ -60,8 +66,8 @@ pub(crate) use schedule::Schedule;
 use self::deque::{Deque, Steal};
 use crate::load::{self, Load};
 use crate::{
-    Block, InputPort, Inputs, Node, NodeEvent, NodeId, PreparedGraph, ReferenceRenderer, Renderer,
-    rt,
+    AheadWork, Block, InputPort, Inputs, Node, NodeEvent, NodeId, PreparedGraph, ReferenceRenderer,
+    Renderer, rt,
 };
 
 /// How a [`ParallelRenderer`] runs.
@@ -160,6 +166,10 @@ impl ParallelRenderer {
             shutdown: AtomicBool::new(false),
             spin: options.spin,
             counters: Counters::default(),
+            ahead: OnceLock::new(),
+            ahead_wanted: AtomicBool::new(false),
+            ahead_inside: AtomicUsize::new(0),
+            ahead_closed: AtomicBool::new(false),
         });
         let workers = (1..=options.threads)
             .map(|lane| {
@@ -232,6 +242,8 @@ impl ParallelRenderer {
 
     fn render_shared(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
         let shared = &*self.shared;
+        // The audio thread's lane, or the worker's that renders ahead.
+        let lane = DRIVER.get();
         graph.schedule.point_at(&mut graph.buffers);
         let job = Job {
             nodes: graph.nodes.as_mut_ptr(),
@@ -248,6 +260,7 @@ impl ParallelRenderer {
         self.epoch += 1;
         // Nothing reads these until it takes a node of the new block, which
         // the store to `sources` makes possible.
+        debug_assert!(shared.job.load(Relaxed).is_null(), "one block at a time");
         shared.job.store((&job as *const Job).cast_mut(), Relaxed);
         shared.remaining.store(graph.len(), Relaxed);
         shared
@@ -259,8 +272,13 @@ impl ParallelRenderer {
         // before they park: either they see the new epoch, or we see them
         // asleep.
         shared.epoch.store(self.epoch, SeqCst);
+        // The tree starts at lane 0. A worker starting the block wakes the
+        // lanes it would have woken too.
         shared.wake_children(0);
-        shared.work(0, self.epoch);
+        if lane != 0 {
+            shared.wake_children(lane);
+        }
+        shared.work(lane, self.epoch);
         // Every node has run, and every thread is done with the graph and the
         // job.
         let wall = started.elapsed();
@@ -294,6 +312,13 @@ impl Renderer for ParallelRenderer {
                 self.render_inline(graph, block);
             }
         });
+    }
+
+    fn render_ahead(&mut self, work: AheadWork) -> Option<AheadWaker> {
+        if self.workers.is_empty() || self.shared.ahead.set(work).is_err() {
+            return None;
+        }
+        Some(AheadWaker(self.shared.clone()))
     }
 }
 
@@ -400,6 +425,24 @@ struct Shared {
     shutdown: AtomicBool,
     spin: Duration,
     counters: Counters,
+    /// The engine's ahead side, for the workers to render when it asks.
+    ahead: OnceLock<AheadWork>,
+    /// Set when the engine asks a worker to render ahead, until one takes
+    /// it on.
+    ahead_wanted: AtomicBool,
+    /// Workers rendering the engine's ahead side now.
+    ahead_inside: AtomicUsize,
+    /// Set once the engine stops, after which no worker renders ahead.
+    ahead_closed: AtomicBool,
+}
+
+/// What wakes a waiting worker.
+enum Wake {
+    /// A block to work on: its epoch.
+    Block(u64),
+    /// The engine's ahead side to render.
+    Ahead,
+    Shutdown,
 }
 
 /// One thread's place in the pool.
@@ -462,27 +505,58 @@ impl Shared {
         let _ = self.lanes[lane].thread.set(thread::current());
         let mut seen = 0;
         let mut awake = Awake::new(&self.counters.awake);
-        while let Some(epoch) = self.wait(lane, seen, &mut awake) {
-            seen = epoch;
-            self.wake_children(lane);
-            self.work(lane, epoch);
+        loop {
+            match self.wait(lane, seen, &mut awake) {
+                Wake::Block(epoch) => {
+                    seen = epoch;
+                    self.wake_children(lane);
+                    self.work(lane, epoch);
+                }
+                // It doesn't count the blocks it starts as seen, so its next
+                // wait finds the last of them, done.
+                Wake::Ahead => self.render_ahead(lane),
+                Wake::Shutdown => break,
+            }
             awake.count();
         }
         awake.count();
     }
 
-    /// Waits for a block other than `seen` to start, and returns its epoch:
-    /// spins for a while, then sleeps. `None` when the renderer shuts down.
-    fn wait(&self, lane: usize, seen: u64, awake: &mut Awake<'_>) -> Option<u64> {
+    /// Renders the engine's ahead side, unless the engine has stopped.
+    fn render_ahead(&self, lane: usize) {
+        // Pairs with `AheadWaker::close`: either this sees the engine
+        // closed, or the engine sees this inside and waits.
+        self.ahead_inside.fetch_add(1, SeqCst);
+        if !self.ahead_closed.load(SeqCst)
+            && let Some(work) = self.ahead.get()
+        {
+            let _driving = Driving::from(lane);
+            work.run();
+        }
+        self.ahead_inside.fetch_sub(1, Release);
+    }
+
+    /// Takes the engine's request to render ahead, if it made one.
+    fn ahead_asked(&self) -> bool {
+        self.ahead_wanted.load(Relaxed) && self.ahead_wanted.swap(false, AcqRel)
+    }
+
+    /// Waits for a block other than `seen` to start, or for the engine to
+    /// ask for its ahead side to be rendered: spins for a while, then
+    /// sleeps.
+    fn wait(&self, lane: usize, seen: u64, awake: &mut Awake<'_>) -> Wake {
         let started = Instant::now();
         let mut spins = 0u32;
         while !self.spin.is_zero() {
             if self.shutdown.load(Acquire) {
-                return None;
+                return Wake::Shutdown;
             }
             let epoch = self.epoch.load(Acquire);
             if epoch != seen {
-                return Some(epoch);
+                return Wake::Block(epoch);
+            }
+            if self.ahead_asked() {
+                return Wake::Ahead;
             }
             spins = spins.wrapping_add(1);
             if spins.is_multiple_of(64) {
@@ -497,13 +571,22 @@ impl Shared {
         let lane = &self.lanes[lane];
         loop {
             lane.sleeping.store(true, SeqCst);
-            // Pairs with the epoch store in `render_shared`: either we see the
-            // new epoch, or the audio thread sees us asleep and wakes us.
+            // Pairs with the epoch store in `render_shared` and the request
+            // in `AheadWaker::wake`: either we see the new epoch or the
+            // request, or the thread making it sees us asleep and wakes us.
             let epoch = self.epoch.load(SeqCst);
-            let shutdown = self.shutdown.load(SeqCst);
-            if epoch != seen || shutdown {
+            let wake = if self.shutdown.load(SeqCst) {
+                Some(Wake::Shutdown)
+            } else if epoch != seen {
+                Some(Wake::Block(epoch))
+            } else if self.ahead_wanted.swap(false, SeqCst) {
+                Some(Wake::Ahead)
+            } else {
+                None
+            };
+            if let Some(wake) = wake {
                 lane.sleeping.store(false, Relaxed);
-                return (!shutdown).then_some(epoch);
+                return wake;
             }
             awake.count();
             thread::park();
@@ -853,6 +936,76 @@ thread_local! {
     /// The renderer and lane this thread is working for while it renders a
     /// block: where the tasks of the nodes it runs go.
     static LANE: Cell<(*const Shared, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+    /// The lane this thread starts blocks from: 0 on the audio thread, and
+    /// a worker's own while it renders the engine's ahead side.
+    static DRIVER: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Has this thread start blocks from a lane until dropped.
+struct Driving(usize);
+
+impl Driving {
+    fn from(lane: usize) -> Self {
+        Self(DRIVER.replace(lane))
+    }
+}
+
+impl Drop for Driving {
+    fn drop(&mut self) {
+        DRIVER.set(self.0);
+    }
+}
+
+/// Wakes a [`ParallelRenderer`]'s workers to render the engine's ahead
+/// side between device callbacks: see [`Renderer::render_ahead`]. The
+/// engine keeps it.
+pub struct AheadWaker(Arc<Shared>);
+
+impl AheadWaker {
+    /// Asks a worker to render ahead: one that's awake takes it on when it
+    /// next looks for work, or else this wakes one. Real-time safe.
+    pub(crate) fn wake(&self) {
+        let shared = &*self.0;
+        shared.ahead_wanted.store(true, SeqCst);
+        // Pairs with the check in `Shared::wait`: a worker we see awake
+        // sees the request before it sleeps.
+        let workers = &shared.lanes[1..];
+        if workers.iter().all(|lane| lane.sleeping.load(SeqCst)) {
+            workers[0].wake();
+        }
+    }
+
+    /// Works on the block a worker is rendering ahead, if there is one, for
+    /// the audio thread while it waits for that worker to finish: as lane
+    /// 0, which is idle while a worker starts the blocks. Says whether
+    /// there was a block to work on. Real-time safe.
+    pub(crate) fn help(&self) -> bool {
+        let shared = &*self.0;
+        if shared.remaining.load(Acquire) == 0 {
+            return false;
+        }
+        // A block that ends meanwhile gives nothing more to take: its
+        // sources carry its epoch, and steals see only the running one's
+        // nodes.
+        shared.work(0, shared.epoch.load(Acquire));
+        true
+    }
+
+    /// Stops the workers rendering ahead, and waits for any doing so to
+    /// finish: for the engine, as it stops, off the audio thread.
+    pub(crate) fn close(&self) {
+        let shared = &*self.0;
+        shared.ahead_closed.store(true, SeqCst);
+        while shared.ahead_inside.load(SeqCst) > 0 {
+            thread::yield_now();
+        }
+    }
+}
+
+impl std::fmt::Debug for AheadWaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AheadWaker").finish_non_exhaustive()
+    }
 }
 
 /// The lane of a block the audio thread renders alone.
@@ -915,9 +1068,11 @@ fn finish(schedule: &Schedule, node: u32, deque: &Deque) -> Option<u32> {
     next
 }
 
-/// The first panic in a block, kept for the audio thread to raise again.
+/// The first panic in a block, kept for the thread that started it to raise
+/// again, or the first on a worker rendering the engine's ahead side, kept
+/// for the audio thread.
 #[derive(Default)]
-struct Failure {
+pub(crate) struct Failure {
     state: AtomicU8,
     payload: UnsafeCell<Option<Box<dyn Any + Send>>>,
 }
@@ -927,12 +1082,12 @@ const WRITING: u8 = 1;
 const FULL: u8 = 2;
 
 // SAFETY: `payload` is written by the one thread that moves `state` from
-// EMPTY to WRITING, and read by the audio thread only after the block, which
-// can't end before the write is done.
+// EMPTY to WRITING, and read by the one thread that takes it only once it
+// sees the state FULL, which the writer stores after the write.
 unsafe impl Sync for Failure {}
 
 impl Failure {
-    fn record(&self, payload: Box<dyn Any + Send>) {
+    pub(crate) fn record(&self, payload: Box<dyn Any + Send>) {
         if self
             .state
             .compare_exchange(EMPTY, WRITING, Acquire, Relaxed)
@@ -944,9 +1099,15 @@ impl Failure {
         }
     }
 
-    /// Takes the block's first panic, if there was one. Only the audio thread
-    /// calls this, after the block.
-    fn take(&self) -> Option<Box<dyn Any + Send>> {
+    /// Whether it holds a panic.
+    #[cfg(test)]
+    pub(crate) fn is_set(&self) -> bool {
+        self.state.load(Acquire) == FULL
+    }
+
+    /// Takes the first panic, if there was one. Only one thread calls this:
+    /// the one that started the block, after the block, or the audio thread.
+    pub(crate) fn take(&self) -> Option<Box<dyn Any + Send>> {
         if self.state.load(Acquire) != FULL {
             return None;
         }

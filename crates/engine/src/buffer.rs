@@ -215,6 +215,14 @@ impl<'a> AudioRef<'a> {
         (0..this.channels).map(move |c| this.channel(c))
     }
 
+    /// The first `channels` channels, or all of them if there are fewer.
+    pub(crate) fn first(&self, channels: usize) -> AudioRef<'a> {
+        AudioRef {
+            channels: channels.min(self.channels),
+            ..*self
+        }
+    }
+
     /// The frames in `range`, as a shorter view.
     pub fn range(&self, range: Range<usize>) -> AudioRef<'a> {
         assert!(
@@ -419,7 +427,7 @@ impl<'a> AudioMut<'a> {
 }
 
 /// The source channel that feeds destination channel `channel`.
-fn source_channel(source_channels: usize, channel: usize) -> Option<usize> {
+pub(crate) fn source_channel(source_channels: usize, channel: usize) -> Option<usize> {
     if source_channels == 1 {
         Some(0)
     } else {

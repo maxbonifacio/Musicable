@@ -13,6 +13,12 @@ pub const CONFIG: EngineConfig = EngineConfig {
     max_block: 256,
 };
 
+/// For graphs rendered ahead of the device, in blocks up to 1024 frames.
+pub const AHEAD: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 1024,
+};
+
 /// What nodes cost, in rounds of [`Burn`] work per sample. One round is a
 /// multiply-add that has to wait for the one before, a few nanoseconds per
 /// sample, so a stereo node with 10 rounds takes about 2 µs per 64 frames.
@@ -60,13 +66,26 @@ impl Node for Burn {
     }
 }
 
-/// Builds a graph of [`Burn`] nodes.
-#[derive(Default)]
+/// Builds a graph of [`Burn`] nodes, prepared for `config`.
 pub struct Builder {
     graph: Graph,
+    config: EngineConfig,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new(CONFIG)
+    }
 }
 
 impl Builder {
+    pub fn new(config: EngineConfig) -> Self {
+        Self {
+            graph: Graph::default(),
+            config,
+        }
+    }
+
     pub fn node(&mut self, work: u32, inputs: &[NodeId]) -> NodeId {
         let key = NodeKey(self.graph.len() as u64);
         let node = self.graph.add(key, Burn::new(work));
@@ -92,7 +111,7 @@ impl Builder {
 
     pub fn finish(mut self, output: NodeId) -> PreparedGraph {
         self.graph.set_output(output).unwrap();
-        self.graph.prepare(&CONFIG).unwrap()
+        self.graph.prepare(&self.config).unwrap()
     }
 }
 
@@ -106,7 +125,12 @@ pub fn wide(width: usize, work: u32) -> PreparedGraph {
 
 /// A chain of `depth` nodes costing `work` each.
 pub fn deep(depth: usize, work: u32) -> PreparedGraph {
-    let mut b = Builder::default();
+    deep_for(CONFIG, depth, work)
+}
+
+/// The same, prepared for `config`.
+pub fn deep_for(config: EngineConfig, depth: usize, work: u32) -> PreparedGraph {
+    let mut b = Builder::new(config);
     let out = b.chain(None, &vec![work; depth]);
     b.finish(out)
 }
@@ -159,7 +183,12 @@ impl Project {
     /// The project's graph, one node per instrument, device and stage: how
     /// the engine schedules it.
     pub fn per_node(self) -> PreparedGraph {
-        let mut b = Builder::default();
+        self.per_node_for(CONFIG)
+    }
+
+    /// The same, prepared for `config`.
+    pub fn per_node_for(self, config: EngineConfig) -> PreparedGraph {
+        let mut b = Builder::new(config);
         let track = self.track();
         let tracks: Vec<_> = (0..self.tracks).map(|_| b.chain(None, &track)).collect();
         let mut into_master = Vec::new();

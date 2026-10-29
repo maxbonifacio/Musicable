@@ -51,7 +51,7 @@ impl Segment {
     }
 
     /// Whether `next`, at a later time, is just this segment running on.
-    fn runs_on_to(&self, next: &Segment) -> bool {
+    pub(crate) fn runs_on_to(&self, next: &Segment) -> bool {
         next.position == self.position_at(next.time)
             && (next.playing, next.record, next.recording, next.latency)
                 == (self.playing, self.record, self.recording, self.latency)

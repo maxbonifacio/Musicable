@@ -1,22 +1,31 @@
 //! The engine, as the audio thread runs it, and the handle the control thread
 //! drives it with.
+//!
+//! The engine renders on two sides: the ahead side has the graph and renders
+//! its blocks, ahead of the device when it can (see `ahead.rs`), and the live
+//! side, here, is the audio thread's, which plays what the ahead side
+//! rendered, or renders a block itself when there's nothing to play yet.
 
 use std::collections::BTreeMap;
+use std::panic;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 use musicable_model::time::TempoMap;
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::ahead::{self, AheadWork, Core, CoreWriter, Course, Drive, Lead, LiveQueue, Shared};
 use crate::preview::{Preview, Previews};
-use crate::timeline::{Segment, Timeline, TimelineWriter};
-use crate::transport::Transport;
+use crate::timeline::Timeline;
 use crate::{
-    AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent, NodeEventKind, NodeKey,
-    ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
+    AheadWaker, AudioBuffer, AudioMut, AudioRef, EngineConfig, Event, MidiMessage, NodeEvent,
+    NodeKey, ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
-/// Messages the control thread can have in flight.
+/// Messages the control thread can have in flight to each side.
 const QUEUE_CAPACITY: usize = 1024;
 /// Old graphs and tempo maps the engine can hand back before it holds off
 /// further swaps.
@@ -30,18 +39,22 @@ pub const MAX_WRITERS: usize = 256;
 /// Where the engine writes what one of the graph's record taps carries
 /// ([`Graph::add_record`](crate::Graph::add_record)), or the notes a note
 /// record has ([`Graph::add_note_record`](crate::Graph::add_note_record)),
-/// block by block, as it renders: a buffer a recorder reads, as it reads an
+/// block by block, as it plays: a buffer a recorder reads, as it reads an
 /// audio input's or a MIDI input's. It's called on the audio thread, so it
 /// must be real-time safe.
+///
+/// What the engine renders ahead ([`EngineHandle::set_lead`]) comes as it
+/// plays too, at its engine time, from a queue that holds a record tap in
+/// two channels: a mono one in both.
 pub trait TapWriter: Send {
-    /// Takes the frames the engine rendered from engine time `time` on: the
+    /// Takes the frames the engine played from engine time `time` on: the
     /// next ones, after those of the block before. A block without
     /// channels is silence, for where the graph hasn't the tap, or there's
     /// no graph yet.
     fn write(&mut self, time: u64, audio: AudioRef<'_>);
 
     /// Takes the notes the node the note record records played in the
-    /// block of `frames` frames the engine rendered from engine time `time`
+    /// block of `frames` frames the engine played from engine time `time`
     /// on, in order, each at its offset into the block: none where the
     /// graph hasn't the record, or there's no graph yet. It comes after
     /// [`write`](Self::write), for every block. A writer of a tap of sound
@@ -51,7 +64,8 @@ pub trait TapWriter: Send {
     }
 }
 
-enum Message {
+/// What the control thread sends the ahead side.
+pub(crate) enum CoreMessage {
     /// `time: None` means as soon as possible.
     Event {
         time: Option<u64>,
@@ -65,36 +79,46 @@ enum Message {
     },
     Swap(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
+    /// The ahead side's end of the queues for the writer of the record taps
+    /// with this key, or `None` to stop writing them.
+    Writer(NodeKey, Option<CoreWriter>),
+}
+
+/// What the control thread sends the live side.
+enum LiveMessage {
     /// A preview to play, or `None` to stop the one playing.
     Preview(Option<Box<Preview>>),
-    /// A writer for the record taps with this key, or `None` to stop
-    /// writing them.
-    Writer(NodeKey, Option<Box<dyn TapWriter>>),
+    /// A writer for the record taps with this key, with its end of their
+    /// queues for a key that's new.
+    Writer(NodeKey, Box<dyn TapWriter>, Option<LiveQueue>),
+    /// Stop writing the record taps with this key.
+    RemoveWriter(NodeKey),
 }
 
-/// What the engine hands back to be dropped off the audio thread.
-enum Garbage {
+/// What the ahead side hands back to be dropped off the audio thread.
+pub(crate) enum CoreGarbage {
     Graph(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
-    Preview(Box<Preview>),
-    Writer(Box<dyn TapWriter>),
+    Writer(CoreWriter),
 }
 
-struct Pending {
-    time: u64,
-    event: Event,
+/// What the live side hands back.
+enum LiveGarbage {
+    Preview(Box<Preview>),
+    Writer(Box<dyn TapWriter>),
+    Queue(LiveQueue),
 }
 
 #[derive(Default)]
-struct Counters {
+pub(crate) struct Counters {
     time: AtomicU64,
     position: AtomicU64,
     playing: AtomicBool,
-    swaps: AtomicU64,
+    pub(crate) swaps: AtomicU64,
     latency: AtomicU64,
-    events_late: AtomicU64,
-    events_dropped: AtomicU64,
-    events_unmatched: AtomicU64,
+    pub(crate) events_late: AtomicU64,
+    pub(crate) events_dropped: AtomicU64,
+    pub(crate) events_unmatched: AtomicU64,
     xruns: AtomicU64,
     /// The preview playing's id, or 0, and the file frame it's at.
     preview: AtomicU64,
@@ -102,12 +126,19 @@ struct Counters {
     /// The previews' gain, as an `f32`'s bits, which the control thread
     /// sets.
     preview_gain: AtomicU32,
+    /// The engine time the ahead side has rendered to.
+    pub(crate) furthest: AtomicU64,
+    /// The lead the control thread asks for, in frames.
+    pub(crate) lead_setting: AtomicU64,
+    lead: AtomicU64,
+    lead_target: AtomicU64,
+    short_blocks: AtomicU64,
 }
 
-/// The engine's counters, as of its last block.
+/// The engine's counters, as of its last device callback.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Frames rendered since the engine started. This is the clock
+    /// Frames played since the engine started. This is the clock
     /// [`EngineHandle::send_at`] times refer to.
     pub time: u64,
     /// The song position, in samples: where the next frame plays from.
@@ -115,9 +146,9 @@ pub struct Stats {
     pub playing: bool,
     /// Graphs installed.
     pub swaps: u64,
-    /// How many frames late the running graph's output plays, after delay
-    /// compensation ([`PreparedGraph::latency`]). The audio device adds its
-    /// own output latency to this.
+    /// How many frames late the output plays, after delay compensation
+    /// ([`PreparedGraph::latency`]), in the graph that rendered the frame
+    /// playing. The audio device adds its own output latency to this.
     pub latency: u64,
     /// Events applied later than the time they were sent for.
     pub events_late: u64,
@@ -132,6 +163,18 @@ pub struct Stats {
     pub xruns: u64,
     /// The preview playing, if one is: see [`EngineHandle::preview`].
     pub preview: Option<PreviewAt>,
+    /// How many frames the engine has rendered ahead of [`time`](Self::time)
+    /// ([`EngineHandle::set_lead`]).
+    pub lead: u64,
+    /// The lead it aims for now: the one set while the transport plays, 512
+    /// frames while it stands still, and none while anything in the graph
+    /// is played live ([`Node::live`](crate::Node::live)), or the lead is
+    /// off.
+    pub lead_target: u64,
+    /// Blocks the audio thread rendered itself, while the engine rendered
+    /// ahead, because the lead ran out: what a callback that drops out has
+    /// been doing.
+    pub short_blocks: u64,
 }
 
 /// Where the preview playing is.
@@ -162,6 +205,9 @@ impl Counters {
                     frame: self.preview_frame.load(Relaxed),
                 }),
             },
+            lead: self.lead.load(Relaxed),
+            lead_target: self.lead_target.load(Relaxed),
+            short_blocks: self.short_blocks.load(Relaxed),
         }
     }
 }
@@ -179,32 +225,73 @@ pub enum SwapError {
     QueueFull(Box<PreparedGraph>),
 }
 
-/// Renders the running graph on the audio thread.
+/// Renders the running graph for the audio thread.
 ///
 /// The engine applies what the control thread sends through its
 /// [`EngineHandle`]: graph swaps and tempo maps between blocks, parameter
-/// changes and transport commands at the exact frame they are due. It renders
-/// whatever number of frames the device asks for, in blocks of at most
-/// [`EngineConfig::max_block`], ending a block early wherever the transport
-/// changes, a loop jumps back or recording punches in or out. It publishes
-/// the transport's course on a [`Timeline`], for recording.
+/// changes and transport commands at the exact frame they are due. It
+/// renders whatever number of frames the device asks for, in blocks of at
+/// most [`EngineConfig::max_block`], ending a block early wherever the
+/// transport changes, a loop jumps back or recording punches in or out. It
+/// publishes the transport's course on a [`Timeline`], for recording.
+///
+/// With a lead set ([`EngineHandle::set_lead`]), it renders ahead of the
+/// device while nothing in the graph is played live, and plays what it
+/// rendered as the device asks for it: then what it's sent applies at the
+/// furthest frame it has rendered.
 ///
 /// Drop the engine off the audio thread, since that frees its graph.
 pub struct Engine {
     config: EngineConfig,
-    renderer: Box<dyn Renderer>,
-    graph: Option<Box<PreparedGraph>>,
-    transport: Transport,
+    shared: Box<Shared>,
+    live: Live,
+}
+
+/// The audio thread's side of the engine.
+struct Live {
+    config: EngineConfig,
+    /// The engine time of the next frame to play.
     time: u64,
-    messages: Consumer<Message>,
-    garbage: Producer<Garbage>,
-    /// Events not yet due, by time and then in arrival order.
-    pending: Vec<Pending>,
+    messages: Consumer<LiveMessage>,
+    garbage: Producer<LiveGarbage>,
     counters: Arc<Counters>,
-    timeline: TimelineWriter,
     previews: Previews,
-    /// The writers of the graph's record taps, by their keys.
-    writers: Vec<(NodeKey, Box<dyn TapWriter>)>,
+    /// The writers of the graph's record taps.
+    writers: Vec<LiveWriter>,
+    /// The course of what the ahead side rendered, from each place it
+    /// doesn't run on.
+    course: Consumer<Course>,
+    /// The course where it's playing.
+    current: Course,
+    /// Wakes the renderer's threads to render ahead, if it has any.
+    waker: Option<AheadWaker>,
+    /// Room for what it plays from the rings, a stretch at a time: the
+    /// output, the cue output and a writer's tap.
+    output: AudioBuffer,
+    cue: AudioBuffer,
+    tap: AudioBuffer,
+    /// Room for a writer's notes for a stretch.
+    notes: Vec<NodeEvent>,
+}
+
+/// The writer of the record taps with a key, and its end of their queues.
+struct LiveWriter {
+    key: NodeKey,
+    writer: Box<dyn TapWriter>,
+    queue: LiveQueue,
+}
+
+/// What the engine played in a stretch of a device callback, for the
+/// caller to write to the device.
+struct Played<'a> {
+    /// The output, if there's a graph yet.
+    output: Option<AudioRef<'a>>,
+    cue: Option<AudioRef<'a>>,
+    /// The graph that rendered it, if it rendered it as the device asked:
+    /// for its taps.
+    graph: Option<&'a PreparedGraph>,
+    /// What the previews played, if one did.
+    preview: Option<AudioRef<'a>>,
 }
 
 impl Engine {
@@ -226,29 +313,57 @@ impl Engine {
             config.sample_rate > 0 && config.max_block > 0,
             "invalid engine config {config:?}"
         );
-        let (message_tx, message_rx) = RingBuffer::new(QUEUE_CAPACITY);
-        let (garbage_tx, garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
+        let (core_tx, core_rx) = RingBuffer::new(QUEUE_CAPACITY);
+        let (live_tx, live_rx) = RingBuffer::new(QUEUE_CAPACITY);
+        let (core_garbage_tx, core_garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
+        let (live_garbage_tx, live_garbage_rx) = RingBuffer::new(GARBAGE_CAPACITY);
+        let (course_tx, course_rx) = RingBuffer::new(ahead::COURSE_CAPACITY);
         let counters = Arc::new(Counters::default());
         counters.preview_gain.store(1.0f32.to_bits(), Relaxed);
         let (timeline, timeline_reader) = crate::timeline::timeline();
-        let engine = Engine {
+        let core = Core::new(
             config,
             renderer,
-            graph: None,
-            transport: Transport::new(config.sample_rate),
-            time: 0,
-            messages: message_rx,
-            garbage: garbage_tx,
-            pending: Vec::with_capacity(EVENT_CAPACITY),
-            counters: counters.clone(),
+            core_rx,
+            core_garbage_tx,
+            counters.clone(),
             timeline,
-            previews: Previews::new(config),
-            writers: Vec::with_capacity(MAX_WRITERS),
+            course_tx,
+        );
+        let shared = Box::new(Shared::new(core));
+        let work = AheadWork::new(&shared);
+        let waker = shared
+            .try_lock()
+            .expect("nothing else has the core yet")
+            .core()
+            .wake_with(work);
+        let buffer = || AudioBuffer::new(2, config.max_block);
+        let engine = Engine {
+            config,
+            live: Live {
+                config,
+                time: 0,
+                messages: live_rx,
+                garbage: live_garbage_tx,
+                counters: counters.clone(),
+                previews: Previews::new(config),
+                writers: Vec::with_capacity(MAX_WRITERS),
+                course: course_rx,
+                current: Course::default(),
+                waker,
+                output: buffer(),
+                cue: buffer(),
+                tap: buffer(),
+                notes: Vec::with_capacity(LiveQueue::NOTES),
+            },
+            shared,
         };
         let handle = EngineHandle {
             config,
-            messages: message_tx,
-            garbage: garbage_rx,
+            core: core_tx,
+            live: live_tx,
+            core_garbage: core_garbage_rx,
+            live_garbage: live_garbage_rx,
             counters,
             params: BTreeMap::new(),
             timeline: Some(timeline_reader),
@@ -262,23 +377,27 @@ impl Engine {
     }
 
     pub fn stats(&self) -> Stats {
-        self.counters.snapshot()
+        self.live.counters.snapshot()
     }
 
     /// For the audio backend to count a device underrun or overrun.
     pub fn record_xrun(&self) {
-        self.counters.xruns.fetch_add(1, Relaxed);
+        self.live.counters.xruns.fetch_add(1, Relaxed);
     }
 
-    /// Frames rendered since the engine started: the engine time of the next
-    /// frame it renders. An audio backend lines its device inputs up with it.
+    /// Frames played since the engine started: the engine time of the next
+    /// frame it plays. An audio backend lines its device inputs up with it.
     pub fn time(&self) -> u64 {
-        self.time
+        self.live.time
     }
 
     /// Renders `output.frames()` frames into `output`: the graph's output,
     /// with its cue output added (see [`Graph::set_cue`](crate::Graph::set_cue)),
     /// and the preview playing, if one is. Real-time safe.
+    ///
+    /// With no frames, it takes in what was sent, as the next block would,
+    /// so [`Stats`] says what plays next: the graph's latency, say. This
+    /// goes for every `process` call.
     pub fn process(&mut self, output: &mut AudioMut<'_>) {
         let frames = output.frames();
         self.process_with_input(AudioRef::empty(frames), &[], output);
@@ -291,7 +410,10 @@ impl Engine {
     /// time, which nodes find in
     /// [`ProcessContext::midi`](crate::ProcessContext::midi). A message for
     /// a time before the first frame plays at the first, and one for a time
-    /// after the last at the last. Real-time safe.
+    /// after the last at the last. Frames the engine rendered ahead had no
+    /// inputs: it renders ahead only while no node plays them
+    /// ([`Node::live`](crate::Node::live)), and their messages go nowhere.
+    /// Real-time safe.
     ///
     /// # Panics
     ///
@@ -303,26 +425,16 @@ impl Engine {
         output: &mut AudioMut<'_>,
     ) {
         rt::scope(|| {
-            self.run(
-                input,
-                midi,
-                output.frames(),
-                |start, frames, graph, preview| {
-                    let mut part = output.range_mut(start..start + frames);
-                    match graph {
-                        Some(graph) => {
-                            part.copy_from(graph.output(frames));
-                            if let Some(cue) = graph.cue(frames) {
-                                part.add_from(cue);
-                            }
-                        }
-                        None => part.clear(),
-                    }
-                    if let Some(preview) = preview {
-                        part.add_from(preview);
-                    }
-                },
-            );
+            self.run(input, midi, output.frames(), |start, frames, played| {
+                let mut part = output.range_mut(start..start + frames);
+                match played.output {
+                    Some(audio) => part.copy_from(audio),
+                    None => part.clear(),
+                }
+                for audio in [played.cue, played.preview].into_iter().flatten() {
+                    part.add_from(audio);
+                }
+            });
         });
     }
 
@@ -331,8 +443,9 @@ impl Engine {
     /// a preview, and
     /// each of its taps into the buffer of `taps` with the same number (see
     /// [`Graph::add_tap`](crate::Graph::add_tap)). Taps the graph hasn't
-    /// got, and everything before the first graph arrives, are silent.
-    /// Real-time safe.
+    /// got, and everything before the first graph arrives, are silent, as
+    /// are the taps in frames the engine rendered ahead: offline renders
+    /// leave the lead off ([`EngineHandle::set_lead`]). Real-time safe.
     ///
     /// # Panics
     ///
@@ -348,17 +461,15 @@ impl Engine {
                 AudioRef::empty(frames),
                 &[],
                 frames,
-                |start, frames, graph, _| {
+                |start, frames, played| {
                     let range = start..start + frames;
-                    match graph {
-                        Some(graph) => output
-                            .range_mut(range.clone())
-                            .copy_from(graph.output(frames)),
+                    match played.output {
+                        Some(audio) => output.range_mut(range.clone()).copy_from(audio),
                         None => output.range_mut(range.clone()).clear(),
                     }
                     for (n, tap) in taps.iter_mut().enumerate() {
                         let mut part = tap.range_mut(range.clone());
-                        match graph.and_then(|graph| graph.tap(n, frames)) {
+                        match played.graph.and_then(|graph| graph.tap(n, frames)) {
                             Some(source) => part.copy_from(source),
                             None => part.clear(),
                         }
@@ -402,40 +513,32 @@ impl Engine {
             output.len()
         );
         rt::scope(|| {
-            self.run(
-                input,
-                midi,
-                output.len() / channels,
-                |start, frames, graph, preview| {
-                    let part = &mut output[start * channels..(start + frames) * channels];
-                    match graph {
-                        Some(graph) => {
-                            graph.output(frames).write_interleaved(part, channels);
-                            if let Some(cue) = graph.cue(frames) {
-                                cue.add_interleaved(part, channels);
-                            }
-                        }
-                        None => part.fill(0.0),
-                    }
-                    if let Some(preview) = preview {
-                        preview.add_interleaved(part, channels);
-                    }
-                },
-            );
+            let frames = output.len() / channels;
+            self.run(input, midi, frames, |start, frames, played| {
+                let part = &mut output[start * channels..(start + frames) * channels];
+                match played.output {
+                    Some(audio) => audio.write_interleaved(part, channels),
+                    None => part.fill(0.0),
+                }
+                for audio in [played.cue, played.preview].into_iter().flatten() {
+                    audio.add_interleaved(part, channels);
+                }
+            });
         });
     }
 
-    /// Renders `frames` frames block by block, with `input` holding the
-    /// device inputs for them and `midi` the MIDI inputs' messages, handing
-    /// each block's offset and length to `write`, with the graph that
-    /// rendered it, if there is one yet, and what the previews played, if
-    /// one did. The record taps go to their writers.
-    fn run(
+    /// Plays `frames` frames, with `input` holding the device inputs for
+    /// them and `midi` the MIDI inputs' messages: what the ahead side has
+    /// rendered, and a block at a time what it hasn't, rendered now. It
+    /// hands each stretch's offset and length to `write`, with what played
+    /// in it. The record taps go to their writers. Then it keeps the lead
+    /// up. With no frames, the ahead side only takes in what was sent.
+    fn run<'a>(
         &mut self,
-        input: AudioRef<'_>,
-        mut midi: &[MidiMessage],
+        input: AudioRef<'a>,
+        mut midi: &'a [MidiMessage],
         frames: usize,
-        mut write: impl FnMut(usize, usize, Option<&PreparedGraph>, Option<AudioRef<'_>>),
+        mut write: impl FnMut(usize, usize, Played<'_>),
     ) {
         assert_eq!(
             input.frames(),
@@ -443,240 +546,321 @@ impl Engine {
             "the device inputs are {} frames long, the output {frames}",
             input.frames()
         );
-        self.receive();
-        let gain = f32::from_bits(self.counters.preview_gain.load(Relaxed));
+        let shared = &*self.shared;
+        // A panic on a worker rendering ahead comes out here, as one in a
+        // node rendered here would.
+        if let Some(payload) = shared.failure.take() {
+            panic::resume_unwind(payload);
+        }
+        let live = &mut self.live;
+        live.receive();
+        match frames {
+            // The ahead side takes in what was sent, as a block would, so
+            // the counters say what plays next.
+            0 => live.take_in(shared),
+            frames => shared.period.store(frames, Relaxed),
+        }
+        let gain = f32::from_bits(live.counters.preview_gain.load(Relaxed));
         let mut done = 0;
+        // Until it renders a block itself, which takes in what was sent.
+        let mut receive = true;
         while done < frames {
-            let block = self.render(input, &mut midi, done, frames - done);
-            let preview = self.previews.play(block, gain);
-            write(done, block, self.graph.as_deref(), preview);
-            let start = self.time - block as u64;
-            for (key, writer) in &mut self.writers {
-                let graph = self.graph.as_deref();
-                let tapped = graph.and_then(|g| g.record(*key, block));
-                writer.write(start, tapped.unwrap_or(AudioRef::empty(block)));
-                let notes = graph.and_then(|g| g.record_notes(*key));
-                writer.write_notes(start, block, notes.unwrap_or_default());
-            }
-            done += block;
+            // Pairs with the ahead side's store: the rings hold what it
+            // rendered.
+            let rendered = shared.rendered.load(Acquire);
+            let left = frames - done;
+            let played = match rendered > live.time {
+                true => {
+                    let most = left.min((rendered - live.time) as usize);
+                    live.play_ahead(shared, most, gain, |n, played| write(done, n, played))
+                }
+                false => {
+                    let played = live.play_live(
+                        shared,
+                        input,
+                        &mut midi,
+                        done,
+                        left,
+                        receive,
+                        gain,
+                        |n, played| write(done, n, played),
+                    );
+                    receive &= played == 0;
+                    played
+                }
+            };
+            done += played;
         }
-        while !self.garbage.is_full()
-            && let Some(finished) = self.previews.take_finished()
-        {
-            let returned = self.garbage.push(Garbage::Preview(finished));
-            debug_assert!(returned.is_ok(), "the garbage queue has room");
+        live.finish(shared);
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // No thread may render the ahead side once it's gone.
+        if let Some(waker) = &self.live.waker {
+            waker.close();
         }
-        let (preview, frame) = self.previews.at().unwrap_or((0, 0));
-        self.counters.preview.store(preview, Relaxed);
-        self.counters.preview_frame.store(frame, Relaxed);
-        let transport = self.transport.state();
-        self.counters.time.store(self.time, Relaxed);
-        self.counters.position.store(transport.position, Relaxed);
-        self.counters.playing.store(transport.playing, Relaxed);
-        self.timeline.until(self.time);
+    }
+}
+
+#[cfg(test)]
+impl Engine {
+    pub(crate) fn shared(&self) -> &Shared {
+        &self.shared
     }
 
-    /// Takes everything the control thread has sent.
+    /// Runs `f` on the ahead side, once no other thread renders it.
+    pub(crate) fn with_core<R>(&mut self, f: impl FnOnce(&mut Core, &Shared) -> R) -> R {
+        let shared = &*self.shared;
+        let mut token = shared.lock(self.live.waker.as_ref());
+        f(token.core(), shared)
+    }
+}
+
+impl Live {
+    /// Takes everything the control thread has sent the live side.
     fn receive(&mut self) {
         loop {
             match self.messages.peek() {
-                // Hold a swap until there is room to hand back what it replaces.
-                Ok(Message::Swap(_)) if self.graph.is_some() && self.garbage.is_full() => break,
-                Ok(Message::Tempo(_)) if self.garbage.is_full() => break,
-                // Room for the two previews a new one can let go of.
-                Ok(Message::Preview(_)) if self.garbage.slots() < 2 => break,
-                Ok(Message::Writer(..)) if self.garbage.is_full() => break,
+                // Room for the two previews a new one can let go of, or a
+                // writer and its queues.
+                Ok(_) if self.garbage.slots() < 2 => break,
                 Ok(_) => {}
                 Err(_) => break,
             }
-            match self.messages.pop() {
-                Ok(Message::Swap(graph)) => self.install(graph),
-                Ok(Message::Tempo(tempo)) => {
-                    let old = self.transport.set_tempo(tempo);
-                    // `receive` checked there is room.
-                    let returned = self.garbage.push(Garbage::Tempo(old));
-                    debug_assert!(returned.is_ok(), "the garbage queue has room");
+            let gone = match self.messages.pop() {
+                Ok(LiveMessage::Preview(preview)) => {
+                    let gone = self.previews.replace(preview);
+                    gone.map(|gone| gone.map(LiveGarbage::Preview))
                 }
-                Ok(Message::Event { time, event }) => {
-                    self.schedule(time.unwrap_or(self.time), event)
-                }
-                Ok(Message::Resend { time, event }) => {
-                    self.schedule(time.map_or(self.time, |t| t.max(self.time)), event)
-                }
-                Ok(Message::Preview(preview)) => {
-                    for gone in self.previews.replace(preview).into_iter().flatten() {
-                        // `receive` checked there is room.
-                        let returned = self.garbage.push(Garbage::Preview(gone));
-                        debug_assert!(returned.is_ok(), "the garbage queue has room");
-                    }
-                }
-                Ok(Message::Writer(key, writer)) => {
-                    let at = self.writers.iter().position(|(k, _)| *k == key);
-                    let gone = match (at, writer) {
-                        (Some(at), Some(writer)) => {
-                            Some(std::mem::replace(&mut self.writers[at].1, writer))
+                Ok(LiveMessage::Writer(key, writer, queue)) => self.add_writer(key, writer, queue),
+                Ok(LiveMessage::RemoveWriter(key)) => {
+                    match self.writers.iter().position(|w| w.key == key) {
+                        Some(at) => {
+                            let LiveWriter { writer, queue, .. } = self.writers.swap_remove(at);
+                            [
+                                Some(LiveGarbage::Writer(writer)),
+                                Some(LiveGarbage::Queue(queue)),
+                            ]
                         }
-                        (Some(at), None) => Some(self.writers.swap_remove(at).1),
-                        // The handle sends no more than there's room for.
-                        (None, Some(writer)) if self.writers.len() < MAX_WRITERS => {
-                            self.writers.push((key, writer));
-                            None
-                        }
-                        (None, writer) => writer,
-                    };
-                    if let Some(gone) = gone {
-                        // `receive` checked there is room.
-                        let returned = self.garbage.push(Garbage::Writer(gone));
-                        debug_assert!(returned.is_ok(), "the garbage queue has room");
+                        None => [None, None],
                     }
                 }
                 Err(_) => break,
+            };
+            for gone in gone.into_iter().flatten() {
+                // `receive` checked there is room.
+                let returned = self.garbage.push(gone);
+                debug_assert!(returned.is_ok(), "the garbage queue has room");
             }
         }
     }
 
-    fn install(&mut self, mut graph: Box<PreparedGraph>) {
-        if let Some(old) = self.graph.as_deref_mut() {
-            graph.adopt_from(old);
-        }
-        // Its loads have all carried on, for the control thread to read.
-        graph.loads.set_installed();
-        let latency = graph.latency() as u64;
-        self.counters.latency.store(latency, Relaxed);
-        if let Some(old) = self.graph.replace(graph) {
-            // `receive` checked there is room.
-            let returned = self.garbage.push(Garbage::Graph(old));
-            debug_assert!(returned.is_ok(), "the garbage queue has room");
-        }
-        self.counters.swaps.fetch_add(1, Relaxed);
-    }
-
-    fn schedule(&mut self, time: u64, event: Event) {
-        if self.pending.len() >= EVENT_CAPACITY {
-            self.counters.events_dropped.fetch_add(1, Relaxed);
-            return;
-        }
-        let at = self.pending.partition_point(|p| p.time <= time);
-        self.pending.insert(at, Pending { time, event });
-    }
-
-    /// Renders the next block, of at most `max` frames, and returns its
-    /// length. Its device inputs start at frame `offset` of `input`, and
-    /// its MIDI messages are those at the front of `midi` due before it
-    /// ends, which it takes off: all of them, if it is the last block.
-    fn render(
+    /// Has `writer` write the record taps with `key`, in place of the
+    /// writer it had for them, and from `queue` if it comes with one.
+    /// Returns what it let go of.
+    fn add_writer(
         &mut self,
-        input: AudioRef<'_>,
-        midi: &mut &[MidiMessage],
+        key: NodeKey,
+        writer: Box<dyn TapWriter>,
+        queue: Option<LiveQueue>,
+    ) -> [Option<LiveGarbage>; 2] {
+        match self.writers.iter_mut().find(|w| w.key == key) {
+            Some(had) => {
+                let writer = std::mem::replace(&mut had.writer, writer);
+                let queue = queue.map(|queue| std::mem::replace(&mut had.queue, queue));
+                [
+                    Some(LiveGarbage::Writer(writer)),
+                    queue.map(LiveGarbage::Queue),
+                ]
+            }
+            // The handle sends no more than there's room for, and a queue
+            // with a writer for a new key.
+            None => match queue {
+                Some(queue) if self.writers.len() < MAX_WRITERS => {
+                    self.writers.push(LiveWriter { key, writer, queue });
+                    [None, None]
+                }
+                queue => [
+                    Some(LiveGarbage::Writer(writer)),
+                    queue.map(LiveGarbage::Queue),
+                ],
+            },
+        }
+    }
+
+    /// Plays up to `most` of the frames the ahead side has rendered, as far
+    /// as their course runs on and a block at most, and hands them to
+    /// `write`. Returns how many it played.
+    fn play_ahead(
+        &mut self,
+        shared: &Shared,
+        most: usize,
+        gain: f32,
+        write: impl FnOnce(usize, Played<'_>),
+    ) -> usize {
+        let time = self.time;
+        while let Ok(next) = self.course.peek()
+            && next.segment.time <= time
+        {
+            self.current = *next;
+            let _ = self.course.pop();
+        }
+        let mut frames = most.min(self.config.max_block);
+        if let Ok(next) = self.course.peek() {
+            frames = frames.min((next.segment.time - time) as usize);
+        }
+        let Course { output, cue, .. } = self.current;
+        // SAFETY: the ahead side has rendered these frames, as `run` saw,
+        // and they aren't played yet.
+        unsafe {
+            if output > 0 {
+                shared.output.read(time, &mut self.output.view_mut(frames));
+            }
+            if cue > 0 {
+                shared.cue.read(time, &mut self.cue.view_mut(frames));
+            }
+        }
+        // A ring holds a mono output in both channels.
+        let output = (output > 0).then(|| self.output.view(frames).first(output.into()));
+        let cue = (cue > 0).then(|| self.cue.view(frames).first(cue.into()));
+        let preview = self.previews.play(frames, gain);
+        write(
+            frames,
+            Played {
+                output,
+                cue,
+                graph: None,
+                preview,
+            },
+        );
+        for LiveWriter { writer, queue, .. } in &mut self.writers {
+            // SAFETY: as above.
+            unsafe {
+                queue.play(
+                    writer.as_mut(),
+                    time,
+                    frames,
+                    &mut self.tap,
+                    &mut self.notes,
+                )
+            };
+        }
+        self.played(shared, frames);
+        frames
+    }
+
+    /// Renders the next block itself, of at most `max` frames, with the
+    /// device inputs from frame `offset` of `input` and the MIDI messages
+    /// at the front of `midi` due in it, having the ahead side take in
+    /// what was sent first if `receive`, and hands it to `write`. Returns
+    /// its length: none if a thread rendering ahead finished a block while
+    /// this waited for the core, which plays first.
+    #[allow(clippy::too_many_arguments)]
+    fn play_live<'a>(
+        &mut self,
+        shared: &Shared,
+        input: AudioRef<'a>,
+        midi: &mut &'a [MidiMessage],
         offset: usize,
         max: usize,
+        receive: bool,
+        gain: f32,
+        write: impl FnOnce(usize, Played<'_>),
     ) -> usize {
-        let start = self.time;
-        // Transport changes due by now apply before the block. The block ends
-        // at the next change, where the loop jumps back and where recording
-        // punches in or out, so each block has one transport state.
-        let due_now = self.pending.partition_point(|p| p.time <= start);
-        for i in 0..due_now {
-            if let Event::Transport(command) = self.pending[i].event {
-                self.transport.apply(command);
-            }
+        let mut token = shared.lock(self.waker.as_ref());
+        if shared.rendered.load(Acquire) > self.time {
+            return 0;
         }
-        self.transport.wrap();
-        let state = self.transport.state();
-        self.timeline.block(Segment {
-            time: start,
-            position: state.position,
-            playing: state.playing,
-            record: state.record,
-            recording: state.recording,
-            latency: self
-                .graph
-                .as_ref()
-                .map_or(0, |graph| graph.latency() as u64),
-        });
-        let mut end = start + max.min(self.config.max_block) as u64;
-        for frames in [
-            self.transport.frames_to_loop_end(),
-            self.transport.frames_to_punch(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            end = end.min(start + frames);
+        // The ahead side should have rendered this: its lead ran out.
+        if shared.primed.load(Relaxed) && shared.target.load(Relaxed) > 0 {
+            self.counters.short_blocks.fetch_add(1, Relaxed);
         }
-        for p in &self.pending[due_now..] {
-            if p.time >= end {
-                break;
-            }
-            if matches!(p.event, Event::Transport(_)) {
-                end = p.time;
-                break;
-            }
-        }
-
-        let due = self.pending.partition_point(|p| p.time < end);
-        let mut graph = self.graph.as_deref_mut();
-        let mut unmatched = 0;
-        for p in self.pending.drain(..due) {
-            if p.time < start {
-                self.counters.events_late.fetch_add(1, Relaxed);
-            }
-            let (node, kind) = match p.event {
-                Event::Param { node, param, value } => {
-                    (node, NodeEventKind::Param { param, value })
-                }
-                Event::Note { node, note } => (node, NodeEventKind::Note(note)),
-                // Transport changes due now were applied above, and later
-                // ones ended the block.
-                Event::Transport(_) => continue,
-            };
-            let event = NodeEvent {
-                offset: (p.time.max(start) - start) as usize,
-                kind,
-            };
-            match graph.as_deref_mut() {
-                Some(graph) => match graph.find(node) {
-                    Some(node) => {
-                        let routed = graph.route(node, event);
-                        debug_assert!(routed, "a graph has room for the events the engine holds");
-                    }
-                    None => unmatched += 1,
-                },
-                None => unmatched += 1,
-            }
-        }
-        if unmatched > 0 {
-            self.counters.events_unmatched.fetch_add(unmatched, Relaxed);
-        }
-
-        let frames = (end - start) as usize;
-        let due = match frames == max {
-            true => midi.len(),
-            false => midi.partition_point(|m| m.time < end),
+        let core = token.core();
+        let drive = Drive::Live {
+            input,
+            midi,
+            offset,
+            max,
+            receive,
         };
-        let (messages, later) = midi.split_at(due);
-        *midi = later;
-        if let Some(graph) = graph {
-            let block = Block {
-                frames,
-                time: start,
-                transport: self.transport.state(),
-                tempo: self.transport.tempo(),
-                input: input.range(offset..offset + frames),
-                midi: messages,
-            };
-            graph.feed_automation(&block);
-            let dropped = graph.play_notes(&block) + graph.control(&block);
-            if dropped > 0 {
-                self.counters.events_dropped.fetch_add(dropped, Relaxed);
-            }
-            graph.load_routed();
-            self.renderer.render(graph, &block);
-            graph.clear_routed();
+        let frames = (core.render(shared, drive)).expect("a block the device asks for renders");
+        self.current = core.last;
+        let graph = core.graph.as_deref();
+        let preview = self.previews.play(frames, gain);
+        write(
+            frames,
+            Played {
+                output: graph.map(|graph| graph.output(frames)),
+                cue: graph.and_then(|graph| graph.cue(frames)),
+                graph,
+                preview,
+            },
+        );
+        let start = self.time;
+        for LiveWriter { key, writer, .. } in &mut self.writers {
+            let tapped = graph.and_then(|g| g.record(*key, frames));
+            writer.write(start, tapped.unwrap_or(AudioRef::empty(frames)));
+            let notes = graph.and_then(|g| g.record_notes(*key));
+            writer.write_notes(start, frames, notes.unwrap_or_default());
         }
-        self.time = end;
-        self.transport.advance(frames as u64);
+        self.played(shared, frames);
         frames
+    }
+
+    /// Has the ahead side take in what the control thread sent, for a
+    /// callback of no frames, and goes on from where it stands, unless it
+    /// has rendered ahead.
+    fn take_in(&mut self, shared: &Shared) {
+        let mut token = shared.lock(self.waker.as_ref());
+        let core = token.core();
+        core.take_in(shared);
+        if shared.rendered.load(Acquire) == self.time {
+            self.current = core.course();
+        }
+    }
+
+    /// Moves on past `frames` frames it has played.
+    fn played(&mut self, shared: &Shared, frames: usize) {
+        self.time += frames as u64;
+        // Pairs with the ahead side's load: it may write their places in
+        // the rings again.
+        shared.played.store(self.time, Release);
+    }
+
+    /// Ends a callback: hands back the previews that finished, publishes
+    /// the counters, and has the ahead side render on if its lead is
+    /// short.
+    fn finish(&mut self, shared: &Shared) {
+        while !self.garbage.is_full()
+            && let Some(finished) = self.previews.take_finished()
+        {
+            let returned = self.garbage.push(LiveGarbage::Preview(finished));
+            debug_assert!(returned.is_ok(), "the garbage queue has room");
+        }
+        let target = shared.target.load(Relaxed);
+        if target > 0 && shared.lead() < target {
+            match &self.waker {
+                Some(waker) => waker.wake(),
+                None => shared.render_ahead_here(),
+            }
+        }
+        let counters = &self.counters;
+        let (preview, frame) = self.previews.at().unwrap_or((0, 0));
+        counters.preview.store(preview, Relaxed);
+        counters.preview_frame.store(frame, Relaxed);
+        let segment = self.current.segment;
+        counters.time.store(self.time, Relaxed);
+        counters
+            .position
+            .store(segment.position_at(self.time), Relaxed);
+        counters.playing.store(segment.playing, Relaxed);
+        counters.latency.store(segment.latency, Relaxed);
+        counters.lead.store(shared.lead(), Relaxed);
+        counters
+            .lead_target
+            .store(shared.target.load(Relaxed), Relaxed);
     }
 }
 
@@ -684,8 +868,12 @@ impl Engine {
 /// and drops the graphs it is done with.
 pub struct EngineHandle {
     config: EngineConfig,
-    messages: Producer<Message>,
-    garbage: Consumer<Garbage>,
+    /// To the ahead side.
+    core: Producer<CoreMessage>,
+    /// To the live side.
+    live: Producer<LiveMessage>,
+    core_garbage: Consumer<CoreGarbage>,
+    live_garbage: Consumer<LiveGarbage>,
     counters: Arc<Counters>,
     /// For each parameter, the value that applies last of those sent. Sent
     /// again after each swap, since a node that is new in the graph missed
@@ -714,6 +902,24 @@ impl EngineHandle {
         self.counters.snapshot()
     }
 
+    /// Has the engine render ahead of the audio device by up to `lead`,
+    /// from its next block on, while nothing in the graph is played live
+    /// ([`Node::live`](crate::Node::live)), as a track that monitors its
+    /// input is: in blocks of up to [`AHEAD_BLOCK`](crate::AHEAD_BLOCK)
+    /// frames, on the renderer's own threads when it has them, so a device
+    /// callback only copies what was rendered. While the transport stands
+    /// still, it keeps 512 frames ahead, so Play starts soon.
+    ///
+    /// What it's sent applies at the furthest frame it has rendered, at
+    /// most the lead ahead, since what it rendered can't be taken back:
+    /// transport commands, tempo maps, graphs and events sent for as soon
+    /// as possible. [`Lead::Off`], the default, renders each block as the
+    /// device asks for it.
+    pub fn set_lead(&self, lead: Lead) {
+        let frames = lead.frames(self.config.sample_rate);
+        self.counters.lead_setting.store(frames, Relaxed);
+    }
+
     /// The engine's [`Timeline`], for a recorder: where in the song each
     /// frame it renders plays, and whether it records. There's one, and the
     /// first call takes it. Read it every so often, or the engine drops
@@ -722,27 +928,27 @@ impl EngineHandle {
         self.timeline.take()
     }
 
-    /// Sends an event to apply at the start of the engine's next `process`
-    /// call.
+    /// Sends an event to apply at the start of the engine's next block: the
+    /// next `process` call's, or past what it has rendered ahead.
     pub fn send(&mut self, event: Event) -> Result<(), QueueFull<Event>> {
         self.push_event(None, event)
     }
 
     /// Sends an event to apply at engine time `time` (see [`Stats::time`]).
-    /// An event for a time already past applies at the start of the next
-    /// `process` call and counts as late.
+    /// An event for a time already past, or already rendered ahead,
+    /// applies at the start of the next block and counts as late.
     pub fn send_at(&mut self, time: u64, event: Event) -> Result<(), QueueFull<Event>> {
         self.push_event(Some(time), event)
     }
 
     fn push_event(&mut self, time: Option<u64>, event: Event) -> Result<(), QueueFull<Event>> {
-        if self.messages.push(Message::Event { time, event }).is_err() {
+        if self.core.push(CoreMessage::Event { time, event }).is_err() {
             return Err(QueueFull(event));
         }
         if let Event::Param { node, param, value } = event {
             // The value sent last isn't always the one that applies last: one
             // sent for now lands before one sent earlier for later.
-            let now = self.counters.time.load(Relaxed);
+            let now = self.counters.furthest.load(Relaxed);
             let applies = time.map_or(now, |t| t.max(now));
             let sent = LastValue {
                 time,
@@ -762,18 +968,18 @@ impl EngineHandle {
     }
 
     /// Queues `graph` to replace the running graph at the start of the
-    /// engine's next `process` call. Nodes take over the state of the old
-    /// nodes with the same keys, and each of their parameters gets the value
-    /// sent for it again: the one that applies last, if several were sent.
+    /// engine's next block. Nodes take over the state of the old nodes with
+    /// the same keys, and each of their parameters gets the value sent for
+    /// it again: the one that applies last, if several were sent.
     pub fn swap_graph(&mut self, graph: PreparedGraph) -> Result<(), SwapError> {
         if graph.config() != self.config {
             return Err(SwapError::ConfigMismatch(Box::new(graph)));
         }
-        let resend: Vec<Message> = self
+        let resend: Vec<CoreMessage> = self
             .params
             .iter()
             .filter(|((node, _), _)| graph.contains(*node))
-            .map(|(&(node, param), last)| Message::Resend {
+            .map(|(&(node, param), last)| CoreMessage::Resend {
                 time: last.time,
                 event: Event::Param {
                     node,
@@ -782,11 +988,11 @@ impl EngineHandle {
                 },
             })
             .collect();
-        if self.messages.slots() < 1 + resend.len() {
+        if self.core.slots() < 1 + resend.len() {
             return Err(SwapError::QueueFull(Box::new(graph)));
         }
-        for message in std::iter::once(Message::Swap(Box::new(graph))).chain(resend) {
-            let sent = self.messages.push(message);
+        for message in std::iter::once(CoreMessage::Swap(Box::new(graph))).chain(resend) {
+            let sent = self.core.push(message);
             debug_assert!(sent.is_ok(), "slots were checked");
         }
         Ok(())
@@ -799,15 +1005,15 @@ impl EngineHandle {
         self.params.clear();
     }
 
-    /// Replaces the engine's tempo map at the start of its next `process`
-    /// call. The playhead keeps its musical position, so changing the tempo
-    /// during playback doesn't jump, and the loop region keeps its place in
-    /// bars and beats.
+    /// Replaces the engine's tempo map at the start of its next block. The
+    /// playhead keeps its musical position, so changing the tempo during
+    /// playback doesn't jump, and the loop region keeps its place in bars
+    /// and beats.
     pub fn set_tempo_map(&mut self, tempo: TempoMap) -> Result<(), QueueFull<TempoMap>> {
-        if self.messages.is_full() {
+        if self.core.is_full() {
             return Err(QueueFull(tempo));
         }
-        let sent = self.messages.push(Message::Tempo(Box::new(tempo)));
+        let sent = self.core.push(CoreMessage::Tempo(Box::new(tempo)));
         debug_assert!(sent.is_ok(), "the queue had room");
         Ok(())
     }
@@ -816,19 +1022,21 @@ impl EngineHandle {
     /// fading out the preview playing, if one is: see [`Preview`].
     pub fn preview(&mut self, preview: Preview) -> Result<(), QueueFull<Box<Preview>>> {
         match self
-            .messages
-            .push(Message::Preview(Some(Box::new(preview))))
+            .live
+            .push(LiveMessage::Preview(Some(Box::new(preview))))
         {
             Ok(()) => Ok(()),
-            Err(rtrb::PushError::Full(Message::Preview(Some(preview)))) => Err(QueueFull(preview)),
+            Err(rtrb::PushError::Full(LiveMessage::Preview(Some(preview)))) => {
+                Err(QueueFull(preview))
+            }
             Err(_) => unreachable!("the message pushed was a preview"),
         }
     }
 
     /// Fades out the preview playing, if one is.
     pub fn stop_preview(&mut self) -> Result<(), QueueFull<()>> {
-        self.messages
-            .push(Message::Preview(None))
+        self.live
+            .push(LiveMessage::Preview(None))
             .map_err(|_| QueueFull(()))
     }
 
@@ -840,28 +1048,33 @@ impl EngineHandle {
 
     /// Has the engine write the record taps with `key` to `writer`, in
     /// place of the writer it had for them, from the start of its next
-    /// `process` call: see [`TapWriter`]. Gives the writer back if the
-    /// message queue is full, or the engine writes to as many writers as it
-    /// can already.
+    /// `process` call: see [`TapWriter`]. A writer for a key that's new
+    /// gets silence for what the engine had already rendered ahead. Gives
+    /// the writer back if the message queue is full, or the engine writes
+    /// to as many writers as it can already.
     pub fn add_writer(
         &mut self,
         key: NodeKey,
         writer: Box<dyn TapWriter>,
     ) -> Result<(), Box<dyn TapWriter>> {
-        let new = !self.writers.contains(&key);
-        if new && self.writers.len() >= MAX_WRITERS {
+        if self.writers.contains(&key) {
+            return match self.live.push(LiveMessage::Writer(key, writer, None)) {
+                Ok(()) => Ok(()),
+                Err(rtrb::PushError::Full(LiveMessage::Writer(_, writer, _))) => Err(writer),
+                Err(_) => unreachable!("the message pushed was a writer"),
+            };
+        }
+        if self.writers.len() >= MAX_WRITERS || self.core.is_full() || self.live.is_full() {
             return Err(writer);
         }
-        match self.messages.push(Message::Writer(key, Some(writer))) {
-            Ok(()) => {
-                if new {
-                    self.writers.push(key);
-                }
-                Ok(())
-            }
-            Err(rtrb::PushError::Full(Message::Writer(_, Some(writer)))) => Err(writer),
-            Err(_) => unreachable!("the message pushed was a writer"),
-        }
+        let (core, live) = ahead::writer_queues(key, self.config);
+        let sent = (self.core.push(CoreMessage::Writer(key, Some(core))).is_ok())
+            && (self.live)
+                .push(LiveMessage::Writer(key, writer, Some(live)))
+                .is_ok();
+        debug_assert!(sent, "both queues had room");
+        self.writers.push(key);
+        Ok(())
     }
 
     /// Has the engine stop writing the record taps with `key`, and drop
@@ -870,9 +1083,12 @@ impl EngineHandle {
         if !self.writers.contains(&key) {
             return Ok(());
         }
-        self.messages
-            .push(Message::Writer(key, None))
-            .map_err(|_| QueueFull(key))?;
+        if self.core.is_full() || self.live.is_full() {
+            return Err(QueueFull(key));
+        }
+        let sent = self.core.push(CoreMessage::Writer(key, None)).is_ok()
+            && self.live.push(LiveMessage::RemoveWriter(key)).is_ok();
+        debug_assert!(sent, "both queues had room");
         self.writers.retain(|&k| k != key);
         Ok(())
     }
@@ -889,16 +1105,37 @@ impl EngineHandle {
     /// while too many are waiting.
     pub fn collect_garbage(&mut self) -> usize {
         let mut dropped = 0;
-        while let Ok(garbage) = self.garbage.pop() {
+        while let Ok(garbage) = self.core_garbage.pop() {
             match garbage {
-                Garbage::Graph(graph) => drop(graph),
-                Garbage::Tempo(tempo) => drop(tempo),
-                Garbage::Preview(preview) => drop(preview),
-                Garbage::Writer(writer) => drop(writer),
+                CoreGarbage::Graph(graph) => drop(graph),
+                CoreGarbage::Tempo(tempo) => drop(tempo),
+                // A writer's end of its queues isn't the writer.
+                CoreGarbage::Writer(queues) => {
+                    drop(queues);
+                    continue;
+                }
+            }
+            dropped += 1;
+        }
+        while let Ok(garbage) = self.live_garbage.pop() {
+            match garbage {
+                LiveGarbage::Preview(preview) => drop(preview),
+                LiveGarbage::Writer(writer) => drop(writer),
+                LiveGarbage::Queue(queue) => {
+                    drop(queue);
+                    continue;
+                }
             }
             dropped += 1;
         }
         dropped
+    }
+
+    /// Sends the ahead side `message` as it is, for a test to apply to
+    /// this engine what another applied.
+    #[cfg(test)]
+    pub(crate) fn send_message(&mut self, message: CoreMessage) {
+        assert!(self.core.push(message).is_ok(), "the queue has room");
     }
 }
 

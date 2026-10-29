@@ -836,6 +836,17 @@ impl Node for MidiMonitor {
         }
     }
 
+    /// A track whose input is a MIDI input's is live while it can monitor
+    /// it. Another track's notes come from the graph.
+    fn live(&self) -> Option<bool> {
+        self.source?;
+        Some(match self.monitor {
+            Monitor::In => true,
+            Monitor::Auto => self.armed,
+            Monitor::Off => false,
+        })
+    }
+
     fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
         let (input, clips) = self.plays(&ctx.transport);
         if std::mem::take(&mut self.retiring) {

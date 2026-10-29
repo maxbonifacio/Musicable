@@ -9,10 +9,13 @@
 //!    for different `ParallelOptions::spin` settings.
 //! 3. **Small graphs.** The audio thread alone against sharing, for projects
 //!    of a few tracks: where `ParallelOptions::inline_below` belongs.
+//! 4. **Rendering ahead.** What longer blocks save when the engine renders
+//!    ahead of the device: where `AHEAD_BLOCK` belongs.
 //!
 //! ```sh
 //! cargo bench -p musicable-engine --bench realtime
 //! cargo bench -p musicable-engine --bench realtime -- small   # one table
+//! cargo bench -p musicable-engine --bench realtime -- ahead
 //! ```
 
 // A report, not engine code: it prints, and it sleeps between blocks like a
@@ -23,7 +26,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{CONFIG, Project, Routing, cores, renderer};
+use common::{AHEAD, CONFIG, Project, Routing, cores, cost, deep_for, renderer};
 use musicable_engine::{
     AudioRef, Block, ParallelOptions, ParallelRenderer, ParallelStats, PreparedGraph,
     ReferenceRenderer, Renderer, TransportState,
@@ -57,6 +60,7 @@ impl Times {
 fn render(
     renderer: &mut dyn Renderer,
     graph: &mut PreparedGraph,
+    frames: usize,
     blocks: usize,
     mut wait: impl FnMut(usize),
 ) -> Times {
@@ -65,11 +69,11 @@ fn render(
     for i in 0..blocks {
         wait(i);
         let block = Block {
-            frames: FRAMES,
-            time: (i * FRAMES) as u64,
+            frames,
+            time: (i * frames) as u64,
             transport: TransportState::default(),
             tempo: &tempo,
-            input: AudioRef::empty(FRAMES),
+            input: AudioRef::empty(frames),
             midi: &[],
         };
         let started = Instant::now();
@@ -82,14 +86,14 @@ fn render(
 
 /// Renders blocks one after another.
 fn back_to_back(renderer: &mut dyn Renderer, graph: &mut PreparedGraph, blocks: usize) -> Times {
-    render(renderer, graph, blocks, |_| {})
+    render(renderer, graph, FRAMES, blocks, |_| {})
 }
 
 /// Renders each block when a device playing at 48 kHz would ask for it.
 fn paced(renderer: &mut dyn Renderer, graph: &mut PreparedGraph, blocks: usize) -> Times {
     let period = Duration::from_secs_f64(FRAMES as f64 / f64::from(CONFIG.sample_rate));
     let start = Instant::now();
-    render(renderer, graph, blocks, |i| {
+    render(renderer, graph, FRAMES, blocks, |i| {
         wait_until(start + period * i as u32);
     })
 }
@@ -121,6 +125,10 @@ fn since(before: ParallelStats, after: ParallelStats) -> ParallelStats {
 
 fn micros(duration: Duration) -> String {
     format!("{:.0} µs", duration.as_secs_f64() * 1e6)
+}
+
+fn millis(duration: Duration) -> String {
+    format!("{:.0} ms", duration.as_secs_f64() * 1e3)
 }
 
 fn per_node_against_per_path() {
@@ -271,6 +279,84 @@ fn small_graphs() {
     println!();
 }
 
+/// Block lengths to render ahead in, from the live side's 64 frames up.
+const AHEAD_BLOCKS: [usize; 5] = [64, 128, 256, 512, 1024];
+
+/// Seconds of audio rendered in each block length.
+const AHEAD_SECONDS: usize = 4;
+
+/// Builds a graph to render ahead.
+type Build = fn() -> PreparedGraph;
+
+/// How long it took to render each second of audio.
+fn per_second(times: &Times, frames: usize) -> Duration {
+    times.mean() * AHEAD.sample_rate / frames as u32
+}
+
+fn ahead_blocks() {
+    println!("## Rendering ahead: block lengths\n");
+    println!(
+        "Each graph renders {AHEAD_SECONDS} s of audio at 48 kHz in blocks of each length, \
+         back to back, as workers rendering ahead do while the lead fills. Per second is \
+         how long a second of audio took, on one thread with the reference renderer, and \
+         shared on {} threads with the default options. The longest block is about how \
+         long the audio thread waits if it needs the engine while a worker renders one.\n",
+        cores()
+    );
+    println!(
+        "| Graph | Block | One thread, per second | Shared, per second | Speed-up | \
+         Shared, p99 block | Shared, longest block |"
+    );
+    println!("|---|---|---|---|---|---|---|");
+    let graphs: [(&str, Build); 3] = [
+        ("64 tracks, sends, slots", || {
+            let project = Project {
+                tracks: 64,
+                routing: Routing::Sends,
+                slots: true,
+            };
+            project.per_node_for(AHEAD)
+        }),
+        ("64 devices in a chain", || {
+            deep_for(AHEAD, 64, cost::DEVICE)
+        }),
+        ("4 tracks", || {
+            let project = Project {
+                tracks: 4,
+                routing: Routing::Direct,
+                slots: false,
+            };
+            project.per_node_for(AHEAD)
+        }),
+    ];
+    for (name, build) in graphs {
+        for frames in AHEAD_BLOCKS {
+            let blocks = AHEAD_SECONDS * AHEAD.sample_rate as usize / frames;
+            let ahead = |renderer: &mut dyn Renderer, graph: &mut PreparedGraph, blocks| {
+                render(renderer, graph, frames, blocks, |_| {})
+            };
+            let alone = ahead(&mut ReferenceRenderer, &mut build(), blocks);
+            let mut renderer = ParallelRenderer::new(ParallelOptions {
+                threads: cores() - 1,
+                ..ParallelOptions::default()
+            });
+            let mut graph = build();
+            ahead(&mut renderer, &mut graph, blocks / 10);
+            let shared = ahead(&mut renderer, &mut graph, blocks);
+            let (alone, shared_second) = (per_second(&alone, frames), per_second(&shared, frames));
+            println!(
+                "| {name} | {frames} | {} | {} | {:.1}× | {} | {} |",
+                millis(alone),
+                millis(shared_second),
+                alone.as_secs_f64() / shared_second.as_secs_f64(),
+                micros(shared.percentile(0.99)),
+                micros(shared.max()),
+            );
+        }
+    }
+    println!();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Only under `cargo bench`, not when tests build every target.
@@ -280,10 +366,11 @@ fn main() {
     // `cargo bench --bench realtime -- small` runs the tables with "small"
     // in their names.
     let filters: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    let tables: [(&str, fn()); 3] = [
+    let tables: [(&str, fn()); 4] = [
         ("paths", per_node_against_per_path),
         ("waiting", waiting_between_blocks),
         ("small", small_graphs),
+        ("ahead", ahead_blocks),
     ];
     println!("# The parallel scheduler at device pace\n");
     for (name, table) in tables {
