@@ -1611,19 +1611,23 @@ Both renderers time every node, every block, for the CPU figures the app
 shows per device and per track ([app.md](app.md#cpu-figures)).
 `PreparedGraph::loads` hands the control thread an `Arc<NodeLoads>`: a
 `Load` for each node, by its key (`LoadKey::Node`), and for each delay that
-delay compensation added, by the key of the node it comes after
-(`LoadKey::Delay`). A `Load` keeps the time the node took, the frames it
-rendered, and its longest block since the control thread last took it, in
-atomics on a cache line of their own. Only the thread running the node
+delay compensation added, by the key of the node it comes after and the
+`Joint` it's at (`LoadKey::Delay`), since a node can have several delays
+after it. A `Load` keeps the time the node took, the frames it rendered,
+and its longest block since the control thread last took it, in atomics
+on a cache line of their own. Only the thread running the node
 writes them, with plain loads and stores, so timing costs no locked
 instructions, apart from the longest block when it grows.
 
 **The clock** is the cheapest the CPU has: the time-stamp counter on
-x86-64, and the virtual counter on ARM64. `load::ticks_per_second`
-calibrates it once against `Instant`, over at least 10 ms since the first
-graph was prepared, and other targets, and Miri, read `Instant` itself. On
-a 4-core Xeon VM a reading took 8 ns, against 53 ns for
-`Instant::now` and `elapsed`.
+x86-64, and the virtual counter on ARM64. Its rate is found once, as the
+first graph is prepared (`load::ticks_per_second`): on ARM64 the system
+keeps it in `CNTFRQ_EL0`, and on x86-64 it's measured against `Instant`
+over 10 ms, between two readings of the counter that each take the
+closest together of a few pairs of `Instant` readings around it, so that
+neither a thread preempted mid-reading nor the computer sleeping skews it.
+Other targets, and Miri, read `Instant` itself. On a 4-core Xeon VM a
+reading took 8 ns, against 53 ns for `Instant::now` and `elapsed`.
 
 **One reading a node.** A thread reads the clock once as it starts on a
 block's nodes, and once after each node, so each node's time runs from the
@@ -1640,8 +1644,13 @@ not towards its time, which is the CPU the node took.
 **Graph swaps.** As a new graph takes over on the audio thread
 ([Graph swaps](#graph-swaps)), each node's load carries on from the node
 with the same key in the old graph, and each delay's from the delay at the
-same place, as their state does, so the figures don't jump. Until then a
-new graph's loads read nothing.
+same joint, as their state does, so the figures don't jump. A delay at the
+same joint after another node, such as the one after a tap when the taps
+change, has another `LoadKey`, and starts again. Until a new graph's loads
+have all carried on they read nothing, or only some of what they carry on,
+so the engine then marks them installed (`NodeLoads::installed`), with a
+release store that the control thread's acquire load pairs with, and the
+app reads none before.
 
 **What it costs.** The scheduler benchmark's 64-track project with every
 channel strip slot filled, 463 nodes, took about 3.7 µs of its 1.40 ms

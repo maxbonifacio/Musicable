@@ -14,18 +14,22 @@
 //! The clock is the cheapest the CPU has: the time-stamp counter on x86-64
 //! and the virtual counter on ARM64, which take a few nanoseconds to read,
 //! where the system's monotonic clock can take tens. Elsewhere it's the
-//! monotonic clock. Ticks become time as they're read
-//! ([`ticks_per_second`]).
+//! monotonic clock. Ticks become time as they're read, at the rate
+//! [`ticks_per_second`] gives.
 //!
 //! [`Node::play_notes`]: crate::Node::play_notes
 //! [`Node::control`]: crate::Node::control
 //! [`Node::adopt`]: crate::Node::adopt
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::time::{Duration, Instant};
 
 use crate::NodeKey;
+use crate::graph::Joint;
 
 /// What a node has cost since it started: the time it took, summed over the
 /// threads it ran on, the frames it rendered, and its longest block lately.
@@ -125,18 +129,20 @@ impl Load {
 pub enum LoadKey {
     /// The node with this key's.
     Node(NodeKey),
-    /// A delay's, which delay compensation added after the node with this
-    /// key, to line its output up with others ([`Graph::prepare`]).
+    /// A delay's, which delay compensation added at `at`, after the node
+    /// with the key `after`, to line its output up with others
+    /// ([`Graph::prepare`]). A node can have several delays after it, each
+    /// at its own joint.
     ///
     /// [`Graph::prepare`]: crate::Graph::prepare
-    Delay(NodeKey),
+    Delay { after: NodeKey, at: Joint },
 }
 
 impl LoadKey {
     /// The node's key, or the key of the node the delay comes after.
     pub fn node(self) -> NodeKey {
         match self {
-            Self::Node(key) | Self::Delay(key) => key,
+            Self::Node(key) | Self::Delay { after: key, .. } => key,
         }
     }
 }
@@ -149,19 +155,49 @@ pub struct NodeLoads {
     keys: Vec<LoadKey>,
     /// By node.
     pub(crate) loads: Vec<Load>,
+    /// Whether the engine has installed the graph, each load having carried
+    /// on from the graph before.
+    installed: AtomicBool,
 }
 
 impl NodeLoads {
     /// Loads for the nodes `keys` say, in order.
     pub(crate) fn new(keys: Vec<LoadKey>) -> Self {
-        // Off the audio thread, so reading the clock there never starts it.
-        start_clock();
+        // Off the audio thread, so the clock is ready before it's read there.
+        ticks_per_second();
         let loads = keys.iter().map(|_| Load::new()).collect();
-        Self { keys, loads }
+        Self {
+            keys,
+            loads,
+            installed: AtomicBool::new(false),
+        }
     }
 
-    /// Each node's load, with whose it is. Several delays can come after
-    /// one node.
+    /// Whether the engine has installed the graph. Until it has, the loads
+    /// read nothing, or only part of what they carry on from the graph
+    /// before, as the engine carries them on one by one; once it has, each
+    /// reads at least what it carried on.
+    pub fn installed(&self) -> bool {
+        self.installed.load(Acquire)
+    }
+
+    /// Says that the engine has installed the graph, once every load has
+    /// carried on from the graph before. Real-time safe.
+    pub(crate) fn set_installed(&self) {
+        self.installed.store(true, Release);
+    }
+
+    /// Carries the `n`th load on from `old`'s `old_n`th, the load of the
+    /// node the `n`th takes over from, if they're both whose they are: a
+    /// delay can take over from one at the same joint after another node,
+    /// such as the delay after a tap when the taps change. Real-time safe.
+    pub(crate) fn carry_on(&self, n: usize, old: &NodeLoads, old_n: usize) {
+        if self.keys[n] == old.keys[old_n] {
+            self.loads[n].carry_on(&old.loads[old_n]);
+        }
+    }
+
+    /// Each node's load, with whose it is.
     pub fn iter(&self) -> impl Iterator<Item = (LoadKey, &Load)> {
         self.keys.iter().copied().zip(&self.loads)
     }
@@ -207,55 +243,85 @@ pub(crate) fn now() -> u64 {
     }
     #[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
     {
-        CLOCK
-            .get()
-            .map_or(0, |&(at, _)| at.elapsed().as_nanos() as u64)
+        EPOCH.get().map_or(0, |at| at.elapsed().as_nanos() as u64)
     }
 }
 
-/// Whether [`now`] reads the monotonic clock, in nanoseconds.
-const MONOTONIC: bool = cfg!(any(
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    miri
-));
+/// Where the monotonic clock's ticks count from, where [`now`] reads it.
+#[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
+static EPOCH: OnceLock<Instant> = OnceLock::new();
 
-/// When the clock started: a time, and the ticks then, to measure the
-/// clock's rate against.
-static CLOCK: OnceLock<(Instant, u64)> = OnceLock::new();
-
-/// The clock's rate, once measured.
+/// The clock's rate, once known.
 static RATE: OnceLock<f64> = OnceLock::new();
 
-/// Starts the clock, if it hasn't started. Not on the audio thread.
-fn start_clock() {
-    CLOCK.get_or_init(|| {
-        let at = Instant::now();
-        let ticks = if MONOTONIC { 0 } else { now() };
-        (at, ticks)
-    });
+/// How many ticks of the clock make a second. It stays the same once known,
+/// so differences between readings are exact. Not on the audio thread: on
+/// x86-64 the first call measures the counter for 10 ms, which preparing
+/// the first graph does ([`NodeLoads`]).
+pub fn ticks_per_second() -> f64 {
+    *RATE.get_or_init(rate)
 }
 
-/// How many ticks of the clock make a second. It's measured against the
-/// system's monotonic clock the first time it's asked for, over the time
-/// since the first graph was prepared, and then stays the same, so
-/// differences between readings are exact. Not on the audio thread: the
-/// first call waits until the clock has run for 10 ms, to measure it well.
-pub fn ticks_per_second() -> f64 {
-    *RATE.get_or_init(|| {
-        if MONOTONIC {
-            return 1e9;
+/// The monotonic clock's rate, in nanoseconds, from when it's first read.
+#[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
+fn rate() -> f64 {
+    EPOCH.get_or_init(Instant::now);
+    1e9
+}
+
+/// The virtual counter's rate, which the system sets as it starts and
+/// keeps in CNTFRQ_EL0, or else as it measures.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+fn rate() -> f64 {
+    let hertz: u64;
+    // SAFETY: CNTFRQ_EL0 is readable at EL0 wherever CNTVCT_EL0 is, and
+    // reading it touches nothing else.
+    unsafe {
+        std::arch::asm!("mrs {}, cntfrq_el0", out(reg) hertz, options(nomem, nostack));
+    }
+    if hertz > 0 { hertz as f64 } else { measure() }
+}
+
+/// The time-stamp counter's rate, as it measures.
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+fn rate() -> f64 {
+    measure()
+}
+
+/// Measures the counter against the monotonic clock over 10 ms, long enough
+/// that the monotonic clock's own grain doesn't count, and short enough that
+/// nothing, such as the computer sleeping, comes between.
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(miri)))]
+fn measure() -> f64 {
+    const SHORTEST: Duration = Duration::from_millis(10);
+    let (start, ticks) = reading();
+    while start.elapsed() < SHORTEST {
+        std::hint::spin_loop();
+    }
+    let (end, end_ticks) = reading();
+    end_ticks.wrapping_sub(ticks) as f64 / (end - start).as_secs_f64()
+}
+
+/// The counter, with the monotonic clock's time as it was read: halfway
+/// between two of the monotonic clock's readings around it, the closest
+/// together of a few tries, so that the thread being preempted between
+/// them can't skew the rate.
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(miri)))]
+fn reading() -> (Instant, u64) {
+    let mut closest: Option<(Duration, Instant, u64)> = None;
+    for _ in 0..8 {
+        let before = Instant::now();
+        let ticks = now();
+        let between = before.elapsed();
+        if closest.is_none_or(|(apart, ..)| between < apart) {
+            closest = Some((between, before + between / 2, ticks));
         }
-        start_clock();
-        let &(at, ticks) = CLOCK.get().expect("the clock has started");
-        // Long enough that the monotonic clock's own grain doesn't count.
-        const SHORTEST: Duration = Duration::from_millis(10);
-        let mut elapsed = at.elapsed();
-        while elapsed < SHORTEST {
-            std::hint::spin_loop();
-            elapsed = at.elapsed();
+        if between < Duration::from_micros(2) {
+            break;
         }
-        now().wrapping_sub(ticks) as f64 / elapsed.as_secs_f64()
-    })
+    }
+    let (_, at, ticks) = closest.expect("the clock was read");
+    (at, ticks)
 }
 
 fn ticks_to_time(ticks: u64) -> Duration {
@@ -277,8 +343,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::nodes::{Delay, Latent, Spin, Sum};
     use crate::{
-        AudioRef, Block, EngineConfig, Graph, ParamId, PreparedGraph, ReferenceRenderer, Renderer,
-        TransportState, rt,
+        AudioRef, Block, Engine, EngineConfig, Graph, ParamId, PreparedGraph, ReferenceRenderer,
+        Renderer, TransportState, rt,
     };
 
     const CONFIG: EngineConfig = EngineConfig {
@@ -288,7 +354,6 @@ pub(crate) mod tests {
 
     #[test]
     fn ticks_become_time() {
-        start_clock();
         ticks_per_second();
         let started = Instant::now();
         let first = now();
@@ -298,7 +363,7 @@ pub(crate) mod tests {
         let ticks = now() - first;
         let measured = ticks_to_time(ticks).as_secs_f64();
         let real = started.elapsed().as_secs_f64();
-        // The rate was measured over 10 ms or more, so it's close, not exact.
+        // On x86-64 the rate was measured over 10 ms, so it's close, not exact.
         assert!(
             (measured / real - 1.0).abs() < 0.05,
             "{measured} s measured over {real} s"
@@ -487,9 +552,16 @@ pub(crate) mod tests {
         let (mut second, spun_second) = graph(20);
         let loads = second.loads();
         let delay = |loads: &NodeLoads| {
-            let mut delays = loads
-                .iter()
-                .filter(|(k, _)| *k == LoadKey::Delay(NodeKey(1)));
+            let after = |key| {
+                matches!(
+                    key,
+                    LoadKey::Delay {
+                        after: NodeKey(1),
+                        ..
+                    }
+                )
+            };
+            let mut delays = loads.iter().filter(|&(key, _)| after(key));
             let (_, delay) = delays.next().expect("a delay after the dry path");
             assert!(delays.next().is_none());
             delay.frames()
@@ -504,5 +576,98 @@ pub(crate) mod tests {
         spun_second.fetch_add(spun_first.load(Relaxed), Relaxed);
         assert_reads(spinner, &spun_second);
         assert_eq!(delay(&loads), 1280, "delays carry on from theirs too");
+    }
+
+    #[test]
+    fn each_delay_has_a_key_of_its_own() {
+        // A source into two sums, each with a latent path from the source
+        // beside it, so delay compensation adds a delay after the source
+        // into each sum.
+        let mut g = Graph::new();
+        let output = g.add(NodeKey(0), Sum::default());
+        let source = g.add(NodeKey(1), Spin::default());
+        for (key, latency) in [(2, 10), (4, 20)] {
+            let wet = g.add(NodeKey(key), Latent(Delay::new(latency)));
+            let sum = g.add(NodeKey(key + 1), Sum::default());
+            g.connect(source, wet).unwrap();
+            g.connect(wet, sum).unwrap();
+            g.connect(source, sum).unwrap();
+            g.connect(sum, output).unwrap();
+        }
+        g.set_output(output).unwrap();
+        let graph = g.prepare(&CONFIG).unwrap();
+        let mut keys: Vec<LoadKey> = graph.loads().iter().map(|(key, _)| key).collect();
+        let into = |to| LoadKey::Delay {
+            after: NodeKey(1),
+            at: Joint::Input {
+                to: NodeKey(to),
+                from: NodeKey(1),
+                nth: 0,
+            },
+        };
+        assert!(keys.contains(&into(3)), "{keys:?}");
+        assert!(keys.contains(&into(5)), "{keys:?}");
+        let len = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), len, "no two loads are the same one's");
+    }
+
+    #[test]
+    fn a_delay_carries_on_only_from_one_after_the_same_node() {
+        // Taps lined up with a latent output. When another tap comes first,
+        // the delay after the first tap is after another node, and its load
+        // starts again, as does the delay after the tap that's now second.
+        let graph = |side_first: bool| {
+            let mut g = Graph::new();
+            let source = g.add(NodeKey(0), Spin::default());
+            let side = g.add(NodeKey(1), Spin::default());
+            let wet = g.add(NodeKey(2), Latent(Delay::new(20)));
+            g.connect(source, wet).unwrap();
+            g.set_output(wet).unwrap();
+            if side_first {
+                g.add_tap(side).unwrap();
+            }
+            g.add_tap(source).unwrap();
+            g.prepare(&CONFIG).unwrap()
+        };
+        let tap = |n, after| LoadKey::Delay {
+            after: NodeKey(after),
+            at: Joint::Tap(n),
+        };
+        let frames = |loads: &NodeLoads, key| {
+            let (_, load) = loads.iter().find(|&(k, _)| k == key).expect("a load");
+            load.frames()
+        };
+        let mut first = graph(false);
+        play(&mut ReferenceRenderer, &mut first, 0, 10);
+        assert_eq!(frames(&first.loads(), tap(0, 0)), 640);
+        let mut second = graph(true);
+        rt::scope(|| second.adopt_from(&mut first));
+        play(&mut ReferenceRenderer, &mut second, 640, 10);
+        let loads = second.loads();
+        assert_eq!(frames(&loads, tap(0, 1)), 640, "after another node");
+        assert_eq!(frames(&loads, tap(1, 0)), 640, "at another joint");
+        assert_eq!(frames(&loads, LoadKey::Node(NodeKey(0))), 1280);
+    }
+
+    #[test]
+    fn loads_are_whole_once_the_engine_installs_their_graph() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        let mut buffer = vec![0.0; 2 * CONFIG.max_block];
+        for blocks in 1..=2 {
+            let mut g = Graph::new();
+            let source = g.add(NodeKey(0), Spin::default());
+            g.set_output(source).unwrap();
+            let graph = g.prepare(&CONFIG).unwrap();
+            let loads = graph.loads();
+            handle.swap_graph(graph).unwrap();
+            assert!(!loads.installed());
+            engine.process_interleaved(&mut buffer, 2);
+            assert!(loads.installed());
+            // The second carried on from the first.
+            let frames = loads.get(NodeKey(0)).unwrap().frames();
+            assert_eq!(frames, blocks * CONFIG.max_block as u64);
+        }
     }
 }

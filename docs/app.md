@@ -1282,14 +1282,19 @@ running graph's loads (`Session::loads`) each frame, after the levels:
   difference is each node's, so a node new since the oldest reading counts
   all the time it took, and one gone since counts nothing, and a row
   doesn't drop to nothing for a second when one of its nodes goes, as
-  when a send is deleted. A channel's figure adds up its rows, and the
-  total adds up them all.
+  when a send is deleted. Each delay is a node of its own here, by where
+  it is (`LoadKey::Delay`), so the same goes for one of the delays after a
+  node. A channel's figure adds up its rows, and the total adds up them
+  all.
 - **A row's longest block** is the longest any of its nodes took in the
   readings after the oldest, over the stream's period.
 - While no stream plays there are no figures, so the views show none, and
-  a graph the engine hasn't installed yet waits until it has: its loads
-  read nothing until then. Another engine, or one with another sample rate
-  or period, starts the readings again.
+  a graph the engine hasn't installed yet waits until it has
+  (`NodeLoads::installed`): until then its loads read nothing, or only
+  some of what they carry on from the graph before, and a reading of a
+  node's load that hadn't carried on yet would count all its time for a
+  second, once that reading was the oldest. Another engine, or one with
+  another sample rate or period, starts the readings again.
 
 The `View` carries the figures as a `musicable_ui::Performance`, which the
 devices' title bars ([The devices panel](#the-devices-panel)), the mixer's

@@ -351,10 +351,20 @@ impl Graph {
             .collect();
         let order = self.topological_order();
         let schedule = Schedule::new(&self.inputs, &self.outputs, &order);
-        // Each delay has one input, the node it comes after, which has a key.
-        let delayed = (self.keys.len()..self.nodes.len()).map(|n| self.keys[self.inputs[n][0].0]);
+        // Each delay has one input, the node it comes after, which has a key,
+        // and one joint.
+        let mut joints = vec![None; self.nodes.len() - self.keys.len()];
+        for &(joint, delay) in &delays {
+            joints[delay.0 - self.keys.len()] = Some(joint);
+        }
+        let delayed = (self.keys.len()..)
+            .zip(joints)
+            .map(|(n, at)| LoadKey::Delay {
+                after: self.keys[self.inputs[n][0].0],
+                at: at.expect("each delay is at a joint"),
+            });
         let loads = (self.keys.iter().map(|&key| LoadKey::Node(key)))
-            .chain(delayed.map(LoadKey::Delay))
+            .chain(delayed)
             .collect();
         self.note_routes.sort_unstable();
         let mut players: Vec<Player> = Vec::new();
@@ -727,8 +737,8 @@ pub struct PreparedGraph {
 /// Where delay compensation put a delay. A delay takes over from the delay
 /// at the same joint in the graph it replaces, as nodes with the same key
 /// do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Joint {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Joint {
     /// On the `nth` connection from `from` into `to`, counting from 0.
     Input {
         to: NodeKey,
@@ -994,8 +1004,9 @@ impl PreparedGraph {
 
     /// How long each node takes, for the control thread to read while the
     /// graph runs: keep them, and hand the graph to the engine. Each node's
-    /// load carries on from the node it takes over from, once the engine
-    /// installs the graph, so until then the loads read nothing.
+    /// load carries on from the node it takes over from as the engine
+    /// installs the graph, so they're only whole once
+    /// [`NodeLoads::installed`] says so.
     pub fn loads(&self) -> Arc<NodeLoads> {
         self.loads.clone()
     }
@@ -1012,10 +1023,10 @@ impl PreparedGraph {
     /// thread.
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
         let (nodes, old_nodes) = (&mut self.nodes, &mut old.nodes);
-        let (loads, old_loads) = (&self.loads.loads, &old.loads.loads);
+        let (loads, old_loads) = (&self.loads, &old.loads);
         let mut adopt = |id: NodeId, old_id: NodeId| {
             nodes[id.0].adopt(old_nodes[old_id.0].as_mut());
-            loads[id.0].carry_on(&old_loads[old_id.0]);
+            loads.carry_on(id.0, old_loads, old_id.0);
         };
         pairs(&self.by_key, &old.by_key, &mut adopt);
         pairs(&self.delays, &old.delays, &mut adopt);

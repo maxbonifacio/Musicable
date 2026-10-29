@@ -72,9 +72,9 @@ impl Figures {
         if self.read_at.is_some_and(|at| now < at + EVERY) {
             return;
         }
-        // Until the engine installs the graph, its loads read nothing: the
-        // readings carry on once it has.
-        if !loads.iter().any(|(_, load)| load.frames() > 0) {
+        // Until the engine installs the graph, its loads read nothing, or
+        // only some of what they carry on from the graph before.
+        if !loads.installed() {
             return;
         }
         self.read_at = Some(now);
@@ -100,10 +100,8 @@ fn read(loads: &NodeLoads, time: u64) -> Reading {
         ..Reading::default()
     };
     for (key, load) in loads.iter() {
-        // Delay compensation can add more than one delay after a node.
-        *reading.busy.entry(key).or_default() += load.busy();
-        let longest = reading.longest.entry(key).or_default();
-        *longest = (*longest).max(load.take_longest());
+        reading.busy.insert(key, load.busy());
+        reading.longest.insert(key, load.take_longest());
     }
     reading
 }
@@ -185,8 +183,8 @@ impl Places {
                 .map_or(Row::Mixer(Chain::Master), Row::Mixer)
         };
         match (key, owner) {
-            (LoadKey::Delay(_), Some(Owner::Metronome)) => Row::Metronome,
-            (LoadKey::Delay(_), Some(owner)) => mixer(owner),
+            (LoadKey::Delay { .. }, Some(Owner::Metronome)) => Row::Metronome,
+            (LoadKey::Delay { .. }, Some(owner)) => mixer(owner),
             (LoadKey::Node(_), Some(Owner::Device(device))) => Row::Device(device),
             (LoadKey::Node(_), Some(Owner::Clips(track))) => Row::Clips(track),
             (LoadKey::Node(_), Some(Owner::Modulators(chain))) => Row::Modulators(chain),
@@ -228,7 +226,7 @@ impl Places {
 mod tests {
     use musicable_commands::{Keymap, transport};
     use musicable_engine::compile::Slot;
-    use musicable_engine::{Engine, NodeKey};
+    use musicable_engine::{Engine, Joint, NodeKey};
     use musicable_model::routing::{Port, Tap, WireId};
     use musicable_model::{DeviceKind, Send, TrackKind};
 
@@ -286,7 +284,12 @@ mod tests {
         let places = Places::new(&project);
         let bass = Chain::Track(ids.bass);
         let row = |key| places.row(LoadKey::Node(key));
-        let delay = |key| places.row(LoadKey::Delay(key));
+        let delay = |after| {
+            places.row(LoadKey::Delay {
+                after,
+                at: Joint::Output,
+            })
+        };
         assert_eq!(row(keys::device(ids.drive)), Row::Device(ids.drive));
         assert_eq!(row(keys::device(ids.limiter)), Row::Device(ids.limiter));
         assert_eq!(row(keys::track_clips(ids.bass)), Row::Clips(ids.bass));
@@ -388,6 +391,39 @@ mod tests {
         // Nothing rendered in between, no figures.
         let readings = VecDeque::from([reading(48_000, &[], &[]), reading(48_000, &[], &[])]);
         assert_eq!(figures(&readings, CONFIG, &places), Performance::default());
+    }
+
+    #[test]
+    fn a_delay_gone_leaves_the_others_after_its_node_as_they_were() {
+        let (project, ids) = project();
+        let places = Places::new(&project);
+        // Delay compensation added delays after the fader into the master
+        // and into the send, and then only the one into the master.
+        let fader = keys::track_gain(ids.bass);
+        let delay = |to| LoadKey::Delay {
+            after: fader,
+            at: Joint::Input {
+                to,
+                from: fader,
+                nth: 0,
+            },
+        };
+        let (master, send) = (delay(keys::MASTER), delay(keys::send(ids.send.id)));
+        let reading = |time, busy: &[(LoadKey, u64)]| Reading {
+            time,
+            busy: (busy.iter())
+                .map(|&(key, micros)| (key, Duration::from_micros(micros)))
+                .collect(),
+            longest: BTreeMap::new(),
+        };
+        let readings = VecDeque::from([
+            reading(0, &[(master, 100_000), (send, 50_000)]),
+            reading(48_000, &[(master, 150_000)]),
+        ]);
+        let performance = figures(&readings, CONFIG, &places);
+        // The delay into the master took 50 ms of the second.
+        let mixer = performance.rows[&Row::Mixer(Chain::Track(ids.bass))];
+        assert_near(mixer.average, 0.05);
     }
 
     #[test]

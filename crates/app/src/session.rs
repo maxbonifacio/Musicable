@@ -843,8 +843,8 @@ impl Session {
     }
 
     /// How long each node of the graph last sent to the engine takes, once
-    /// one has been sent. Until the engine installs it, its loads read
-    /// nothing.
+    /// one has been sent. They're whole once the engine has installed it
+    /// ([`NodeLoads::installed`]).
     pub fn loads(&self) -> Option<&NodeLoads> {
         self.engine.loads.as_deref()
     }

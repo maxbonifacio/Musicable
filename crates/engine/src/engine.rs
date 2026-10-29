@@ -539,6 +539,8 @@ impl Engine {
         if let Some(old) = self.graph.as_deref_mut() {
             graph.adopt_from(old);
         }
+        // Its loads have all carried on, for the control thread to read.
+        graph.loads.set_installed();
         let latency = graph.latency() as u64;
         self.counters.latency.store(latency, Relaxed);
         if let Some(old) = self.graph.replace(graph) {
