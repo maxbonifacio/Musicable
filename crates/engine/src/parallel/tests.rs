@@ -11,7 +11,8 @@ use proptest::test_runner::{Config, TestRunner};
 
 use super::*;
 use crate::graph::Routed;
-use crate::nodes::{Constant, Delay, Gain, Latent, Sine, Sum};
+use crate::load::tests::{assert_reads, play, spin};
+use crate::nodes::{Constant, Delay, Gain, Latent, Sine, Spin, Sum};
 use crate::{
     AudioBuffer, AudioMut, EngineConfig, Graph, NodeEventKind, NodeKey, ParamId, ProcessContext,
     TransportState,
@@ -1027,4 +1028,47 @@ fn allocating_in_a_task_on_any_thread_fails_the_block() {
         let message = payload.downcast::<String>().unwrap();
         assert!(message.contains("real-time violation"), "{message}");
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn nodes_read_the_time_they_take_on_any_thread() {
+    let mut spun = Vec::new();
+    let mut graph = fan_in(4, |i| {
+        let (node, time) = spin(Duration::from_micros(100 * (i as u64 + 2)));
+        spun.push(time);
+        Box::new(node)
+    });
+    let loads = graph.loads();
+    let mut renderer = ParallelRenderer::new(options(3, Duration::from_millis(5)));
+    play(&mut renderer, &mut graph, 0, 30);
+    assert_eq!(renderer.monitor().stats().parallel_blocks, 30);
+    for (key, spun) in (1..).zip(&spun) {
+        let load = loads.get(NodeKey(key)).unwrap();
+        assert_reads(load, spun);
+        assert_eq!(load.frames(), 30 * 32);
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_nodes_tasks_count_towards_it_on_any_thread() {
+    // Four tasks a block, which the workers take as they spin between
+    // blocks. The node's own thread waits for theirs to finish, which
+    // counts towards its longest block, but not its load: the threads
+    // that ran them count them.
+    let node = Spin {
+        render: Duration::from_micros(800),
+        tasks: 4,
+        ..Spin::default()
+    };
+    let spun = node.spun.clone();
+    let mut graph = alone(node);
+    let loads = graph.loads();
+    let mut renderer = ParallelRenderer::new(options(3, Duration::from_millis(5)));
+    play(&mut renderer, &mut graph, 0, 20);
+    let load = loads.get(NodeKey(0)).unwrap();
+    assert_reads(load, &spun);
+    let longest = load.take_longest();
+    assert!(longest >= Duration::from_micros(200), "{longest:?}");
 }

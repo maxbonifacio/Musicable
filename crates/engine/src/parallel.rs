@@ -58,6 +58,7 @@ use std::time::{Duration, Instant};
 pub(crate) use schedule::Schedule;
 
 use self::deque::{Deque, Steal};
+use crate::load::{self, Load};
 use crate::{
     Block, InputPort, Inputs, Node, NodeEvent, NodeId, PreparedGraph, ReferenceRenderer, Renderer,
     rt,
@@ -241,6 +242,7 @@ impl ParallelRenderer {
             schedule: &graph.schedule,
             block: (block as *const Block<'_>).cast(),
             sample_rate: graph.config.sample_rate,
+            loads: graph.loads.loads.as_ptr(),
         };
         let started = Instant::now();
         self.epoch += 1;
@@ -437,6 +439,8 @@ struct Job {
     schedule: *const Schedule,
     block: *const Block<'static>,
     sample_rate: u32,
+    /// Each node's load.
+    loads: *const Load,
 }
 
 #[derive(Default)]
@@ -564,10 +568,18 @@ impl Shared {
             }
             slot.done.fetch_add(1, Release);
         }
-        // Every task is taken. Wait for the ones other lanes took.
-        let mut backoff = Backoff::default();
-        while slot.done.load(Acquire) < tasks {
-            backoff.snooze();
+        // Every task is taken. Wait for the ones other lanes took. They add
+        // their time to the node's load, so the node's own leaves the wait
+        // out.
+        if slot.done.load(Acquire) < tasks {
+            let waiting = load::now();
+            let mut backoff = Backoff::default();
+            while slot.done.load(Acquire) < tasks {
+                backoff.snooze();
+            }
+            let waited = slot.waited.load(Relaxed);
+            let waited = waited.wrapping_add(load::now().wrapping_sub(waiting));
+            slot.waited.store(waited, Relaxed);
         }
         if let Some(payload) = failure {
             panic::resume_unwind(payload);
@@ -606,12 +618,19 @@ impl Shared {
             self.wake_helpers(index);
             let started = Instant::now();
             // SAFETY: taking a task keeps its job from ending until the task
-            // is counted done, so the task is set, and alive.
-            let task = unsafe { &*(*slot.task.get()).expect("a job has its task") };
+            // is counted done, so the task is set, and alive, and so is the
+            // load of the node whose task it is, which its lane set before
+            // giving the job out.
+            let (task, load) = unsafe {
+                let task = &*(*slot.task.get()).expect("a job has its task");
+                (task, &*slot.load.load(Relaxed))
+            };
+            let ticks = load::now();
             let ran = {
                 let _tasks = WorkingFor::none();
                 panic::catch_unwind(AssertUnwindSafe(|| rt::scope(|| task(index))))
             };
+            load.add_task(load::now().wrapping_sub(ticks));
             if let Err(payload) = ran {
                 self.failure.record(payload);
             }
@@ -697,12 +716,25 @@ impl Shared {
         // counted, so the job and everything it points to stay valid.
         let job = unsafe { &*self.job.load(Acquire) };
         let schedule = unsafe { &*job.schedule };
-        let deque = &self.lanes[lane].deque;
+        let frames = unsafe { (*job.block).frames };
+        let Lane { deque, tasks, .. } = &self.lanes[lane];
         let mut next = Some(first);
+        // Each node's time runs from the end of the one before, so the clock
+        // is read once a node.
+        let mut last = load::now();
         while let Some(node) = next.or_else(|| deque.pop()) {
+            // SAFETY: the job has a load for each of its nodes.
+            let load = unsafe { &*job.loads.add(node as usize) };
+            // The time of any tasks it gives out goes there too.
+            tasks
+                .load
+                .store(std::ptr::from_ref(load).cast_mut(), Relaxed);
             // SAFETY: this lane took `node`, from the counter, a deque or by
             // making it ready, so no other thread runs it this block.
             unsafe { self.run_node(job, node) };
+            let now = load::now();
+            load.add(now.wrapping_sub(last), tasks.take_waited(), frames);
+            last = now;
             next = finish(schedule, node, deque);
             *finished += 1;
         }
@@ -759,6 +791,14 @@ struct Tasks {
     /// What runs each task. Set before `left` gives out a new job, and read
     /// only by a lane that has taken one of its tasks.
     task: UnsafeCell<Option<*const (dyn Fn(u32) + Sync)>>,
+    /// The load of the node the slot's lane is running, which the time of
+    /// each of its tasks goes into. Set before the node runs, and read only
+    /// by a lane that has taken one of its tasks.
+    load: AtomicPtr<Load>,
+    /// Ticks the slot's own lane has spent waiting for other lanes to finish
+    /// the tasks of the node it runs, since the node started. Only that lane
+    /// uses it.
+    waited: AtomicU64,
 }
 
 // SAFETY: `task` is written by the slot's own lane before it publishes a
@@ -787,6 +827,16 @@ impl Tasks {
                 Err(actual) => word = actual,
             }
         }
+    }
+
+    /// Takes the ticks the slot's lane has waited ([`Tasks::waited`]). Only
+    /// that lane calls this.
+    fn take_waited(&self) -> u64 {
+        let waited = self.waited.load(Relaxed);
+        if waited != 0 {
+            self.waited.store(0, Relaxed);
+        }
+        waited
     }
 }
 
