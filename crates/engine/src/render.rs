@@ -19,6 +19,9 @@ pub struct Block<'a> {
     pub input: AudioRef<'a>,
     /// The MIDI inputs' messages for the block: [`ProcessContext::midi`].
     pub midi: &'a [MidiMessage],
+    /// Whether the block renders ahead of the device:
+    /// [`ProcessContext::ahead`].
+    pub ahead: bool,
 }
 
 impl<'a> Block<'a> {
@@ -34,6 +37,7 @@ impl<'a> Block<'a> {
             events,
             input: self.input,
             midi: self.midi,
+            ahead: self.ahead,
         }
     }
 }
@@ -131,6 +135,7 @@ mod tests {
             tempo: &TempoMap::default(),
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         };
         ReferenceRenderer.render(&mut prepared, &block);
         prepared

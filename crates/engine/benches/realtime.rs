@@ -75,6 +75,7 @@ fn render(
             tempo: &tempo,
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         };
         let started = Instant::now();
         renderer.render(graph, &block);

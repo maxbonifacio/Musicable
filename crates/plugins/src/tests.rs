@@ -162,6 +162,8 @@ pub(crate) struct Block<'a> {
     pub(crate) transport: TransportState,
     pub(crate) tempo: TempoMap,
     pub(crate) events: &'a [NodeEvent],
+    /// Whether it renders ahead of the device.
+    pub(crate) ahead: bool,
 }
 
 /// Plays one block of `node`, with `input` on the left and its negative on
@@ -199,6 +201,7 @@ pub(crate) fn play_keyed(
         events: block.events,
         input: AudioRef::empty(frames),
         midi: &[],
+        ahead: block.ahead,
     };
     {
         let views = [

@@ -699,6 +699,7 @@ mod tests {
                 events: &[],
                 input: crate::AudioRef::empty(n),
                 midi: &[],
+                ahead: false,
             };
             rt::scope(|| player.process(&ctx, Inputs::NONE, &mut buffer.view_mut(n)));
             out.extend_from_slice(buffer.view(n).channel(0));

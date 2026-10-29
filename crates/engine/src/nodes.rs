@@ -644,7 +644,7 @@ impl Node for Gain {
         }
         self.scale(ctx, output, start..ctx.frames);
         if let Some(meter) = &self.meter {
-            meter.measure(output.view(), ctx.sample_rate);
+            meter.measure(ctx.time, output.view(), ctx.sample_rate);
         }
     }
 }
@@ -1596,6 +1596,7 @@ mod tests {
             events,
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         }
     }
 

@@ -1489,6 +1489,7 @@ mod tests {
                     tempo: &self.tempo,
                     input: crate::AudioRef::empty(frames),
                     midi: &[],
+                    ahead: false,
                 };
                 let graph = &mut self.graph;
                 rt::scope(|| {
@@ -1953,6 +1954,7 @@ mod tests {
                 events: &[],
                 input: crate::AudioRef::empty(n),
                 midi: &[],
+                ahead: false,
             };
             rt::scope(|| player.process(&ctx, Inputs::NONE, &mut buffer.view_mut(n)));
             left.extend_from_slice(buffer.view(n).channel(0));

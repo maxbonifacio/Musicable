@@ -269,4 +269,9 @@ pub struct ProcessContext<'a> {
     /// time's offset from the block's [`time`](Self::time), or at the
     /// block's first frame if it came too late for its time.
     pub midi: &'a [MidiMessage],
+    /// Whether the block renders ahead of the audio device
+    /// ([`EngineHandle::set_lead`]), to be heard up to the lead later,
+    /// rather than as the device asks for it. A plugin host passes it on,
+    /// as VST3's prefetch mode.
+    pub ahead: bool,
 }

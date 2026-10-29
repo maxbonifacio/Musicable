@@ -1688,6 +1688,7 @@ mod tests {
                     events: &[],
                     input: crate::AudioRef::empty(n),
                     midi: &[],
+                    ahead: false,
                 };
                 let (clips, buffer) = (&mut self.clips, &mut self.buffer);
                 rt::scope(|| clips.process(&ctx, Inputs::NONE, &mut buffer.view_mut(n)));

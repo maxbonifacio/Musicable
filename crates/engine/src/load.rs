@@ -450,6 +450,7 @@ pub(crate) mod tests {
                 tempo: &tempo,
                 input: AudioRef::empty(frames),
                 midi: &[],
+                ahead: false,
             };
             rt::scope(|| {
                 graph.play_notes(&block);

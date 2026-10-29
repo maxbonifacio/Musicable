@@ -638,6 +638,7 @@ mod tests {
             events,
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         }
     }
 
@@ -845,6 +846,7 @@ mod tests {
                 tempo: &tempo,
                 input: AudioRef::empty(frames),
                 midi: &[],
+                ahead: false,
             };
             feed.block(&block, RATE, |offset, value| {
                 events.push((time + offset as u64, value));

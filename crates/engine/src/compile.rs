@@ -2447,6 +2447,7 @@ mod tests {
             tempo: &p.tempo,
             input: crate::AudioRef::empty(64),
             midi: &[],
+            ahead: false,
         };
         ReferenceRenderer.render(&mut graph, &block);
         // The downbeat's click is on the cue output, and not in the mix.

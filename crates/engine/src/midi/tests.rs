@@ -471,6 +471,7 @@ impl Rig {
             tempo: &self.tempo,
             input: AudioRef::empty(64),
             midi,
+            ahead: false,
         };
         let graph = &mut self.graph;
         rt::scope(|| {

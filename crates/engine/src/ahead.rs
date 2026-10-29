@@ -850,6 +850,7 @@ impl Core {
                 tempo: self.transport.tempo(),
                 input,
                 midi,
+                ahead,
             };
             graph.feed_automation(&block);
             let dropped = graph.play_notes(&block) + graph.control(&block);
