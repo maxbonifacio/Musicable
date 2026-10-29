@@ -114,7 +114,8 @@ counter:
   down by device.
 - The **lead gauge**, the thin bar under the CPU meter while Render Ahead
   is on, is how much of the lead Musicable aims for it kept ahead of the
-  device over the last quarter of a second: full is all of it. It turns
+  device over the last quarter of a second: full is all of it, and it
+  starts again when you change Render Ahead. It turns
   amber under half, and red when the audio thread had to render blocks
   itself because the lead ran out, the step before a dropout. It's empty
   while a track monitors its input, since nothing renders ahead then. The

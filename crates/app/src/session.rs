@@ -319,7 +319,8 @@ impl Session {
     /// The new engine takes over where the old one was: its playhead goes to
     /// the same place in bars and beats, and it plays if the old one did,
     /// once the project's graph for it is ready. What the old engine hadn't
-    /// received yet, it never will.
+    /// received yet, it never will. The meters and the modulators' readings
+    /// start again, but for the meters' highest readings.
     pub fn replace_engine(&mut self, mut handle: EngineHandle) -> EngineHandle {
         let at = self.playhead();
         let playing = self.engine.playing;
@@ -330,6 +331,9 @@ impl Session {
         let old = std::mem::replace(&mut self.engine.handle, handle);
         self.engine.outbox.clear();
         self.engine.gates.clear();
+        // The new engine's time starts again from 0, and its graph measures
+        // into the same meters.
+        self.engine.meters.restart();
         self.engine.loads = None;
         self.engine.playing = false;
         self.engine.recording = false;
@@ -412,6 +416,14 @@ impl Session {
     /// counting what hasn't reached the engine yet.
     pub fn is_recording(&self) -> bool {
         self.engine.recording
+    }
+
+    /// Whether the transport plays, counting what hasn't reached the engine
+    /// yet: from the moment Play is pressed, where [`stats`](Self::stats)
+    /// says so once the device plays that far, which while the engine
+    /// renders ahead can be the lead and a block later.
+    pub fn is_playing(&self) -> bool {
+        self.engine.playing
     }
 
     /// What the armed tracks have recorded so far, while they record, for

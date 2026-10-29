@@ -621,10 +621,15 @@ level of the frame the device plays (`Stats::time`), not of the one
 rendered last, up to the lead later. Each slot's time stands in for a
 sequence number: the writer sets it to `u64::MAX` before it changes the
 readings, and to their time after, and a reader that sees it changing, or
-sees it change while it reads, goes to the slot before. With nothing from by
-then in the ring, such as before the first block or for a time it has gone
-round since, it reads the latest. `Meter::level` is the latest, and the
-highest reading is always the latest.
+sees it change while it reads, goes to the slot before. Until the first
+stretch a meter measured ended, it reads silence, as it starts, so a meter
+new to a graph that went in ahead of what's heard, such as a new track's,
+stays still until its sound is heard; a time its ring has gone round since,
+which nothing from by then is left for, reads the latest. `Meter::level` is
+the latest, and the highest reading is always the latest. An engine that
+takes over from another starts its time again from 0, so the session calls
+`Meters::restart` first, which forgets every reading but the highest, as the
+old engine's would read as the new one's.
 
 - `Meters` keeps a meter for each track and one for the master.
   `compile_metered(project, meters)` puts them in the graph's output stages;
@@ -638,7 +643,9 @@ highest reading is always the latest.
 - `Meters` also keeps a `meter::Reading`, an atomic number, for each of the
   modulators' outputs and each parameter routings move, which `follow`
   keeps as it does the meters. A reading keeps its times as a meter does:
-  `Reading::set(time, ..)` and `get_at(time)`. The `Modulation` nodes set them at each tick
+  `Reading::set(time, ..)` and `get_at(time)`, which is none before the
+  first, so the window shows a new Macro's handle at its control's value
+  until then. The `Modulation` nodes set them at each tick
   ([Modulation](#modulation)), and the window shows them on the modulator
   strip's handles and the controls they move (see
   [app.md](app.md#the-modulator-strip)).
@@ -1664,6 +1671,8 @@ graph, while the output or the cue output has more than two channels,
 which is all its rings hold, and while anything in the graph is live
 (below). `Stats::lead` is how far ahead it was at the end of the last
 callback, and `Stats::lead_target` how far ahead it aims to be.
+`Stats::rendered` is how far it had rendered when the stats were read,
+which the threads rendering ahead keep up to date between callbacks.
 
 **Two sides.** `ahead.rs` splits the engine in two. The ahead side holds the
 graph, the renderer, the transport and the events not yet due, and renders
@@ -1781,7 +1790,9 @@ delay compensation added, by the key of the node it comes after and the
 `Joint` it's at (`LoadKey::Delay`), since a node can have several delays
 after it. A `Load` keeps the time the node took, the frames it rendered,
 and its longest block since the control thread last took it, in atomics
-on a cache line of their own. Only the thread running the node
+on a cache line of their own. Blocks rendered ahead are never the longest:
+they have only to be ready before the lead runs out, not within the
+device's period, and are up to 16 times as long. Only the thread running the node
 writes them, with plain loads and stores, so timing costs no locked
 instructions, apart from the longest block when it grows.
 

@@ -175,6 +175,11 @@ pub struct Stats {
     /// ahead, because the lead ran out: what a callback that drops out has
     /// been doing.
     pub short_blocks: u64,
+    /// Frames rendered since the engine started, played and ahead: as of
+    /// now, not the last callback, as the renderer's threads render ahead
+    /// between callbacks, so it can be more than [`time`](Self::time) and
+    /// [`lead`](Self::lead) add up to.
+    pub rendered: u64,
 }
 
 /// Where the preview playing is.
@@ -208,6 +213,7 @@ impl Counters {
             lead: self.lead.load(Relaxed),
             lead_target: self.lead_target.load(Relaxed),
             short_blocks: self.short_blocks.load(Relaxed),
+            rendered: self.furthest.load(Relaxed),
         }
     }
 }

@@ -111,7 +111,7 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         buffers[node.0] = output;
         let now = load::now();
         // Its tasks ran here, if it had any.
-        loads.loads[node.0].add(now.wrapping_sub(last), 0, block.frames);
+        loads.loads[node.0].add(now.wrapping_sub(last), 0, block.frames, block.ahead);
         last = now;
     }
 }

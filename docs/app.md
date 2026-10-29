@@ -581,7 +581,10 @@ back.
 
 **Inputs.** The stream opens the inputs that armed tracks and tracks
 monitoring In take, and keeps them open until the device changes. Opening
-one restarts the stream, so it waits while recording. A MIDI input's
+one restarts the stream, so it waits while recording. Applying new audio
+settings opens those the tracks want with the new stream (`Output::apply`),
+so a take that's recording carries on with them, even with the same
+engine, as a new buffer size under 1024 frames keeps. A MIDI input's
 channels read as MPE ([engine.md](engine.md#notes)), and MIDI inputs open
 on Windows only so far ([audio.md](audio.md#midi-inputs)). A track's input
 plays through its devices the stream's monitoring latency late
@@ -1276,9 +1279,12 @@ engine that takes over.
   amber under half while the engine renders ahead, and red over a quarter
   of a second in which `Stats::short_blocks` rose: the audio thread had to
   render blocks itself. While a track monitors an input, nothing renders
-  ahead and it's empty. The CPU meter's tooltip, which the gauge shares,
-  says how far ahead the engine was, of how far it aims, and the short
-  blocks since the stream started (`Output::short_blocks`).
+  ahead and it's empty, whatever rendered ahead earlier in the quarter of a
+  second, and another setting starts the quarter again, so the gauge and
+  the tooltip show nothing from the setting before. The CPU meter's
+  tooltip, which the gauge shares, says how far ahead the engine was, of
+  how far it aims, and the short blocks since the stream started
+  (`Output::short_blocks`).
 - **Dropouts**: `StreamStats::underruns` since the stream started. Click to
   count from zero again. The tooltip has the audio lost, how many of the
   dropouts were in the system's audio engine or driver, and the late
@@ -1295,9 +1301,11 @@ running graph's loads (`Session::loads`) each frame, after the levels:
 
 - **Four times a second** it reads every node's load: the time the node
   has taken, and its longest block since the reading before, with the
-  frames the engine has rendered: those played (`Stats::time`) and those
-  ahead (`Stats::lead`), so while the lead fills or empties, the figures
-  are still over the audio rendered. It keeps the readings that span at
+  frames the engine has rendered, played and ahead (`Stats::rendered`), so
+  while the lead fills or empties, the figures are still over the audio
+  rendered. They're as of then, as the loads are, not as of the last
+  callback, as `Stats::time` and `Stats::lead` are, since the engine's
+  threads render ahead between callbacks. It keeps the readings that span at
   least the last second of audio rendered, and works the figures out from
   the oldest of them and the newest.
 - **Each node goes in a row**, by what its key belongs to
@@ -1319,7 +1327,10 @@ running graph's loads (`Session::loads`) each frame, after the levels:
   all.
 - **A row's longest block** is the longest any of its nodes took in the
   readings after the oldest, over the stream's period: the device's, not
-  the engine's `max_block`, which is longer.
+  the engine's `max_block`, which is longer. Only blocks the device waited
+  for count (`Load::add`), so the long blocks rendered ahead just before a
+  track armed don't make Longest read up to 16 times too high for the
+  second after.
 - **A row renders ahead** if the engine rendered ahead at the newest
   reading (`Stats::lead_target` above zero). In this milestone the whole
   graph renders ahead or live, so every row says the same, and

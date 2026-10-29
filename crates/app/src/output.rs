@@ -235,16 +235,23 @@ impl Output {
     /// open, the output goes back to the stream it had, and says why the new
     /// one failed.
     ///
-    /// The inputs open go with the device: the app asks for the ones it
-    /// wants again.
+    /// The inputs open go with the device: the audio inputs `wanted`, as
+    /// [`want_inputs`](Self::want_inputs) takes them, open on the new one
+    /// with it. So the stream opens once, and a take that's recording, while
+    /// which the app asks for no inputs, carries on with them.
     pub fn apply(
         &mut self,
         request: StreamRequest,
+        wanted: &BTreeSet<String>,
         session: &mut Session,
     ) -> Result<(), audio::Error> {
-        let inputs = std::mem::take(&mut self.inputs);
+        let previous = std::mem::replace(&mut self.request, request);
         let default_input = self.default_input.take();
+        let wanted = self.with_wanted(Vec::new(), wanted);
+        let inputs = std::mem::replace(&mut self.inputs, wanted);
+        let request = self.request.clone();
         if let Err(error) = self.start(&request, session) {
+            self.request = previous;
             self.inputs = inputs;
             self.default_input = default_input;
             let previous = self.request.clone();
@@ -253,7 +260,6 @@ impl Output {
             }
             return Err(error);
         }
-        self.request = request;
         Ok(())
     }
 
@@ -275,21 +281,7 @@ impl Output {
         midi: &BTreeSet<String>,
         session: &mut Session,
     ) {
-        if wanted.contains("") && self.default_input.is_none() {
-            self.default_input = Some(self.find_default_input());
-        }
-        let mut inputs = self.inputs.clone();
-        for id in wanted {
-            let id = match id.as_str() {
-                "" => self.default_input.clone().flatten(),
-                id => Some(id.to_owned()),
-            };
-            if let Some(id) = id
-                && !inputs.contains(&id)
-            {
-                inputs.push(id);
-            }
-        }
+        let inputs = self.with_wanted(self.inputs.clone(), wanted);
         let mut midi_inputs = self.midi_inputs.clone();
         if !midi.is_empty() {
             // One unplugged since it opened is forgotten, without opening
@@ -307,6 +299,26 @@ impl Output {
         if let Err(error) = self.start(&request, session) {
             self.failed(&error);
         }
+    }
+
+    /// `inputs` and then the audio inputs `wanted` they haven't got, by
+    /// their ids, with `""` for the default input.
+    fn with_wanted(&mut self, mut inputs: Vec<String>, wanted: &BTreeSet<String>) -> Vec<String> {
+        if wanted.contains("") && self.default_input.is_none() {
+            self.default_input = Some(self.find_default_input());
+        }
+        for id in wanted {
+            let id = match id.as_str() {
+                "" => self.default_input.clone().flatten(),
+                id => Some(id.to_owned()),
+            };
+            if let Some(id) = id
+                && !inputs.contains(&id)
+            {
+                inputs.push(id);
+            }
+        }
+        inputs
     }
 
     /// The ids of the MIDI inputs plugged in, listed again if the last list
@@ -740,7 +752,7 @@ struct LeadMeter {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Lately {
     /// The lead on average, in frames, while the engine rendered ahead, and
-    /// the lead it aimed for: both none if it didn't.
+    /// the lead it aimed for: both none if it didn't, or doesn't now.
     pub(crate) lead: u64,
     pub(crate) target: u64,
     /// Whether it rendered ahead at the end, and whether the transport
@@ -753,9 +765,15 @@ pub(crate) struct Lately {
 
 impl LeadMeter {
     /// Takes the engine's counters at `now`, with Render Ahead at
-    /// `setting`.
+    /// `setting`. A new setting starts the window again, so nothing from
+    /// before it shows.
     fn update(&mut self, now: Instant, stats: &Stats, setting: Lead) {
-        self.setting = setting;
+        if setting != self.setting {
+            *self = Self {
+                setting,
+                ..Self::default()
+            };
+        }
         self.short_blocks = stats.short_blocks;
         let (then, short_then) = *self.since.get_or_insert((now, stats.short_blocks));
         if stats.lead_target > 0 {
@@ -766,11 +784,15 @@ impl LeadMeter {
         if now.saturating_duration_since(then) < METER_WINDOW {
             return;
         }
+        // Rendering live at the end, whatever rendered ahead before then,
+        // there's no lead to show.
+        let ahead = stats.lead_target > 0;
         let readings = self.readings.max(1);
+        let average = |sum: u64| if ahead { sum / readings } else { 0 };
         self.lately = Some(Lately {
-            lead: self.leads / readings,
-            target: self.targets / readings,
-            ahead: stats.lead_target > 0,
+            lead: average(self.leads),
+            target: average(self.targets),
+            ahead,
             playing: stats.playing,
             short: stats.short_blocks > short_then,
         });
@@ -1021,9 +1043,13 @@ mod tests {
             "Since the device started, the audio thread rendered 2 blocks itself, as the lead \
              ran out: a bigger buffer or a longer Render Ahead gives it more room."
         ));
-        // A track monitors its input.
+        // A track monitors its input: what rendered ahead earlier in the
+        // window doesn't fill the gauge.
+        meter.update(at(600), &stats(2400, 2400, 2), Lead::Normal);
         meter.update(at(750), &stats(0, 0, 2), Lead::Normal);
         assert_eq!(meter.gauge(), gauge(0.0, false, false));
+        let lately = meter.lately.unwrap();
+        assert_eq!((lately.lead, lately.target), (0, 0));
         assert_eq!(
             meter.describe(48_000, 0),
             "Render Ahead is Normal, and nothing renders ahead now: while a track monitors its \
@@ -1042,8 +1068,15 @@ mod tests {
             "Render Ahead is Normal: the engine was 10.7 ms ahead of the device lately, of the \
              10.7 ms it aims for while the transport stands still."
         );
+        // Another setting starts the window again: nothing from before it
+        // shows.
+        meter.update(at(1100), &stopped, Lead::Long);
+        assert_eq!(meter.gauge(), None);
+        assert_eq!(meter.describe(48_000, 0), "Render Ahead is Long.");
+        meter.update(at(1350), &stopped, Lead::Long);
+        assert_eq!(meter.gauge(), gauge(1.0, true, false));
         // No gauge with Render Ahead off.
-        meter.update(at(1250), &stopped, Lead::Off);
+        meter.update(at(1600), &stopped, Lead::Off);
         assert_eq!(meter.gauge(), None);
     }
 }

@@ -11,7 +11,7 @@ use proptest::test_runner::{Config, TestRunner};
 
 use super::*;
 use crate::graph::Routed;
-use crate::load::tests::{assert_reads, play, spin};
+use crate::load::tests::{assert_reads, play, play_ahead, spin};
 use crate::nodes::{Constant, Delay, Gain, Latent, Sine, Spin, Sum};
 use crate::{
     AudioBuffer, AudioMut, EngineConfig, Graph, NodeEventKind, NodeKey, ParamId, ProcessContext,
@@ -1073,4 +1073,7 @@ fn a_nodes_tasks_count_towards_it_on_any_thread() {
     assert_reads(load, &spun);
     let longest = load.take_longest();
     assert!(longest >= Duration::from_micros(200), "{longest:?}");
+    // Blocks rendered ahead take their time, but none is the longest.
+    play_ahead(&mut renderer, &mut graph, 20 * 64, 10);
+    assert_eq!(load.take_longest(), Duration::ZERO);
 }

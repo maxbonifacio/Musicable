@@ -13,7 +13,7 @@
 //! rendered, which runs ahead of what the device has played as the lead
 //! grows, and the whole graph renders ahead, so no figure has a longest
 //! block that matters: an ahead block has only to be ready before the lead
-//! runs out.
+//! runs out, and the engine leaves those out of a node's longest.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -87,7 +87,9 @@ impl Figures {
             return;
         }
         self.read_at = Some(now);
-        let time = stats.time + stats.lead;
+        // As of now, as the loads are: the time the renderer's threads
+        // spent rendering ahead since the last callback is in them.
+        let time = stats.rendered;
         // Another engine, or the same one started again, or playing
         // through another buffer size.
         let restarted = (self.readings.back()).is_some_and(|last| time < last.time);
@@ -466,10 +468,12 @@ mod tests {
         assert!(drive.ahead && drive.average > 0.0, "{drive:?}");
         assert!(performance.rows.values().all(|cpu| cpu.ahead));
         assert_near(performance.ahead, performance.total);
-        // Over the frames rendered: the readings say how far.
+        // Over the frames rendered: the readings say how far, as of when
+        // they read the loads.
         let readings = &figures.readings;
         let newest = readings.back().unwrap().time;
-        assert_eq!(newest, stats.time + stats.lead);
+        assert_eq!(newest, stats.rendered);
+        assert!(newest >= stats.time + stats.lead);
     }
 
     #[test]

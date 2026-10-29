@@ -4,7 +4,7 @@
 
 use musicable_app::{Session, demo_project};
 use musicable_commands::{Keymap, Request, file};
-use musicable_engine::{Engine, EngineConfig, rt};
+use musicable_engine::{AudioRef, Engine, EngineConfig, rt};
 use musicable_model::Project;
 use musicable_model::time::{BeatRange, Beats};
 
@@ -137,8 +137,11 @@ fn a_new_engine_takes_over_where_the_old_one_was() {
     project.metronome = true;
     let mut rig = Rig::new(project);
 
-    // Halfway through beat 3, at 48 kHz: a beat is 28,800 frames.
+    // Halfway through beat 3, at 48 kHz: a beat is 28,800 frames. The
+    // session plays from the moment Play is pressed, and the engine once it
+    // renders.
     assert!(rig.press("Space"));
+    assert!(rig.session.is_playing() && !rig.session.stats().playing);
     rig.render(72_000);
     assert_eq!(rig.session.playhead(), Beats::from_ratio(5, 2));
 
@@ -146,10 +149,17 @@ fn a_new_engine_takes_over_where_the_old_one_was() {
         sample_rate: 44_100,
         max_block: 128,
     };
+    // What the old engine measured last, as if the song were loud then.
+    let master = rig.session.meters().master();
+    master.measure(72_000, AudioRef::from_planar(&[0.5; 256], 1), 48_000);
     let (engine, handle) = Engine::new(config);
     let old = rig.session.replace_engine(handle);
     let old_engine = std::mem::replace(&mut rig.engine, engine);
     drop((old_engine, old));
+    // The new engine's time starts again from 0, so the meters forget the
+    // old one's readings, but for the highest.
+    let level = rig.session.meters().master().level_at(1000);
+    assert_eq!((level.peak, level.highest), ([0.0; 2], 0.5));
     rig.session.wait_for_graph();
     assert_eq!(rig.session.engine_config(), config);
 

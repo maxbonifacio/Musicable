@@ -805,7 +805,7 @@ impl Shared {
         // counted, so the job and everything it points to stay valid.
         let job = unsafe { &*self.job.load(Acquire) };
         let schedule = unsafe { &*job.schedule };
-        let frames = unsafe { (*job.block).frames };
+        let (frames, ahead) = unsafe { ((*job.block).frames, (*job.block).ahead) };
         let Lane { deque, tasks, .. } = &self.lanes[lane];
         let mut next = Some(first);
         // Each node's time runs from the end of the one before, so the clock
@@ -822,7 +822,7 @@ impl Shared {
             // making it ready, so no other thread runs it this block.
             unsafe { self.run_node(job, node) };
             let now = load::now();
-            load.add(now.wrapping_sub(last), tasks.take_waited(), frames);
+            load.add(now.wrapping_sub(last), tasks.take_waited(), frames, ahead);
             last = now;
             next = finish(schedule, node, deque);
             *finished += 1;

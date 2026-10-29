@@ -49,6 +49,8 @@ const WRITING: u64 = u64::MAX;
 /// change while it reads, goes to the slot before.
 struct Timed<const N: usize> {
     slots: Box<[Slot<N>]>,
+    /// The time of the first readings set, or [`WRITING`] before any are.
+    first: AtomicU64,
 }
 
 struct Slot<const N: usize> {
@@ -64,6 +66,7 @@ impl<const N: usize> Default for Timed<N> {
         };
         Self {
             slots: (0..SLOTS).map(|_| slot()).collect(),
+            first: AtomicU64::new(WRITING),
         }
     }
 }
@@ -78,6 +81,9 @@ impl<const N: usize> Timed<N> {
     /// Sets the readings for engine time `time`. Real-time safe. One
     /// thread at a time sets them.
     fn set(&self, time: u64, values: [f32; N]) {
+        if self.first.load(Relaxed) == WRITING {
+            self.first.store(time, Relaxed);
+        }
         let slot = &self.slots[(time / GRAIN as u64) as usize % SLOTS];
         slot.time.store(WRITING, Relaxed);
         // Whoever sees a value set after this sees the slot changing.
@@ -89,7 +95,8 @@ impl<const N: usize> Timed<N> {
     }
 
     /// The readings set last for a time at or before `time`, if the ring
-    /// still has any.
+    /// has any: none before the first ([`before_first`](Self::before_first)),
+    /// or once the ring has gone round since.
     fn at(&self, time: u64) -> Option<[f32; N]> {
         let newest = time / GRAIN as u64;
         let oldest = newest.saturating_sub(SLOTS as u64 - 1);
@@ -111,6 +118,21 @@ impl<const N: usize> Timed<N> {
             }
         }
         None
+    }
+
+    /// Whether `time` comes before the first readings, as far as the ring
+    /// can tell: up to the end of their stretch, whose slot later readings
+    /// in it take.
+    fn before_first(&self, time: u64) -> bool {
+        time / GRAIN as u64 <= self.first.load(Relaxed) / GRAIN as u64
+    }
+
+    /// Forgets every reading, as if none had been set, while none are.
+    fn clear(&self) {
+        for slot in &self.slots {
+            slot.time.store(WRITING, Relaxed);
+        }
+        self.first.store(WRITING, Relaxed);
     }
 }
 
@@ -170,18 +192,23 @@ impl Meter {
     /// The readings as of engine time `time`, as the device plays it: those
     /// of the last stretch measured that ended by then, at most a few
     /// milliseconds before. While the engine renders ahead, the latest are
-    /// up to the lead later than that. They're the latest if the meter has
-    /// none from by then in the last second or so. The highest reading is
-    /// the latest, whatever the time.
+    /// up to the lead later than that. Until the first stretch the meter
+    /// measured ended, it reads silence, as it starts, and it reads the
+    /// latest if it has none from by then in the last second or so. The
+    /// highest reading is the latest, whatever the time.
     pub fn level_at(&self, time: u64) -> Level {
         let latest = self.level();
-        let Some([left, right, power_left, power_right]) = self.timed.at(time) else {
-            return latest;
-        };
-        Level {
-            peak: [left, right],
-            rms: [power_left.sqrt(), power_right.sqrt()],
-            highest: latest.highest,
+        match self.timed.at(time) {
+            Some([left, right, power_left, power_right]) => Level {
+                peak: [left, right],
+                rms: [power_left.sqrt(), power_right.sqrt()],
+                highest: latest.highest,
+            },
+            None if self.timed.before_first(time) => Level {
+                highest: latest.highest,
+                ..Level::default()
+            },
+            None => latest,
         }
     }
 
@@ -189,6 +216,15 @@ impl Meter {
     /// it.
     pub fn clear_highest(&self) {
         self.highest.store(0, Relaxed);
+    }
+
+    /// Starts the meter again, as new but for its highest reading, for an
+    /// engine that starts its time again: see [`Meters::restart`].
+    fn restart(&self) {
+        for reading in self.peak.iter().chain(&self.power) {
+            reading.store(0, Relaxed);
+        }
+        self.timed.clear();
     }
 
     /// Measures a block of `signal` that starts at engine time `time`,
@@ -261,12 +297,16 @@ impl Reading {
 
     /// The value as of engine time `time`, as the device plays it: the last
     /// set for a time by then, at most a few milliseconds before, or the
-    /// latest if there's none from by then in the last second or so. See
+    /// latest if there's none from by then in the last second or so. None
+    /// before the first was set, and for up to a few milliseconds after:
+    /// what's heard then hasn't the reading in it yet. See
     /// [`Meter::level_at`].
-    pub fn get_at(&self, time: u64) -> f32 {
-        self.timed
-            .at(time)
-            .map_or_else(|| self.get(), |[value]| value)
+    pub fn get_at(&self, time: u64) -> Option<f32> {
+        match self.timed.at(time) {
+            Some([value]) => Some(value),
+            None if self.timed.before_first(time) => None,
+            None => Some(self.get()),
+        }
     }
 
     /// Sets the value for engine time `time`. Real-time safe. One node at a
@@ -274,6 +314,12 @@ impl Reading {
     pub fn set(&self, time: u64, value: f32) {
         self.latest.store(value.to_bits(), Relaxed);
         self.timed.set(time, [value]);
+    }
+
+    /// Starts the reading again from 0, as new: see [`Meters::restart`].
+    fn restart(&self) {
+        self.latest.store(0, Relaxed);
+        self.timed.clear();
     }
 }
 
@@ -350,6 +396,19 @@ impl Meters {
     pub fn clear_highest(&self) {
         for meter in self.tracks.values().chain([&self.master]) {
             meter.clear_highest();
+        }
+    }
+
+    /// Starts every meter and reading again, as new, but for the meters'
+    /// highest readings, for an engine whose time starts again from 0 to
+    /// measure into them: the readings with the old engine's times would
+    /// read as the new one's. Call it while no engine measures into them.
+    pub fn restart(&self) {
+        for meter in self.tracks.values().chain([&self.master]) {
+            meter.restart();
+        }
+        for reading in self.outputs.values().chain(self.moved.values()) {
+            reading.restart();
         }
     }
 }
@@ -456,8 +515,13 @@ mod tests {
         let rms = |time| meter.level_at(time).rms[1];
         assert!(rms(1024) < rms(2048 + 300) && rms(2048 + 300) < rms(4096));
         assert_eq!(meter.level_at(1024).highest, 0.4);
-        // Before anything had been measured, they're the latest.
-        assert_eq!(peak_at(100), 0.4);
+        // Before the first stretch had ended, the meter reads silence, as it
+        // starts, but for the highest reading.
+        let level = meter.level_at(100);
+        assert_eq!(
+            (level.peak, level.rms, level.highest),
+            ([0.0; 2], [0.0; 2], 0.4)
+        );
         // Once the ring has gone round, the early stretches' slots have
         // later readings, so for their times there are only the latest.
         let data = vec![0.5; 2 * 1024];
@@ -474,9 +538,61 @@ mod tests {
         }
         assert_eq!(reading.get(), 63.0);
         // The last set for each stretch of 256 frames, and by the time.
-        assert_eq!(reading.get_at(32 * 20), 15.0);
-        assert_eq!(reading.get_at(32 * 23 + 7), 23.0);
-        assert_eq!(reading.get_at(10_000), 63.0);
+        assert_eq!(reading.get_at(32 * 20), Some(15.0));
+        assert_eq!(reading.get_at(32 * 23 + 7), Some(23.0));
+        assert_eq!(reading.get_at(10_000), Some(63.0));
+        // The first stretch's slot has the last set in it, at 224, so before
+        // then there's none.
+        assert_eq!(reading.get_at(100), None);
+        assert_eq!(reading.get_at(224), Some(7.0));
+    }
+
+    #[test]
+    fn readings_new_to_an_engine_rendering_ahead_wait_for_their_time() {
+        // A meter and a reading new to a graph that went in at engine time
+        // 48 000, while the device played 9600 frames, 200 ms, behind.
+        let (meter, reading) = (Meter::new(), Reading::new());
+        let data = vec![0.5; 2 * 1024];
+        for block in 0..10 {
+            let time = 48_000 + block * 1024;
+            meter.measure(time, AudioRef::from_planar(&data, 2), RATE);
+            reading.set(time, 0.75);
+        }
+        // What the device plays is from before they had any.
+        assert_eq!(meter.level_at(48_000 - 9600).peak, [0.0; 2]);
+        assert_eq!(meter.level_at(48_000 + 100).rms, [0.0; 2]);
+        assert_eq!(reading.get_at(48_000 - 1), None);
+        // Then from when they did.
+        assert_eq!(meter.level_at(48_000 + 300).peak, [0.5; 2]);
+        assert_eq!(reading.get_at(48_000), Some(0.75));
+    }
+
+    #[test]
+    fn restarted_meters_forget_the_old_engines_times() {
+        let mut project = Project::new();
+        let a = project.add_track("A", musicable_model::TrackKind::Audio);
+        let mut meters = Meters::new();
+        meters.follow(&project);
+        // An engine that played for a third of a second, loud.
+        let meter = Arc::clone(meters.track(a).unwrap());
+        measure(&meter, 1.25, 0.5, 512, 30);
+        assert_eq!(meter.level_at(1024).peak, [1.25, 0.5]);
+        meters.restart();
+        // A new one starts again from 0, with nothing measured yet.
+        let level = meter.level_at(1024);
+        assert_eq!(
+            (level.peak, level.rms, level.highest),
+            ([0.0; 2], [0.0; 2], 1.25)
+        );
+        assert_eq!(
+            meter.level(),
+            Level {
+                highest: 1.25,
+                ..Level::default()
+            }
+        );
+        measure(&meter, 0.25, 0.25, 512, 4);
+        assert_eq!(meter.level_at(1024).peak, [0.25; 2]);
     }
 
     #[test]

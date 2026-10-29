@@ -1301,7 +1301,8 @@ impl App {
     /// Plays through the stream `request` asks for, and keeps the settings
     /// if it opens.
     fn apply_audio(&mut self, request: musicable_audio::StreamRequest) {
-        let outcome = match self.output.apply(request, &mut self.session) {
+        let wanted = self.session.wanted_inputs();
+        let outcome = match self.output.apply(request, &wanted, &mut self.session) {
             Ok(()) => {
                 self.settings.audio.set_request(self.output.request());
                 self.save_settings();
@@ -1707,12 +1708,14 @@ impl eframe::App for App {
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
+        // From the frame Play is pressed in, not only once the device plays
+        // it, which can be the lead and a block later.
+        let plays = self.session.is_playing() || stats.playing;
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
-        } else if self.session.stats().playing || self.session.stats().preview.is_some() || metering
-        {
+        } else if plays || stats.preview.is_some() || metering {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
@@ -2020,14 +2023,16 @@ fn levels(meters: &Meters, project: &Project, time: u64) -> Levels {
         for modulator in &strip.modulators {
             for n in modulator.outputs() {
                 let output = modulation::Output::new(modulator.id, n);
-                if let Some(reading) = meters.output(output) {
-                    outputs.insert(output, reading.get_at(time));
+                // None until the first is heard, so a Macro's shows its
+                // control's.
+                if let Some(value) = meters.output(output).and_then(|r| r.get_at(time)) {
+                    outputs.insert(output, value);
                 }
             }
         }
         for routing in &strip.routings {
-            if let Some(reading) = meters.moved(routing.to) {
-                moved.insert(routing.to, reading.get_at(time));
+            if let Some(value) = meters.moved(routing.to).and_then(|r| r.get_at(time)) {
+                moved.insert(routing.to, value);
             }
         }
     }
