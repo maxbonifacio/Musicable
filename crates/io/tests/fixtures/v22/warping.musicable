@@ -1,0 +1,368 @@
+{
+  "format": "musicable-project",
+  "version": 22,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 128.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 2,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 6,
+  "next_locator_id": 0,
+  "next_take_id": 1,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Drums",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Break",
+          "start": 0,
+          "length": 2580480,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "Slowest",
+          "start": 2580480,
+          "length": 2580480,
+          "content": {
+            "audio": {
+              "file": "Pad.wav",
+              "offset": -645120,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 5.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [9007199254740991, 9007199254740991]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Fastest",
+          "start": 5160960,
+          "length": 322560,
+          "content": {
+            "audio": {
+              "file": "Hats.wav",
+              "offset": -9007199254740991,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 999.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [12345, -9007199254740991]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        }
+      ],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Vocals",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 3,
+          "name": "Vocal",
+          "start": 1290240,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vocal.wav",
+              "offset": -80640,
+              "gain": 0.5,
+              "fade_in": 40320,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 90.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [1000, 161280],
+                  [48000, 322560],
+                  [60000, 1075200]
+                ],
+                "onsets": null
+              },
+              "automation": [
+                {
+                  "param": "gain",
+                  "points": [
+                    [-161280, 0.0],
+                    [322560, 1.0],
+                    [322560, 15.848931924611133]
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "Vocal",
+          "start": 2580480,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vocal.wav",
+              "offset": 96000,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": null,
+              "automation": [
+                {
+                  "param": "gain",
+                  "points": [
+                    [645120, 1.0],
+                    [1290240, 0.0]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "takes": [
+        {
+          "id": 0,
+          "name": "Take 1",
+          "clips": [
+            {
+              "id": 5,
+              "name": "Vocal",
+              "start": 1290240,
+              "length": 2580480,
+              "content": {
+                "audio": {
+                  "file": "Vocal.wav",
+                  "offset": 322560,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": {
+                    "mode": "re_pitch",
+                    "tempo": 64.5,
+                    "transpose": 0,
+                    "detune": 0,
+                    "slice": {
+                      "preserve": "transients",
+                      "transient_loop": "forward",
+                      "envelope": 100.0
+                    },
+                    "granular": {
+                      "follow_pitch": true,
+                      "grain_size": 30.0,
+                      "fluctuation": 25.0
+                    },
+                    "spectral": {
+                      "high_quality": false,
+                      "formants": 100.0,
+                      "envelope": 128.0
+                    },
+                    "markers": [
+                      [0, 0]
+                    ],
+                    "onsets": null
+                  },
+                  "automation": []
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null
+}

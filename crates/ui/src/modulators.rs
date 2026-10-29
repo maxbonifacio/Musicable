@@ -985,7 +985,7 @@ mod tests {
     use musicable_model::modulation::{ModulatorId, RoutingId};
     use musicable_model::native::{NativeDevice, NativeKind};
     use musicable_model::param::{ParamSpec, Scale};
-    use musicable_model::plugin::{PluginDevice, PluginSettings};
+    use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
     use musicable_model::{DeviceId, TrackId, TrackKind};
 
     use super::*;
@@ -1370,7 +1370,7 @@ mod tests {
                     format,
                     id: name.to_lowercase(),
                     name: name.to_owned(),
-                    instrument: false,
+                    kind: PluginKind::AudioEffect,
                     inputs: Vec::new(),
                     settings: PluginSettings::default(),
                 }));

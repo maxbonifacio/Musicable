@@ -5,21 +5,31 @@ use std::ffi::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use musicable_model::PluginFormat;
+use musicable_model::plugin::PluginKind;
+use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
+use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
+use vst3::Steinberg::Vst::{BusDirection, IComponent, IComponentTrait, MediaType};
 use vst3::Steinberg::{
-    FUnknown, IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactory3,
-    IPluginFactory3Trait, IPluginFactoryTrait, PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo,
-    TUID, kResultOk,
+    FUnknown, IPluginBaseTrait, IPluginFactory, IPluginFactory2, IPluginFactory2Trait,
+    IPluginFactory3, IPluginFactory3Trait, IPluginFactoryTrait, PClassInfo, PClassInfo2,
+    PClassInfoW, PFactoryInfo, TUID, kResultOk,
 };
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use super::com::HostApplication;
 use crate::bundle::{self, canonical};
-use crate::{Error, PluginInfo};
+use crate::{Buses, Error, PluginInfo};
 
 /// The category of the classes that are plugins.
 const AUDIO_MODULE_CLASS: &str = "Audio Module Class";
+
+/// How long the scan spends making a module's plugins to count their buses
+/// ([`Module::probe`]), so a module with hundreds of plugins in it doesn't
+/// take it too long.
+const PROBE_TIME: Duration = Duration::from_secs(10);
 
 /// The folder in a bundle's `Contents` with this platform's binary, except
 /// on macOS, where it's `MacOS`.
@@ -204,9 +214,46 @@ impl Module {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .collect(),
+                buses: None,
                 path: self.path.clone(),
             })
             .collect()
+    }
+
+    /// Makes each of `plugins`, the module's, that isn't an instrument, to
+    /// count its buses, and lets it go again: VST3 has no subcategory for
+    /// MIDI effects, so the scan tells them by their buses
+    /// ([`PluginInfo::kind`]). It stops after [`PROBE_TIME`], and the
+    /// plugins it didn't make go by their subcategories alone. Called on
+    /// the thread that loaded the module, as VST3 has plugins made on the
+    /// main thread.
+    pub(crate) fn probe(&self, plugins: &mut [PluginInfo]) {
+        let started = Instant::now();
+        let host = ComWrapper::new(HostApplication);
+        let context = host
+            .as_com_ref::<FUnknown>()
+            .map_or(ptr::null_mut(), |c| c.as_ptr());
+        for plugin in plugins.iter_mut() {
+            if started.elapsed() > PROBE_TIME {
+                break;
+            }
+            if plugin.kind() == PluginKind::Instrument {
+                continue;
+            }
+            let Some(component) = parse_class_id(&plugin.id).and_then(|cid| self.create(&cid))
+            else {
+                continue;
+            };
+            // SAFETY: on the thread that loaded the module, just made, with
+            // a context that lives as long as the calls. One that fails is
+            // let go of, not terminated.
+            if unsafe { component.initialize(context) } != kResultOk {
+                continue;
+            }
+            plugin.buses = Some(buses(&component));
+            // SAFETY: initialized above, and terminated once.
+            unsafe { component.terminate() };
+        }
     }
 
     /// Makes an object of class `cid`, as interface `I`.
@@ -243,6 +290,23 @@ impl Drop for Module {
         #[cfg(target_os = "macos")]
         self.bundle.release();
         drop(self.library.take());
+    }
+}
+
+/// How many buses of each kind `component` has, which is initialized.
+pub(crate) fn buses(component: &ComPtr<IComponent>) -> Buses {
+    let count = |media: MediaType, direction: BusDirection| {
+        // SAFETY: initialized, on the thread that made it.
+        let count = unsafe { component.getBusCount(media, direction) };
+        count.max(0) as u32
+    };
+    let (audio, events) = (kAudio as MediaType, kEvent as MediaType);
+    let (input, output) = (kInput as BusDirection, kOutput as BusDirection);
+    Buses {
+        audio_in: count(audio, input),
+        audio_out: count(audio, output),
+        notes_in: count(events, input),
+        notes_out: count(events, output),
     }
 }
 

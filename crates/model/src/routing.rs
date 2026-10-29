@@ -629,7 +629,7 @@ impl Flow {
 mod tests {
     use super::*;
     use crate::native::NativeDevice;
-    use crate::plugin::{PluginDevice, PluginInput, PluginSettings};
+    use crate::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
     use crate::{Device, PluginFormat, TrackKind};
 
     /// A kick, and a bass with a compressor and an EQ after it, and a
@@ -951,7 +951,7 @@ mod tests {
             format: PluginFormat::Vst3,
             id: "0123456789ABCDEF0123456789ABCDEF".into(),
             name: "Vocoder".into(),
-            instrument: false,
+            kind: PluginKind::AudioEffect,
             inputs: vec![input(1, "Carrier"), input(3, "Aux")],
             settings: PluginSettings::default(),
         }));

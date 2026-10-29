@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use musicable_model::clip::ClipId;
-use musicable_model::plugin::PluginState;
+use musicable_model::plugin::{PluginKind, PluginState};
 use musicable_model::time::Beats;
-use musicable_model::{DeviceId, DeviceKind, Project, TrackId};
+use musicable_model::{DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
 use crate::{
     Args, BatchError, CommandError, CommandId, Context, Document, Library, Registry, Request,
@@ -167,6 +167,20 @@ impl Library for StubLibrary {
     fn plugin_state(&mut self, id: DeviceId) -> Option<PluginState> {
         self.calls.push(format!("state {}", id.0));
         self.states.get(&id).cloned()
+    }
+
+    fn set_plugin_kind(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        kind: PluginKind,
+    ) -> Result<(), String> {
+        if id.is_empty() {
+            return Err("there's no plugin with no id".to_owned());
+        }
+        let kind = kind.key();
+        self.calls.push(format!("kind {format:?} {id} {kind}"));
+        Ok(())
     }
 }
 

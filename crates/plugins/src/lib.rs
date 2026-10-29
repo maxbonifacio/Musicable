@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use musicable_model::PluginFormat;
+use musicable_model::plugin::PluginKind;
 use serde::{Deserialize, Serialize};
 
 mod bundle;
@@ -73,17 +74,54 @@ pub struct PluginInfo {
     /// such as `instrument`, `audio-effect` or `reverb`, or VST3's
     /// subcategories, such as `Instrument`, `Fx` or `Reverb`.
     pub features: Vec<String>,
+    /// What a VST3 plugin's buses take and give, as the scan found when it
+    /// made the plugin to see: VST3 has no subcategory for MIDI effects.
+    /// `None` for CLAP plugins, whose features say, and where the scan
+    /// didn't look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buses: Option<Buses>,
     /// The library it's in.
     pub path: PathBuf,
 }
 
 impl PluginInfo {
-    /// Whether the plugin plays notes.
-    pub fn is_instrument(&self) -> bool {
-        self.features
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("instrument"))
+    /// What the plugin does with notes, by the scan's rule. An instrument
+    /// says so: CLAP's `instrument` feature, or VST3's `Instrument`
+    /// subcategory. A CLAP MIDI effect has the `note-effect` feature, which
+    /// CLAP gives "a note effect or a note generator/sequencer"; one with
+    /// `note-detector`, which turns audio into notes, works on sound, so
+    /// it's an audio effect. A VST3 MIDI effect takes notes and plays notes,
+    /// and has no audio output. Everything else is an audio effect.
+    pub fn kind(&self) -> PluginKind {
+        let has = |feature: &str| {
+            self.features
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(feature))
+        };
+        let midi_effect = match self.format {
+            PluginFormat::Clap => has("note-effect"),
+            PluginFormat::Vst3 => self.buses.is_some_and(|buses| {
+                buses.notes_in > 0 && buses.notes_out > 0 && buses.audio_out == 0
+            }),
+        };
+        if has("instrument") {
+            PluginKind::Instrument
+        } else if midi_effect {
+            PluginKind::MidiEffect
+        } else {
+            PluginKind::AudioEffect
+        }
     }
+}
+
+/// How many buses of each kind a VST3 plugin has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Buses {
+    pub audio_in: u32,
+    pub audio_out: u32,
+    /// Event buses, which carry notes.
+    pub notes_in: u32,
+    pub notes_out: u32,
 }
 
 /// A plugin parameter, as the plugin describes it.

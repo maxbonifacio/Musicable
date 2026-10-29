@@ -154,9 +154,12 @@ pub trait Node: Any + Send {
     ///
     /// `ctx.events` holds the notes and controllers sent to the node for the
     /// block, in order of offset, from the nodes whose notes come to it and
-    /// from the engine, so a MIDI effect can play them on, changed. They come
-    /// here instead of with [`process`](Node::process), which gets the
-    /// node's other events.
+    /// from the engine, so a MIDI effect can play them on, changed, and the
+    /// node's parameter changes, so it plays them as its parameters are on
+    /// each frame. The notes come here instead of with
+    /// [`process`](Node::process), which gets the node's other events: its
+    /// parameter changes again, and the modulation, which comes once the
+    /// notes have played.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
 
     /// Sends the modulation the node makes for the block about to render,

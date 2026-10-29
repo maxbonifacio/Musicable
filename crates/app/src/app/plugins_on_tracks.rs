@@ -7,7 +7,9 @@
 //! plugins go on tracks the same way, and their windows open inside
 //! Musicable's on Windows. A device's Bypass button bypasses its plugin,
 //! and deactivates it with Alt, and the devices panel's keys act on the
-//! devices selected there.
+//! devices selected there. A MIDI effect is in the browser's folder of
+//! them, can be marked as another kind, and goes in front of the track's
+//! instrument.
 //!
 //! It drives the app's window as eframe would, without an audio device.
 
@@ -26,6 +28,7 @@ use musicable_test_plugins::{BYPASS, GAIN, LEVEL, gui};
 use super::App;
 use super::testing::{TempDir, chord, press, window};
 use crate::plugin_scan::PLUGINS_FILE;
+use crate::settings::SETTINGS_FILE;
 
 /// Keeps what a scan of `library` finds in `config`, as if Musicable had
 /// scanned before.
@@ -113,7 +116,7 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
         1,
     );
     click(&mut harness, "Add Device...");
-    harness.get_by_label("2 plugins");
+    harness.get_by_label("3 plugins");
 
     // A double-click puts a plugin on the track, after what's there.
     double_click(&mut harness, "Test Synth");
@@ -346,7 +349,7 @@ fn a_vst3_plugin_goes_on_a_track_and_its_window_opens_inside_musicables() {
         1,
     );
     click(&mut harness, "Add Device...");
-    harness.get_by_label("2 plugins");
+    harness.get_by_label("3 plugins");
     double_click(&mut harness, "Test Gain");
     assert_eq!(names(&harness, "Keys"), ["Test Gain"]);
     let gain = plugins(&harness, "Keys")[0].1;
@@ -373,6 +376,62 @@ fn a_vst3_plugin_goes_on_a_track_and_its_window_opens_inside_musicables() {
                    plugins' windows only on Windows so far.";
         assert_eq!(harness.state().messages, [why]);
     }
+    drop(harness);
+    library.assert_alright();
+}
+
+#[test]
+fn a_midi_effect_from_the_browser_goes_in_front_of_the_instrument() {
+    let config = TempDir::new("midi-effect-config");
+    let folder = TempDir::new("midi-effect-song");
+    // VST3's arpeggiator, which only its buses mark as a MIDI effect.
+    let library = Library::copy_vst3(&folder.0, "test-plugins");
+    scanned(&config.0, &library);
+    let mut song = Project::new();
+    song.add_track("Keys", TrackKind::Midi);
+    let path = folder.0.join("Song.musicable");
+    project::save(&path, &song).unwrap();
+    let mut harness = window(&config.0, Some(path));
+    let header = harness.get_by_label("Track Keys").rect();
+    click_at(
+        &mut harness,
+        pos2(header.left() + 12.0, header.center().y),
+        1,
+    );
+    click(&mut harness, "Add Device...");
+
+    // It's alone in the MIDI Effects folder.
+    click(&mut harness, "MIDI Effects");
+    harness.get_by_label("Test Arpeggiator");
+    assert!(harness.query_by_label("Test Synth").is_none());
+
+    // Marked as an audio effect, it leaves the folder, and the settings
+    // keep the mark. Marked as what the scan found, the mark goes.
+    let settings = || std::fs::read_to_string(config.0.join(SETTINGS_FILE)).unwrap_or_default();
+    let mark = "\"vst3:4D5553494341424C4554455354000004\" = \"audio_effect\"";
+    harness.get_by_label("Test Arpeggiator").click_secondary();
+    harness.run();
+    click(&mut harness, "Audio Effect");
+    assert!(harness.query_by_label("Test Arpeggiator").is_none());
+    assert!(settings().contains(mark), "{}", settings());
+    click(&mut harness, "Audio Effects");
+    harness.get_by_label("Test Arpeggiator").click_secondary();
+    harness.run();
+    click(&mut harness, "MIDI Effect");
+    assert!(harness.query_by_label("Test Arpeggiator").is_none());
+    assert!(!settings().contains("plugins.kinds"), "{}", settings());
+
+    // Added after the synth, it goes in front of it, where the notes are.
+    click(&mut harness, "All");
+    double_click(&mut harness, "Test Synth");
+    double_click(&mut harness, "Test Arpeggiator");
+    assert_eq!(names(&harness, "Keys"), ["Test Arpeggiator", "Test Synth"]);
+    harness.get_by_label("MIDI Effect · VST3");
+    assert!(
+        harness.state().messages.is_empty(),
+        "{:?}",
+        harness.state().messages
+    );
     drop(harness);
     library.assert_alright();
 }

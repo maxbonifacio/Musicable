@@ -48,6 +48,9 @@
 //! [agents]
 //! enabled = true
 //!
+//! [plugins.kinds]
+//! "vst3:ABCDEF0123456789ABCDEF0123456789" = "midi_effect"
+//!
 //! [recording]
 //! capture_minutes = 5
 //!
@@ -66,6 +69,7 @@
 //! other profiles has a settings file of its own, in its folder, that holds
 //! only them ([`crate::profiles`]). `[profiles]` says which is in use.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -74,6 +78,8 @@ use std::path::{Path, PathBuf};
 use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
 use musicable_engine::Lead;
+use musicable_model::PluginFormat;
+use musicable_model::plugin::PluginKind;
 use musicable_ui::{Base, DEFAULT_WORKSPACE, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
@@ -162,6 +168,9 @@ pub struct Settings {
     pub analysis: AnalysisSettings,
     pub render_cache: RenderCacheSettings,
     pub agents: AgentSettings,
+    /// Written only once a plugin is marked.
+    #[serde(skip_serializing_if = "PluginsSettings::is_empty")]
+    pub plugins: PluginsSettings,
 }
 
 /// How Musicable looks.
@@ -308,6 +317,56 @@ impl BrowserSettings {
             .preview_volume
             .clamp(MIN_PREVIEW_VOLUME, MAX_PREVIEW_VOLUME);
         10f32.powf(db as f32 / 20.0)
+    }
+}
+
+/// What kind of plugin the user marked plugins as, where the scan's rule
+/// gets them wrong ([`browser::SET_PLUGIN_KIND`]).
+///
+/// [`browser::SET_PLUGIN_KIND`]: musicable_commands::browser::SET_PLUGIN_KIND
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsSettings {
+    /// Each plugin marked, by its format and its id, as
+    /// `"clap:org.example.arp"`, and what it's marked as: `instrument`,
+    /// `midi_effect` or `audio_effect`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub kinds: BTreeMap<String, String>,
+}
+
+impl PluginsSettings {
+    /// Whether no plugin is marked.
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty()
+    }
+
+    /// The marks, by format and id, leaving out those the file has wrong.
+    pub fn marks(&self) -> BTreeMap<(PluginFormat, String), PluginKind> {
+        (self.kinds.iter())
+            .filter_map(|(plugin, kind)| {
+                let (format, id) = plugin.split_once(':')?;
+                let format = match format {
+                    "clap" => PluginFormat::Clap,
+                    "vst3" => PluginFormat::Vst3,
+                    _ => return None,
+                };
+                Some(((format, id.to_owned()), PluginKind::from_key(kind)?))
+            })
+            .collect()
+    }
+
+    /// The settings that hold `marks`.
+    pub fn from_marks(marks: &BTreeMap<(PluginFormat, String), PluginKind>) -> Self {
+        let kinds = (marks.iter())
+            .map(|((format, id), kind)| {
+                let format = match format {
+                    PluginFormat::Clap => "clap",
+                    PluginFormat::Vst3 => "vst3",
+                };
+                (format!("{format}:{id}"), kind.key().to_owned())
+            })
+            .collect();
+        Self { kinds }
     }
 }
 
@@ -685,6 +744,12 @@ mod tests {
                 min_free_gb: 10,
             },
             agents: AgentSettings { enabled: true },
+            plugins: PluginsSettings {
+                kinds: BTreeMap::from([(
+                    "vst3:ABCDEF0123456789ABCDEF0123456789".to_owned(),
+                    "midi_effect".to_owned(),
+                )]),
+            },
         };
         let text = settings.to_toml();
         assert!(text.starts_with("format = \"musicable-settings\"\nversion = 1\n"));
@@ -742,6 +807,33 @@ mod tests {
         assert!(browser.auto_preview);
         assert!((browser.preview_gain() - 0.501).abs() < 0.001);
         assert_eq!(BrowserSettings::default().preview_gain(), 1.0);
+    }
+
+    #[test]
+    fn plugins_marked_as_kinds_go_by_format_and_id() {
+        let text = "[plugins.kinds]\n\
+                    \"clap:org.example.arp\" = \"midi_effect\"\n\
+                    \"vst3:ABCD\" = \"instrument\"\n\
+                    \"au:org.example.old\" = \"instrument\"\n\
+                    \"clap:org.example.wrong\" = \"synth\"\n";
+        let plugins = Settings::parse(text).unwrap().plugins;
+        let marks = plugins.marks();
+        let expected = BTreeMap::from([
+            (
+                (PluginFormat::Clap, "org.example.arp".to_owned()),
+                PluginKind::MidiEffect,
+            ),
+            (
+                (PluginFormat::Vst3, "ABCD".to_owned()),
+                PluginKind::Instrument,
+            ),
+        ]);
+        assert_eq!(marks, expected);
+        let kept = PluginsSettings::from_marks(&marks);
+        assert_eq!(kept.marks(), marks);
+        assert_eq!(kept.kinds.len(), 2);
+        // None at first, and none written.
+        assert!(!Settings::default().to_toml().contains("plugins"));
     }
 
     #[test]

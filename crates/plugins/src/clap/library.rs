@@ -159,6 +159,7 @@ impl Library {
             version: text(descriptor.version),
             description: text(descriptor.description),
             features,
+            buses: None,
             path: self.path.clone(),
         })
     }

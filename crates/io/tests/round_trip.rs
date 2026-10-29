@@ -12,7 +12,7 @@ use musicable_model::clip::{
 use musicable_model::modulation::{ControlKind, Curve, ModulatorKind, Output, Routing};
 use musicable_model::native::{NativeDevice, NativeKind, ParamInfo};
 use musicable_model::param::{ClipParam, ParamAddress};
-use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings, PluginState};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginParam, PluginSettings, PluginState};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
     GranularSettings, Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings,
@@ -118,7 +118,7 @@ impl Random {
             format: self.pick(&[PluginFormat::Clap, PluginFormat::Vst3]),
             id: format!("org.example.{}", self.below(100)),
             name: self.name(),
-            instrument: self.one_in(2),
+            kind: self.pick(&PluginKind::ALL),
             inputs: Vec::new(),
             settings: PluginSettings { state, params },
         })

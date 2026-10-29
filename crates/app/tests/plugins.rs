@@ -10,7 +10,9 @@
 //! lines a latent plugin up with a dry track to the sample, also after the
 //! plugin's latency changes. A plugin's side inputs go into its device as
 //! it lists them, and a muted kick wired into one ducks a bass through the
-//! plugin, lined up to the sample whichever track has latency. And the
+//! plugin, lined up to the sample whichever track has latency. An
+//! arpeggiator in front of a synth plays it the notes of its track's clips
+//! in turn, and bypassed or deactivated lets the notes through. And the
 //! app's binary scans each library in a process of its own, so a library
 //! that crashes takes only that process down.
 
@@ -24,16 +26,20 @@ use musicable_commands::{Args, Keymap, Value, automation, device, edit, transpor
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
-use musicable_model::clip::{AudioClip, ClipContent};
+use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
 use musicable_plugins::scan::{self, Outcome};
 use musicable_plugins::{Instance, ParentWindow, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
-use musicable_test_plugins::vst3::{VST3_GAIN_ID, VST3_SIDECHAIN};
-use musicable_test_plugins::{BYPASS, GAIN, GAIN_ID, LATENCY, SIDECHAIN, gui};
+use musicable_test_plugins::vst3::{
+    VST3_ARPEGGIATOR_ID, VST3_GAIN_ID, VST3_SIDECHAIN, VST3_SYNTH_ID,
+};
+use musicable_test_plugins::{
+    ARP_STEP, ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, SIDECHAIN, SYNTH_ID, TRANSPOSE, gui,
+};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -82,7 +88,7 @@ impl TestPlugins {
         }
     }
 
-    /// What a scan finds: Test Gain and Test Synth.
+    /// What a scan finds: Test Gain, Test Synth and Test Arpeggiator.
     fn installed(&self) -> Vec<PluginInfo> {
         scan::scan_here(self.library.path()).unwrap()
     }
@@ -93,7 +99,28 @@ impl TestPlugins {
             PluginFormat::Clap => GAIN_ID.to_str().unwrap(),
             PluginFormat::Vst3 => VST3_GAIN_ID,
         };
-        plugin(project, self.format, id, "Test Gain", settings)
+        let kind = PluginKind::AudioEffect;
+        plugin(project, self.format, id, "Test Gain", kind, settings)
+    }
+
+    /// A Test Synth device.
+    fn synth(&self, project: &mut Project) -> Device {
+        let id = match self.format {
+            PluginFormat::Clap => SYNTH_ID.to_str().unwrap(),
+            PluginFormat::Vst3 => VST3_SYNTH_ID,
+        };
+        let (kind, settings) = (PluginKind::Instrument, PluginSettings::default());
+        plugin(project, self.format, id, "Test Synth", kind, settings)
+    }
+
+    /// A Test Arpeggiator device.
+    fn arpeggiator(&self, project: &mut Project, settings: PluginSettings) -> Device {
+        let id = match self.format {
+            PluginFormat::Clap => ARPEGGIATOR_ID.to_str().unwrap(),
+            PluginFormat::Vst3 => VST3_ARPEGGIATOR_ID,
+        };
+        let kind = PluginKind::MidiEffect;
+        plugin(project, self.format, id, "Test Arpeggiator", kind, settings)
     }
 
     /// Test Gain's Gain for `factor`: the factor itself in CLAP, and
@@ -111,6 +138,15 @@ impl TestPlugins {
         match self.format {
             PluginFormat::Clap => f64::from(frames),
             PluginFormat::Vst3 => f64::from(frames) / 48_000.0,
+        }
+    }
+
+    /// Test Arpeggiator's Transpose for `semitones`: the semitones in
+    /// CLAP, and normalized from -24 to 24 in VST3.
+    fn transpose(&self, semitones: f64) -> f64 {
+        match self.format {
+            PluginFormat::Clap => semitones,
+            PluginFormat::Vst3 => (semitones + 24.0) / 48.0,
         }
     }
 
@@ -182,13 +218,14 @@ fn plugin(
     format: PluginFormat,
     id: &str,
     name: &str,
+    kind: PluginKind,
     settings: PluginSettings,
 ) -> Device {
     project.new_device(DeviceKind::Plugin(PluginDevice {
         format,
         id: id.to_owned(),
         name: name.to_owned(),
-        instrument: false,
+        kind,
         inputs: Vec::new(),
         settings,
     }))
@@ -701,8 +738,8 @@ fn a_missing_plugin_lets_the_sound_through_and_says_why() {
     let plugins = TestPlugins::new(PluginFormat::Clap, "missing");
     let settings = PluginSettings::default();
     let reverb = |p: &mut Project| {
-        let id = "org.example.reverb";
-        plugin(p, PluginFormat::Clap, id, "Old Reverb", settings)
+        let (id, kind) = ("org.example.reverb", PluginKind::AudioEffect);
+        plugin(p, PluginFormat::Clap, id, "Old Reverb", kind, settings)
     };
     let (song, device) = tone_with(reverb);
     let mut rig = Rig::new(song, None);
@@ -925,6 +962,99 @@ fn ducks_a_bass_through_a_side_input(format: PluginFormat) {
 }
 
 #[test]
+fn a_clap_arpeggiator_plays_a_synth_in_its_track() {
+    arpeggiator_plays_a_synth_in_its_track(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_arpeggiator_plays_a_synth_in_its_track() {
+    arpeggiator_plays_a_synth_in_its_track(PluginFormat::Vst3);
+}
+
+/// How many times `samples` cross zero.
+fn crossings(samples: &[f32]) -> usize {
+    samples
+        .windows(2)
+        .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
+        .count()
+}
+
+/// The peak of `samples`.
+fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0, |peak, s| peak.max(s.abs()))
+}
+
+#[track_caller]
+fn assert_plays_key(samples: &[f32], key: u8) {
+    let frequency = 440.0 * 2.0_f64.powf((f64::from(key) - 69.0) / 12.0);
+    let expected = 2.0 * frequency * samples.len() as f64 / f64::from(CONFIG.sample_rate);
+    let crossed = crossings(samples) as f64;
+    assert!(
+        (crossed - expected).abs() < 2.0,
+        "{crossed} crossings, and key {key} makes {expected:.1}"
+    );
+    // Test Synth's Level, at velocity 1.
+    let peak = peak(samples);
+    assert!((peak - 0.5).abs() < 0.01, "a peak of {peak}");
+}
+
+fn arpeggiator_plays_a_synth_in_its_track(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "arpeggiator");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    // C and E, held for a beat: half a second.
+    let mut chord = MidiClip::default();
+    for key in [60, 64] {
+        chord.add_note(Beats::ZERO, Beats::new(1), key, 1.0);
+    }
+    let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+    let clip = song.new_clip("Chord", range, ClipContent::Midi(chord));
+    let up = with_param(TRANSPOSE, plugins.transpose(12.0));
+    let arpeggiator = plugins.arpeggiator(&mut song, up);
+    let synth = plugins.synth(&mut song);
+    let track = song.track_mut(keys).unwrap();
+    track.clips.push(clip);
+    track.devices = vec![arpeggiator.clone(), synth];
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+
+    // The chord's keys in turn, lowest first, an octave up, a step of an
+    // eighth of a second each, until the chord ends.
+    let beat = 24_000;
+    let step = (ARP_STEP * f64::from(CONFIG.sample_rate)) as usize;
+    let (left, _) = rig.play_from_start(beat + 4_800);
+    let start = left.iter().position(|s| *s != 0.0).unwrap();
+    assert!(start < 256, "the synth started at {start}");
+    for (i, key) in [72, 76, 72, 76].into_iter().enumerate() {
+        // Clear of where the steps meet.
+        let from = start + i * step + 100;
+        assert_plays_key(&left[from..from + step - 200], key);
+    }
+    assert!(left[start + beat + 1..].iter().all(|s| *s == 0.0));
+
+    // Bypassed or deactivated, it lets the chord through as it is: two
+    // notes at once.
+    let device = Args::new().with("devices", vec![arpeggiator.id]);
+    let bypass = device.clone().with("bypassed", true);
+    rig.session.run_with(&device::SET_BYPASS, &bypass).unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(beat);
+    assert!(peak(&left) > 0.9, "a peak of {}", peak(&left));
+    let bypass = device.clone().with("bypassed", false);
+    rig.session.run_with(&device::SET_BYPASS, &bypass).unwrap();
+    let deactivate = device.with("active", false);
+    rig.session
+        .run_with(&device::SET_ACTIVE, &deactivate)
+        .unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(beat);
+    assert!(peak(&left) > 0.9, "a peak of {}", peak(&left));
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
 fn the_app_scans_each_library_in_a_process_of_its_own() {
     let dir = folder("scan");
     let scanned = |library: &Path| {
@@ -939,7 +1069,10 @@ fn the_app_scans_each_library_in_a_process_of_its_own() {
             panic!("the test plugins weren't found in {}", good.display());
         };
         let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Test Gain", "Test Synth"]);
+        assert_eq!(names, ["Test Gain", "Test Synth", "Test Arpeggiator"]);
+        // A MIDI effect, which a VST3 plugin says only through its buses,
+        // as the scanning process counts them.
+        assert_eq!(found[2].kind(), PluginKind::MidiEffect);
     }
     for crash in copies("crash") {
         let crashed = scanned(&crash);

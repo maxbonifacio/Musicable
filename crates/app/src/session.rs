@@ -26,10 +26,11 @@ use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
 use musicable_model::modulation::Routing;
 use musicable_model::param::ParamAddress;
+use musicable_model::plugin::PluginKind;
 use musicable_model::routing::Tap;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::WarpMode;
-use musicable_model::{DeviceId, Input, Monitor, Project, TrackId, TrackKind};
+use musicable_model::{DeviceId, Input, Monitor, PluginFormat, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 use crate::library::{Library, LibraryLink, ToEngine};
@@ -890,6 +891,30 @@ impl Session {
     /// The plugins the session finds the project's plugins among.
     pub fn installed_plugins(&self) -> &[PluginInfo] {
         self.plugins.installed()
+    }
+
+    /// What `plugin` does with notes: what the user marked it as
+    /// ([`browser::SET_PLUGIN_KIND`]), or what the scan found.
+    ///
+    /// [`browser::SET_PLUGIN_KIND`]: musicable_commands::browser::SET_PLUGIN_KIND
+    pub fn plugin_kind(&self, plugin: &PluginInfo) -> PluginKind {
+        self.plugins.kind_of(plugin)
+    }
+
+    /// What the user marked plugins as, by format and id.
+    pub fn plugin_kinds(&self) -> &BTreeMap<(PluginFormat, String), PluginKind> {
+        self.plugins.kinds()
+    }
+
+    /// Has the plugins marked as in `kinds`, as the settings file has them.
+    pub fn set_plugin_kinds(&mut self, kinds: BTreeMap<(PluginFormat, String), PluginKind>) {
+        self.plugins.set_kinds(kinds);
+    }
+
+    /// Whether the user marked a plugin as another kind since this last
+    /// said, for the app to save and list it.
+    pub fn take_plugin_kinds_changed(&mut self) -> bool {
+        self.plugins.take_kinds_changed()
     }
 
     /// Plugins loaded from now on call `waker`, from any thread but an

@@ -464,7 +464,7 @@ struct PluginDevice {
     format: PluginFormat,
     id: String,
     name: String,
-    instrument: bool,
+    kind: PluginKind,
     /// Its side inputs, as the plugin last said.
     inputs: Vec<PluginInput>,
     /// Base64, or `None` for a plugin as new.
@@ -488,6 +488,35 @@ struct PluginInput {
 enum PluginFormat {
     Clap,
     Vst3,
+}
+
+/// What a plugin does with notes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PluginKind {
+    Instrument,
+    MidiEffect,
+    AudioEffect,
+}
+
+impl From<model::plugin::PluginKind> for PluginKind {
+    fn from(kind: model::plugin::PluginKind) -> Self {
+        match kind {
+            model::plugin::PluginKind::Instrument => Self::Instrument,
+            model::plugin::PluginKind::MidiEffect => Self::MidiEffect,
+            model::plugin::PluginKind::AudioEffect => Self::AudioEffect,
+        }
+    }
+}
+
+impl From<PluginKind> for model::plugin::PluginKind {
+    fn from(kind: PluginKind) -> Self {
+        match kind {
+            PluginKind::Instrument => Self::Instrument,
+            PluginKind::MidiEffect => Self::MidiEffect,
+            PluginKind::AudioEffect => Self::AudioEffect,
+        }
+    }
 }
 
 /// One of Musicable's own devices.
@@ -2592,7 +2621,7 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             format,
             id,
             name,
-            instrument,
+            kind,
             inputs,
             settings,
         } = plugin;
@@ -2604,7 +2633,7 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             },
             id: id.clone(),
             name: name.clone(),
-            instrument: *instrument,
+            kind: (*kind).into(),
             inputs: (inputs.iter())
                 .map(|input| PluginInput {
                     id: input.id,
@@ -2623,7 +2652,7 @@ impl PluginDevice {
             format,
             id,
             name,
-            instrument,
+            kind,
             inputs,
             state,
             params,
@@ -2662,7 +2691,7 @@ impl PluginDevice {
             },
             id: id.clone(),
             name: name.clone(),
-            instrument: *instrument,
+            kind: (*kind).into(),
             inputs: (inputs.iter())
                 .map(|input| model::plugin::PluginInput {
                     id: input.id,

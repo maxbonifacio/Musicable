@@ -13,10 +13,10 @@ use std::path::Path;
 use musicable_model::automation::Lane;
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::routing::{Tap, Wire};
 use musicable_model::{
-    Chain, Device, DeviceId, DeviceKind, PluginFormat, Project, TrackId, TrackKind,
+    Chain, Device, DeviceId, DeviceKind, Misplaced, PluginFormat, Project, TrackId, TrackKind,
 };
 
 use crate::editor::{DeviceClipboard, Editor, Focus, Selection, TakenDevice};
@@ -109,6 +109,24 @@ const TO_NEW_TRACK: Param = Param::optional(
 /// The keys of Musicable's own devices, as `device.add` takes them.
 const KINDS: &str = "eq, compressor, gate, delay, reverb, utility, sampler or synth";
 
+/// The kinds of plugin, as `device.add_plugin` takes them.
+pub(crate) const PLUGIN_KINDS: &[&str] = &["instrument", "midi_effect", "audio_effect"];
+
+/// The `format` argument: a plugin's format.
+pub(crate) const FORMAT: Param =
+    Param::required("format", Type::Text, "The plugin's format: clap or vst3.");
+
+/// The plugin format the `format` argument names.
+pub(crate) fn plugin_format(args: &Args) -> Result<PluginFormat, CommandError> {
+    match args.get::<String>("format")?.as_str() {
+        "clap" => Ok(PluginFormat::Clap),
+        "vst3" => Ok(PluginFormat::Vst3),
+        other => Err(CommandError::invalid(format!(
+            "there's no plugin format {other:?}: it's clap or vst3"
+        ))),
+    }
+}
+
 /// Registers the device commands.
 pub fn register(registry: &mut Registry) {
     registry.add(
@@ -137,7 +155,7 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         Command::new(ADD_PLUGIN, "Add Plugin").with_params(&[
-            Param::required("format", Type::Text, "The plugin's format: clap or vst3."),
+            FORMAT,
             Param::required(
                 "plugin",
                 Type::Text,
@@ -145,9 +163,11 @@ pub fn register(registry: &mut Registry) {
             ),
             Param::required("name", Type::Text, "Its name, to show while it's missing."),
             Param::optional(
-                "instrument",
-                Type::Bool,
-                "Whether it plays notes: not without it.",
+                "kind",
+                Type::Choice(PLUGIN_KINDS),
+                "What it does with notes: an instrument plays them, and a MIDI effect, such \
+                 as an arpeggiator, plays them on changed, before the instrument on a MIDI \
+                 track. An audio effect without it.",
             ),
             TRACK,
             MASTER,
@@ -155,24 +175,20 @@ pub fn register(registry: &mut Registry) {
             NEW_TRACK,
         ]),
         |ctx, args| {
-            let format = match args.get::<String>("format")?.as_str() {
-                "clap" => PluginFormat::Clap,
-                "vst3" => PluginFormat::Vst3,
-                other => {
-                    return Err(CommandError::invalid(format!(
-                        "there's no plugin format {other:?}: it's clap or vst3"
-                    )));
-                }
-            };
+            let format = plugin_format(args)?;
             let id: String = args.get("plugin")?;
             if id.is_empty() {
                 return Err(CommandError::invalid("a plugin's id can't be empty"));
             }
+            // An audio effect without one: the choices are checked.
+            let kind = (args.opt::<String>("kind")?)
+                .and_then(|key| PluginKind::from_key(&key))
+                .unwrap_or_default();
             let kind = DeviceKind::Plugin(PluginDevice {
                 format,
                 id,
                 name: args.get("name")?,
-                instrument: args.opt("instrument")?.unwrap_or(false),
+                kind,
                 inputs: Vec::new(),
                 settings: PluginSettings::default(),
             });
@@ -413,13 +429,16 @@ pub fn register(registry: &mut Registry) {
             let (chain, index) = place(ctx, args, "devices")?;
             let name = step_name(ctx, &devices, "Move");
             let moved = ctx.document.transact(&name, |tx| {
-                tx.at_once(|tx| {
+                let moved = tx.at_once(|tx| {
                     let chain = chain.unwrap_or_else(|| new_track(tx, &devices));
                     move_devices(tx, &devices, chain, index)?;
                     Ok(chain)
-                })
+                });
+                let chain = moved.map_err(|refused| wire::refused(tx.project(), refused))?;
+                keep_order(tx, chain)?;
+                Ok::<_, CommandError>(chain)
             });
-            let chain = moved.map_err(|refused| wire::refused(ctx.document.project(), refused))?;
+            let chain = moved?;
             select_devices(ctx, chain, &devices);
             Ok(Value::None)
         },
@@ -544,11 +563,26 @@ fn add(
     };
     let (chain, index) = place(ctx, args, what)?;
     let (track_name, track) = track_for(&[&kind]);
+    if let Some(chain) = chain
+        && ctx
+            .document
+            .project()
+            .fit_device(chain, index, &kind)
+            .is_none()
+    {
+        return Err(no_notes(&kind));
+    }
     let (device, chain) = ctx.document.transact(name, |tx| {
         let chain = match chain {
             Some(chain) => chain,
             None => Chain::Track(crate::track::add_track(tx, track_name, track)),
         };
+        // A MIDI effect goes before the instrument, and an instrument after
+        // the MIDI effects, so the notes pass through them in order.
+        let index = tx
+            .project()
+            .fit_device(chain, index, &kind)
+            .unwrap_or(index);
         let device = tx.new_device(kind);
         let id = device.id;
         tx.add_device(chain, index, device);
@@ -583,15 +617,54 @@ fn place(
 }
 
 /// What a new track for devices of `kinds` is called, after the first of
-/// them, and what it is: a MIDI track if one is an instrument, an audio
-/// track if none is.
+/// them, and what it is: a MIDI track if one is an instrument or a MIDI
+/// effect, an audio track if none is.
 fn track_for(kinds: &[&DeviceKind]) -> (String, TrackKind) {
     let name = kinds.first().map_or("Device", |kind| device_name(kind));
-    let kind = match kinds.iter().any(|kind| kind.is_instrument()) {
+    let notes = (kinds.iter()).any(|kind| kind.is_instrument() || kind.is_midi_effect());
+    let kind = match notes {
         true => TrackKind::Midi,
         false => TrackKind::Audio,
     };
     (name.to_owned(), kind)
+}
+
+/// The error for a device of `kind`, a MIDI effect, put where there are no
+/// notes for it.
+fn no_notes(kind: &DeviceKind) -> CommandError {
+    CommandError::invalid(format!(
+        "{} is a MIDI effect, which goes on a MIDI track, before its instrument",
+        device_name(kind)
+    ))
+}
+
+/// The error for a chain whose devices `misplaced` says are out of order,
+/// in `project` as the edit left it, before it was taken back.
+fn misplaced(project: &Project, misplaced: Misplaced) -> CommandError {
+    let name = |device| {
+        project
+            .find_device(device)
+            .map_or("The device", |(_, _, found)| device_name(&found.kind))
+            .to_owned()
+    };
+    match misplaced {
+        Misplaced::NoNotes(device) => CommandError::invalid(format!(
+            "{} is a MIDI effect, which goes on a MIDI track, before its instrument",
+            name(device)
+        )),
+        Misplaced::AfterInstrument(device) => {
+            let chain = project.find_device(device).map(|(chain, ..)| chain);
+            let instrument = chain
+                .and_then(|chain| project.devices(chain))
+                .and_then(|devices| devices.iter().find(|d| d.kind.is_instrument()))
+                .map_or("the instrument", |found| device_name(&found.kind));
+            CommandError::invalid(format!(
+                "{} is a MIDI effect, which goes before {instrument}, the instrument that \
+                 plays the notes it plays on",
+                name(device)
+            ))
+        }
+    }
 }
 
 /// Adds a new track for `devices` (see [`track_for`]), where `device.add`
@@ -790,16 +863,29 @@ fn nudge(ctx: &mut Context<'_>, left: bool) -> Result<(), CommandError> {
     }
     let name = step_name(ctx, &moving, "Move");
     let moved = ctx.document.transact(&name, |tx| {
-        tx.at_once(|tx| {
+        let moved = tx.at_once(|tx| {
             for (device, index) in moves {
                 tx.move_device(device, chain, index)?;
             }
             Ok(())
-        })
+        });
+        moved.map_err(|refused| wire::refused(tx.project(), refused))?;
+        keep_order(tx, chain)
     });
-    moved.map_err(|refused| wire::refused(ctx.document.project(), refused))?;
+    moved?;
     select_devices(ctx, chain, &selected);
     Ok(())
+}
+
+/// Takes back every edit `tx` has made, and says why, if they left the
+/// devices of `chain` out of order: see [`Project::check_order`].
+fn keep_order(tx: &mut Transaction<'_>, chain: Chain) -> Result<(), CommandError> {
+    let Err(wrong) = tx.project().check_order(chain) else {
+        return Ok(());
+    };
+    let error = misplaced(tx.project(), wrong);
+    tx.cancel();
+    Err(error)
 }
 
 /// `devices` as copies take them, each with the lanes that automate it and
@@ -865,13 +951,19 @@ fn add_copies(
             bypassed,
             active,
         } = original;
+        // A MIDI effect goes before the instrument, and an instrument after
+        // the MIDI effects. One where there are no notes is left out.
+        let index = index.saturating_add(copies.len());
+        let Some(index) = tx.project().fit_device(chain, index, &kind) else {
+            continue;
+        };
         let copy = Device {
             bypassed,
             active,
             ..tx.new_device(kind)
         };
         let id = copy.id;
-        tx.add_device(chain, index.saturating_add(copies.len()), copy);
+        tx.add_device(chain, index, copy);
         // Left out, as a file couldn't hold its settings.
         if tx.project().find_device(id).is_none() {
             continue;
@@ -1067,7 +1159,7 @@ mod tests {
         );
         setup.select_tracks(&[keys]);
         let synth = setup
-            .run_with(&ADD_PLUGIN, add("Synth").with("instrument", true))
+            .run_with(&ADD_PLUGIN, add("Synth").with("kind", "instrument"))
             .unwrap();
         let eq = setup.run_with(&ADD_PLUGIN, add("EQ")).unwrap();
         // In front of the synth.
@@ -1088,7 +1180,7 @@ mod tests {
         assert_eq!(ids(&project.tracks[1].devices), [reverb]);
         assert_eq!(ids(&project.master.devices), [limiter]);
         let synth = project.tracks[0].devices[1].kind.plugin().unwrap();
-        assert!(synth.instrument);
+        assert_eq!(synth.kind, PluginKind::Instrument);
         assert_eq!(synth.settings, PluginSettings::default());
         assert_eq!(
             setup.committed_names(),
@@ -1113,6 +1205,84 @@ mod tests {
             setup.run_with(&ADD_PLUGIN, gone),
             Err(CommandError::invalid("there's no track 9"))
         );
+    }
+
+    #[test]
+    fn midi_effects_go_before_the_instrument_and_instruments_after_them() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let bass = project.add_track("Bass", TrackKind::Audio);
+        let mut setup = Setup::new(project);
+        let on_keys = |name, kind| add(name).with("kind", kind).with("track", keys);
+        let mut added = |args| setup.run_with(&ADD_PLUGIN, args).unwrap();
+        let synth = added(on_keys("Synth", "instrument"));
+        let eq = added(on_keys("EQ", "audio_effect"));
+        // At the end without an index, so before the synth.
+        let arp = added(on_keys("Arp", "midi_effect"));
+        // After the synth, as asked, is too late: just before it.
+        let chord = added(on_keys("Chord", "midi_effect").with("index", 3_i64));
+        // Before the arp is too early for a second synth: just after it.
+        let pad = added(on_keys("Pad", "instrument").with("index", 0_i64));
+        let ids = |setup: &Setup, track: usize| -> Vec<Value> {
+            let devices = &setup.document.project().tracks[track].devices;
+            devices.iter().map(|d| d.id.into()).collect()
+        };
+        assert_eq!(
+            ids(&setup, 0),
+            [&arp, &chord, &pad, &synth, &eq].map(Clone::clone)
+        );
+        let kind = setup.document.project().tracks[0].devices[0].kind.plugin();
+        assert_eq!(kind.unwrap().kind, PluginKind::MidiEffect);
+
+        let refused = Err(CommandError::invalid(
+            "Arp is a MIDI effect, which goes on a MIDI track, before its instrument",
+        ));
+        let on_bass = add("Arp").with("kind", "midi_effect").with("track", bass);
+        assert_eq!(setup.run_with(&ADD_PLUGIN, on_bass), refused);
+        let on_master = add("Arp").with("kind", "midi_effect").with("master", true);
+        assert_eq!(setup.run_with(&ADD_PLUGIN, on_master), refused);
+        let to_bass = Args::new()
+            .with("devices", vec![arp.clone()])
+            .with("track", bass);
+        assert_eq!(setup.run_with(&MOVE, to_bass), refused);
+        let after_synth = Args::new()
+            .with("devices", vec![chord.clone()])
+            .with("index", 3_i64);
+        assert_eq!(
+            setup.run_with(&MOVE, after_synth),
+            Err(CommandError::invalid(
+                "Chord is a MIDI effect, which goes before Pad, the instrument that plays the \
+                 notes it plays on"
+            ))
+        );
+        assert_eq!(ids(&setup, 0)[..2], [arp.clone(), chord.clone()]);
+        // A MIDI effect makes a MIDI track of its own.
+        let alone = add("Arp")
+            .with("kind", "midi_effect")
+            .with("new_track", true);
+        setup.run_with(&ADD_PLUGIN, alone).unwrap();
+        let project = setup.document.project();
+        assert_eq!(project.tracks[2].kind, TrackKind::Midi);
+
+        // Copies fit where they can go, and a MIDI effect's is left out
+        // where there are no notes.
+        let copy = Args::new()
+            .with("devices", vec![arp.clone(), eq.clone()])
+            .with("track", keys)
+            .with("index", 5_i64);
+        let Ok(Value::List(copies)) = setup.run_with(&COPY, copy) else {
+            panic!("the copies are listed");
+        };
+        assert_eq!(ids(&setup, 0)[2], copies[0]);
+        assert_eq!(ids(&setup, 0).last(), copies.last());
+        let copy = Args::new()
+            .with("devices", vec![arp, eq])
+            .with("track", bass);
+        let Ok(Value::List(copies)) = setup.run_with(&COPY, copy) else {
+            panic!("the copies are listed");
+        };
+        assert_eq!(copies.len(), 1);
+        assert_eq!(ids(&setup, 1), copies);
     }
 
     #[test]
@@ -1504,7 +1674,7 @@ mod tests {
             format: PluginFormat::Clap,
             id: "org.example.synth".to_owned(),
             name: "Synth".to_owned(),
-            instrument: true,
+            kind: PluginKind::Instrument,
             inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(musicable_model::plugin::PluginState::new(vec![1, 2])),
@@ -1583,7 +1753,7 @@ mod tests {
         project.add_track("Reverb", TrackKind::Return);
         let mut setup = Setup::new(project);
         let synth = add("Synth")
-            .with("instrument", true)
+            .with("kind", "instrument")
             .with("new_track", true);
         let synth = setup.run_with(&ADD_PLUGIN, synth).unwrap();
         let eq = setup

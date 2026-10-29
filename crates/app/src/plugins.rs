@@ -43,9 +43,9 @@ use std::time::{Duration, Instant};
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings, PluginState};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings, PluginState};
 use musicable_model::routing::Port;
-use musicable_model::{DeviceId, Project};
+use musicable_model::{DeviceId, PluginFormat, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
 /// How long what a plugin reports, after it starts or is given a state or
@@ -125,6 +125,12 @@ pub(crate) struct Plugins {
     /// The plugins installed, as the last scan found them: `None` until the
     /// app says, and no plugin loads before then.
     installed: Option<Vec<PluginInfo>>,
+    /// What the user marked plugins as, by format and id, where the scan's
+    /// rule gets them wrong ([`set_kind`](Self::set_kind)).
+    kinds: BTreeMap<(PluginFormat, String), PluginKind>,
+    /// Whether `kinds` changed since [`take_kinds_changed`](Self::take_kinds_changed)
+    /// last said.
+    kinds_changed: bool,
     hosted: BTreeMap<DeviceId, Hosted>,
     /// Plugin devices whose plugin didn't load, and why. They're tried
     /// again when the installed plugins change.
@@ -180,6 +186,8 @@ impl Plugins {
     pub fn new(config: EngineConfig) -> Self {
         Self {
             installed: None,
+            kinds: BTreeMap::new(),
+            kinds_changed: false,
             hosted: BTreeMap::new(),
             failed: BTreeMap::new(),
             config,
@@ -197,6 +205,60 @@ impl Plugins {
 
     pub fn installed(&self) -> &[PluginInfo] {
         self.installed.as_deref().unwrap_or_default()
+    }
+
+    /// What `plugin` does with notes: what the user marked it as, or what
+    /// the scan found.
+    pub fn kind_of(&self, plugin: &PluginInfo) -> PluginKind {
+        let key = (plugin.format, plugin.id.clone());
+        self.kinds
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| plugin.kind())
+    }
+
+    /// Marks the installed plugin `id` in `format` as `kind`, or takes the
+    /// mark away if that's what the scan found. A VST3 plugin's class id
+    /// can come in either case.
+    pub fn set_kind(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        kind: PluginKind,
+    ) -> Result<(), String> {
+        let found = self.installed().iter().find(|plugin| {
+            plugin.format == format
+                && match format {
+                    PluginFormat::Vst3 => plugin.id.eq_ignore_ascii_case(id),
+                    PluginFormat::Clap => plugin.id == id,
+                }
+        });
+        let Some(plugin) = found else {
+            return Err(format!("there's no plugin {id:?} installed in that format"));
+        };
+        let key = (format, plugin.id.clone());
+        let changed = match kind == plugin.kind() {
+            true => self.kinds.remove(&key).is_some(),
+            false => self.kinds.insert(key, kind) != Some(kind),
+        };
+        self.kinds_changed |= changed;
+        Ok(())
+    }
+
+    /// What the user marked plugins as, by format and id.
+    pub fn kinds(&self) -> &BTreeMap<(PluginFormat, String), PluginKind> {
+        &self.kinds
+    }
+
+    /// Has the plugins marked as in `kinds`, as the settings file had them.
+    pub fn set_kinds(&mut self, kinds: BTreeMap<(PluginFormat, String), PluginKind>) {
+        self.kinds = kinds;
+    }
+
+    /// Whether the user marked a plugin as another kind since this last
+    /// said.
+    pub fn take_kinds_changed(&mut self) -> bool {
+        std::mem::take(&mut self.kinds_changed)
     }
 
     /// Plugins loaded from now on call `waker` when they need

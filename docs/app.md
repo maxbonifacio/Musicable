@@ -894,6 +894,11 @@ to work for the app ([How it's built](#how-its-built)).
 - Musicable's own presets are `.musicable-preset` files, in a folder for
   each device in the Presets folder, or in the `[browser]` settings'
   `presets_folder`.
+- The Devices list puts each plugin in its kind's folder, as the user
+  marked it (`browser.set_plugin_kind`) or the scan found it
+  (`Session::plugin_kind`, [plugins.md](plugins.md#plugins-on-tracks)).
+  The app keeps the marks in `settings.toml`'s `[plugins.kinds]`, saves
+  them as one changes, and lists the plugins again.
 
 ### Behind the browser
 

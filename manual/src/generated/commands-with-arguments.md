@@ -19,6 +19,7 @@
 | Preview Sample | `browser.preview` |
 | Remove Folder from Library | `browser.remove_folder` |
 | Search the Library | `browser.search` |
+| Set Plugin Kind | `browser.set_plugin_kind` |
 | Tag Sample | `browser.tag` |
 
 ### Clip

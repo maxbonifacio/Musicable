@@ -13,13 +13,13 @@ use musicable_engine::switch::Switch;
 use musicable_engine::{AudioMut, Engine, Graph, Node, NodeKey, NoteEvent, NoteId, TransportState};
 use musicable_model::PluginFormat;
 use musicable_model::clip::{Controller, Dimension};
-use musicable_model::plugin::PluginInput;
+use musicable_model::plugin::{PluginInput, PluginKind};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
 use musicable_test_plugins::vst3::{
-    PEAK, VST3_GAIN_ID, VST3_SIDECHAIN, VST3_SYNTH_ID, Vst3Transport,
+    PEAK, VST3_ARPEGGIATOR_ID, VST3_GAIN_ID, VST3_SIDECHAIN, VST3_SYNTH_ID, Vst3Transport,
 };
-use musicable_test_plugins::{GAIN, LATENCY, LEVEL, gui};
+use musicable_test_plugins::{GAIN, LATENCY, LEVEL, TRANSPOSE, gui};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
     kRecording, kTempoValid, kTimeSigValid,
@@ -34,10 +34,11 @@ use super::Instance;
 use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
-    Block, CONFIG, Impulse, assert_close, bypass, bypassed_at_256_and_back_at_1280, controller,
-    ducked, note, param, play, play_blocks, play_keyed, ramp, scaled, scan_path, sine, temp_dir,
+    Block, CONFIG, Impulse, arpeggiate, assert_arpeggiated, assert_close, bypass,
+    bypassed_at_256_and_back_at_1280, controller, ducked, note, param, play, play_blocks,
+    play_keyed, ramp, scaled, scan_path, sine, temp_dir,
 };
-use crate::{ParentWindow, PluginEvent, Waker};
+use crate::{Buses, ParentWindow, PluginEvent, PluginInfo, Waker};
 
 /// A VST3 bundle of the test plugins, with the hooks tests drive them with.
 struct TestPlugins {
@@ -66,6 +67,10 @@ impl TestPlugins {
 
     fn synth(&self) -> Instance {
         self.instance(VST3_SYNTH_ID, None)
+    }
+
+    fn arpeggiator(&self) -> Instance {
+        self.instance(VST3_ARPEGGIATOR_ID, None)
     }
 
     fn assert_alright(&self) {
@@ -170,7 +175,7 @@ fn the_gain_plugin_describes_itself_and_its_parameters() {
         ("Musicable", "1.0.0")
     );
     assert_eq!(info.features, ["Fx"]);
-    assert!(!info.is_instrument());
+    assert_eq!(info.kind(), PluginKind::AudioEffect);
     let params = instance.params();
     assert_eq!(
         params.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -753,7 +758,7 @@ fn the_plugin_restarts_as_it_asks() {
 fn the_synth_plays_notes_with_their_expression() {
     let plugins = TestPlugins::new("synth");
     let mut instance = plugins.synth();
-    assert!(instance.info().is_instrument());
+    assert_eq!(instance.info().kind(), PluginKind::Instrument);
     assert_eq!(instance.info().features, ["Instrument", "Synth"]);
     assert_eq!(
         instance.params().iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -1017,6 +1022,19 @@ fn the_plugins_window_opens_inside_ours() {
     plugins.assert_alright();
 }
 
+#[test]
+fn an_arpeggiator_plays_notes_of_its_own() {
+    let plugins = TestPlugins::new("arpeggiator");
+    let mut instance = plugins.arpeggiator();
+    assert_eq!(instance.info().kind(), PluginKind::MidiEffect);
+    // An octave up, of two either way.
+    instance.set_param(TRANSPOSE, 0.75);
+    instance.activate(CONFIG).unwrap();
+    assert_arpeggiated(&arpeggiate(instance.node_source().node()));
+    drop(instance);
+    plugins.assert_alright();
+}
+
 fn scan_bundle(name: &str, timeout: Duration) -> Outcome {
     let (bundle, _) = testing::copy_vst3(&temp_dir(name), name);
     scan_path(&bundle, timeout)
@@ -1028,12 +1046,29 @@ fn the_scanner_finds_vst3_plugins_and_survives_bad_ones() {
         panic!("the good bundle wasn't found");
     };
     let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["Test Gain", "Test Synth"]);
+    assert_eq!(names, ["Test Gain", "Test Synth", "Test Arpeggiator"]);
     assert_eq!(
         (found[0].format, found[0].id.as_str()),
         (PluginFormat::Vst3, VST3_GAIN_ID)
     );
-    assert!(found[1].is_instrument());
+    let kinds: Vec<_> = found.iter().map(PluginInfo::kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            PluginKind::AudioEffect,
+            PluginKind::Instrument,
+            PluginKind::MidiEffect
+        ]
+    );
+    // The arpeggiator says nothing of what it is but its buses.
+    assert_eq!(
+        found[2].buses,
+        Some(Buses {
+            notes_in: 1,
+            notes_out: 1,
+            ..Buses::default()
+        })
+    );
     let crashed = scan_bundle("crash", scan::TIMEOUT);
     assert!(matches!(&crashed, Outcome::Crashed(_)), "{crashed:?}");
     let hung = scan_bundle("hang", Duration::from_secs(1));

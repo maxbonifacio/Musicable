@@ -69,7 +69,7 @@ pub enum Loaded {
     /// A device, set as the preset has it: one of Musicable's own presets.
     Device(DeviceKind),
     /// A VST3 plugin's state, for the plugin with this class id: a VST3
-    /// preset file. The plugin's name and whether it plays notes come from
+    /// preset file. The plugin's name and what it does with notes come from
     /// the plugin.
     Vst3 {
         class_id: String,
@@ -361,7 +361,7 @@ fn documents() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use musicable_model::TrackKind;
-    use musicable_model::plugin::{PluginDevice, PluginParam, PluginSettings};
+    use musicable_model::plugin::{PluginDevice, PluginKind, PluginParam, PluginSettings};
 
     use super::*;
 
@@ -379,7 +379,7 @@ mod tests {
             format: PluginFormat::Clap,
             id: "org.surge-synth-team.surge-xt".to_owned(),
             name: "Surge XT".to_owned(),
-            instrument: true,
+            kind: PluginKind::Instrument,
             inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(vec![1, 2, 3, 255])),

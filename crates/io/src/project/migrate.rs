@@ -38,6 +38,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     wires,
     plugin_inputs,
     tracks_from_tracks,
+    plugin_kinds,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -353,6 +354,43 @@ fn plugin_inputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
 /// and outputs to nothing, Sends Only. Version 20 files have neither, so
 /// they need nothing.
 fn tracks_from_tracks(_: &mut Map<String, Value>) -> Result<(), Invalid> {
+    Ok(())
+}
+
+/// Version 22 said what each plugin does with notes, as a `kind`, MIDI
+/// effects among them, in place of whether it's an instrument. Version 21
+/// plugins are instruments or audio effects.
+fn plugin_kinds(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        kinds(track.get_mut("devices"), &format!("tracks[{i}].devices"))?;
+    }
+    let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
+    kinds(master, "master.devices")
+}
+
+/// Gives each plugin in `devices`, a list at `path`, a kind in place of
+/// its `instrument`.
+fn kinds(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let devices = devices.and_then(Value::as_array_mut);
+    for (j, device) in devices.into_iter().flatten().enumerate() {
+        let plugin = (device.get_mut("kind"))
+            .and_then(|kind| kind.get_mut("plugin"))
+            .and_then(Value::as_object_mut);
+        let Some(plugin) = plugin else {
+            continue;
+        };
+        let path = format!("{path}[{j}].kind.plugin");
+        let kind = match plugin.remove("instrument") {
+            Some(Value::Bool(true)) => "instrument",
+            Some(Value::Bool(false)) => "audio_effect",
+            _ => {
+                let path = format!("{path}.instrument");
+                return Err(Invalid::new(path, "must be true or false"));
+            }
+        };
+        add(plugin, &path, "kind", json!(kind))?;
+    }
     Ok(())
 }
 

@@ -463,7 +463,7 @@ fn set_up(studio: &mut Studio) -> Made {
         .with("format", format)
         .with("plugin", id)
         .with("name", "Test Synth")
-        .with("instrument", true)
+        .with("kind", "instrument")
         .with("track", keys);
     let synth = studio.add_device(&device::ADD_PLUGIN, args);
     assert!(

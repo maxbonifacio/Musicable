@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
-use musicable_model::clip::Controller;
+use musicable_model::clip::{Controller, Note};
 
 use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef, InputPort};
@@ -12,7 +12,9 @@ use crate::engine::EVENT_CAPACITY;
 use crate::load::{self, LoadKey, NodeLoads};
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
-use crate::{Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, ParamId};
+use crate::{
+    Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId,
+};
 
 /// A node's identity across graph rebuilds, chosen by whoever builds the
 /// graph. [`compile`](crate::compile()) derives keys from model ids.
@@ -81,6 +83,9 @@ pub struct Graph {
     /// notes, from [`send_notes`](Graph::send_notes) and
     /// [`send_side_notes`](Graph::send_side_notes).
     note_routes: Vec<(NodeId, NodeId, bool)>,
+    /// The nodes [`plays_notes`](Graph::plays_notes) has play notes,
+    /// wherever they go.
+    playing: Vec<NodeId>,
     /// The automation nodes handed back, to send them as events.
     feeds: Vec<(NodeId, ParamId, Feed)>,
     /// The nodes whose [`Node::control`] runs each block, from
@@ -196,6 +201,18 @@ impl Graph {
     /// go through no node on the way, so they keep their ids.
     pub fn send_side_notes(&mut self, from: NodeId, to: NodeId) -> Result<(), GraphError> {
         self.route_notes(from, to, true)
+    }
+
+    /// Has the engine have `node` play its notes for each block
+    /// ([`Node::play_notes`]) whether they go anywhere or not, as a MIDI
+    /// effect at the end of a track's chain does, so it plays the same
+    /// whatever takes them.
+    pub fn plays_notes(&mut self, node: NodeId) -> Result<(), GraphError> {
+        self.check(node)?;
+        if !self.playing.contains(&node) {
+            self.playing.push(node);
+        }
+        Ok(())
     }
 
     fn route_notes(&mut self, from: NodeId, to: NodeId, side: bool) -> Result<(), GraphError> {
@@ -369,13 +386,32 @@ impl Graph {
         self.note_routes.sort_unstable();
         let mut players: Vec<Player> = Vec::new();
         for &(from, to, side) in &self.note_routes {
+            let to_key = (self.keys[to.0], side);
             match players.last_mut() {
-                Some(player) if player.node == from => player.targets.push((to, side)),
+                Some(player) if player.node == from => {
+                    player.targets.push((to, side));
+                    player.target_keys.push(to_key);
+                }
                 _ => players.push(Player {
                     node: from,
+                    key: self.keys[from.0],
                     targets: vec![(to, side)],
+                    target_keys: vec![to_key],
                     record: None,
+                    sounding: Vec::with_capacity(Notes::CAPACITY),
                 }),
+            }
+        }
+        for &node in &self.playing {
+            if !players.iter().any(|p| p.node == node) {
+                players.push(Player {
+                    node,
+                    key: self.keys[node.0],
+                    targets: Vec::new(),
+                    target_keys: Vec::new(),
+                    record: None,
+                    sounding: Vec::with_capacity(Notes::CAPACITY),
+                });
             }
         }
         // A record of a node that plays no notes stays empty.
@@ -405,14 +441,17 @@ impl Graph {
             let ready = players.iter().position(|p| !waiting(p)).expect("no loops");
             ordered.push(players.remove(ready));
         }
+        let room = Feed::room(config.max_block);
         let mut plays_notes = vec![false; self.nodes.len()];
         let mut inbox = 0;
         for player in &ordered {
+            // What comes to it: the engine's events, the notes and its
+            // automation.
             let routes_in = (routes.iter()).filter(|r| r.1 == player.node).count();
+            let feeds_in = self.feeds.iter().filter(|f| f.0 == player.node).count();
             plays_notes[player.node.0] = true;
-            inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY);
+            inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY + feeds_in * room);
         }
-        let room = Feed::room(config.max_block);
         let controllers = self.order_controllers();
         let mut is_controller = vec![false; self.nodes.len()];
         for controller in &controllers {
@@ -781,8 +820,14 @@ pub(crate) struct Routed {
 /// side inputs for notes, and its note record, if it has one.
 struct Player {
     node: NodeId,
+    key: NodeKey,
     targets: Vec<(NodeId, bool)>,
+    /// The targets' keys, for the graph that takes over.
+    target_keys: Vec<(NodeKey, bool)>,
     record: Option<usize>,
+    /// The notes it has sounding where its notes go, by id, as many as
+    /// [`Notes::CAPACITY`]: those it started and hasn't ended yet.
+    sounding: Vec<NoteId>,
 }
 
 /// The notes a node played in the current block, for the writer with
@@ -806,6 +851,9 @@ pub struct Notes<'a> {
     targets: &'a [(NodeId, bool)],
     /// Where the node's notes are recorded, if they are.
     record: Option<&'a mut Vec<NodeEvent>>,
+    /// The notes the node has sounding where its notes go, if they're kept
+    /// track of: as many as [`CAPACITY`](Self::CAPACITY).
+    sounding: Option<&'a mut Vec<NoteId>>,
     frames: usize,
     /// How many more notes the node can send this block.
     room: usize,
@@ -835,6 +883,21 @@ impl Notes<'_> {
             return false;
         }
         self.room -= 1;
+        if let (Some(sounding), NodeEventKind::Note(note)) = (&mut self.sounding, kind) {
+            match note {
+                NoteEvent::On { note, .. } if sounding.len() < sounding.capacity() => {
+                    if !sounding.contains(&note) {
+                        sounding.push(note);
+                    }
+                }
+                NoteEvent::Off { note, .. } => {
+                    if let Some(at) = sounding.iter().position(|&n| n == note) {
+                        sounding.swap_remove(at);
+                    }
+                }
+                _ => {}
+            }
+        }
         for &(node, side) in self.targets {
             let order = self.routed.len() as u32;
             let kind = if side { kind.to_side() } else { kind };
@@ -857,9 +920,57 @@ impl Notes<'_> {
         self.send_kind(offset, NodeEventKind::Controller { controller, value })
     }
 
+    /// Ends every note the node has sounding where its notes go, `offset`
+    /// frames into the block, as if let go at no particular speed: as when
+    /// what it plays changes all at once, such as a MIDI effect's switch
+    /// bypassing it. Each end takes room as a note does.
+    pub fn end_all(&mut self, offset: usize) {
+        let Some(sounding) = self.sounding.take() else {
+            return;
+        };
+        while let Some(note) = sounding.pop() {
+            let velocity = Note::RELEASE_VELOCITY;
+            self.send_kind(
+                offset,
+                NodeEventKind::Note(NoteEvent::Off { note, velocity }),
+            );
+        }
+        self.sounding = Some(sounding);
+    }
+
     /// The block's length: notes are sent at offsets below it.
     pub fn frames(&self) -> usize {
         self.frames
+    }
+}
+
+impl<'a> Notes<'a> {
+    /// Notes that go into `routed` alone, with room for
+    /// [`CAPACITY`](Self::CAPACITY) in a block `frames` long: for a node
+    /// that hands on what the node in it plays, such as a switch. Each is
+    /// sent to node 0.
+    pub(crate) fn buffer(routed: &'a mut Vec<Routed>, frames: usize) -> Self {
+        const NOWHERE: [(NodeId, bool); 1] = [(NodeId(0), false)];
+        Self {
+            routed,
+            targets: &NOWHERE,
+            record: None,
+            sounding: None,
+            frames,
+            room: Self::CAPACITY,
+            dropped: 0,
+        }
+    }
+
+    /// How many notes there was no room for.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Counts `count` notes as dropped, as a node that hands on what
+    /// another plays had no room for them.
+    pub(crate) fn drop_more(&mut self, count: u64) {
+        self.dropped += count;
     }
 }
 
@@ -1057,6 +1168,13 @@ impl PreparedGraph {
     /// Lets each node take over from the node with the same key in `old`,
     /// and each delay from the delay at the same joint. Runs on the audio
     /// thread.
+    ///
+    /// The notes each player had sounding go on sounding where its notes
+    /// still go. Those sounding where they don't any more end on the first
+    /// frame, on the node they went to, if it's still there: the notes
+    /// that come to it now come from elsewhere, or by another way, so the
+    /// ends of those sounding would never come. So a MIDI effect added or
+    /// taken away while notes play leaves none hanging.
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
         let (nodes, old_nodes) = (&mut self.nodes, &mut old.nodes);
         let (loads, old_loads) = (&self.loads, &old.loads);
@@ -1066,6 +1184,28 @@ impl PreparedGraph {
         };
         pairs(&self.by_key, &old.by_key, &mut adopt);
         pairs(&self.delays, &old.delays, &mut adopt);
+        for gone in old.players.iter_mut() {
+            let player = self.players.iter().position(|p| p.key == gone.key);
+            let mut kept_any = false;
+            for &(to, side) in &gone.target_keys {
+                let kept =
+                    player.is_some_and(|p| self.players[p].target_keys.contains(&(to, side)));
+                kept_any |= kept;
+                let Some(to) = self.find(to).filter(|_| !kept) else {
+                    continue;
+                };
+                for &note in &gone.sounding {
+                    let velocity = Note::RELEASE_VELOCITY;
+                    let kind = NodeEventKind::Note(NoteEvent::Off { note, velocity });
+                    let kind = if side { kind.to_side() } else { kind };
+                    self.route(to, NodeEvent { offset: 0, kind });
+                }
+            }
+            // Its notes sound on where it still sends them, if anywhere.
+            if let Some(p) = player.filter(|_| kept_any) {
+                std::mem::swap(&mut self.players[p].sounding, &mut gone.sounding);
+            }
+        }
     }
 
     /// Queues an event for the next block. Returns whether there was room:
@@ -1125,15 +1265,13 @@ impl PreparedGraph {
             record.notes.clear();
         }
         let mut dropped = 0;
-        for player in players.iter() {
-            // The notes sent to it so far, which is all of them: the engine
-            // routed its own before the block, and the players they come
-            // from have played.
+        for player in players.iter_mut() {
+            // What's sent to it so far: all its notes, as the engine routed
+            // its own before the block, and the players they come from have
+            // played, and all its parameter changes, as its automation is
+            // fed by now. Not the modulation, which comes later.
             inbox.clear();
-            let sent = routed
-                .iter()
-                .filter(|r| r.node == player.node && is_played(r));
-            inbox.extend(sent);
+            inbox.extend(routed.iter().filter(|r| r.node == player.node));
             inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
             inbox_events.clear();
             inbox_events.extend(inbox.iter().map(|r| r.event));
@@ -1142,6 +1280,7 @@ impl PreparedGraph {
                 routed,
                 targets: &player.targets,
                 record: player.record.map(|i| &mut note_records[i].notes),
+                sounding: Some(&mut player.sounding),
                 frames: block.frames,
                 room: Notes::CAPACITY,
                 dropped: 0,
@@ -1595,6 +1734,200 @@ mod tests {
         assert_eq!(graph.record_notes(NodeKey(9)), Some(&recorded[..]));
         assert_eq!(graph.record_notes(NodeKey(11)), Some(&[][..]));
         assert_eq!(graph.record_notes(NodeKey(10)), None);
+    }
+
+    /// Keeps the events `play_notes` gets, and those `process` gets, with
+    /// their offsets, and starts note 7 on the first block it plays.
+    #[derive(Default)]
+    struct Holds {
+        played: Vec<(usize, NodeEventKind)>,
+        processed: Vec<(usize, NodeEventKind)>,
+        started: bool,
+    }
+
+    impl Holds {
+        fn new() -> Self {
+            Self {
+                played: Vec::with_capacity(8),
+                processed: Vec::with_capacity(8),
+                started: false,
+            }
+        }
+    }
+
+    impl Node for Holds {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            self.processed
+                .extend(ctx.events.iter().map(|e| (e.offset, e.kind)));
+            output.clear();
+        }
+
+        fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            self.played
+                .extend(ctx.events.iter().map(|e| (e.offset, e.kind)));
+            if !std::mem::replace(&mut self.started, true) {
+                let note = NoteId(7);
+                assert!(notes.send(
+                    0,
+                    NoteEvent::On {
+                        note,
+                        key: 60,
+                        velocity: 1.0
+                    }
+                ));
+            }
+        }
+    }
+
+    /// Renders one block of 64 frames of `graph`, from engine time `time`.
+    fn render_block(graph: &mut PreparedGraph, time: u64) {
+        let tempo = TempoMap::default();
+        let block = Block {
+            frames: 64,
+            time,
+            transport: TransportState::default(),
+            tempo: &tempo,
+            input: AudioRef::empty(64),
+            midi: &[],
+            ahead: false,
+        };
+        rt::scope(|| {
+            assert_eq!(graph.play_notes(&block), 0);
+            graph.load_routed();
+            ReferenceRenderer.render(graph, &block);
+            graph.clear_routed();
+        });
+    }
+
+    fn node<T: Node>(graph: &mut PreparedGraph, id: NodeId) -> &mut T {
+        graph.nodes[id.0].as_mut().downcast_mut::<T>().unwrap()
+    }
+
+    #[test]
+    fn players_get_their_parameter_changes_with_their_notes() {
+        let mut g = Graph::new();
+        let holds = g.add(NodeKey(0), Holds::new());
+        let keep = g.add(NodeKey(1), KeepAll(Vec::with_capacity(8)));
+        g.send_notes(holds, keep).unwrap();
+        g.set_output(keep).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        let param = NodeEventKind::Param {
+            param: ParamId(3),
+            value: 0.5,
+        };
+        let note = NodeEventKind::Note(NoteEvent::On {
+            note: NoteId(1),
+            key: 64,
+            velocity: 1.0,
+        });
+        assert!(graph.route(
+            holds,
+            NodeEvent {
+                offset: 20,
+                kind: note
+            }
+        ));
+        assert!(graph.route(
+            holds,
+            NodeEvent {
+                offset: 10,
+                kind: param
+            }
+        ));
+        render_block(&mut graph, 0);
+        // In order of offset, and the parameter again with `process`, which
+        // doesn't get the note.
+        let holds = node::<Holds>(&mut graph, holds);
+        assert_eq!(holds.played, [(10, param), (20, note)]);
+        assert_eq!(holds.processed, [(10, param)]);
+    }
+
+    #[test]
+    fn a_node_can_play_its_notes_with_nowhere_to_send_them() {
+        let mut g = Graph::new();
+        let holds = g.add(NodeKey(0), Holds::new());
+        let out = g.add(NodeKey(1), KeepAll(Vec::with_capacity(8)));
+        g.plays_notes(holds).unwrap();
+        g.add_note_record(NodeKey(9), holds).unwrap();
+        g.set_output(out).unwrap();
+        let mut graph = g.prepare(&CONFIG).unwrap();
+        let param = NodeEventKind::Param {
+            param: ParamId(3),
+            value: 0.5,
+        };
+        assert!(graph.route(
+            holds,
+            NodeEvent {
+                offset: 4,
+                kind: param
+            }
+        ));
+        render_block(&mut graph, 0);
+        assert_eq!(node::<Holds>(&mut graph, holds).played, [(4, param)]);
+        // What it plays is kept as it would be on its way.
+        let on = NoteEvent::On {
+            note: NoteId(7),
+            key: 60,
+            velocity: 1.0,
+        };
+        let recorded = [NodeEvent {
+            offset: 0,
+            kind: NodeEventKind::Note(on),
+        }];
+        assert_eq!(graph.record_notes(NodeKey(9)), Some(&recorded[..]));
+    }
+
+    #[test]
+    fn notes_end_where_the_way_they_went_has_gone() {
+        // A player holding a note, and two nodes it can send it to.
+        let build = |to: &[u64]| {
+            let mut g = Graph::new();
+            let holds = g.add(NodeKey(0), Holds::new());
+            let a = g.add(NodeKey(1), KeepAll(Vec::with_capacity(8)));
+            let b = g.add(NodeKey(2), KeepAll(Vec::with_capacity(8)));
+            for &key in to {
+                let target = if key == 1 { a } else { b };
+                g.send_notes(holds, target).unwrap();
+            }
+            g.set_output(a).unwrap();
+            (g.prepare(&CONFIG).unwrap(), [a, b])
+        };
+        let (mut first, [a, b]) = build(&[1]);
+        render_block(&mut first, 0);
+        let on = NodeEventKind::Note(NoteEvent::On {
+            note: NoteId(7),
+            key: 60,
+            velocity: 1.0,
+        });
+        assert_eq!(node::<KeepAll>(&mut first, a).0, [(0, on)]);
+        let off = NodeEventKind::Note(NoteEvent::Off {
+            note: NoteId(7),
+            velocity: Note::RELEASE_VELOCITY,
+        });
+        let swap = |old: &mut PreparedGraph, to: &[u64], time| {
+            let (mut new, _) = build(to);
+            rt::scope(|| new.adopt_from(old));
+            node::<Holds>(&mut new, NodeId(0)).started = true;
+            render_block(&mut new, time);
+            let mut kept = |id| std::mem::take(&mut node::<KeepAll>(&mut new, id).0);
+            let got = [kept(a), kept(b)];
+            (new, got)
+        };
+        // The way to the first node stays, so the note sounds on there,
+        // until that way goes: then it ends, on the next block's first
+        // frame.
+        let (mut second, got) = swap(&mut first, &[1, 2], 64);
+        assert_eq!(got, [vec![], vec![]]);
+        let (_, got) = swap(&mut second, &[2], 128);
+        assert_eq!(got, [vec![(0, off)], vec![]]);
+        // Gone all at once, the note ends there, and no more sounds where
+        // the notes go from then on.
+        let (mut first, _) = build(&[1]);
+        render_block(&mut first, 0);
+        let (mut second, got) = swap(&mut first, &[2], 64);
+        assert_eq!(got, [vec![(0, off)], vec![]]);
+        let (_, got) = swap(&mut second, &[], 128);
+        assert_eq!(got, [vec![], vec![]]);
     }
 
     /// Sends the modulation it gets plus one, or one if it gets none,

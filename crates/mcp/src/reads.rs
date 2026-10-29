@@ -401,7 +401,8 @@ fn port_entry(port: Port) -> Json {
 }
 
 /// A device as the project lists it: its id, name and kind, and whether
-/// it's bypassed or deactivated, if it is.
+/// it's an instrument or a MIDI effect, or bypassed or deactivated, if it
+/// is.
 fn device_entry(device: &Device) -> Json {
     let mut entry = json!({
         "id": device.id.0,
@@ -410,6 +411,9 @@ fn device_entry(device: &Device) -> Json {
     });
     if device.kind.is_instrument() {
         entry["instrument"] = true.into();
+    }
+    if device.kind.is_midi_effect() {
+        entry["midi_effect"] = true.into();
     }
     if device.bypassed {
         entry["bypassed"] = true.into();

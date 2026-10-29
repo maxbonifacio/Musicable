@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 21,
+  "version": 22,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -674,7 +674,13 @@ So a test device that halves the signal is
 On a MIDI track, the first instrument gets the notes: the first device that
 plays notes, which is a sampler, a synth, a test instrument or a plugin
 instrument. It gets them bypassed or deactivated too, and doesn't play
-them, so they don't go on to an instrument after it.
+them, so they don't go on to an instrument after it. The plugins before it
+whose `kind` is `"midi_effect"` play them first, in order, each the notes
+the one before played, and the last plays the instrument. A bypassed MIDI
+effect passes them on as they come, and a deactivated one is out of their
+way. A MIDI effect no notes reach, after the first instrument or on a
+channel that isn't a MIDI track's, plays nothing, as if deactivated:
+Musicable never puts one there, but a file can.
 
 A **native device**'s settings say which of Musicable's own devices it is
 and how it's set:
@@ -870,7 +876,7 @@ A **plugin**'s settings say which plugin it is and how it's set:
 | `format` | string | `"clap"` or `"vst3"`. |
 | `id` | string | The plugin's id in its format, which finds the plugin when the project opens: a CLAP plugin's id, such as `"org.surge-synth-team.surge-xt"`, or a VST3 plugin's class id. Not empty. |
 | `name` | string | The plugin's name when it was added, to show while it's missing. Any text, empty included. |
-| `instrument` | boolean | Whether it plays notes. |
+| `kind` | string | What it does with notes: `"instrument"`, which plays them, `"midi_effect"`, which plays them on, changed, to the instrument after it, such as an arpeggiator, or `"audio_effect"`, which has none. |
 | `inputs` | array of inputs | The plugin's side inputs, its audio inputs beyond its main one, such as a compressor's sidechain, in the plugin's order, as it said when it last loaded. Empty until it first loads. |
 | `state` | string or `null` | The state the plugin last saved, in its own format, as base64 with padding (RFC 4648). `null` for a plugin as it starts, new. |
 | `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
@@ -1170,6 +1176,7 @@ A **port** is an object with one field:
 | 19 | 2026-10-27 | Wires, from taps on channels into devices' ports, starting with the Compressor's and the Gate's sidechains, and lanes for their gains. Version 18 files have none. |
 | 20 | 2026-10-27 | Plugins' side inputs, and wires into them. Version 19 plugins have none until they next load. |
 | 21 | 2026-10-28 | Tracks taking their input from other tracks' taps, Resampling the master among them, and `"sends_only"` outputs. Version 20 files have neither. |
+| 22 | 2026-10-29 | Plugins' `kind`, in place of `instrument`, with MIDI effects, which play the notes on to the instrument after them. Version 21 plugins are instruments or audio effects. |
 
 ## Changing the format
 

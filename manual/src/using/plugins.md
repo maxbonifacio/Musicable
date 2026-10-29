@@ -1,7 +1,7 @@
 # Plugins
 
-Musicable plays CLAP and VST3 plugins, instruments and effects, beside its
-own [built-in devices](../devices/index.md).
+Musicable plays CLAP and VST3 plugins, instruments, MIDI effects and
+audio effects, beside its own [built-in devices](../devices/index.md).
 
 ## Finding them
 
@@ -30,20 +30,56 @@ each, with its format after its name: "Surge XT (CLAP)" and "Surge XT
 (VST3)". The list's foot says how many plugins there are, and has
 **Rescan**, or says "Scanning..." while a scan runs.
 
+Each plugin is an instrument, a MIDI effect or an audio effect, as the scan
+finds it. A CLAP plugin says which it is. A VST3 plugin says when it's an
+instrument, but not when it's a MIDI effect, so Musicable takes one that
+takes notes and plays notes, but no sound, for a MIDI effect, as an
+arpeggiator does. Where that gets a plugin wrong, its right-click menu in
+the browser marks it as another **Kind**
+([The browser](../window/browser.md#devices)), which Musicable remembers,
+and marking it as the kind the scan found takes the mark away. Devices
+already on tracks keep the kind they were added as: delete one and add it
+again for the new kind.
+
 ## Putting one on a track
 
 Double-click a plugin in the browser to put it at the end of the selected
 track's devices, or the master's while the master track is selected. Or drag
 it into the devices panel, onto a track for the end of its devices, onto the
 master track for the master's, or below the tracks for a new track named
-after it: a MIDI track for an instrument and an audio track for an effect
-([The browser](../window/browser.md#devices)).
+after it: a MIDI track for an instrument or a MIDI effect and an audio
+track for an audio effect ([The browser](../window/browser.md#devices)).
 
 Drag a plugin device by its title bar in the devices panel to move it along
 the chain or to another track, and Ctrl-drag it to copy it ([The devices
 panel](../window/devices-panel.md#selecting-moving-and-copying)). A moved
 plugin plays on, with its window open if it was. A copy loads the plugin
 again, with the state the original has in its window.
+
+## MIDI effects
+
+A MIDI effect, such as an arpeggiator, a chord maker or a note repeater,
+plays the notes that come into it on, changed, rather than sound. It goes
+on a MIDI track, in front of the instrument, as in Live, and plays the
+instrument the notes it makes, as the notes come: an arpeggiator plays a
+synth the chord its track's clip holds, a note at a time.
+
+- **Where it goes.** A MIDI effect added or copied to a track goes no
+  later than just before its instrument, wherever it's dropped, and an
+  instrument no earlier than just after the last MIDI effect. A MIDI effect
+  can't go on an audio track, a group, a return track or the master, which
+  have no notes, nor move past the instrument: the move is refused, and
+  says why.
+- **Several** play in turn, left to right, each the notes the last one
+  played, and the last plays the instrument. The track's modulators, such
+  as an Envelope that each note starts, get the notes the instrument does
+  ([Modulation](modulation.md)).
+- **Bypassed**, a MIDI effect passes the notes on as they come, and
+  **deactivated**, it's out of their way. Either way the notes it was
+  playing end, so none hangs, and brought back, it starts afresh.
+- **Notes of its own.** What it plays are notes of its own, which the
+  instrument tells apart from those played into it, each with the
+  expression the plugin gives it, such as a pitch bend of its own.
 
 ## Plugin windows
 

@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap_sys::events::{
@@ -17,23 +17,24 @@ use clap_sys::events::{
 };
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use musicable_engine::nodes::Sum;
-use musicable_engine::switch::Switch;
+use musicable_engine::switch::{NoteSwitch, Switch};
 use musicable_engine::{
     AudioMut, AudioRef, Engine, EngineConfig, Event, Graph, InputPort, Inputs, Node, NodeEvent,
     NodeEventKind, NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId,
     ProcessContext, TransportState, rt,
 };
 use musicable_model::clip::{Controller, Dimension};
-use musicable_model::plugin::PluginInput;
+use musicable_model::plugin::{PluginInput, PluginKind};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
 use musicable_test_plugins::{
-    BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS, gui,
+    ARP_STEP, ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS,
+    TRANSPOSE, gui,
 };
 
 use crate::clap::Instance;
 use crate::scan::{self, Outcome};
-use crate::{ParentWindow, PluginEvent};
+use crate::{ParentWindow, PluginEvent, PluginInfo};
 
 pub(crate) const CONFIG: EngineConfig = EngineConfig {
     sample_rate: 48_000,
@@ -151,6 +152,10 @@ impl TestPlugins {
 
     fn synth(&self) -> Instance {
         Instance::new(&self.path, SYNTH_ID.to_str().unwrap(), None).unwrap()
+    }
+
+    fn arpeggiator(&self) -> Instance {
+        Instance::new(&self.path, ARPEGGIATOR_ID.to_str().unwrap(), None).unwrap()
     }
 }
 
@@ -283,7 +288,7 @@ fn the_gain_plugin_describes_its_parameters() {
     let plugins = TestPlugins::new("params");
     let instance = plugins.gain();
     assert_eq!(instance.info().name, "Test Gain");
-    assert!(!instance.info().is_instrument());
+    assert_eq!(instance.info().kind(), PluginKind::AudioEffect);
     let params = instance.params();
     assert_eq!(
         params.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -903,7 +908,7 @@ pub(crate) fn sine(frequency: f64, amplitude: f64, phase: f64, frames: usize) ->
 fn the_synth_plays_notes_with_their_expression() {
     let plugins = TestPlugins::new("synth");
     let mut instance = plugins.synth();
-    assert!(instance.info().is_instrument());
+    assert_eq!(instance.info().kind(), PluginKind::Instrument);
     instance.activate(CONFIG).unwrap();
     let mut node = instance.node_source().node();
     let silence = vec![0.0; 128];
@@ -1375,6 +1380,125 @@ fn controllers_go_as_midi_to_a_plugin_that_takes_notes_as_clap_s_own() {
     plugins.assert_alright();
 }
 
+/// Keeps the notes it gets, by engine time, as many as there's room for.
+pub(crate) struct Kept(pub(crate) Arc<Mutex<Vec<(u64, NoteEvent)>>>);
+
+impl Kept {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::with_capacity(64))))
+    }
+}
+
+impl Node for Kept {
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        let mut kept = self.0.lock().unwrap();
+        for event in ctx.events {
+            if let NodeEventKind::Note(note) = event.kind
+                && kept.len() < kept.capacity()
+            {
+                kept.push((ctx.time + event.offset as u64, note));
+            }
+        }
+    }
+}
+
+/// Plays `arpeggiator`, a MIDI effect's node, in its switch, as a MIDI
+/// track has it, with keys 60 and 64 held from engine time 0 and let go
+/// at frame 15,104, two and a half steps on, and returns the notes it
+/// plays, by engine time.
+pub(crate) fn arpeggiate(arpeggiator: impl Node) -> Vec<(u64, NoteEvent)> {
+    let mut g = Graph::new();
+    let switch = g.add(NodeKey(0), NoteSwitch::new(Box::new(arpeggiator), false));
+    let kept = Kept::new();
+    let notes = Arc::clone(&kept.0);
+    let kept = g.add(NodeKey(1), kept);
+    g.send_notes(switch, kept).unwrap();
+    g.set_output(kept).unwrap();
+    let (mut engine, mut handle) = Engine::new(CONFIG);
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    let mut send = |note| {
+        let node = NodeKey(0);
+        handle.send(Event::Note { node, note }).unwrap();
+    };
+    for (id, key) in [(1, 60), (2, 64)] {
+        let (note, velocity) = (NoteId(id), 1.0);
+        send(NoteEvent::On {
+            note,
+            key,
+            velocity,
+        });
+    }
+    let mut block = vec![0.0; 2 * 256];
+    for i in 0..61 {
+        if i == 59 {
+            for id in [1, 2] {
+                let (note, velocity) = (NoteId(id), 0.0);
+                send(NoteEvent::Off { note, velocity });
+            }
+        }
+        engine.process(&mut AudioMut::from_planar(&mut block, 2));
+    }
+    drop((engine, handle));
+    Arc::into_inner(notes).unwrap().into_inner().unwrap()
+}
+
+/// Checks that an arpeggiator transposing an octave up played the keys
+/// [`arpeggiate`] holds in turn, a step each, lowest first, each with a
+/// fresh id from the host's own, and ended the last as they were let go.
+pub(crate) fn assert_arpeggiated(played: &[(u64, NoteEvent)]) {
+    let step = (ARP_STEP * f64::from(CONFIG.sample_rate)) as u64;
+    assert_eq!(step, 6000);
+    let ids: Vec<_> = played
+        .iter()
+        .filter_map(|(_, note)| match note {
+            NoteEvent::On { note, .. } => Some(*note),
+            _ => None,
+        })
+        .collect();
+    let [a, b, c] = ids[..] else {
+        panic!("three steps: {played:?}");
+    };
+    let on = |note, key| NoteEvent::On {
+        note,
+        key,
+        velocity: 1.0,
+    };
+    let off = |note| NoteEvent::Off {
+        note,
+        velocity: 0.0,
+    };
+    assert_eq!(
+        played,
+        [
+            (0, on(a, 72)),
+            (step, off(a)),
+            (step, on(b, 76)),
+            (2 * step, off(b)),
+            (2 * step, on(c, 72)),
+            (15_104, off(c)),
+        ]
+    );
+    // Ids of their own, which no note played into a plugin has.
+    assert!(ids.iter().all(|id| id.0 >= 1 << 63), "{ids:?}");
+    assert!(a != b && b != c && a != c, "{ids:?}");
+}
+
+#[test]
+fn an_arpeggiator_plays_notes_of_its_own_as_clap_notes_or_midi() {
+    // A library named so plays MIDI.
+    for name in ["arpeggiator", "midi-arpeggiator"] {
+        let plugins = TestPlugins::new(name);
+        let mut instance = plugins.arpeggiator();
+        assert_eq!(instance.info().kind(), PluginKind::MidiEffect);
+        instance.set_param(TRANSPOSE, 12.0);
+        instance.activate(CONFIG).unwrap();
+        assert_arpeggiated(&arpeggiate(instance.node_source().node()));
+        drop(instance);
+        plugins.assert_alright();
+    }
+}
+
 #[test]
 fn plugins_see_the_transport() {
     let plugins = TestPlugins::new("transport");
@@ -1488,8 +1612,17 @@ fn the_scanner_finds_plugins_and_survives_bad_ones() {
         panic!("the good library wasn't found");
     };
     let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["Test Gain", "Test Synth"]);
+    assert_eq!(names, ["Test Gain", "Test Synth", "Test Arpeggiator"]);
     assert!(found[1].features.iter().any(|f| f == "instrument"));
+    let kinds: Vec<_> = found.iter().map(PluginInfo::kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            PluginKind::AudioEffect,
+            PluginKind::Instrument,
+            PluginKind::MidiEffect
+        ]
+    );
     let crashed = scan_copy("crash", scan::TIMEOUT);
     assert!(matches!(&crashed, Outcome::Crashed(_)), "{crashed:?}");
     let hung = scan_copy("hang", Duration::from_secs(1));

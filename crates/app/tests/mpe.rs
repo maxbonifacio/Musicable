@@ -18,7 +18,7 @@ use musicable_app::Session;
 use musicable_audio::{MidiBuffer, MidiWriter};
 use musicable_commands::{Keymap, transport};
 use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, MidiMessage, rt};
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
 use musicable_plugins::Instance;
 use musicable_plugins::scan;
@@ -104,7 +104,7 @@ impl Studio {
             format: PluginFormat::Clap,
             id: SYNTH_ID.to_str().unwrap().to_owned(),
             name: "Test Synth".to_owned(),
-            instrument: true,
+            kind: PluginKind::Instrument,
             inputs: Vec::new(),
             settings: PluginSettings::default(),
         }));
