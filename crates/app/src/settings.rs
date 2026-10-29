@@ -9,6 +9,7 @@
 //! device = "{0.0.0.00000000}.{a1b2c3d4-...}"
 //! exclusive = false
 //! buffer_size = 128
+//! render_ahead = "normal"
 //!
 //! [behaviour]
 //! play_from = "start_marker"
@@ -72,6 +73,7 @@ use std::path::{Path, PathBuf};
 
 use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
+use musicable_engine::Lead;
 use musicable_ui::{Base, DEFAULT_WORKSPACE, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
@@ -455,6 +457,42 @@ pub struct AudioSettings {
     /// Frames per period, or none for the smallest the device supports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_size: Option<u32>,
+    /// How far ahead of the device the engine renders while no track plays
+    /// live.
+    pub render_ahead: RenderAhead,
+}
+
+/// How far ahead of the audio device the engine renders the project while
+/// no track plays live, as a track monitoring its input does: `off`,
+/// `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms).
+/// See [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderAhead {
+    Off,
+    Short,
+    #[default]
+    Normal,
+    Long,
+}
+
+impl RenderAhead {
+    pub const ALL: [RenderAhead; 4] = [
+        RenderAhead::Off,
+        RenderAhead::Short,
+        RenderAhead::Normal,
+        RenderAhead::Long,
+    ];
+
+    /// The engine's lead for it.
+    pub fn lead(self) -> Lead {
+        match self {
+            RenderAhead::Off => Lead::Off,
+            RenderAhead::Short => Lead::Short,
+            RenderAhead::Normal => Lead::Normal,
+            RenderAhead::Long => Lead::Long,
+        }
+    }
 }
 
 impl AudioSettings {
@@ -474,13 +512,13 @@ impl AudioSettings {
         }
     }
 
-    pub fn from_request(request: &StreamRequest) -> Self {
-        Self {
-            device: request.device.clone(),
-            exclusive: request.mode == Mode::Exclusive,
-            sample_rate: request.sample_rate,
-            buffer_size: request.period,
-        }
+    /// Asks for the stream `request` asks for from now on. Render Ahead
+    /// stays as it is.
+    pub fn set_request(&mut self, request: &StreamRequest) {
+        self.device = request.device.clone();
+        self.exclusive = request.mode == Mode::Exclusive;
+        self.sample_rate = request.sample_rate;
+        self.buffer_size = request.period;
     }
 }
 
@@ -603,6 +641,7 @@ mod tests {
                 exclusive: true,
                 sample_rate: Some(96_000),
                 buffer_size: Some(64),
+                render_ahead: RenderAhead::Long,
             },
             behaviour: Behaviour {
                 play_from: PlayFrom::Playhead,
@@ -661,6 +700,9 @@ mod tests {
         assert_eq!(Settings::parse("").unwrap(), Settings::default());
         let settings = Settings::parse("[audio]\nbuffer_size = 256\nlater = true\n").unwrap();
         assert_eq!(settings.audio.buffer_size, Some(256));
+        // The engine renders about 50 ms ahead.
+        assert_eq!(settings.audio.render_ahead, RenderAhead::Normal);
+        assert_eq!(settings.audio.render_ahead.lead(), Lead::Normal);
         assert_eq!(settings.behaviour, Behaviour::default());
         assert_eq!(settings.recording.capture_minutes, 5);
         assert_eq!(settings.appearance.theme, "dark");
@@ -720,6 +762,10 @@ mod tests {
             Settings::parse("[behaviour]\nplay_from = \"anywhere\""),
             Err(SettingsError::Toml(_))
         ));
+        assert!(matches!(
+            Settings::parse("[audio]\nrender_ahead = \"far\""),
+            Err(SettingsError::Toml(_))
+        ));
     }
 
     #[test]
@@ -732,7 +778,14 @@ mod tests {
             inputs: Vec::new(),
             midi_inputs: Vec::new(),
         };
-        assert_eq!(AudioSettings::from_request(&request).request(), request);
+        let mut settings = AudioSettings {
+            render_ahead: RenderAhead::Off,
+            ..AudioSettings::default()
+        };
+        settings.set_request(&request);
+        assert_eq!(settings.request(), request);
+        // Render Ahead isn't the stream's.
+        assert_eq!(settings.render_ahead, RenderAhead::Off);
     }
 
     #[test]

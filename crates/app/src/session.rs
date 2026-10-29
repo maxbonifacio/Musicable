@@ -18,7 +18,7 @@ use musicable_engine::modulation;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
-    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout,
+    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Lead,
     MAX_WRITERS, Meters, NodeKey, NodeLoads, ParamId, PreparedGraph, Preview, QueueFull, Stats,
     SwapError, TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
 };
@@ -115,6 +115,8 @@ pub struct Session {
     library: Library,
     /// How loud previews play: 1.0 as they are.
     preview_gain: f32,
+    /// How far ahead of the device the engine renders.
+    lead: Lead,
 }
 
 impl Session {
@@ -269,6 +271,7 @@ impl Session {
             revision: 0,
             library: Library::none(),
             preview_gain: 1.0,
+            lead: Lead::Off,
         };
         session.arm();
         session
@@ -339,6 +342,7 @@ impl Session {
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
         self.engine.handle.set_preview_gain(self.preview_gain);
+        self.engine.handle.set_lead(self.lead);
         // The new engine writes no taps yet.
         self.restart_taps();
         self.arm();
@@ -972,6 +976,21 @@ impl Session {
     pub fn set_preview_gain(&mut self, gain: f32) {
         self.preview_gain = gain;
         self.engine.handle.set_preview_gain(gain);
+    }
+
+    /// Has the engine render `lead` ahead of the device from now on, while
+    /// no track plays live: see
+    /// [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
+    /// It renders each block as the device asks for it until this is
+    /// called.
+    pub fn set_lead(&mut self, lead: Lead) {
+        self.lead = lead;
+        self.engine.handle.set_lead(lead);
+    }
+
+    /// How far ahead of the device the engine renders.
+    pub fn lead(&self) -> Lead {
+        self.lead
     }
 
     /// Adds the recordings that have finished as takes, and passes on what

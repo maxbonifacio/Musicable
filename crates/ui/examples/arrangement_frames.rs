@@ -240,6 +240,7 @@ impl Bench {
                     load: Some(0.25),
                     dropouts: 0,
                     details: "",
+                    lead: None,
                 },
                 keymap_file: KeymapStatus {
                     path: None,

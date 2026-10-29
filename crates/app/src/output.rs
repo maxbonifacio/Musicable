@@ -11,22 +11,24 @@ use musicable_audio::{
     SampleFormat, StartError, Stream, StreamInfo, StreamRequest, StreamStats,
 };
 use musicable_engine::{
-    Engine, EngineConfig, EngineHandle, InputLayout, ParallelMonitor, ParallelStats,
+    AHEAD_BLOCK, Engine, EngineConfig, EngineHandle, InputLayout, Lead, ParallelMonitor,
+    ParallelStats, Stats,
 };
+use musicable_ui::LeadGauge;
 
 use crate::Session;
 
 /// What the engine renders for while no device has opened. It changes once
-/// one does.
+/// one does, if the device runs at another rate or asks for longer blocks.
 const NO_DEVICE: EngineConfig = EngineConfig {
     sample_rate: 48_000,
-    max_block: 512,
+    max_block: AHEAD_BLOCK,
 };
 
 /// How long to wait before trying a device again after it failed.
 const RETRY: Duration = Duration::from_secs(2);
 
-/// How often the CPU meter updates.
+/// How often the CPU meter and the lead gauge update.
 const METER_WINDOW: Duration = Duration::from_millis(250);
 
 /// How often the MIDI inputs are listed again while tracks want any, to
@@ -35,10 +37,12 @@ const MIDI_LISTING: Duration = Duration::from_secs(2);
 
 /// The audio device, playing what the engine renders.
 ///
-/// The engine is built for the device: for its sample rate, with the period
-/// the device asks for as its block size. When a device needs another, such
-/// as after a change of buffer size, the output builds a new engine and hands
-/// it to the [`Session`], which sets it up where the old one left off.
+/// The engine is built for the device: for its sample rate, with blocks as
+/// long as the period the device asks for, or as the engine renders ahead
+/// in ([`AHEAD_BLOCK`]), whichever is longer ([`engine_config`]). When a
+/// device needs another, such as after a change of sample rate, the output
+/// builds a new engine and hands it to the [`Session`], which sets it up
+/// where the old one left off.
 ///
 /// When the device fails or goes away, the engine waits, and the output tries
 /// the device again every two seconds. An ASIO driver that asks to be reset,
@@ -76,8 +80,11 @@ pub struct Output {
     /// Whether the stream ended because an ASIO driver asked to be reset.
     reset: bool,
     meter: LoadMeter,
+    lead: LeadMeter,
     /// The stream's dropouts when the user last reset the count.
     dropouts_from: u64,
+    /// The engine's short blocks when the stream started.
+    short_from: u64,
 }
 
 impl Output {
@@ -112,7 +119,7 @@ impl Output {
         }
         let config = opened
             .as_ref()
-            .map_or(NO_DEVICE, |open| open.info().engine_config());
+            .map_or(NO_DEVICE, |open| engine_config(open.info()));
         let (engine, handle, monitor) = crate::engine(config);
         let mut output = Self {
             request,
@@ -128,7 +135,9 @@ impl Output {
             retry_at: None,
             reset: false,
             meter: LoadMeter::default(),
+            lead: LeadMeter::default(),
             dropouts_from: 0,
+            short_from: 0,
         };
         if let Err(error) = opened.and_then(|open| output.play(open)) {
             output.failed(&error);
@@ -156,7 +165,9 @@ impl Output {
             retry_at: None,
             reset: false,
             meter: LoadMeter::default(),
+            lead: LeadMeter::default(),
             dropouts_from: 0,
+            short_from: 0,
         };
         (output, handle)
     }
@@ -173,8 +184,8 @@ impl Output {
     }
 
     /// Call once per frame. Notices a stream that ended by itself, tries the
-    /// device again when it's time, and updates the CPU meter. `notices`
-    /// says what happened.
+    /// device again when it's time, and updates the CPU meter and the lead
+    /// gauge. `notices` says what happened.
     pub fn tick(&mut self, session: &mut Session, notices: &mut Vec<String>) {
         if self.stream.as_ref().is_some_and(Stream::has_ended) {
             let error = self.stop();
@@ -214,9 +225,9 @@ impl Output {
             }
         }
         if let Some(stream) = &self.stream {
-            let busy = stream.stats().busy;
-            self.meter
-                .update(Instant::now(), busy, self.monitor.stats());
+            let (now, busy) = (Instant::now(), stream.stats().busy);
+            self.meter.update(now, busy, self.monitor.stats());
+            self.lead.update(now, &session.stats(), session.lead());
         }
     }
 
@@ -416,6 +427,26 @@ impl Output {
         })
     }
 
+    /// How far ahead of the device the engine rendered lately, for the
+    /// gauge under the CPU meter: none while Render Ahead is off or no
+    /// stream plays.
+    pub fn lead_gauge(&self) -> Option<LeadGauge> {
+        self.stream.as_ref().and(self.lead.gauge())
+    }
+
+    /// Render Ahead, and what the engine's lead came to lately: none while
+    /// no stream plays, or until a quarter of a second has gone by.
+    pub(crate) fn lead_lately(&self) -> Option<(Lead, Lately)> {
+        let lately = self.stream.as_ref().and(self.lead.lately)?;
+        Some((self.lead.setting, lately))
+    }
+
+    /// The blocks the audio thread rendered itself since the stream
+    /// started, while the engine rendered ahead, as the lead ran out.
+    pub fn short_blocks(&self) -> u64 {
+        self.lead.short_blocks.saturating_sub(self.short_from)
+    }
+
     /// Counts dropouts from zero again.
     pub fn reset_dropouts(&mut self) {
         if let Some(stream) = &self.stream {
@@ -452,7 +483,8 @@ impl Output {
             })
     }
 
-    /// The stream, the load and the dropouts in more words, for a tooltip.
+    /// The stream, the load, rendering ahead and the dropouts in more words,
+    /// for a tooltip.
     pub fn details(&self) -> String {
         let Some(stream) = &self.stream else {
             let problem = self.problem.as_deref().unwrap_or("no device is open");
@@ -480,6 +512,8 @@ impl Output {
                  {cores:.1} threads ran nodes at once on average."
             );
         }
+        let lead = self.lead.describe(info.sample_rate, self.short_blocks());
+        let _ = write!(text, "\n\n{lead}");
         let lost = audio_duration(stats.lost_frames, info.sample_rate);
         let _ = write!(
             text,
@@ -528,7 +562,7 @@ impl Output {
             ..request.clone()
         };
         let open = audio::open(&request)?;
-        let config = open.info().engine_config();
+        let config = engine_config(open.info());
         if self.engine().config() != config {
             // The old engine's workers stop before the new engine's start.
             // Windows gives a process 32 real-time (MMCSS) threads, so on a
@@ -546,6 +580,7 @@ impl Output {
     /// Plays the engine on `open`, a stream it was built for.
     fn play(&mut self, open: OpenStream) -> Result<(), audio::Error> {
         let engine = self.idle.take().expect("the engine waits for a stream");
+        let short_from = engine.stats().short_blocks;
         match open.start(engine) {
             Ok(stream) => {
                 self.stream = Some(stream);
@@ -553,7 +588,9 @@ impl Output {
                 self.problem = None;
                 self.retry_at = None;
                 self.meter = LoadMeter::default();
+                self.lead = LeadMeter::default();
                 self.dropouts_from = 0;
+                self.short_from = short_from;
                 Ok(())
             }
             Err(StartError { engine, error }) => {
@@ -588,6 +625,19 @@ impl Drop for Output {
         // Stop the device first, so the engine is dropped here and not on the
         // audio thread.
         self.stop();
+    }
+}
+
+/// What to build the engine for `info`'s stream with: its sample rate, and
+/// blocks as long as its period or as the engine renders ahead in,
+/// whichever is longer. So plugins are activated for both, and the engine
+/// needn't be built again as Render Ahead changes or a buffer size under
+/// [`AHEAD_BLOCK`] does.
+pub(crate) fn engine_config(info: &StreamInfo) -> EngineConfig {
+    let config = info.engine_config();
+    EngineConfig {
+        max_block: config.max_block.max(AHEAD_BLOCK),
+        ..config
     }
 }
 
@@ -661,6 +711,130 @@ impl LoadMeter {
         let work = parallel.busy.saturating_sub(parallel_then.busy);
         self.cores = (!wall.is_zero()).then(|| work.as_secs_f64() / wall.as_secs_f64());
         self.since = Some((now, busy, parallel));
+    }
+}
+
+/// The lead gauge: how far ahead of the device the engine rendered, over
+/// the last quarter of a second or so, against the lead it aimed for, and
+/// whether the audio thread had to render blocks itself as the lead ran
+/// out.
+#[derive(Debug, Default)]
+struct LeadMeter {
+    /// Render Ahead, as last seen.
+    setting: Lead,
+    /// When the window started, with the engine's short blocks then.
+    since: Option<(Instant, u64)>,
+    /// The window's readings so far while the engine rendered ahead: the
+    /// leads and the leads aimed for, in frames, added up, and how many
+    /// there were.
+    leads: u64,
+    targets: u64,
+    readings: u64,
+    /// The engine's short blocks, as last seen.
+    short_blocks: u64,
+    /// As of the last window.
+    lately: Option<Lately>,
+}
+
+/// What the engine's lead came to over a quarter of a second or so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Lately {
+    /// The lead on average, in frames, while the engine rendered ahead, and
+    /// the lead it aimed for: both none if it didn't.
+    pub(crate) lead: u64,
+    pub(crate) target: u64,
+    /// Whether it rendered ahead at the end, and whether the transport
+    /// played then.
+    pub(crate) ahead: bool,
+    pub(crate) playing: bool,
+    /// Whether the audio thread rendered blocks itself.
+    pub(crate) short: bool,
+}
+
+impl LeadMeter {
+    /// Takes the engine's counters at `now`, with Render Ahead at
+    /// `setting`.
+    fn update(&mut self, now: Instant, stats: &Stats, setting: Lead) {
+        self.setting = setting;
+        self.short_blocks = stats.short_blocks;
+        let (then, short_then) = *self.since.get_or_insert((now, stats.short_blocks));
+        if stats.lead_target > 0 {
+            self.leads += stats.lead.min(stats.lead_target);
+            self.targets += stats.lead_target;
+            self.readings += 1;
+        }
+        if now.saturating_duration_since(then) < METER_WINDOW {
+            return;
+        }
+        let readings = self.readings.max(1);
+        self.lately = Some(Lately {
+            lead: self.leads / readings,
+            target: self.targets / readings,
+            ahead: stats.lead_target > 0,
+            playing: stats.playing,
+            short: stats.short_blocks > short_then,
+        });
+        (self.leads, self.targets, self.readings) = (0, 0, 0);
+        self.since = Some((now, stats.short_blocks));
+    }
+
+    /// The gauge, once a window has gone by, while Render Ahead is on.
+    fn gauge(&self) -> Option<LeadGauge> {
+        let lately = self.lately.filter(|_| self.setting != Lead::Off)?;
+        Some(LeadGauge {
+            filled: match lately.target {
+                0 => 0.0,
+                target => (lately.lead as f64 / target as f64) as f32,
+            },
+            ahead: lately.ahead,
+            short: lately.short,
+        })
+    }
+
+    /// What Render Ahead did lately, in a few words, at `sample_rate`, with
+    /// `short_blocks` rendered by the audio thread since the stream
+    /// started.
+    fn describe(&self, sample_rate: u32, short_blocks: u64) -> String {
+        let name = match self.setting {
+            Lead::Off => {
+                return "Render Ahead is off: each block renders as the device asks for it."
+                    .to_owned();
+            }
+            Lead::Short => "Short",
+            Lead::Normal => "Normal",
+            Lead::Long => "Long",
+        };
+        let mut text = format!("Render Ahead is {name}");
+        let time = |frames| millis(audio_duration(frames, sample_rate));
+        match self.lately {
+            Some(lately) if lately.ahead => {
+                let _ = write!(
+                    text,
+                    ": the engine was {} ahead of the device lately, of the {} it aims for{}.",
+                    time(lately.lead),
+                    time(lately.target),
+                    match lately.playing {
+                        true => "",
+                        false => " while the transport stands still",
+                    }
+                );
+            }
+            Some(_) => text.push_str(
+                ", and nothing renders ahead now: while a track monitors its input, each \
+                 block renders as the device asks for it.",
+            ),
+            None => text.push('.'),
+        }
+        if short_blocks > 0 {
+            let plural = if short_blocks == 1 { "" } else { "s" };
+            let _ = write!(
+                text,
+                " Since the device started, the audio thread rendered {short_blocks} block{plural} \
+                 itself, as the lead ran out: a bigger buffer or a longer Render Ahead gives it \
+                 more room."
+            );
+        }
+        text
     }
 }
 
@@ -766,6 +940,15 @@ mod tests {
         assert_eq!(millis(latency(&info, &stats)), "2.7 ms");
         stats.queued = 542;
         assert_eq!(millis(latency(&info, &stats)), "11.3 ms");
+        // The engine renders blocks of up to 1024 frames, as it does ahead
+        // of the device, or the device's, if they're longer.
+        let config = engine_config(&info);
+        assert_eq!((config.sample_rate, config.max_block), (48_000, 1024));
+        let long = StreamInfo {
+            period: 2048,
+            ..info
+        };
+        assert_eq!(engine_config(&long).max_block, 2048);
     }
 
     #[test]
@@ -793,5 +976,74 @@ mod tests {
         meter.update(at(550), busy(425), parallel(40, 20));
         assert_eq!(meter.load, Some(1.0));
         assert_eq!(meter.cores, None);
+    }
+
+    #[test]
+    fn the_lead_gauge_shows_how_much_of_the_lead_the_engine_kept() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let stats = |lead, lead_target, short_blocks| Stats {
+            lead,
+            lead_target,
+            short_blocks,
+            playing: true,
+            ..Stats::default()
+        };
+        let gauge = |filled, ahead, short| {
+            Some(LeadGauge {
+                filled,
+                ahead,
+                short,
+            })
+        };
+        let mut meter = LeadMeter::default();
+        assert_eq!(
+            meter.describe(48_000, 0),
+            "Render Ahead is off: each block renders as the device asks for it."
+        );
+        meter.update(start, &stats(2400, 2400, 0), Lead::Normal);
+        assert_eq!(meter.gauge(), None);
+        assert_eq!(meter.describe(48_000, 0), "Render Ahead is Normal.");
+        // Half the lead on average, over a quarter of a second.
+        meter.update(at(100), &stats(1200, 2400, 0), Lead::Normal);
+        meter.update(at(250), &stats(0, 2400, 0), Lead::Normal);
+        assert_eq!(meter.gauge(), gauge(0.5, true, false));
+        assert_eq!(
+            meter.describe(48_000, 0),
+            "Render Ahead is Normal: the engine was 25.0 ms ahead of the device lately, of the \
+             50.0 ms it aims for."
+        );
+        // The audio thread had to render two blocks itself.
+        meter.update(at(400), &stats(600, 2400, 2), Lead::Normal);
+        meter.update(at(500), &stats(600, 2400, 2), Lead::Normal);
+        assert_eq!(meter.gauge(), gauge(0.25, true, true));
+        assert!(meter.describe(48_000, 2).ends_with(
+            "Since the device started, the audio thread rendered 2 blocks itself, as the lead \
+             ran out: a bigger buffer or a longer Render Ahead gives it more room."
+        ));
+        // A track monitors its input.
+        meter.update(at(750), &stats(0, 0, 2), Lead::Normal);
+        assert_eq!(meter.gauge(), gauge(0.0, false, false));
+        assert_eq!(
+            meter.describe(48_000, 0),
+            "Render Ahead is Normal, and nothing renders ahead now: while a track monitors its \
+             input, each block renders as the device asks for it."
+        );
+        // The transport stops, and a lead longer than the one aimed for
+        // counts as full.
+        let stopped = Stats {
+            playing: false,
+            ..stats(600, 512, 2)
+        };
+        meter.update(at(1000), &stopped, Lead::Normal);
+        assert_eq!(meter.gauge(), gauge(1.0, true, false));
+        assert_eq!(
+            meter.describe(48_000, 0),
+            "Render Ahead is Normal: the engine was 10.7 ms ahead of the device lately, of the \
+             10.7 ms it aims for while the transport stands still."
+        );
+        // No gauge with Render Ahead off.
+        meter.update(at(1250), &stopped, Lead::Off);
+        assert_eq!(meter.gauge(), None);
     }
 }

@@ -8,12 +8,18 @@
 //! time each took to render a second of audio is the share of a core it
 //! needs to keep up. Its longest block is the longest any of its nodes
 //! took in that second, as a share of the audio device's period.
+//!
+//! While the engine renders ahead, the second of audio is a second
+//! rendered, which runs ahead of what the device has played as the lead
+//! grows, and the whole graph renders ahead, so no figure has a longest
+//! block that matters: an ahead block has only to be ready before the lead
+//! runs out.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use musicable_engine::compile::keys::{self, Owner};
-use musicable_engine::{EngineConfig, LoadKey, NodeLoads};
+use musicable_engine::{EngineConfig, LoadKey, NodeLoads, Stats};
 use musicable_model::{Chain, DeviceId, Project, TrackId};
 use musicable_ui::{Cpu, Performance, Row};
 
@@ -30,20 +36,23 @@ pub struct Figures {
     readings: VecDeque<Reading>,
     /// When the loads were last read.
     read_at: Option<Instant>,
-    /// The engine the readings are from.
-    config: Option<EngineConfig>,
+    /// The engine the readings are from, and the frames the device asks
+    /// for at a time.
+    config: Option<(EngineConfig, u32)>,
     performance: Performance,
 }
 
 /// What each node had taken by one moment.
 #[derive(Debug, Default)]
 struct Reading {
-    /// The engine's time: the frames it had rendered.
+    /// The frames the engine had rendered: played, and ahead.
     time: u64,
     /// The time each node had taken, on every thread.
     busy: BTreeMap<LoadKey, Duration>,
     /// The longest block each node took since the reading before.
     longest: BTreeMap<LoadKey, Duration>,
+    /// Whether the engine was rendering ahead.
+    ahead: bool,
 }
 
 impl Figures {
@@ -53,19 +62,19 @@ impl Figures {
     }
 
     /// Reads `loads`, the running graph's, if it's time to, and works the
-    /// figures out again. `time` is the engine's, the frames it has
-    /// rendered, and `config` what it renders for. Without loads, or while
-    /// no device plays, there are no figures.
+    /// figures out again. `stats` are the engine's, rendering for `config`
+    /// through a device that asks for `period` frames at a time, or none
+    /// while no device plays. Then, or without loads, there are no figures.
     pub fn update(
         &mut self,
         now: Instant,
         loads: Option<&NodeLoads>,
-        playing: bool,
-        time: u64,
+        period: Option<u32>,
+        stats: &Stats,
         config: EngineConfig,
         project: &Project,
     ) {
-        let (Some(loads), true) = (loads, playing) else {
+        let (Some(loads), Some(period)) = (loads, period) else {
             *self = Self::default();
             return;
         };
@@ -78,25 +87,32 @@ impl Figures {
             return;
         }
         self.read_at = Some(now);
-        // Another engine, or the same one started again.
+        let time = stats.time + stats.lead;
+        // Another engine, or the same one started again, or playing
+        // through another buffer size.
         let restarted = (self.readings.back()).is_some_and(|last| time < last.time);
-        if restarted || self.config != Some(config) {
+        if restarted || self.config != Some((config, period)) {
             self.readings.clear();
-            self.config = Some(config);
+            self.config = Some((config, period));
         }
-        self.readings.push_back(read(loads, time));
+        self.readings
+            .push_back(read(loads, time, stats.lead_target > 0));
         let window = (WINDOW * f64::from(config.sample_rate)) as u64;
         while self.readings.len() > 2 && self.readings[1].time + window <= time {
             self.readings.pop_front();
         }
-        self.performance = figures(&self.readings, config, &Places::new(project));
+        let period = f64::from(period) / f64::from(config.sample_rate);
+        let places = Places::new(project);
+        self.performance = figures(&self.readings, config.sample_rate, period, &places);
     }
 }
 
-/// The time each node in `loads` had taken by engine time `time`.
-fn read(loads: &NodeLoads, time: u64) -> Reading {
+/// The time each node in `loads` had taken by the time the engine had
+/// rendered `time` frames, rendering ahead or not.
+fn read(loads: &NodeLoads, time: u64, ahead: bool) -> Reading {
     let mut reading = Reading {
         time,
+        ahead,
         ..Reading::default()
     };
     for (key, load) in loads.iter() {
@@ -106,14 +122,21 @@ fn read(loads: &NodeLoads, time: u64) -> Reading {
     reading
 }
 
-/// The figures over `readings`, oldest first: the time each row's nodes
-/// took from the oldest to the newest, over the time the engine rendered
-/// meanwhile, and their longest block since the oldest.
-fn figures(readings: &VecDeque<Reading>, config: EngineConfig, places: &Places) -> Performance {
+/// The figures over `readings`, oldest first, of an engine rendering at
+/// `sample_rate` through a device with a period of `period` seconds: the
+/// time each row's nodes took from the oldest to the newest, over the time
+/// the engine rendered meanwhile, and their longest block since the
+/// oldest. Each row renders ahead if the engine was, at the newest.
+fn figures(
+    readings: &VecDeque<Reading>,
+    sample_rate: u32,
+    period: f64,
+    places: &Places,
+) -> Performance {
     let (Some(oldest), Some(newest)) = (readings.front(), readings.back()) else {
         return Performance::default();
     };
-    let rendered = newest.time.saturating_sub(oldest.time) as f64 / f64::from(config.sample_rate);
+    let rendered = newest.time.saturating_sub(oldest.time) as f64 / f64::from(sample_rate);
     if rendered <= 0.0 {
         return Performance::default();
     }
@@ -130,17 +153,25 @@ fn figures(readings: &VecDeque<Reading>, config: EngineConfig, places: &Places) 
         let row = longest.entry(places.row(key)).or_default();
         *row = (*row).max(block);
     }
-    let period = config.max_block as f64 / f64::from(config.sample_rate);
+    let ahead = newest.ahead;
     let mut performance = Performance::default();
     for (row, busy) in busy {
         let average = (busy.as_secs_f64() / rendered) as f32;
         let longest = longest.get(&row).copied().unwrap_or_default();
         let longest = (longest.as_secs_f64() / period) as f32;
-        performance.rows.insert(row, Cpu { average, longest });
+        let cpu = Cpu {
+            average,
+            longest,
+            ahead,
+        };
+        performance.rows.insert(row, cpu);
         if let Some(chain) = places.chain(row) {
             *performance.channels.entry(chain).or_default() += average;
         }
         performance.total += average;
+        if ahead {
+            performance.ahead += average;
+        }
     }
     performance
 }
@@ -226,7 +257,7 @@ impl Places {
 mod tests {
     use musicable_commands::{Keymap, transport};
     use musicable_engine::compile::Slot;
-    use musicable_engine::{Engine, Joint, NodeKey};
+    use musicable_engine::{Engine, Joint, Lead, NodeKey};
     use musicable_model::routing::{Port, Tap, WireId};
     use musicable_model::{DeviceKind, Send, TrackKind};
 
@@ -335,8 +366,12 @@ mod tests {
             time,
             busy: times(busy),
             longest: times(longest),
+            ahead: false,
         }
     }
+
+    /// The period of [`CONFIG`]'s device, in seconds.
+    const PERIOD: f64 = 0.01;
 
     #[track_caller]
     fn assert_near(got: f32, expected: f32) {
@@ -366,7 +401,7 @@ mod tests {
                 &[(drive, 5_000), (fader, 100), (limiter, 12_000)],
             ),
         ]);
-        let performance = figures(&readings, CONFIG, &places);
+        let performance = figures(&readings, CONFIG.sample_rate, PERIOD, &places);
         // A quarter of a second's work in a second: a quarter of a core.
         // Its longest block since the oldest reading, 5 ms, is half the
         // 10 ms period.
@@ -390,7 +425,51 @@ mod tests {
         assert_eq!(performance.rows.len(), 3);
         // Nothing rendered in between, no figures.
         let readings = VecDeque::from([reading(48_000, &[], &[]), reading(48_000, &[], &[])]);
-        assert_eq!(figures(&readings, CONFIG, &places), Performance::default());
+        assert_eq!(
+            figures(&readings, CONFIG.sample_rate, PERIOD, &places),
+            Performance::default()
+        );
+    }
+
+    #[test]
+    fn figures_count_the_frames_rendered_ahead() {
+        let (project, ids) = project();
+        let (mut engine, handle) = Engine::new(EngineConfig {
+            max_block: 1024,
+            ..CONFIG
+        });
+        let config = handle.config();
+        let mut session = Session::offline(project, None, Keymap::default_keymap(), handle);
+        session.set_lead(Lead::Long);
+        session.run(&transport::PLAY).unwrap();
+        session.wait_for_graph();
+        let mut figures = Figures::default();
+        let start = Instant::now();
+        // Callbacks of 128 frames.
+        let mut buffer = vec![0.0; 2 * 128];
+        let mut read = |figures: &mut Figures, engine: &mut Engine, after| {
+            for _ in 0..100 {
+                engine.process_interleaved(&mut buffer, 2);
+            }
+            let (stats, project) = (session.stats(), session.project());
+            let at = start + Duration::from_millis(after);
+            figures.update(at, session.loads(), Some(128), &stats, config, project);
+            stats
+        };
+        read(&mut figures, &mut engine, 0);
+        let stats = read(&mut figures, &mut engine, 250);
+        // The engine renders ahead, the lead growing, and every row with
+        // it.
+        assert!(stats.lead > 0 && stats.lead_target > 0, "{stats:?}");
+        let performance = figures.performance();
+        let drive = performance.device(ids.drive).unwrap();
+        assert!(drive.ahead && drive.average > 0.0, "{drive:?}");
+        assert!(performance.rows.values().all(|cpu| cpu.ahead));
+        assert_near(performance.ahead, performance.total);
+        // Over the frames rendered: the readings say how far.
+        let readings = &figures.readings;
+        let newest = readings.back().unwrap().time;
+        assert_eq!(newest, stats.time + stats.lead);
     }
 
     #[test]
@@ -415,12 +494,13 @@ mod tests {
                 .map(|&(key, micros)| (key, Duration::from_micros(micros)))
                 .collect(),
             longest: BTreeMap::new(),
+            ahead: false,
         };
         let readings = VecDeque::from([
             reading(0, &[(master, 100_000), (send, 50_000)]),
             reading(48_000, &[(master, 150_000)]),
         ]);
-        let performance = figures(&readings, CONFIG, &places);
+        let performance = figures(&readings, CONFIG.sample_rate, PERIOD, &places);
         // The delay into the master took 50 ms of the second.
         let mixer = performance.rows[&Row::Mixer(Chain::Track(ids.bass))];
         assert_near(mixer.average, 0.05);
@@ -435,10 +515,11 @@ mod tests {
         session.wait_for_graph();
         let mut figures = Figures::default();
         let start = Instant::now();
-        let update = |figures: &mut Figures, session: &Session, after, playing| {
+        let update = |figures: &mut Figures, session: &Session, after, playing: bool| {
             let (stats, project) = (session.stats(), session.project());
             let at = start + Duration::from_millis(after);
-            figures.update(at, session.loads(), playing, stats.time, CONFIG, project);
+            let period = playing.then_some(CONFIG.max_block as u32);
+            figures.update(at, session.loads(), period, &stats, CONFIG, project);
         };
         let mut buffer = vec![0.0; 2 * CONFIG.max_block];
         let mut play = |engine: &mut Engine, blocks| {

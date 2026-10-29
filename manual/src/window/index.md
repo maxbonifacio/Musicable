@@ -22,7 +22,8 @@ Follow and Snap to Grid, are ticked while they're on.
 The transport bar has go to start, play, stop, record, Capture, loop, punch
 in and punch out, the metronome, the tempo, the time signature, and the
 playhead in bars, beats and sixteenths and in minutes and seconds. At its
-right end are the CPU meter and the dropout counter ([Setting up
+right end are the CPU meter, with the lead gauge under it while Render
+Ahead is on, and the dropout counter ([Setting up
 audio](../getting-started/audio.md#the-cpu-meter-and-the-dropouts)), and
 the CPU meter's tooltip has what the whole project took of a core
 ([The Performance panel](performance.md)).

@@ -486,7 +486,8 @@ fn title_row(
 }
 
 /// The share of a core the device called `name` takes, small, amber or
-/// red when it's busy, with its longest block in the tooltip.
+/// red when it's busy, with how it renders and, live, its longest block in
+/// the tooltip.
 fn cpu_figure(ui: &mut Ui, name: &str, cpu: Cpu, theme: &Theme) {
     let figure = performance::percent(cpu.average);
     let colour = performance::colour(cpu.average, theme);
@@ -503,11 +504,18 @@ fn cpu_figure(ui: &mut Ui, name: &str, cpu: Cpu, theme: &Theme) {
         ui.painter().galley(rect.min, galley, colour);
     }
     response.on_hover_ui(|ui| {
-        ui.label(format!(
-            "CPU: {} of a core over the last second. Its longest block took {} of a buffer.",
-            performance::percent(cpu.average),
-            performance::percent(cpu.longest),
-        ));
+        let average = performance::percent(cpu.average);
+        ui.label(match cpu.live_longest() {
+            Some(longest) => format!(
+                "CPU: {average} of a core over the last second. Live: its longest block took \
+                 {} of a buffer.",
+                performance::percent(longest),
+            ),
+            None => format!(
+                "CPU: {average} of a core over the last second. Ahead: it renders ahead of the \
+                 audio device, so a long block doesn't drop out."
+            ),
+        });
     });
 }
 
@@ -1456,7 +1464,11 @@ mod tests {
         harness.run();
         // Without figures, none shows.
         assert!(harness.query_by_label("Old Reverb CPU").is_none());
-        let cpu = |average, longest| Cpu { average, longest };
+        let cpu = |average, longest| Cpu {
+            average,
+            longest,
+            ahead: false,
+        };
         harness.state_mut().performance.rows = BTreeMap::from([
             (Row::Device(synth.id), cpu(0.6, 0.9)),
             (Row::Device(reverb.id), cpu(0.12, 0.2)),

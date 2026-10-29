@@ -96,7 +96,8 @@ computer can connect to it.
 
 Agents can read what each device costs the CPU too, as the
 [Performance panel](../window/performance.md) lists it, to say which plugin
-to freeze or take out.
+to freeze or take out, and how far ahead of the audio device Musicable
+renders ([Render Ahead](../getting-started/audio.md#render-ahead)).
 
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,

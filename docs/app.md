@@ -498,8 +498,11 @@ with `Session::change_mixer`
 the mouse map, as the arrangement's do. The faders, sends, pans, buttons,
 menus and meters are named for screen readers, such as "Lead Volume", which
 is how the tests drive them. The meters read the engine's `Meters` every
-frame, and the window redraws at 60 frames a second while any of them shows
-a signal, so they fall all the way back after you stop. The CPU part
+frame, as of the frame the device plays (`Stats::time`, with
+`Meter::level_at`), so while the engine renders ahead they move with what's
+heard, not with what was rendered last ([engine.md](engine.md#built-in-devices)).
+The window redraws at 60 frames a second while any of them shows a signal,
+so they fall all the way back after you stop. The CPU part
 (`cpu`) shows the channel's share of a core from the view's `Performance`
 ([CPU figures](#cpu-figures)), as a meter named such as "Lead CPU", and
 "--" while there are no figures. The **Track** menu adds tracks
@@ -547,17 +550,21 @@ devices panel (`Shell::show_device`). Its panel's id is
 [The Performance panel](../manual/src/window/performance.md) in the manual
 says what it lists. It draws the view's `musicable_ui::Performance`, the
 figures the app worked out last ([CPU figures](#cpu-figures)): a `Cpu`,
-the average and the longest block, for each `Row`, which is a device, a
-channel's clips, modulators or mixer, or the metronome
-(`crates/ui/src/performance.rs`). Each frame it lists the rows busiest
+the average, the longest block and whether it renders ahead, for each
+`Row`, which is a device, a channel's clips, modulators or mixer, or the
+metronome (`crates/ui/src/performance.rs`). The Renders column says Ahead
+or Live, and the Longest column is empty for a row that renders ahead
+(`Cpu::live_longest`), since its blocks have only to be ready before the
+lead runs out. Each frame it lists the rows busiest
 first (`Performance::busiest`), leaving out any whose device or track has
 gone since, but while the pointer is over the panel the rows keep the
 order they had, with any new ones at the foot, so a click lands on the row
 it was aimed at as the figures change. Only the rows in sight are drawn,
 over a Total line that stays in sight. The columns' headings say what the
 figures mean in their tooltips, and each row is a list item named after its
-channel and its part, such as "Bass, Drive", with its average as its value,
-which is how the tests read it. Clicking a row runs `device.select` for a
+channel and its part, such as "Bass, Drive", with its average and how it
+renders as its value, such as "30%, live", which is how the tests read
+it. Clicking a row runs `device.select` for a
 device, and `edit.select_tracks` or `edit.select_master` for the rest of a
 channel, and the shell brings a device clicked into sight in the devices
 panel (`Shell::show_device`), as the Routing panel's clicks do. Its panel's
@@ -786,7 +793,8 @@ Amount or Lag is a gesture, so the history keeps one step for it.
 
 The readings come from the engine's `Meters`, which the app follows with
 the project, as it does the meters ([engine.md](engine.md#built-in-devices)),
-and hands the window each frame in `mixer::Levels::outputs` and `moved`. It
+and hands the window each frame in `mixer::Levels::outputs` and `moved`, as
+of the frame the device plays (`Reading::get_at`), as the meters are. It
 redraws at 60 frames a second while they change, and clears them while no
 audio plays, so a stopped engine's last readings don't linger: a Macro's
 handles then show its controls' own values.
@@ -1213,9 +1221,12 @@ theme colours egui's own widgets too: `[widgets]` is egui's visuals, and
 - At startup it opens the stream the settings ask for. If the device in the
   settings isn't plugged in, it plays through the default output instead, and
   says so; the settings keep the device for next time.
-- The engine is built for the stream, with its sample rate and its period as
-  the block size, and always renders with the parallel scheduler
-  (`musicable_app::engine`).
+- The engine is built for the stream, with its sample rate, and blocks as
+  long as its period or as the engine renders ahead in (`AHEAD_BLOCK`, 1024
+  frames), whichever is longer (`output::engine_config`), so plugins are
+  activated for both, and a change of buffer size under 1024 frames, or of
+  Render Ahead, doesn't build another. It always renders with the parallel
+  scheduler (`musicable_app::engine`). Exports render in blocks as long.
 - When the stream ends by itself, because the device was unplugged or its
   format changed, the output tries it again at once and then every two
   seconds. An ASIO driver that asks to be reset, after a change in its own
@@ -1241,6 +1252,13 @@ The Recording page's offset is the playing device's [recording
 offset](#recording), in its mode and at its rate, and the next recording
 uses it, as does Capture.
 
+**Render Ahead**, below the device's settings, is the engine's lead
+(`EngineHandle::set_lead`, [engine.md](engine.md#rendering-ahead)): Off,
+Short, Normal or Long, `audio.render_ahead` in the settings file, Normal
+when it's left out (`settings::RenderAhead`). It applies at once, with no
+Apply, and the session keeps it (`Session::set_lead`) to set on every
+engine that takes over.
+
 ### Meters
 
 - **CPU**: the share of the time the audio thread spent in its wake-ups,
@@ -1249,7 +1267,18 @@ uses it, as does Capture.
   `StreamStats::busy`. The tooltip adds the longest wake-up, how many
   threads the parallel scheduler kept busy at once while it shared blocks,
   and, while there are CPU figures, the project's share of a core, which
-  is the Performance panel's total ([CPU figures](#cpu-figures)).
+  is the Performance panel's total ([CPU figures](#cpu-figures)), and the
+  share of what rendered ahead (`Performance::ahead`).
+- **The lead gauge**, under the CPU meter while Render Ahead is on: the
+  engine's lead as a share of the lead it aims for (`Stats::lead` over
+  `lead_target`), over the last quarter of a second, from `LeadMeter` in
+  `output.rs`, which the view carries as a `musicable_ui::LeadGauge`. It's
+  amber under half while the engine renders ahead, and red over a quarter
+  of a second in which `Stats::short_blocks` rose: the audio thread had to
+  render blocks itself. While a track monitors an input, nothing renders
+  ahead and it's empty. The CPU meter's tooltip, which the gauge shares,
+  says how far ahead the engine was, of how far it aims, and the short
+  blocks since the stream started (`Output::short_blocks`).
 - **Dropouts**: `StreamStats::underruns` since the stream started. Click to
   count from zero again. The tooltip has the audio lost, how many of the
   dropouts were in the system's audio engine or driver, and the late
@@ -1266,9 +1295,11 @@ running graph's loads (`Session::loads`) each frame, after the levels:
 
 - **Four times a second** it reads every node's load: the time the node
   has taken, and its longest block since the reading before, with the
-  engine's time, the frames it has rendered. It keeps the readings that
-  span at least the last second of audio rendered, and works the figures
-  out from the oldest of them and the newest.
+  frames the engine has rendered: those played (`Stats::time`) and those
+  ahead (`Stats::lead`), so while the lead fills or empties, the figures
+  are still over the audio rendered. It keeps the readings that span at
+  least the last second of audio rendered, and works the figures out from
+  the oldest of them and the newest.
 - **Each node goes in a row**, by what its key belongs to
   (`compile::keys::owner`): a device's node in the device's row, a track's
   clips, input and clip type in its Clips row, and a channel's modulation
@@ -1287,7 +1318,12 @@ running graph's loads (`Session::loads`) each frame, after the levels:
   node. A channel's figure adds up its rows, and the total adds up them
   all.
 - **A row's longest block** is the longest any of its nodes took in the
-  readings after the oldest, over the stream's period.
+  readings after the oldest, over the stream's period: the device's, not
+  the engine's `max_block`, which is longer.
+- **A row renders ahead** if the engine rendered ahead at the newest
+  reading (`Stats::lead_target` above zero). In this milestone the whole
+  graph renders ahead or live, so every row says the same, and
+  `Performance::ahead` adds up the rows that render ahead.
 - While no stream plays there are no figures, so the views show none, and
   a graph the engine hasn't installed yet waits until it has
   (`NodeLoads::installed`): until then its loads read nothing, or only

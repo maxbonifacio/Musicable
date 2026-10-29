@@ -11,8 +11,8 @@ then Escape closes that, or stops waiting, first. The Settings window isn't
 a panel, so workspaces don't keep it.
 
 - **Audio**: the device to play through, its mode, rate and buffer size,
-  which **Apply** opens, and what's playing now ([Setting up
-  audio](../getting-started/audio.md)).
+  which **Apply** opens, how far ahead of it Musicable renders, and what's
+  playing now ([Setting up audio](../getting-started/audio.md)).
 - **Recording**: how long Capture holds the inputs, 0 for off
   ([Capture](../using/recording.md#capture)), and the recording offset of
   the device playing, in its mode and at its rate ([Where it
@@ -124,7 +124,8 @@ it.
 ## The settings file
 
 `settings.toml` holds the audio settings, written whenever you apply new
-ones, and every other setting, written as soon as it changes. Musicable
+ones, and every other setting, Render Ahead's too, written as soon as it
+changes. Musicable
 reads it as it starts:
 
 ```toml
@@ -135,6 +136,7 @@ version = 1
 device = "{0.0.0.00000000}.{a1b2c3d4-...}"
 exclusive = false
 buffer_size = 128
+render_ahead = "normal"
 
 [behaviour]
 play_from = "start_marker"
@@ -191,6 +193,7 @@ Every setting can be left out:
 | `audio.exclusive` | Whether Musicable takes the device for itself, for the lowest latency. | `false` |
 | `audio.sample_rate` | The rate the device plays at. | The rate it runs at |
 | `audio.buffer_size` | The buffer size, in frames. | The smallest the device supports, or an ASIO driver's preferred size |
+| `audio.render_ahead` | How far ahead of the device Musicable renders while no track monitors an input: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms) ([Render Ahead](../getting-started/audio.md#render-ahead)). | `normal` |
 | `behaviour.play_from` | Where Play/Stop plays from: the start marker (`start_marker`) or where the playhead stopped (`playhead`). | `start_marker` |
 | `behaviour.middle_c` | What the piano roll calls MIDI note 60: `c3`, `c4` or `c5`. | `c3` |
 | `behaviour.warp_recordings` | Whether recordings follow the tempo they were played to. | `true` |

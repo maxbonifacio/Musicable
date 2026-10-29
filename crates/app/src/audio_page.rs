@@ -1,5 +1,5 @@
 //! The Settings window's Audio page: which device to play through, and
-//! how.
+//! how, and how far ahead of it the engine renders.
 
 use eframe::egui::{Button, ComboBox, Grid, Id, RadioButton, RichText, Ui};
 use musicable_audio::{
@@ -8,12 +8,15 @@ use musicable_audio::{
 
 use crate::Output;
 use crate::output::{kilohertz, millis};
+use crate::settings::RenderAhead;
+use crate::settings_window::Asked;
 
 /// The buffer sizes on offer, where the device takes them.
 const BUFFER_SIZES: [u32; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
 
-/// The Audio page. The settings change when the user applies them, all at
-/// once, since each change reopens the device.
+/// The Audio page. The device's settings change when the user applies them,
+/// all at once, since each change reopens the device. Render Ahead changes
+/// at once, since it doesn't.
 #[derive(Default)]
 pub struct AudioPage {
     /// The output devices, when the page came into sight or was refreshed.
@@ -45,10 +48,16 @@ impl AudioPage {
         self.refresh();
     }
 
-    /// Draws the page. Returns the settings to apply, when the user applies
-    /// them.
-    pub fn show(&mut self, ui: &mut Ui, output: &Output) -> Option<StreamRequest> {
-        let mut apply = None;
+    /// Draws the page, with Render Ahead at `render_ahead`. Returns what
+    /// the user changed: the device's settings to apply, when the user
+    /// applies them, or Render Ahead.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        output: &Output,
+        render_ahead: RenderAhead,
+    ) -> Option<Asked> {
+        let mut asked = None;
         if playing(output) != self.playing {
             self.playing = playing(output);
             self.load_capabilities();
@@ -79,7 +88,7 @@ impl AudioPage {
                 .add_enabled(changed && picked, Button::new("Apply"))
                 .clicked()
             {
-                apply = Some(self.draft.clone());
+                asked = Some(Asked::Stream(self.draft.clone()));
             }
             if ui.add_enabled(changed, Button::new("Revert")).clicked() {
                 self.draft = output.request().clone();
@@ -97,11 +106,15 @@ impl AudioPage {
             None => {}
         }
         ui.separator();
+        if let Some(chosen) = render_ahead_choice(ui, render_ahead) {
+            asked = Some(Asked::RenderAhead(chosen));
+        }
+        ui.separator();
         ui.label(RichText::new("Now playing").strong());
         ui.label(output.details());
         ui.separator();
         gpl_notice(ui);
-        apply
+        asked
     }
 
     /// Says how applying the settings went.
@@ -440,6 +453,44 @@ impl AudioPage {
     fn device_rate(&self) -> Option<u32> {
         self.capabilities().map(|caps| caps.sample_rate)
     }
+}
+
+/// Render Ahead's choices, with `current` chosen. Returns the one the user
+/// picks.
+fn render_ahead_choice(ui: &mut Ui, current: RenderAhead) -> Option<RenderAhead> {
+    ui.label(RichText::new("Render Ahead").strong());
+    let mut chosen = current;
+    for choice in RenderAhead::ALL {
+        let (name, hover) = match choice {
+            RenderAhead::Off => (
+                "Off",
+                "Every block renders as the device asks for it, within its buffer",
+            ),
+            RenderAhead::Short => (
+                "Short, about 20 ms",
+                "Knobs turned by hand are heard soonest",
+            ),
+            RenderAhead::Normal => (
+                "Normal, about 50 ms",
+                "Room for a heavy mix at a small buffer",
+            ),
+            RenderAhead::Long => (
+                "Long, about 200 ms",
+                "The most room, for the heaviest mixes",
+            ),
+        };
+        ui.radio_value(&mut chosen, choice, name)
+            .on_hover_text(hover);
+    }
+    ui.label(
+        RichText::new(
+            "While no track monitors its input, Musicable renders the whole project this far \
+             ahead of the device, on all its cores, so a small buffer plays a heavy mix without \
+             dropouts. Knobs turned by hand, Stop and jumps are heard up to this much later.",
+        )
+        .weak(),
+    );
+    (chosen != current).then_some(chosen)
 }
 
 /// What the device `request` names plays through.

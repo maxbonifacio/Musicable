@@ -41,6 +41,37 @@ With ASIO, Musicable plays through the driver's first two outputs, the
 first analog outputs on most interfaces. Only one ASIO driver can play at a
 time.
 
+## Render Ahead
+
+**Render Ahead**, under the device's settings, lets a small buffer play a
+heavy mix. While no track monitors its input, Musicable renders the whole
+project ahead of the device, on all its cores, and each buffer the device
+asks for is ready already. A plugin can then take longer than a buffer
+lasts now and then without a dropout, as long as the project keeps up on
+the whole.
+
+- **Off**: every block renders as the device asks for it, within its
+  buffer.
+- **Short**, about 20 ms ahead.
+- **Normal**, about 50 ms ahead, as Musicable starts.
+- **Long**, about 200 ms ahead, the most room, for the heaviest mixes.
+
+The further ahead, the later you hear what you change by hand while the
+song plays, up to that long after: a knob you turn, Stop, or a jump. While
+the transport stands still, Musicable keeps only about 512 samples ahead,
+so Play starts soon.
+
+While a track can monitor an audio or MIDI input, with its monitoring at
+**In**, or at **Auto** while it's armed
+([Monitoring](../using/recording.md#monitoring)), the whole project renders
+live, as the device asks for each buffer, so what you play reaches your
+ears at the buffer's latency. A track taking its input from another track
+doesn't count. Exports aren't played through the device, so Render Ahead
+makes no difference to them.
+
+Render Ahead changes at once, with no **Apply**, since the device needn't
+open again.
+
 ## When a device goes away
 
 - If the device in the settings isn't plugged in as Musicable starts, it
@@ -78,15 +109,24 @@ counter:
   the song included, over the last quarter of a second. Near 100%, it
   starts running late, and dropouts follow. Its tooltip adds the longest it
   took to wake up and render, how many threads Musicable kept busy at once,
-  and the share of a core the project took, which the
-  [Performance panel](../window/performance.md) breaks down by device.
+  and the share of a core the project took, and how much of it rendered
+  ahead, which the [Performance panel](../window/performance.md) breaks
+  down by device.
+- The **lead gauge**, the thin bar under the CPU meter while Render Ahead
+  is on, is how much of the lead Musicable aims for it kept ahead of the
+  device over the last quarter of a second: full is all of it. It turns
+  amber under half, and red when the audio thread had to render blocks
+  itself because the lead ran out, the step before a dropout. It's empty
+  while a track monitors its input, since nothing renders ahead then. The
+  tooltip says how far ahead Musicable was, and how many blocks the audio
+  thread had to render itself since the device started.
 - **Dropouts** counts the times the device ran out of audio since it
   started, which you hear as clicks or gaps. Click it to count from zero
   again. Its tooltip says how much audio they lost, how many of them were
   in the system's audio engine or driver, and how often the audio thread
   woke up late.
 
-To get rid of dropouts, try a bigger buffer, exclusive mode or ASIO, and
-closing apps that keep the computer busy. Build Musicable with `--release`,
-as [Installing Musicable](installing.md) does, since other builds are much
-slower.
+To get rid of dropouts, try a bigger buffer, a longer Render Ahead,
+exclusive mode or ASIO, and closing apps that keep the computer busy. Build
+Musicable with `--release`, as [Installing Musicable](installing.md) does,
+since other builds are much slower.

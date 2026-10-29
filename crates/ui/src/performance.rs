@@ -29,7 +29,13 @@ const AVERAGE: &str = "The share of one core it took over the last second: 50% i
 
 /// What the Longest column's heading says in its tooltip.
 const LONGEST: &str = "Its longest block over the last second, as a share of the buffer: over \
-                       100%, it alone took longer than a buffer lasts.";
+                       100%, it alone took longer than a buffer lasts. Only for what renders \
+                       live.";
+
+/// What the Renders column's heading says in its tooltip.
+const RENDERS: &str = "Ahead: rendered ahead of the audio device, on all the cores, as Render \
+                       Ahead in Settings > Audio has it. Live: rendered as the device asks for \
+                       each buffer, as everything is while a track monitors its input.";
 
 /// A share of a core over this turns a figure amber.
 pub const BUSY: f32 = 0.25;
@@ -43,8 +49,28 @@ pub struct Cpu {
     /// shares add up.
     pub average: f32,
     /// Its longest block, as a share of the audio device's period: over
-    /// 1.0, it alone took longer than a callback lasts.
+    /// 1.0, it alone took longer than a callback lasts. It matters only
+    /// while it renders live.
     pub longest: f32,
+    /// Whether it renders ahead of the audio device, rather than live, as
+    /// the device asks for each block. A block rendered ahead has only to
+    /// be ready before the lead runs out.
+    pub ahead: bool,
+}
+
+impl Cpu {
+    /// Its longest block, while it renders live.
+    pub fn live_longest(&self) -> Option<f32> {
+        (!self.ahead).then_some(self.longest)
+    }
+
+    /// How it renders, as the Performance panel says: "Ahead" or "Live".
+    pub fn renders(&self) -> &'static str {
+        match self.ahead {
+            true => "Ahead",
+            false => "Live",
+        }
+    }
 }
 
 /// Something in the project that takes CPU time, as the Performance panel
@@ -74,6 +100,8 @@ pub struct Performance {
     pub channels: BTreeMap<Chain, f32>,
     /// The whole project's share of a core: 1.5 is a core and a half.
     pub total: f32,
+    /// The share of a core of what renders ahead of the device.
+    pub ahead: f32,
 }
 
 impl Performance {
@@ -146,8 +174,9 @@ impl PerformancePanel {
                     let line = Line {
                         channel,
                         part: &part,
+                        renders: cpu.renders(),
                         average: cpu.average,
-                        longest: Some(cpu.longest),
+                        longest: cpu.live_longest(),
                         clicks: row != Row::Metronome,
                     };
                     if lines.line(ui, &line).clicked() {
@@ -160,6 +189,7 @@ impl PerformancePanel {
         let total = Line {
             channel: "Total",
             part: "",
+            renders: "",
             average: performance.total,
             longest: None,
             clicks: false,
@@ -180,6 +210,8 @@ struct Line<'a> {
     channel: &'a str,
     /// The device, or the part of the channel.
     part: &'a str,
+    /// How it renders: "Ahead", "Live", or nothing for the total.
+    renders: &'a str,
     average: f32,
     longest: Option<f32>,
     /// Whether it senses clicks.
@@ -202,6 +234,7 @@ impl Lines<'_> {
         let headings = [
             ("Track", None),
             ("Device", None),
+            ("Renders", Some(RENDERS)),
             ("Average", Some(AVERAGE)),
             ("Longest", Some(LONGEST)),
         ];
@@ -235,8 +268,12 @@ impl Lines<'_> {
             .filter(|name| !name.is_empty());
         let label = label.collect::<Vec<_>>().join(", ");
         let average = percent(line.average);
+        let value = match line.renders {
+            "" => average,
+            renders => format!("{average}, {}", renders.to_lowercase()),
+        };
         response.widget_info(|| WidgetInfo {
-            current_text_value: Some(average.clone()),
+            current_text_value: Some(value.clone()),
             ..WidgetInfo::labeled(Role::ListItem, true, &label)
         });
         if !ui.is_rect_visible(rect) {
@@ -249,8 +286,13 @@ impl Lines<'_> {
                 .rect_filled(rect, theme.corner, visuals.weak_bg_fill);
         }
         let text = visuals.text_color();
-        let [track, part, average_cell, longest_cell] = self.cells(rect);
-        for ((cell, align), name) in [(track, line.channel), (part, line.part)] {
+        let [track, part, renders, average_cell, longest_cell] = self.cells(rect);
+        let names = [
+            (track, line.channel),
+            (part, line.part),
+            (renders, line.renders),
+        ];
+        for ((cell, align), name) in names {
             let font = FontId::proportional(theme.text);
             let mut job = LayoutJob::simple_singleline(name.to_owned(), font, text);
             job.wrap =
@@ -285,11 +327,13 @@ impl Lines<'_> {
     }
 
     /// The cells of a line in `rect`, left to right, with how their text
-    /// goes in them: the track's, the device's, and the two figures'.
-    fn cells(&self, rect: Rect) -> [(Rect, Align2); 4] {
+    /// goes in them: the track's, the device's, how it renders, and the
+    /// two figures'.
+    fn cells(&self, rect: Rect) -> [(Rect, Align2); 5] {
         let Columns {
             track,
             part,
+            renders,
             figure,
         } = self.columns;
         let mut left = rect.left();
@@ -301,6 +345,7 @@ impl Lines<'_> {
         [
             cell(track, Align2::LEFT_CENTER),
             cell(part, Align2::LEFT_CENTER),
+            cell(renders, Align2::LEFT_CENTER),
             cell(figure, Align2::RIGHT_CENTER),
             cell(figure, Align2::RIGHT_CENTER),
         ]
@@ -321,19 +366,22 @@ impl Lines<'_> {
 struct Columns {
     track: f32,
     part: f32,
+    renders: f32,
     /// Each figure's.
     figure: f32,
 }
 
 impl Columns {
-    /// The columns of a line `width` wide: the figures as wide as they
-    /// need, and the names sharing the rest.
+    /// The columns of a line `width` wide: how it renders and the figures
+    /// as wide as they need, and the names sharing the rest.
     fn across(width: f32, theme: &Theme) -> Self {
-        let figure = (theme.text * 5.0).min(width / 4.0);
-        let names = (width - 2.0 * figure).max(0.0);
+        let figure = (theme.text * 5.0).min(width / 5.0);
+        let renders = (theme.text * 5.0).min(width / 5.0);
+        let names = (width - 2.0 * figure - renders).max(0.0);
         Self {
             track: names * 0.4,
             part: names * 0.6,
+            renders,
             figure,
         }
     }
@@ -436,7 +484,7 @@ mod tests {
     fn rows_come_busiest_first() {
         let cpu = |average| Cpu {
             average,
-            longest: 0.0,
+            ..Cpu::default()
         };
         let performance = Performance {
             rows: BTreeMap::from([
@@ -464,7 +512,11 @@ mod tests {
     }
 
     fn cpu(average: f32, longest: f32) -> Cpu {
-        Cpu { average, longest }
+        Cpu {
+            average,
+            longest,
+            ahead: false,
+        }
     }
 
     /// What the project in [`project`] has.
@@ -527,18 +579,19 @@ mod tests {
             ]),
             channels: BTreeMap::new(),
             total: 1.321,
+            ahead: 0.0,
         };
         harness.run();
         let listed = [
-            ("Bass, Test Gain", "30%"),
-            ("Master, Test Gain", "10%"),
-            ("Bass, Mixer", "2%"),
-            ("Metronome", "<1%"),
+            ("Bass, Test Gain", "30%, live"),
+            ("Master, Test Gain", "10%, live"),
+            ("Bass, Mixer", "2%, live"),
+            ("Metronome", "<1%, live"),
             ("Total", "132%"),
         ];
         let listed = listed.map(|(name, average)| (name.to_owned(), average.to_owned()));
         assert_eq!(rows(&harness), listed);
-        for heading in ["Track", "Device", "Average", "Longest"] {
+        for heading in ["Track", "Device", "Renders", "Average", "Longest"] {
             harness.get_by_role_and_label(Role::ColumnHeader, heading);
         }
         // A device's row selects it, and the devices panel shows it.
@@ -570,6 +623,31 @@ mod tests {
     }
 
     #[test]
+    fn rows_say_they_render_ahead_without_a_longest_block() {
+        let ahead = Cpu {
+            average: 0.4,
+            longest: 3.0,
+            ahead: true,
+        };
+        assert_eq!((ahead.renders(), ahead.live_longest()), ("Ahead", None));
+        let live = cpu(0.1, 0.5);
+        assert_eq!((live.renders(), live.live_longest()), ("Live", Some(0.5)));
+        let (project, ids) = project();
+        let mut harness = harness(project);
+        harness.state_mut().shell.toggle_panel(PERFORMANCE);
+        harness.state_mut().performance = Performance {
+            rows: BTreeMap::from([(Row::Device(ids.drive), ahead)]),
+            channels: BTreeMap::new(),
+            total: 0.4,
+            ahead: 0.4,
+        };
+        harness.run();
+        let listed = [("Bass, Test Gain", "40%, ahead"), ("Total", "40%")];
+        let listed = listed.map(|(name, average)| (name.to_owned(), average.to_owned()));
+        assert_eq!(rows(&harness), listed);
+    }
+
+    #[test]
     fn the_rows_keep_their_places_while_the_pointer_is_over_them() {
         let (project, ids) = project();
         let mut harness = harness(project);
@@ -581,6 +659,7 @@ mod tests {
             ]),
             channels: BTreeMap::new(),
             total: drive + limiter,
+            ahead: 0.0,
         };
         harness.state_mut().performance = figures(0.3, 0.1);
         harness.run();
@@ -595,7 +674,7 @@ mod tests {
         harness.state_mut().performance = figures(0.3, 0.5);
         harness.run();
         assert_eq!(row_names(&harness), order);
-        assert_eq!(rows(&harness)[1].1, "50%");
+        assert_eq!(rows(&harness)[1].1, "50%, live");
         // Once it's gone, the busiest goes first again.
         harness.hover_at(pos2(1.0, 1.0));
         harness.run();

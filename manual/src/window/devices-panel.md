@@ -19,9 +19,10 @@ device. The **×** at the right of a device's title bar deletes it.
 
 Left of the **×**, while an audio device plays, is the share of a core the
 device took over the last second: amber over 25% of a core, and red over
-50%. Its tooltip adds the device's longest block, as a share of the buffer
-([The Performance panel](performance.md)). A deactivated device takes
-none.
+50%. Its tooltip adds whether it renders live or ahead of the audio
+device, and while live, the device's longest block, as a share of the
+buffer ([The Performance panel](performance.md)). A deactivated device
+takes none.
 
 ## Selecting, moving and copying
 

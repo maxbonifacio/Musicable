@@ -213,11 +213,35 @@ pub struct Performance {
     pub load: Option<f32>,
     /// Dropouts since the device started or the count was reset.
     pub dropouts: u64,
+    /// How far ahead of the device the engine rendered lately, while
+    /// Render Ahead is on and a device plays.
+    pub render_ahead: Option<RenderingAhead>,
     /// Each device's figures, and those of each channel's clips,
     /// modulators and mixer, and the metronome's, busiest first.
     pub rows: Vec<CpuRow>,
     /// The whole project's share of a core: 1.5 is a core and a half.
     pub total: f32,
+}
+
+/// How far ahead of the audio device the engine rendered lately, as the
+/// gauge under the transport bar's CPU meter shows it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenderingAhead {
+    /// Render Ahead, as the Audio settings name it: "short", "normal" or
+    /// "long".
+    pub setting: &'static str,
+    /// Whether the project renders ahead now: nothing does while a track
+    /// monitors its input.
+    pub ahead: bool,
+    /// How far ahead the engine was on average lately, in milliseconds,
+    /// and how far it aimed to be: both none while nothing rendered ahead.
+    pub lead_ms: f32,
+    pub target_ms: f32,
+    /// The share of a core of what rendered ahead, of the project's total.
+    pub load: f32,
+    /// The blocks the audio thread had to render itself since the device
+    /// started, as the lead ran out.
+    pub short_blocks: u64,
 }
 
 /// What something in the project costs the CPU, over the last second.
@@ -226,8 +250,12 @@ pub struct CpuRow {
     pub part: CpuPart,
     /// The share of one core it takes to keep up. Shares add up.
     pub average: f32,
-    /// Its longest block, as a share of the audio device's buffer.
+    /// Its longest block, as a share of the audio device's buffer. It
+    /// matters only while it renders live.
     pub longest: f32,
+    /// Whether it rendered ahead of the device, rather than live, as the
+    /// device asked for each buffer.
+    pub ahead: bool,
 }
 
 /// Something in the project that takes CPU time.

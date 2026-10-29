@@ -14,6 +14,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_commands::editor::{Behaviour, MiddleC, PlayFrom};
 use musicable_commands::{Modifiers, options};
+use musicable_engine::Lead;
 use musicable_io::project;
 use musicable_model::time::Beats;
 use musicable_model::{Project, TrackKind};
@@ -23,7 +24,7 @@ use super::App;
 use super::testing::{TempDir, chord, press, window};
 use crate::library;
 use crate::mouse_file::BACKUP_FILE;
-use crate::settings::{MOUSE_FILE, SETTINGS_FILE, Settings};
+use crate::settings::{MOUSE_FILE, RenderAhead, SETTINGS_FILE, Settings};
 use crate::settings_window::{APPEARANCE, AUDIO, BROWSER, KEYS, MOUSE, RECORDING, WORKSPACES};
 
 /// The page the Settings window shows, if it's open.
@@ -154,6 +155,24 @@ fn the_audio_settings_and_the_keys_are_pages_of_one_window() {
     assert!(harness.query_by_label("Settings").is_none());
     press(&mut harness, chord("Ctrl+Comma"));
     assert_eq!(page(&harness), Some(RECORDING));
+}
+
+#[test]
+fn render_ahead_changes_at_once_and_is_kept() {
+    let config = TempDir::new("settings-render-ahead");
+    let mut harness = window(&config.0, None);
+    // The engine renders about 50 ms ahead from the start.
+    assert_eq!(harness.state().session.lead(), Lead::Normal);
+    press(&mut harness, chord("Ctrl+Comma"));
+    assert_eq!(page(&harness), Some(AUDIO));
+
+    // With no Apply: the device needn't open again.
+    click(&mut harness, "Long, about 200 ms");
+    assert_eq!(harness.state().session.lead(), Lead::Long);
+    assert_eq!(saved(&config).audio.render_ahead, RenderAhead::Long);
+    click(&mut harness, "Off");
+    assert_eq!(harness.state().session.lead(), Lead::Off);
+    assert_eq!(saved(&config).audio.render_ahead, RenderAhead::Off);
 }
 
 #[test]

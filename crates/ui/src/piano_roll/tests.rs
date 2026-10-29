@@ -217,6 +217,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                             load: None,
                             dropouts: 0,
                             details: "",
+                            lead: None,
                         },
                         keymap_file: KeymapStatus::default(),
                         messages: &[],

@@ -62,8 +62,11 @@ let Stopped { engine, error } = stream.stop();
   channels, sample format, period, buffer and latency, and whether the audio
   thread runs at real-time priority.
 - `StreamInfo::engine_config` has the stream's rate, and its period as
-  `max_block`. The engine must run at the stream's rate: `start` hands back an
-  engine that doesn't in `StartError`, with `Error::EngineRate`.
+  `max_block`, the shortest an engine for it takes: one that renders ahead
+  takes `AHEAD_BLOCK` at least, as the app's does
+  ([engine.md](engine.md#rendering-ahead)). The engine must run at the
+  stream's rate: `start` hands back an engine that doesn't in `StartError`,
+  with `Error::EngineRate`.
 - `StreamRequest` takes a device id (`Device::id` from `output_devices`, which
   stays the same across runs), the mode, a sample rate and a period. `None`
   picks the default output, the device's rate and the smallest period.

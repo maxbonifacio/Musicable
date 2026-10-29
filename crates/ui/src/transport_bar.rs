@@ -5,13 +5,16 @@
 //! resize, and the bar draws those shown left to right, with a line
 //! between sections.
 
-use egui::{Button, DragValue, Id, Rect, Response, RichText, Sense, Ui, vec2};
+use egui::{
+    Align, Button, DragValue, Id, Layout, Rect, Response, RichText, Role, Sense, Ui, Vec2,
+    WidgetInfo, vec2,
+};
 use musicable_commands::{CommandId, transport};
 use musicable_model::time::TempoMap;
 
 use crate::parts::{Draw, Part, Parts, Registry, Size, TRANSPORT_BAR};
 use crate::performance::percent;
-use crate::shell::{Action, View, chords};
+use crate::shell::{Action, LeadGauge, View, chords};
 use crate::theme::Theme;
 use crate::widgets::{Icon, clock, icon_button, meter, position};
 
@@ -235,7 +238,8 @@ fn tempo(ui: &mut Ui, bar: &Bar<'_, '_>, _: Option<f32>, actions: &mut Vec<Actio
     bar.run(ui.small_button("+"), transport::TEMPO_UP, actions);
 }
 
-/// The CPU meter, `width` wide, with the load and the dropout counter.
+/// The CPU meter, `width` wide, with the load, the lead gauge under it while
+/// Render Ahead is on, and the dropout counter.
 fn cpu(ui: &mut Ui, bar: &Bar<'_, '_>, width: Option<f32>, actions: &mut Vec<Action>) {
     let (audio, theme) = (&bar.view.audio, bar.theme);
     let load = audio.load.map_or("CPU --".to_owned(), |load| {
@@ -246,17 +250,30 @@ fn cpu(ui: &mut Ui, bar: &Bar<'_, '_>, width: Option<f32>, actions: &mut Vec<Act
     let performance = bar.view.performance;
     let details = match performance.rows.is_empty() {
         true => audio.details.to_owned(),
-        false => format!(
-            "{}\n\nThe project took {} of a core over the last second, adding up what View > \
-             Performance lists.",
-            audio.details,
-            percent(performance.total)
-        ),
+        false => {
+            let ahead = match performance.ahead > 0.0 {
+                true => format!(", {} of it rendering ahead", percent(performance.ahead)),
+                false => String::new(),
+            };
+            format!(
+                "{}\n\nThe project took {} of a core over the last second{ahead}, adding up \
+                 what View > Performance lists.",
+                audio.details,
+                percent(performance.total)
+            )
+        }
     };
     ui.label(RichText::new(load).monospace())
         .on_hover_text(&details);
     let size = vec2(width.unwrap_or(theme.cpu_meter.x), theme.cpu_meter.y);
-    meter(ui, audio.load, size, theme).on_hover_text(&details);
+    // The lead gauge goes under the meter, a third as tall.
+    let gauge = vec2(size.x, (size.y * 0.3).round().max(2.0));
+    let stack = vec2(size.x, size.y + GAUGE_GAP + gauge.y);
+    ui.allocate_ui_with_layout(stack, Layout::top_down(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = GAUGE_GAP;
+        meter(ui, audio.load, size, theme).on_hover_text(&details);
+        lead_gauge(ui, audio.lead, gauge, theme).on_hover_text(&details);
+    });
     ui.separator();
     let dropouts = if audio.dropouts == 0 {
         RichText::new("No dropouts")
@@ -270,6 +287,45 @@ fn cpu(ui: &mut Ui, bar: &Bar<'_, '_>, width: Option<f32>, actions: &mut Vec<Act
     if counter.clicked() {
         actions.push(Action::ResetDropouts);
     }
+}
+
+/// The room between the CPU meter and the lead gauge under it.
+const GAUGE_GAP: f32 = 1.0;
+
+/// The lead gauge, `size` big: how much of the lead the engine aims for it
+/// had in front of the device lately, amber under half of it while it
+/// renders ahead, and red once the audio thread had to render blocks
+/// itself. Only its room shows without a gauge, while Render Ahead is off.
+fn lead_gauge(ui: &mut Ui, gauge: Option<LeadGauge>, size: Vec2, theme: &Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let Some(gauge) = gauge else {
+        return response;
+    };
+    let filled = gauge.filled.clamp(0.0, 1.0);
+    response.widget_info(|| WidgetInfo {
+        value: Some(f64::from(filled)),
+        ..WidgetInfo::labeled(Role::Meter, true, "Render Ahead")
+    });
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let colour = if gauge.short {
+            theme.meter_over
+        } else if gauge.ahead && filled < 0.5 {
+            theme.meter_loud
+        } else {
+            theme.meter_quiet
+        };
+        // Red all along once blocks ran short, the lead empty or not.
+        let track = match gauge.short {
+            true => colour.gamma_multiply(0.35),
+            false => ui.visuals().extreme_bg_color,
+        };
+        painter.rect_filled(rect, 1.0, track);
+        let mut fill = rect;
+        fill.set_width(rect.width() * filled);
+        painter.rect_filled(fill, 1.0, colour);
+    }
+    response
 }
 
 /// Shows the transport bar's parts left to right in `ui`, a panel along
