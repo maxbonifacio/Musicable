@@ -473,7 +473,7 @@ impl Modulation {
             modulator.advance(dt, &song, notes);
             for (output, reading) in modulator.outputs.iter().zip(&modulator.readings) {
                 if let Some(reading) = reading {
-                    reading.set(*output as f32);
+                    reading.set(time, *output as f32);
                 }
             }
         }
@@ -512,7 +512,7 @@ impl Modulation {
         for target in targets.iter_mut() {
             if let Some((reading, span)) = &target.reading {
                 let share = if *span != 0.0 { target.sum / span } else { 0.0 };
-                reading.set(share as f32);
+                reading.set(time, share as f32);
             }
             match target.to {
                 To::Port(port) => {

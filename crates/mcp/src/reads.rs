@@ -912,19 +912,42 @@ pub(crate) fn performance(window: &impl Window) -> Json {
                 CpuPart::Mixer(chain) => part("mixer", chain)?,
                 CpuPart::Metronome => json!({ "part": "metronome" }),
             };
+            entry["renders"] = json!(if row.ahead { "ahead" } else { "live" });
             entry["average"] = share(row.average);
-            entry["longest"] = share(row.longest);
+            // A block rendered ahead has only to be ready before the lead
+            // runs out.
+            entry["longest"] = match row.ahead {
+                true => Json::Null,
+                false => share(row.longest),
+            };
             Some(entry)
         })
         .collect();
+    let ahead = (performance.render_ahead.as_ref()).map(|ahead| {
+        json!({
+            "setting": ahead.setting,
+            "ahead": ahead.ahead,
+            "lead_ms": tenth(ahead.lead_ms),
+            "target_ms": tenth(ahead.target_ms),
+            "load": share(ahead.load),
+            "short_blocks": ahead.short_blocks,
+        })
+    });
     json!({
         "playing": performance.playing,
         "audio": performance.audio,
         "load": performance.load.map(share),
         "dropouts": performance.dropouts,
+        "render_ahead": ahead,
         "total": share(performance.total),
         "rows": rows,
     })
+}
+
+/// A number to a tenth: `48.3`.
+fn tenth(value: f32) -> Json {
+    let value = (f64::from(value) * 10.0).round() / 10.0;
+    json::to_json(&Value::Number(value))
 }
 
 /// A share, such as of a core, to a thousandth: `0.342`.

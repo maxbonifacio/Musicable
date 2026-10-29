@@ -235,6 +235,13 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   and starts it processing, all on the main thread. Every bus is in each
   block, as VST3 asks: one that's off holds silence, flagged in
   `silenceFlags`.
+- **Rendering ahead.** It's set up for real time (`kRealtime` in
+  `ProcessSetup`), and each block's `processMode` says how that block
+  renders, as VST3 lets a host say per call: `kPrefetch` for a block the
+  engine renders ahead of the device (`ProcessContext::ahead`,
+  [engine.md](engine.md#rendering-ahead)), which needn't be ready within
+  a callback, and `kRealtime` for the rest, and for the parameters the main
+  thread flushes. Exports render with real-time blocks for now.
 - **Parameters** are normalized, from 0 to 1, whatever they stand for.
   `steps` is VST3's step count, and the module is the unit the parameter is
   in, with its parents', such as `Oscillators/Osc 1`. VST3 has no

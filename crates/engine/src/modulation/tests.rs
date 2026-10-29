@@ -145,6 +145,7 @@ impl Run {
             events,
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         };
         let room = ports.len() * Feed::room(BLOCK);
         let mut controls = Controls::for_tests(routed, ports, frames, room);

@@ -102,6 +102,7 @@ pub(crate) mod testing {
             events,
             input: AudioRef::empty(frames),
             midi: &[],
+            ahead: false,
         }
     }
 

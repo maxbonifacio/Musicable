@@ -1,14 +1,20 @@
 # The Performance panel
 
 The Performance panel lists what the project costs the CPU, busiest first:
-each device, and each track's clips, modulators and mixer, with the share
-of a core it took over the last second and its longest block. **View >
+each device, and each track's clips, modulators and mixer, with whether it
+renders ahead of the audio device or live, the share of a core it took over
+the last second, and its longest block. **View >
 Performance** (Ctrl+Alt+C) shows it, in a tab beside the mixer at first.
 It's where to look when the CPU meter climbs or dropouts start, for the
 plugin to swap, freeze or take out.
 
 ## What the figures say
 
+- **Renders** is **Ahead** while Musicable renders the project ahead of
+  the audio device, as [Render
+  Ahead](../getting-started/audio.md#render-ahead) has it, and **Live**
+  while it renders each buffer as the device asks for it, as it does while
+  a track monitors an input, or Render Ahead is off.
 - **Average** is the share of one core the device needs to keep up: 12% is
   an eighth of a core, and 100% a whole one. Shares add up: a track's is
   its devices' and the rest of its strip's, and the **Total** row's is the
@@ -19,7 +25,10 @@ plugin to swap, freeze or take out.
   share of the audio device's buffer. Each buffer has to be ready before
   the audio device plays it, so a device that takes 60% of a buffer by
   itself leaves the rest of the project little time, whatever its average.
-  Over 100%, it alone takes longer than a buffer lasts.
+  Over 100%, it alone takes longer than a buffer lasts. It's only for what
+  renders live: a block rendered ahead has only to be ready before the
+  lead runs out, so how long one takes doesn't matter while the project
+  keeps up.
 - An average turns amber over 25% of a core, and red over 50%.
 
 The figures show while an audio device plays, whether the song plays or
@@ -52,7 +61,8 @@ it was aimed at, and when it leaves, the busiest goes to the top again.
   ([The devices panel](devices-panel.md#adding-devices)).
 - Each track's, its devices' and its strip's together, is in the mixer's
   **CPU** row ([The mixer](mixer.md#a-strip)).
-- The CPU meter's tooltip, in the transport bar, has the project's total.
+- The CPU meter's tooltip, in the transport bar, has the project's total,
+  and how much of it rendered ahead.
 - Agents read the rows with `get_performance`
   ([The command line](../reference/command-line.md#agents)).
 

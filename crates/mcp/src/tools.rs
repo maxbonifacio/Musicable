@@ -244,12 +244,16 @@ pub fn list() -> Vec<Tool> {
             "Get Performance",
             "Reads what the project costs the CPU while an audio device plays, as the \
              Performance panel lists it, busiest first: each device's share of one core over \
-             the last second, and its longest block as a share of the device's buffer, and the \
-             same for each channel's clips, modulators and mixer, and the metronome. Shares add \
-             up, to the project's total: 1.5 is a core and a half. A device whose longest block \
-             nears 1 can cause dropouts by itself, whatever its share. It also gives the \
+             the last second, whether it renders ahead of the device or live, and while live \
+             its longest block as a share of the device's buffer, and the same for each \
+             channel's clips, modulators and mixer, and the metronome. Shares add up, to the \
+             project's total: 1.5 is a core and a half. A device rendering live whose longest \
+             block nears 1 can cause dropouts by itself, whatever its share. It also gives the \
              transport bar's figures: what plays, the audio thread's load, over 1 when it can't \
-             keep up, and the dropouts.",
+             keep up, and the dropouts, and while Render Ahead is on, how far ahead of the \
+             device the engine rendered lately and aimed to, the share of a core of what \
+             rendered ahead, and the blocks the audio thread had to render itself as the lead \
+             ran out, which come before dropouts.",
             object(json!({}), &[]),
         ),
     ]

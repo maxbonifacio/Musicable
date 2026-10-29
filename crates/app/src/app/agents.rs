@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange};
+use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
-use musicable_mcp::{CpuPart, CpuRow, Host, Performance, Reply, Run};
+use musicable_mcp::{CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run};
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project, TrackId};
@@ -440,13 +441,36 @@ impl musicable_mcp::Window for Agent<'_> {
                 },
                 average: cpu.average,
                 longest: cpu.longest,
+                ahead: cpu.ahead,
             })
             .collect();
+        let render_ahead =
+            output
+                .lead_lately()
+                .zip(output.info())
+                .and_then(|((setting, lately), info)| {
+                    let setting = match setting {
+                        Lead::Off => return None,
+                        Lead::Short => "short",
+                        Lead::Normal => "normal",
+                        Lead::Long => "long",
+                    };
+                    let ms = |frames| (frames as f64 * 1000.0 / f64::from(info.sample_rate)) as f32;
+                    Some(RenderingAhead {
+                        setting,
+                        ahead: lately.ahead,
+                        lead_ms: ms(lately.lead),
+                        target_ms: ms(lately.target),
+                        load: figures.ahead,
+                        short_blocks: output.short_blocks(),
+                    })
+                });
         Performance {
             playing: output.info().is_some(),
             audio: output.summary(),
             load: output.load(),
             dropouts: output.dropouts(),
+            render_ahead,
             rows,
             total: figures.total,
         }

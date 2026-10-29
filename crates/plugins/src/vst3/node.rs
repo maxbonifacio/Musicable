@@ -19,7 +19,7 @@ use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
     kRecording, kTempoValid, kTimeSigValid,
 };
-use vst3::Steinberg::Vst::ProcessModes_::kRealtime;
+use vst3::Steinberg::Vst::ProcessModes_::{kPrefetch, kRealtime};
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, Event, Event__type0, IAudioProcessor,
@@ -304,7 +304,7 @@ impl Node for Vst3Node {
         audio.changes.ready();
         // SAFETY: processing, holding `busy`; a block of no frames reads
         // no buffers.
-        unsafe { process(processor, audio, 0) };
+        unsafe { process(processor, audio, 0, mode(ctx)) };
         audio.changes.clear();
     }
 
@@ -368,7 +368,7 @@ fn run(
         audio.steady_time,
     );
     // SAFETY: processing, holding `busy`, with buffers `frames` long.
-    let result = unsafe { process(processor, audio, frames) };
+    let result = unsafe { process(processor, audio, frames, mode(ctx)) };
     audio.steady_time += frames as i64;
     if result != kResultOk {
         return false;
@@ -381,9 +381,19 @@ fn run(
     true
 }
 
+/// The mode a block is processed in: prefetch for a block rendered ahead
+/// of the device, as Cubase's ASIO-Guard has it, which VST3 lets a host
+/// change from one call to the next, and real time for the rest.
+fn mode(ctx: &ProcessContext<'_>) -> int32 {
+    match ctx.ahead {
+        true => kPrefetch as int32,
+        false => kRealtime as int32,
+    }
+}
+
 /// Calls the plugin's `process` with what's in `audio`, for a block
-/// `frames` long, or of no frames to hand over parameter changes, and
-/// hands back what the controller is to hear of.
+/// `frames` long, or of no frames to hand over parameter changes, in
+/// `mode`, and hands back what the controller is to hear of.
 ///
 /// # Safety
 ///
@@ -393,10 +403,11 @@ unsafe fn process(
     processor: ComRef<'_, IAudioProcessor>,
     audio: &mut Audio,
     frames: usize,
+    mode: int32,
 ) -> tresult {
     audio.out_changes.clear();
     let mut data = ProcessData {
-        processMode: kRealtime as int32,
+        processMode: mode,
         symbolicSampleSize: kSample32 as int32,
         numSamples: frames as i32,
         numInputs: audio.inputs.buffers.len() as i32,
@@ -462,7 +473,7 @@ pub(crate) unsafe fn flush(
         audio.changes.ready();
         // SAFETY: the caller's promise; a block of no frames reads no
         // buffers.
-        unsafe { process(processor, audio, 0) };
+        unsafe { process(processor, audio, 0, kRealtime as int32) };
     }
     audio.changes.clear();
     handed

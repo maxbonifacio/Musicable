@@ -140,6 +140,24 @@ pub struct Audio<'a> {
     pub dropouts: u64,
     /// More about the device, the load and the dropouts, for a tooltip.
     pub details: &'a str,
+    /// The lead gauge beside the CPU meter, while Render Ahead is on and a
+    /// device plays.
+    pub lead: Option<LeadGauge>,
+}
+
+/// How far ahead of the audio device the engine renders, as the gauge
+/// beside the CPU meter shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LeadGauge {
+    /// How much of the lead it aims for it had in front of the device
+    /// lately, from 0.0 to 1.0.
+    pub filled: f32,
+    /// Whether it renders ahead now: nothing does while a track monitors
+    /// its input.
+    pub ahead: bool,
+    /// Whether the audio thread rendered blocks itself lately, as the lead
+    /// ran out.
+    pub short: bool,
 }
 
 /// The user's keymap file, as the Keys page shows it.

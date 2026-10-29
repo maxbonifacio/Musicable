@@ -43,8 +43,8 @@ use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
 use crate::renders::RenderCache;
 use crate::settings::{
-    self, ANALYSIS_FOLDER, AudioSettings, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, RENDER_FOLDER,
-    SETTINGS_FILE, Settings, THEMES_FOLDER,
+    self, ANALYSIS_FOLDER, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, RENDER_FOLDER, SETTINGS_FILE,
+    Settings, THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -244,6 +244,7 @@ impl App {
             Some(waker(ctx)),
         ));
         session.set_preview_gain(settings.browser.preview_gain());
+        session.set_lead(settings.audio.render_ahead.lead());
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         let theme_file = UserTheme::new(
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
@@ -1300,9 +1301,10 @@ impl App {
     /// Plays through the stream `request` asks for, and keeps the settings
     /// if it opens.
     fn apply_audio(&mut self, request: musicable_audio::StreamRequest) {
-        let outcome = match self.output.apply(request, &mut self.session) {
+        let wanted = self.session.wanted_inputs();
+        let outcome = match self.output.apply(request, &wanted, &mut self.session) {
             Ok(()) => {
-                self.settings.audio = AudioSettings::from_request(self.output.request());
+                self.settings.audio.set_request(self.output.request());
                 self.save_settings();
                 Ok(format!("Playing through {}.", self.output.device_name()))
             }
@@ -1324,6 +1326,11 @@ impl App {
         use settings_window::Asked;
         match asked {
             Asked::Stream(request) => self.apply_audio(request),
+            Asked::RenderAhead(ahead) => {
+                self.settings.audio.render_ahead = ahead;
+                self.session.set_lead(ahead.lead());
+                self.save_settings();
+            }
             Asked::RecordingOffset(frames) => self.set_recording_offset(frames),
             Asked::CaptureMinutes(minutes) => {
                 self.settings.recording.capture_minutes = minutes;
@@ -1680,7 +1687,9 @@ impl eframe::App for App {
         }
         self.read_audio_files(ctx);
         let playing = self.output.info().is_some();
-        let mut levels = levels(self.session.meters(), self.session.project());
+        // As of the frame the device plays, while the engine renders ahead.
+        let played = self.session.stats().time;
+        let mut levels = levels(self.session.meters(), self.session.project(), played);
         // Without a stream, nothing moves the modulators, and their
         // readings are only where they stopped.
         if !playing {
@@ -1694,16 +1703,19 @@ impl eframe::App for App {
         let stats = self.session.stats();
         let config = self.session.engine_config();
         let (loads, project) = (self.session.loads(), self.session.project());
-        (self.performance).update(Instant::now(), loads, playing, stats.time, config, project);
+        let period = self.output.info().map(|info| info.period);
+        (self.performance).update(Instant::now(), loads, period, &stats, config, project);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
+        // From the frame Play is pressed in, not only once the device plays
+        // it, which can be the lead and a block later.
+        let plays = self.session.is_playing() || stats.playing;
         // Also while the window is hidden, so the engine's old graphs get
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
-        } else if self.session.stats().playing || self.session.stats().preview.is_some() || metering
-        {
+        } else if plays || stats.preview.is_some() || metering {
             PLAYING_FRAME
         } else {
             STOPPED_FRAME
@@ -1782,6 +1794,7 @@ impl eframe::App for App {
                 load: self.output.load(),
                 dropouts: self.output.dropouts(),
                 details: &details,
+                lead: self.output.lead_gauge(),
             },
             keymap_file: KeymapStatus {
                 path: self.keymap_file.path(),
@@ -1989,10 +2002,11 @@ fn automatable(params: &[ParamInfo]) -> Arc<[PluginParam]> {
 }
 
 /// The readings of the meters of `project`'s channels, for the mixer, and of
-/// its modulators, for their outputs and the controls they move.
-fn levels(meters: &Meters, project: &Project) -> Levels {
+/// its modulators, for their outputs and the controls they move, as of
+/// engine time `time`.
+fn levels(meters: &Meters, project: &Project, time: u64) -> Levels {
     let read = |meter: &Meter| {
-        let level = meter.level();
+        let level = meter.level_at(time);
         Level {
             peak: level.peak,
             rms: level.rms,
@@ -2009,14 +2023,16 @@ fn levels(meters: &Meters, project: &Project) -> Levels {
         for modulator in &strip.modulators {
             for n in modulator.outputs() {
                 let output = modulation::Output::new(modulator.id, n);
-                if let Some(reading) = meters.output(output) {
-                    outputs.insert(output, reading.get());
+                // None until the first is heard, so a Macro's shows its
+                // control's.
+                if let Some(value) = meters.output(output).and_then(|r| r.get_at(time)) {
+                    outputs.insert(output, value);
                 }
             }
         }
         for routing in &strip.routings {
-            if let Some(reading) = meters.moved(routing.to) {
-                moved.insert(routing.to, reading.get());
+            if let Some(value) = meters.moved(routing.to).and_then(|r| r.get_at(time)) {
+                moved.insert(routing.to, value);
             }
         }
     }

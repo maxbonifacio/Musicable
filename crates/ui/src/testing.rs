@@ -20,8 +20,9 @@ use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project};
 
 use crate::{
-    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Levels, Library, Listing, Peaks, Performance,
-    Playback, PluginEntry, PluginStatus, Plugins, Preview, Shell, View, Waveforms, Workspaces,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, LeadGauge, Levels, Library, Listing, Peaks,
+    Performance, Playback, PluginEntry, PluginStatus, Plugins, Preview, Shell, View, Waveforms,
+    Workspaces,
 };
 
 /// What the shell shows in the tests, and what it hands back.
@@ -45,6 +46,8 @@ pub(crate) struct State {
     pub levels: Levels,
     /// What the CPU figures say.
     pub performance: Performance,
+    /// What the lead gauge shows, if it shows.
+    pub lead: Option<LeadGauge>,
     /// The plugins installed, whether a scan is running, and how each
     /// plugin device's plugin is doing.
     pub plugins: Vec<PluginEntry>,
@@ -256,6 +259,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         history: Document::default(),
         levels: Levels::default(),
         performance: Performance::default(),
+        lead: None,
         plugins: Vec::new(),
         scanning: false,
         plugin_status: BTreeMap::new(),
@@ -295,6 +299,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                     load: Some(0.25),
                     dropouts: 0,
                     details: "",
+                    lead: state.lead,
                 },
                 keymap_file: KeymapStatus {
                     path: state.keymap_path.as_deref(),

@@ -18,7 +18,7 @@ use musicable_engine::modulation;
 use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
-    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout,
+    Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Lead,
     MAX_WRITERS, Meters, NodeKey, NodeLoads, ParamId, PreparedGraph, Preview, QueueFull, Stats,
     SwapError, TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
 };
@@ -115,6 +115,8 @@ pub struct Session {
     library: Library,
     /// How loud previews play: 1.0 as they are.
     preview_gain: f32,
+    /// How far ahead of the device the engine renders.
+    lead: Lead,
 }
 
 impl Session {
@@ -269,6 +271,7 @@ impl Session {
             revision: 0,
             library: Library::none(),
             preview_gain: 1.0,
+            lead: Lead::Off,
         };
         session.arm();
         session
@@ -316,7 +319,8 @@ impl Session {
     /// The new engine takes over where the old one was: its playhead goes to
     /// the same place in bars and beats, and it plays if the old one did,
     /// once the project's graph for it is ready. What the old engine hadn't
-    /// received yet, it never will.
+    /// received yet, it never will. The meters and the modulators' readings
+    /// start again, but for the meters' highest readings.
     pub fn replace_engine(&mut self, mut handle: EngineHandle) -> EngineHandle {
         let at = self.playhead();
         let playing = self.engine.playing;
@@ -327,6 +331,9 @@ impl Session {
         let old = std::mem::replace(&mut self.engine.handle, handle);
         self.engine.outbox.clear();
         self.engine.gates.clear();
+        // The new engine's time starts again from 0, and its graph measures
+        // into the same meters.
+        self.engine.meters.restart();
         self.engine.loads = None;
         self.engine.playing = false;
         self.engine.recording = false;
@@ -339,6 +346,7 @@ impl Session {
         self.engine.flush();
         self.document.editor_mut().sample_rate = self.engine.handle.config().sample_rate;
         self.engine.handle.set_preview_gain(self.preview_gain);
+        self.engine.handle.set_lead(self.lead);
         // The new engine writes no taps yet.
         self.restart_taps();
         self.arm();
@@ -408,6 +416,14 @@ impl Session {
     /// counting what hasn't reached the engine yet.
     pub fn is_recording(&self) -> bool {
         self.engine.recording
+    }
+
+    /// Whether the transport plays, counting what hasn't reached the engine
+    /// yet: from the moment Play is pressed, where [`stats`](Self::stats)
+    /// says so once the device plays that far, which while the engine
+    /// renders ahead can be the lead and a block later.
+    pub fn is_playing(&self) -> bool {
+        self.engine.playing
     }
 
     /// What the armed tracks have recorded so far, while they record, for
@@ -972,6 +988,21 @@ impl Session {
     pub fn set_preview_gain(&mut self, gain: f32) {
         self.preview_gain = gain;
         self.engine.handle.set_preview_gain(gain);
+    }
+
+    /// Has the engine render `lead` ahead of the device from now on, while
+    /// no track plays live: see
+    /// [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
+    /// It renders each block as the device asks for it until this is
+    /// called.
+    pub fn set_lead(&mut self, lead: Lead) {
+        self.lead = lead;
+        self.engine.handle.set_lead(lead);
+    }
+
+    /// How far ahead of the device the engine renders.
+    pub fn lead(&self) -> Lead {
+        self.lead
     }
 
     /// Adds the recordings that have finished as takes, and passes on what

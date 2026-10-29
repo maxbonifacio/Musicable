@@ -110,10 +110,12 @@ pub struct Vst3Transport {
     pub signature: [i32; 2],
     /// Frames since the plugin was activated.
     pub steady: i64,
+    /// The mode the block came in: VST3's `ProcessModes`.
+    pub mode: i32,
 }
 
 impl Vst3Transport {
-    fn of(context: &ProcessContext) -> Self {
+    fn of(context: &ProcessContext, mode: i32) -> Self {
         Self {
             state: context.state,
             samples: context.projectTimeSamples,
@@ -123,6 +125,7 @@ impl Vst3Transport {
             cycle: [context.cycleStartMusic, context.cycleEndMusic],
             signature: [context.timeSigNumerator, context.timeSigDenominator],
             steady: context.continousTimeSamples,
+            mode,
         }
     }
 }
@@ -938,7 +941,7 @@ impl IAudioProcessorTrait for GainComponent {
         let audio = &mut *audio;
         // SAFETY: the host passes its context, or null.
         if let Some(context) = unsafe { data.processContext.as_ref() } {
-            *lock(&gain.transport) = Some(Vst3Transport::of(context));
+            *lock(&gain.transport) = Some(Vst3Transport::of(context, data.processMode));
         }
         // SAFETY: the host passes its changes, or null.
         unsafe { read_changes(data.inputParameterChanges, frames, &mut audio.changes) };
@@ -1793,7 +1796,7 @@ impl IAudioProcessorTrait for SynthComponent {
         let audio = &mut *audio;
         // SAFETY: the host passes its context, or null.
         if let Some(context) = unsafe { data.processContext.as_ref() } {
-            *lock(&synth.transport) = Some(Vst3Transport::of(context));
+            *lock(&synth.transport) = Some(Vst3Transport::of(context, data.processMode));
         }
         // SAFETY: the host passes its changes and events, or null.
         unsafe {

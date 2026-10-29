@@ -548,8 +548,8 @@ mod tests {
     use musicable_model::{Project, TrackKind};
 
     use super::*;
-    use crate::Workspace;
     use crate::testing::{State, harness};
+    use crate::{LeadGauge, Workspace};
 
     type Harness = egui_kittest::Harness<'static, State>;
 
@@ -764,6 +764,35 @@ mod tests {
         harness.get_by_label("Loop");
         // Setting them isn't a change to save.
         assert!(harness.state_mut().shell.changed_workspace().is_none());
+    }
+
+    #[test]
+    fn the_lead_gauge_goes_under_the_cpu_meter() {
+        let mut harness = harness(project());
+        // While Render Ahead is off, only its room shows.
+        let gauge = |harness: &Harness| {
+            (harness.query_by_role_and_label(Role::Meter, "Render Ahead"))
+                .map(|gauge| (gauge.rect(), gauge.accesskit_node().numeric_value()))
+        };
+        assert_eq!(gauge(&harness), None);
+        let meter = harness
+            .get_by_role_and_label(Role::Meter, "CPU load")
+            .rect();
+        harness.state_mut().lead = Some(LeadGauge {
+            filled: 0.5,
+            ahead: true,
+            short: false,
+        });
+        harness.run();
+        let (rect, filled) = gauge(&harness).expect("a gauge");
+        assert_eq!(filled, Some(0.5));
+        assert_eq!((rect.left(), rect.width()), (meter.left(), meter.width()));
+        assert!(rect.top() > meter.bottom(), "{rect:?} under {meter:?}");
+        // The meter stays where it was.
+        let moved = harness
+            .get_by_role_and_label(Role::Meter, "CPU load")
+            .rect();
+        assert_eq!(moved, meter);
     }
 
     #[test]

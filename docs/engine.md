@@ -103,6 +103,10 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
   playing, frame `i` is at song position `position + i`.
 - `ProcessContext::time` is the block's engine time, and `Engine::time` the
   engine time the next callback starts at.
+- `ProcessContext::ahead` says whether the block renders ahead of the
+  device ([Rendering ahead](#rendering-ahead)), and so needn't be ready
+  within a callback: a VST3 plugin hears it as `kPrefetch`
+  ([plugins.md](plugins.md#vst3)).
 
 **Device inputs.** `Engine::process_with_input` and
 `process_interleaved_with_input` take what the audio devices' inputs captured
@@ -608,6 +612,25 @@ never waits on the UI. The peak falls back at 20 dB a second once the signal
 drops, the RMS averages over about 0.3 s, and the highest sample holds
 until `Meter::clear_highest`.
 
+A meter measures each block in stretches of up to 256 frames, and keeps
+each stretch's readings with the engine time it ends at, in a ring of 256
+slots, one for each stretch, which reaches back 1.4 s at 48 kHz and the
+longest lead at 192 kHz. `Meter::level_at(time)` reads the last stretch
+that ended by `time`, so while the engine renders ahead, the UI reads the
+level of the frame the device plays (`Stats::time`), not of the one
+rendered last, up to the lead later. Each slot's time stands in for a
+sequence number: the writer sets it to `u64::MAX` before it changes the
+readings, and to their time after, and a reader that sees it changing, or
+sees it change while it reads, goes to the slot before. Until the first
+stretch a meter measured ended, it reads silence, as it starts, so a meter
+new to a graph that went in ahead of what's heard, such as a new track's,
+stays still until its sound is heard; a time its ring has gone round since,
+which nothing from by then is left for, reads the latest. `Meter::level` is
+the latest, and the highest reading is always the latest. An engine that
+takes over from another starts its time again from 0, so the session calls
+`Meters::restart` first, which forgets every reading but the highest, as the
+old engine's would read as the new one's.
+
 - `Meters` keeps a meter for each track and one for the master.
   `compile_metered(project, meters)` puts them in the graph's output stages;
   call `Meters::follow` first, so new tracks get one. `compile()` is the
@@ -619,7 +642,10 @@ until `Meter::clear_highest`.
   mixer reads them every frame (see [app.md](app.md#the-mixer)).
 - `Meters` also keeps a `meter::Reading`, an atomic number, for each of the
   modulators' outputs and each parameter routings move, which `follow`
-  keeps as it does the meters. The `Modulation` nodes set them at each tick
+  keeps as it does the meters. A reading keeps its times as a meter does:
+  `Reading::set(time, ..)` and `get_at(time)`, which is none before the
+  first, so the window shows a new Macro's handle at its control's value
+  until then. The `Modulation` nodes set them at each tick
   ([Modulation](#modulation)), and the window shows them on the modulator
   strip's handles and the controls they move (see
   [app.md](app.md#the-modulator-strip)).
@@ -1214,7 +1240,8 @@ tracks'. A routing that's bypassed, out of reach, or to a parameter whose
 node isn't in the graph, such as a missing plugin's, moves nothing.
 
 **Readings.** At each tick, a node also sets the readings `compile()` gives
-it from the `Meters` (`Modulation::read_output`, `read_target`): where each
+it from the `Meters` (`Modulation::read_output`, `read_target`), for the
+tick's engine time: where each
 of its modulators' outputs is, and for each parameter of its own channel,
 the sum it sends, the routings it relays included, as a share of the
 parameter's range, or in a plugin's units. Only one node sets each, so
@@ -1644,6 +1671,8 @@ graph, while the output or the cue output has more than two channels,
 which is all its rings hold, and while anything in the graph is live
 (below). `Stats::lead` is how far ahead it was at the end of the last
 callback, and `Stats::lead_target` how far ahead it aims to be.
+`Stats::rendered` is how far it had rendered when the stats were read,
+which the threads rendering ahead keep up to date between callbacks.
 
 **Two sides.** `ahead.rs` splits the engine in two. The ahead side holds the
 graph, the renderer, the transport and the events not yet due, and renders
@@ -1712,6 +1741,13 @@ rest of its frames itself, since no node plays them while nothing is live.
 A `MidiMonitor` that isn't monitoring misses them too, so it doesn't know
 what the input held meanwhile.
 
+**What the app reads.** A block rendered ahead says so in
+`ProcessContext::ahead`, and a meter or a reading keeps the engine time
+each value is for ([Built-in devices](#built-in-devices)), so the app's
+meters and modulation dots show what the device plays, not what was
+rendered last. The app builds the engine with a `max_block` of at least
+`AHEAD_BLOCK` ([app.md](app.md#audio)).
+
 **Previews and writers.** Previews play on the live side, from the next
 callback whatever the lead, on top of what was rendered. A record tap's
 writer gets each frame as it plays, in order: straight from the graph in a
@@ -1754,7 +1790,9 @@ delay compensation added, by the key of the node it comes after and the
 `Joint` it's at (`LoadKey::Delay`), since a node can have several delays
 after it. A `Load` keeps the time the node took, the frames it rendered,
 and its longest block since the control thread last took it, in atomics
-on a cache line of their own. Only the thread running the node
+on a cache line of their own. Blocks rendered ahead are never the longest:
+they have only to be ready before the lead runs out, not within the
+device's period, and are up to 16 times as long. Only the thread running the node
 writes them, with plain loads and stores, so timing costs no locked
 instructions, apart from the longest block when it grows.
 

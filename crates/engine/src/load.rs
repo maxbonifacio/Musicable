@@ -46,9 +46,9 @@ pub struct Load {
     ticks: AtomicU64,
     /// Frames rendered.
     frames: AtomicU64,
-    /// The most ticks a block took, start to end, since the control thread
-    /// last took it. Taking it races the audio thread raising it, so it only
-    /// goes up with `fetch_max`.
+    /// The most ticks a block the device waited for took, start to end,
+    /// since the control thread last took it. Taking it races the audio
+    /// thread raising it, so it only goes up with `fetch_max`.
     longest: AtomicU64,
     /// Ticks spent on the block about to render before it renders: playing
     /// notes and modulating.
@@ -63,8 +63,11 @@ impl Load {
     /// Adds a block of `frames` the node rendered, which took `ticks` on the
     /// thread that rendered it, `waited` of them waiting for other threads
     /// to finish the node's tasks: those threads add the tasks' time
-    /// themselves ([`add_task`](Self::add_task)). Real-time safe.
-    pub(crate) fn add(&self, ticks: u64, waited: u64, frames: usize) {
+    /// themselves ([`add_task`](Self::add_task)). A block rendered `ahead`
+    /// of the device is never the longest: it has only to be ready before
+    /// the lead runs out, not within the device's period, and it can be 16
+    /// times as long. Real-time safe.
+    pub(crate) fn add(&self, ticks: u64, waited: u64, frames: usize, ahead: bool) {
         let before = self.before.load(Relaxed);
         if before != 0 {
             self.before.store(0, Relaxed);
@@ -77,7 +80,7 @@ impl Load {
         self.ticks.store(total, Relaxed);
         let frames = self.frames.load(Relaxed).wrapping_add(frames as u64);
         self.frames.store(frames, Relaxed);
-        if block > self.longest.load(Relaxed) {
+        if !ahead && block > self.longest.load(Relaxed) {
             self.longest.fetch_max(block, Relaxed);
         }
     }
@@ -118,7 +121,7 @@ impl Load {
     /// The longest any block took since the last call, from the node's first
     /// note played to its last frame rendered, on the thread that rendered
     /// it, waiting for its tasks included: how much of the time the block
-    /// lasts the node takes up.
+    /// lasts the node takes up. Blocks rendered ahead aren't in it.
     pub fn take_longest(&self) -> Duration {
         ticks_to_time(self.longest.swap(0, Relaxed))
     }
@@ -374,8 +377,8 @@ pub(crate) mod tests {
     fn a_load_adds_up_blocks_and_keeps_the_longest() {
         let load = Load::new();
         let long = ticks(Duration::from_micros(500));
-        load.add(long, 0, 128);
-        load.add(long / 10, 0, 128);
+        load.add(long, 0, 128, false);
+        load.add(long / 10, 0, 128, false);
         assert_eq!(load.frames(), 256);
         let busy = load.busy().as_secs_f64();
         assert!((busy / 550e-6 - 1.0).abs() < 0.01, "{busy}");
@@ -389,10 +392,10 @@ pub(crate) mod tests {
         let load = Load::new();
         load.add_before(300);
         load.add_before(200);
-        load.add(1000, 0, 64);
+        load.add(1000, 0, 64, false);
         assert_eq!(load.ticks.load(Relaxed), 1500);
         assert_eq!(load.longest.load(Relaxed), 1500);
-        load.add(100, 0, 64);
+        load.add(100, 0, 64, false);
         assert_eq!(load.ticks.load(Relaxed), 1600, "the block after has none");
     }
 
@@ -403,19 +406,31 @@ pub(crate) mod tests {
         // waited 400 of the 1000 it took.
         load.add_task(300);
         load.add_task(400);
-        load.add(1000, 400, 64);
+        load.add(1000, 400, 64, false);
         assert_eq!(load.ticks.load(Relaxed), 1300);
+        assert_eq!(load.longest.load(Relaxed), 1000);
+    }
+
+    #[test]
+    fn blocks_rendered_ahead_take_time_but_are_never_the_longest() {
+        let load = Load::new();
+        load.add(1000, 0, 64, false);
+        // A block 16 times as long, ahead of the device, which had the
+        // lead's time to be ready in, not the device's period.
+        load.add(16_000, 0, 1024, true);
+        assert_eq!(load.ticks.load(Relaxed), 17_000);
+        assert_eq!(load.frames(), 1088);
         assert_eq!(load.longest.load(Relaxed), 1000);
     }
 
     #[test]
     fn a_load_carries_on_from_the_old_one() {
         let old = Load::new();
-        old.add(1000, 0, 64);
+        old.add(1000, 0, 64, false);
         old.add_task(500);
         let new = Load::new();
         new.carry_on(&old);
-        new.add(100, 0, 64);
+        new.add(100, 0, 64, false);
         assert_eq!(new.ticks.load(Relaxed), 1600);
         assert_eq!(new.frames(), 128);
         assert_eq!(new.longest.load(Relaxed), 1000);
@@ -440,6 +455,27 @@ pub(crate) mod tests {
         from: u64,
         blocks: usize,
     ) {
+        render(renderer, graph, from, blocks, false);
+    }
+
+    /// The same, but rendering ahead of the device, as the engine's workers
+    /// do.
+    pub(crate) fn play_ahead(
+        renderer: &mut dyn Renderer,
+        graph: &mut PreparedGraph,
+        from: u64,
+        blocks: usize,
+    ) {
+        render(renderer, graph, from, blocks, true);
+    }
+
+    fn render(
+        renderer: &mut dyn Renderer,
+        graph: &mut PreparedGraph,
+        from: u64,
+        blocks: usize,
+        ahead: bool,
+    ) {
         let tempo = TempoMap::default();
         let frames = graph.config().max_block;
         for n in 0..blocks {
@@ -450,6 +486,7 @@ pub(crate) mod tests {
                 tempo: &tempo,
                 input: AudioRef::empty(frames),
                 midi: &[],
+                ahead,
             };
             rt::scope(|| {
                 graph.play_notes(&block);
@@ -494,10 +531,14 @@ pub(crate) mod tests {
         assert_eq!(long.frames(), 40 * 64);
         let longest = long.take_longest();
         assert!(longest >= Duration::from_micros(500), "{longest:?}");
+        // Blocks rendered ahead take their time, but none is the longest.
+        play_ahead(&mut ReferenceRenderer, &mut graph, 40 * 64, 10);
+        assert_eq!(long.frames(), 50 * 64);
+        assert_eq!(long.take_longest(), Duration::ZERO);
         // Summing silence takes next to nothing.
         let sum = loads.get(NodeKey(0)).unwrap();
         assert!(sum.busy() * 20 < short.busy(), "{:?}", sum.busy());
-        assert_eq!(sum.frames(), 40 * 64);
+        assert_eq!(sum.frames(), 50 * 64);
     }
 
     #[test]

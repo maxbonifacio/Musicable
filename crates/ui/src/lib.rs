@@ -65,8 +65,8 @@ pub use panels::{
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
 pub use performance::{Cpu, Performance, Row};
 pub use shell::{
-    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, Playback, Recording, SaveChoice, Shell, View,
-    Workspaces, ask_to_save,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, LeadGauge, Playback, Recording, SaveChoice,
+    Shell, View, Workspaces, ask_to_save,
 };
 pub use theme::{
     Base, BrowserSizes, DeviceSizes, DockSizes, FontSizes, Fonts, MixerSizes, PianoRollSizes,

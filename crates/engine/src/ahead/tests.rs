@@ -392,6 +392,9 @@ fn events_sent_for_now_apply_at_the_furthest_frame_rendered() {
     let mut out = render(&mut engine, 256 * 12, 256);
     let stats = handle.stats();
     assert!(stats.lead >= 2400);
+    // A renderer without threads of its own renders ahead only in the
+    // callbacks, so the frames rendered now are those as of the last one.
+    assert_eq!(stats.rendered, stats.time + stats.lead);
     let furthest = (stats.time + stats.lead) as usize;
     handle.send(gain(0.5)).unwrap();
     out.extend(render(&mut engine, 256 * 20, 256));

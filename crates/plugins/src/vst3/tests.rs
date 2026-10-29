@@ -24,10 +24,11 @@ use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
     kBarPositionValid, kContTimeValid, kCycleActive, kCycleValid, kPlaying, kProjectTimeMusicValid,
     kRecording, kTempoValid, kTimeSigValid,
 };
+use vst3::Steinberg::Vst::ProcessModes_::{kPrefetch, kRealtime};
 use vst3::Steinberg::Vst::RestartFlags_::{
     kIoChanged, kLatencyChanged, kParamTitlesChanged, kParamValuesChanged, kReloadComponent,
 };
-use vst3::Steinberg::uint32;
+use vst3::Steinberg::{int32, uint32};
 
 use super::Instance;
 use super::preset::{self, Preset};
@@ -919,6 +920,27 @@ fn plugins_see_the_transport() {
     assert_eq!((transport.cycle, transport.signature), ([0.0, 4.0], [4, 4]));
     // Frames since it activated, wherever the song is.
     assert_eq!(transport.steady, 16);
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn blocks_rendered_ahead_come_in_prefetch_mode() {
+    let plugins = TestPlugins::new("prefetch");
+    let mut instance = plugins.gain();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let ahead = Block {
+        ahead: true,
+        ..Block::default()
+    };
+    play(&mut node, &ramp(16), &ahead);
+    let mode = plugins.transport(&instance).unwrap().mode;
+    assert_eq!(mode, kPrefetch as int32);
+    // A block the device asks for, as in an export, comes in real time.
+    play(&mut node, &ramp(16), &Block::default());
+    let mode = plugins.transport(&instance).unwrap().mode;
+    assert_eq!(mode, kRealtime as int32);
     drop((node, instance));
     plugins.assert_alright();
 }

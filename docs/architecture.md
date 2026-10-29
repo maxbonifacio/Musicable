@@ -311,10 +311,11 @@ where a part has started, what's built.
   ([engine.md](engine.md#node-timing)). Hybrid buffering has started: while
   nothing in the graph is played live, the whole graph renders ahead of the
   device on the parallel scheduler's workers, and the callback plays it
-  ([engine.md](engine.md#rendering-ahead)). Next, the tracks nobody hears
-  live render ahead while the rest renders as the device asks. Exports
-  render on the workers already, in the app engine's block size
-  (`export::Job`).
+  ([engine.md](engine.md#rendering-ahead)), as far ahead as the Audio
+  settings' Render Ahead says, with a gauge under the CPU meter
+  ([app.md](app.md#meters)). Next, the tracks nobody hears live render
+  ahead while the rest renders as the device asks. Exports render on the
+  workers already, in the app engine's block size (`export::Job`).
 - **Plugin sandboxing.** Scanning loads each new library in a process of
   its own already (`plugins::scan`). Hosting a plugin in another process is
   another kind of `Instance`, which drives the plugin in a process that

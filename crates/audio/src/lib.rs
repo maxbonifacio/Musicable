@@ -333,7 +333,9 @@ pub struct StreamInfo {
 
 impl StreamInfo {
     /// What to create the engine with: the stream's sample rate, and its
-    /// period as the block size.
+    /// period as the block size, the shortest an engine for it takes. One
+    /// that renders ahead takes blocks of at least
+    /// [`AHEAD_BLOCK`](musicable_engine::AHEAD_BLOCK).
     pub fn engine_config(&self) -> EngineConfig {
         EngineConfig {
             sample_rate: self.sample_rate,

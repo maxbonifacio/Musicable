@@ -24,7 +24,7 @@ use crate::mouse_file::UserMouse;
 use crate::mouse_page;
 use crate::profiles::Profiles;
 use crate::profiles_page::{self, ProfilesPage};
-use crate::settings::{ProfileSettings, RenderCacheSettings, Settings};
+use crate::settings::{ProfileSettings, RenderAhead, RenderCacheSettings, Settings};
 use crate::theme_file::UserTheme;
 
 /// The device to play through, and how.
@@ -75,7 +75,8 @@ const PAGES: [Page; 11] = [
             if new {
                 pages.audio.reset(cx.output);
             }
-            pages.audio.show(ui, cx.output).map(Asked::Stream)
+            let render_ahead = cx.settings.audio.render_ahead;
+            pages.audio.show(ui, cx.output, render_ahead)
         },
     },
     Page {
@@ -170,6 +171,8 @@ const MAX_CAPTURE_MINUTES: u32 = 120;
 pub enum Asked {
     /// Play through the device the Audio page has, as it has it.
     Stream(StreamRequest),
+    /// The engine renders this far ahead of the device from now on.
+    RenderAhead(RenderAhead),
     /// Recordings through the device playing land this many frames late.
     RecordingOffset(i64),
     /// Capture holds this many minutes of the inputs from now on.

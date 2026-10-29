@@ -31,7 +31,9 @@ use crate::bridge::{self, Bridge};
 use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
-use crate::{Call, CpuPart, CpuRow, Host, Performance, Reply, Run, Window, answer, host};
+use crate::{
+    Call, CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run, Window, answer, host,
+};
 
 /// A transport that plays along, and does nothing else.
 #[derive(Default)]
@@ -987,6 +989,7 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
             "audio": "",
             "load": null,
             "dropouts": 0,
+            "render_ahead": null,
             "total": 0.0,
             "rows": [],
         })
@@ -995,12 +998,14 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
         part,
         average,
         longest,
+        ahead: false,
     };
     rig.window.performance = Performance {
         playing: true,
         audio: "48 kHz · 128 samples · 2.7 ms".into(),
         load: Some(0.25),
         dropouts: 2,
+        render_ahead: None,
         rows: vec![
             row(CpuPart::Device(id), 0.342_17, 0.61),
             row(CpuPart::Mixer(Chain::Track(bass)), 0.004, 0.012),
@@ -1020,14 +1025,50 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
             "audio": "48 kHz · 128 samples · 2.7 ms",
             "load": 0.25,
             "dropouts": 2,
+            "render_ahead": null,
             "total": 0.547,
             "rows": [
-                {"device": id.0, "name": "Device", "chain": {"track": bass.0}, "average": 0.342, "longest": 0.61},
-                {"part": "mixer", "chain": {"track": bass.0}, "average": 0.004, "longest": 0.012},
-                {"part": "modulators", "chain": "master", "average": 0.001, "longest": 0.002},
-                {"part": "metronome", "average": 0.0, "longest": 0.0},
+                {"device": id.0, "name": "Device", "chain": {"track": bass.0}, "renders": "live", "average": 0.342, "longest": 0.61},
+                {"part": "mixer", "chain": {"track": bass.0}, "renders": "live", "average": 0.004, "longest": 0.012},
+                {"part": "modulators", "chain": "master", "renders": "live", "average": 0.001, "longest": 0.002},
+                {"part": "metronome", "renders": "live", "average": 0.0, "longest": 0.0},
             ],
         })
+    );
+    // Rendering ahead, a block has only to be ready before the lead runs
+    // out, so how long one took doesn't matter.
+    rig.window.performance = Performance {
+        render_ahead: Some(RenderingAhead {
+            setting: "normal",
+            ahead: true,
+            lead_ms: 48.26,
+            target_ms: 50.0,
+            load: 0.346_8,
+            short_blocks: 3,
+        }),
+        rows: vec![CpuRow {
+            ahead: true,
+            ..row(CpuPart::Device(id), 0.342_17, 0.61)
+        }],
+        ..rig.window.performance.clone()
+    };
+    let performance = rig.call("get_performance", json!({})).unwrap();
+    assert_eq!(
+        performance["render_ahead"],
+        json!({
+            "setting": "normal",
+            "ahead": true,
+            "lead_ms": 48.3,
+            "target_ms": 50.0,
+            "load": 0.347,
+            "short_blocks": 3,
+        })
+    );
+    assert_eq!(
+        performance["rows"],
+        json!([
+            {"device": id.0, "name": "Device", "chain": {"track": bass.0}, "renders": "ahead", "average": 0.342, "longest": null},
+        ])
     );
     assert_eq!(
         rig.call("get_performance", json!({"track": 1})),
