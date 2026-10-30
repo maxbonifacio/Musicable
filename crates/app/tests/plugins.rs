@@ -12,7 +12,9 @@
 //! it lists them, and a muted kick wired into one ducks a bass through the
 //! plugin, lined up to the sample whichever track has latency. An
 //! arpeggiator in front of a synth plays it the notes of its track's clips
-//! in turn, and bypassed or deactivated lets the notes through. And the
+//! in turn, and bypassed or deactivated lets the notes through. A second
+//! track doubles what it plays, taking the notes after it or at its
+//! track's Post FX, with the first track muted. And the
 //! app's binary scans each library in a process of its own, so a library
 //! that crashes takes only that process down.
 
@@ -22,7 +24,7 @@ use std::process::Command;
 use std::{ptr, thread};
 
 use musicable_app::{PLUGIN_SETTLING, SCAN_PLUGIN, Session};
-use musicable_commands::{Args, Keymap, Value, automation, device, edit, transport, wire};
+use musicable_commands::{Args, Keymap, Value, automation, device, edit, mixer, transport, wire};
 use musicable_engine::{Engine, EngineConfig, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
@@ -1050,6 +1052,66 @@ fn arpeggiator_plays_a_synth_in_its_track(format: PluginFormat) {
     rig.session.wait_for_graph();
     let (left, _) = rig.play_from_start(beat);
     assert!(peak(&left) > 0.9, "a peak of {}", peak(&left));
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_second_track_doubles_a_clap_arpeggiator_through_midi_from() {
+    doubles_an_arpeggiator_through_midi_from(PluginFormat::Clap);
+}
+
+#[test]
+fn a_second_track_doubles_a_vst3_arpeggiator_through_midi_from() {
+    doubles_an_arpeggiator_through_midi_from(PluginFormat::Vst3);
+}
+
+fn doubles_an_arpeggiator_through_midi_from(format: PluginFormat) {
+    let plugins = TestPlugins::new(format, "double");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    let double = song.add_track("Double", TrackKind::Midi);
+    let mut chord = MidiClip::default();
+    for key in [60, 64] {
+        chord.add_note(Beats::ZERO, Beats::new(1), key, 1.0);
+    }
+    let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+    let clip = song.new_clip("Chord", range, ClipContent::Midi(chord));
+    let up = with_param(TRANSPOSE, plugins.transpose(12.0));
+    let arpeggiator = plugins.arpeggiator(&mut song, up);
+    let synth = plugins.synth(&mut song);
+    let track = song.track_mut(keys).unwrap();
+    track.clips.push(clip);
+    track.devices = vec![arpeggiator.clone(), synth];
+    // Muted, so only the Double sounds, which plays what it takes all the
+    // same.
+    track.muted = true;
+    let synth = plugins.synth(&mut song);
+    song.track_mut(double).unwrap().devices.push(synth);
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+
+    // Chosen in the mixer: the notes after the arpeggiator, and then at the
+    // Keys' Post FX, those that reach its synth, which are the same.
+    let beat = 24_000;
+    let step = (ARP_STEP * f64::from(CONFIG.sample_rate)) as usize;
+    for args in [
+        Args::new().with("after", arpeggiator.id),
+        Args::new().with("from", keys).with("tap", "post_fx"),
+    ] {
+        let args = args.with("track", double);
+        rig.session.run_with(&mixer::SET_INPUT, &args).unwrap();
+        rig.session.wait_for_graph();
+        let (left, _) = rig.play_from_start(beat + 4_800);
+        let start = left.iter().position(|s| *s != 0.0).unwrap();
+        assert!(start < 256, "the Double started at {start}");
+        for (i, key) in [72, 76, 72, 76].into_iter().enumerate() {
+            let from = start + i * step + 100;
+            assert_plays_key(&left[from..from + step - 200], key);
+        }
+        assert!(left[start + beat + 1..].iter().all(|s| *s == 0.0));
+    }
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
     drop(rig);
     plugins.assert_alright();
 }

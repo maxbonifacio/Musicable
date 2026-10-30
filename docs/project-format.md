@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 22,
+  "version": 23,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -432,13 +432,15 @@ An **input** is an object with one field: `audio`, holding an audio
 input, `midi`, holding a MIDI input, or `tap`, holding a tap on another
 track, as a wire's `from` has it (see Wire), such as
 `{"tap": {"post_fx": {"track": 3}}}`. An audio track takes any tap on
-another track that carries sound, but not a MIDI track's Pre FX, which is
-its notes, and it takes the master's Post Fader,
-`{"tap": {"post_fader": "master"}}`, for **Resampling**: it records the
-mix, but never plays it, and plays nothing while it records, so it isn't
-in the mix it records. The master has no other tap for an input. A MIDI
-track takes another MIDI track's Pre FX, its notes. An input from a tap
-can't close a loop (see Routing).
+another track that carries sound, but not a MIDI track's Pre FX or the
+point after one of its MIDI effects, which carry notes alone, and it takes
+the master's Post Fader, `{"tap": {"post_fader": "master"}}`, for
+**Resampling**: it records the mix, but never plays it, and plays nothing
+while it records, so it isn't in the mix it records. The master has no
+other tap for an input. A MIDI track takes another MIDI track's notes: at
+its Pre FX, those of its clips and its input; after one of its MIDI
+effects, those that plays; or at its Post FX, those that reach its
+instrument. An input from a tap can't close a loop (see Routing).
 
 An **audio input** is some channels of an audio device's input:
 
@@ -1117,7 +1119,9 @@ Signal flows from tracks to buses without loops:
   the track can't reach its tap, through the outputs, the sends, the other
   inputs and the wires. So a track can't take its input from itself, from
   the group it feeds or from a track that takes its own. Resampling is the
-  exception, since the track never plays the master it records.
+  exception, since the track never plays the master it records. A MIDI
+  track's notes from another's Post FX are taken where they reach its
+  instrument, so the track can key a compressor after that instrument.
 - A file with a loop is refused at the first input or wire in it: the
   inputs come first, in track order, then the wires, in theirs.
 
@@ -1140,8 +1144,8 @@ where its wires take it.
 | Tap | Meaning |
 |---|---|
 | `{"pre_fx": id}` | What comes into the devices of the track with that id: its clips and its input, or on a group or a return track, what feeds it. A MIDI track's is its notes, which no wire takes, only another MIDI track's input. |
-| `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. |
-| `{"post_fx": channel}` | What comes out of a channel's last device, where its pre-fader sends take their signal. |
+| `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. A MIDI effect's, on a MIDI track before its first instrument, is the notes it plays, which no wire takes, only another MIDI track's input. One after the instrument is out of the notes' way, as if deactivated. |
+| `{"post_fx": channel}` | What comes out of a channel's last device, where its pre-fader sends take their signal. A MIDI track's carries its notes too, for another MIDI track's input: those that reach its instrument. |
 | `{"post_fader": channel}` | What comes out of a channel's fader and pan, where its post-fader sends take their signal. |
 
 A **port** is an object with one field:
@@ -1177,6 +1181,7 @@ A **port** is an object with one field:
 | 20 | 2026-10-27 | Plugins' side inputs, and wires into them. Version 19 plugins have none until they next load. |
 | 21 | 2026-10-28 | Tracks taking their input from other tracks' taps, Resampling the master among them, and `"sends_only"` outputs. Version 20 files have neither. |
 | 22 | 2026-10-29 | Plugins' `kind`, in place of `instrument`, with MIDI effects, which play the notes on to the instrument after them. Version 21 plugins are instruments or audio effects. |
+| 23 | 2026-10-30 | MIDI tracks taking the notes a MIDI effect plays, at the point after it, which carries notes alone, or those that reach a MIDI track's instrument, at its Post FX. Version 22 inputs and wires from after a MIDI effect took its sound, which was silence, so they go, with the lanes and the routings that move those wires' gains. |
 
 ## Changing the format
 

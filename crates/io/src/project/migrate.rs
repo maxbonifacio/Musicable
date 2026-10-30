@@ -39,6 +39,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     plugin_inputs,
     tracks_from_tracks,
     plugin_kinds,
+    notes_after_effects,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -392,6 +393,88 @@ fn kinds(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
         add(plugin, &path, "kind", json!(kind))?;
     }
     Ok(())
+}
+
+/// Version 23 had MIDI tracks take the notes a MIDI effect plays, at the
+/// point after it, and those that reach a MIDI track's instrument, at its
+/// Post FX. The point after a MIDI effect the notes reach carries notes
+/// alone now, so the version 22 inputs and wires that took its sound, which
+/// was silence, go, and with each wire the lane and the routings that move
+/// its gain.
+fn notes_after_effects(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let effects = played_effects(file);
+    let after_effect = |tap: Option<&Value>| {
+        (tap.and_then(|tap| tap.get("device")))
+            .and_then(Value::as_u64)
+            .is_some_and(|id| effects.contains(&id))
+    };
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for track in tracks.into_iter().flatten() {
+        if let Some(input) = track.get_mut("input")
+            && after_effect(input.get("tap"))
+        {
+            *input = Value::Null;
+        }
+    }
+    let mut gone = Vec::new();
+    if let Some(wires) = file.get_mut("wires").and_then(Value::as_array_mut) {
+        wires.retain(|wire| {
+            let from_effect = after_effect(wire.get("from"));
+            if from_effect {
+                gone.extend(wire.get("id").and_then(Value::as_u64));
+            }
+            !from_effect
+        });
+    }
+    let moves_gone = |param: Option<&Value>| {
+        (param.and_then(|param| param.get("wire")))
+            .and_then(Value::as_u64)
+            .is_some_and(|id| gone.contains(&id))
+    };
+    if let Some(lanes) = file.get_mut("automation").and_then(Value::as_array_mut) {
+        lanes.retain(|lane| !moves_gone(lane.get("param")));
+    }
+    let unroute = |channel: &mut Value| {
+        let routings = (channel.get_mut("modulation"))
+            .and_then(|modulation| modulation.get_mut("routings"))
+            .and_then(Value::as_array_mut);
+        if let Some(routings) = routings {
+            routings.retain(|routing| !moves_gone(routing.get("to")));
+        }
+    };
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    tracks.into_iter().flatten().for_each(unroute);
+    file.get_mut("master").map(unroute);
+    Ok(())
+}
+
+/// The ids of the MIDI effects the notes reach in a version 22 file: those
+/// on MIDI tracks, before the track's first instrument.
+fn played_effects(file: &Map<String, Value>) -> Vec<u64> {
+    let mut effects = Vec::new();
+    let tracks = file.get("tracks").and_then(Value::as_array);
+    let midi = |track: &&Value| track.get("kind").and_then(Value::as_str) == Some("midi");
+    for track in tracks.into_iter().flatten().filter(midi) {
+        let devices = track.get("devices").and_then(Value::as_array);
+        for device in devices.into_iter().flatten() {
+            let kind = device.get("kind");
+            let of = |which: &str| {
+                (kind.and_then(|kind| kind.get(which)))
+                    .and_then(|device| device.get("kind"))
+                    .and_then(Value::as_str)
+            };
+            let instrument = of("plugin") == Some("instrument")
+                || matches!(of("native"), Some("sampler" | "synth"))
+                || kind.is_some_and(|kind| kind.get("test_instrument").is_some());
+            if instrument {
+                break;
+            }
+            if of("plugin") == Some("midi_effect") {
+                effects.extend(device.get("id").and_then(Value::as_u64));
+            }
+        }
+    }
+    effects
 }
 
 /// Gives each plugin in `devices`, a list at `path`, no side inputs.
@@ -938,6 +1021,46 @@ mod tests {
             "tracks[0].devices[0].kind.plugin.inputs",
             "a plugin's inputs in a version 19 file"
         );
+    }
+
+    #[test]
+    fn version_22_sound_from_after_a_midi_effect_goes() {
+        let plugin = |id: u64, kind: &str| json!({"id": id, "kind": {"plugin": {"kind": kind}}});
+        let synth = json!({"id": 1, "kind": {"native": {"kind": "synth"}}});
+        let after = |id: u64| json!({"device": id});
+        let routings = |wires: &[u64]| {
+            let to = wires.iter().map(|&id| json!({"to": {"wire": id}}));
+            json!({"routings": to.collect::<Vec<_>>()})
+        };
+        let mut file = json!({
+            "version": 22,
+            "tracks": [
+                {
+                    "kind": "midi",
+                    "devices": [plugin(0, "midi_effect"), synth, plugin(2, "midi_effect")],
+                },
+                {"kind": "audio", "input": {"tap": after(0)}, "modulation": routings(&[0, 1])},
+                {"kind": "audio", "input": {"tap": after(2)}},
+                {"kind": "audio", "input": {"tap": after(1)}, "devices": [plugin(3, "midi_effect")]},
+            ],
+            "master": {"modulation": routings(&[0])},
+            "wires": [{"id": 0, "from": after(0)}, {"id": 1, "from": after(2)}, {"id": 2, "from": after(3)}],
+            "automation": [{"param": {"wire": 0}}, {"param": {"wire": 1}}, {"param": {"volume": "master"}}],
+        });
+        run(&STEPS[..22], &mut file, 22).unwrap();
+        // The first arpeggiator's point is notes now, and its sound was
+        // silence.
+        assert_eq!(file["tracks"][1]["input"], Value::Null);
+        // No notes reach a MIDI effect after the synth, or on an audio track.
+        assert_eq!(file["tracks"][2]["input"], json!({"tap": after(2)}));
+        assert_eq!(file["tracks"][3]["input"], json!({"tap": after(1)}));
+        let wires = json!([{"id": 1, "from": after(2)}, {"id": 2, "from": after(3)}]);
+        assert_eq!(file["wires"], wires);
+        let lanes = json!([{"param": {"wire": 1}}, {"param": {"volume": "master"}}]);
+        assert_eq!(file["automation"], lanes);
+        assert_eq!(file["tracks"][1]["modulation"], routings(&[1]));
+        assert_eq!(file["master"]["modulation"], routings(&[]));
+        assert_eq!(file["version"], json!(23));
     }
 
     #[test]

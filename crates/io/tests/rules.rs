@@ -658,9 +658,23 @@ fn outputs_feed_group_tracks_without_loops() {
     assert_eq!(project.tracks[4].output, Bus::SendsOnly);
 }
 
+/// A CLAP plugin of `kind` with id `id`, as it starts.
+fn plugin(id: &str, kind: PluginKind) -> DeviceKind {
+    DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: id.into(),
+        name: id.rsplit('.').next().unwrap_or(id).into(),
+        kind,
+        inputs: Vec::new(),
+        settings: PluginSettings::default(),
+    })
+}
+
 /// A kick feeding a group, a print of the kick's Post FX, a MIDI track
 /// doubling another's notes, and a track resampling the master, with a
-/// Compressor on the kick. The tracks' ids are their places in the list.
+/// Compressor on the kick, device 0, and an arpeggiator before a synth on
+/// the MIDI track doubled, devices 1 and 2. The tracks' ids are their
+/// places in the list.
 fn tapped() -> Project {
     let mut project = Project::new();
     let kick = project.add_track("Kick", TrackKind::Audio);
@@ -674,6 +688,9 @@ fn tapped() -> Project {
         NativeKind::Compressor,
     )));
     project.track_mut(kick).unwrap().devices.push(compressor);
+    let arp = project.new_device(plugin("org.example.arp", PluginKind::MidiEffect));
+    let synth = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+    project.track_mut(keys).unwrap().devices = vec![arp, synth];
     let take = |project: &mut Project, track, input| {
         project.track_mut(track).unwrap().input = Some(input);
     };
@@ -708,9 +725,20 @@ fn inputs_from_taps_suit_their_tracks_without_loops() {
             "is MIDI track 2's Pre FX, which is notes: an audio track takes sound",
         ),
         (
+            1,
+            json!({"device": 1}),
+            "is after device 1, a MIDI effect, which plays notes: an audio track takes sound",
+        ),
+        (
             3,
             json!({"post_fx": {"track": 0}}),
-            "must be another MIDI track's Pre FX: a MIDI track takes notes",
+            "must be another MIDI track's Pre FX or Post FX, or after one of its MIDI \
+             effects: a MIDI track takes notes",
+        ),
+        (
+            3,
+            json!({"device": 2}),
+            "must be another MIDI track's Pre FX or Post FX",
         ),
         (
             1,
@@ -730,6 +758,17 @@ fn inputs_from_taps_suit_their_tracks_without_loops() {
         "tracks[4].input",
         "must be null: buses record nothing",
     );
+    // The notes the arpeggiator plays, and those that reach the synth, at
+    // the Keys' Post FX, whose sound an audio track takes.
+    for (track, tap) in [
+        (3, json!({"device": 1})),
+        (3, json!({"post_fx": {"track": 2}})),
+        (1, json!({"post_fx": {"track": 2}})),
+    ] {
+        let loaded = load(&take(track, tap.clone())).unwrap();
+        let input = loaded.tracks[track].input.as_ref().and_then(Input::tap);
+        assert!(input.is_some(), "{tap}");
+    }
     // From itself, from the group it feeds, or round another track's, where
     // the later of the two in the list makes the loop.
     for (track, tap, in_a_loop) in [
@@ -2758,7 +2797,7 @@ fn wired() -> Project {
     let mut project = Project::new();
     let kick = project.add_track("Kick", TrackKind::Audio);
     let bass = project.add_track("Bass", TrackKind::Audio);
-    project.add_track("Keys", TrackKind::Midi);
+    let keys = project.add_track("Keys", TrackKind::Midi);
     let squash = project.new_device(DeviceKind::Native(NativeDevice::new(
         NativeKind::Compressor,
     )));
@@ -2783,6 +2822,8 @@ fn wired() -> Project {
     let mut aux = project.new_wire(Tap::PostFader(Chain::Track(kick)), aux);
     aux.gain = 0.5;
     project.wires = vec![key, aux];
+    let arp = project.new_device(plugin("org.example.arp", PluginKind::MidiEffect));
+    project.track_mut(keys).unwrap().devices.push(arp);
     project
 }
 
@@ -2809,6 +2850,11 @@ fn wires_join_taps_and_ports_the_project_has_without_loops() {
         &edited(|wires| wires[0]["from"] = json!({"pre_fx": 2})),
         "wires[0].from",
         "is MIDI track 2's Pre FX, which is notes",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"device": 2})),
+        "wires[0].from",
+        "is after device 2, a MIDI effect, which plays notes",
     );
     refused(
         &edited(|wires| wires[0]["from"] = json!({"device": 9})),

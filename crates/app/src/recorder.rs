@@ -52,7 +52,7 @@ use musicable_engine::{
 };
 use musicable_io::audio::WavWriter;
 use musicable_model::routing::Tap;
-use musicable_model::{AudioInput, Input, TrackId};
+use musicable_model::{AudioInput, Input, TrackId, TrackKind};
 
 use self::capture::{HELD_BYTES, Held};
 use self::midi::MidiTape;
@@ -82,6 +82,9 @@ pub(crate) struct Armed {
     pub track: TrackId,
     /// The track's name, which its files are named after.
     pub name: String,
+    /// Whether it's an audio track or a MIDI track, which takes the notes
+    /// of a tap where an audio track takes its sound.
+    pub kind: TrackKind,
     /// An audio input or a tap of sound for an audio track, a MIDI input
     /// or another MIDI track's notes for a MIDI track.
     pub input: Input,
@@ -91,17 +94,21 @@ pub(crate) struct Armed {
     pub offset: i64,
 }
 
-/// The buffers the engine writes the taps that tracks record from into,
-/// by their taps.
-pub(crate) type Taps = BTreeMap<Tap, TapBuffer>;
+impl Armed {
+    /// The tap whose notes it takes, if it's a MIDI track taking another
+    /// track's notes.
+    pub(crate) fn notes_tap(&self) -> Option<Tap> {
+        self.input.tap().filter(|_| self.kind == TrackKind::Midi)
+    }
+}
 
-/// The buffer the engine writes a tap that tracks record from into.
-#[derive(Clone)]
-pub(crate) enum TapBuffer {
-    /// The tap's sound, which audio tracks take, as an audio input's.
-    Sound(InputBuffer),
-    /// A MIDI track's notes, its Pre FX, which other MIDI tracks take.
-    Notes(NoteBuffer),
+/// The buffers the engine writes the taps that tracks record from into:
+/// the sound of the taps audio tracks take, as an audio input's, and the
+/// notes of those MIDI tracks take. A MIDI track's Post FX can have both.
+#[derive(Clone, Default)]
+pub(crate) struct Taps {
+    pub sound: BTreeMap<Tap, InputBuffer>,
+    pub notes: BTreeMap<Tap, NoteBuffer>,
 }
 
 /// What the engine played of a MIDI track's notes, for the MIDI tracks
@@ -532,7 +539,7 @@ impl Tape {
             project: 0,
             layout: InputLayout::new(),
             buffers: Buffers::default(),
-            taps: Taps::new(),
+            taps: Taps::default(),
             segments: VecDeque::new(),
             until: 0,
             running: None,
@@ -595,14 +602,14 @@ impl Tape {
         if let Some(running) = &mut self.running {
             for track in &mut running.tracks {
                 if let Input::Tap(tap) = track.input
-                    && let Some(TapBuffer::Sound(buffer)) = taps.get(&tap)
+                    && let Some(buffer) = taps.sound.get(&tap)
                 {
                     track.buffer = buffer.clone();
                 }
             }
             for track in &mut running.notes {
-                if let Input::Tap(tap) = track.armed.input
-                    && let Some(TapBuffer::Notes(buffer)) = taps.get(&tap)
+                if let Some(tap) = track.armed.notes_tap()
+                    && let Some(buffer) = taps.notes.get(&tap)
                 {
                     track.set_tap(buffer.clone());
                 }
@@ -618,10 +625,10 @@ impl Tape {
         find_audio(&self.layout, &self.buffers.audio, &self.taps, input)
     }
 
-    /// The buffer of another track's notes a MIDI track taking `input`
-    /// records from, if it takes them: see [`find_notes`].
-    fn find_notes(&self, input: &Input) -> Option<NoteBuffer> {
-        find_notes(&self.taps, input)
+    /// The buffer of another track's notes `track` records from, if it's a
+    /// MIDI track taking them.
+    fn find_notes(&self, track: &Armed) -> Option<NoteBuffer> {
+        self.taps.notes.get(&track.notes_tap()?).cloned()
     }
 
     /// Takes the segments the timeline published since the last read.
@@ -700,8 +707,14 @@ impl Tape {
         let mut tracks = Vec::new();
         let mut notes = Vec::new();
         for armed in &self.armed {
-            if let Some(buffer) = self.find_notes(&armed.input) {
-                notes.push(MidiTape::from_tap(armed.clone(), buffer, start));
+            if armed.notes_tap().is_some() {
+                match self.find_notes(armed) {
+                    Some(buffer) => notes.push(MidiTape::from_tap(armed.clone(), buffer, start)),
+                    None => self.reports.push(Report::Problem(format!(
+                        "{} records nothing: its input isn't there.",
+                        armed.name
+                    ))),
+                }
                 continue;
             }
             match &armed.input {
@@ -1151,10 +1164,7 @@ fn find_audio(
     match input {
         Input::Audio(input) => find(layout, buffers, input),
         Input::Tap(tap) => {
-            let TapBuffer::Sound(buffer) = taps.get(tap)? else {
-                return None;
-            };
-            let buffer = buffer.clone();
+            let buffer = taps.sound.get(tap)?.clone();
             let channels = InputChannels {
                 index: 0,
                 channel: 0,
@@ -1164,18 +1174,6 @@ fn find_audio(
             Some((buffer, channels))
         }
         Input::Midi(_) => None,
-    }
-}
-
-/// The buffer of another track's notes a MIDI track taking `input` records
-/// from: the one of `taps` the engine writes a tap of notes into.
-fn find_notes(taps: &Taps, input: &Input) -> Option<NoteBuffer> {
-    match input {
-        Input::Tap(tap) => match taps.get(tap)? {
-            TapBuffer::Notes(buffer) => Some(buffer.clone()),
-            TapBuffer::Sound(_) => None,
-        },
-        Input::Audio(_) | Input::Midi(_) => None,
     }
 }
 

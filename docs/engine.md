@@ -170,11 +170,15 @@ a writer it replaces or drops goes back to the control thread with the
 garbage. The app's writers fill buffers like an input's for its recorder
 ([app.md](app.md#recording)).
 
-A MIDI track that takes another's notes records what that track's
-`MidiMonitor` plays: its clips' notes and its input's. The graph keeps them
-for each block in a note record with the same key (`Graph::add_note_record`,
-`PreparedGraph::record_notes`), and the engine hands them to the writer's
-`write_notes` after its frames, each at its offset into the block, the
+A MIDI track that takes another's notes records what the node at that
+track's tap plays: its `MidiMonitor`, its clips' notes and its input's, or
+the switch of one of its MIDI effects. The graph keeps them for each block
+in a note record (`Graph::add_note_record`, `PreparedGraph::record_notes`),
+keyed apart from the tap's record tap (`compile::keys::record_notes`), so a
+MIDI track's Post FX can have both, and writers of two taps that come to
+the same node, such as Pre FX and Post FX on a track without MIDI effects,
+share its notes. The engine hands them to the writer's `write_notes` after
+its frames, each at its offset into the block, the
 block's notes empty where the graph hasn't the record. A note played at
 `t` left the clips then, so it belongs at `p`, without the latency: the
 notes of the other track's clips land on them, and those played live on it
@@ -668,7 +672,8 @@ every strip is built, so a wire can join any two:
   post-fader slot. The master has Post FX and Post Fader. Every tap comes
   before the output stage, where mute and solo cut, so a muted track's
   wires carry on: a muted ghost kick still ducks the bass. A MIDI track's
-  Pre FX is notes, which no wire takes yet.
+  Pre FX is notes, and so is the point after each MIDI effect in front of
+  its instrument (`Project::carries_sound`), which no wire takes yet.
 - **The wire** (`keys::wire`) is a `Gain` at the wire's gain, fed by its
   tap, and feeding its device's switch on a side input: 0 for the
   Compressor's or the Gate's Sidechain, and for a plugin's side input
@@ -720,10 +725,12 @@ the graph's shape and recompiles.
 ## Inputs from taps
 
 An audio track's input can be a tap on another track (`Input::Tap`), the
-same points a wire takes, but for a MIDI track's Pre FX, which is notes, or
-the master's Post Fader, which is Resampling (`Input::RESAMPLING`). A MIDI
-track's can be another MIDI track's Pre FX: its notes, from its clips and
-its input. The compiler adds them once the strips and wires are built:
+same points a wire takes, or the master's Post Fader, which is Resampling
+(`Input::RESAMPLING`). A MIDI track's can be another MIDI track's notes
+(`Project::carries_notes`): at its Pre FX, from its clips and its input,
+after one of its MIDI effects, what that plays, or at its Post FX, what
+reaches its instrument. The compiler adds them once the strips and wires
+are built:
 
 - **Monitoring.** The track's `InputMonitor` takes the tap on its side
   input 0 (`InputMonitor::with_side_input`) and plays it as it would an
@@ -742,17 +749,21 @@ its input. The compiler adds them once the strips and wires are built:
   in what it records, and come back on a ramp after. The cut follows the
   monitor's arming, which the monitor leaves it in an atomic after each
   block, so it has no parameters of its own.
-- **Notes.** A MIDI track taking another's notes has that track's
-  `MidiMonitor` send them to its own monitor's side input for notes
+- **Notes.** A MIDI track taking another's notes has the node that plays
+  them at the tap send them to its own monitor's side input for notes
   (`Graph::send_side_notes`), which plays them with its clips' as it would
-  a MIDI input's, with the same monitoring. The other track's clip player
-  sends its notes to its monitor even if it has no instrument, so a track
-  can play one that has none. They're taken before mute and solo, as a tap
-  is.
+  a MIDI input's, with the same monitoring. At Pre FX that's the other
+  track's `MidiMonitor`; after one of its MIDI effects, the `NoteSwitch` of
+  the last one up to there that plays, or the monitor where none does, so
+  after a deactivated one the notes are those that come into it; and at
+  Post FX, the last of them all, whose notes reach the instrument. The
+  other track's clip player sends its notes to its monitor even if it has
+  no instrument, and a MIDI effect plays without one, so a track can play
+  one that has none. They're taken before mute and solo, as a tap is.
 - **Record taps.** Each audio track's tap gets a record tap, keyed by the
   tap (`keys::record`), so tracks taking the same one share it, and each
-  MIDI track's a note record of the notes it takes, keyed the same way
-  ([Recording](#recording)).
+  MIDI track's a note record of the notes it takes, keyed by the tap too,
+  apart (`keys::record_notes`) ([Recording](#recording)).
 - **Which inputs play.** `Project::live_inputs` gives the inputs the engine
   plays: each whose ends the project has and whose tap carries what the
   track takes, unless it would close a loop with the outputs, the sends and
@@ -1106,7 +1117,8 @@ for either), in order with them, and takes room in a block as a note does.
 - `Graph::add_note_record(key, node)` keeps what a node plays in each
   block, for the `TapWriter` with the key (`PreparedGraph::record_notes`):
   a MIDI track's notes, for the tracks recording them
-  ([Recording](#recording)).
+  ([Recording](#recording)). Writers with different keys can record the
+  same node, which keeps one record for them all.
 - A node whose notes go nowhere, such as an instrument, gets the notes sent
   to it with its other events, in `process`.
 - An instrument's voice can ring on after its note is let go. A node says
@@ -1226,6 +1238,8 @@ no sound, and none goes through it.
   can't clash with the notes played into it ([plugins.md](plugins.md#notes-and-the-transport)).
   A monitor's ids start there too, but a MIDI effect's notes replace the
   notes it gets, so no node gets both.
+- Another MIDI track can take what a MIDI effect plays, after it, and what
+  reaches the instrument, at Post FX ([Inputs from taps](#inputs-from-taps)).
 
 **The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
 stands in for instruments until plugin hosting. It plays each note with a

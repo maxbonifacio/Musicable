@@ -106,10 +106,10 @@ pub(super) struct HeldNotes {
 }
 
 impl Held {
-    /// The held notes a track taking `input` takes, if it takes another
+    /// The held notes `track` takes, if it's a MIDI track taking another
     /// track's notes.
-    fn notes_of(&self, input: &Input) -> Option<&HeldNotes> {
-        let tap = input.tap()?;
+    fn notes_of(&self, track: &Armed) -> Option<&HeldNotes> {
+        let tap = track.notes_tap()?;
         self.notes.iter().find(|held| held.tap == tap)
     }
 }
@@ -124,9 +124,9 @@ impl Tape {
         }
         self.held.tracks = tracks;
         let audio: Vec<&Input> = (self.held.tracks.iter())
+            .filter(|track| track.notes_tap().is_none())
             .map(|track| &track.input)
             .filter(|input| matches!(input, Input::Audio(_) | Input::Tap(_)))
-            .filter(|input| self.find_notes(input).is_none())
             .collect();
         (self.held.audio).retain(|held| audio.iter().any(|&i| same_source(i, &held.input)));
         for input in audio {
@@ -155,7 +155,7 @@ impl Tape {
     fn hold_note_taps(&mut self, renewed: bool) {
         let mut taps: Vec<(Tap, NoteBuffer)> = Vec::new();
         for track in &self.held.tracks {
-            if let (Some(tap), Some(buffer)) = (track.input.tap(), self.find_notes(&track.input))
+            if let (Some(tap), Some(buffer)) = (track.notes_tap(), self.find_notes(track))
                 && !taps.iter().any(|&(held, _)| held == tap)
             {
                 taps.push((tap, buffer));
@@ -396,7 +396,7 @@ impl Tape {
                 } else {
                     input.refused = true;
                     let tracks = (self.held.tracks.iter())
-                        .filter(|track| track.input == Input::Tap(input.tap));
+                        .filter(|track| track.notes_tap() == Some(input.tap));
                     let refused = refusal(tracks, "input", self.held_bytes);
                     self.reports.push(Report::Problem(refused));
                 }
@@ -458,13 +458,14 @@ impl Tape {
         let heard = |track: &Armed| i128::from(at) + i128::from(latency) + i128::from(track.offset);
         let has = |track: &Armed| {
             // Another track's notes are there as the engine played them.
-            if let Some(held) = self.held.notes_of(&track.input) {
-                return match (&held.source, &held.held) {
+            if track.notes_tap().is_some() {
+                let held = self.held.notes_of(track);
+                return held.is_none_or(|held| match (&held.source, &held.held) {
                     (Some((source, _)), Some((buffer, _))) => {
                         source.has_ended() || buffer.settled() >= at
                     }
                     _ => true,
-                };
+                });
             }
             match &track.input {
                 input @ (Input::Audio(_) | Input::Tap(_)) => (self.held.audio.iter())
@@ -523,8 +524,12 @@ impl Tape {
         let mut tracks = Vec::new();
         let mut notes = Vec::new();
         for track in &self.held.tracks {
-            if let Some(held) = self.held.notes_of(&track.input) {
-                if let Some((buffer, _)) = &held.held {
+            if track.notes_tap().is_some() {
+                let held = self
+                    .held
+                    .notes_of(track)
+                    .and_then(|held| held.held.as_ref());
+                if let Some((buffer, _)) = held {
                     notes.push(MidiTape::from_tap(track.clone(), buffer.clone(), start));
                 }
                 continue;
@@ -632,9 +637,10 @@ fn same_channels(a: &AudioInput, b: &AudioInput) -> bool {
     (&a.device, a.channel, a.stereo) == (&b.device, b.channel, b.stereo)
 }
 
-/// Whether `track` takes the held audio input or tap `input`.
+/// Whether `track` takes the held audio input or tap `input`: whether it's
+/// an audio track taking it.
 fn takes_input(track: &Armed, input: &Input) -> bool {
-    same_source(&track.input, input)
+    track.notes_tap().is_none() && same_source(&track.input, input)
 }
 
 /// Whether a track taking `input` takes the MIDI input `id`.

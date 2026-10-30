@@ -17,8 +17,10 @@ Sidechain column's menu does: **Pre FX**, what comes into its devices from
 its clips or its input, then **after** each of its devices, **Post FX**,
 what comes out of the last of them, and **Post Fader**, after its fader and
 pan. Picking one has the track take that sound as its input, and the strip
-reads, say, **from Kick, Post FX**. A MIDI track's Pre FX is notes, which an
-audio track can't take, so its menu starts at its first device.
+reads, say, **from Kick, Post FX**. A MIDI track's Pre FX is notes, and so
+is the point after each [MIDI effect](plugins.md#midi-effects) in front of
+its instrument, which an audio track can't take, so its menu starts after
+the instrument.
 
 Picking one sets the track to monitor **In**, so it plays what it takes
 through its own devices, sends and fader: a copy of a vocal for a parallel
@@ -42,20 +44,30 @@ what it takes too, while it's armed or monitors In, as it holds an input
 ## Taking another track's notes
 
 A MIDI track's input menu lists the other MIDI tracks after the MIDI
-inputs, under **Tracks**, each opening to **Pre FX**: its notes, from its
-clips and its input, with its controllers, such as the sustain pedal.
+inputs, under **Tracks**, each opening to its points that carry notes:
+
+- **Pre FX**: its notes, from its clips and its input, with its
+  controllers, such as the sustain pedal.
+- **after** each of its [MIDI effects](plugins.md#midi-effects): the notes
+  that one plays, such as an arpeggiator's, or after one that's bypassed or
+  deactivated, the notes that come into it.
+- **Post FX**: the notes that reach its instrument, after all its MIDI
+  effects.
+
 Picking one has the track play those notes as it would a keyboard's, along
-with its own clips', and the strip reads, say, **from Lead, Pre FX**. It
+with its own clips', and the strip reads, say, **from Lead, after Arp**. It
 monitors **In**, as a track taking sound does, so a second instrument can
-double a part. A track without an instrument can still give its notes to
-one that has, and like sound, notes come before their track's mute and
-solo.
+double a part, arpeggio and all. A track without an instrument can still
+give its notes to one that has, and like sound, notes come before their
+track's mute and solo.
 
 ### Recording the notes
 
 Arm the track and record, and it records the notes it takes. The other
 track's clips' notes land exactly where they are, with their velocities and
-the controllers' moves, as a clip of its own you can edit. Notes played
+the controllers' moves, as a clip of its own you can edit, and so do the
+notes a MIDI effect plays on them: recording what an arpeggiator plays
+turns the arpeggio into notes you can edit. Notes played
 live on the other track land where Musicable played them, a moment after
 that track's own take would have them: as long as monitoring them took.
 Capture holds them too, while the track is armed or monitors In.

@@ -675,7 +675,9 @@ A tap is `after`, a device, for what that device puts out, on any track;
 or `track` or `master` with `tap`: `pre_fx` for what comes into a track's
 devices, `post_fx` (without `tap`) for what comes out of the last of them,
 and `post_fader` for what comes out of the fader and pan. The master has
-no Pre FX, and a MIDI track's is notes, which no wire takes yet. The steps
+no Pre FX, and a MIDI track's is notes, and so is the point after each of
+its MIDI effects in front of its instrument, which no wire takes yet. The
+steps
 are "Connect Wire", "Disconnect Wire", "Wire Source" and "Wire Gain", and
 a wire's gain is a parameter like any other, which scripts write as
 "wire 1" ([Automation](#automation)). Modulators move it as they move a
@@ -877,9 +879,11 @@ of the master's a track can take: the track records the mix and plays
 nothing while it does. A track that takes a tap in place of what it took
 monitors In, in the same step, so it plays what it takes, but for
 Resampling, which leaves its monitoring alone. A MIDI track's Pre FX is
-notes, which an audio track can't take, and which a MIDI track takes from
-another MIDI track, `from` without a `tap` taking it: a tap that carries
-sound is refused. An input that would close a loop, from a track
+notes, and so is the point after each of its MIDI effects in front of its
+instrument, which an audio track can't take. A MIDI track takes them from
+another MIDI track, `from` without a `tap` taking its Pre FX and `after` a
+MIDI effect what that plays, and its Post FX too, `post_fx`, the notes
+that reach its instrument: a tap that carries sound alone is refused. An input that would close a loop, from a track
 the track's own sound reaches, is refused with an error that says so, such
 as "That would make a loop: what comes out of Print reaches Kick Post FX"
 (`Project::check_input`). Resampling never closes one.
