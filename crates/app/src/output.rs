@@ -842,8 +842,8 @@ impl LeadMeter {
                 );
             }
             Some(_) => text.push_str(
-                ", and nothing renders ahead now: while a track monitors its input, each \
-                 block renders as the device asks for it.",
+                ", and nothing renders ahead now, as for a moment when a track arms: each block \
+                 renders as the device asks for it.",
             ),
             None => text.push('.'),
         }
@@ -1043,8 +1043,8 @@ mod tests {
             "Since the device started, the audio thread rendered 2 blocks itself, as the lead \
              ran out: a bigger buffer or a longer Render Ahead gives it more room."
         ));
-        // A track monitors its input: what rendered ahead earlier in the
-        // window doesn't fill the gauge.
+        // Nothing renders ahead, as for a moment when a track arms: what
+        // rendered ahead earlier in the window doesn't fill the gauge.
         meter.update(at(600), &stats(2400, 2400, 2), Lead::Normal);
         meter.update(at(750), &stats(0, 0, 2), Lead::Normal);
         assert_eq!(meter.gauge(), gauge(0.0, false, false));
@@ -1052,8 +1052,8 @@ mod tests {
         assert_eq!((lately.lead, lately.target), (0, 0));
         assert_eq!(
             meter.describe(48_000, 0),
-            "Render Ahead is Normal, and nothing renders ahead now: while a track monitors its \
-             input, each block renders as the device asks for it."
+            "Render Ahead is Normal, and nothing renders ahead now, as for a moment when a track \
+             arms: each block renders as the device asks for it."
         );
         // The transport stops, and a lead longer than the one aimed for
         // counts as full.

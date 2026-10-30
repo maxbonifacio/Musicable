@@ -230,8 +230,9 @@ pub struct RenderingAhead {
     /// Render Ahead, as the Audio settings name it: "short", "normal" or
     /// "long".
     pub setting: &'static str,
-    /// Whether the project renders ahead now: nothing does while a track
-    /// monitors its input.
+    /// Whether the project renders ahead now, all but what plays live, such
+    /// as a track monitoring its input: nothing does for a moment as a track
+    /// arms.
     pub ahead: bool,
     /// How far ahead the engine was on average lately, in milliseconds,
     /// and how far it aimed to be: both none while nothing rendered ahead.

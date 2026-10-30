@@ -314,10 +314,10 @@ where a part has started, what's built.
   sources, such as an armed track, and everything they reach render as the
   device asks ([engine.md](engine.md#rendering-ahead)), as far ahead as the
   Audio settings' Render Ahead says, with a gauge under the CPU meter
-  ([app.md](app.md#meters)). Next, the app marks tracks Always Live and
-  builds the graph again as a track is armed, and the live half shares the
-  workers. Exports render on the workers already, in the app engine's
-  block size (`export::Job`).
+  ([app.md](app.md#meters)). Arming a track builds the graph again with
+  the track live. Next, the live half shares the workers, and the app
+  marks tracks Always Live. Exports render on the workers already, in the
+  app engine's block size (`export::Job`).
 - **Plugin sandboxing.** Scanning loads each new library in a process of
   its own already (`plugins::scan`). Hosting a plugin in another process is
   another kind of `Instance`, which drives the plugin in a process that

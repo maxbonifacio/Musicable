@@ -1220,7 +1220,8 @@ stops the transport at the start of the song. Then:
   | Bypassing a device | Its switch's `Switch::BYPASS` parameter ([engine.md](engine.md#bypassing-devices)), and the link sets the plugin's own bypass ([plugins.md](plugins.md#plugins-on-tracks)) |
   | Deactivating or activating a device | A new graph |
   | A plugin's parameters and settings | Nothing: the plugin gets them ([plugins.md](plugins.md#plugins-on-tracks)) |
-  | Track and clip names, arm, locators | Nothing yet |
+  | Arming a track, its monitoring | Its input's `InputMonitor::ARMED` or `MONITOR` parameter, and a new graph, where a track that can monitor its input renders live ([engine.md](engine.md#rendering-ahead)) |
+  | Track and clip names, locators | Nothing yet |
 
   Play, stop and go to start send their `TransportCommand` as they run.
 - `Session::take_requests` hands over what the commands asked of the app,

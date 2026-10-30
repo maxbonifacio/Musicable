@@ -4,7 +4,8 @@
 //! for an input later than its driver says. An armed MIDI track records
 //! the notes its MIDI input plays the same way. Capture makes what armed
 //! tracks, and those monitoring In, played without recording into takes,
-//! audio and MIDI.
+//! audio and MIDI. Arming a track has it render live, with what it plays
+//! into, while the rest renders ahead.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,7 +16,8 @@ use musicable_app::Session;
 use musicable_audio::{InputBuffer, InputWriter, MidiBuffer};
 use musicable_commands::editor::AudioFile;
 use musicable_commands::{Args, Keymap, edit, mixer, track, transport};
-use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, rt};
+use musicable_engine::compile::keys;
+use musicable_engine::{AudioRef, Engine, EngineConfig, InputLayout, Lead, LoadKey, rt};
 use musicable_io::audio::Decoder;
 use musicable_model::clip::{ClipContent, Offset};
 use musicable_model::time::Beats;
@@ -177,6 +179,47 @@ fn armed_tracks_record_takes_where_they_were_played() {
     studio.session.run(&edit::UNDO).unwrap();
     let track = studio.session.project().track(lead).unwrap();
     assert!(track.takes.is_empty() && track.clips.is_empty());
+    let _ = fs::remove_dir_all(&studio.folder);
+}
+
+#[test]
+fn an_armed_track_renders_live_with_what_it_plays_into() {
+    let mut studio = Studio::new("live");
+    studio.session.set_lead(Lead::Normal);
+    studio.session.run(&track::NEW_AUDIO_TRACK).unwrap();
+    let (lead, bass) = (studio.lead, studio.session.project().tracks[1].id);
+    // Whether the node with `key` renders live, in the graph sent last.
+    let live = |session: &Session, key| {
+        let loads = session.loads().expect("a graph was sent");
+        let side = loads.sides().find(|&(k, ..)| k == LoadKey::Node(key));
+        side.map(|(.., live)| live)
+    };
+    studio.session.wait_for_graph();
+    for armed in [true, false, true] {
+        if studio.session.project().track(lead).unwrap().armed != armed {
+            let change = mixer::Change::Armed(lead, armed);
+            studio.session.change_mixer(change).unwrap();
+            studio.session.wait_for_graph();
+        }
+        // Lead monitors its input while it's armed, and the master plays
+        // it, while Bass's clips, which nothing live reaches, render ahead.
+        for key in [keys::track_input(lead), keys::master_output()] {
+            assert_eq!(
+                live(&studio.session, key),
+                Some(armed),
+                "{key:?}, armed {armed}"
+            );
+        }
+        assert_eq!(live(&studio.session, keys::track_clips(bass)), Some(false));
+        // A quarter of a second, by which the input has faded in or out.
+        let until = studio.time + 12_000;
+        while studio.time < until {
+            studio.play();
+        }
+        let heard = studio.output.iter().any(|&sample| sample != 0.0);
+        assert_eq!(heard, armed, "armed {armed}");
+    }
+    assert_eq!(studio.session.take_problems(), Vec::<String>::new());
     let _ = fs::remove_dir_all(&studio.folder);
 }
 

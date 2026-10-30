@@ -1033,8 +1033,8 @@ impl Session {
         self.engine.handle.set_preview_gain(gain);
     }
 
-    /// Has the engine render `lead` ahead of the device from now on, while
-    /// no track plays live: see
+    /// Has the engine render `lead` ahead of the device from now on, all
+    /// but what plays live: see
     /// [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
     /// It renders each block as the device asks for it until this is
     /// called.
@@ -1258,16 +1258,21 @@ impl Session {
                     | Edit::TrackSoloSafe { .. } => {
                         gates_changed = true;
                     }
+                    // At once, and in a graph built again, where a track
+                    // that can monitor its input renders live, with what it
+                    // reaches, and one that can't renders ahead.
                     Edit::TrackArmed { track, to, .. } => {
                         let armed = if to { 1.0 } else { 0.0 };
                         param(keys::track_input(track), InputMonitor::ARMED, armed);
                         armed_changed = true;
+                        recompile = true;
                     }
                     Edit::TrackMonitor { track, to, .. } => {
                         let monitor = InputMonitor::monitor_value(to) as f32;
                         param(keys::track_input(track), InputMonitor::MONITOR, monitor);
                         // Capture holds the inputs of tracks monitoring In.
                         armed_changed = true;
+                        recompile = true;
                     }
                     // Recordings are named after their tracks.
                     Edit::TrackName { .. } => armed_changed = true,

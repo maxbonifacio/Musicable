@@ -44,11 +44,10 @@ time.
 ## Render Ahead
 
 **Render Ahead**, under the device's settings, lets a small buffer play a
-heavy mix. While no track monitors its input, Musicable renders the whole
-project ahead of the device, on all its cores, and each buffer the device
-asks for is ready already. A plugin can then take longer than a buffer
-lasts now and then without a dropout, as long as the project keeps up on
-the whole.
+heavy mix. Musicable renders the project ahead of the device, on all its
+cores, and each buffer the device asks for is ready already. A plugin can
+then take longer than a buffer lasts now and then without a dropout, as
+long as the project keeps up on the whole.
 
 - **Off**: every block renders as the device asks for it, within its
   buffer.
@@ -61,13 +60,17 @@ song plays, up to that long after: a knob you turn, Stop, or a jump. While
 the transport stands still, Musicable keeps only about 512 samples ahead,
 so Play starts soon.
 
-While a track can monitor an audio or MIDI input, with its monitoring at
+A track that can monitor an audio or MIDI input, with its monitoring at
 **In**, or at **Auto** while it's armed
-([Monitoring](../using/recording.md#monitoring)), the whole project renders
-live, as the device asks for each buffer, so what you play reaches your
-ears at the buffer's latency. A track taking its input from another track
-doesn't count. Exports aren't played through the device, so Render Ahead
-makes no difference to them.
+([Monitoring](../using/recording.md#monitoring)), renders live, as the
+device asks for each buffer, so what you play reaches your ears at the
+buffer's latency. So does everything it plays into: the buses its sends go
+to, a track or a sidechain taking it as an input, and the master, whose
+knobs then change what you hear at once. The rest of the project still
+renders ahead, and the live part plays on top of it. A track taking its
+input from another track renders live only if that track does. Exports
+aren't played through the device, so Render Ahead makes no difference to
+them.
 
 Render Ahead changes at once, with no **Apply**, since the device needn't
 open again.
@@ -117,10 +120,10 @@ counter:
   device over the last quarter of a second: full is all of it, and it
   starts again when you change Render Ahead. It turns
   amber under half, and red when the audio thread had to render blocks
-  itself because the lead ran out, the step before a dropout. It's empty
-  while a track monitors its input, since nothing renders ahead then. The
-  tooltip says how far ahead Musicable was, and how many blocks the audio
-  thread had to render itself since the device started.
+  itself because the lead ran out, the step before a dropout. It dips for
+  a moment as a track arms or disarms, while what renders live changes.
+  The tooltip says how far ahead Musicable was, and how many blocks the
+  audio thread had to render itself since the device started.
 - **Dropouts** counts the times the device ran out of audio since it
   started, which you hear as clicks or gaps. Click it to count from zero
   again. Its tooltip says how much audio they lost, how many of them were

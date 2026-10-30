@@ -11,11 +11,12 @@
 //!
 //! While the engine renders ahead, the second of audio is a second
 //! rendered, which runs ahead of what the device has played as the lead
-//! grows, and the whole graph renders ahead, so no figure has a longest
+//! grows, and all of the graph but its live half renders ahead, so only the
+//! figures of the devices and channels in the live half have a longest
 //! block that matters: an ahead block has only to be ready before the lead
 //! runs out, and the engine leaves those out of a node's longest.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use musicable_engine::compile::keys::{self, Owner};
@@ -53,6 +54,9 @@ struct Reading {
     longest: BTreeMap<LoadKey, Duration>,
     /// Whether the engine was rendering ahead.
     ahead: bool,
+    /// The nodes that render live even then, as the device asks: the
+    /// graph's live half.
+    live: BTreeSet<LoadKey>,
 }
 
 impl Figures {
@@ -117,9 +121,12 @@ fn read(loads: &NodeLoads, time: u64, ahead: bool) -> Reading {
         ahead,
         ..Reading::default()
     };
-    for (key, load) in loads.iter() {
+    for (key, load, live) in loads.sides() {
         reading.busy.insert(key, load.busy());
         reading.longest.insert(key, load.take_longest());
+        if live {
+            reading.live.insert(key);
+        }
     }
     reading
 }
@@ -128,7 +135,8 @@ fn read(loads: &NodeLoads, time: u64, ahead: bool) -> Reading {
 /// `sample_rate` through a device with a period of `period` seconds: the
 /// time each row's nodes took from the oldest to the newest, over the time
 /// the engine rendered meanwhile, and their longest block since the
-/// oldest. Each row renders ahead if the engine was, at the newest.
+/// oldest. Each row renders ahead if the engine was, at the newest, and
+/// none of its nodes was in the graph's live half.
 fn figures(
     readings: &VecDeque<Reading>,
     sample_rate: u32,
@@ -155,9 +163,10 @@ fn figures(
         let row = longest.entry(places.row(key)).or_default();
         *row = (*row).max(block);
     }
-    let ahead = newest.ahead;
+    let live: BTreeSet<Row> = newest.live.iter().map(|&key| places.row(key)).collect();
     let mut performance = Performance::default();
     for (row, busy) in busy {
+        let ahead = newest.ahead && !live.contains(&row);
         let average = (busy.as_secs_f64() / rendered) as f32;
         let longest = longest.get(&row).copied().unwrap_or_default();
         let longest = (longest.as_secs_f64() / period) as f32;
@@ -368,7 +377,7 @@ mod tests {
             time,
             busy: times(busy),
             longest: times(longest),
-            ahead: false,
+            ..Reading::default()
         }
     }
 
@@ -431,6 +440,26 @@ mod tests {
             figures(&readings, CONFIG.sample_rate, PERIOD, &places),
             Performance::default()
         );
+    }
+
+    #[test]
+    fn rows_with_nodes_in_the_live_half_render_live_while_the_rest_renders_ahead() {
+        let (project, ids) = project();
+        let places = Places::new(&project);
+        let (drive, fader) = (keys::device(ids.drive), keys::track_gain(ids.bass));
+        let ahead = |mut reading: Reading| {
+            reading.ahead = true;
+            reading
+        };
+        let mut newest = ahead(reading(24_000, &[(drive, 250_000), (fader, 25_000)], &[]));
+        newest.live.insert(LoadKey::Node(fader));
+        let readings = VecDeque::from([ahead(reading(0, &[(drive, 0), (fader, 0)], &[])), newest]);
+        let performance = figures(&readings, CONFIG.sample_rate, PERIOD, &places);
+        assert!(performance.device(ids.drive).unwrap().ahead);
+        assert!(!performance.rows[&Row::Mixer(Chain::Track(ids.bass))].ahead);
+        // What renders ahead is the drive's share alone.
+        assert_near(performance.ahead, 0.5);
+        assert_near(performance.total, 0.55);
     }
 
     #[test]
@@ -497,8 +526,7 @@ mod tests {
             busy: (busy.iter())
                 .map(|&(key, micros)| (key, Duration::from_micros(micros)))
                 .collect(),
-            longest: BTreeMap::new(),
-            ahead: false,
+            ..Reading::default()
         };
         let readings = VecDeque::from([
             reading(0, &[(master, 100_000), (send, 50_000)]),
