@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap_sys::events::{
@@ -1380,24 +1380,18 @@ fn controllers_go_as_midi_to_a_plugin_that_takes_notes_as_clap_s_own() {
     plugins.assert_alright();
 }
 
-/// Keeps the notes it gets, by engine time, as many as there's room for.
-pub(crate) struct Kept(pub(crate) Arc<Mutex<Vec<(u64, NoteEvent)>>>);
-
-impl Kept {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(Vec::with_capacity(64))))
-    }
-}
+/// Hands on the notes it gets, by engine time, as many as there's room
+/// for. Through a ring buffer, which never allocates, as a mutex can as it
+/// first locks: macOS's does.
+struct Kept(rtrb::Producer<(u64, NoteEvent)>);
 
 impl Node for Kept {
     fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
         output.clear();
-        let mut kept = self.0.lock().unwrap();
         for event in ctx.events {
-            if let NodeEventKind::Note(note) = event.kind
-                && kept.len() < kept.capacity()
-            {
-                kept.push((ctx.time + event.offset as u64, note));
+            if let NodeEventKind::Note(note) = event.kind {
+                // Past the room, the test finds notes missing.
+                let _ = self.0.push((ctx.time + event.offset as u64, note));
             }
         }
     }
@@ -1410,9 +1404,8 @@ impl Node for Kept {
 pub(crate) fn arpeggiate(arpeggiator: impl Node) -> Vec<(u64, NoteEvent)> {
     let mut g = Graph::new();
     let switch = g.add(NodeKey(0), NoteSwitch::new(Box::new(arpeggiator), false));
-    let kept = Kept::new();
-    let notes = Arc::clone(&kept.0);
-    let kept = g.add(NodeKey(1), kept);
+    let (notes, mut played) = rtrb::RingBuffer::new(64);
+    let kept = g.add(NodeKey(1), Kept(notes));
     g.send_notes(switch, kept).unwrap();
     g.set_output(kept).unwrap();
     let (mut engine, mut handle) = Engine::new(CONFIG);
@@ -1440,7 +1433,7 @@ pub(crate) fn arpeggiate(arpeggiator: impl Node) -> Vec<(u64, NoteEvent)> {
         engine.process(&mut AudioMut::from_planar(&mut block, 2));
     }
     drop((engine, handle));
-    Arc::into_inner(notes).unwrap().into_inner().unwrap()
+    std::iter::from_fn(|| played.pop().ok()).collect()
 }
 
 /// Checks that an arpeggiator transposing an octave up played the keys
