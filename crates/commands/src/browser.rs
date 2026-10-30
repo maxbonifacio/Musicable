@@ -1,18 +1,21 @@
 //! The browser commands: searching the library of samples, previewing and
-//! tagging samples, finding ones alike, and the folders the library holds.
+//! tagging samples, finding ones alike, the folders the library holds, and
+//! what kind of plugin each plugin is.
 //!
 //! The library is the app's, as the transport is: the files are on its disk,
 //! and its engine plays the previews. Commands reach it through
 //! [`Library`]. What a search or [`FIND_SIMILAR`] finds is what the browser
 //! shows, so an agent's search shows there too. The library's changes, such
 //! as tags, aren't the project's, so they aren't in its undo history: a tag
-//! is taken away with [`TAG`] too.
+//! is taken away with [`TAG`] too, and a plugin marked as another kind is
+//! marked back with [`SET_PLUGIN_KIND`].
 
 use std::path::{Path, PathBuf};
 
-use musicable_model::plugin::PluginState;
-use musicable_model::{DeviceId, DeviceKind};
+use musicable_model::plugin::{PluginKind, PluginState};
+use musicable_model::{DeviceId, DeviceKind, PluginFormat};
 
+use crate::device::{FORMAT, PLUGIN_KINDS, plugin_format};
 use crate::{Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
 
 /// Finds samples by their names, folders and tags.
@@ -34,6 +37,11 @@ pub const REMOVE_FOLDER: CommandId = CommandId::new("browser.remove_folder");
 pub const RESCAN: CommandId = CommandId::new("browser.rescan");
 /// Shows the browser and puts the cursor in its search field.
 pub const FOCUS_SEARCH: CommandId = CommandId::new("browser.focus_search");
+/// Marks an installed plugin as an instrument, a MIDI effect or an audio
+/// effect, for when the scan's rule gets it wrong: the browser lists it in
+/// that kind's folder from then on, and devices added from it are of that
+/// kind.
+pub const SET_PLUGIN_KIND: CommandId = CommandId::new("browser.set_plugin_kind");
 
 /// How many files a search gives back without a limit.
 const LIMIT: usize = 100;
@@ -81,6 +89,16 @@ pub trait Library {
     /// takes the state the project has.
     fn plugin_state(&mut self, _id: DeviceId) -> Option<PluginState> {
         None
+    }
+    /// Marks the installed plugin `id` in `format` as `kind`, for good:
+    /// marking it as the kind the scan found takes the mark away.
+    fn set_plugin_kind(
+        &mut self,
+        _format: PluginFormat,
+        _id: &str,
+        _kind: PluginKind,
+    ) -> Result<(), String> {
+        Err(NO_LIBRARY.to_owned())
     }
 }
 
@@ -248,6 +266,33 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_PLUGIN_KIND, "Set Plugin Kind").with_params(&[
+            FORMAT,
+            Param::required(
+                "plugin",
+                Type::Text,
+                "The plugin's id in its format, such as org.surge-synth-team.surge-xt.",
+            ),
+            Param::required(
+                "kind",
+                Type::Choice(PLUGIN_KINDS),
+                "What it does with notes: an instrument plays them, a MIDI effect, such as an \
+                 arpeggiator, plays them on changed, and an audio effect works on sound.",
+            ),
+        ]),
+        |ctx, args| {
+            let format = plugin_format(args)?;
+            let id: String = args.get("plugin")?;
+            let key: String = args.get("kind")?;
+            // The choices are checked.
+            let kind = PluginKind::from_key(&key).unwrap_or_default();
+            ctx.library
+                .set_plugin_kind(format, &id, kind)
+                .map_err(CommandError::invalid)?;
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(FOCUS_SEARCH, "Search in Browser").not_for_agents(),
         |ctx, _| {
             ctx.requests.push(Request::FocusBrowserSearch);
@@ -360,6 +405,34 @@ mod tests {
             setup.run_with(&TAG, blank),
             Err(CommandError::invalid("a tag can't be empty"))
         );
+    }
+
+    #[test]
+    fn plugins_are_marked_as_kinds_in_the_library() {
+        let mut setup = Setup::new(musicable_model::Project::new());
+        let args = Args::new()
+            .with("format", "vst3")
+            .with("plugin", "ABCD")
+            .with("kind", "midi_effect");
+        assert_eq!(setup.run_with(&SET_PLUGIN_KIND, args), Ok(Value::None));
+        assert_eq!(setup.library.calls, ["kind Vst3 ABCD midi_effect"]);
+        let wrong = Args::new()
+            .with("format", "vst3")
+            .with("plugin", "ABCD")
+            .with("kind", "synth");
+        assert!(setup.run_with(&SET_PLUGIN_KIND, wrong).is_err());
+        let format = Args::new()
+            .with("format", "au")
+            .with("plugin", "ABCD")
+            .with("kind", "instrument");
+        assert_eq!(
+            setup.run_with(&SET_PLUGIN_KIND, format),
+            Err(CommandError::invalid(
+                "there's no plugin format \"au\": it's clap or vst3"
+            ))
+        );
+        // It's the app's, not the project's.
+        assert_eq!(setup.committed_names(), Vec::<String>::new());
     }
 
     #[test]

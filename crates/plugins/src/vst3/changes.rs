@@ -446,15 +446,15 @@ impl IParamValueQueueTrait for OutputQueue {
     }
 }
 
-/// A block's events: notes, for the plugin, or none, for the events the
-/// plugin plays, which nothing takes yet.
+/// A block's events: the notes for the plugin, or those the plugin plays,
+/// as many as there's room for.
 pub(crate) struct Events {
     com: ComWrapper<EventList>,
 }
 
 struct EventList {
     events: UnsafeCell<Vec<Event>>,
-    /// Whether it's the plugin's, which drops what the plugin adds.
+    /// Whether it's the plugin's, which keeps what the plugin adds.
     output: bool,
 }
 
@@ -487,6 +487,11 @@ impl Events {
 
     pub(crate) fn clear(&mut self) {
         self.events().clear();
+    }
+
+    /// The events in it, in the order they came.
+    pub(crate) fn list(&mut self) -> &[Event] {
+        self.events()
     }
 
     /// Adds an event, unless the list is full: says whether it did.
@@ -524,8 +529,17 @@ impl IEventListTrait for EventList {
         kResultOk
     }
 
-    unsafe fn addEvent(&self, _: *mut Event) -> tresult {
-        if self.output { kResultOk } else { kResultFalse }
+    unsafe fn addEvent(&self, event: *mut Event) -> tresult {
+        // SAFETY: the plugin's turn.
+        let events = unsafe { &mut *self.events.get() };
+        // SAFETY: the plugin passes its event, or null.
+        match (self.output, unsafe { event.as_ref() }) {
+            (true, Some(event)) if events.len() < events.capacity() => {
+                events.push(*event);
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
     }
 }
 
@@ -631,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn events_reach_the_plugin_and_its_own_go_nowhere() {
+    fn events_reach_the_plugin_and_its_own_come_back() {
         // SAFETY: zeroed is a valid event.
         let event: Event = unsafe { std::mem::zeroed() };
         let mut events = Events::new(2, false);
@@ -644,7 +658,7 @@ mod tests {
             ..event
         }));
         assert!(!events.push(event));
-        let output = Events::new(0, true);
+        let mut output = Events::new(1, true);
         // SAFETY: the lists are alive, and it's the plugin's turn.
         unsafe {
             let list = ComRef::from_raw(events.as_ptr()).unwrap();
@@ -654,9 +668,15 @@ mod tests {
             assert_eq!(got.sampleOffset, 2);
             assert_eq!(list.getEvent(2, &mut got), kInvalidArgument);
             assert_eq!(list.addEvent(&mut got), kResultFalse);
+            // The plugin's own, as many as there's room for.
             let list = ComRef::from_raw(output.as_ptr()).unwrap();
             assert_eq!(list.addEvent(&mut got), kResultOk);
-            assert_eq!(list.getEventCount(), 0);
+            assert_eq!(list.addEvent(&mut got), kResultFalse);
+            assert_eq!(list.addEvent(ptr::null_mut()), kResultFalse);
         }
+        let offsets: Vec<i32> = output.list().iter().map(|e| e.sampleOffset).collect();
+        assert_eq!(offsets, [2]);
+        output.clear();
+        assert!(output.list().is_empty());
     }
 }

@@ -1,4 +1,5 @@
-//! The plugins: one type for both, which tells them apart by [`Kind`].
+//! The plugins: one type for all three, which tells them apart by
+//! [`Kind`].
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -51,8 +52,9 @@ use clap_sys::host::clap_host;
 use clap_sys::id::{CLAP_INVALID_ID, clap_id};
 use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::plugin_features::{
-    CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_STEREO,
-    CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_UTILITY,
+    CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_INSTRUMENT,
+    CLAP_PLUGIN_FEATURE_NOTE_EFFECT, CLAP_PLUGIN_FEATURE_STEREO, CLAP_PLUGIN_FEATURE_SYNTHESIZER,
+    CLAP_PLUGIN_FEATURE_UTILITY,
 };
 use clap_sys::process::{
     CLAP_PROCESS_CONTINUE, CLAP_PROCESS_ERROR, clap_process, clap_process_status,
@@ -60,10 +62,12 @@ use clap_sys::process::{
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
-use crate::{ALIVE, FIXED_PORTS, MPE, gui, violation};
+use crate::arp::{Arp, Stepped};
+use crate::{ALIVE, FIXED_PORTS, MIDI_OUT, MPE, gui, violation};
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
 pub const SYNTH_ID: &CStr = c"org.musicable.test.synth";
+pub const ARPEGGIATOR_ID: &CStr = c"org.musicable.test.arpeggiator";
 
 /// A nul-terminated list of feature strings.
 struct Features<const N: usize>([*const c_char; N]);
@@ -85,6 +89,12 @@ static SYNTH_FEATURES: Features<4> = Features([
     ptr::null(),
 ]);
 
+static ARPEGGIATOR_FEATURES: Features<3> = Features([
+    CLAP_PLUGIN_FEATURE_NOTE_EFFECT.as_ptr(),
+    CLAP_PLUGIN_FEATURE_UTILITY.as_ptr(),
+    ptr::null(),
+]);
+
 static GAIN_DESCRIPTOR: clap_plugin_descriptor = descriptor(
     GAIN_ID,
     c"Test Gain",
@@ -99,7 +109,15 @@ static SYNTH_DESCRIPTOR: clap_plugin_descriptor = descriptor(
     &SYNTH_FEATURES.0,
 );
 
-pub(crate) static DESCRIPTORS: [&clap_plugin_descriptor; 2] = [&GAIN_DESCRIPTOR, &SYNTH_DESCRIPTOR];
+static ARPEGGIATOR_DESCRIPTOR: clap_plugin_descriptor = descriptor(
+    ARPEGGIATOR_ID,
+    c"Test Arpeggiator",
+    c"Plays the notes held in turn.",
+    &ARPEGGIATOR_FEATURES.0,
+);
+
+pub(crate) static DESCRIPTORS: [&clap_plugin_descriptor; 3] =
+    [&GAIN_DESCRIPTOR, &SYNTH_DESCRIPTOR, &ARPEGGIATOR_DESCRIPTOR];
 
 const fn descriptor(
     id: &'static CStr,
@@ -125,6 +143,7 @@ const fn descriptor(
 enum Kind {
     Gain,
     Synth,
+    Arpeggiator,
 }
 
 /// A parameter, as the plugin describes it.
@@ -144,6 +163,7 @@ pub const LATENCY: clap_id = 11;
 pub const BYPASS: clap_id = 12;
 pub const LEVEL: clap_id = 20;
 pub const THREADS: clap_id = 21;
+pub const TRANSPOSE: clap_id = 30;
 
 /// The gain's sidechain input port's id, far from its index, 1, so a host
 /// that mixes the two up feeds the wrong port.
@@ -198,6 +218,15 @@ const SYNTH_PARAMS: [Param; 2] = [
         flags: CLAP_PARAM_IS_STEPPED,
     },
 ];
+
+const ARPEGGIATOR_PARAMS: [Param; 1] = [Param {
+    id: TRANSPOSE,
+    name: "Transpose",
+    min: -24.0,
+    max: 24.0,
+    default: 0.0,
+    flags: CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE,
+}];
 
 /// Notes the synth plays at once. Its thread pool tasks are one per voice.
 const VOICES: usize = 16;
@@ -340,6 +369,8 @@ struct Audio {
     /// Whether the sustain pedal is down. It holds every note, whatever its
     /// channel, as MPE's master channel does.
     sustain: bool,
+    /// The arpeggiator's.
+    arp: Arp,
 }
 
 /// What the plugin's pretend window holds.
@@ -423,12 +454,15 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         Kind::Gain
     } else if id == SYNTH_ID {
         Kind::Synth
+    } else if id == ARPEGGIATOR_ID {
+        Kind::Arpeggiator
     } else {
         return ptr::null();
     };
     let (descriptor, params): (_, &[Param]) = match kind {
         Kind::Gain => (&GAIN_DESCRIPTOR, &GAIN_PARAMS),
         Kind::Synth => (&SYNTH_DESCRIPTOR, &SYNTH_PARAMS),
+        Kind::Arpeggiator => (&ARPEGGIATOR_DESCRIPTOR, &ARPEGGIATOR_PARAMS),
     };
     let plugin = Box::new(TestPlugin {
         clap: clap_plugin {
@@ -487,6 +521,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
             job: (0, 0),
             channels: [MidiChannel::DEFAULT; 16],
             sustain: false,
+            arp: Arp::new(48_000.0, 0.0),
         }),
     });
     ALIVE.fetch_add(1, Ordering::SeqCst);
@@ -536,6 +571,7 @@ impl TestPlugin {
         match self.kind {
             Kind::Gain => &GAIN_PARAMS,
             Kind::Synth => &SYNTH_PARAMS,
+            Kind::Arpeggiator => &ARPEGGIATOR_PARAMS,
         }
     }
 
@@ -755,6 +791,7 @@ impl TestPlugin {
         let kind = match self.kind {
             Kind::Gain => "gain",
             Kind::Synth => "synth",
+            Kind::Arpeggiator => "arpeggiator",
         };
         let mut state = format!("musicable-test-plugin 1\nkind={kind}\n");
         for (index, param) in self.params().iter().enumerate() {
@@ -824,6 +861,7 @@ impl TestPlugin {
             (Kind::Gain, _) => audio.bypassed = value >= 0.5,
             (Kind::Synth, 0) => audio.level = value,
             (Kind::Synth, _) => audio.threads = value >= 0.5,
+            (Kind::Arpeggiator, _) => audio.arp.transpose = value,
         }
     }
 
@@ -935,6 +973,17 @@ impl TestPlugin {
             CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF | CLAP_EVENT_NOTE_CHOKE => {
                 // SAFETY: as above.
                 let event = unsafe { &*event.cast::<clap_event_note>() };
+                if self.kind == Kind::Arpeggiator {
+                    let (key, time) = (event.key, header.time);
+                    // SAFETY: the caller's promise.
+                    let emit = &mut |note| unsafe { play_stepped(note, out) };
+                    if header.type_ == CLAP_EVENT_NOTE_ON {
+                        audio.arp.hold(key, event.velocity, time, emit);
+                    } else {
+                        audio.arp.let_go(key, time, emit);
+                    }
+                    return;
+                }
                 if header.type_ == CLAP_EVENT_NOTE_ON {
                     note_on(
                         audio,
@@ -986,6 +1035,21 @@ impl TestPlugin {
                 // SAFETY: as above.
                 let event = unsafe { &*event.cast::<clap_event_midi>() };
                 self.log_midi(event.data);
+                if self.kind == Kind::Arpeggiator {
+                    let [status, key, velocity] = event.data;
+                    let (key, time) = (i16::from(key), header.time);
+                    // SAFETY: the caller's promise.
+                    let emit = &mut |note| unsafe { play_stepped(note, out) };
+                    match status & 0xF0 {
+                        0x90 if velocity > 0 => {
+                            let velocity = f64::from(velocity) / 127.0;
+                            audio.arp.hold(key, velocity, time, emit);
+                        }
+                        0x80 | 0x90 => audio.arp.let_go(key, time, emit),
+                        _ => {}
+                    }
+                    return;
+                }
                 // SAFETY: the caller's promise.
                 unsafe { apply_midi(audio, event.port_index as i16, event.data, out) };
             }
@@ -1004,6 +1068,15 @@ impl TestPlugin {
     /// `process` must be the host's process call, with buffers at least
     /// `end` frames long.
     unsafe fn render(&self, process: &clap_process, start: usize, end: usize) {
+        if self.kind == Kind::Arpeggiator {
+            // SAFETY: only the thread processing touches it.
+            let audio = unsafe { &mut *self.audio.get() };
+            let out = process.out_events;
+            // SAFETY: the caller's promise: the host's output events.
+            let emit = &mut |note| unsafe { play_stepped(note, out) };
+            audio.arp.run(start as u32, end as u32, emit);
+            return;
+        }
         // SAFETY: the caller's promise: there's one output port, stereo,
         // which `plugin_process` checked.
         let Some(out) = (unsafe { stereo(&*process.audio_outputs) }) else {
@@ -1062,6 +1135,7 @@ impl TestPlugin {
                     }
                 }
             }
+            Kind::Arpeggiator => {}
             Kind::Synth => {
                 // SAFETY: as above.
                 let pool = unsafe { (*self.audio.get()).threads } && {
@@ -1357,6 +1431,54 @@ unsafe fn apply_controller(
     }
 }
 
+/// Plays a note the arpeggiator starts or ends, as CLAP's note, or as MIDI
+/// from a library named to.
+///
+/// # Safety
+///
+/// `out` must be the host's output events, or null.
+unsafe fn play_stepped(note: Stepped, out: *const clap_output_events) {
+    let header = |type_, size: usize| clap_event_header {
+        size: size as u32,
+        time: note.time,
+        space_id: CLAP_CORE_EVENT_SPACE_ID,
+        type_,
+        flags: 0,
+    };
+    if MIDI_OUT.load(Ordering::Relaxed) {
+        let key = note.key as u8;
+        let data = if note.on {
+            let velocity = (note.velocity * 127.0).round().clamp(1.0, 127.0);
+            [0x90, key, velocity as u8]
+        } else {
+            [0x80, key, 0]
+        };
+        let event = clap_event_midi {
+            header: header(CLAP_EVENT_MIDI, size_of::<clap_event_midi>()),
+            port_index: 0,
+            data,
+        };
+        // SAFETY: the caller's promise.
+        unsafe { push(out, &event.header) };
+    } else {
+        let type_ = if note.on {
+            CLAP_EVENT_NOTE_ON
+        } else {
+            CLAP_EVENT_NOTE_OFF
+        };
+        let event = clap_event_note {
+            header: header(type_, size_of::<clap_event_note>()),
+            note_id: note.id,
+            port_index: 0,
+            channel: 0,
+            key: note.key,
+            velocity: note.velocity,
+        };
+        // SAFETY: the caller's promise.
+        unsafe { push(out, &event.header) };
+    }
+}
+
 /// Pushes an event to the host's output events.
 ///
 /// # Safety
@@ -1479,7 +1601,7 @@ unsafe extern "C" fn plugin_activate(
     audio.modulation = 0.0;
     audio.latency = match this.kind {
         Kind::Gain => latency_frames(this.value(1)),
-        Kind::Synth => 0,
+        Kind::Synth | Kind::Arpeggiator => 0,
     };
     audio.delay = [vec![0.0; audio.latency], vec![0.0; audio.latency]];
     audio.side_delay = audio.delay.clone();
@@ -1488,6 +1610,7 @@ unsafe extern "C" fn plugin_activate(
     audio.buffers = std::array::from_fn(|_| vec![0.0; max_frames as usize]);
     audio.channels = [MidiChannel::DEFAULT; 16];
     audio.sustain = false;
+    audio.arp = Arp::new(sample_rate, this.value(0));
     let previous = this
         .active_latency
         .swap(audio.latency as u32, Ordering::SeqCst);
@@ -1559,6 +1682,7 @@ unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
     audio.voices = [Voice::default(); VOICES];
     audio.channels = [MidiChannel::DEFAULT; 16];
     audio.sustain = false;
+    audio.arp.clear();
 }
 
 unsafe extern "C" fn plugin_process(
@@ -1586,8 +1710,12 @@ unsafe extern "C" fn plugin_process(
             return CLAP_PROCESS_ERROR;
         }
     }
-    let inputs = if this.kind == Kind::Gain { 2 } else { 0 };
-    if process.audio_inputs_count != inputs || process.audio_outputs_count != 1 {
+    let (inputs, outputs) = match this.kind {
+        Kind::Gain => (2, 1),
+        Kind::Synth => (0, 1),
+        Kind::Arpeggiator => (0, 0),
+    };
+    if process.audio_inputs_count != inputs || process.audio_outputs_count != outputs {
         violation("process got the wrong number of audio ports");
         return CLAP_PROCESS_ERROR;
     }
@@ -1606,16 +1734,18 @@ unsafe extern "C" fn plugin_process(
             violation("process got a port the host turned off without silence marked constant");
         }
     }
-    // SAFETY: the host passes one output port.
-    let output = unsafe { &*process.audio_outputs };
-    if output.channel_count != 2 || output.data32.is_null() {
-        violation("process got an output that isn't stereo");
-        return CLAP_PROCESS_ERROR;
-    }
-    // SAFETY: as above.
-    for out in unsafe { stereo(output) }.into_iter().flatten() {
-        // SAFETY: each channel is `frames` long.
-        unsafe { std::slice::from_raw_parts_mut(out, frames) }.fill(0.0);
+    if outputs > 0 {
+        // SAFETY: the host passes one output port.
+        let output = unsafe { &*process.audio_outputs };
+        if output.channel_count != 2 || output.data32.is_null() {
+            violation("process got an output that isn't stereo");
+            return CLAP_PROCESS_ERROR;
+        }
+        // SAFETY: as above.
+        for out in unsafe { stereo(output) }.into_iter().flatten() {
+            // SAFETY: each channel is `frames` long.
+            unsafe { std::slice::from_raw_parts_mut(out, frames) }.fill(0.0);
+        }
     }
     // SAFETY: the host passes its transport, or null.
     if let Some(transport) = unsafe { process.transport.as_ref() } {
@@ -1680,7 +1810,7 @@ unsafe extern "C" fn plugin_get_extension(
     }
     // SAFETY: the host passes a nul-terminated id.
     let id = unsafe { CStr::from_ptr(id) };
-    let synth = this.kind == Kind::Synth;
+    let (gain, synth) = (this.kind == Kind::Gain, this.kind == Kind::Synth);
     if id == CLAP_EXT_PARAMS {
         (&raw const PARAMS).cast()
     } else if id == CLAP_EXT_STATE {
@@ -1689,15 +1819,15 @@ unsafe extern "C" fn plugin_get_extension(
         (&raw const AUDIO_PORTS).cast()
     } else if (id == CLAP_EXT_AUDIO_PORTS_ACTIVATION
         || id == CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT)
-        && !synth
+        && gain
         && !FIXED_PORTS.load(Ordering::SeqCst)
     {
         (&raw const PORTS_ACTIVATION).cast()
     } else if id == CLAP_EXT_GUI {
         (&raw const GUI).cast()
-    } else if id == CLAP_EXT_LATENCY && !synth {
+    } else if id == CLAP_EXT_LATENCY && gain {
         (&raw const LATENCY_EXT).cast()
-    } else if id == CLAP_EXT_NOTE_PORTS && synth {
+    } else if id == CLAP_EXT_NOTE_PORTS && !gain {
         (&raw const NOTE_PORTS).cast()
     } else if id == CLAP_EXT_THREAD_POOL && synth {
         (&raw const THREAD_POOL).cast()
@@ -1793,6 +1923,7 @@ unsafe extern "C" fn params_value_to_text(
         GAIN => format!("{value:.2}"),
         LATENCY => format!("{} samples", latency_frames(value)),
         LEVEL => format!("{:.0} %", value * 100.0),
+        TRANSPOSE => format!("{value:+.0} st"),
         THREADS | BYPASS => if value >= 0.5 { "On" } else { "Off" }.to_owned(),
         _ => return false,
     };
@@ -1814,7 +1945,7 @@ unsafe extern "C" fn params_text_to_value(
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
     let number = || text.split_whitespace().next()?.parse::<f64>().ok();
     let parsed = match id {
-        GAIN | LATENCY => number(),
+        GAIN | LATENCY | TRANSPOSE => number(),
         LEVEL => number().map(|n| n / 100.0),
         THREADS | BYPASS => match text.as_ref() {
             "On" => Some(1.0),
@@ -1936,6 +2067,7 @@ unsafe extern "C" fn audio_ports_count(plugin: *const clap_plugin, is_input: boo
     let this = unsafe { this(plugin) };
     this.on_main("audio_ports.count");
     match (this.kind, is_input) {
+        (Kind::Arpeggiator, _) => 0,
         (Kind::Synth, true) => 0,
         (Kind::Gain, true) => 2,
         (_, false) => 1,
@@ -2023,7 +2155,8 @@ unsafe extern "C" fn note_ports_count(plugin: *const clap_plugin, is_input: bool
     // SAFETY: the host calls back with its plugin.
     let this = unsafe { this(plugin) };
     this.on_main("note_ports.count");
-    u32::from(is_input)
+    // The arpeggiator plays notes too.
+    u32::from(is_input || this.kind == Kind::Arpeggiator)
 }
 
 unsafe extern "C" fn note_ports_get(
@@ -2035,19 +2168,20 @@ unsafe extern "C" fn note_ports_get(
     // SAFETY: the host calls back with its plugin.
     let this = unsafe { this(plugin) };
     this.on_main("note_ports.get");
-    if index != 0 || !is_input {
+    if index != 0 || !(is_input || this.kind == Kind::Arpeggiator) {
         return false;
     }
     let mut name = [0; 256];
+    let port = if is_input { "Notes" } else { "Notes Out" };
     // SAFETY: the array holds as much as it says.
-    unsafe { copy_str("Notes", name.as_mut_ptr(), name.len()) };
-    let (supported_dialects, preferred_dialect) = if this.mpe {
+    unsafe { copy_str(port, name.as_mut_ptr(), name.len()) };
+    let both = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI;
+    let (supported_dialects, preferred_dialect) = if this.mpe && this.kind == Kind::Synth {
         (CLAP_NOTE_DIALECT_MIDI_MPE, CLAP_NOTE_DIALECT_MIDI_MPE)
+    } else if !is_input && MIDI_OUT.load(Ordering::SeqCst) {
+        (both, CLAP_NOTE_DIALECT_MIDI)
     } else {
-        (
-            CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI,
-            CLAP_NOTE_DIALECT_CLAP,
-        )
+        (both, CLAP_NOTE_DIALECT_CLAP)
     };
     // SAFETY: the host passes somewhere to write.
     unsafe {

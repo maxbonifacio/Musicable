@@ -4,16 +4,21 @@
 use std::ptr;
 
 use clap_sys::events::{
-    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_EXPRESSION,
+    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_END,
+    CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
     CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_MOD,
-    CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi, clap_event_note,
+    CLAP_EVENT_PARAM_VALUE, CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_PRESSURE,
+    CLAP_NOTE_EXPRESSION_TUNING, clap_event_header, clap_event_midi, clap_event_note,
     clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod,
     clap_event_param_value, clap_event_type, clap_input_events, clap_note_expression,
     clap_output_events,
 };
 use clap_sys::id::clap_id;
+use musicable_engine::Played;
+use musicable_model::clip::{Dimension, Note};
 
 use super::voices::Voices;
+use crate::process::Made;
 
 /// Room for one event of any kind the host sends. Every kind starts with
 /// its header, so a pointer to the event is a pointer to its header.
@@ -151,6 +156,75 @@ impl Event {
     fn header(&self) -> *const clap_event_header {
         ptr::from_ref(self).cast()
     }
+
+    /// When in the block it is, in frames.
+    pub(crate) fn time(&self) -> u32 {
+        // SAFETY: every kind starts with its header.
+        unsafe { self.header.time }
+    }
+
+    /// A copy of a note event a plugin plays, or of the MIDI it plays, or
+    /// `None` for any other event.
+    ///
+    /// # Safety
+    ///
+    /// `header` must be the header of an event of the size it says.
+    unsafe fn played(header: &clap_event_header) -> Option<Self> {
+        let fits = |size: usize| header.size as usize >= size;
+        let event = ptr::from_ref(header);
+        // SAFETY, for each read: the caller's promise, and the type and
+        // size say what the event is.
+        match header.type_ {
+            CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF | CLAP_EVENT_NOTE_CHOKE
+                if fits(size_of::<clap_event_note>()) =>
+            {
+                let note = unsafe { *event.cast::<clap_event_note>() };
+                Some(Self { note })
+            }
+            CLAP_EVENT_NOTE_EXPRESSION if fits(size_of::<clap_event_note_expression>()) => {
+                let expression = unsafe { *event.cast::<clap_event_note_expression>() };
+                Some(Self { expression })
+            }
+            CLAP_EVENT_MIDI if fits(size_of::<clap_event_midi>()) => {
+                let midi = unsafe { *event.cast::<clap_event_midi>() };
+                Some(Self { midi })
+            }
+            _ => None,
+        }
+    }
+
+    /// Plays a note event a plugin played, or the MIDI it played, as the
+    /// engine's notes: see [`Made`]. A choked note is let go at no
+    /// particular speed, and tuning goes as pitch bend.
+    pub(crate) fn play(&self, made: &mut Made, emit: &mut dyn FnMut(Played)) {
+        // SAFETY, for each read: the header says which the event is, as
+        // `played` copied it.
+        let type_ = unsafe { self.header.type_ };
+        match type_ {
+            CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF | CLAP_EVENT_NOTE_CHOKE => {
+                let note = unsafe { self.note };
+                let (id, channel, key) = (note.note_id, note.channel, note.key);
+                match type_ {
+                    CLAP_EVENT_NOTE_ON => made.start(id, channel, key, note.velocity, emit),
+                    CLAP_EVENT_NOTE_OFF => made.end(id, channel, key, note.velocity, emit),
+                    _ => made.end(id, channel, key, Note::RELEASE_VELOCITY.into(), emit),
+                }
+            }
+            CLAP_EVENT_NOTE_EXPRESSION => {
+                let expression = unsafe { self.expression };
+                let dimension = match expression.expression_id {
+                    CLAP_NOTE_EXPRESSION_TUNING => Dimension::PitchBend,
+                    CLAP_NOTE_EXPRESSION_PRESSURE => Dimension::Pressure,
+                    CLAP_NOTE_EXPRESSION_BRIGHTNESS => Dimension::Timbre,
+                    _ => return,
+                };
+                let (id, channel, key) = (expression.note_id, expression.channel, expression.key);
+                made.express(id, channel, key, dimension, expression.value, emit);
+            }
+            CLAP_EVENT_MIDI => made.midi(unsafe { self.midi }.data, emit),
+            _ => {}
+        }
+    }
 }
 
 /// The events a plugin gets for one block, in order of time. Allocated
@@ -243,6 +317,9 @@ pub(crate) struct Output<'a> {
     /// The voices it plays, while it processes, which learn when it ends
     /// them.
     pub(crate) voices: Option<&'a mut Voices>,
+    /// The notes it plays, and the MIDI, as it plays them, where something
+    /// takes them, as many as there's room for.
+    pub(crate) notes: Option<&'a mut Vec<Event>>,
 }
 
 /// The list a plugin sends events back on, which puts them in `output`. It
@@ -296,8 +373,19 @@ unsafe extern "C" fn output_try_push(
             }
             return true;
         }
-        // Notes a plugin plays go nowhere yet.
-        _ => return true,
+        // The notes it plays, kept where something takes them.
+        _ => {
+            // SAFETY: as above.
+            let played = unsafe { Event::played(header) };
+            return match (played, output.notes.as_deref_mut()) {
+                (Some(event), Some(notes)) if notes.len() < notes.capacity() => {
+                    notes.push(event);
+                    true
+                }
+                (Some(_), Some(_)) => false,
+                _ => true,
+            };
+        }
     };
     output.queue.push(out).is_ok()
 }
@@ -344,6 +432,7 @@ mod tests {
         let mut output = Output {
             queue: &mut producer,
             voices: Some(&mut voices),
+            notes: None,
         };
         let list = output_list(&mut output);
         let begin = clap_event_param_gesture {
@@ -371,6 +460,7 @@ mod tests {
         let mut output = Output {
             queue: &mut producer,
             voices: None,
+            notes: None,
         };
         let list = output_list(&mut output);
         // SAFETY: as above.

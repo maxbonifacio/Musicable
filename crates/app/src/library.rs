@@ -26,7 +26,7 @@ use musicable_library::{
     Adder, AudioFacts, Busy, FileId, Index, IndexError, Prepared, Preset, Priority, Query, Queue,
     Record, Searcher, scan,
 };
-use musicable_model::plugin::{PluginDevice, PluginSettings, PluginState};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings, PluginState};
 use musicable_model::{DeviceId, DeviceKind, PluginFormat};
 use musicable_plugins::Waker;
 use musicable_ui::Peaks;
@@ -904,7 +904,7 @@ impl Library {
                     format: PluginFormat::Vst3,
                     id: plugin.id.clone(),
                     name: plugin.name.clone(),
-                    instrument: plugin.is_instrument(),
+                    kind: plugins.kind_of(plugin),
                     inputs: Vec::new(),
                     settings: PluginSettings {
                         state: Some(state),
@@ -1169,6 +1169,15 @@ impl musicable_commands::Library for LibraryLink<'_> {
         }
         self.library
             .save_preset(id, &device, device_name, name, self.plugins)
+    }
+
+    fn set_plugin_kind(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        kind: PluginKind,
+    ) -> Result<(), String> {
+        self.plugins.set_kind(format, id, kind)
     }
 
     /// Saved from the plugin as it plays, as a preset saves it.

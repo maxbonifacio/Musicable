@@ -23,7 +23,7 @@ use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
     AudioMut, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind, NodeMaker, NoteEvent, NoteId,
-    ParamId, ProcessContext,
+    Notes, ParamId, ProcessContext,
 };
 use musicable_model::clip::Dimension;
 
@@ -32,7 +32,7 @@ use super::host::Shared;
 use super::library::Library;
 use super::voices::{VOICE_CAPACITY, Voices};
 use crate::midi::{Layout, MidiOut};
-use crate::process::{Channels, ParamChange, Sounding, SoundingNote, Transport};
+use crate::process::{self, Channels, Made, ParamChange, Sounding, SoundingNote, Transport};
 use crate::threads::{ACTIVE, AudioThread, FAILED, PROCESSING};
 
 /// How many events a plugin can get in one block, beyond which they're
@@ -59,6 +59,11 @@ pub(crate) struct Audio {
     pub(crate) voices: Voices,
     /// Notes and controllers as MIDI, for a plugin that takes MIDI.
     pub(crate) midi: MidiOut,
+    /// The notes the plugin plays in a block, and the MIDI, as it plays
+    /// them, while it plays in the notes pass.
+    pub(crate) played: Vec<Event>,
+    /// The notes it plays, as the engine's.
+    pub(crate) made: Made,
     /// Frames processed since the plugin was activated.
     pub(crate) steady_time: i64,
     pub(crate) from_main: rtrb::Consumer<ParamChange>,
@@ -79,6 +84,8 @@ impl Audio {
             sounding: Sounding::new(),
             voices: Voices::new(),
             midi: MidiOut::new(Layout::Channel),
+            played: Vec::with_capacity(Notes::CAPACITY),
+            made: Made::new(),
             steady_time: 0,
             from_main,
             to_main,
@@ -104,6 +111,9 @@ impl Audio {
         let mpe = note_port.is_some_and(|p| p.dialect == CLAP_NOTE_DIALECT_MIDI_MPE);
         self.midi
             .reset(if mpe { Layout::Mpe } else { Layout::Channel });
+        // The notes it played end, as it forgets them.
+        self.played.clear();
+        self.made.end_soon();
         self.steady_time = 0;
     }
 }
@@ -244,6 +254,12 @@ impl fmt::Debug for NodeSource {
 /// processing. Its parameter changes go to the plugin's `flush` meanwhile,
 /// and the plugin resets before it processes again.
 ///
+/// A MIDI effect plays in the notes pass ([`Node::play_notes`]): the plugin
+/// processes the block there, with no sound, and the notes it plays go
+/// where the node's notes go, each under an id of the engine's own (see
+/// [`Made`]). Those it was playing as it starts again, after its setup
+/// changes, end at once. The plugins that make sound play no notes yet.
+///
 /// Modulation goes to the plugin in its own units, as CLAP has it. Where a
 /// new graph no longer modulates a parameter that the node it replaces
 /// did, the node ends the parameter's modulation before anything else.
@@ -322,13 +338,56 @@ impl Node for ClapNode {
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
-        if !run(
-            shared, transport, resetting, stale, ctx, inputs, output, audio,
-        ) {
+        let played = run(
+            shared,
+            transport,
+            resetting,
+            stale,
+            ctx,
+            inputs,
+            Some(&mut *output),
+            None,
+            audio,
+        );
+        if !played {
             output.clear();
         }
         // Both hold as many as there are voices, so this doesn't allocate.
         ended.append(&mut audio.voices.ended);
+    }
+
+    /// Processes the plugin for the block, with no sound, and sends the
+    /// notes it plays where the node's notes go: a MIDI effect's.
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        let Self {
+            shared,
+            transport,
+            ended,
+            resetting,
+            stale,
+            ..
+        } = self;
+        ended.clear();
+        shared.running.store(true, Ordering::Release);
+        let Some(_busy) = shared.try_enter() else {
+            return;
+        };
+        // SAFETY: `busy` is held, so nothing else touches it.
+        let audio = unsafe { &mut *shared.audio.get() };
+        let none = Inputs::NONE;
+        run(
+            shared,
+            transport,
+            resetting,
+            stale,
+            ctx,
+            none,
+            None,
+            Some(notes),
+            audio,
+        );
+        // What it ends sounds nowhere.
+        audio.voices.ended.clear();
     }
 
     fn ended_voices(&self) -> &[NoteId] {
@@ -401,6 +460,7 @@ impl Node for ClapNode {
         let mut out = events::Output {
             queue: &mut audio.to_main,
             voices: None,
+            notes: None,
         };
         let out_events = events::output_list(&mut out);
         // SAFETY: active and not processing, on an audio thread, with lists
@@ -442,7 +502,9 @@ fn end_stale(stale: &mut Vec<u32>, audio: &mut Audio) {
 
 /// Processes the plugin for one block, holding `busy`: false if it can't.
 /// It resets first if `resetting`, and ends the modulation of the
-/// parameters in `stale` first thing.
+/// parameters in `stale` first thing. It plays its main output into
+/// `output`, if there's one, and the notes it plays into `notes`, if there
+/// are.
 #[allow(clippy::too_many_arguments)]
 fn run(
     shared: &Shared,
@@ -451,7 +513,8 @@ fn run(
     stale: &mut Vec<u32>,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
-    output: &mut AudioMut<'_>,
+    output: Option<&mut AudioMut<'_>>,
+    notes: Option<&mut Notes<'_>>,
     audio: &mut Audio,
 ) -> bool {
     let lifecycle = shared.lifecycle();
@@ -487,10 +550,12 @@ fn run(
             // SAFETY: as above.
             unsafe { reset(plugin) };
         }
-        // Its voices are gone.
+        // Its voices are gone, and so are the notes it played, which ended
+        // where they went as it was bypassed.
         audio.sounding.clear();
         audio.voices.clear();
         audio.midi.restart();
+        audio.made.forget();
     }
 
     audio.inputs.clear(frames);
@@ -506,9 +571,11 @@ fn run(
     *transport_event = transport(Some(ctx));
 
     let in_events = audio.events.list();
+    audio.played.clear();
     let mut out = events::Output {
         queue: &mut audio.to_main,
         voices: Some(&mut audio.voices),
+        notes: notes.is_some().then_some(&mut audio.played),
     };
     let out_events = events::output_list(&mut out);
     let process = clap_process {
@@ -533,6 +600,18 @@ fn run(
     if status == CLAP_PROCESS_ERROR {
         return false;
     }
+    if let Some(notes) = notes {
+        let Audio { played, made, .. } = audio;
+        made.start_block(&mut |p| process::send(notes, 0, p));
+        for event in played.iter() {
+            let offset = event.time() as usize;
+            event.play(made, &mut |p| process::send(notes, offset, p));
+        }
+        played.clear();
+    }
+    let Some(output) = output else {
+        return true;
+    };
     let Some(main) = audio.outputs.channels.main() else {
         return false;
     };

@@ -20,9 +20,8 @@ pub struct PluginDevice {
     pub id: String,
     /// The plugin's name when it was added, to show while it's missing.
     pub name: String,
-    /// Whether it plays notes. A MIDI track's notes go to its first
-    /// instrument.
-    pub instrument: bool,
+    /// What it does with notes, as the browser said when it was added.
+    pub kind: PluginKind,
     /// Its side inputs, in its order, as the plugin said when it last
     /// loaded, so wires into them keep their ports while it's missing. An
     /// input it no longer had then stays, after the others, if a wire went
@@ -35,6 +34,49 @@ impl PluginDevice {
     /// The side input with the plugin's id `id`, if it has it.
     pub fn input(&self, id: u32) -> Option<&PluginInput> {
         self.inputs.iter().find(|input| input.id == id)
+    }
+}
+
+/// What a plugin does with notes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PluginKind {
+    /// It plays them: a MIDI track's notes go to its first instrument.
+    Instrument,
+    /// It plays the notes that come into it on, changed, as an arpeggiator
+    /// does: on a MIDI track, before the instrument
+    /// ([`Project::check_order`](crate::Project::check_order)).
+    MidiEffect,
+    /// It works on sound alone.
+    #[default]
+    AudioEffect,
+}
+
+impl PluginKind {
+    pub const ALL: [Self; 3] = [Self::Instrument, Self::MidiEffect, Self::AudioEffect];
+
+    /// What files and commands call it: `"instrument"`, `"midi_effect"` or
+    /// `"audio_effect"`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Instrument => "instrument",
+            Self::MidiEffect => "midi_effect",
+            Self::AudioEffect => "audio_effect",
+        }
+    }
+
+    /// The kind whose key is `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.key() == key)
+    }
+
+    /// What the browser calls it: "Instrument", "MIDI Effect" or "Audio
+    /// Effect".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Instrument => "Instrument",
+            Self::MidiEffect => "MIDI Effect",
+            Self::AudioEffect => "Audio Effect",
+        }
     }
 }
 

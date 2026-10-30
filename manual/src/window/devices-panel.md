@@ -54,6 +54,11 @@ so selecting another track forgets them.
   works on the selected devices if the device is one of them, or else on
   the device alone, which it selects.
 
+A MIDI effect stays in front of its track's instrument: a move that would
+take it past the instrument, or onto a track without notes, is refused, and
+says why, and a copy goes just in front of the instrument, or isn't made
+where there are no notes ([Plugins](../using/plugins.md#midi-effects)).
+
 A moved device takes everything with it: its settings, its automation, and a
 plugin's own window, open if it was. Moved onto the master, it leaves a
 track that took the point after it with **No Input**, as deleting it does
@@ -100,7 +105,8 @@ Live, lit while the device plays.
 Each is a step in the undo history, such as "Bypass EQ" or "Deactivate
 EQ". A bypassed instrument is silent: the notes it was playing end with the
 fade, and notes that start while it's bypassed aren't heard, though the next
-one after it comes back is. A Bypass lane automates the button
+one after it comes back is. A bypassed MIDI effect passes the notes on as
+they come, and a deactivated one is out of their way. A Bypass lane automates the button
 ([Automation](../using/automation.md#bypass)), and clicking it overrides the
 lane, as moving any control does. The Settings window's Mouse page changes
 what a click and an Alt-click do ([The mouse](../customising/mouse.md)).
@@ -122,8 +128,8 @@ page of its own under [Built-in devices](../devices/index.md).
 
 ## Plugins
 
-A plugin device has its name, its kind and format ("Instrument · CLAP"),
-and:
+A plugin device has its name, its kind and format ("Instrument · CLAP",
+"MIDI Effect · VST3" or "Audio Effect · CLAP"), and:
 
 - **Plugin Window**, which opens the plugin's own window, or closes it.
   Double-clicking the device's name opens it too, as in Live

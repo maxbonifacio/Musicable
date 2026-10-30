@@ -11,7 +11,7 @@ use musicable_model::modulation::{ControlKind, ModulatorKind, Output, lfo};
 use musicable_model::native::{NativeDevice, NativeKind, eq, sampler, synth};
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{
-    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+    PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
@@ -105,7 +105,7 @@ fn plugged() -> Project {
         format: PluginFormat::Clap,
         id: "org.example.synth".into(),
         name: "Synth".into(),
-        instrument: true,
+        kind: PluginKind::Instrument,
         inputs: Vec::new(),
         settings: PluginSettings {
             state: Some(PluginState::new(*b"preset")),
@@ -120,7 +120,7 @@ fn plugged() -> Project {
         format: PluginFormat::Vst3,
         id: "0123456789ABCDEF0123456789ABCDEF".into(),
         name: "Effect".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
@@ -858,9 +858,9 @@ fn plugins_name_their_plugin_and_keep_its_settings_in_order() {
         "must not be empty",
     );
     refused(
-        &edited_plugin(|p| p["instrument"] = json!("yes")),
-        &at("instrument"),
-        "expected a boolean",
+        &edited_plugin(|p| p["kind"] = json!("synth")),
+        &at("kind"),
+        "unknown variant `synth`",
     );
     refused(
         &edited_plugin(|p| p["state"] = json!("not base64!")),
@@ -2772,7 +2772,7 @@ fn wired() -> Project {
         format: PluginFormat::Clap,
         id: "org.example.ducker".into(),
         name: "Ducker".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: vec![input(2, "Sidechain"), input(5, "Aux")],
         settings: PluginSettings::default(),
     }));

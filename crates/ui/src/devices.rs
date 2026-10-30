@@ -18,6 +18,7 @@ use egui::{
 use musicable_commands::{Args, CommandId, device, edit};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
+use musicable_model::plugin::PluginKind;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::{self, Destination, Dragged};
@@ -41,8 +42,11 @@ pub struct PluginEntry {
     pub id: String,
     pub name: String,
     pub vendor: String,
-    /// It plays notes.
-    pub instrument: bool,
+    /// What it does with notes: what the scan found, unless the user
+    /// marked it otherwise ([`browser::SET_PLUGIN_KIND`]).
+    ///
+    /// [`browser::SET_PLUGIN_KIND`]: musicable_commands::browser::SET_PLUGIN_KIND
+    pub kind: PluginKind,
 }
 
 /// How a plugin device's plugin is doing.
@@ -797,18 +801,14 @@ pub(crate) fn describe(device: &Device) -> (&str, String) {
                 "" => plugin.id.as_str(),
                 name => name,
             };
-            let role = if plugin.instrument {
-                "Instrument"
-            } else {
-                "Effect"
-            };
+            let role = plugin.kind.name();
             (name, format!("{role} · {}", format_name(plugin.format)))
         }
         DeviceKind::Native(native) => (
             native.kind.name(),
             format!("{} · Built in", role(native.kind)),
         ),
-        DeviceKind::TestGain { .. } => ("Test Gain", "Effect · Built in".to_owned()),
+        DeviceKind::TestGain { .. } => ("Test Gain", "Audio Effect · Built in".to_owned()),
         DeviceKind::TestInstrument { .. } => {
             ("Test Instrument", "Instrument · Built in".to_owned())
         }
@@ -817,10 +817,16 @@ pub(crate) fn describe(device: &Device) -> (&str, String) {
 
 /// What a built-in device of kind `kind` is for.
 fn role(kind: NativeKind) -> &'static str {
+    native_kind(kind).name()
+}
+
+/// What a built-in device of kind `kind` does with notes: none is a MIDI
+/// effect yet.
+fn native_kind(kind: NativeKind) -> PluginKind {
     if kind.is_instrument() {
-        "Instrument"
+        PluginKind::Instrument
     } else {
-        "Effect"
+        PluginKind::AudioEffect
     }
 }
 
@@ -831,13 +837,22 @@ fn format_name(format: PluginFormat) -> &'static str {
     }
 }
 
-/// Which plugins the browser lists.
+/// Which devices the browser lists: all of them, or those of one kind,
+/// the folder of the kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Filter {
     #[default]
     All,
-    Instruments,
-    Effects,
+    Kind(PluginKind),
+}
+
+impl Filter {
+    fn wants(self, kind: PluginKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Kind(wanted) => kind == wanted,
+        }
+    }
 }
 
 /// The browser's list of plugins.
@@ -868,11 +883,12 @@ impl Browser {
                 .hint_text("Search")
                 .desired_width(f32::INFINITY),
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (filter, title) in [
                 (Filter::All, "All"),
-                (Filter::Instruments, "Instruments"),
-                (Filter::Effects, "Effects"),
+                (Filter::Kind(PluginKind::Instrument), "Instruments"),
+                (Filter::Kind(PluginKind::MidiEffect), "MIDI Effects"),
+                (Filter::Kind(PluginKind::AudioEffect), "Audio Effects"),
             ] {
                 if ui.selectable_label(self.filter == filter, title).clicked() {
                     self.filter = filter;
@@ -881,17 +897,12 @@ impl Browser {
         });
         ui.separator();
         let filter = self.filter;
-        let wanted = |instrument: bool| match filter {
-            Filter::All => true,
-            Filter::Instruments => instrument,
-            Filter::Effects => !instrument,
-        };
         let mut built_in: Vec<(u32, NativeKind)> = (view.native.iter())
-            .filter(|kind| wanted(kind.is_instrument()))
+            .filter(|&&kind| filter.wants(native_kind(kind)))
             .filter_map(|&kind| Some((score(&self.search, kind.name(), kind.key(), &[])?, kind)))
             .collect();
         let mut found: Vec<(u32, &PluginEntry)> = (plugins.installed.iter())
-            .filter(|p| wanted(p.instrument))
+            .filter(|p| filter.wants(p.kind))
             .filter_map(|p| {
                 let label = format!("{} {}", p.name, p.vendor);
                 Some((score(&self.search, &label, &p.id, &[])?, p))
@@ -970,16 +981,13 @@ impl Browser {
                             "" => String::new(),
                             vendor => format!(" by {vendor}"),
                         },
-                        if plugin.instrument {
-                            "Instrument"
-                        } else {
-                            "Effect"
-                        },
+                        plugin.kind.name(),
                         format_name(plugin.format),
                     ));
                     if row.double_clicked() {
                         actions.push(Action::RunWith(device::ADD_PLUGIN, add(plugin, chain)));
                     }
+                    row.context_menu(|ui| kind_menu(ui, plugin, actions));
                 }
             });
         ui.separator();
@@ -1006,6 +1014,33 @@ impl Browser {
     }
 }
 
+/// A plugin's menu in the browser, which marks it as an instrument, a MIDI
+/// effect or an audio effect, for when the scan's rule gets it wrong.
+fn kind_menu(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
+    ui.label(RichText::new("Kind").weak());
+    for kind in PluginKind::ALL {
+        if ui.radio(plugin.kind == kind, kind.name()).clicked() {
+            let args = Args::new()
+                .with("format", format_key(plugin.format))
+                .with("plugin", plugin.id.as_str())
+                .with("kind", kind.key());
+            actions.push(Action::RunWith(
+                musicable_commands::browser::SET_PLUGIN_KIND,
+                args,
+            ));
+            ui.close();
+        }
+    }
+}
+
+/// What a command calls `format`.
+fn format_key(format: PluginFormat) -> &'static str {
+    match format {
+        PluginFormat::Clap => "clap",
+        PluginFormat::Vst3 => "vst3",
+    }
+}
+
 /// What the browser calls `chain`, where it adds devices: the selected
 /// track without a chain.
 pub(crate) fn chain_name(project: &Project, chain: Option<Chain>) -> String {
@@ -1021,15 +1056,11 @@ pub(crate) fn chain_name(project: &Project, chain: Option<Chain>) -> String {
 
 /// The arguments that add `plugin` to `chain`, or to the selected track.
 pub(crate) fn add(plugin: &PluginEntry, chain: Option<Chain>) -> Args {
-    let format = match plugin.format {
-        PluginFormat::Clap => "clap",
-        PluginFormat::Vst3 => "vst3",
-    };
     let args = Args::new()
-        .with("format", format)
+        .with("format", format_key(plugin.format))
         .with("plugin", plugin.id.as_str())
         .with("name", plugin.name.as_str())
-        .with("instrument", plugin.instrument);
+        .with("kind", plugin.kind.key());
     onto(args, chain)
 }
 
@@ -1064,24 +1095,24 @@ mod tests {
         format!("org.example.{}", name.to_lowercase().replace(' ', "-"))
     }
 
-    fn plugin(project: &mut Project, name: &str, instrument: bool) -> Device {
+    fn plugin(project: &mut Project, name: &str, kind: PluginKind) -> Device {
         project.new_device(DeviceKind::Plugin(PluginDevice {
             format: PluginFormat::Clap,
             id: id(name),
             name: name.to_owned(),
-            instrument,
+            kind,
             inputs: Vec::new(),
             settings: PluginSettings::default(),
         }))
     }
 
-    fn entry(name: &str, vendor: &str, instrument: bool) -> PluginEntry {
+    fn entry(name: &str, vendor: &str, kind: PluginKind) -> PluginEntry {
         PluginEntry {
             format: PluginFormat::Clap,
             id: id(name),
             name: name.to_owned(),
             vendor: vendor.to_owned(),
-            instrument,
+            kind,
         }
     }
 
@@ -1162,10 +1193,10 @@ mod tests {
         let mut project = Project::new();
         let keys = project.add_track("Keys", TrackKind::Midi);
         let bass = project.add_track("Bass", TrackKind::Audio);
-        let synth = plugin(&mut project, "Surge XT", true);
-        let reverb = plugin(&mut project, "Old Reverb", false);
+        let synth = plugin(&mut project, "Surge XT", PluginKind::Instrument);
+        let reverb = plugin(&mut project, "Old Reverb", PluginKind::AudioEffect);
         let gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
-        let limiter = plugin(&mut project, "Limiter", false);
+        let limiter = plugin(&mut project, "Limiter", PluginKind::AudioEffect);
         (project.track_mut(keys).unwrap().devices).extend([synth.clone(), reverb.clone()]);
         project.master.devices.extend([gain, limiter]);
         let mut harness = harness(project);
@@ -1252,29 +1283,37 @@ mod tests {
         let mut harness = harness(project);
         let state = harness.state_mut();
         state.plugins = vec![
-            entry("Dragonfly Hall Reverb", "Michael Willis", false),
-            entry("Surge XT", "Surge Synth Team", true),
-            entry("Vital", "Vital Audio", true),
+            entry(
+                "Dragonfly Hall Reverb",
+                "Michael Willis",
+                PluginKind::AudioEffect,
+            ),
+            entry("Note Arp", "Example", PluginKind::MidiEffect),
+            entry("Surge XT", "Surge Synth Team", PluginKind::Instrument),
+            entry("Vital", "Vital Audio", PluginKind::Instrument),
         ];
         state.shell.toggle_panel(BROWSER);
         harness.run();
         click(&mut harness, "Devices");
-        let names = ["Dragonfly Hall Reverb", "Surge XT", "Vital"];
+        let names = ["Dragonfly Hall Reverb", "Note Arp", "Surge XT", "Vital"];
         let tops: Vec<f32> = (names.iter())
             .map(|name| harness.get_by_label(name).rect().top())
             .collect();
         assert!(tops.is_sorted(), "in the order given: {tops:?}");
-        harness.get_by_label("3 plugins");
+        harness.get_by_label("4 plugins");
 
-        // Picking effects or instruments, and searching, by name or by
-        // vendor.
+        // Picking a kind's folder, and searching, by name or by vendor.
         let listed = |harness: &Harness<'static, State>| -> Vec<&str> {
             (names.into_iter())
                 .filter(|name| harness.query_by_label(name).is_some())
                 .collect()
         };
-        click(&mut harness, "Effects");
+        click(&mut harness, "Audio Effects");
         assert_eq!(listed(&harness), ["Dragonfly Hall Reverb"]);
+        click(&mut harness, "MIDI Effects");
+        assert_eq!(listed(&harness), ["Note Arp"]);
+        // No built-in device is a MIDI effect.
+        assert!(harness.query_by_label("Built-in").is_none());
         click(&mut harness, "Instruments");
         assert_eq!(listed(&harness), ["Surge XT", "Vital"]);
         click(&mut harness, "All");
@@ -1291,7 +1330,7 @@ mod tests {
         let mut harness = self::harness(Project::new());
         let state = harness.state_mut();
         state.project.add_track("Keys", TrackKind::Midi);
-        state.plugins = vec![entry("Vital", "Vital Audio", true)];
+        state.plugins = vec![entry("Vital", "Vital Audio", PluginKind::Instrument)];
         state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
         harness.run();
@@ -1306,7 +1345,7 @@ mod tests {
             .with("format", "clap")
             .with("plugin", "org.example.vital")
             .with("name", "Vital")
-            .with("instrument", true);
+            .with("kind", "instrument");
         assert_eq!(
             actions(&mut harness),
             [
@@ -1336,7 +1375,7 @@ mod tests {
         let keys = project.add_track("Keys", TrackKind::Midi);
         let mut harness = harness(project);
         let state = harness.state_mut();
-        let surge = entry("Surge XT", "Surge Synth Team", true);
+        let surge = entry("Surge XT", "Surge Synth Team", PluginKind::Instrument);
         state.plugins = vec![
             surge.clone(),
             PluginEntry {
@@ -1344,7 +1383,7 @@ mod tests {
                 id: "D07A3E8BF8E64BB8A1A2B3C4D5E6F708".to_owned(),
                 ..surge
             },
-            entry("Vital", "Vital Audio", true),
+            entry("Vital", "Vital Audio", PluginKind::Instrument),
         ];
         state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
@@ -1361,7 +1400,7 @@ mod tests {
             .with("format", "vst3")
             .with("plugin", "D07A3E8BF8E64BB8A1A2B3C4D5E6F708")
             .with("name", "Surge XT")
-            .with("instrument", true)
+            .with("kind", "instrument")
             .with("track", keys);
         assert_eq!(
             actions(&mut harness),
@@ -1454,9 +1493,9 @@ mod tests {
     #[test]
     fn each_device_shows_its_share_of_a_core() {
         let mut project = Project::new();
-        let reverb = plugin(&mut project, "Old Reverb", false);
+        let reverb = plugin(&mut project, "Old Reverb", PluginKind::AudioEffect);
         let mut gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
-        let synth = plugin(&mut project, "Surge XT", true);
+        let synth = plugin(&mut project, "Surge XT", PluginKind::Instrument);
         gain.active = false;
         let devices = vec![synth.clone(), reverb.clone(), gain.clone()];
         let mut harness = showing(devices, project);
@@ -1493,7 +1532,7 @@ mod tests {
         let mut project = Project::new();
         let mut eq = native(&mut project, NativeKind::Eq);
         eq.bypassed = true;
-        let reverb = plugin(&mut project, "Old Reverb", false);
+        let reverb = plugin(&mut project, "Old Reverb", PluginKind::AudioEffect);
         let mut gain = project.new_device(DeviceKind::TestGain { gain: 0.5 });
         gain.active = false;
         let devices = vec![eq.clone(), reverb.clone(), gain.clone()];
@@ -1739,8 +1778,8 @@ mod tests {
     #[test]
     fn clicks_select_devices_and_a_click_beside_them_selects_none() {
         let mut project = Project::new();
-        let first = plugin(&mut project, "First", false);
-        let second = plugin(&mut project, "Second", false);
+        let first = plugin(&mut project, "First", PluginKind::AudioEffect);
+        let second = plugin(&mut project, "Second", PluginKind::AudioEffect);
         let mut harness = showing(vec![first.clone(), second.clone()], project);
         // A click on a title bar selects its device alone, and Ctrl- or
         // Shift-click adds it to the selection, or takes it out. A click in
@@ -1750,7 +1789,10 @@ mod tests {
             harness.get_by_label("Device Second").click_modifiers(mods);
             harness.run();
         }
-        let kind = harness.get_all_by_label("Effect · CLAP").nth(1).unwrap();
+        let kind = harness
+            .get_all_by_label("Audio Effect · CLAP")
+            .nth(1)
+            .unwrap();
         let kind = kind.rect().center();
         crate::testing::click_at(&mut harness, kind);
         assert_eq!(
@@ -1782,7 +1824,8 @@ mod tests {
     #[test]
     fn title_bars_drag_devices_along_the_chain_and_ctrl_copies_them() {
         let mut project = Project::new();
-        let [a, b, c] = ["A", "B", "C"].map(|name| plugin(&mut project, name, false));
+        let [a, b, c] =
+            ["A", "B", "C"].map(|name| plugin(&mut project, name, PluginKind::AudioEffect));
         let mut harness = showing(vec![a.clone(), b.clone(), c.clone()], project);
         harness.set_size(egui::vec2(1800.0, 600.0));
         harness.run();
@@ -1862,7 +1905,7 @@ mod tests {
     fn devices_dragged_onto_tracks_and_strips_go_on_them() {
         let mut project = Project::new();
         let bass = project.add_track("Bass", TrackKind::Audio);
-        let a = plugin(&mut project, "A", false);
+        let a = plugin(&mut project, "A", PluginKind::AudioEffect);
         let mut harness = showing(vec![a.clone()], project);
         harness.set_size(egui::vec2(1800.0, 900.0));
         harness.run();
@@ -1903,7 +1946,8 @@ mod tests {
     #[test]
     fn a_devices_menu_works_on_the_selection_if_its_in_it() {
         let mut project = Project::new();
-        let [mut a, b, c] = ["A", "B", "C"].map(|name| plugin(&mut project, name, false));
+        let [mut a, b, c] =
+            ["A", "B", "C"].map(|name| plugin(&mut project, name, PluginKind::AudioEffect));
         a.bypassed = true;
         let mut harness = showing(vec![a.clone(), b.clone(), c.clone()], project);
         harness.set_size(egui::vec2(1800.0, 600.0));
@@ -2055,13 +2099,39 @@ mod tests {
     }
 
     #[test]
+    fn a_plugins_menu_in_the_browser_marks_its_kind() {
+        let mut harness = harness(Project::new());
+        let state = harness.state_mut();
+        state.plugins = vec![entry("Note Arp", "Example", PluginKind::AudioEffect)];
+        state.shell.toggle_panel(BROWSER);
+        harness.run();
+        click(&mut harness, "Devices");
+        harness.get_by_label("Note Arp").click_secondary();
+        harness.run();
+        harness.get_by_label("Kind");
+        click(&mut harness, "MIDI Effect");
+        let args = Args::new()
+            .with("format", "clap")
+            .with("plugin", "org.example.note-arp")
+            .with("kind", "midi_effect");
+        assert_eq!(
+            actions(&mut harness),
+            [Action::RunWith(
+                musicable_commands::browser::SET_PLUGIN_KIND,
+                args
+            )]
+        );
+        assert!(harness.query_by_label("Kind").is_none(), "the menu closes");
+    }
+
+    #[test]
     fn the_browser_lists_the_built_in_devices_that_play_first() {
         let mut project = Project::new();
         let keys = project.add_track("Keys", TrackKind::Midi);
         let mut harness = harness(project);
         let state = harness.state_mut();
         state.native = vec![NativeKind::Eq, NativeKind::Utility, NativeKind::Synth];
-        state.plugins = vec![entry("Vital", "Vital Audio", true)];
+        state.plugins = vec![entry("Vital", "Vital Audio", PluginKind::Instrument)];
         state.editor.selected_track = Some(Chain::Track(keys));
         state.shell.toggle_panel(BROWSER);
         harness.run();
@@ -2081,7 +2151,7 @@ mod tests {
         };
         click(&mut harness, "Instruments");
         assert_eq!(listed(&harness), ["Built-in", "Synth", "Vital"]);
-        click(&mut harness, "Effects");
+        click(&mut harness, "Audio Effects");
         assert_eq!(listed(&harness), ["Built-in", "EQ", "Utility"]);
         click(&mut harness, "All");
         harness.get_by_role(Role::TextInput).click();
@@ -2252,14 +2322,14 @@ mod tests {
     fn a_plugins_box_has_a_row_for_each_of_its_side_inputs() {
         let mut project = Project::new();
         let kick = project.add_track("Kick", TrackKind::Audio);
-        let mut vocoder = plugin(&mut project, "Vocoder", false);
+        let mut vocoder = plugin(&mut project, "Vocoder", PluginKind::AudioEffect);
         let input = |id, name: &str| PluginInput {
             id,
             name: name.to_owned(),
         };
         let inputs = vec![input(7, "Sidechain"), input(9, "Carrier")];
         vocoder.kind.plugin_mut().unwrap().inputs = inputs;
-        let reverb = plugin(&mut project, "Reverb", false);
+        let reverb = plugin(&mut project, "Reverb", PluginKind::AudioEffect);
         let mut harness = showing(vec![vocoder.clone(), reverb], project);
         let source = |harness: &Harness<'static, State>, label: &str| {
             let picker = harness.get_by_role_and_label(Role::ComboBox, label);

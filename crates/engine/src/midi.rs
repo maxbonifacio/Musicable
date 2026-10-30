@@ -131,17 +131,17 @@ fn moved(controller: u8) -> Option<Controller> {
 
 /// What each controller holds, as it last moved, for those that have.
 #[derive(Debug, Clone, Copy)]
-struct Held([Option<f32>; Controller::MAX as usize + 1]);
+pub(crate) struct Held([Option<f32>; Controller::MAX as usize + 1]);
 
 impl Held {
-    const NONE: Self = Self([None; Controller::MAX as usize + 1]);
+    pub(crate) const NONE: Self = Self([None; Controller::MAX as usize + 1]);
 
-    fn set(&mut self, controller: Controller, value: f32) {
+    pub(crate) fn set(&mut self, controller: Controller, value: f32) {
         self.0[usize::from(controller.number())] = Some(value);
     }
 
     /// The controllers that have moved, and what they hold, in order.
-    fn moved(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
+    pub(crate) fn moved(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
         Controller::all().filter_map(|c| Some((c, self.0[usize::from(c.number())]?)))
     }
 
@@ -249,6 +249,15 @@ impl MidiNotes {
         notes
     }
 
+    /// Notes from every MIDI channel, each read as a keyboard plays it, as
+    /// a plugin plays them, until an MPE configuration message sets a zone.
+    /// Their ids count up from `first_id`.
+    pub fn every_channel(first_id: u64) -> Self {
+        let mut notes = Self::new(None, first_id);
+        notes.set_zone(0, 0);
+        notes
+    }
+
     /// The one channel it takes, or `None` for every channel.
     pub fn channel(&self) -> Option<u8> {
         self.channel
@@ -267,7 +276,7 @@ impl MidiNotes {
         let Some((channel, voice)) = parse(bytes) else {
             return;
         };
-        if self.channel.is_some_and(|c| c != channel) {
+        if !self.takes(channel) {
             return;
         }
         self.play(channel, voice, &mut |note| emit(Played::Note(note)));
@@ -276,50 +285,47 @@ impl MidiNotes {
         }
     }
 
+    /// Starts a note on `key` on `channel`, as a note on does, at
+    /// `velocity`, from 0.0 to 1.0, finer than MIDI's steps: for notes that
+    /// come as more than MIDI, such as a plugin's. Gives `emit` what it
+    /// plays, in order. A key or channel beyond MIDI's, or a channel it
+    /// doesn't take, does nothing.
+    pub fn start(&mut self, channel: u8, key: u8, velocity: f32, mut emit: impl FnMut(Played)) {
+        if self.takes(channel) && key < 128 {
+            let velocity = velocity.clamp(0.0, 1.0);
+            self.note_on(channel, key, velocity, &mut |note| emit(Played::Note(note)));
+        }
+    }
+
+    /// Ends the note on `key` on `channel`, as a note off does, at
+    /// `velocity`, from 0.0 to 1.0.
+    pub fn end(&mut self, channel: u8, key: u8, velocity: f32, mut emit: impl FnMut(Played)) {
+        if self.takes(channel) && key < 128 {
+            let velocity = velocity.clamp(0.0, 1.0);
+            self.note_off(channel, key, velocity, &mut |note| emit(Played::Note(note)));
+        }
+    }
+
+    /// The note sounding on `key` on `channel`, if one is.
+    pub fn sounding(&self, channel: u8, key: u8) -> Option<NoteId> {
+        *self
+            .sounding
+            .get(usize::from(channel))?
+            .get(usize::from(key))?
+    }
+
+    /// Whether it takes `channel`.
+    fn takes(&self, channel: u8) -> bool {
+        channel < 16 && self.channel.is_none_or(|c| c == channel)
+    }
+
     /// What `voice` on `channel` does to notes.
     fn play(&mut self, channel: u8, voice: Voice, emit: &mut impl FnMut(NoteEvent)) {
         let c = usize::from(channel);
         match voice {
-            Voice::On { key, velocity } => {
-                let slot = &mut self.sounding[c][usize::from(key)];
-                if let Some(note) = slot.take() {
-                    emit(NoteEvent::Off {
-                        note,
-                        velocity: RELEASE,
-                    });
-                }
-                let note = NoteId(self.next_id);
-                self.next_id = self.next_id.wrapping_add(1);
-                *slot = Some(note);
-                emit(NoteEvent::On {
-                    note,
-                    key,
-                    velocity: unit(velocity),
-                });
-                let pitch = self.pitch(channel);
-                let Channel {
-                    pressure, timbre, ..
-                } = self.channels[c];
-                let at_start = [
-                    (Dimension::PitchBend, (pitch != 0.0).then_some(pitch)),
-                    (Dimension::Pressure, (pressure != 0.0).then_some(pressure)),
-                    (Dimension::Timbre, timbre),
-                ];
-                for (dimension, value) in at_start {
-                    if let Some(value) = value {
-                        emit(NoteEvent::Expression {
-                            note,
-                            dimension,
-                            value,
-                        });
-                    }
-                }
-            }
+            Voice::On { key, velocity } => self.note_on(channel, key, unit(velocity), emit),
             Voice::Off { key, velocity } => {
-                if let Some(note) = self.sounding[c][usize::from(key)].take() {
-                    let velocity = velocity.map_or(RELEASE, unit);
-                    emit(NoteEvent::Off { note, velocity });
-                }
+                self.note_off(channel, key, velocity.map_or(RELEASE, unit), emit);
             }
             Voice::KeyPressure { key, value } => {
                 if let Some(note) = self.sounding[c][usize::from(key)] {
@@ -341,6 +347,52 @@ impl MidiNotes {
             Voice::Control { controller, value } => {
                 self.control(channel, controller, value, emit);
             }
+        }
+    }
+
+    /// Starts a note on `key` on `channel`, with its channel's expression,
+    /// ending the note sounding there first, if there is one.
+    fn note_on(&mut self, channel: u8, key: u8, velocity: f32, emit: &mut impl FnMut(NoteEvent)) {
+        let c = usize::from(channel);
+        let slot = &mut self.sounding[c][usize::from(key)];
+        if let Some(note) = slot.take() {
+            emit(NoteEvent::Off {
+                note,
+                velocity: RELEASE,
+            });
+        }
+        let note = NoteId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        *slot = Some(note);
+        emit(NoteEvent::On {
+            note,
+            key,
+            velocity,
+        });
+        let pitch = self.pitch(channel);
+        let Channel {
+            pressure, timbre, ..
+        } = self.channels[c];
+        let at_start = [
+            (Dimension::PitchBend, (pitch != 0.0).then_some(pitch)),
+            (Dimension::Pressure, (pressure != 0.0).then_some(pressure)),
+            (Dimension::Timbre, timbre),
+        ];
+        for (dimension, value) in at_start {
+            if let Some(value) = value {
+                emit(NoteEvent::Expression {
+                    note,
+                    dimension,
+                    value,
+                });
+            }
+        }
+    }
+
+    /// Ends the note sounding on `key` on `channel`, if there is one.
+    fn note_off(&mut self, channel: u8, key: u8, velocity: f32, emit: &mut impl FnMut(NoteEvent)) {
+        if let Some(note) = self.sounding[usize::from(channel)][usize::from(key)].take() {
+            emit(NoteEvent::Off { note, velocity });
         }
     }
 
@@ -391,8 +443,9 @@ impl MidiNotes {
         }
     }
 
-    /// An id no note it has played had.
-    fn fresh_id(&mut self) -> NoteId {
+    /// An id no note it has played had: for a note played alongside those
+    /// it reads, such as one a plugin names by an id of its own.
+    pub fn fresh_id(&mut self) -> NoteId {
         let note = NoteId(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         note

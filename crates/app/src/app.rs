@@ -43,8 +43,8 @@ use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
 use crate::renders::RenderCache;
 use crate::settings::{
-    self, ANALYSIS_FOLDER, KEYMAP_FILE, MOUSE_FILE, ProfileSettings, RENDER_FOLDER, SETTINGS_FILE,
-    Settings, THEMES_FOLDER,
+    self, ANALYSIS_FOLDER, KEYMAP_FILE, MOUSE_FILE, PluginsSettings, ProfileSettings,
+    RENDER_FOLDER, SETTINGS_FILE, Settings, THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -232,6 +232,7 @@ impl App {
         let mut session = Session::new(project, folder.as_deref(), keymap, handle);
         session.editor_mut().behaviour = profile.behaviour;
         session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
+        session.set_plugin_kinds(settings.plugins.marks());
         session.set_plugin_waker(waker(ctx));
         // The browser's library, whose file work runs on a queue of its own.
         let queue = Arc::new(Queue::for_this_machine());
@@ -608,19 +609,35 @@ impl App {
     /// Finds the project's plugins among `installed` from now on, and lists
     /// them in the browser.
     fn set_installed_plugins(&mut self, installed: Vec<PluginInfo>) {
-        let mut entries: Vec<PluginEntry> = installed
-            .iter()
+        self.session.set_installed_plugins(installed);
+        self.list_plugins();
+    }
+
+    /// Lists the plugins installed in the browser, each of the kind the
+    /// user marked it as, or the scan found.
+    fn list_plugins(&mut self) {
+        let session = &self.session;
+        let mut entries: Vec<PluginEntry> = (session.installed_plugins().iter())
             .map(|plugin| PluginEntry {
                 format: plugin.format,
                 id: plugin.id.clone(),
                 name: plugin.name.clone(),
                 vendor: plugin.vendor.clone(),
-                instrument: plugin.is_instrument(),
+                kind: session.plugin_kind(plugin),
             })
             .collect();
         entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.vendor.clone()));
         self.plugin_entries = entries;
-        self.session.set_installed_plugins(installed);
+    }
+
+    /// Saves the plugins the user marked as other kinds, and lists them
+    /// as those, once a mark changes.
+    fn follow_plugin_kinds(&mut self) {
+        if self.session.take_plugin_kinds_changed() {
+            self.settings.plugins = PluginsSettings::from_marks(self.session.plugin_kinds());
+            self.save_settings();
+            self.list_plugins();
+        }
     }
 
     /// How each plugin device's plugin is doing, for the devices panel, and
@@ -1671,6 +1688,7 @@ impl eframe::App for App {
             self.set_installed_plugins(scanned.plugins);
         }
         self.session.tick();
+        self.follow_plugin_kinds();
         self.plugin_windows.tick(&mut self.session);
         self.tick_export();
         self.messages.extend(self.session.take_problems());

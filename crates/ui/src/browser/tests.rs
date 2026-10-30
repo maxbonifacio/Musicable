@@ -5,7 +5,7 @@ use egui::{Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use musicable_library::{AudioFacts, Format, Tag};
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::{DeviceKind, Project, TrackKind};
 
 use super::*;
@@ -368,13 +368,13 @@ fn the_preview_strip_shows_the_sample_playing_and_stops_it() {
     assert_eq!(actions(&mut harness), [Action::SetPreviewVolume(-1)]);
 }
 
-fn plugin(name: &str, format: PluginFormat, id: &str, instrument: bool) -> PluginEntry {
+fn plugin(name: &str, format: PluginFormat, id: &str, kind: PluginKind) -> PluginEntry {
     PluginEntry {
         format,
         id: id.to_owned(),
         name: name.to_owned(),
         vendor: "Example".to_owned(),
-        instrument,
+        kind,
     }
 }
 
@@ -427,13 +427,18 @@ fn presets_are_listed_by_device_and_added_to_the_devices_chain() {
     let mut harness = harness(project, samples());
     let state = harness.state_mut();
     state.plugins = vec![
-        plugin("Vital", PluginFormat::Clap, "org.example.vital", true),
+        plugin(
+            "Vital",
+            PluginFormat::Clap,
+            "org.example.vital",
+            PluginKind::Instrument,
+        ),
         // VST3 class ids can come in either case.
         plugin(
             "Surge XT",
             PluginFormat::Vst3,
             "abcdef0123456789abcdef0123456789",
-            true,
+            PluginKind::Instrument,
         ),
     ];
     state.library.presets = presets();
@@ -486,7 +491,7 @@ fn samples_devices_and_presets_drag_onto_tracks_and_into_the_devices_panel() {
         "Vital",
         PluginFormat::Clap,
         "org.example.vital",
-        true,
+        PluginKind::Instrument,
     )];
     state.library.presets = presets();
     state.library.search("kick");
@@ -613,7 +618,7 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
         format: PluginFormat::Clap,
         id: "org.example.vital".to_owned(),
         name: "Vital".to_owned(),
-        instrument: true,
+        kind: PluginKind::Instrument,
         inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));

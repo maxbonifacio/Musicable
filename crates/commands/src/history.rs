@@ -352,7 +352,7 @@ mod tests {
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::param::{ClipParam, ParamAddress};
     use musicable_model::plugin::{
-        PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+        PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
     };
     use musicable_model::routing::{Port, Tap, Wire, WireId};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
@@ -372,7 +372,10 @@ mod tests {
             format: PluginFormat::Clap,
             id: "org.example.plugin".into(),
             name: "Plugin".into(),
-            instrument,
+            kind: match instrument {
+                true => PluginKind::Instrument,
+                false => PluginKind::AudioEffect,
+            },
             inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),

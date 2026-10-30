@@ -36,7 +36,7 @@ use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
 use modulation::Modulation;
 use native::NativeDevice;
-use plugin::PluginDevice;
+use plugin::{PluginDevice, PluginKind};
 use routing::{Tap, Wire};
 use time::{BeatRange, Beats, TempoMap};
 
@@ -135,9 +135,19 @@ impl DeviceKind {
     pub fn is_instrument(&self) -> bool {
         match self {
             Self::TestInstrument { .. } => true,
-            Self::Plugin(plugin) => plugin.instrument,
+            Self::Plugin(plugin) => plugin.kind == PluginKind::Instrument,
             Self::Native(native) => native.kind.is_instrument(),
             Self::TestGain { .. } => false,
+        }
+    }
+
+    /// Whether the device plays the notes that come into it on, changed,
+    /// to the instrument after it: a MIDI effect plugin. See
+    /// [`Project::check_order`].
+    pub fn is_midi_effect(&self) -> bool {
+        match self {
+            Self::Plugin(plugin) => plugin.kind == PluginKind::MidiEffect,
+            Self::TestInstrument { .. } | Self::Native(_) | Self::TestGain { .. } => false,
         }
     }
 
@@ -198,6 +208,41 @@ impl Chain {
             Self::Master => None,
         }
     }
+}
+
+/// Whether `devices`, a chain's in order, are in an order notes can pass
+/// through, on a channel that has notes or one that hasn't, and if not, why
+/// not. A MIDI effect goes on a MIDI track, before its first instrument,
+/// which plays the notes the MIDI effects play on to it, each to the next.
+pub fn check_order<'a>(
+    notes: bool,
+    devices: impl IntoIterator<Item = &'a Device>,
+) -> Result<(), Misplaced> {
+    let mut instrument = false;
+    for device in devices {
+        if device.kind.is_midi_effect() {
+            if !notes {
+                return Err(Misplaced::NoNotes(device.id));
+            }
+            if instrument {
+                return Err(Misplaced::AfterInstrument(device.id));
+            }
+        }
+        instrument |= device.kind.is_instrument();
+    }
+    Ok(())
+}
+
+/// Why a chain's devices are in an order notes can't pass through: see
+/// [`check_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Misplaced {
+    /// This MIDI effect is on an audio track, a group or a return track, or
+    /// on the master, which have no notes.
+    NoNotes(DeviceId),
+    /// This MIDI effect comes after the track's first instrument, which
+    /// plays the notes, so none reach it.
+    AfterInstrument(DeviceId),
 }
 
 /// A plugin format Musicable hosts.
@@ -724,6 +769,50 @@ impl Project {
         tracks.chain(&mut self.master.devices).find(|d| d.id == id)
     }
 
+    /// Whether the devices of `chain` are in an order notes can pass
+    /// through, and if not, why not: see [`check_order`]. A chain the
+    /// project hasn't is in order.
+    pub fn check_order(&self, chain: Chain) -> Result<(), Misplaced> {
+        let devices = self.devices(chain).unwrap_or_default();
+        check_order(self.has_notes(chain), devices)
+    }
+
+    /// Whether `chain` has notes for MIDI effects to play on: whether it's
+    /// a MIDI track's.
+    pub fn has_notes(&self, chain: Chain) -> bool {
+        (chain.track())
+            .and_then(|track| self.track(track))
+            .is_some_and(|track| track.kind == TrackKind::Midi)
+    }
+
+    /// Where a MIDI effect goes in `chain` when nothing says where: just
+    /// before its first instrument, or at the end of a chain without one.
+    pub fn midi_effect_index(&self, chain: Chain) -> usize {
+        let devices = self.devices(chain).unwrap_or_default();
+        (devices.iter())
+            .position(|device| device.kind.is_instrument())
+            .unwrap_or(devices.len())
+    }
+
+    /// Where a device of `kind` put at `index` in `chain`, or past its end,
+    /// goes, so the chain stays in order ([`check_order`]): a MIDI effect
+    /// no later than just before the first instrument, and an instrument
+    /// no earlier than just after the last MIDI effect. `None` for a MIDI
+    /// effect where there are no notes, and for a chain the project hasn't.
+    pub fn fit_device(&self, chain: Chain, index: usize, kind: &DeviceKind) -> Option<usize> {
+        let devices = self.devices(chain)?;
+        let index = index.min(devices.len());
+        if kind.is_midi_effect() {
+            let notes = self.has_notes(chain);
+            return notes.then(|| index.min(self.midi_effect_index(chain)));
+        }
+        if kind.is_instrument() {
+            let effects = devices.iter().rposition(|d| d.kind.is_midi_effect());
+            return Some(index.max(effects.map_or(0, |last| last + 1)));
+        }
+        Some(index)
+    }
+
     /// The clip with `id`, and the track it's on. Only tracks' own clips:
     /// takes' clips are found through their take.
     pub fn find_clip(&self, id: ClipId) -> Option<(&Track, &Clip)> {
@@ -923,12 +1012,12 @@ mod tests {
         assert_eq!(track.instrument(), Some(&first));
     }
 
-    fn plugin(instrument: bool) -> DeviceKind {
+    fn plugin(kind: PluginKind) -> DeviceKind {
         DeviceKind::Plugin(PluginDevice {
             format: PluginFormat::Clap,
             id: "org.example.plugin".into(),
             name: "Plugin".into(),
-            instrument,
+            kind,
             inputs: Vec::new(),
             settings: plugin::PluginSettings::default(),
         })
@@ -936,19 +1025,83 @@ mod tests {
 
     #[test]
     fn plugins_that_play_notes_are_instruments() {
-        assert!(plugin(true).is_instrument());
-        assert!(!plugin(false).is_instrument());
-        assert!(plugin(false).plugin().is_some());
+        assert!(plugin(PluginKind::Instrument).is_instrument());
+        assert!(!plugin(PluginKind::MidiEffect).is_instrument());
+        assert!(plugin(PluginKind::MidiEffect).is_midi_effect());
+        assert!(!plugin(PluginKind::AudioEffect).is_instrument());
+        assert!(!plugin(PluginKind::AudioEffect).is_midi_effect());
+        assert!(plugin(PluginKind::AudioEffect).plugin().is_some());
         assert!(DeviceKind::TestGain { gain: 1.0 }.plugin().is_none());
+        for kind in PluginKind::ALL {
+            assert_eq!(PluginKind::from_key(kind.key()), Some(kind));
+        }
+        assert_eq!(PluginKind::from_key("effect"), None);
+    }
+
+    #[test]
+    fn midi_effects_go_on_midi_tracks_before_the_instrument() {
+        let mut p = Project::new();
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let vocal = p.add_track("Vocal", TrackKind::Audio);
+        let [arp, chord] = [0; 2].map(|_| p.new_device(plugin(PluginKind::MidiEffect)));
+        let synth = p.new_device(plugin(PluginKind::Instrument));
+        let eq = p.new_device(DeviceKind::TestGain { gain: 0.5 });
+        let chain = Chain::Track(keys);
+        assert_eq!(p.midi_effect_index(chain), 0);
+        let devices = vec![arp.clone(), eq.clone(), synth.clone()];
+        p.track_mut(keys).unwrap().devices = devices;
+        assert_eq!(p.check_order(chain), Ok(()));
+        assert_eq!(p.midi_effect_index(chain), 2);
+        p.track_mut(keys).unwrap().devices.push(chord.clone());
+        assert_eq!(
+            p.check_order(chain),
+            Err(Misplaced::AfterInstrument(chord.id))
+        );
+        // Without an instrument, they can go anywhere on the track.
+        p.track_mut(keys).unwrap().devices = vec![eq.clone(), chord.clone()];
+        assert_eq!(p.check_order(chain), Ok(()));
+        assert_eq!(p.midi_effect_index(chain), 2);
+        p.track_mut(vocal).unwrap().devices.push(arp.clone());
+        let misplaced = Err(Misplaced::NoNotes(arp.id));
+        assert_eq!(p.check_order(Chain::Track(vocal)), misplaced);
+        p.master.devices.push(arp.clone());
+        assert_eq!(p.check_order(Chain::Master), misplaced);
+        assert_eq!(p.check_order(Chain::Track(TrackId(9))), Ok(()));
+    }
+
+    #[test]
+    fn devices_fit_where_notes_pass_through_them_in_order() {
+        let mut p = Project::new();
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let vocal = p.add_track("Vocal", TrackKind::Audio);
+        let arp = p.new_device(plugin(PluginKind::MidiEffect));
+        let synth = p.new_device(plugin(PluginKind::Instrument));
+        let eq = p.new_device(DeviceKind::TestGain { gain: 0.5 });
+        p.track_mut(keys).unwrap().devices = vec![eq, arp.clone(), synth];
+        let chain = Chain::Track(keys);
+        let fit = |kind: PluginKind, index| p.fit_device(chain, index, &plugin(kind));
+        // Nothing comes after the synth, at 2, or before the arp, at 1.
+        assert_eq!(fit(PluginKind::MidiEffect, 0), Some(0));
+        assert_eq!(fit(PluginKind::MidiEffect, 3), Some(2));
+        assert_eq!(fit(PluginKind::MidiEffect, usize::MAX), Some(2));
+        assert_eq!(fit(PluginKind::Instrument, 0), Some(2));
+        assert_eq!(fit(PluginKind::Instrument, usize::MAX), Some(3));
+        assert_eq!(fit(PluginKind::AudioEffect, 0), Some(0));
+        assert_eq!(fit(PluginKind::AudioEffect, 9), Some(3));
+        let midi = plugin(PluginKind::MidiEffect);
+        assert_eq!(p.fit_device(Chain::Track(vocal), 0, &midi), None);
+        assert_eq!(p.fit_device(Chain::Master, 0, &midi), None);
+        assert_eq!(p.fit_device(Chain::Track(TrackId(9)), 0, &midi), None);
+        assert!(p.has_notes(chain) && !p.has_notes(Chain::Track(vocal)));
     }
 
     #[test]
     fn devices_are_found_by_id_on_tracks_and_the_master() {
         let mut p = Project::new();
         let keys = p.add_track("Keys", TrackKind::Midi);
-        let synth = p.new_device(plugin(true));
+        let synth = p.new_device(plugin(PluginKind::Instrument));
         let gain = p.new_device(DeviceKind::TestGain { gain: 0.5 });
-        let limiter = p.new_device(plugin(false));
+        let limiter = p.new_device(plugin(PluginKind::AudioEffect));
         let ids = (synth.id, gain.id, limiter.id);
         p.track_mut(keys).unwrap().devices = vec![synth, gain];
         p.master.devices.push(limiter);
@@ -962,7 +1115,7 @@ mod tests {
             Some((Chain::Master, 0))
         );
         assert!(p.find_device(DeviceId(99)).is_none());
-        p.device_mut(ids.2).unwrap().kind = plugin(true);
+        p.device_mut(ids.2).unwrap().kind = plugin(PluginKind::Instrument);
         assert!(p.master.devices[0].kind.is_instrument());
         assert_eq!(p.devices(Chain::Track(keys)).map(<[Device]>::len), Some(2));
         assert_eq!(p.devices(Chain::Track(TrackId(7))), None);

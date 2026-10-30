@@ -40,7 +40,7 @@ use vst3::{ComPtr, ComWrapper};
 
 use super::com::{ComponentHandler, HostApplication, PlugFrame, Stream, rect_size};
 use super::host::{Edit, NO_RESIZE, Shared};
-use super::module::{Module, parse_class_id, utf16};
+use super::module::{self, Module, parse_class_id, utf16};
 use super::node::{self, Audio, BusInfo, Controllers, NodeSource};
 use super::preset::{self, Preset};
 use crate::process::ParamChange;
@@ -139,7 +139,7 @@ impl Instance {
     /// [`poll`](Self::poll) called.
     pub fn new(path: &Path, id: &str, waker: Option<Waker>) -> Result<Self, Error> {
         let module = Module::load(path)?;
-        let info = module
+        let mut info = module
             .plugins()
             .into_iter()
             .find(|p| p.id.eq_ignore_ascii_case(id))
@@ -151,6 +151,7 @@ impl Instance {
             .as_com_ref::<FUnknown>()
             .map_or(ptr::null_mut(), |c| c.as_ptr());
         let parts = parts(&module, &cid, context, &info.name)?;
+        info.buses = Some(module::buses(&parts.component));
         let (to_audio, from_main) = rtrb::RingBuffer::new(PARAM_QUEUE);
         let (to_main, from_audio) = rtrb::RingBuffer::new(OUT_QUEUE);
         let audio = Audio::new(from_main, to_main);
@@ -620,15 +621,16 @@ impl Instance {
 
     /// Turns on the buses the nodes use, and off the others: the main audio
     /// ones, the side inputs wires go into, which `inputs` says are on if
-    /// the plugin takes them, and the first event input, for notes, if
-    /// there is one. Says whether there is.
+    /// the plugin takes them, the first event input, for notes, if there is
+    /// one, and the first event output, for the notes a MIDI effect plays.
+    /// Says whether there's an event input.
     fn activate_buses(&self, inputs: &mut BusInfo, outputs: &BusInfo) -> bool {
         let component = &self.parts.component;
         let (audio, events) = (kAudio as MediaType, kEvent as MediaType);
-        let input = kInput as BusDirection;
+        let (input, output) = (kInput as BusDirection, kOutput as BusDirection);
         // SAFETY: on the main thread, and inactive: every call.
         unsafe {
-            for (direction, buses) in [(input, &*inputs), (kOutput as BusDirection, outputs)] {
+            for (direction, buses) in [(input, &*inputs), (output, outputs)] {
                 if let Some(main) = buses.main {
                     component.activateBus(audio, direction, main as i32, 1);
                 }
@@ -644,6 +646,9 @@ impl Instance {
             let takes_notes = component.getBusCount(events, input) > 0;
             if takes_notes {
                 component.activateBus(events, input, 0, 1);
+            }
+            if component.getBusCount(events, output) > 0 {
+                component.activateBus(events, output, 0, 1);
             }
             takes_notes
         }

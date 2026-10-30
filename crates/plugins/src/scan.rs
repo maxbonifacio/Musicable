@@ -8,6 +8,11 @@
 //! process down. A [`ScanCache`] remembers every library scanned, good or
 //! bad, so the next scan only looks at new and changed files, and doesn't
 //! load a bad library again until it changes.
+//!
+//! A VST3 library's plugins are made too, to count their buses, which
+//! tells its MIDI effects ([`PluginInfo::kind`]). That runs more of their
+//! code, so the scanning process reports what the library's factory said
+//! first: if making the plugins crashes or hangs, that stands.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -64,9 +69,21 @@ pub fn format_of(path: &Path) -> Option<PluginFormat> {
 /// This is what the scanning process does; the app itself calls
 /// [`scan_isolated`].
 pub fn scan_here(path: &Path) -> Result<Vec<PluginInfo>, Error> {
+    scan(path, |_| ())
+}
+
+/// Scans the library at `path`, giving `found` what a VST3 library's
+/// factory says before its plugins are made to count their buses.
+fn scan(path: &Path, found: impl FnOnce(&[PluginInfo])) -> Result<Vec<PluginInfo>, Error> {
     match format_of(path) {
         Some(PluginFormat::Clap) => Ok(Library::load(path)?.plugins()),
-        Some(PluginFormat::Vst3) => Ok(Module::load(path)?.plugins()),
+        Some(PluginFormat::Vst3) => {
+            let module = Module::load(path)?;
+            let mut plugins = module.plugins();
+            found(&plugins);
+            module.probe(&mut plugins);
+            Ok(plugins)
+        }
         None => Err(Error::new(format!(
             "{} isn't a plugin library",
             path.display()
@@ -75,13 +92,20 @@ pub fn scan_here(path: &Path) -> Result<Vec<PluginInfo>, Error> {
 }
 
 /// The scanning process's work: scans the library at `path` and prints
-/// what it found, for [`scan_isolated`] to read.
+/// what it found, for [`scan_isolated`] to read. For a VST3 library, it
+/// prints what the factory says first, and again once it has counted the
+/// plugins' buses: the last result printed stands.
 pub fn child(path: &Path) {
-    let outcome = match scan_here(path) {
+    let outcome = match scan(path, |plugins| print(&Outcome::Found(plugins.to_vec()))) {
         Ok(plugins) => Outcome::Found(plugins),
         Err(e) => Outcome::Failed(e.to_string()),
     };
-    let json = serde_json::to_string(&outcome).unwrap_or_default();
+    print(&outcome);
+}
+
+/// Prints a result for [`scan_isolated`] to read.
+fn print(outcome: &Outcome) {
+    let json = serde_json::to_string(outcome).unwrap_or_default();
     // Straight to the file: unlike `println!`, which a test harness can
     // capture.
     let mut stdout = io::stdout().lock();
@@ -129,12 +153,14 @@ pub fn scan_isolated(mut command: Command, timeout: Duration) -> Outcome {
     outcome(&out, status, timeout)
 }
 
-/// What the scanning process's output and exit say.
+/// What the scanning process's output and exit say: the last result it
+/// printed whole.
 fn outcome(out: &[u8], status: Option<ExitStatus>, timeout: Duration) -> Outcome {
     let found = String::from_utf8_lossy(out)
         .lines()
-        .find_map(|line| line.strip_prefix(RESULT).map(str::to_owned))
-        .and_then(|json| serde_json::from_str::<Outcome>(&json).ok());
+        .filter_map(|line| line.strip_prefix(RESULT))
+        .filter_map(|json| serde_json::from_str::<Outcome>(json).ok())
+        .next_back();
     match (found, status) {
         (Some(outcome), _) => outcome,
         (None, Some(status)) => Outcome::Crashed(format!("it crashed the scanner ({status})")),
@@ -225,10 +251,19 @@ fn is_library(path: &Path) -> bool {
 }
 
 /// What scanning found, library by library, kept from one run to the next.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanCache {
+    /// The scanner's [`VERSION`](Self::VERSION) that found it.
+    #[serde(default)]
+    pub version: u32,
     /// Sorted by path.
     pub files: Vec<ScannedFile>,
+}
+
+impl Default for ScanCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// One library, as it was when it was scanned.
@@ -243,12 +278,25 @@ pub struct ScannedFile {
 }
 
 impl ScanCache {
-    /// The cache saved at `path`, or an empty one if there's none or it
-    /// can't be read.
+    /// Goes up when the scanner finds more than it did, so every library is
+    /// scanned again: 1 counts VST3 plugins' buses.
+    pub const VERSION: u32 = 1;
+
+    /// An empty cache, for this version of the scanner.
+    pub fn new() -> Self {
+        Self {
+            version: Self::VERSION,
+            files: Vec::new(),
+        }
+    }
+
+    /// The cache saved at `path`, or an empty one if there's none, it
+    /// can't be read, or an older scanner found it.
     pub fn read(path: &Path) -> Self {
         fs::read(path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+            .filter(|cache| cache.version == Self::VERSION)
             .unwrap_or_default()
     }
 
@@ -412,6 +460,13 @@ mod tests {
             outcome(b"loading...\n", None, TIMEOUT),
             Outcome::Crashed(reason) if reason.contains("still loading")
         ));
+        // The last result whole stands: a second one cut short, as by a
+        // crash, leaves the first.
+        let more = Outcome::Failed("it failed".into());
+        let both = format!("{out}{RESULT}{}\n", serde_json::to_string(&more).unwrap());
+        assert_eq!(outcome(both.as_bytes(), None, TIMEOUT), more);
+        let cut = format!("{out}{RESULT}{{\"failed\":\"it");
+        assert_eq!(outcome(cut.as_bytes(), None, TIMEOUT), found);
     }
 
     #[test]
@@ -444,5 +499,12 @@ mod tests {
             ScanCache::read(&dir.join("none.json")),
             ScanCache::default()
         );
+        // What an older scanner found is scanned again.
+        let older = ScanCache {
+            version: 0,
+            ..cache
+        };
+        older.write(&saved).unwrap();
+        assert_eq!(ScanCache::read(&saved), ScanCache::new());
     }
 }

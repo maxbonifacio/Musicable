@@ -17,7 +17,7 @@ says what's different there.
 | `Instance`: a `clap::Instance` or a `vst3::Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else the format wants done on the main thread. `Instance::new` takes the format, and the app holds every plugin as an `Instance` |
 | `NodeSource`, `ClapNode`, `Vst3Node` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
 | `scan` | A process of its own | Lists the plugins in a library, so one that crashes or hangs as it loads takes only the scanner down; `ScanCache` remembers what was found |
-| `crates/test-plugins` | Tests | A gain and a synth, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
+| `crates/test-plugins` | Tests | A gain, a synth and an arpeggiator, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
 | `Plugins` | The app's main thread | An instance for each plugin device in the open project, kept in step with it both ways (`crates/app/src/plugins.rs`) |
 | `PluginScan` | A thread of the app's | Scans in the background, each library in a process of its own, and keeps what it found (`crates/app/src/plugin_scan.rs`) |
 | `PluginWindows` | The app's main thread | The plugins' own windows, and Musicable's windows they go inside (`crates/app/src/plugin_windows.rs`) |
@@ -167,6 +167,37 @@ Every block gives the plugin the transport at its first frame: the tempo,
 the position in beats and in seconds, the time signature and where the bar
 started, whether it's playing, and the loop.
 
+**Notes a plugin plays.** A MIDI effect plays notes on, rather than sound
+([Plugins on tracks](#plugins-on-tracks)). Its switch has its node play in
+the engine's notes pass (`Node::play_notes`), with the block's notes and
+parameter changes and no audio, and never renders it
+([engine.md](engine.md#notes)). The node takes back the notes the plugin
+plays in the block, at their frames: CLAP's own notes, chokes and note
+expression, and MIDI, from its output events (`clap::events::Output`), or
+VST3's notes on and off, poly pressure, note expression and the MIDI
+controllers it plays (`kLegacyMIDICCOutEvent`), from its first event
+output, which activating turns on.
+
+- `process::Made` gives each note the plugin plays an id of the engine's
+  own, from 2^63 up, as `midi::MidiNotes` does a MIDI input's, so they
+  can't clash with the notes played into it. It finds the notes the plugin
+  ends or expresses by all it gives of an id, a channel and a key, -1 for
+  any, as CLAP has it. A note with an id of the plugin's own sounds until
+  the plugin ends it, whatever starts on its key, as CLAP's voice stacking
+  and VST3's note ids allow, so a note repeater's overlapping notes on one
+  key each play out. One without an id, and MIDI, play as a keyboard does:
+  a note on a key and channel already sounding ends the one there.
+- Its expression and MIDI play as an MPE controller's would
+  ([engine.md](engine.md#notes)): tuning is pitch bend, pressure is
+  pressure, and brightness is timbre. MIDI reads each channel as a
+  keyboard, until an MPE configuration message sets zones.
+- The notes a plugin was playing end at the start of its first block after
+  it's activated again, as for a restart, and are forgotten as it's reset,
+  since its switch ends them as it brings it back.
+- A plugin can play `Notes::CAPACITY` (512) note events in a block: CLAP's
+  output queue says it's full beyond them, and VST3's `addEvent` says
+  `kResultFalse`.
+
 ## Side inputs
 
 A plugin's audio inputs beyond its main one, such as a compressor's
@@ -231,8 +262,9 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   controller the component's state. VST3's UI thread is the main thread.
 - **Activating** sets the plugin up for the engine's sample rate and block
   size, turns on its main audio buses, the side inputs wires go into
-  ([Side inputs](#side-inputs)) and its first event input, activates it
-  and starts it processing, all on the main thread. Every bus is in each
+  ([Side inputs](#side-inputs)), its first event input, and its first event
+  output, for the notes it plays, activates it and starts it processing,
+  all on the main thread. Every bus is in each
   block, as VST3 asks: one that's off holds silence, flagged in
   `silenceFlags`.
 - **Rendering ahead.** It's set up for real time (`kRealtime` in
@@ -308,6 +340,23 @@ when it was added, and keeps its settings: the state the plugin last saved,
 and the parameters set since ([project-format.md](project-format.md#track)).
 The session's `Plugins` holds an `Instance` for each plugin device in the
 open project, on a track or on the master:
+
+- **Kinds.** A plugin device says what its plugin does with notes
+  (`PluginDevice::kind`): an instrument plays them, a MIDI effect plays
+  them on, changed, to the instrument after it, and an audio effect has
+  none. A device takes the kind the scan found (`PluginInfo::kind`): the
+  `instrument` feature makes an instrument, which a VST3 plugin has from
+  its subcategories, and CLAP's `note-effect` a MIDI effect. VST3 has no
+  word for one, so the scanner counts a VST3 plugin's buses
+  (`PluginInfo::buses`), and one with a note input, a note output and no
+  audio output is a MIDI effect, as JUCE's arpeggiator is. A user can mark
+  a plugin the rule gets wrong as another kind
+  (`browser.set_plugin_kind`), which `Plugins::kind_of` gives the browser,
+  and the app keeps in settings.toml, by format and id. A mark is for
+  devices added after it: the project's devices keep their kind, which
+  is in the file, so a project opens the same where the plugin isn't
+  marked. The order rule puts a MIDI effect before its track's instrument
+  ([engine.md](engine.md#notes)).
 
 - **Loading.** A device's plugin loads once the app knows it's installed
   (`Session::set_installed_plugins`, from a scan), and gets the device's
@@ -446,7 +495,7 @@ CLAP asks.
 
 ## Testing
 
-`crates/test-plugins` builds a CLAP library with two plugins. Test Gain
+`crates/test-plugins` builds a CLAP library with three plugins. Test Gain
 multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Its Bypass, marked as its
 bypass, plays its input unchanged, as late as its latency makes it. Its
@@ -460,18 +509,23 @@ its voices on the host's thread pool, noting which threads run them. It
 takes notes as CLAP's own or as MIDI, holds them with the sustain pedal,
 and keeps a log of the MIDI it gets. A copy whose name starts with `mpe`
 takes only MPE MIDI, so tests can check that an MPE performance sounds as
-it does through CLAP's note expression. Both
+it does through CLAP's note expression. Test Arpeggiator, a note effect,
+plays the keys held in turn, lowest first, an eighth of a second each,
+transposed by its Transpose, as CLAP's own notes with ids of its own, or as
+MIDI from a copy whose name starts with `midi`. All three
 check which thread the host calls each function on, and in which state, and
 count every breach. Tests drive them through hooks the library exports:
 turning a knob in the pretend window, changing state that isn't a
 parameter, asking for a callback or a resize.
 
-The library is also a VST3 module with the same two plugins. There, Test
+The library is also a VST3 module with the same three plugins. There, Test
 Gain is a component with a controller of its own, which tells the
 component about state that isn't a parameter in a message, asks to restart
 for a new latency, and has a meter, Peak, which the processor sets. Test
 Synth is one object, plays notes with VST3's note expression, and maps
-CC 7 to its Level through its MIDI mapping. Both
+CC 7 to its Level through its MIDI mapping. Test Arpeggiator is one object
+too, with an event bus each way and no audio, which only its buses mark as
+a MIDI effect. All three
 check VST3's rules, in the same count: what's called on which thread and in
 which state, and that the host connects, terminates and lets go of each
 object, in order, before the module exits.
@@ -503,8 +557,9 @@ their windows and redoes past the changes they make on their own, moves
 one to another track with its window open and copies it, plays a
 missing plugin, lines a latent plugin up with a dry track to the sample,
 also after its latency changes, has a muted kick duck a bass through Test
-Gain's side input, lined up to the sample whichever track is late, and
-runs the app's binary as the scanner.
+Gain's side input, lined up to the sample whichever track is late, has
+Test Arpeggiator play Test Synth a chord a note at a time, bypassed and
+deactivated too, and runs the app's binary as the scanner.
 [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) exports the
 ducking too, in both formats.
 [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)
@@ -519,8 +574,8 @@ VST3 plugin on a track and opens its window.
   state.
 - Outputs beyond the main ones (multi-output instruments, routing's M5),
   switching a CLAP plugin's side inputs while it processes, for one that
-  says it can, 64-bit processing, notes a plugin plays, and letting a
-  quiet plugin sleep.
+  says it can, 64-bit processing, notes an instrument or an audio effect
+  plays as it renders (routing's M3), and letting a quiet plugin sleep.
 - Per-note pitch bend, pressure and timbre for a CLAP plugin that takes
   only plain MIDI, without MPE, and for a VST3 plugin without note
   expression: the first get the channel's, the last none.

@@ -327,7 +327,7 @@ pub(crate) fn refused(project: &Project, Loop(route): Loop) -> CommandError {
 mod tests {
     use musicable_model::mixer::Bus;
     use musicable_model::native::NativeDevice;
-    use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
+    use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
     use musicable_model::time::Beats;
     use musicable_model::{PluginFormat, TrackKind};
 
@@ -842,7 +842,7 @@ mod tests {
             format: PluginFormat::Clap,
             id: format!("org.example.{name}"),
             name: name.into(),
-            instrument: false,
+            kind: PluginKind::AudioEffect,
             inputs,
             settings: PluginSettings::default(),
         });

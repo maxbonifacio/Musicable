@@ -336,6 +336,53 @@ fn notes_held_can_be_let_go_or_forgotten() {
     assert_eq!(take(&mut notes, [0x80, 60, 0]), []);
 }
 
+#[test]
+fn every_channel_reads_each_as_a_keyboard_until_a_zone_is_set() {
+    let mut notes = MidiNotes::every_channel(0);
+    assert_eq!(notes.channel(), None);
+    take(&mut notes, [0x92, 60, 127]);
+    // Channel 3 bends 2 semitones, not 48, and channel 1's bend moves
+    // nothing on it.
+    assert_eq!(take(&mut notes, [0xE2, 0x7F, 0x7F]), [bend(0, 2.0)]);
+    assert_eq!(take(&mut notes, [0xE0, 0x7F, 0x7F]), []);
+    // An MPE configuration message sets a zone as it does for MPE: a
+    // member bends 48 semitones, on top of the master's 2.
+    for message in rpn(0, 6, 15) {
+        take(&mut notes, message);
+    }
+    take(&mut notes, [0x93, 62, 127]);
+    assert_eq!(take(&mut notes, [0xE3, 0x7F, 0x7F]), [bend(1, 50.0)]);
+}
+
+#[test]
+fn notes_start_and_end_at_any_velocity_and_are_found_by_key() {
+    let mut notes = MidiNotes::every_channel(10);
+    let mut played = Vec::new();
+    notes.start(4, 60, 0.3, |p| played.push(p));
+    assert_eq!(played, [Played::Note(on(10, 60, 0.3))]);
+    assert_eq!(notes.sounding(4, 60), Some(NoteId(10)));
+    assert_eq!(notes.sounding(3, 60), None);
+    // A key held again ends the note there first, and takes its channel's
+    // expression.
+    take(&mut notes, [0xD4, 127, 0]);
+    played.clear();
+    notes.start(4, 60, 0.6, |p| played.push(p));
+    let pressed = expression(11, Dimension::Pressure, 1.0);
+    let started = [off(10, RELEASE), on(11, 60, 0.6), pressed].map(Played::Note);
+    assert_eq!(played, started);
+    played.clear();
+    notes.end(4, 60, 0.25, |p| played.push(p));
+    notes.end(4, 60, 0.25, |p| played.push(p));
+    assert_eq!(played, [Played::Note(off(11, 0.25))]);
+    // Past MIDI's channels and keys, or on a channel it doesn't take,
+    // nothing plays.
+    played.clear();
+    notes.start(16, 60, 1.0, |p| played.push(p));
+    notes.start(0, 128, 1.0, |p| played.push(p));
+    MidiNotes::new(Some(2), 0).start(3, 60, 1.0, |p| played.push(p));
+    assert!(played.is_empty());
+}
+
 /// Plays notes and moves controllers at set engine times, as a clip player
 /// does.
 struct Clips(Vec<(u64, NodeEventKind)>);

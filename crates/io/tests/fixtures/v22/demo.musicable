@@ -1,0 +1,470 @@
+{
+  "format": "musicable-project",
+  "version": 22,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 124.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": true,
+  "metronome": true,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 12,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "A1",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 55.0,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "A2",
+      "kind": "audio",
+      "gain": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 110.0,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "E3",
+      "kind": "midi",
+      "gain": 0.5,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 164.81,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 3,
+      "name": "A3",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 220.0,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 4,
+      "name": "C4",
+      "kind": "audio",
+      "gain": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 261.63,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 5,
+      "name": "E4",
+      "kind": "midi",
+      "gain": 0.5,
+      "pan": 0.0,
+      "muted": true,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 329.63,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 6,
+      "name": "A4",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 440.0,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 7,
+      "name": "C5",
+      "kind": "audio",
+      "gain": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 523.25,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 8,
+      "name": "E5",
+      "kind": "midi",
+      "gain": 0.5,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 659.26,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 9,
+      "name": "A5",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 880.0,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 10,
+      "name": "C6",
+      "kind": "audio",
+      "gain": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 1046.5,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 11,
+      "name": "E6",
+      "kind": "midi",
+      "gain": 0.5,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": {
+        "frequency": 1318.51,
+        "level": 0.08
+      },
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null
+}

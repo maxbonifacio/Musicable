@@ -17,7 +17,7 @@ use musicable_commands::{Args, Editor, Keymap, mixer, transport};
 use musicable_engine::{EngineConfig, rt};
 use musicable_io::audio::{Decoder, SampleFormat, save_wav};
 use musicable_model::clip::{AudioClip, ClipContent, Controller, MidiClip, Point};
-use musicable_model::plugin::{PluginDevice, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::routing::Tap;
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{
@@ -115,7 +115,7 @@ fn song(dir: &Path, input: impl FnOnce(TrackId) -> Option<Input>) -> (Project, [
         format: PluginFormat::Clap,
         id: GAIN_ID.to_str().unwrap().to_owned(),
         name: "Test Gain".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings,
     }));

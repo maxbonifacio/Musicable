@@ -183,6 +183,9 @@ frames = 878
 
 [agents]
 enabled = true
+
+[plugins.kinds]
+"vst3:ABCDEF0123456789ABCDEF0123456789" = "midi_effect"
 ```
 
 Every setting can be left out:
@@ -216,8 +219,10 @@ Every setting can be left out:
 | `recording.capture_minutes` | How long Capture holds the inputs, in minutes: 0 turns it off. | 5 |
 | `recording.offsets` | Each is the recording offset, in `frames`, of a `device`, by its id, in exclusive mode or not (`exclusive`), at a `sample_rate`. An offset of 0 isn't kept. | None |
 | `agents.enabled` | Whether agents can control Musicable. | `false` |
+| `plugins.kinds` | The plugins marked as another kind than the scan found, in the browser ([Plugins](../using/plugins.md#finding-them)): each by its format and id, as `"clap:org.example.arp"`, and what it's marked as, `instrument`, `midi_effect` or `audio_effect`. It's not one of a profile's settings. | None |
 
 The Settings window has a control for every setting but the export
-window's, which that window keeps as it was last used. Settings this
+window's, which that window keeps as it was last used, and the plugins'
+kinds, which the browser marks. Settings this
 version doesn't know are ignored, so a file from a later version still
 opens. A file that can't be read leaves the default settings, and says why.

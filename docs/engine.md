@@ -432,7 +432,8 @@ still in the graph, though not in the strip: it never starts its device,
 so a plugin stops on the audio thread as the graph takes over, and its
 node goes on taking parameter changes through `flush`. A deactivated
 instrument still takes the track's notes, so they don't go to an
-instrument after it.
+instrument after it. A MIDI effect's node sits in a `switch::NoteSwitch`
+instead, which bypasses it in the notes' way ([MIDI effects](#notes)).
 
 ## Parameter smoothing
 
@@ -1115,9 +1116,22 @@ for either), in order with them, and takes room in a block as a note does.
   instruments say when their voices end. Nothing reads it yet.
 - A node can send `Notes::CAPACITY` (512) note events in a block. The rest
   are dropped, and counted in `Stats::events_dropped`.
+- `Graph::plays_notes(node)` has a node play its notes even with nowhere
+  to send them, as a MIDI effect without an instrument after it does, so
+  it keeps its time and its record.
+- Each node that plays notes keeps track of the notes it has sounding
+  where its notes go, up to `Notes::CAPACITY`, and the switches it holds on
+  there, such as the sustain pedal. When a swap takes a route away, the
+  node ends the notes it had sounding along it, at the start of the next
+  block, and lets go of the switches, which would hold them on, so nothing
+  hangs where its notes no longer go (`Notes::release_all` does both at
+  once, as a switch does). Then the switches it holds on go on along the
+  routes the swap adds, so a pedal a track's clips hold down holds
+  whichever way their notes go.
 
 **MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
-their expression, to the track's first instrument (`Track::instrument`).
+their expression, to the track's first instrument (`Track::instrument`),
+through its MIDI effects if it has any ([below](#notes)).
 
 - A clip plays the notes from its `offset` in its own time, for its length.
   A note still sounding when the clip ends stops there.
@@ -1172,6 +1186,46 @@ switches they held, when it stops playing its input, as it does a MIDI
 input's. The monitor passes the clips' note ends and expression on
 whether the clips play or not, since instruments pass over notes they don't
 know, so a note started before the monitor came along still ends.
+
+**MIDI effects.** A MIDI track's MIDI effect plugins
+(`DeviceKind::is_midi_effect`), before its instrument, play its notes on,
+changed: an arpeggiator plays a chord a note at a time. The compiler puts
+them in the notes' way, in order: the clips' player plays through the
+track's monitor, if it has one, to the first MIDI effect, each plays to
+the next, and the last to the instrument, and to the track's modulators,
+so an Envelope starts on the notes the instrument gets
+([Modulation](#modulation)). Each is in a
+`switch::NoteSwitch`, with the device's key, out of the signal: it plays
+no sound, and none goes through it.
+
+- The switch plays its device in the notes pass (`Node::play_notes`),
+  with the block's notes and parameter changes, and sends on what the
+  device plays. The modulation of its parameters comes as the block
+  renders, after the notes have played, so the switch keeps it for the
+  device's next block (256 at most), which takes it at its first frame.
+- Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead, and
+  stops the device, which takes its events through `flush`, until it
+  comes back afresh (`Node::reset`). Either way, the switch ends the notes
+  sounding where it lands, and lets go of the switches held on there, such
+  as the sustain pedal, so none hangs: the device's, which it plays no
+  more, and those passed on, whose ends it would never hear. What plays
+  from there starts from what the controllers that come in hold, as the
+  switch keeps them (`midi::Held`), so a pedal held down on the track
+  holds on: bypassed, they go on as they are, and the device brought back
+  hears them before the rest of its first part. Where the device starts or
+  stops partway through a block, it plays that part of the block as a
+  block of its own.
+- A deactivated MIDI effect is out of the notes' way, as a deactivated
+  device is out of the signal, and its switch (`NoteSwitch::deactivated`)
+  stays in the graph, so a plugin stops on the audio thread, and goes on
+  taking its parameter changes. One the notes can't reach, after the
+  instrument or on a chain without notes, compiles as deactivated:
+  commands never put one there (`Project::check_order`,
+  `Project::fit_device`), but a file can.
+- A plugin's notes get ids of the engine's own, from 2^63 up, so they
+  can't clash with the notes played into it ([plugins.md](plugins.md#notes-and-the-transport)).
+  A monitor's ids start there too, but a MIDI effect's notes replace the
+  notes it gets, so no node gets both.
 
 **The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
 stands in for instruments until plugin hosting. It plays each note with a

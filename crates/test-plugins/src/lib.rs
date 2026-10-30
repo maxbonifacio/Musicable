@@ -1,6 +1,6 @@
 //! Plugins for testing Musicable's plugin hosting. Not shipped.
 //!
-//! The crate builds a CLAP shared library holding two plugins:
+//! The crate builds a CLAP shared library holding three plugins:
 //!
 //! - **Test Gain** (`org.musicable.test.gain`), a stereo effect that
 //!   multiplies its input by its Gain parameter and delays it by its Latency
@@ -18,14 +18,19 @@
 //!   each note as a sine at the note's pitch, shaped by CLAP's note
 //!   expressions for tuning, pressure and brightness. It can render its
 //!   voices on the host's thread pool.
+//! - **Test Arpeggiator** (`org.musicable.test.arpeggiator`), a MIDI effect,
+//!   with CLAP's `note-effect` feature and no audio, that plays the keys
+//!   held in turn, lowest first, a step of [`ARP_STEP`] each, its Transpose
+//!   parameter's semitones up. It starts stepping with the first key held,
+//!   and the note it plays ends once none is held.
 //!
-//! Both check that the host keeps CLAP's rules: which thread calls what, and
-//! in which state. Each breach counts as a violation, which tests read with
-//! [`musicable_test_violations`]. Tests also play the part of a plugin's
-//! window: [`musicable_test_gui`] edits a parameter as someone turning a knob
-//! would, and [`musicable_test_set_label`] changes state that isn't a
-//! parameter. The plugins' windows are pretend ones that only record what
-//! the host asks of them.
+//! All three check that the host keeps CLAP's rules: which thread calls
+//! what, and in which state. Each breach counts as a violation, which tests
+//! read with [`musicable_test_violations`]. Tests also play the part of a
+//! plugin's window: [`musicable_test_gui`] edits a parameter as someone
+//! turning a knob would, and [`musicable_test_set_label`] changes state
+//! that isn't a parameter. The plugins' windows are pretend ones that only
+//! record what the host asks of them.
 //!
 //! The synth plays notes from MIDI too, as MPE has them or as a keyboard
 //! does: pitch bend, channel and key pressure, and controller 74 shape them
@@ -42,12 +47,13 @@
 //! with `mpe` makes the synth an MPE synth, which takes notes only as MIDI
 //! with MPE, as many do. One starting with `fixed` gives the gain no
 //! audio-ports-activation, so its sidechain is always on, as with many
-//! plugins.
+//! plugins. And one starting with `midi` has the arpeggiator play MIDI
+//! rather than CLAP's own notes.
 //!
-//! The library is also a VST3 module with the same two plugins, which check
-//! VST3's rules, in the same count: see [`vst3`]. Tests make a VST3 bundle
-//! of their own with it, with [`testing::Library::copy_vst3`], and its name
-//! misbehaves in the same way.
+//! The library is also a VST3 module with the same three plugins, which
+//! check VST3's rules, in the same count: see [`vst3`]. Tests make a VST3
+//! bundle of their own with it, with [`testing::Library::copy_vst3`], and
+//! its name misbehaves in the same way.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
@@ -62,11 +68,15 @@ use clap_sys::host::clap_host;
 use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::version::CLAP_VERSION;
 
+mod arp;
 mod plugin;
 pub mod testing;
 pub mod vst3;
 
-pub use plugin::{BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS};
+pub use arp::ARP_STEP;
+pub use plugin::{
+    ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS, TRANSPOSE,
+};
 
 /// The CLAP entry point the host looks for.
 #[allow(non_upper_case_globals)]
@@ -85,6 +95,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Whether the synth takes notes only as MIDI with MPE: the library's file
 /// is named so.
 pub(crate) static MPE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the arpeggiator plays MIDI rather than CLAP's own notes: the
+/// library's file is named so.
+pub(crate) static MIDI_OUT: AtomicBool = AtomicBool::new(false);
 
 /// Whether the gain has no audio-ports-activation, so its sidechain is
 /// always on: the library's file is named so.
@@ -114,6 +128,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
         return false;
     }
     MPE.store(name.starts_with("mpe"), Ordering::SeqCst);
+    MIDI_OUT.store(name.starts_with("midi"), Ordering::SeqCst);
     FIXED_PORTS.store(name.starts_with("fixed"), Ordering::SeqCst);
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         violation("the library was initialized twice without deinit in between");

@@ -3840,7 +3840,7 @@ pub struct Committed {
 
 #[cfg(test)]
 mod tests {
-    use musicable_model::plugin::{PluginDevice, PluginParam, PluginState};
+    use musicable_model::plugin::{PluginDevice, PluginKind, PluginParam, PluginState};
     use musicable_model::time::Beats;
     use musicable_model::{PluginFormat, TrackKind};
 
@@ -3890,7 +3890,7 @@ mod tests {
             format: PluginFormat::Clap,
             id: "org.example.synth".into(),
             name: "Synth".into(),
-            instrument: true,
+            kind: PluginKind::Instrument,
             inputs: Vec::new(),
             settings: PluginSettings::default(),
         }));
@@ -3981,7 +3981,7 @@ mod tests {
             format: PluginFormat::Clap,
             id: "org.example.synth".into(),
             name: "Synth".into(),
-            instrument: true,
+            kind: PluginKind::Instrument,
             inputs: Vec::new(),
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),

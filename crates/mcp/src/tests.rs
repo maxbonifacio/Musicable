@@ -13,7 +13,7 @@ use musicable_commands::{
     Context, Document, Editor, Keymap, NoLibrary, Registry, Request, Steps, Transport,
 };
 use musicable_model::clip::{AudioClip, ClipContent, Offset, Warping};
-use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::Warp;
 use musicable_model::{Chain, DeviceId, DeviceKind, PluginFormat, Project, TrackId, TrackKind};
@@ -880,7 +880,7 @@ fn a_plugins_side_inputs_are_its_ports_by_its_ids_for_them() {
         format: PluginFormat::Vst3,
         id: "0123456789ABCDEF0123456789ABCDEF".into(),
         name: "Vocoder".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: vec![input(1, "Carrier"), input(3, "Aux")],
         settings: PluginSettings::default(),
     }));

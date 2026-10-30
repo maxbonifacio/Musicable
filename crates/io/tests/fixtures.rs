@@ -25,7 +25,7 @@ use musicable_model::native::{
 };
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{
-    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+    PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -64,6 +64,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("sidechain", sidechain()),
         ("plugin-inputs", plugin_inputs()),
         ("tracks-from-tracks", tracks_from_tracks()),
+        ("midi-effects", midi_effects()),
     ]
 }
 
@@ -372,12 +373,15 @@ fn plugins() -> Project {
     let mut project = Project::new();
     let synth = project.add_track("Synth", TrackKind::Midi);
     let vocal = project.add_track("Vocal", TrackKind::Audio);
-    let plugin = |format, id: &str, name: &str, instrument, settings| {
+    let plugin = |format, id: &str, name: &str, instrument: bool, settings| {
         DeviceKind::Plugin(PluginDevice {
             format,
             id: id.into(),
             name: name.into(),
-            instrument,
+            kind: match instrument {
+                true => PluginKind::Instrument,
+                false => PluginKind::AudioEffect,
+            },
             inputs: Vec::new(),
             settings,
         })
@@ -690,7 +694,7 @@ fn automation() -> Project {
         format: PluginFormat::Clap,
         id: "com.example.filter".into(),
         name: "Filter".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings: PluginSettings::default(),
     });
@@ -1161,7 +1165,7 @@ fn bypass() -> Project {
         format: PluginFormat::Vst3,
         id: "ABCDEF0123456789ABCDEF0123456789".into(),
         name: "Limiter".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
@@ -1197,7 +1201,7 @@ fn modulation() -> Project {
         format: PluginFormat::Clap,
         id: "com.example.filter".into(),
         name: "Filter".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings: PluginSettings::default(),
     }));
@@ -1349,11 +1353,14 @@ fn plugin_inputs() -> Project {
         id,
         name: name.to_owned(),
     };
-    let plugin = |format, id: &str, name: &str, instrument, inputs| PluginDevice {
+    let plugin = |format, id: &str, name: &str, instrument: bool, inputs| PluginDevice {
         format,
         id: id.to_owned(),
         name: name.to_owned(),
-        instrument,
+        kind: match instrument {
+            true => PluginKind::Instrument,
+            false => PluginKind::AudioEffect,
+        },
         inputs,
         settings: PluginSettings::default(),
     };
@@ -1427,6 +1434,54 @@ fn tracks_from_tracks() -> Project {
     let resample = project.track_mut(resample).unwrap();
     resample.input = Some(Input::RESAMPLING);
     resample.armed = true;
+    project
+}
+
+/// MIDI effects, from version 22: a CLAP arpeggiator and a bypassed VST3
+/// chord effect before a synth plugin and an EQ, and a MIDI track with a
+/// MIDI effect and no instrument.
+fn midi_effects() -> Project {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let sketch = project.add_track("Sketch", TrackKind::Midi);
+    let plugin = |format, id: &str, name: &str, kind| {
+        DeviceKind::Plugin(PluginDevice {
+            format,
+            id: id.into(),
+            name: name.into(),
+            kind,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        })
+    };
+    let arp = || {
+        plugin(
+            PluginFormat::Clap,
+            "com.example.arp",
+            "Arp",
+            PluginKind::MidiEffect,
+        )
+    };
+    let chord = plugin(
+        PluginFormat::Vst3,
+        "0123456789ABCDEF0123456789ABCDEF",
+        "Chord",
+        PluginKind::MidiEffect,
+    );
+    let synth = plugin(
+        PluginFormat::Clap,
+        "com.example.synth",
+        "Synth",
+        PluginKind::Instrument,
+    );
+    let first = project.new_device(arp());
+    let mut chord = project.new_device(chord);
+    chord.bypassed = true;
+    let synth = project.new_device(synth);
+    let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+    project.track_mut(keys).unwrap().devices = vec![first, chord, synth, eq];
+    let alone = project.new_device(arp());
+    project.track_mut(sketch).unwrap().devices = vec![alone];
     project
 }
 

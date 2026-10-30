@@ -29,7 +29,7 @@ use musicable_model::automation::{Lane, Point};
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip, Offset, Warping};
 use musicable_model::native::{NativeDevice, NativeKind, compressor};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginInput, PluginSettings};
+use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::{Warp, WarpMode};
@@ -157,7 +157,7 @@ fn song(dir: &Path) -> Project {
         format: PluginFormat::Clap,
         id: GAIN_ID.to_str().unwrap().to_owned(),
         name: "Test Gain".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         settings,
     }));
@@ -446,7 +446,7 @@ fn test_gain(
         format,
         id: id.to_owned(),
         name: "Test Gain".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs,
         settings,
     }))

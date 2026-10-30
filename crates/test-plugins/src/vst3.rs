@@ -1,4 +1,5 @@
-//! The test plugins as a VST3 module: Test Gain and Test Synth again.
+//! The test plugins as a VST3 module: Test Gain, Test Synth and Test
+//! Arpeggiator again.
 //!
 //! - **Test Gain** is a component and an edit controller of its own, as most
 //!   VST3 plugins are, which talk through the host's messages. Its Gain and
@@ -15,8 +16,13 @@
 //!   brightness note expressions and its poly pressure. Its MIDI mapping
 //!   has MIDI's volume controller, 7, move its Level, as VST3 plugins take
 //!   controllers.
+//! - **Test Arpeggiator** is one object too: a MIDI effect, with an event
+//!   input and an event output and no audio, under VST3's Fx subcategory,
+//!   as VST3 has none for MIDI effects. It plays the keys held as the CLAP
+//!   arpeggiator does, as VST3's notes. Its Transpose goes from 24
+//!   semitones down to 24 up, normalized, in 48 steps.
 //!
-//! Both count each breach of VST3's rules as a violation, in the same count
+//! All three count each breach of VST3's rules as a violation, in the same count
 //! as the CLAP plugins: which thread calls what, and in which state. Their
 //! windows are pretend ones. Tests drive them through the hooks here, which
 //! take the plugin's component or controller, as the host has it. The
@@ -49,15 +55,16 @@ use vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged;
 use vst3::Steinberg::Vst::SpeakerArr::kStereo;
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{
-    BusDirection, BusInfo, BusType, CtrlNumber, Event, IAttributeListTrait, IAudioProcessor,
-    IAudioProcessorTrait, IComponent, IComponentHandler, IComponentHandler2,
+    BusDirection, BusInfo, BusType, CtrlNumber, Event, Event__type0, IAttributeListTrait,
+    IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentHandler2,
     IComponentHandler2Trait, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
     IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList, IEventListTrait,
     IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait, IMidiMapping,
     IMidiMappingTrait, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, IUnitInfo,
-    IUnitInfoTrait, IoMode, MediaType, NoteExpressionTypeID, ParamID, ParamValue, ParameterInfo,
-    ProcessContext, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo,
-    SpeakerArrangement, String128, TChar, UnitID, UnitInfo, kNoParentUnitId, kRootUnitId,
+    IUnitInfoTrait, IoMode, MediaType, NoteExpressionTypeID, NoteOffEvent, NoteOnEvent, ParamID,
+    ParamValue, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, ProgramListID,
+    ProgramListInfo, RoutingInfo, SpeakerArrangement, String128, TChar, UnitID, UnitInfo,
+    kNoParentUnitId, kRootUnitId,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView,
@@ -70,8 +77,9 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
+use crate::arp::{Arp, Stepped};
 use crate::plugin::copy_str;
-use crate::{ALIVE, GAIN, LATENCY, LEVEL, gui, violation};
+use crate::{ALIVE, GAIN, LATENCY, LEVEL, TRANSPOSE, gui, violation};
 
 /// The class ids, made from `MUSICABLETEST` and a number.
 const fn class_id(n: u32) -> TUID {
@@ -81,11 +89,14 @@ const fn class_id(n: u32) -> TUID {
 const GAIN_CID: TUID = class_id(1);
 const GAIN_CONTROLLER_CID: TUID = class_id(2);
 const SYNTH_CID: TUID = class_id(3);
+const ARPEGGIATOR_CID: TUID = class_id(4);
 
 /// Test Gain's class id, as hosts name VST3 plugins: 32 hex digits.
 pub const VST3_GAIN_ID: &str = "4D5553494341424C4554455354000001";
 /// Test Synth's.
 pub const VST3_SYNTH_ID: &str = "4D5553494341424C4554455354000003";
+/// Test Arpeggiator's.
+pub const VST3_ARPEGGIATOR_ID: &str = "4D5553494341424C4554455354000004";
 
 /// Test Gain's meter, which its processor sets to each block's peak.
 pub const PEAK: u32 = 12;
@@ -291,7 +302,7 @@ struct ClassInfo {
 
 const AUDIO_MODULE_CLASS: &str = "Audio Module Class";
 
-static CLASSES: [ClassInfo; 3] = [
+static CLASSES: [ClassInfo; 4] = [
     ClassInfo {
         cid: GAIN_CID,
         category: AUDIO_MODULE_CLASS,
@@ -309,6 +320,12 @@ static CLASSES: [ClassInfo; 3] = [
         category: AUDIO_MODULE_CLASS,
         name: "Test Synth",
         sub_categories: "Instrument|Synth",
+    },
+    ClassInfo {
+        cid: ARPEGGIATOR_CID,
+        category: AUDIO_MODULE_CLASS,
+        name: "Test Arpeggiator",
+        sub_categories: "Fx",
     },
 ];
 
@@ -385,6 +402,8 @@ impl IPluginFactoryTrait for Factory {
             GainController::create()
         } else if cid == SYNTH_CID {
             Synth::create()
+        } else if cid == ARPEGGIATOR_CID {
+            Arpeggiator::create()
         } else {
             return kInvalidArgument;
         };
@@ -1991,6 +2010,468 @@ impl IMidiMappingTrait for SynthComponent {
 
 /// MIDI's volume controller, which moves the synth's level.
 const VOLUME: CtrlNumber = 7;
+
+// Test Arpeggiator.
+
+/// How many semitones Transpose goes either way, normalized from 0 to 1
+/// in twice as many steps.
+const TRANSPOSE_RANGE: f64 = 24.0;
+
+/// Transpose's semitones for its normalized `value`.
+fn semitones(value: f64) -> f64 {
+    (value * 2.0 * TRANSPOSE_RANGE - TRANSPOSE_RANGE).round()
+}
+
+/// Test Arpeggiator: component, processor and controller in one.
+struct Arpeggiator {
+    checks: Checks,
+    lifecycle: Lifecycle,
+    /// Transpose, normalized, as the processor has it, and as the
+    /// controller does.
+    transpose: AtomicU64,
+    controller_transpose: AtomicU64,
+    handler: Mutex<Option<ComPtr<IComponentHandler>>>,
+    audio: Mutex<ArpeggiatorAudio>,
+}
+
+struct ArpeggiatorAudio {
+    arp: Arp,
+    /// The block's parameter changes and events: see [`read_changes`] and
+    /// [`read_events`].
+    changes: Vec<(ParamID, i32, f64)>,
+    events: Vec<Event>,
+}
+
+struct ArpeggiatorComponent(Arc<Arpeggiator>);
+
+impl Class for ArpeggiatorComponent {
+    type Interfaces = (IComponent, IAudioProcessor, IEditController);
+}
+
+impl Arpeggiator {
+    fn create() -> ComPtr<FUnknown> {
+        let arpeggiator = Arc::new(Self {
+            checks: Checks::new("Test Arpeggiator"),
+            lifecycle: Lifecycle::default(),
+            transpose: AtomicU64::new(0.5f64.to_bits()),
+            controller_transpose: AtomicU64::new(0.5f64.to_bits()),
+            handler: Mutex::new(None),
+            audio: Mutex::new(ArpeggiatorAudio {
+                arp: Arp::new(48_000.0, 0.0),
+                changes: Vec::with_capacity(BLOCK_INPUTS),
+                events: Vec::with_capacity(BLOCK_INPUTS),
+            }),
+        });
+        let wrapper = ComWrapper::new(ArpeggiatorComponent(arpeggiator));
+        wrapper.to_com_ptr::<FUnknown>().expect("it's a COM object")
+    }
+
+    fn transpose(&self) -> f64 {
+        f64::from_bits(self.transpose.load(Ordering::SeqCst))
+    }
+
+    fn state(&self) -> String {
+        state_text("arpeggiator", &[(TRANSPOSE, self.transpose())], "")
+    }
+
+    /// Plays one of the host's events, at `time`.
+    fn play(arp: &mut Arp, event: &Event, emit: &mut dyn FnMut(Stepped)) {
+        let time = event.sampleOffset as u32;
+        // SAFETY, for each union field read: the event's type says which it
+        // is.
+        match event.r#type {
+            t if t == kNoteOnEvent as uint16 => {
+                let on = unsafe { event.__field0.noteOn };
+                arp.hold(on.pitch, f64::from(on.velocity), time, emit);
+            }
+            t if t == kNoteOffEvent as uint16 => {
+                let off = unsafe { event.__field0.noteOff };
+                arp.let_go(off.pitch, time, emit);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A note the arpeggiator starts or ends, as VST3's event.
+fn stepped_event(note: Stepped) -> Event {
+    let (kind, payload) = if note.on {
+        let on = NoteOnEvent {
+            channel: 0,
+            pitch: note.key,
+            tuning: 0.0,
+            velocity: note.velocity as f32,
+            length: 0,
+            noteId: note.id,
+        };
+        (kNoteOnEvent, Event__type0 { noteOn: on })
+    } else {
+        let off = NoteOffEvent {
+            channel: 0,
+            pitch: note.key,
+            velocity: note.velocity as f32,
+            noteId: note.id,
+            tuning: 0.0,
+        };
+        (kNoteOffEvent, Event__type0 { noteOff: off })
+    };
+    Event {
+        busIndex: 0,
+        sampleOffset: note.time as int32,
+        ppqPosition: 0.0,
+        flags: 0,
+        r#type: kind as uint16,
+        __field0: payload,
+    }
+}
+
+impl IPluginBaseTrait for ArpeggiatorComponent {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        self.0.checks.initialize(context)
+    }
+
+    unsafe fn terminate(&self) -> tresult {
+        let arpeggiator = &self.0;
+        if arpeggiator.lifecycle.active.load(Ordering::SeqCst) {
+            violation("Test Arpeggiator was terminated while active");
+        }
+        *lock(&arpeggiator.handler) = None;
+        arpeggiator.checks.terminate()
+    }
+}
+
+impl IComponentTrait for ArpeggiatorComponent {
+    /// It's its own controller.
+    unsafe fn getControllerClassId(&self, _: *mut TUID) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn setIoMode(&self, _: IoMode) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn getBusCount(&self, media: MediaType, _: BusDirection) -> int32 {
+        self.0.checks.ui("getBusCount");
+        // A note input and a note output, and no audio.
+        int32::from(media == kEvent as MediaType)
+    }
+
+    unsafe fn getBusInfo(
+        &self,
+        media: MediaType,
+        direction: BusDirection,
+        index: int32,
+        bus: *mut BusInfo,
+    ) -> tresult {
+        self.0.checks.ui("getBusInfo");
+        if index != 0 || media != kEvent as MediaType {
+            return kInvalidArgument;
+        }
+        let name = if direction == kInput as BusDirection {
+            "Notes"
+        } else {
+            "Notes Out"
+        };
+        // SAFETY: the host passes somewhere to write, or null.
+        unsafe { write_bus(bus, media, direction, 16, name, true) }
+    }
+
+    unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
+        kNotImplemented
+    }
+
+    unsafe fn activateBus(
+        &self,
+        media: MediaType,
+        _: BusDirection,
+        index: int32,
+        _: TBool,
+    ) -> tresult {
+        self.0.checks.ui("activateBus");
+        self.0.lifecycle.check_inactive("activateBus");
+        if index == 0 && media == kEvent as MediaType {
+            kResultOk
+        } else {
+            kInvalidArgument
+        }
+    }
+
+    unsafe fn setActive(&self, state: TBool) -> tresult {
+        let arpeggiator = &self.0;
+        if arpeggiator.lifecycle.set_active(&arpeggiator.checks, state) {
+            let setup = *lock(&arpeggiator.lifecycle.setup);
+            let rate = setup.map_or(48_000.0, |setup| setup.sampleRate);
+            let transpose = semitones(arpeggiator.transpose());
+            lock(&arpeggiator.audio).arp = Arp::new(rate, transpose);
+        }
+        kResultOk
+    }
+
+    unsafe fn setState(&self, stream: *mut IBStream) -> tresult {
+        let arpeggiator = &self.0;
+        arpeggiator.checks.ui("setState");
+        // SAFETY: the host passes its stream, or null.
+        let state = unsafe { read_stream(stream) };
+        let values = state.and_then(|s| parse_state(&s, "arpeggiator", &[TRANSPOSE]));
+        let Some((values, _)) = values else {
+            return kResultFalse;
+        };
+        (arpeggiator.transpose).store(values[0].to_bits(), Ordering::SeqCst);
+        kResultOk
+    }
+
+    unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
+        self.0.checks.ui("getState");
+        // SAFETY: the host passes its stream, or null.
+        unsafe { write_stream(stream, self.0.state().as_bytes()) }
+    }
+}
+
+impl IAudioProcessorTrait for ArpeggiatorComponent {
+    unsafe fn setBusArrangements(
+        &self,
+        _: *mut SpeakerArrangement,
+        inputs_count: int32,
+        _: *mut SpeakerArrangement,
+        outputs_count: int32,
+    ) -> tresult {
+        self.0.checks.ui("setBusArrangements");
+        self.0.lifecycle.check_inactive("setBusArrangements");
+        if inputs_count == 0 && outputs_count == 0 {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
+    }
+
+    unsafe fn getBusArrangement(
+        &self,
+        _: BusDirection,
+        _: int32,
+        _: *mut SpeakerArrangement,
+    ) -> tresult {
+        kInvalidArgument
+    }
+
+    unsafe fn canProcessSampleSize(&self, size: int32) -> tresult {
+        if size == kSample32 as int32 {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
+    }
+
+    unsafe fn getLatencySamples(&self) -> uint32 {
+        0
+    }
+
+    unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
+        self.0.lifecycle.setup_processing(&self.0.checks, setup)
+    }
+
+    /// Turning processing off resets it, as VST3 has it.
+    unsafe fn setProcessing(&self, state: TBool) -> tresult {
+        let arpeggiator = &self.0;
+        let result = arpeggiator
+            .lifecycle
+            .set_processing(&arpeggiator.checks, state);
+        if state == 0 {
+            lock(&arpeggiator.audio).arp.clear();
+        }
+        result
+    }
+
+    unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        let arpeggiator = &self.0;
+        // SAFETY: the host passes its data, or null.
+        let Some(data) = (unsafe { data.as_mut() }) else {
+            violation("process got no data");
+            return kInvalidArgument;
+        };
+        let Some((frames, _)) = arpeggiator.lifecycle.process(&arpeggiator.checks, data) else {
+            return kResultFalse;
+        };
+        let Ok(mut audio) = arpeggiator.audio.try_lock() else {
+            violation("process came on two threads at once");
+            return kResultFalse;
+        };
+        let ArpeggiatorAudio {
+            arp,
+            changes,
+            events,
+        } = &mut *audio;
+        // SAFETY: the host passes its changes and events, or null.
+        unsafe {
+            read_changes(data.inputParameterChanges, frames, changes);
+            read_events(data.inputEvents, frames, events);
+        }
+        let change = |arp: &mut Arp, id, value: f64| {
+            if id == TRANSPOSE {
+                arpeggiator
+                    .transpose
+                    .store(value.to_bits(), Ordering::SeqCst);
+                arp.transpose = semitones(value);
+            } else {
+                violation("the host set a parameter the arpeggiator doesn't have");
+            }
+        };
+        if frames == 0 {
+            for &(id, _, value) in changes.iter() {
+                change(arp, id, value);
+            }
+            return kResultOk;
+        }
+        if data.numInputs != 0 || data.numOutputs != 0 {
+            violation("process got audio buses the arpeggiator doesn't have");
+            return kResultFalse;
+        }
+        // SAFETY: the host passes its list for the events the plugin plays,
+        // or null.
+        let out = unsafe { ComRef::from_raw(data.outputEvents) };
+        let emit = &mut |note| {
+            let mut event = stepped_event(note);
+            // SAFETY: the host's list, for the block.
+            if let Some(out) = out {
+                unsafe { out.addEvent(&mut event) };
+            }
+        };
+        let (mut next_change, mut next_event) = (0, 0);
+        for frame in 0..frames {
+            while let Some(&(id, offset, value)) = changes.get(next_change)
+                && offset as usize <= frame
+            {
+                change(arp, id, value);
+                next_change += 1;
+            }
+            while let Some(event) = events.get(next_event)
+                && event.sampleOffset as usize <= frame
+            {
+                Arpeggiator::play(arp, event, emit);
+                next_event += 1;
+            }
+            arp.run(frame as u32, frame as u32 + 1, emit);
+        }
+        kResultOk
+    }
+
+    unsafe fn getTailSamples(&self) -> uint32 {
+        0
+    }
+}
+
+impl IEditControllerTrait for ArpeggiatorComponent {
+    unsafe fn setComponentState(&self, stream: *mut IBStream) -> tresult {
+        let arpeggiator = &self.0;
+        arpeggiator.checks.ui("setComponentState");
+        // SAFETY: the host passes the component's state, or null.
+        let state = unsafe { read_stream(stream) };
+        let values = state.and_then(|s| parse_state(&s, "arpeggiator", &[TRANSPOSE]));
+        let Some((values, _)) = values else {
+            violation("setComponentState got a state that isn't the component's");
+            return kResultFalse;
+        };
+        (arpeggiator.controller_transpose).store(values[0].to_bits(), Ordering::SeqCst);
+        kResultOk
+    }
+
+    /// The controller has no state of its own.
+    unsafe fn setState(&self, _: *mut IBStream) -> tresult {
+        kNotImplemented
+    }
+
+    unsafe fn getState(&self, _: *mut IBStream) -> tresult {
+        kNotImplemented
+    }
+
+    unsafe fn getParameterCount(&self) -> int32 {
+        self.0.checks.ui("getParameterCount");
+        1
+    }
+
+    unsafe fn getParameterInfo(&self, index: int32, info: *mut ParameterInfo) -> tresult {
+        self.0.checks.ui("getParameterInfo");
+        // SAFETY: the host passes somewhere to write, or null.
+        let (0, Some(info)) = (index, unsafe { info.as_mut() }) else {
+            return kInvalidArgument;
+        };
+        let steps = (2.0 * TRANSPOSE_RANGE) as int32;
+        write_param(
+            info,
+            TRANSPOSE,
+            "Transpose",
+            0.5,
+            steps,
+            kCanAutomate,
+            kRootUnitId,
+        );
+        kResultOk
+    }
+
+    unsafe fn getParamStringByValue(
+        &self,
+        id: ParamID,
+        value: ParamValue,
+        string: *mut String128,
+    ) -> tresult {
+        // SAFETY: the host passes somewhere to write, or null.
+        let (TRANSPOSE, Some(string)) = (id, unsafe { string.as_mut() }) else {
+            return kInvalidArgument;
+        };
+        write_utf16(string, &format!("{:+.0} st", semitones(value)));
+        kResultOk
+    }
+
+    unsafe fn getParamValueByString(
+        &self,
+        _: ParamID,
+        _: *mut TChar,
+        _: *mut ParamValue,
+    ) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn normalizedParamToPlain(&self, _: ParamID, value: ParamValue) -> ParamValue {
+        semitones(value)
+    }
+
+    unsafe fn plainParamToNormalized(&self, _: ParamID, value: ParamValue) -> ParamValue {
+        ((value + TRANSPOSE_RANGE) / (2.0 * TRANSPOSE_RANGE)).clamp(0.0, 1.0)
+    }
+
+    unsafe fn getParamNormalized(&self, id: ParamID) -> ParamValue {
+        self.0.checks.ui("getParamNormalized");
+        if id != TRANSPOSE {
+            violation("the host asked for a parameter that doesn't exist");
+        }
+        f64::from_bits(self.0.controller_transpose.load(Ordering::SeqCst))
+    }
+
+    unsafe fn setParamNormalized(&self, id: ParamID, value: ParamValue) -> tresult {
+        let arpeggiator = &self.0;
+        arpeggiator.checks.ui("setParamNormalized");
+        if id != TRANSPOSE || !(0.0..=1.0).contains(&value) {
+            violation("the host set a parameter that doesn't exist, or out of its range");
+            return kInvalidArgument;
+        }
+        (arpeggiator.controller_transpose).store(value.to_bits(), Ordering::SeqCst);
+        kResultOk
+    }
+
+    unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
+        let arpeggiator = &self.0;
+        arpeggiator.checks.ui("setComponentHandler");
+        // SAFETY: the host passes its handler, or null.
+        let handler = unsafe { ComRef::from_raw(handler) }.map(|h| h.to_com_ptr());
+        *lock(&arpeggiator.handler) = handler;
+        kResultOk
+    }
+
+    /// It has no window.
+    unsafe fn createView(&self, _: FIDString) -> *mut IPlugView {
+        self.0.checks.ui("createView");
+        ptr::null_mut()
+    }
+}
 
 // The pretend window.
 

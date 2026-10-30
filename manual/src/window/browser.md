@@ -84,19 +84,29 @@ outlined, and "New track" shows below the tracks.
 
 The Devices list has Musicable's own devices under **Built-in**, then the
 plugins found, by name, under **Plugins** ([Plugins](../using/plugins.md)).
-**All**, **Instruments** and **Effects** show all of them, or only the
-instruments or the effects. Hovering a plugin shows its vendor, its kind
-and its format. The search field finds devices by name, and plugins by
-vendor too, the best matches first.
+**All**, **Instruments**, **MIDI Effects** and **Audio Effects** show all
+of them, or only those of one kind: an instrument plays notes, a MIDI
+effect, such as an arpeggiator, plays them on, changed, to the instrument
+after it ([Plugins](../using/plugins.md#midi-effects)), and an audio effect
+works on sound. Hovering a plugin shows its vendor, its kind and its
+format. The search field finds devices by name, and plugins by vendor too,
+the best matches first.
+
+A plugin's right-click menu has its **Kind**, for a plugin Musicable takes
+for the wrong one: pick another and the browser lists it in that kind's
+folder from then on, and adds it as that kind
+([Plugins](../using/plugins.md#finding-them)).
 
 Double-click a device to put it at the end of the selected track's devices,
 or the master's while the master track is selected. Or drag it: into the
 devices panel, between the devices where a line shows it would go, onto a
 track or its mixer strip for the end of its devices, onto the master track
 for the master's, or below the tracks for a new track named after it, a
-MIDI track for an instrument and an audio track for an effect. The track
-it goes on is selected, so the devices panel shows it there. Devices
-dragged by their title bars in the devices panel go the same places
+MIDI track for an instrument or a MIDI effect and an audio track for an
+audio effect. A MIDI effect goes no later than just before the track's
+instrument, wherever it's dropped, and only on a MIDI track. The track it
+goes on is selected, so the devices panel shows it there. Devices dragged
+by their title bars in the devices panel go the same places
 ([The devices panel](devices-panel.md#selecting-moving-and-copying)).
 
 ## Presets

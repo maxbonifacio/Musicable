@@ -7,12 +7,15 @@ use std::sync::atomic::Ordering;
 
 use musicable_engine::switch::Switch;
 use musicable_engine::{
-    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, ProcessContext,
+    AudioMut, EngineConfig, Inputs, Node, NodeEventKind, NodeMaker, NoteEvent, Notes, Played,
+    ProcessContext,
 };
 use musicable_model::clip::{Controller, Dimension};
 use vst3::ComRef;
+use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlPolyPressure, kPitchBend};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
-    kNoteExpressionValueEvent, kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent,
+    kLegacyMIDICCOutEvent, kNoteExpressionValueEvent, kNoteOffEvent, kNoteOnEvent,
+    kPolyPressureEvent,
 };
 use vst3::Steinberg::Vst::NoteExpressionTypeIDs_::{kBrightnessTypeID, kTuningTypeID};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{
@@ -31,7 +34,7 @@ use vst3::Steinberg::{int32, kResultOk, tresult, uint16, uint32};
 use super::changes::{EVENT_CAPACITY, Events, InputChanges, OutputChanges, QUEUE_CAPACITY};
 use super::host::Shared;
 use super::module::Module;
-use crate::process::{Channels, ParamChange, Sounding, SoundingNote, Transport};
+use crate::process::{self, Channels, Made, ParamChange, Sounding, SoundingNote, Transport};
 use crate::threads::{AudioThread, PROCESSING};
 
 /// Everything processing a plugin needs. Whoever holds the instance's
@@ -49,8 +52,12 @@ pub(crate) struct Audio {
     pub(crate) changes: InputChanges,
     pub(crate) out_changes: OutputChanges,
     pub(crate) events: Events,
+    /// The events the plugin plays in a block, which it keeps while it
+    /// plays in the notes pass.
     pub(crate) out_events: Events,
     pub(crate) sounding: Sounding,
+    /// The notes it plays, as the engine's.
+    pub(crate) made: Made,
     /// The transport, as the plugin last got it.
     pub(crate) context: Context,
     /// Frames processed since the plugin was activated.
@@ -74,8 +81,9 @@ impl Audio {
             changes: InputChanges::new(),
             out_changes: OutputChanges::new(),
             events: Events::new(EVENT_CAPACITY, false),
-            out_events: Events::new(0, true),
+            out_events: Events::new(Notes::CAPACITY, true),
             sounding: Sounding::new(),
+            made: Made::new(),
             context: context(None, 0, 0),
             steady_time: 0,
             from_main,
@@ -101,6 +109,9 @@ impl Audio {
         self.changes.clear();
         self.events.clear();
         self.sounding.clear();
+        // The notes it played end, as it forgets them.
+        self.out_events.clear();
+        self.made.end_soon();
         self.context = context(None, config.sample_rate, 0);
         self.steady_time = 0;
     }
@@ -229,6 +240,13 @@ impl fmt::Debug for NodeSource {
 /// its parameter changes in blocks of no frames. VST3 resets a plugin by
 /// turning its processing off and on again, which it does before it
 /// processes again.
+///
+/// A MIDI effect plays in the notes pass ([`Node::play_notes`]): the plugin
+/// processes the block there, with no sound, and the notes it plays go
+/// where the node's notes go, each under an id of the engine's own (see
+/// [`Made`]). The controllers it plays as VST3's legacy MIDI go as MIDI
+/// does. Those it was playing as it starts again, after its setup changes,
+/// end at once. The plugins that make sound play no notes yet.
 pub struct Vst3Node {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
@@ -268,9 +286,40 @@ impl Node for Vst3Node {
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
-        if !run(shared, &mut self.resetting, ctx, inputs, output, audio) {
+        let played = run(
+            shared,
+            &mut self.resetting,
+            ctx,
+            inputs,
+            Some(&mut *output),
+            None,
+            audio,
+        );
+        if !played {
             output.clear();
         }
+    }
+
+    /// Processes the plugin for the block, with no sound, and sends the
+    /// notes it plays where the node's notes go: a MIDI effect's.
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        let shared = &self.shared;
+        shared.running.store(true, Ordering::Release);
+        let Some(_busy) = shared.try_enter() else {
+            return;
+        };
+        // SAFETY: `busy` is held, so nothing else touches it.
+        let audio = unsafe { &mut *shared.audio.get() };
+        let none = Inputs::NONE;
+        run(
+            shared,
+            &mut self.resetting,
+            ctx,
+            none,
+            None,
+            Some(notes),
+            audio,
+        );
     }
 
     /// The plugin stays processing, as VST3 sees it, so the main thread
@@ -315,13 +364,15 @@ impl Node for Vst3Node {
 }
 
 /// Processes the plugin for one block, holding `busy`: false if it can't.
-/// It resets first if `resetting`.
+/// It resets first if `resetting`. It plays its main output into `output`,
+/// if there's one, and the notes it plays into `notes`, if there are.
 fn run(
     shared: &Shared,
     resetting: &mut bool,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
-    output: &mut AudioMut<'_>,
+    output: Option<&mut AudioMut<'_>>,
+    notes: Option<&mut Notes<'_>>,
     audio: &mut Audio,
 ) -> bool {
     if shared.lifecycle() != PROCESSING {
@@ -347,8 +398,10 @@ fn run(
             processor.setProcessing(0);
             processor.setProcessing(1);
         }
-        // Its voices are gone.
+        // Its voices are gone, and so are the notes it played, which ended
+        // where they went as it was bypassed.
         audio.sounding.clear();
+        audio.made.forget();
     }
     audio.inputs.clear(frames);
     audio.outputs.clear(frames);
@@ -373,6 +426,19 @@ fn run(
     if result != kResultOk {
         return false;
     }
+    if let Some(notes) = notes {
+        let Audio {
+            out_events, made, ..
+        } = audio;
+        made.start_block(&mut |p| process::send(notes, 0, p));
+        for event in out_events.list() {
+            let offset = usize::try_from(event.sampleOffset).unwrap_or(0);
+            played(event, made, &mut |p| process::send(notes, offset, p));
+        }
+    }
+    let Some(output) = output else {
+        return true;
+    };
     let Some(main) = audio.outputs.channels.main() else {
         return false;
     };
@@ -391,6 +457,69 @@ fn mode(ctx: &ProcessContext<'_>) -> int32 {
     }
 }
 
+/// Plays an event the plugin played, as the engine's notes: see [`Made`].
+/// Its legacy MIDI's controllers, channel pressure, pitch bend and key
+/// pressure go as MIDI.
+fn played(event: &Event, made: &mut Made, emit: &mut dyn FnMut(Played)) {
+    // SAFETY, for each union field read: the event's type says which it
+    // is.
+    match event.r#type {
+        t if t == kNoteOnEvent as uint16 => {
+            let on = unsafe { event.__field0.noteOn };
+            let velocity = f64::from(on.velocity);
+            made.start(on.noteId, on.channel, on.pitch, velocity, emit);
+        }
+        t if t == kNoteOffEvent as uint16 => {
+            let off = unsafe { event.__field0.noteOff };
+            let velocity = f64::from(off.velocity);
+            made.end(off.noteId, off.channel, off.pitch, velocity, emit);
+        }
+        t if t == kPolyPressureEvent as uint16 => {
+            let p = unsafe { event.__field0.polyPressure };
+            let pressure = f64::from(p.pressure);
+            made.express(
+                p.noteId,
+                p.channel,
+                p.pitch,
+                Dimension::Pressure,
+                pressure,
+                emit,
+            );
+        }
+        t if t == kNoteExpressionValueEvent as uint16 => {
+            let expression = unsafe { event.__field0.noteExpressionValue };
+            let (id, value) = (expression.noteId, expression.value);
+            let (dimension, value) = match expression.typeId {
+                kind if kind == kTuningTypeID as NoteExpressionTypeID => {
+                    (Dimension::PitchBend, 240.0 * (value - 0.5))
+                }
+                kind if kind == kBrightnessTypeID as NoteExpressionTypeID => {
+                    (Dimension::Timbre, value)
+                }
+                _ => return,
+            };
+            // It names its note by id alone.
+            if id >= 0 {
+                made.express(id, -1, -1, dimension, value, emit);
+            }
+        }
+        t if t == kLegacyMIDICCOutEvent as uint16 => {
+            let cc = unsafe { event.__field0.midiCCOut };
+            let channel = (cc.channel as u8) & 0x0F;
+            let (value, value2) = ((cc.value as u8) & 0x7F, (cc.value2 as u8) & 0x7F);
+            let bytes = match cc.controlNumber {
+                number @ 0..=127 => [0xB0 | channel, number, value],
+                number if number == kAfterTouch as u8 => [0xD0 | channel, value, 0],
+                number if number == kPitchBend as u8 => [0xE0 | channel, value, value2],
+                number if number == kCtrlPolyPressure as u8 => [0xA0 | channel, value, value2],
+                _ => return,
+            };
+            made.midi(bytes, emit);
+        }
+        _ => {}
+    }
+}
+
 /// Calls the plugin's `process` with what's in `audio`, for a block
 /// `frames` long, or of no frames to hand over parameter changes, in
 /// `mode`, and hands back what the controller is to hear of.
@@ -406,6 +535,7 @@ unsafe fn process(
     mode: int32,
 ) -> tresult {
     audio.out_changes.clear();
+    audio.out_events.clear();
     let mut data = ProcessData {
         processMode: mode,
         symbolicSampleSize: kSample32 as int32,

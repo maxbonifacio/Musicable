@@ -36,7 +36,7 @@ use musicable_model::modulation::{
 use musicable_model::native::{NativeDevice, NativeKind, eq};
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{
-    PluginDevice, PluginInput, PluginParam, PluginSettings, PluginState,
+    PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
 use musicable_model::routing::{Port, Tap};
 use musicable_model::time::{BeatRange, Beats};
@@ -256,6 +256,14 @@ fn examples() -> Vec<Example> {
         }),
         leaves(browser::RESCAN, bare),
         leaves(browser::SEARCH, |_| Some(Args::new().with("text", "kick"))),
+        leaves(browser::SET_PLUGIN_KIND, |_| {
+            Some(
+                Args::new()
+                    .with("format", "clap")
+                    .with("plugin", "org.example.arp")
+                    .with("kind", "midi_effect"),
+            )
+        }),
         leaves(browser::STOP_PREVIEW, bare),
         leaves(browser::TAG, |_| {
             Some(Args::new().with("file", KICK).with("tag", "dusty"))
@@ -429,7 +437,7 @@ fn examples() -> Vec<Example> {
                     .with("format", "clap")
                     .with("plugin", "org.example.synth")
                     .with("name", "Synth")
-                    .with("instrument", true)
+                    .with("kind", "instrument")
                     .with("track", track),
             )
         }),
@@ -2221,7 +2229,7 @@ fn fixture() -> Project {
         format: PluginFormat::Clap,
         id: "org.example.effect".into(),
         name: "Effect".into(),
-        instrument: false,
+        kind: PluginKind::AudioEffect,
         inputs: vec![PluginInput {
             id: 2,
             name: "Sidechain".into(),
