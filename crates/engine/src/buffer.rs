@@ -3,13 +3,17 @@
 //! Audio is `f32`, one contiguous run of samples per channel. An
 //! [`AudioBuffer`] owns room for up to its capacity in frames. Nodes see
 //! [`AudioRef`] and [`AudioMut`] views that are exactly one block long, so
-//! block sizes can change from one block to the next.
+//! block sizes can change from one block to the next. A view reaches only
+//! its own frames of each channel, so threads can work on different frames
+//! of one buffer at once: the parallel renderer's parts of a block.
 //!
 //! Where channel counts differ, a mono source feeds every channel. Otherwise
 //! channels map one to one, extra source channels are dropped and destination
 //! channels with no source get silence.
 
+use std::marker::PhantomData;
 use std::ops::Range;
+use std::ptr::NonNull;
 
 use crate::graph::NodeId;
 
@@ -52,10 +56,11 @@ impl AudioBuffer {
             self.capacity
         );
         AudioRef {
-            data: &self.data,
+            data: NonNull::from(self.data.as_slice()).cast(),
             stride: self.capacity,
             channels: self.channels,
             frames,
+            samples: PhantomData,
         }
     }
 
@@ -71,10 +76,11 @@ impl AudioBuffer {
             self.capacity
         );
         AudioMut {
-            data: &mut self.data,
+            data: NonNull::from(self.data.as_mut_slice()).cast(),
             stride: self.capacity,
             channels: self.channels,
             frames,
+            samples: PhantomData,
         }
     }
 
@@ -118,59 +124,99 @@ impl RawBuffer {
     ///
     /// # Safety
     ///
-    /// The buffer is alive and nothing writes to it while the view lives.
-    /// `frames` is at most its capacity.
+    /// As for [`part`](Self::part), of `0..frames`.
     pub(crate) unsafe fn view<'a>(self, frames: usize) -> AudioRef<'a> {
-        debug_assert!(frames <= self.capacity);
-        AudioRef {
-            // SAFETY: `data` points to `channels * capacity` samples, which
-            // the caller ensures are alive and not being written.
-            data: unsafe { std::slice::from_raw_parts(self.data, self.channels * self.capacity) },
-            stride: self.capacity,
-            channels: self.channels,
-            frames,
-        }
+        // SAFETY: the caller's promise.
+        unsafe { self.part(0..frames) }
     }
 
     /// The first `frames` frames of every channel, writable.
     ///
     /// # Safety
     ///
-    /// The buffer is alive and nothing else reads or writes it while the view
-    /// lives. `frames` is at most its capacity.
+    /// As for [`part_mut`](Self::part_mut), of `0..frames`.
     pub(crate) unsafe fn view_mut<'a>(self, frames: usize) -> AudioMut<'a> {
-        debug_assert!(frames <= self.capacity);
-        AudioMut {
-            // SAFETY: as in `view`, and the caller ensures this is the only
-            // access.
-            data: unsafe {
-                std::slice::from_raw_parts_mut(self.data, self.channels * self.capacity)
-            },
+        // SAFETY: the caller's promise.
+        unsafe { self.part_mut(0..frames) }
+    }
+
+    /// Frames `frames` of every channel.
+    ///
+    /// # Safety
+    ///
+    /// The buffer is alive and nothing writes to those frames while the
+    /// view lives. They end at most at its capacity.
+    pub(crate) unsafe fn part<'a>(self, frames: Range<usize>) -> AudioRef<'a> {
+        AudioRef {
+            data: self.at(&frames),
             stride: self.capacity,
             channels: self.channels,
-            frames,
+            frames: frames.len(),
+            samples: PhantomData,
         }
+    }
+
+    /// Frames `frames` of every channel, writable.
+    ///
+    /// # Safety
+    ///
+    /// The buffer is alive and nothing else reads or writes those frames
+    /// while the view lives. They end at most at its capacity.
+    pub(crate) unsafe fn part_mut<'a>(self, frames: Range<usize>) -> AudioMut<'a> {
+        AudioMut {
+            data: self.at(&frames),
+            stride: self.capacity,
+            channels: self.channels,
+            frames: frames.len(),
+            samples: PhantomData,
+        }
+    }
+
+    /// Where `frames` start in the first channel.
+    fn at(self, frames: &Range<usize>) -> NonNull<f32> {
+        debug_assert!(!self.data.is_null(), "only a buffer is viewed");
+        debug_assert!(frames.start <= frames.end && frames.end <= self.capacity);
+        let data = match self.channels {
+            // An empty buffer's address is only aligned, with nothing past it.
+            0 => self.data,
+            // SAFETY: the frames are within the capacity, so this is within
+            // the first channel, or just past its end.
+            _ => unsafe { self.data.add(frames.start) },
+        };
+        // SAFETY: a buffer's address isn't null, and neither is one in it.
+        unsafe { NonNull::new_unchecked(data) }
     }
 }
 
 /// A read-only view of planar audio: `channels` channels of `frames` frames.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioRef<'a> {
-    data: &'a [f32],
+    /// The first channel's first frame. Each channel starts `stride`
+    /// samples after the one before, and the view reads `frames` samples
+    /// from there, and nothing between them.
+    data: NonNull<f32>,
     stride: usize,
     channels: usize,
     frames: usize,
+    samples: PhantomData<&'a [f32]>,
 }
+
+// SAFETY: it reads its samples as the `&[f32]` of each channel it gives out
+// would, and those can be sent and shared.
+unsafe impl Send for AudioRef<'_> {}
+// SAFETY: as above.
+unsafe impl Sync for AudioRef<'_> {}
 
 impl<'a> AudioRef<'a> {
     /// No channels, `frames` long: the device inputs of a stream that has
     /// none.
     pub const fn empty(frames: usize) -> AudioRef<'static> {
         AudioRef {
-            data: &[],
+            data: NonNull::dangling(),
             stride: 0,
             channels: 0,
             frames,
+            samples: PhantomData,
         }
     }
 
@@ -182,10 +228,11 @@ impl<'a> AudioRef<'a> {
     pub fn from_planar(data: &'a [f32], channels: usize) -> Self {
         let frames = planar_frames(data.len(), channels);
         Self {
-            data,
+            data: NonNull::from(data).cast(),
             stride: frames,
             channels,
             frames,
+            samples: PhantomData,
         }
     }
 
@@ -206,7 +253,9 @@ impl<'a> AudioRef<'a> {
             "no channel {index} in {}",
             self.channels
         );
-        &self.data[index * self.stride..][..self.frames]
+        // SAFETY: whoever made the view lent it `frames` samples from the
+        // start of each channel for `'a`.
+        unsafe { std::slice::from_raw_parts(channel(self.data, index, self.stride), self.frames) }
     }
 
     /// The channels in order.
@@ -231,10 +280,11 @@ impl<'a> AudioRef<'a> {
             self.frames
         );
         AudioRef {
-            data: self.data.get(range.start..).unwrap_or_default(),
+            data: start(self.data, self.channels, range.start),
             stride: self.stride,
             channels: self.channels,
             frames: range.len(),
+            samples: PhantomData,
         }
     }
 
@@ -290,11 +340,20 @@ impl<'a> AudioRef<'a> {
 /// A writable view of planar audio: `channels` channels of `frames` frames.
 #[derive(Debug)]
 pub struct AudioMut<'a> {
-    data: &'a mut [f32],
+    /// As in [`AudioRef`]: it writes `frames` samples from the start of
+    /// each channel, and nothing between them.
+    data: NonNull<f32>,
     stride: usize,
     channels: usize,
     frames: usize,
+    samples: PhantomData<&'a mut [f32]>,
 }
+
+// SAFETY: it reads and writes its samples as the `&mut [f32]` of each
+// channel it gives out would, and those can be sent and shared.
+unsafe impl Send for AudioMut<'_> {}
+// SAFETY: as above.
+unsafe impl Sync for AudioMut<'_> {}
 
 impl<'a> AudioMut<'a> {
     /// Views `data` as `channels` channels stored one after another.
@@ -305,10 +364,11 @@ impl<'a> AudioMut<'a> {
     pub fn from_planar(data: &'a mut [f32], channels: usize) -> Self {
         let frames = planar_frames(data.len(), channels);
         Self {
-            data,
+            data: NonNull::from(data).cast(),
             stride: frames,
             channels,
             frames,
+            samples: PhantomData,
         }
     }
 
@@ -324,12 +384,7 @@ impl<'a> AudioMut<'a> {
     ///
     /// If there is no channel `index`.
     pub fn channel(&self, index: usize) -> &[f32] {
-        assert!(
-            index < self.channels,
-            "no channel {index} in {}",
-            self.channels
-        );
-        &self.data[index * self.stride..][..self.frames]
+        self.view().channel(index)
     }
 
     /// # Panics
@@ -341,16 +396,20 @@ impl<'a> AudioMut<'a> {
             "no channel {index} in {}",
             self.channels
         );
-        &mut self.data[index * self.stride..][..self.frames]
+        let data = channel(self.data, index, self.stride);
+        // SAFETY: whoever made the view lent it `frames` samples from the
+        // start of each channel, and borrowing the view lends them on.
+        unsafe { std::slice::from_raw_parts_mut(data, self.frames) }
     }
 
     /// The channels in order, writable.
     pub fn channels_mut(&mut self) -> impl Iterator<Item = &mut [f32]> {
-        let frames = self.frames;
-        self.data
-            .chunks_mut(self.stride.max(1))
-            .take(self.channels)
-            .map(move |channel| &mut channel[..frames])
+        let (data, stride, frames) = (self.data, self.stride, self.frames);
+        // SAFETY: as in `channel_mut`, once for each channel, and the
+        // channels don't overlap.
+        (0..self.channels).map(move |index| unsafe {
+            std::slice::from_raw_parts_mut(channel(data, index, stride), frames)
+        })
     }
 
     /// A read-only view of the same frames.
@@ -360,6 +419,7 @@ impl<'a> AudioMut<'a> {
             stride: self.stride,
             channels: self.channels,
             frames: self.frames,
+            samples: PhantomData,
         }
     }
 
@@ -371,10 +431,11 @@ impl<'a> AudioMut<'a> {
             self.frames
         );
         AudioMut {
-            data: self.data.get_mut(range.start..).unwrap_or_default(),
+            data: start(self.data, self.channels, range.start),
             stride: self.stride,
             channels: self.channels,
             frames: range.len(),
+            samples: PhantomData,
         }
     }
 
@@ -423,6 +484,23 @@ impl<'a> AudioMut<'a> {
                 None => self.channel_mut(c).fill(0.0),
             }
         }
+    }
+}
+
+/// Where channel `index` of a view starts.
+fn channel(data: NonNull<f32>, index: usize, stride: usize) -> *mut f32 {
+    // SAFETY: a view's channels are all in the samples it was made from.
+    unsafe { data.as_ptr().add(index * stride) }
+}
+
+/// Where a view's frames from `frame` on start, for a shorter view.
+fn start(data: NonNull<f32>, channels: usize, frame: usize) -> NonNull<f32> {
+    match channels {
+        // An empty view's address is only aligned, with nothing past it.
+        0 => data,
+        // SAFETY: the shorter view's frames are the view's, so this is
+        // within its first channel, or just past its end.
+        _ => unsafe { data.add(frame) },
     }
 }
 
