@@ -1,6 +1,6 @@
 //! The Routing panel: every connection in the project, a row each, under
 //! the kind it is: each track's output, the sends, the inputs tracks take
-//! from other tracks, their sound or another MIDI track's notes, the keys
+//! from other tracks, their sound or their notes, the keys
 //! wired into devices' side inputs, and the notes wired into instruments
 //! and MIDI effects. A row has where the connection comes from, where it
 //! goes, and its gain: an output's is its track's fader, a send's its level
@@ -614,7 +614,7 @@ impl Rows<'_> {
         let columns = self.columns;
         let value = mixer.tap_input_name(tap);
         let hint = match track.kind {
-            TrackKind::Midi => "Where the track records from: another MIDI track's notes",
+            TrackKind::Midi => "Where the track records from: another track's notes",
             _ if Input::Tap(tap).is_resampling() => {
                 "Where the track records from: the master, without this track in it"
             }

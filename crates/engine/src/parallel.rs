@@ -123,10 +123,12 @@ pub struct ParallelRenderer {
     max_nodes: usize,
     /// Parallel blocks rendered.
     epoch: u64,
-    /// Whether the last block ran on the audio thread alone.
-    inline: bool,
-    /// The work the last block took, summed over threads.
-    last_work: Duration,
+    /// Whether the last block ran on the audio thread alone, for each of
+    /// the first [`STAGES`] stages of a graph, the last for the rest.
+    inline: [bool; STAGES],
+    /// The work the last block took, summed over threads, for each stage
+    /// the same way.
+    last_work: [Duration; STAGES],
     /// The address of the graph the last block ran, to notice a new one.
     last_graph: usize,
 }
@@ -189,8 +191,8 @@ impl ParallelRenderer {
             inline_below: options.inline_below,
             max_nodes: options.max_nodes,
             epoch: 0,
-            inline: false,
-            last_work: Duration::MAX,
+            inline: [false; STAGES],
+            last_work: [Duration::MAX; STAGES],
             last_graph: 0,
         }
     }
@@ -216,7 +218,7 @@ impl ParallelRenderer {
         if address != self.last_graph {
             // A new graph: assume it's worth sharing until it shows otherwise.
             self.last_graph = address;
-            self.last_work = Duration::MAX;
+            self.last_work = [Duration::MAX; STAGES];
         }
         let Some(below) = self.inline_below else {
             return true;
@@ -225,8 +227,9 @@ impl ParallelRenderer {
         // work into tasks, or there's too little to do. Once inline, stay
         // there until there's clearly enough work, so a graph near the line
         // doesn't flip every block.
-        let below = if self.inline { below * 2 } else { below };
-        (graph.schedule.width > 1 || tasks) && self.last_work >= below
+        let stage = graph.stage.min(STAGES - 1);
+        let below = if self.inline[stage] { below * 2 } else { below };
+        (graph.schedule.width(graph.stage) > 1 || tasks) && self.last_work[stage] >= below
     }
 
     fn render_inline(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
@@ -235,8 +238,9 @@ impl ParallelRenderer {
         // shared.
         let _lane = WorkingFor::enter(&self.shared, INLINE);
         ReferenceRenderer.render(graph, block);
-        self.last_work = started.elapsed();
-        self.inline = true;
+        let stage = graph.stage.min(STAGES - 1);
+        self.last_work[stage] = started.elapsed();
+        self.inline[stage] = true;
         self.shared.counters.inline_blocks.fetch_add(1, Relaxed);
     }
 
@@ -252,6 +256,7 @@ impl ParallelRenderer {
             events: graph.events.as_ptr(),
             event_ranges: graph.event_ranges.as_ptr(),
             schedule: &graph.schedule,
+            stage: graph.stage,
             block: (block as *const Block<'_>).cast(),
             sample_rate: graph.config.sample_rate,
             loads: graph.loads.loads.as_ptr(),
@@ -262,14 +267,14 @@ impl ParallelRenderer {
         // the store to `sources` makes possible.
         debug_assert!(shared.job.load(Relaxed).is_null(), "one block at a time");
         shared.job.store((&job as *const Job).cast_mut(), Relaxed);
-        shared.remaining.store(graph.len(), Relaxed);
+        shared.remaining.store(graph.stage_nodes().len(), Relaxed);
         // A worker starting the block works in place of lane 0, which is
         // the audio thread's and idle unless it comes to help: one lane
         // more keeps as many threads busy.
-        let width = graph.schedule.width;
+        let width = graph.schedule.width(graph.stage);
         let wanted = width + usize::from(lane != 0 && lane < width);
         shared.wanted.store(wanted.min(shared.lanes.len()), Relaxed);
-        let sources = graph.schedule.sources.len() as u64;
+        let sources = graph.schedule.sources(graph.stage).len() as u64;
         shared.sources.store(tag(self.epoch) | sources, Release);
         // Wake the workers. SeqCst pairs with the check sleeping workers make
         // before they park: either they see the new epoch, or we see them
@@ -287,8 +292,9 @@ impl ParallelRenderer {
         let wall = started.elapsed();
         let busy = Duration::from_nanos(shared.counters.block_busy.swap(0, Relaxed));
         shared.job.store(std::ptr::null_mut(), Relaxed);
-        self.last_work = busy;
-        self.inline = false;
+        let stage = graph.stage.min(STAGES - 1);
+        self.last_work[stage] = busy;
+        self.inline[stage] = false;
         let counters = &shared.counters;
         counters.parallel_blocks.fetch_add(1, Relaxed);
         counters.busy.fetch_add(nanos(busy), Relaxed);
@@ -483,6 +489,8 @@ struct Job {
     events: *const NodeEvent,
     event_ranges: *const (u32, u32),
     schedule: *const Schedule,
+    /// The graph's stage the block renders.
+    stage: usize,
     block: *const Block<'static>,
     sample_rate: u32,
     /// Each node's load.
@@ -747,8 +755,9 @@ impl Shared {
                 Ok(_) => {
                     // SAFETY: we took a source of the running block, which
                     // can't end before we count it, so its job is valid.
-                    let schedule = unsafe { &*(*self.job.load(Acquire)).schedule };
-                    return Some(schedule.sources[left as usize - 1]);
+                    let job = unsafe { &*self.job.load(Acquire) };
+                    let schedule = unsafe { &*job.schedule };
+                    return Some(schedule.sources(job.stage)[left as usize - 1]);
                 }
                 Err(actual) => word = actual,
             }
@@ -1016,6 +1025,11 @@ impl std::fmt::Debug for AheadWaker {
 
 /// The lane of a block the audio thread renders alone.
 const INLINE: usize = usize::MAX;
+
+/// How many of a graph's stages the renderer judges apart, whether to share
+/// each between threads: a graph without notes made while rendering has
+/// one, and the stages beyond these share the last's judgement.
+const STAGES: usize = 4;
 
 /// Marks this thread as working for a lane of a renderer, or for none, until
 /// dropped.

@@ -377,6 +377,7 @@ mod tests {
                 false => PluginKind::AudioEffect,
             },
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: vec![PluginParam { id: 1, value: 0.5 }],
@@ -847,6 +848,11 @@ mod tests {
                     name: "Sidechain".to_owned(),
                 }],
             },
+            Edit::PluginNoteOutput {
+                device: effect,
+                from: false,
+                to: true,
+            },
             Edit::PluginParam {
                 device: effect,
                 param: 7,
@@ -990,7 +996,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 76;
+    const KINDS: usize = 77;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1072,6 +1078,7 @@ mod tests {
             Edit::WireFrom { .. } => 73,
             Edit::PluginInputs { .. } => 74,
             Edit::WireChannel { .. } => 75,
+            Edit::PluginNoteOutput { .. } => 76,
         }
     }
 

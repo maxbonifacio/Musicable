@@ -163,6 +163,7 @@ fn enter() -> bool {
         return false;
     }
     crate::PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
+    crate::ECHO.store(name.starts_with("echo"), Ordering::SeqCst);
     if ENTERED.swap(true, Ordering::SeqCst) {
         violation("the VST3 module was entered twice without exiting");
     }
@@ -1504,6 +1505,9 @@ struct Synth {
     /// Whether it plays each channel as a part of its own, from a module
     /// named so.
     parts: bool,
+    /// Whether it plays the notes it gets out again, an octave up, through
+    /// an event output, from a module named so.
+    echo: bool,
     /// Level, normalized, as the processor has it, and as the controller
     /// does.
     level: AtomicU64,
@@ -1535,6 +1539,7 @@ impl Synth {
             checks: Checks::new("Test Synth"),
             lifecycle: Lifecycle::default(),
             parts: crate::PARTS.load(Ordering::SeqCst),
+            echo: crate::ECHO.load(Ordering::SeqCst),
             level: AtomicU64::new(0.5f64.to_bits()),
             controller_level: AtomicU64::new(0.5f64.to_bits()),
             label: Mutex::new(String::new()),
@@ -1691,8 +1696,10 @@ impl IComponentTrait for SynthComponent {
 
     unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> int32 {
         self.0.checks.ui("getBusCount");
-        // A note input, and an audio output.
-        int32::from((media == kEvent as MediaType) == (direction == kInput as BusDirection))
+        // A note input, and an audio output, and the echo's note output.
+        let events = media == kEvent as MediaType;
+        let echo = events && self.0.echo;
+        int32::from(events == (direction == kInput as BusDirection) || echo)
     }
 
     unsafe fn getBusInfo(
@@ -1704,10 +1711,16 @@ impl IComponentTrait for SynthComponent {
     ) -> tresult {
         self.0.checks.ui("getBusInfo");
         let input = direction == kInput as BusDirection;
-        if index != 0 || input != (media == kEvent as MediaType) {
+        let events = media == kEvent as MediaType;
+        let echo = events && !input && self.0.echo;
+        if index != 0 || (input != events && !echo) {
             return kInvalidArgument;
         }
-        let (channels, name) = if input { (16, "Notes") } else { (2, "Output") };
+        let (channels, name) = match (input, events) {
+            (true, _) => (16, "Notes"),
+            (false, true) => (16, "Notes Out"),
+            (false, false) => (2, "Output"),
+        };
         // SAFETY: the host passes somewhere to write, or null.
         unsafe { write_bus(bus, media, direction, channels, name, true) }
     }
@@ -1848,6 +1861,9 @@ impl IAudioProcessorTrait for SynthComponent {
             violation("process got outputs that aren't the synth's");
             return kResultFalse;
         };
+        // SAFETY: the host passes its list for the events the plugin plays,
+        // or null.
+        let out = unsafe { ComRef::from_raw(data.outputEvents) };
         let (mut next_change, mut next_event) = (0, 0);
         for frame in 0..frames {
             while let Some(&(id, offset, value)) = changes.get(next_change)
@@ -1864,6 +1880,12 @@ impl IAudioProcessorTrait for SynthComponent {
                 && event.sampleOffset as usize <= frame
             {
                 synth.play(&mut audio.voices, event);
+                if synth.echo
+                    && let (Some(out), Some(mut echoed)) = (out, echoed(event))
+                {
+                    // SAFETY: the host's list, for the block.
+                    unsafe { out.addEvent(&mut echoed) };
+                }
                 next_event += 1;
             }
             let level = synth.level();
@@ -2106,6 +2128,21 @@ impl Arpeggiator {
             _ => {}
         }
     }
+}
+
+/// The note event the echoing synth plays out again for `event`, an
+/// octave up, on its frame: one for each note starting or ending.
+fn echoed(event: &Event) -> Option<Event> {
+    let mut echoed = *event;
+    // SAFETY, for each union field: the event's type says which it is.
+    match event.r#type {
+        t if t == kNoteOnEvent as u16 => unsafe { echoed.__field0.noteOn.pitch += crate::ECHO_UP },
+        t if t == kNoteOffEvent as u16 => unsafe {
+            echoed.__field0.noteOff.pitch += crate::ECHO_UP
+        },
+        _ => return None,
+    }
+    Some(echoed)
 }
 
 /// A note the arpeggiator starts or ends, as VST3's event.

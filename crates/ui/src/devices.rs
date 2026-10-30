@@ -1102,6 +1102,7 @@ mod tests {
             name: name.to_owned(),
             kind,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         }))
     }

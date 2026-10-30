@@ -48,9 +48,11 @@ impl<'a> Block<'a> {
 /// oracle; [`ParallelRenderer`](crate::ParallelRenderer) runs nodes on several
 /// threads and matches it sample for sample.
 pub trait Renderer: Send {
-    /// Processes every node of `graph` once, each after all of its inputs.
+    /// Processes every node of `graph`'s current stage once, each after all
+    /// of its inputs: the whole graph, for one without notes made while
+    /// rendering ([`Graph::send_made_notes`](crate::Graph::send_made_notes)).
     /// The engine has already put each node's events for the block into
-    /// `graph`.
+    /// `graph`, and rendered the stages before.
     ///
     /// Nodes run with denormals flushed to zero
     /// ([`rt::flush_denormals`]), whichever thread runs them, and each one's
@@ -84,6 +86,7 @@ impl Renderer for ReferenceRenderer {
 }
 
 fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
+    let stage = graph.stage_nodes();
     let PreparedGraph {
         config,
         nodes,
@@ -99,7 +102,7 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
     // Each node's time runs from the end of the one before, so the clock is
     // read once a node.
     let mut last = load::now();
-    for &node in order.iter() {
+    for &node in &order[stage] {
         // Take the node's buffer out so its inputs can be read alongside it.
         // No node feeds itself, and taking leaves an empty buffer, so nothing
         // is allocated or freed.

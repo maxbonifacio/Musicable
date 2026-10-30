@@ -162,6 +162,23 @@ pub trait Node: Any + Send {
     /// notes have played.
     fn play_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
 
+    /// Sends the notes the node made as it rendered the block `ctx` is for,
+    /// for a node whose notes made while rendering go somewhere
+    /// ([`Graph::send_made_notes`]), such as an instrument plugin that plays
+    /// its arpeggios out, or one that hears notes in what comes into it.
+    /// The engine calls it on the audio thread, or the worker rendering
+    /// ahead, once the node's stage has rendered, so it must be real-time
+    /// safe too. `ctx` has no events: the node had them in
+    /// [`process`](Node::process), and keeps what it made there for this,
+    /// over every part of the block it rendered as a block of its own.
+    fn made_notes(&mut self, _ctx: &ProcessContext<'_>, _notes: &mut Notes<'_>) {}
+
+    /// Tells the node that the notes it makes as it renders go somewhere in
+    /// its graph ([`Graph::send_made_notes`]), so it keeps them for
+    /// [`made_notes`](Node::made_notes) as it renders. Called off the audio
+    /// thread as the graph is built, before [`prepare`](Node::prepare).
+    fn makes_notes(&mut self) {}
+
     /// Sends the modulation the node makes for the block about to render,
     /// for a node that modulates other nodes' parameters
     /// ([`Graph::modulate`]), such as a channel's

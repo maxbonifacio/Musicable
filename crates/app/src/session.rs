@@ -1136,6 +1136,9 @@ impl Session {
                 Change::Inputs(inputs) => self.document.follow(&name, |tx| {
                     tx.set_plugin_inputs(device, inputs);
                 }),
+                Change::NoteOutput(on) => self.document.follow(&name, |tx| {
+                    tx.set_plugin_note_output(device, on);
+                }),
                 Change::Window(event) => self.window_events.push((device, event)),
                 Change::Failed(problem) => self.problems.push(problem),
             }
@@ -1341,6 +1344,15 @@ impl Session {
                     Edit::PluginInputs { device, .. } => {
                         let project = self.document.project();
                         recompile |= project.wires.iter().any(|w| w.to.device() == device);
+                    }
+                    // Whether a plugin has a note output says whether what
+                    // takes its notes gets any. With nothing taking them,
+                    // the graph stays as it is.
+                    Edit::PluginNoteOutput { device, .. } => {
+                        let project = self.document.project();
+                        let tap = Tap::Device(device);
+                        recompile |= project.wires.iter().any(|w| w.from == tap)
+                            || (project.tracks.iter()).any(|t| t.input == Some(Input::Tap(tap)));
                     }
                     // So is automation, and the plugins leave what it moves
                     // to the engine.

@@ -159,6 +159,7 @@ fn song(dir: &Path) -> Project {
         name: "Test Gain".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings,
     }));
     let up = vec![Point::new(beats(1, 1), 0.5), Point::new(beats(3, 1), 1.0)];
@@ -448,6 +449,7 @@ fn test_gain(
         name: "Test Gain".into(),
         kind: PluginKind::AudioEffect,
         inputs,
+        note_output: false,
         settings,
     }))
 }

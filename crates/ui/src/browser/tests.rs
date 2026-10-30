@@ -620,6 +620,7 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
         name: "Vital".to_owned(),
         kind: PluginKind::Instrument,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     project.track_mut(keys).unwrap().devices.push(synth.clone());

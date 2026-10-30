@@ -381,6 +381,7 @@ mod tests {
             name: "Surge XT".to_owned(),
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings {
                 state: Some(PluginState::new(vec![1, 2, 3, 255])),
                 params: vec![PluginParam { id: 7, value: 0.25 }],

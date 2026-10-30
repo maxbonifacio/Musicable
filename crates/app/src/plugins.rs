@@ -26,7 +26,9 @@
 //!
 //! A plugin's side inputs go into the project as the plugin lists them, so
 //! wires can go into them, and those wires switch them on: see
-//! [`Plugins::sync`].
+//! [`Plugins::sync`]. So does whether it has a note output, so the point
+//! after an instrument or audio effect plugin with one carries the notes
+//! it plays out.
 //!
 //! A plugin's own bypass parameter, if it has one, is its device's Bypass:
 //! it follows the device's `bypassed`, rather than the plugin's settings,
@@ -89,6 +91,9 @@ pub(crate) enum Change {
     /// The plugin's side inputs, as it lists them now, for its device to
     /// take.
     Inputs(Vec<PluginInput>),
+    /// Whether the plugin has a note output, as it says now, for its device
+    /// to take.
+    NoteOutput(bool),
     /// The plugin's window asks to be another size, or closed.
     Window(PluginEvent),
     /// Something went wrong with the plugin.
@@ -153,6 +158,9 @@ struct Hosted {
     /// The side inputs the device has from the plugin, as it last listed
     /// them.
     inputs: Vec<PluginInput>,
+    /// Whether the device has a note output from the plugin, as it last
+    /// said.
+    note_output: bool,
     /// Each parameter's value in the state the plugin last loaded, or as it
     /// started.
     base: BTreeMap<u32, f64>,
@@ -376,6 +384,7 @@ impl Plugins {
             name,
             applied: PluginSettings::default(),
             inputs: plugin.inputs.clone(),
+            note_output: plugin.note_output,
             fresh,
             automated: BTreeSet::new(),
             bypassed: false,
@@ -700,6 +709,10 @@ impl Hosted {
         if self.instance.side_inputs() != self.inputs {
             self.inputs = self.instance.side_inputs().to_vec();
             changes.push(Change::Inputs(self.inputs.clone()));
+        }
+        if self.instance.note_output() != self.note_output {
+            self.note_output = self.instance.note_output();
+            changes.push(Change::NoteOutput(self.note_output));
         }
         changes
     }

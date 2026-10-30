@@ -1,6 +1,7 @@
 //! What processing a plugin takes, whatever its format: its buffers and
 //! moving audio between them and the engine's, the notes sounding on it,
-//! the notes it plays, and the transport.
+//! the notes it plays, in the notes pass or as it renders, and the
+//! transport.
 
 use std::ops::Range;
 use std::slice;
@@ -423,6 +424,72 @@ fn keys(channel: i16, key: i16) -> (Range<u8>, Range<u8>) {
         Err(_) => 0..count,
     };
     (range(channel, 16), range(key, 128))
+}
+
+/// Where the notes a plugin plays as it processes a block go, as the
+/// engine's ([`Made`]).
+pub(crate) enum PlayedTo<'a, 'n> {
+    /// Nowhere: nothing takes them.
+    Nowhere,
+    /// Where the node's notes go, as a MIDI effect plays them, in the notes
+    /// pass.
+    Notes(&'a mut Notes<'n>),
+    /// Kept for the node to send where its made notes go once its stage
+    /// has rendered, as an instrument or an audio effect plays them out
+    /// ([`Kept`]).
+    Kept(&'a mut Kept),
+}
+
+impl PlayedTo<'_, '_> {
+    /// Whether anything takes them.
+    pub(crate) fn takes(&self) -> bool {
+        !matches!(self, Self::Nowhere)
+    }
+
+    /// Sends or keeps `played`, `offset` frames into the block from engine
+    /// time `time`.
+    pub(crate) fn play(&mut self, time: u64, offset: usize, played: Played) {
+        match self {
+            Self::Nowhere => {}
+            Self::Notes(notes) => send(notes, offset, played),
+            Self::Kept(kept) => kept.keep(time + offset as u64, played),
+        }
+    }
+}
+
+/// The notes a plugin played out as it rendered, as the engine's, kept for
+/// its node to send once its stage has rendered
+/// ([`Node::made_notes`](musicable_engine::Node::made_notes)): each at the
+/// engine time it's on, so the parts of a block its switch has it render
+/// as blocks of their own each land where they were played. As many as a
+/// block can send, [`Notes::CAPACITY`]: more are dropped. Allocated once.
+pub(crate) struct Kept {
+    notes: Vec<(u64, Played)>,
+}
+
+impl Kept {
+    pub(crate) fn new() -> Self {
+        Self {
+            notes: Vec::with_capacity(Notes::CAPACITY),
+        }
+    }
+
+    /// Keeps `played`, at engine time `time`, if there's room.
+    pub(crate) fn keep(&mut self, time: u64, played: Played) {
+        if self.notes.len() < self.notes.capacity() {
+            self.notes.push((time, played));
+        }
+    }
+
+    /// Sends the notes kept where the node's made notes go, for the block
+    /// from engine time `time`, and forgets them. One from before the block
+    /// comes on its first frame.
+    pub(crate) fn send(&mut self, time: u64, notes: &mut Notes<'_>) {
+        for (at, played) in self.notes.drain(..) {
+            let offset = usize::try_from(at.saturating_sub(time)).unwrap_or(usize::MAX);
+            send(notes, offset, played);
+        }
+    }
 }
 
 /// Sends what a plugin played, `offset` frames into the block, where its

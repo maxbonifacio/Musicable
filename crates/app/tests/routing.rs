@@ -3,8 +3,9 @@
 //! renders it, sample for sample, with a latent plugin on a third track,
 //! and Capture takes it the same way. A track resampling the master
 //! records the mixdown without itself in it, and a MIDI track recording
-//! another's notes records its clip's notes where they are, and those an
-//! arpeggiator plays on the other track where it played them.
+//! another's notes records its clip's notes where they are, those an
+//! arpeggiator plays on the other track where it played them, and those a
+//! synth plays out as it renders, on the frames it played them.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -26,7 +27,7 @@ use musicable_model::{
 };
 use musicable_plugins::{PluginInfo, scan};
 use musicable_test_plugins::testing::Library;
-use musicable_test_plugins::{ARP_STEP, ARPEGGIATOR_ID, GAIN, GAIN_ID, LATENCY};
+use musicable_test_plugins::{ARP_STEP, ARPEGGIATOR_ID, ECHO_UP, GAIN, GAIN_ID, LATENCY, SYNTH_ID};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -118,6 +119,7 @@ fn song(dir: &Path, input: impl FnOnce(TrackId) -> Option<Input>) -> (Project, [
         name: "Test Gain".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings,
     }));
     let track = p.track_mut(bass).unwrap();
@@ -420,6 +422,7 @@ fn a_midi_track_records_what_an_arpeggiator_plays() {
         name: "Test Arpeggiator".into(),
         kind: PluginKind::MidiEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     let id = arpeggiator.id;
@@ -455,5 +458,52 @@ fn a_midi_track_records_what_an_arpeggiator_plays() {
         .map(|n| (n.start, n.length, n.key, n.velocity))
         .collect();
     assert_eq!(notes, expected);
+    library.assert_alright();
+}
+
+#[test]
+fn a_midi_track_records_what_a_synth_plays_out() {
+    let dir = folder("echoed");
+    // Named so, the library's synth plays each note it gets out again as
+    // it renders, an octave up, on the same frame.
+    let library = Library::copy(&dir, "echo-routing-clap");
+    let installed = scan::scan_here(library.path()).unwrap();
+    let (mut song, riff, [lead, double]) = riff(&dir);
+    let synth = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: SYNTH_ID.to_str().unwrap().to_owned(),
+        name: "Test Synth".into(),
+        kind: PluginKind::Instrument,
+        inputs: Vec::new(),
+        // As the project was saved, once the plugin had said it has one.
+        note_output: true,
+        settings: PluginSettings::default(),
+    }));
+    let id = synth.id;
+    song.track_mut(lead).unwrap().devices.push(synth);
+    let taken = recorded(&song, &dir, &installed, (true, double), |session| {
+        let args = Args::new().with("track", double).with("after", id);
+        session.run_with(&mixer::SET_INPUT, &args).unwrap();
+        let args = Args::new().with("track", double).with("armed", true);
+        session.run_with(&mixer::SET_ARM, &args).unwrap();
+    });
+    // The riff's notes an octave up, where they were, with their velocities
+    // and release velocities. The synth plays out no mod wheel.
+    let up = |key: u8| key + ECHO_UP as u8;
+    let notes = |clip: &MidiClip| -> Vec<_> {
+        (clip.notes.iter())
+            .map(|n| (n.start, n.length, n.key, n.velocity, n.release_velocity))
+            .collect()
+    };
+    let expected: Vec<_> = (notes(&riff).into_iter())
+        .map(|(start, length, key, velocity, release)| (start, length, up(key), velocity, release))
+        .collect();
+    let track = taken.track(double).unwrap();
+    assert_eq!(track.clips.len(), 1);
+    let ClipContent::Midi(midi) = &track.clips[0].content else {
+        panic!("{:?}", track.clips[0]);
+    };
+    assert_eq!(notes(midi), expected);
+    assert_eq!(midi.controller(Controller::MOD_WHEEL), []);
     library.assert_alright();
 }

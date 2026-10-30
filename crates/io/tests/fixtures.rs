@@ -67,6 +67,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("midi-effects", midi_effects()),
         ("notes-from-tracks", notes_from_tracks()),
         ("midi-to", midi_to()),
+        ("made-notes", made_notes()),
     ]
 }
 
@@ -385,6 +386,7 @@ fn plugins() -> Project {
                 false => PluginKind::AudioEffect,
             },
             inputs: Vec::new(),
+            note_output: false,
             settings,
         })
     };
@@ -698,6 +700,7 @@ fn automation() -> Project {
         name: "Filter".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     });
     let filter = project.new_device(filter);
@@ -1169,6 +1172,7 @@ fn bypass() -> Project {
         name: "Limiter".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     limiter.bypassed = true;
@@ -1205,6 +1209,7 @@ fn modulation() -> Project {
         name: "Filter".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     let plugin_id = plugin.id;
@@ -1364,6 +1369,7 @@ fn plugin_inputs() -> Project {
             false => PluginKind::AudioEffect,
         },
         inputs,
+        note_output: false,
         settings: PluginSettings::default(),
     };
     let vocoder = plugin(
@@ -1453,6 +1459,7 @@ fn midi_effects() -> Project {
             name: name.into(),
             kind,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1502,6 +1509,7 @@ fn notes_from_tracks() -> Project {
             name: name.into(),
             kind,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1534,6 +1542,7 @@ fn midi_to() -> Project {
             name: name.into(),
             kind,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1558,6 +1567,41 @@ fn midi_to() -> Project {
     let arp_id = arp.id;
     project.track_mut(arps).unwrap().devices.push(arp);
     let wire = project.new_wire(Tap::Device(arp_id), Port::Notes(rack_id));
+    project.wires.push(wire);
+    project
+}
+
+/// Plugins that play notes out as they render: a synth whose arpeggios a
+/// second MIDI track doubles, and a note detector on a vocal, whose notes
+/// a note wire plays on the synth.
+fn made_notes() -> Project {
+    let mut project = Project::new();
+    let plugin = |id: &str, name: &str, kind| {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: id.into(),
+            name: name.into(),
+            kind,
+            inputs: Vec::new(),
+            note_output: true,
+            settings: PluginSettings::default(),
+        })
+    };
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let synth = plugin("com.example.synth", "Synth", PluginKind::Instrument);
+    let synth = project.new_device(synth);
+    let synth_id = synth.id;
+    project.track_mut(keys).unwrap().devices.push(synth);
+    let double = project.add_track("Double", TrackKind::Midi);
+    let track = project.track_mut(double).unwrap();
+    track.input = Some(Input::Tap(Tap::Device(synth_id)));
+    track.monitor = Monitor::In;
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let detector = plugin("com.example.detector", "Detector", PluginKind::AudioEffect);
+    let detector = project.new_device(detector);
+    let detector_id = detector.id;
+    project.track_mut(vocal).unwrap().devices.push(detector);
+    let wire = project.new_wire(Tap::Device(detector_id), Port::Notes(synth_id));
     project.wires.push(wire);
     project
 }

@@ -43,8 +43,7 @@ to one of its devices.
   menu's other tracks and Resampling. The strip's input menu has the
   interfaces' inputs, which take a track out of the list. Beside where a key
   comes from is the Sidechain column's menu of sources, and beside where
-  notes come from, the same menu of the MIDI tracks' points that carry
-  notes.
+  notes come from, the same menu of the points that carry notes.
 - **A note row's channel**, in place of a gain, is a menu: **Any Channel**,
   each note on its own, or **Channel 1** to **Channel 16**.
 - **The gains** move as their controls do, by dragging, with Ctrl held to

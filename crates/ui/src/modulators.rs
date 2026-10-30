@@ -1372,6 +1372,7 @@ mod tests {
                     name: name.to_owned(),
                     kind: PluginKind::AudioEffect,
                     inputs: Vec::new(),
+                    note_output: false,
                     settings: PluginSettings::default(),
                 }));
                 plugins.push(device.id);

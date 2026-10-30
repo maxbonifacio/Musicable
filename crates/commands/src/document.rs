@@ -604,6 +604,37 @@ impl Transaction<'_> {
         }
     }
 
+    /// Sets whether the plugin device with id `device` has a note output to
+    /// what its plugin says, `on`. Without one now, it keeps it while a
+    /// MIDI track takes its notes, or a note wire, so neither loses them. A
+    /// device that isn't a plugin does nothing.
+    pub fn set_plugin_note_output(&mut self, device: DeviceId, on: bool) {
+        let tap = Tap::Device(device);
+        let project = &self.project;
+        let taken = (project.tracks.iter())
+            .filter(|track| track.kind == TrackKind::Midi)
+            .any(|track| track.input == Some(Input::Tap(tap)))
+            || (project.wires.iter()).any(|wire| wire.from == tap && wire.takes_notes());
+        self.put_plugin_note_output(device, on || taken);
+    }
+
+    /// Sets whether the plugin device with id `device` has a note output to
+    /// `on`, as undo and redo do.
+    fn put_plugin_note_output(&mut self, device: DeviceId, on: bool) {
+        let Some(plugin) = (self.project.device_mut(device)).and_then(|d| d.kind.plugin_mut())
+        else {
+            return;
+        };
+        if plugin.note_output != on {
+            plugin.note_output = on;
+            self.edits.push(Edit::PluginNoteOutput {
+                device,
+                from: !on,
+                to: on,
+            });
+        }
+    }
+
     /// Sets the side inputs of the plugin device with id `device` to
     /// `inputs` as they are, as undo and redo do.
     fn put_plugin_inputs(&mut self, device: DeviceId, inputs: Vec<PluginInput>) {
@@ -2298,6 +2329,7 @@ impl Transaction<'_> {
                 self.set_plugin_settings(*device, to.clone())
             }
             Edit::PluginInputs { device, to, .. } => self.put_plugin_inputs(*device, to.clone()),
+            Edit::PluginNoteOutput { device, to, .. } => self.put_plugin_note_output(*device, *to),
             Edit::NativeParam {
                 device, param, to, ..
             } => self.set_native_param(*device, *param, *to),
@@ -2755,6 +2787,13 @@ pub enum Edit {
         from: Vec<PluginInput>,
         to: Vec<PluginInput>,
     },
+    /// Whether the plugin device with id `device` has a note output
+    /// changed, as its plugin said.
+    PluginNoteOutput {
+        device: DeviceId,
+        from: bool,
+        to: bool,
+    },
     /// Parameter `param` of the built-in device with id `device` changed.
     NativeParam {
         device: DeviceId,
@@ -3197,6 +3236,11 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::PluginNoteOutput { device, from, to } => Edit::PluginNoteOutput {
+                device,
+                from: to,
+                to: from,
+            },
             Edit::NativeParam {
                 device,
                 param,
@@ -3618,6 +3662,14 @@ impl Edit {
                 },
             ) if device == other => to.clone_from(next),
             (
+                Edit::PluginNoteOutput { device, to, .. },
+                Edit::PluginNoteOutput {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => *to = *next,
+            (
                 Edit::NativeParam {
                     device, param, to, ..
                 },
@@ -3760,6 +3812,7 @@ impl Edit {
                 | Edit::PluginParam { .. }
                 | Edit::PluginSettings { .. }
                 | Edit::PluginInputs { .. }
+                | Edit::PluginNoteOutput { .. }
                 | Edit::NativeParam { .. }
                 | Edit::NativeSample { .. }
                 | Edit::AddWire { .. }
@@ -3857,6 +3910,7 @@ impl Edit {
             Edit::PluginParam { from, to, .. } => from == to,
             Edit::PluginSettings { from, to, .. } => from == to,
             Edit::PluginInputs { from, to, .. } => from == to,
+            Edit::PluginNoteOutput { from, to, .. } => from == to,
             Edit::NativeParam { from, to, .. } => from == to,
             Edit::NativeSample { from, to, .. } => from == to,
             Edit::LanePoints { from, to, .. } => from == to,
@@ -3933,6 +3987,7 @@ mod tests {
             name: "Synth".into(),
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         }));
         project
@@ -4024,6 +4079,7 @@ mod tests {
             name: "Synth".into(),
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: Vec::new(),

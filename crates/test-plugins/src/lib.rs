@@ -48,10 +48,13 @@
 //! with MPE, as many do. One starting with `fixed` gives the gain no
 //! audio-ports-activation, so its sidechain is always on, as with many
 //! plugins. One starting with `midi` has the arpeggiator play MIDI
-//! rather than CLAP's own notes. And one starting with `parts` makes the
+//! rather than CLAP's own notes. One starting with `parts` makes the
 //! synth multi-timbral, as a plugin with a part on each MIDI channel is:
 //! each channel plays its notes an octave above the channel before, so a
-//! test hears which channel a note came on.
+//! test hears which channel a note came on. And one starting with `echo`
+//! gives the synth a note output, which plays each note it gets out again
+//! as it renders, an octave up, on the same frames, as a synth that plays
+//! its arpeggios out does.
 //!
 //! The library is also a VST3 module with the same three plugins, which
 //! check VST3's rules, in the same count: see [`vst3`]. Tests make a VST3
@@ -111,6 +114,13 @@ pub(crate) static FIXED_PORTS: AtomicBool = AtomicBool::new(false);
 /// before, as a part of its own: the library's file is named so.
 pub(crate) static PARTS: AtomicBool = AtomicBool::new(false);
 
+/// Whether the synth plays the notes it gets out again, an octave up, as
+/// it renders: the library's file is named so.
+pub(crate) static ECHO: AtomicBool = AtomicBool::new(false);
+
+/// How many semitones up the echoing synth plays the notes it gets out.
+pub const ECHO_UP: i16 = 12;
+
 /// The semitones the multi-timbral synth plays `channel`'s notes up: an
 /// octave for each channel before it, and none for a synth that isn't.
 pub(crate) fn part_transpose(parts: bool, channel: i16) -> f64 {
@@ -147,6 +157,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     MIDI_OUT.store(name.starts_with("midi"), Ordering::SeqCst);
     FIXED_PORTS.store(name.starts_with("fixed"), Ordering::SeqCst);
     PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
+    ECHO.store(name.starts_with("echo"), Ordering::SeqCst);
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         violation("the library was initialized twice without deinit in between");
     }

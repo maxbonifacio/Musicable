@@ -107,6 +107,7 @@ fn plugged() -> Project {
         name: "Synth".into(),
         kind: PluginKind::Instrument,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings {
             state: Some(PluginState::new(*b"preset")),
             params: vec![
@@ -122,6 +123,7 @@ fn plugged() -> Project {
         name: "Effect".into(),
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     project.master.devices.push(effect);
@@ -666,6 +668,7 @@ fn plugin(id: &str, kind: PluginKind) -> DeviceKind {
         name: id.rsplit('.').next().unwrap_or(id).into(),
         kind,
         inputs: Vec::new(),
+        note_output: false,
         settings: PluginSettings::default(),
     })
 }
@@ -2813,6 +2816,7 @@ fn wired() -> Project {
         name: "Ducker".into(),
         kind: PluginKind::AudioEffect,
         inputs: vec![input(2, "Sidechain"), input(5, "Aux")],
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     let ducker_id = ducker.id;

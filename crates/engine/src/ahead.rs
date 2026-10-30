@@ -852,14 +852,10 @@ impl Core {
                 midi,
                 ahead,
             };
-            graph.feed_automation(&block);
-            let dropped = graph.play_notes(&block) + graph.control(&block);
+            let dropped = graph.run(&mut *self.renderer, &block);
             if dropped > 0 {
                 self.counters.events_dropped.fetch_add(dropped, Relaxed);
             }
-            graph.load_routed();
-            self.renderer.render(graph, &block);
-            graph.clear_routed();
             if ahead {
                 let dropped = keep(shared, graph, &mut self.writers, start, frames);
                 if dropped > 0 {

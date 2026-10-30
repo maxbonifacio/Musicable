@@ -190,6 +190,7 @@ pub fn register(registry: &mut Registry) {
                 name: args.get("name")?,
                 kind,
                 inputs: Vec::new(),
+                note_output: false,
                 settings: PluginSettings::default(),
             });
             let name = format!("Add {}", kind.name());
@@ -1678,6 +1679,7 @@ mod tests {
             name: "Synth".to_owned(),
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings {
                 state: Some(musicable_model::plugin::PluginState::new(vec![1, 2])),
                 params: vec![PluginParam { id: 3, value: 0.5 }],

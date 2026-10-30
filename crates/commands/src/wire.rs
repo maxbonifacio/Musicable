@@ -86,7 +86,8 @@ pub fn register(registry: &mut Registry) {
                 Type::Bool,
                 "Wires notes into the device's note input instead: an instrument's or a MIDI \
                  effect's, from a MIDI track's pre_fx or post_fx, or after one of its MIDI \
-                 effects. That's how a track plays an instrument on another.",
+                 effects, or after a plugin that plays notes out, on any track. That's how a \
+                 track plays an instrument on another.",
             ),
             TRACK,
             MASTER,
@@ -964,6 +965,7 @@ mod tests {
             name: name.into(),
             kind: PluginKind::AudioEffect,
             inputs,
+            note_output: false,
             settings: PluginSettings::default(),
         });
         let index = m.project().devices(chain).unwrap().len();

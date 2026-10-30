@@ -731,8 +731,9 @@ same points a wire takes, or the master's Post Fader, which is Resampling
 (`Input::RESAMPLING`). A MIDI track's can be another MIDI track's notes
 (`Project::carries_notes`): at its Pre FX, from its clips and its input,
 after one of its MIDI effects, what that plays, or at its Post FX, what
-reaches its instrument. The compiler adds them once the strips and wires
-are built:
+reaches its instrument. It can also be the notes a plugin on any track
+plays out as it renders, after it ([Notes](#notes)). The compiler adds
+them once the strips and wires are built:
 
 - **Monitoring.** The track's `InputMonitor` takes the tap on its side
   input 0 (`InputMonitor::with_side_input`) and plays it as it would an
@@ -761,7 +762,10 @@ are built:
   Post FX, the last of them all, whose notes reach the instrument. The
   other track's clip player sends its notes to its monitor even if it has
   no instrument, and a MIDI effect plays without one, so a track can play
-  one that has none. They're taken before mute and solo, as a tap is.
+  one that has none. After a plugin that plays notes out, the plugin's
+  switch sends its made notes (`Graph::send_side_made_notes`), so the
+  track renders a stage later. They're taken before mute and solo, as a
+  tap is.
 - **Record taps.** Each audio track's tap gets a record tap, keyed by the
   tap (`keys::record`), so tracks taking the same one share it, and each
   MIDI track's a note record of the notes it takes, keyed by the tap too,
@@ -1135,15 +1139,16 @@ for either), in order with them, and takes room in a block as a note does.
 - `Graph::plays_notes(node)` has a node play its notes even with nowhere
   to send them, as a MIDI effect without an instrument after it does, so
   it keeps its time and its record.
-- Each node that plays notes keeps track of the notes it has sounding
-  where its notes go, up to `Notes::CAPACITY`, and the switches it holds on
-  there, such as the sustain pedal, on no channel and on each of the 16.
-  When a swap takes a route away, the node ends the notes it had sounding
-  along it, at the start of the next block, and lets go of the switches,
-  which would hold them on, so nothing hangs where its notes no longer go
-  (`Notes::release_all` does both at once, as a switch does). Then the
-  switches it holds on go on along the routes the swap adds, so a pedal a
-  track's clips hold down holds whichever way their notes go.
+- Each node that plays notes, or makes them as it renders, keeps track of
+  the notes it has sounding where its notes go, up to `Notes::CAPACITY`,
+  and the switches it holds on there, such as the sustain pedal, on no
+  channel and on each of the 16. When a swap takes a route away, the node
+  ends the notes it had sounding along it, at the start of the next block,
+  and lets go of the switches, which would hold them on, so nothing hangs
+  where its notes no longer go (`Notes::release_all` does both at once, as
+  a switch does). Then the switches it holds on go on along the routes the
+  swap adds, so a pedal a track's clips hold down holds whichever way
+  their notes go.
 
 **MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
 their expression, to the track's first instrument (`Track::instrument`),
@@ -1276,6 +1281,44 @@ notes that reach its first instrument, wired ones too.
 - A wire that takes over in a swap carries on with the notes it had
   sounding. On another channel, it lets go of the switches on the old one
   and sends what the controllers hold on the new.
+
+**Notes made while rendering.** A plugin can play notes out as it
+renders: an instrument its arpeggios, or a note detector the notes it
+hears in its sound (`PluginDevice::makes_notes`: a note output, on a
+plugin that isn't a MIDI effect). It has them only once it has rendered,
+after the notes pass. `Graph::send_made_notes(from, to)` and
+`send_side_made_notes` send them on: the node hands them over
+(`Node::made_notes`) once it has rendered the block, and what takes them
+plays them in the same block, never one late.
+
+- Such routes put the graph in stages. What takes made notes renders in a
+  stage after the node that made them, and every other node in the
+  earliest stage its inputs, the notes it gets and its modulators allow.
+  Each stage in turn has its players play their notes, its controllers
+  run and its nodes render, and then the notes its nodes made go into the
+  events of the stages after it (`PreparedGraph::run`). A graph without
+  made notes is one stage, as it always was. Both renderers render a
+  stage at a time ([Parallel rendering](#parallel-rendering)).
+- Made notes can't close a loop: a route that would lead back to the node
+  that makes them, by sound, notes or modulation, would have no stage to
+  start in, so the graph refuses it, as it refuses any route added later
+  that would close one through made notes. The project's flow catches
+  the sound and the notes before then, but not modulation, so the
+  compiler has a group's or the master's modulators skip the notes made
+  by a plugin they move, or by one before it.
+- The compiler routes a plugin's made notes from the point after it
+  (`Tap::Device`) to a MIDI track's input, a note wire or a note record,
+  as it routes what a MIDI effect plays. A node hears that its notes go
+  somewhere (`Node::makes_notes`) as the graph is built, so a plugin whose
+  notes go nowhere keeps none.
+- The switch passes its device's made notes on. A bypassed device makes
+  none: as it stops, the notes it made that still sound end, on the frame
+  it stops, and the switches it held on, such as the sustain pedal, come
+  up, so none hangs. A deactivated one is out of the signal, and makes
+  none.
+- A plugin keeps its notes by engine time as it renders, so those it made
+  in the parts of a block a switch renders apart each land where it
+  played them ([plugins.md](plugins.md#notes-and-the-transport)).
 
 **The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
 stands in for instruments until plugin hosting. It plays each note with a
@@ -1687,6 +1730,11 @@ doesn't have to. Then each block:
    from another thread's queue.
 3. The block ends when every node has run. The thread that started it keeps
    working until then.
+
+A graph with notes made while rendering ([Notes](#notes)) renders a
+stage at a time, each as a block of its own: a stage's nodes without
+inputs in it start it, only its own connections count, and whether it's
+shared is judged for each of the first four stages apart.
 
 **Between blocks.** A worker with nothing to do spins for
 `ParallelOptions::spin` (20 µs by default), then sleeps until the next block

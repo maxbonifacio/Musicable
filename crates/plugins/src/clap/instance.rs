@@ -114,6 +114,8 @@ pub struct Instance {
     ext: Extensions,
     params: Vec<ParamInfo>,
     side_inputs: Vec<PluginInput>,
+    /// Whether it has a note output, as it last described its note ports.
+    note_output: bool,
     /// The side inputs wires go into, by id, which are on.
     wired: Vec<u32>,
     /// The engine config it's active for.
@@ -203,6 +205,7 @@ impl Instance {
             ext,
             params: Vec::new(),
             side_inputs: Vec::new(),
+            note_output: false,
             wired: Vec::new(),
             config: None,
             to_audio,
@@ -213,6 +216,7 @@ impl Instance {
         };
         instance.params = instance.read_params();
         instance.side_inputs = side_inputs(&instance.audio_ports(true));
+        instance.note_output = instance.read_note_output();
         Ok(instance)
     }
 
@@ -438,6 +442,7 @@ impl Instance {
         let outputs = self.audio_ports(false);
         self.side_inputs = side_inputs(&inputs);
         self.switch_side_inputs(&mut inputs);
+        self.note_output = self.read_note_output();
         let note_port = self.note_port();
         let plugin = self.plugin();
         let busy = self.shared.enter()?;
@@ -631,6 +636,24 @@ impl Instance {
         }
     }
 
+    /// Whether the plugin has a note output, as it last described its note
+    /// ports: the notes it plays out as it renders, for the point after its
+    /// device to carry, or the notes a MIDI effect plays.
+    pub fn note_output(&self) -> bool {
+        self.note_output
+    }
+
+    /// Whether the plugin says it has a note output.
+    fn read_note_output(&self) -> bool {
+        // SAFETY: the extension lives as long as the plugin.
+        let ports = unsafe { self.ext.note_ports.as_ref() };
+        let Some(count) = ports.and_then(|p| p.count) else {
+            return false;
+        };
+        // SAFETY: on the main thread.
+        unsafe { count(self.plugin(), false) > 0 }
+    }
+
     /// Where notes go: the first note input, in CLAP's dialect if it takes
     /// it, else as MPE, else as MIDI.
     fn note_port(&self) -> Option<NotePort> {
@@ -761,8 +784,9 @@ impl Instance {
             }
         } else if rescan {
             // An inactive plugin's ports are read as it's activated, and
-            // its side inputs now.
+            // its side inputs and note output now.
             self.side_inputs = side_inputs(&self.audio_ports(true));
+            self.note_output = self.read_note_output();
         }
         let requests = &self.shared.requests;
         if requests.params_rescan.swap(0, Ordering::AcqRel) != 0 {
