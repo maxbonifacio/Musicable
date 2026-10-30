@@ -8,7 +8,12 @@
 //! of its own, with the parallel scheduler on workers that don't take
 //! real-time priority, and instances of its own of the project's plugins,
 //! loaded on the main thread, which [`Export::tick`] services as the app
-//! services its own session's.
+//! services its own session's. The engine renders in blocks of [`CHUNK`],
+//! each pipelined ([`Pipeline::Always`]), so a long chain of plugins, as on
+//! a master, renders on several cores. Plugins hear each as a block the
+//! device asked for, not one rendered ahead (VST3's `kRealtime`, not
+//! `kPrefetch`), since some change their oversampling or voices when
+//! rendering ahead.
 //!
 //! The copy plays without the metronome, looping or punching in, from the
 //! start of the range to its end, where the transport stops. With the tail,
@@ -38,7 +43,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use musicable_commands::{Args, Editor, transport};
-use musicable_engine::{AudioMut, Engine, EngineConfig, ParallelOptions, ParallelRenderer};
+use musicable_engine::{
+    AudioMut, Engine, EngineConfig, ParallelOptions, ParallelRenderer, Pipeline,
+};
 use musicable_io::audio::{Decoder, Format, SampleFormat, Writer};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Project, TrackId};
@@ -49,7 +56,7 @@ use crate::Session;
 
 /// The app plays, and exports, in stereo.
 const CHANNELS: usize = 2;
-/// Frames rendered at a time.
+/// Frames rendered at a time, and the most in a block.
 const CHUNK: usize = 4096;
 /// Quieter than this, a sample is silence as far as the tail goes: half a
 /// 16-bit step, about −96 dBFS.
@@ -697,10 +704,11 @@ impl Export {
         let job = &self.job;
         let config = EngineConfig {
             sample_rate: job.sample_rate(),
-            max_block: job.config.max_block,
+            max_block: job.config.max_block.max(CHUNK),
         };
         let options = ParallelOptions {
             realtime: false,
+            pipeline: Pipeline::Always,
             ..ParallelOptions::default()
         };
         let renderer = ParallelRenderer::new(options);

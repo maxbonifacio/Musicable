@@ -344,7 +344,9 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   engine renders ahead of the device (`ProcessContext::ahead`,
   [engine.md](engine.md#rendering-ahead)), which needn't be ready within
   a callback, and `kRealtime` for the rest, and for the parameters the main
-  thread flushes. Exports render with real-time blocks for now.
+  thread flushes. An export's blocks are pipelined, but real-time ones
+  all the same, since some plugins change their oversampling or voices
+  under `kPrefetch`.
 - **Parameters** are normalized, from 0 to 1, whatever they stand for.
   `steps` is VST3's step count, and the module is the unit the parameter is
   in, with its parents', such as `Oscillators/Osc 1`. VST3 has no

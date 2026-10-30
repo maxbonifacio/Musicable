@@ -31,6 +31,11 @@ punching in, from the start of the range, and stops at its end, to the
 sample. Each file starts with the range, lined up to the sample however late
 the plugins make it, and the stems line up with the mix.
 
+An export renders on all the cores, even a long chain of plugins on one
+track or the master, which it splits into parts that run down the chain at
+once: each plugin renders one part while the plugin after it renders the
+part before.
+
 Stems render with solo cleared, so a group's stem has all its unmuted
 tracks; when solo is on and the mix is wanted too, the mix renders as it's
 heard.
