@@ -43,6 +43,7 @@ pub mod modulation;
 pub mod nodes;
 mod parallel;
 pub mod preview;
+mod queue;
 mod render;
 pub mod resample;
 pub mod rt;
@@ -238,17 +239,20 @@ pub trait Node: Any + Send {
     /// outside the graph as it comes, from the audio devices' inputs
     /// ([`ProcessContext::input`]) or the MIDI inputs
     /// ([`ProcessContext::midi`]), as a track monitoring its input does.
-    /// While any node is, the engine renders each block as the device asks
-    /// for it, rather than ahead ([`EngineHandle::set_lead`]): blocks it
+    /// The engine renders it, and what it reaches, as the device asks for
+    /// each block, rather than ahead ([`EngineHandle::set_lead`]): blocks it
     /// renders ahead have no inputs.
     ///
     /// `None`, the default, for a node that never is; `Some(false)` for
     /// one that can be but isn't now, such as a track's monitor that isn't
-    /// monitoring. The graph asks each node once as it's prepared, and asks
+    /// monitoring. The graph asks each node once as it's prepared, and puts
+    /// the ones that are in its live half ([`Graph::prepare`]), and it asks
     /// the ones that can be before each block, on the audio thread or a
     /// worker, so it must be quick and real-time safe. The engine renders
     /// an event for such a node in a block it renders as the device asks,
-    /// so a parameter that makes it live, such as arming, applies in time.
+    /// so a parameter that makes it live, such as arming, applies in time,
+    /// and while one outside the live half is live, it renders every block
+    /// as the device asks.
     fn live(&self) -> Option<bool> {
         None
     }

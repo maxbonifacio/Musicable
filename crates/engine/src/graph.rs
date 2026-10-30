@@ -13,6 +13,7 @@ use crate::engine::EVENT_CAPACITY;
 use crate::load::{self, LoadKey, NodeLoads};
 use crate::nodes::Delay;
 use crate::parallel::Schedule;
+use crate::queue;
 use crate::{
     Automation, Block, EngineConfig, Node, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId,
     Renderer,
@@ -73,8 +74,9 @@ pub struct Graph {
     outputs: Vec<Vec<NodeId>>,
     output: Option<NodeId>,
     cue: Option<NodeId>,
-    /// The nodes [`add_tap`](Graph::add_tap) tapped, in order.
-    taps: Vec<NodeId>,
+    /// The nodes [`add_tap`](Graph::add_tap) tapped, in order: in a half
+    /// of a graph, those in the half.
+    taps: Vec<Option<NodeId>>,
     /// The taps [`add_record`](Graph::add_record) added, by their writers'
     /// keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
@@ -100,7 +102,44 @@ pub struct Graph {
     /// Which nodes modulate which nodes' parameters, from
     /// [`modulate`](Graph::modulate), in the order they were added.
     modulations: Vec<(NodeId, NodeId, ParamId)>,
+    /// The nodes [`set_live`](Graph::set_live) has render live.
+    marks: Vec<NodeId>,
+    /// The nodes [`render_together`](Graph::render_together) keeps on one
+    /// side, in pairs.
+    together: Vec<(NodeId, NodeId)>,
+    // What `prepare` works out for each node, which the halves of a graph
+    // carry over from the whole graph.
+    /// Whose each node is: its key's, a delay's, or no one's, for a queue's.
+    ids: Vec<Option<LoadKey>>,
+    /// Where each node's notes, modulation and made notes come in the
+    /// whole graph.
+    ranks: Vec<Rank>,
+    /// Where each node's notes and made notes go in the whole graph, by
+    /// key, and whether to the side input for notes.
+    targets_of: Vec<Vec<(NodeKey, bool)>>,
+    made_of: Vec<Vec<(NodeKey, bool)>>,
+    /// The room a modulator's queue in the live half has, as much as the
+    /// modulator had: see [`queue`](crate::queue).
+    rooms: Vec<(NodeId, usize)>,
+    /// The queues into the live half, for the engine to check they have
+    /// room before it renders ahead.
+    queue_rooms: Vec<queue::Room>,
 }
+
+/// Where a node's notes, modulation and made notes come among the events a
+/// node gets on one frame, from 1, in the whole graph: 0 if it plays,
+/// modulates or makes none. Events sent before any node plays, such as
+/// the engine's, come first.
+#[derive(Debug, Clone, Copy, Default)]
+struct Rank {
+    player: u32,
+    controller: u32,
+    maker: u32,
+}
+
+/// How many notes a queue of notes into the live half holds: as many as
+/// four blocks can send.
+const NOTE_QUEUE: usize = 4 * Notes::CAPACITY;
 
 impl Graph {
     /// The most frames late a path can be, to compensate for: 262,144, about
@@ -314,6 +353,32 @@ impl Graph {
         Ok(ports)
     }
 
+    /// Has `node` render live, as the device asks for each block, whatever
+    /// comes into it: a track set to Always Live, or a plugin that must run
+    /// in real time. What it reaches renders live too, as with any live
+    /// source ([`Node::live`]): see [`prepare`](Graph::prepare).
+    pub fn set_live(&mut self, node: NodeId) -> Result<(), GraphError> {
+        self.check(node)?;
+        if !self.marks.contains(&node) {
+            self.marks.push(node);
+        }
+        Ok(())
+    }
+
+    /// Keeps `a` and `b` on the same side of the graph, live or ahead: if
+    /// either renders live, so does the other, and what it reaches. For
+    /// nodes that share state outside the graph, which they must both
+    /// read at the same engine time, such as a track's monitor and the cut
+    /// after its devices that follows the monitor's arming.
+    pub fn render_together(&mut self, a: NodeId, b: NodeId) -> Result<(), GraphError> {
+        self.check(a)?;
+        self.check(b)?;
+        if a != b && !self.together.contains(&(a, b)) {
+            self.together.push((a, b));
+        }
+        Ok(())
+    }
+
     /// Sets the node whose output the engine plays.
     pub fn set_output(&mut self, node: NodeId) -> Result<(), GraphError> {
         self.check(node)?;
@@ -338,7 +403,7 @@ impl Graph {
     /// tap's number: they count from 0, in the order they're added.
     pub fn add_tap(&mut self, node: NodeId) -> Result<usize, GraphError> {
         self.check(node)?;
-        self.taps.push(node);
+        self.taps.push(Some(node));
         Ok(self.taps.len() - 1)
     }
 
@@ -387,20 +452,45 @@ impl Graph {
     /// [`send_notes`](Graph::send_notes) aren't delayed, so an instrument's
     /// sound lines up as long as nothing latent comes before it.
     ///
+    /// **Two halves.** A graph with a live source ([`Node::live`]), or a
+    /// node set live ([`set_live`](Graph::set_live)), comes in two halves:
+    /// the live half, those nodes and everything they reach through their
+    /// outputs, their notes, the notes they make and their modulation, and
+    /// the half that renders ahead, the rest. The engine renders the live
+    /// half as the device asks, and the rest ahead of it when it can
+    /// ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)). What the
+    /// half rendering ahead sends the live half goes through queues, one
+    /// for each node's sound, notes and modulation that cross, at its own
+    /// engine time, so it comes in on the frame it would have with the
+    /// graph whole, and the events a live node gets on a frame come in the
+    /// same order. Delay compensation lines up the whole graph first, so the
+    /// halves have the same latency. A graph without live sources is one
+    /// half, which renders ahead.
+    ///
     /// # Panics
     ///
     /// If the sample rate or the block size in `config` is zero.
-    pub fn prepare(mut self, config: &EngineConfig) -> Result<PreparedGraph, GraphError> {
+    pub fn prepare(self, config: &EngineConfig) -> Result<PreparedGraph, GraphError> {
+        self.prepare_split(config, true)
+    }
+
+    /// [`prepare`](Graph::prepare), keeping the graph whole if `split` is
+    /// false: for a test's reference, which renders every node as the
+    /// device asks.
+    pub(crate) fn prepare_split(
+        mut self,
+        config: &EngineConfig,
+        split: bool,
+    ) -> Result<PreparedGraph, GraphError> {
         assert!(
             config.sample_rate > 0 && config.max_block > 0,
             "invalid engine config {config:?}"
         );
         let mut output = self.output.ok_or(GraphError::NoOutput)?;
-        let mut by_key: Vec<(NodeKey, NodeId)> =
-            self.keys.iter().copied().zip((0..).map(NodeId)).collect();
+        let mut by_key: Vec<NodeKey> = self.keys.clone();
         by_key.sort_unstable();
-        if let Some(pair) = by_key.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(GraphError::DuplicateKey(pair[0].0));
+        if let Some(pair) = by_key.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(GraphError::DuplicateKey(pair[0]));
         }
         for (i, node) in self.nodes.iter_mut().enumerate() {
             node.prepare(config);
@@ -409,8 +499,408 @@ impl Graph {
             }
         }
         self.sort_ports();
-        let (mut delays, latency) = self.compensate(config, &mut output);
-        delays.sort_unstable();
+        let (delays, latency) = self.compensate(config, &mut output);
+        self.output = Some(output);
+        // Whose each node is: its key's, or a delay's, by where it is.
+        self.ids = (self.keys.iter())
+            .map(|&key| Some(LoadKey::Node(key)))
+            .collect();
+        self.ids.resize(self.nodes.len(), None);
+        for (at, delay) in delays {
+            let after = self.keys[self.inputs[delay.0][0].0];
+            self.ids[delay.0] = Some(LoadKey::Delay { after, at });
+        }
+        // Where each node's notes go, by key, which the halves keep.
+        let keys = |routes: &[(NodeId, NodeId, bool)], n: usize| {
+            let from = routes.iter().filter(|r| r.0.0 == n);
+            from.map(|r| (self.keys[r.1.0], r.2)).collect::<Vec<_>>()
+        };
+        let len = self.nodes.len();
+        self.targets_of = (0..len).map(|n| keys(&self.note_routes, n)).collect();
+        self.made_of = (0..len).map(|n| keys(&self.made_routes, n)).collect();
+        self.rank()?;
+        let live = self.liveness();
+        if !split || !live.contains(&true) {
+            let loads = Arc::new(NodeLoads::new(self.ids.clone(), len));
+            return self.finish(config, latency, loads, 0);
+        }
+        let [ahead, live] = self.split(&live, config);
+        let ids = ahead.ids.iter().chain(&live.ids).copied().collect();
+        let loads = Arc::new(NodeLoads::new(ids, ahead.nodes.len()));
+        let mut live_ids: Vec<LoadKey> = live.ids.iter().flatten().copied().collect();
+        live_ids.sort_unstable();
+        let base = ahead.nodes.len();
+        let live = live.finish(config, latency, Arc::clone(&loads), base)?;
+        let mut ahead = ahead.finish(config, latency, loads, 0)?;
+        ahead.live_half = Some(Box::new(live));
+        ahead.live_ids = live_ids;
+        Ok(ahead)
+    }
+
+    /// Which nodes render live, as [`set_live`](Graph::set_live) says: each
+    /// live source ([`Node::live`]) and node set live, and everything they
+    /// reach through their outputs, their notes, the notes they make and
+    /// their modulation, with the nodes kept on their side
+    /// ([`render_together`](Graph::render_together)). A delay on a node's
+    /// input renders on the node's side, after the queue from the ahead
+    /// half if there's one, so it carries on from the delay it takes over
+    /// from whichever side its input renders on; a delay after the output,
+    /// the cue output or a tap, on its input's.
+    fn liveness(&self) -> Vec<bool> {
+        let mut live = vec![false; self.nodes.len()];
+        let mut reached: Vec<NodeId> = (0..self.nodes.len())
+            .map(NodeId)
+            .filter(|n| self.nodes[n.0].live() == Some(true) || self.marks.contains(n))
+            .collect();
+        for n in &reached {
+            live[n.0] = true;
+        }
+        while let Some(n) = reached.pop() {
+            let audio = self.outputs[n.0].iter().copied();
+            let routes = self.note_routes.iter().chain(&self.made_routes);
+            let notes = routes.filter(|r| r.0 == n).map(|r| r.1);
+            let modulated = (self.modulations.iter()).filter(|m| m.0 == n).map(|m| m.1);
+            let together = (self.together.iter()).filter_map(|&(a, b)| match n {
+                _ if a == n => Some(b),
+                _ if b == n => Some(a),
+                _ => None,
+            });
+            for next in audio.chain(notes).chain(modulated).chain(together) {
+                if !std::mem::replace(&mut live[next.0], true) {
+                    reached.push(next);
+                }
+            }
+        }
+        for (n, id) in self.ids.iter().enumerate() {
+            if let Some(LoadKey::Delay {
+                at: Joint::Input { .. },
+                ..
+            }) = id
+            {
+                live[n] = live[self.outputs[n][0].0];
+            }
+        }
+        live
+    }
+
+    /// Numbers the nodes that play notes, modulate others and make notes in
+    /// the order the whole graph has them do it: stage by stage, its
+    /// players, then its controllers, then its makers. What a node gets
+    /// from them on one frame comes to it in this order, whichever half
+    /// sends it, so a node renders the same in a half as in the whole
+    /// graph.
+    fn rank(&mut self) -> Result<(), GraphError> {
+        let stage_of = self.stages()?;
+        let players = self.player_order(&stage_of);
+        let makers = self.maker_order(&stage_of);
+        let mut controllers: Vec<NodeId> = (self.order_controllers().into_iter())
+            .map(|c| c.node)
+            .collect();
+        controllers.sort_by_key(|c| stage_of[c.0]);
+        let mut ranks = vec![Rank::default(); self.nodes.len()];
+        let mut next = 0;
+        let stages = stage_of.iter().max().map_or(1, |&s| s + 1);
+        for stage in 0..stages {
+            let here = |n: &&NodeId| stage_of[n.0] == stage;
+            for p in players.iter().filter(here) {
+                next += 1;
+                ranks[p.0].player = next;
+            }
+            for c in controllers.iter().filter(here) {
+                next += 1;
+                ranks[c.0].controller = next;
+            }
+            for m in makers.iter().filter(here) {
+                next += 1;
+                ranks[m.0].maker = next;
+            }
+        }
+        self.ranks = ranks;
+        Ok(())
+    }
+
+    /// The nodes that play notes, each after the players whose notes it
+    /// gets, stage by stage. Notes don't go around loops, so one is always
+    /// ready.
+    fn player_order(&self, stage_of: &[u32]) -> Vec<NodeId> {
+        let mut routes = self.note_routes.clone();
+        routes.sort_unstable();
+        let mut players: Vec<NodeId> = Vec::new();
+        for &(from, ..) in &routes {
+            if players.last() != Some(&from) {
+                players.push(from);
+            }
+        }
+        for &node in &self.playing {
+            if !players.contains(&node) {
+                players.push(node);
+            }
+        }
+        let mut ordered = Vec::with_capacity(players.len());
+        while !players.is_empty() {
+            let waiting = |p: NodeId| {
+                (routes.iter()).any(|&(from, to, _)| to == p && players.contains(&from))
+            };
+            let ready = players.iter().position(|&p| !waiting(p)).expect("no loops");
+            ordered.push(players.remove(ready));
+        }
+        ordered.sort_by_key(|p| stage_of[p.0]);
+        ordered
+    }
+
+    /// The nodes that make notes as they render, stage by stage.
+    fn maker_order(&self, stage_of: &[u32]) -> Vec<NodeId> {
+        let mut routes = self.made_routes.clone();
+        routes.sort_unstable();
+        let mut makers: Vec<NodeId> = Vec::new();
+        for &(from, ..) in &routes {
+            if makers.last() != Some(&from) {
+                makers.push(from);
+            }
+        }
+        makers.sort_by_key(|m| stage_of[m.0]);
+        makers
+    }
+
+    /// Adds `node` to a half being split off, whose it is as `id` says,
+    /// with where its notes go in the whole graph and its ranks there.
+    fn push(
+        &mut self,
+        node: Box<dyn Node>,
+        id: Option<LoadKey>,
+        rank: Rank,
+        targets: Vec<(NodeKey, bool)>,
+        made: Vec<(NodeKey, bool)>,
+    ) -> NodeId {
+        self.nodes.push(node);
+        self.ids.push(id);
+        self.ranks.push(rank);
+        self.targets_of.push(targets);
+        self.made_of.push(made);
+        self.inputs.push(Vec::new());
+        self.ports.push(Vec::new());
+        self.outputs.push(Vec::new());
+        NodeId(self.nodes.len() - 1)
+    }
+
+    /// Adds a queue's node to a half being split off: no one's, so it takes
+    /// over from nothing.
+    fn push_queue(&mut self, node: Box<dyn Node>, rank: Rank) -> NodeId {
+        self.push(node, None, rank, Vec::new(), Vec::new())
+    }
+
+    /// Feeds `from`'s output into `to`'s input `port`, in a half being
+    /// split off.
+    fn join(&mut self, from: NodeId, to: NodeId, port: InputPort) {
+        self.inputs[to.0].push(from);
+        self.ports[to.0].push(port);
+        self.outputs[from.0].push(to);
+    }
+
+    /// Splits the graph, with its delays and ranks, into the half that
+    /// renders ahead and the half that renders live, as `live` says, each
+    /// to finish preparing, with a queue wherever something passes from
+    /// the ahead half to the live one (see [`queue`](crate::queue)): one
+    /// for each ahead node's sound that a live node takes, one for each
+    /// ahead node's notes and made notes that a live node gets, and one
+    /// for each ahead modulator's ports that go to live nodes. Nothing
+    /// passes the other way, as what a live node reaches is live.
+    fn split(self, live: &[bool], config: &EngineConfig) -> [Graph; 2] {
+        let Graph {
+            nodes,
+            inputs,
+            ports,
+            outputs,
+            output,
+            cue,
+            taps,
+            records,
+            note_records,
+            note_routes,
+            made_routes,
+            playing,
+            feeds,
+            controllers,
+            modulations,
+            ids,
+            ranks,
+            targets_of,
+            made_of,
+            ..
+        } = self;
+        let len = nodes.len();
+        let half = |n: NodeId| usize::from(live[n.0]);
+        let mut halves = [Graph::default(), Graph::default()];
+        let mut place = Vec::with_capacity(len);
+        for (n, node) in nodes.into_iter().enumerate() {
+            let (targets, made) = (targets_of[n].clone(), made_of[n].clone());
+            let id = halves[half(NodeId(n))].push(node, ids[n], ranks[n], targets, made);
+            place.push(id);
+        }
+        let [ahead, live_half] = &mut halves;
+        // Each ahead node's sound that a live node takes, through a queue.
+        let frames = crate::ahead::ring_frames(*config);
+        let mut sound: Vec<Option<NodeId>> = vec![None; len];
+        for n in (0..len).filter(|&n| !live[n]) {
+            if !outputs[n].iter().any(|to| live[to.0]) {
+                continue;
+            }
+            let channels = ahead.nodes[place[n].0].channels();
+            let (out, into) = queue::sound(channels, frames);
+            let out = ahead.push_queue(Box::new(out), Rank::default());
+            ahead.join(place[n], out, InputPort::Main);
+            sound[n] = Some(live_half.push_queue(Box::new(into), Rank::default()));
+        }
+        for to in 0..len {
+            for (&from, &port) in inputs[to].iter().zip(&ports[to]) {
+                match (live[from.0], live[to]) {
+                    (false, false) => ahead.join(place[from.0], place[to], port),
+                    (true, true) => live_half.join(place[from.0], place[to], port),
+                    (false, true) => {
+                        let queue = sound[from.0].expect("a queue for what goes live");
+                        live_half.join(queue, place[to], port);
+                    }
+                    (true, false) => unreachable!("what a live node feeds is live"),
+                }
+            }
+        }
+        for (h, graph) in [&mut *ahead, &mut *live_half].into_iter().enumerate() {
+            let here = |n: &NodeId| half(*n) == h;
+            graph.output = output.filter(here).map(|n| place[n.0]);
+            graph.cue = cue.filter(here).map(|n| place[n.0]);
+            graph.taps = (taps.iter())
+                .map(|tap| tap.filter(here).map(|n| place[n.0]))
+                .collect();
+            graph.records = records.clone();
+        }
+        for (key, node) in note_records {
+            let graph = if live[node.0] {
+                &mut *live_half
+            } else {
+                &mut *ahead
+            };
+            graph.note_records.push((key, place[node.0]));
+        }
+        for node in playing {
+            let graph = if live[node.0] {
+                &mut *live_half
+            } else {
+                &mut *ahead
+            };
+            graph.playing.push(place[node.0]);
+        }
+        for (node, param, feed) in feeds {
+            let graph = if live[node.0] {
+                &mut *live_half
+            } else {
+                &mut *ahead
+            };
+            graph.feeds.push((place[node.0], param, feed));
+        }
+        for node in controllers {
+            let graph = if live[node.0] {
+                &mut *live_half
+            } else {
+                &mut *ahead
+            };
+            graph.controllers.push(place[node.0]);
+        }
+        // Notes and made notes for live nodes from ahead ones, through a
+        // queue for each node they come from. The node that plays them on
+        // has the rank of the one they come from, as a player.
+        let capacity = NOTE_QUEUE;
+        let mut queues = [vec![None; len], vec![None; len]];
+        for (made, routes) in [(false, note_routes), (true, made_routes)] {
+            for (from, to, side) in routes {
+                match (live[from.0], live[to.0]) {
+                    (false, false) if made => {
+                        ahead.made_routes.push((place[from.0], place[to.0], side))
+                    }
+                    (false, false) => ahead.note_routes.push((place[from.0], place[to.0], side)),
+                    (true, true) if made => {
+                        live_half
+                            .made_routes
+                            .push((place[from.0], place[to.0], side));
+                    }
+                    (true, true) => live_half
+                        .note_routes
+                        .push((place[from.0], place[to.0], side)),
+                    (false, true) => {
+                        let queue = &mut queues[usize::from(made)][from.0];
+                        let into = *queue.get_or_insert_with(|| {
+                            let (out, into, room) = queue::notes(capacity, Notes::CAPACITY);
+                            let out = ahead.push_queue(Box::new(out), Rank::default());
+                            match made {
+                                true => ahead.made_routes.push((place[from.0], out, false)),
+                                false => ahead.note_routes.push((place[from.0], out, false)),
+                            }
+                            ahead.queue_rooms.push(room);
+                            let rank = ranks[from.0];
+                            let player = if made { rank.maker } else { rank.player };
+                            let rank = Rank {
+                                player,
+                                ..Rank::default()
+                            };
+                            live_half.push_queue(Box::new(into), rank)
+                        });
+                        live_half.note_routes.push((into, place[to.0], side));
+                    }
+                    (true, false) => unreachable!("what a live node's notes reach is live"),
+                }
+            }
+        }
+        // Modulation of live nodes from ahead ones, through a queue for
+        // each modulator: its ports into the live half go to the queue's
+        // parameters, numbered in turn, and the node that sends them on
+        // has a port for each, the modulator's rank and as much room.
+        let room = Feed::room(config.max_block);
+        let blocks = frames.div_ceil(config.max_block.min(crate::AHEAD_BLOCK)) + 2;
+        let mut modulators: Vec<Option<(NodeId, NodeId, u64)>> = vec![None; len];
+        for &(from, to, param) in &modulations {
+            match (live[from.0], live[to.0]) {
+                (false, false) => ahead.modulations.push((place[from.0], place[to.0], param)),
+                (true, true) => live_half
+                    .modulations
+                    .push((place[from.0], place[to.0], param)),
+                (false, true) => {
+                    let (out, into, port) = modulators[from.0].get_or_insert_with(|| {
+                        let ports = modulations.iter().filter(|m| m.0 == from).count();
+                        let block = ports * room;
+                        let (out, into, queue) = queue::modulation(block * blocks, block);
+                        let out = ahead.push_queue(Box::new(out), Rank::default());
+                        ahead.queue_rooms.push(queue);
+                        let rank = Rank {
+                            controller: ranks[from.0].controller,
+                            ..Rank::default()
+                        };
+                        let into = live_half.push_queue(Box::new(into), rank);
+                        live_half.controllers.push(into);
+                        live_half.rooms.push((into, block));
+                        (out, into, 0)
+                    });
+                    ahead
+                        .modulations
+                        .push((place[from.0], *out, ParamId(*port)));
+                    live_half.modulations.push((*into, place[to.0], param));
+                    *port += 1;
+                }
+                (true, false) => unreachable!("what a live node modulates is live"),
+            }
+        }
+        halves
+    }
+
+    /// The rest of [`prepare`](Graph::prepare), for the whole graph or for
+    /// one of its halves: orders the nodes and allocates their buffers, and
+    /// gathers what plays notes, makes them and modulates, each node timed
+    /// in `loads` from `load_base` on.
+    fn finish(
+        mut self,
+        config: &EngineConfig,
+        latency: usize,
+        loads: Arc<NodeLoads>,
+        load_base: usize,
+    ) -> Result<PreparedGraph, GraphError> {
         let buffers: Vec<AudioBuffer> = self
             .nodes
             .iter()
@@ -423,73 +913,52 @@ impl Graph {
         let mut order = self.topological_order();
         order.sort_by_key(|n| stage_of[n.0]);
         let schedule = Schedule::new(&self.inputs, &self.outputs, &order, &stage_of, stages);
-        // Each delay has one input, the node it comes after, which has a key,
-        // and one joint.
-        let mut joints = vec![None; self.nodes.len() - self.keys.len()];
-        for &(joint, delay) in &delays {
-            joints[delay.0 - self.keys.len()] = Some(joint);
-        }
-        let delayed = (self.keys.len()..)
-            .zip(joints)
-            .map(|(n, at)| LoadKey::Delay {
-                after: self.keys[self.inputs[n][0].0],
-                at: at.expect("each delay is at a joint"),
-            });
-        let loads = (self.keys.iter().map(|&key| LoadKey::Node(key)))
-            .chain(delayed)
+        let ids = &self.ids;
+        let key_of = |n: NodeId| match ids[n.0] {
+            Some(LoadKey::Node(key)) => Some(key),
+            _ => None,
+        };
+        let mut by_key: Vec<(NodeKey, NodeId)> = (0..ids.len())
+            .filter_map(|n| Some((key_of(NodeId(n))?, NodeId(n))))
             .collect();
+        by_key.sort_unstable();
+        let mut delays: Vec<(Joint, NodeId)> = (ids.iter().enumerate())
+            .filter_map(|(n, id)| match id {
+                Some(LoadKey::Delay { at, .. }) => Some((*at, NodeId(n))),
+                _ => None,
+            })
+            .collect();
+        delays.sort_unstable();
         self.note_routes.sort_unstable();
-        let mut players: Vec<Player> = Vec::new();
-        for &(from, to, side) in &self.note_routes {
-            let to_key = (self.keys[to.0], side);
-            match players.last_mut() {
-                Some(player) if player.node == from => {
-                    player.targets.push((to, side));
-                    player.target_keys.push(to_key);
-                }
-                _ => players.push(Player {
-                    node: from,
-                    key: self.keys[from.0],
-                    targets: vec![(to, side)],
-                    target_keys: vec![to_key],
-                    record: None,
-                    sounding: Sounding::new(),
-                }),
-            }
-        }
-        for &node in &self.playing {
-            if !players.iter().any(|p| p.node == node) {
-                players.push(Player {
-                    node,
-                    key: self.keys[node.0],
-                    targets: Vec::new(),
-                    target_keys: Vec::new(),
-                    record: None,
-                    sounding: Sounding::new(),
-                });
-            }
-        }
-        // The nodes that make notes as they render, with where they go.
         self.made_routes.sort_unstable();
-        let mut makers: Vec<Player> = Vec::new();
-        for &(from, to, side) in &self.made_routes {
-            let to_key = (self.keys[to.0], side);
-            match makers.last_mut() {
-                Some(maker) if maker.node == from => {
-                    maker.targets.push((to, side));
-                    maker.target_keys.push(to_key);
-                }
-                _ => makers.push(Player {
-                    node: from,
-                    key: self.keys[from.0],
-                    targets: vec![(to, side)],
-                    target_keys: vec![to_key],
-                    record: None,
-                    sounding: Sounding::new(),
-                }),
-            }
-        }
-        makers.sort_by_key(|m| stage_of[m.node.0]);
+        let player =
+            |node: NodeId, routes: &[(NodeId, NodeId, bool)], keys: &[(NodeKey, bool)]| Player {
+                node,
+                key: key_of(node),
+                targets: (routes.iter())
+                    .filter(|r| r.0 == node)
+                    .map(|r| (r.1, r.2))
+                    .collect(),
+                target_keys: keys.to_vec(),
+                record: None,
+                sounding: Sounding::new(),
+                rank: 0,
+            };
+        // The nodes that play notes, each after the players whose notes it
+        // gets, and those that make notes as they render, with where their
+        // notes go, stage by stage.
+        let mut ordered: Vec<Player> = (self.player_order(&stage_of).into_iter())
+            .map(|node| Player {
+                rank: self.ranks[node.0].player,
+                ..player(node, &self.note_routes, &self.targets_of[node.0])
+            })
+            .collect();
+        let mut makers: Vec<Player> = (self.maker_order(&stage_of).into_iter())
+            .map(|node| Player {
+                rank: self.ranks[node.0].maker,
+                ..player(node, &self.made_routes, &self.made_of[node.0])
+            })
+            .collect();
         // One record for each node recorded, which each of its writers
         // reads: what it plays, then what it makes as it renders. A record
         // of a node that plays and makes no notes stays empty.
@@ -498,7 +967,7 @@ impl Graph {
             .map(|&(key, node)| {
                 let i = (note_records.iter().position(|r| r.node == node)).unwrap_or_else(|| {
                     let i = note_records.len();
-                    let lists = players.iter_mut().chain(makers.iter_mut());
+                    let lists = ordered.iter_mut().chain(makers.iter_mut());
                     for player in lists.filter(|p| p.node == node) {
                         player.record = Some(i);
                     }
@@ -511,21 +980,7 @@ impl Graph {
                 (key, i)
             })
             .collect();
-        // Each player after the players whose notes it gets, and in its
-        // stage. Notes don't go around loops, so one is always ready.
         let routes = &self.note_routes;
-        let mut ordered: Vec<Player> = Vec::with_capacity(players.len());
-        while !players.is_empty() {
-            let waiting = |p: &Player| {
-                let from_waiting = |from: NodeId| players.iter().any(|q| q.node == from);
-                routes
-                    .iter()
-                    .any(|&(from, to, _)| to == p.node && from_waiting(from))
-            };
-            let ready = players.iter().position(|p| !waiting(p)).expect("no loops");
-            ordered.push(players.remove(ready));
-        }
-        ordered.sort_by_key(|p| stage_of[p.node.0]);
         let made = &self.made_routes;
         // What comes to a node as notes: from players and from makers.
         let notes_into = |node: NodeId| {
@@ -546,9 +1001,14 @@ impl Graph {
         let mut controllers = self.order_controllers();
         controllers.sort_by_key(|c| stage_of[c.node.0]);
         let mut is_controller = vec![false; self.nodes.len()];
-        for controller in &controllers {
+        for controller in &mut controllers {
             let node = controller.node;
             is_controller[node.0] = true;
+            controller.rank = self.ranks[node.0].controller;
+            controller.room = match self.rooms.iter().find(|r| r.0 == node) {
+                Some(&(_, room)) => room,
+                None => controller.ports.len() * room,
+            };
             // What comes to it: the engine's events, the notes, its
             // automation and the modulation of the nodes that modulate it.
             let routes_in = notes_into(node);
@@ -588,13 +1048,12 @@ impl Graph {
             .collect();
         // Room for every parameter event the engine can hold, for each
         // player's and maker's notes to each of its targets, for the
-        // automation the graph sends and for what each port of each
-        // controller sends.
+        // automation the graph sends and for what each controller sends.
         let notes: usize = (ordered.iter().chain(&makers))
             .map(|p| p.targets.len())
             .sum();
         let feeds = self.feeds.len() * room;
-        let ports = self.modulations.len() * room;
+        let ports: usize = controllers.iter().map(|c| c.room).sum();
         let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds + ports;
         // The nodes that can be live sources, for the engine to ask before
         // each block, and their keys, for the events it sends them.
@@ -602,9 +1061,7 @@ impl Graph {
             .filter(|&n| self.nodes[n].live().is_some())
             .map(NodeId)
             .collect();
-        let mut live_keys: Vec<NodeKey> = (live.iter())
-            .filter_map(|id| self.keys.get(id.0).copied())
-            .collect();
+        let mut live_keys: Vec<NodeKey> = live.iter().filter_map(|&id| key_of(id)).collect();
         live_keys.sort_unstable();
         Ok(PreparedGraph {
             config: *config,
@@ -613,7 +1070,7 @@ impl Graph {
             inputs: self.inputs,
             ports: self.ports,
             order,
-            output,
+            output: self.output,
             cue: self.cue,
             taps: self.taps,
             records: self.records,
@@ -638,9 +1095,13 @@ impl Graph {
             stages,
             stage: 0,
             schedule,
-            loads: Arc::new(NodeLoads::new(loads)),
+            loads,
+            load_base,
             live,
             live_keys,
+            live_half: None,
+            live_ids: Vec::new(),
+            queue_rooms: self.queue_rooms,
         })
     }
 
@@ -657,6 +1118,8 @@ impl Graph {
                     .filter(|m| m.0 == node)
                     .map(|&(_, to, param)| (to, param))
                     .collect(),
+                rank: 0,
+                room: 0,
             })
             .collect();
         let mut ordered = Vec::with_capacity(waiting.len());
@@ -732,7 +1195,7 @@ impl Graph {
             }
         }
         let cue_late = self.cue.map_or(0, |cue| late[cue.0]);
-        let taps_late = self.taps.iter().map(|tap| late[tap.0]).max();
+        let taps_late = self.taps.iter().flatten().map(|tap| late[tap.0]).max();
         let latency = late[output.0].max(cue_late).max(taps_late.unwrap_or(0));
         if let Some(cue) = self.cue {
             self.cue = Some(self.line_up(cue, &late, latency, Joint::Cue, &mut delays, config));
@@ -740,8 +1203,10 @@ impl Graph {
         *output = self.line_up(*output, &late, latency, Joint::Output, &mut delays, config);
         for n in 0..self.taps.len() {
             let joint = Joint::Tap(u32::try_from(n).unwrap_or(u32::MAX));
-            let tap = self.taps[n];
-            self.taps[n] = self.line_up(tap, &late, latency, joint, &mut delays, config);
+            if let Some(tap) = self.taps[n] {
+                let tap = self.line_up(tap, &late, latency, joint, &mut delays, config);
+                self.taps[n] = Some(tap);
+            }
         }
         (delays, latency)
     }
@@ -965,10 +1430,12 @@ pub struct PreparedGraph {
     /// Every node comes after all of its inputs, and each stage's nodes
     /// after the stage's before it.
     pub(crate) order: Vec<NodeId>,
-    pub(crate) output: NodeId,
+    /// The output node: in a graph's halves, in the half that has it.
+    pub(crate) output: Option<NodeId>,
     pub(crate) cue: Option<NodeId>,
-    /// The nodes whose outputs are the taps, lined up with the output.
-    taps: Vec<NodeId>,
+    /// The nodes whose outputs are the taps, lined up with the output, by
+    /// number: in a graph's halves, those in the half.
+    taps: Vec<Option<NodeId>>,
     /// The record taps, by their writers' keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
     /// The notes each recorded node played in the current block.
@@ -1024,12 +1491,25 @@ pub struct PreparedGraph {
     pub(crate) stage: usize,
     /// How the parallel renderer runs the graph.
     pub(crate) schedule: Schedule,
-    /// How long each node takes.
+    /// How long each node takes, for both halves of a graph.
     pub(crate) loads: Arc<NodeLoads>,
+    /// Where this half's loads start in `loads`.
+    pub(crate) load_base: usize,
     /// The nodes that can be live sources ([`Node::live`]).
     live: Vec<NodeId>,
     /// Their keys, sorted.
     live_keys: Vec<NodeKey>,
+    /// The half of the graph that renders live, if any node does: this is
+    /// the half that renders ahead then. The engine takes it out as it
+    /// installs the graph, for its live side to render.
+    pub(crate) live_half: Option<Box<PreparedGraph>>,
+    /// Whose the live half's nodes are, sorted, for the engine to tell
+    /// whether a node that renders live now will render ahead in the graph
+    /// that takes over.
+    pub(crate) live_ids: Vec<LoadKey>,
+    /// The queues of notes and modulation into the live half, for the
+    /// engine to check they have room for a block it renders ahead.
+    queue_rooms: Vec<queue::Room>,
 }
 
 /// Where delay compensation put a delay. A delay takes over from the delay
@@ -1051,10 +1531,13 @@ pub enum Joint {
     Tap(u32),
 }
 
-/// A node event on its way into a graph, with its arrival order.
+/// A node event on its way into a graph, with its arrival order and its
+/// sender's rank: the events a node gets on one frame come to it in order
+/// of rank, then of arrival.
 #[derive(Clone, Copy)]
 pub(crate) struct Routed {
     pub node: NodeId,
+    pub rank: u32,
     pub order: u32,
     pub event: NodeEvent,
 }
@@ -1063,10 +1546,14 @@ pub(crate) struct Routed {
 /// side inputs for notes, and its note record, if it has one.
 struct Player {
     node: NodeId,
-    key: NodeKey,
+    /// Its key: none for a queue's, which takes over from nothing.
+    key: Option<NodeKey>,
     targets: Vec<(NodeId, bool)>,
-    /// The targets' keys, for the graph that takes over.
+    /// The keys of the nodes its notes go to in the whole graph, in either
+    /// half, for the graph that takes over.
     target_keys: Vec<(NodeKey, bool)>,
+    /// Where its notes come among a node's events.
+    rank: u32,
     record: Option<usize>,
     sounding: Sounding,
 }
@@ -1163,10 +1650,13 @@ struct Stage {
 }
 
 /// A node that modulates others, and the node and parameter each of its
-/// ports goes to.
+/// ports goes to, with where its modulation comes among a node's events
+/// and how much it can send in a block.
 struct Modulator {
     node: NodeId,
     ports: Vec<(NodeId, ParamId)>,
+    rank: u32,
+    room: usize,
 }
 
 /// Where a node puts the notes it plays in a block: see
@@ -1174,6 +1664,8 @@ struct Modulator {
 pub struct Notes<'a> {
     routed: &'a mut Vec<Routed>,
     targets: &'a [(NodeId, bool)],
+    /// Where the node's notes come among a target's events.
+    rank: u32,
     /// Where the node's notes are recorded, if they are.
     record: Option<&'a mut Vec<NodeEvent>>,
     /// What the node has sounding where its notes go, if it's kept track
@@ -1216,6 +1708,7 @@ impl Notes<'_> {
             let kind = if side { kind.to_side() } else { kind };
             self.routed.push(Routed {
                 node,
+                rank: self.rank,
                 order,
                 event: NodeEvent { offset, kind },
             });
@@ -1292,12 +1785,21 @@ impl<'a> Notes<'a> {
         Self {
             routed,
             targets: &NOWHERE,
+            rank: 0,
             record: None,
             sounding: None,
             frames,
             room: Self::CAPACITY,
             dropped: 0,
         }
+    }
+
+    /// Sends a note or a controller's move as it was played, as
+    /// [`send`](Self::send) and [`send_controller_on`](Self::send_controller_on)
+    /// do: for a node that plays on what another node played.
+    pub(crate) fn send_played(&mut self, offset: usize, kind: NodeEventKind) -> bool {
+        debug_assert!(kind.is_played(), "notes and controllers are played");
+        self.send_kind(offset, kind)
     }
 
     /// How many notes there was no room for.
@@ -1318,6 +1820,8 @@ pub struct Controls<'a> {
     routed: &'a mut Vec<Routed>,
     /// Where each port goes.
     ports: &'a [(NodeId, ParamId)],
+    /// Where the node's modulation comes among a node's events.
+    rank: u32,
     frames: usize,
     /// How many more events the node can send this block.
     room: usize,
@@ -1351,7 +1855,13 @@ impl Controls<'_> {
             note: None,
         };
         let event = NodeEvent { offset, kind };
-        self.routed.push(Routed { node, order, event });
+        let rank = self.rank;
+        self.routed.push(Routed {
+            node,
+            rank,
+            order,
+            event,
+        });
         true
     }
 
@@ -1379,6 +1889,7 @@ impl<'a> Controls<'a> {
         Self {
             routed,
             ports,
+            rank: 0,
             frames,
             room,
             dropped: 0,
@@ -1396,34 +1907,55 @@ impl PreparedGraph {
         self.config
     }
 
+    /// How many nodes the graph has, in both halves, the queues between
+    /// them included.
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.nodes.len() + self.live_half.as_ref().map_or(0, |live| live.len())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.len() == 0
     }
 
     /// Whether a node has `key`.
     pub fn contains(&self, key: NodeKey) -> bool {
-        self.find(key).is_some()
+        self.find(key).is_some() || self.live_half.as_ref().is_some_and(|l| l.contains(key))
     }
 
     /// The output node's most recent `frames` frames.
     pub fn output(&self, frames: usize) -> AudioRef<'_> {
-        self.buffers[self.output.0].view(frames)
+        (self.own_output(frames))
+            .or_else(|| Some(self.live_half.as_ref()?.output(frames)))
+            .unwrap_or(AudioRef::empty(frames))
+    }
+
+    /// The output node's most recent `frames` frames, if it's in this half.
+    pub(crate) fn own_output(&self, frames: usize) -> Option<AudioRef<'_>> {
+        self.output
+            .map(|output| self.buffers[output.0].view(frames))
     }
 
     /// The cue node's most recent `frames` frames, if the graph has one (see
     /// [`Graph::set_cue`]).
     pub fn cue(&self, frames: usize) -> Option<AudioRef<'_>> {
+        (self.own_cue(frames)).or_else(|| self.live_half.as_ref()?.cue(frames))
+    }
+
+    /// The cue node's most recent `frames` frames, if it's in this half.
+    pub(crate) fn own_cue(&self, frames: usize) -> Option<AudioRef<'_>> {
         self.cue.map(|cue| self.buffers[cue.0].view(frames))
     }
 
     /// Tap `n`'s most recent `frames` frames, if the graph has it (see
     /// [`Graph::add_tap`]).
     pub fn tap(&self, n: usize, frames: usize) -> Option<AudioRef<'_>> {
-        self.taps.get(n).map(|tap| self.buffers[tap.0].view(frames))
+        (self.own_tap(n, frames)).or_else(|| self.live_half.as_ref()?.tap(n, frames))
+    }
+
+    /// Tap `n`'s most recent `frames` frames, if it's in this half.
+    pub(crate) fn own_tap(&self, n: usize, frames: usize) -> Option<AudioRef<'_>> {
+        let tap = (*self.taps.get(n)?)?;
+        Some(self.buffers[tap.0].view(frames))
     }
 
     /// How many taps the graph has.
@@ -1438,6 +1970,13 @@ impl PreparedGraph {
         self.tap(n, frames)
     }
 
+    /// The record tap for the writer with `key`'s most recent `frames`
+    /// frames, if it's in this half.
+    pub(crate) fn own_record(&self, key: NodeKey, frames: usize) -> Option<AudioRef<'_>> {
+        let &(_, n) = self.records.iter().find(|(k, _)| *k == key)?;
+        self.own_tap(n, frames)
+    }
+
     /// The keys of the writers the graph has record taps for, in the order
     /// they were added.
     pub fn records(&self) -> impl Iterator<Item = NodeKey> + '_ {
@@ -1448,14 +1987,21 @@ impl PreparedGraph {
     /// block, in order, each at its offset into the block, if the graph
     /// has a note record with that key (see [`Graph::add_note_record`]).
     pub fn record_notes(&self, key: NodeKey) -> Option<&[NodeEvent]> {
+        (self.own_record_notes(key)).or_else(|| self.live_half.as_ref()?.record_notes(key))
+    }
+
+    /// The same, if the node recorded is in this half.
+    pub(crate) fn own_record_notes(&self, key: NodeKey) -> Option<&[NodeEvent]> {
         let &(_, i) = self.note_keys.iter().find(|&&(k, _)| k == key)?;
         Some(&self.note_records[i].notes)
     }
 
-    /// The keys of the writers the graph has note records for, in the
-    /// order they were added.
+    /// The keys of the writers the graph has note records for: those of
+    /// the half that renders ahead, then those of the live half, each in
+    /// the order they were added.
     pub fn note_records(&self) -> impl Iterator<Item = NodeKey> + '_ {
-        self.note_keys.iter().map(|&(key, _)| key)
+        let live = self.live_half.iter().flat_map(|live| live.note_keys.iter());
+        (self.note_keys.iter().chain(live)).map(|&(key, _)| key)
     }
 
     /// How many frames late the output plays, after delay compensation: the
@@ -1476,26 +2022,58 @@ impl PreparedGraph {
         self.loads.clone()
     }
 
-    /// Whether any node is a live source now ([`Node::live`]).
+    /// Whether any node is a live source now ([`Node::live`]), in this half
+    /// and in the live half, unless the engine took it out.
     pub(crate) fn is_live(&self) -> bool {
         (self.live.iter()).any(|id| self.nodes[id.0].live() == Some(true))
+            || self.live_half.as_ref().is_some_and(|live| live.is_live())
     }
 
-    /// Whether the node with `key` can be a live source.
+    /// Whether the node with `key` can be a live source, in this half and
+    /// in the live half, unless the engine took it out.
     pub(crate) fn can_be_live(&self, key: NodeKey) -> bool {
         self.live_keys.binary_search(&key).is_ok()
+            || self
+                .live_half
+                .as_ref()
+                .is_some_and(|live| live.can_be_live(key))
     }
 
-    /// How many channels the output has.
+    /// Whether the node with `key` renders in the graph's live half, which
+    /// the engine may have taken out.
+    pub(crate) fn renders_live(&self, key: NodeKey) -> bool {
+        self.live_ids.binary_search(&LoadKey::Node(key)).is_ok()
+    }
+
+    /// Whether anything that renders in this graph's live half renders
+    /// ahead in `new`, which takes over from it: a track disarmed, say.
+    pub(crate) fn turns_ahead(&self, new: &PreparedGraph) -> bool {
+        self.live_ids.iter().any(|id| match *id {
+            LoadKey::Node(key) => new.find(key).is_some(),
+            LoadKey::Delay { at, .. } => new.delays.binary_search_by_key(&at, |d| d.0).is_ok(),
+        })
+    }
+
+    /// Whether every queue into the live half has room for the notes and
+    /// the modulation of another block.
+    pub(crate) fn queues_have_room(&self) -> bool {
+        self.queue_rooms.iter().all(queue::Room::has_room)
+    }
+
+    /// How many channels the output has, in this half: none if it's in the
+    /// live half.
     pub(crate) fn output_channels(&self) -> usize {
-        self.buffers[self.output.0].channels()
+        self.output
+            .map_or(0, |output| self.buffers[output.0].channels())
     }
 
-    /// How many channels the cue output has: none without one.
+    /// How many channels the cue output has, in this half: none without
+    /// one.
     pub(crate) fn cue_channels(&self) -> usize {
         self.cue.map_or(0, |cue| self.buffers[cue.0].channels())
     }
 
+    /// The node with `key`, in this half.
     pub(crate) fn find(&self, key: NodeKey) -> Option<NodeId> {
         self.by_key
             .binary_search_by_key(&key, |&(k, _)| k)
@@ -1504,8 +2082,8 @@ impl PreparedGraph {
     }
 
     /// Lets each node take over from the node with the same key in `old`,
-    /// and each delay from the delay at the same joint. Runs on the audio
-    /// thread.
+    /// and each delay from the delay at the same joint, whichever half of
+    /// either graph they're in. Runs on the audio thread.
     ///
     /// The notes each player had sounding go on sounding where its notes
     /// still go. Those sounding where they don't any more end on the first
@@ -1517,20 +2095,31 @@ impl PreparedGraph {
     /// while notes play leaves none hanging. The switches a player holds on
     /// then go on where its notes go now, after any let go there, so a
     /// pedal a track's clips hold down holds whichever way their notes go.
+    #[cfg(test)]
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
+        let mut live = self.live_half.take();
+        let mut old_live = old.live_half.take();
+        take_over(self, live.as_deref_mut(), old);
+        if let Some(old_live) = old_live.as_deref_mut() {
+            take_over(self, live.as_deref_mut(), old_live);
+        }
+        self.live_half = live;
+        old.live_half = old_live;
+    }
+
+    /// Lets each node of this half take over from the node with the same
+    /// key in `old`, one half of the graph it replaces, and each delay from
+    /// the delay at the same joint, with their loads.
+    fn adopt_nodes(&mut self, old: &mut PreparedGraph) {
         let (nodes, old_nodes) = (&mut self.nodes, &mut old.nodes);
         let (loads, old_loads) = (&self.loads, &old.loads);
+        let (base, old_base) = (self.load_base, old.load_base);
         let mut adopt = |id: NodeId, old_id: NodeId| {
             nodes[id.0].adopt(old_nodes[old_id.0].as_mut());
-            loads.carry_on(id.0, old_loads, old_id.0);
+            loads.carry_on(base + id.0, old_loads, old_base + old_id.0);
         };
         pairs(&self.by_key, &old.by_key, &mut adopt);
         pairs(&self.delays, &old.delays, &mut adopt);
-        // Every let go before any switch goes on, so none comes after one.
-        self.let_go(&old.players, false);
-        self.let_go(&old.makers, true);
-        self.hand_over(&mut old.players, false);
-        self.hand_over(&mut old.makers, true);
     }
 
     /// The players, or with `made` the makers.
@@ -1541,77 +2130,6 @@ impl PreparedGraph {
         }
     }
 
-    /// Ends the notes each of `gone`, the old graph's players, or with
-    /// `made` its makers, had sounding where its notes don't go any more,
-    /// and lets go of the switches it held on there: see
-    /// [`adopt_from`](Self::adopt_from).
-    fn let_go(&mut self, gone: &[Player], made: bool) {
-        for gone in gone {
-            let player = self.list(made).iter().position(|p| p.key == gone.key);
-            for &(to, side) in &gone.target_keys {
-                let targets = |p: usize| &self.list(made)[p].target_keys;
-                let kept = player.is_some_and(|p| targets(p).contains(&(to, side)));
-                let Some(to) = self.find(to).filter(|_| !kept) else {
-                    continue;
-                };
-                let ends = gone.sounding.notes.iter().map(|&note| {
-                    let velocity = Note::RELEASE_VELOCITY;
-                    NodeEventKind::Note(NoteEvent::Off { note, velocity })
-                });
-                let ups = switches_on(gone.sounding.switches).map(|(controller, channel)| {
-                    NodeEventKind::Controller {
-                        controller,
-                        value: 0.0,
-                        channel,
-                    }
-                });
-                for kind in ends.chain(ups) {
-                    let kind = if side { kind.to_side() } else { kind };
-                    self.route(to, NodeEvent { offset: 0, kind });
-                }
-            }
-        }
-    }
-
-    /// Has the notes each of `gone`, the old graph's players, or with
-    /// `made` its makers, had sounding sound on where its notes still go,
-    /// and the switches it held on hold on where they go now: see
-    /// [`adopt_from`](Self::adopt_from).
-    fn hand_over(&mut self, gone: &mut [Player], made: bool) {
-        for gone in gone.iter_mut() {
-            let Some(p) = self.list(made).iter().position(|p| p.key == gone.key) else {
-                continue;
-            };
-            let mut kept_any = false;
-            for t in 0..self.list(made)[p].targets.len() {
-                let player = &self.list(made)[p];
-                let (to, side) = player.targets[t];
-                if gone.target_keys.contains(&player.target_keys[t]) {
-                    kept_any = true;
-                    continue;
-                }
-                for (controller, channel) in switches_on(gone.sounding.switches) {
-                    let kind = NodeEventKind::Controller {
-                        controller,
-                        value: 1.0,
-                        channel,
-                    };
-                    let kind = if side { kind.to_side() } else { kind };
-                    self.route(to, NodeEvent { offset: 0, kind });
-                }
-            }
-            let player = match made {
-                true => &mut self.makers[p],
-                false => &mut self.players[p],
-            };
-            // Its notes sound on where it still sends them, if anywhere.
-            if kept_any {
-                std::mem::swap(&mut player.sounding.notes, &mut gone.sounding.notes);
-            }
-            player.sounding.switches = gone.sounding.switches;
-        }
-    }
-
     /// Queues an event for the next block. Returns whether there was room:
     /// there always is for the events the engine holds.
     pub(crate) fn route(&mut self, node: NodeId, event: NodeEvent) -> bool {
@@ -1619,7 +2137,12 @@ impl PreparedGraph {
             return false;
         }
         let order = self.routed.len() as u32;
-        self.routed.push(Routed { node, order, event });
+        self.routed.push(Routed {
+            node,
+            rank: 0,
+            order,
+            event,
+        });
         true
     }
 
@@ -1643,7 +2166,12 @@ impl PreparedGraph {
                     routed.len() < routed.capacity(),
                     "a graph has room for its automation"
                 );
-                routed.push(Routed { node, order, event });
+                routed.push(Routed {
+                    node,
+                    rank: 0,
+                    order,
+                    event,
+                });
             });
         }
     }
@@ -1662,6 +2190,7 @@ impl PreparedGraph {
             inbox,
             inbox_events,
             loads,
+            load_base,
             stage_of,
             stages,
             stage,
@@ -1683,15 +2212,22 @@ impl PreparedGraph {
             // fed by now. Not the modulation, which comes later.
             inbox.clear();
             inbox.extend(routed.iter().filter(|r| r.node == player.node));
-            inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
+            inbox.sort_unstable_by_key(|r| (r.event.offset, r.rank, r.order));
             inbox_events.clear();
             inbox_events.extend(inbox.iter().map(|r| r.event));
             let ctx = block.context(config.sample_rate, inbox_events);
+            // A queue's player plays on notes another node played, which
+            // that node keeps sounding.
+            let sounding = match player.key {
+                Some(_) => Some(&mut player.sounding),
+                None => None,
+            };
             let mut notes = Notes {
                 routed,
                 targets: &player.targets,
+                rank: player.rank,
                 record: player.record.map(|i| &mut note_records[i].notes),
-                sounding: Some(&mut player.sounding),
+                sounding,
                 frames: block.frames,
                 room: Notes::CAPACITY,
                 dropped: 0,
@@ -1699,7 +2235,7 @@ impl PreparedGraph {
             let started = load::now();
             nodes[player.node.0].play_notes(&ctx, &mut notes);
             let ticks = load::now().wrapping_sub(started);
-            loads.loads[player.node.0].add_before(ticks);
+            loads.loads[*load_base + player.node.0].add_before(ticks);
             dropped += notes.dropped;
         }
         // The stage's players have had theirs.
@@ -1726,6 +2262,7 @@ impl PreparedGraph {
             inbox,
             inbox_events,
             loads,
+            load_base,
             stage_of,
             stages,
             stage,
@@ -1735,28 +2272,28 @@ impl PreparedGraph {
         if range.is_empty() {
             return 0;
         }
-        let room = Feed::room(config.max_block);
         let mut dropped = 0;
         for controller in &controllers[range] {
             // Everything sent to it so far, which is all of it: the nodes
             // that modulate it have had their turn.
             inbox.clear();
             inbox.extend(routed.iter().filter(|r| r.node == controller.node));
-            inbox.sort_unstable_by_key(|r| (r.event.offset, r.order));
+            inbox.sort_unstable_by_key(|r| (r.event.offset, r.rank, r.order));
             inbox_events.clear();
             inbox_events.extend(inbox.iter().map(|r| r.event));
             let ctx = block.context(config.sample_rate, inbox_events);
             let mut controls = Controls {
                 routed,
                 ports: &controller.ports,
+                rank: controller.rank,
                 frames: block.frames,
-                room: controller.ports.len() * room,
+                room: controller.room,
                 dropped: 0,
             };
             let started = load::now();
             nodes[controller.node.0].control(&ctx, &mut controls);
             let ticks = load::now().wrapping_sub(started);
-            loads.loads[controller.node.0].add_before(ticks);
+            loads.loads[*load_base + controller.node.0].add_before(ticks);
             dropped += controls.dropped;
         }
         // The stage's controllers have had theirs.
@@ -1807,6 +2344,7 @@ impl PreparedGraph {
             makers,
             note_records,
             loads,
+            load_base,
             stages,
             stage,
             ..
@@ -1817,6 +2355,7 @@ impl PreparedGraph {
             let mut notes = Notes {
                 routed,
                 targets: &maker.targets,
+                rank: maker.rank,
                 record: maker.record.map(|i| &mut note_records[i].notes),
                 sounding: Some(&mut maker.sounding),
                 frames: block.frames,
@@ -1826,7 +2365,7 @@ impl PreparedGraph {
             let started = load::now();
             nodes[maker.node.0].made_notes(&ctx, &mut notes);
             let ticks = load::now().wrapping_sub(started);
-            loads.loads[maker.node.0].add_before(ticks);
+            loads.loads[*load_base + maker.node.0].add_before(ticks);
             dropped += notes.dropped;
         }
         dropped
@@ -1839,7 +2378,22 @@ impl PreparedGraph {
     /// rendered, which go to the stages after it. Returns how many notes
     /// and how much modulation there was no room for. Runs on the audio
     /// thread, or on a worker rendering ahead.
+    ///
+    /// A graph split into halves renders the half that renders ahead and
+    /// then its live half, with what passes between them through their
+    /// queues ([`Graph::prepare`]), unless the engine took the live half out
+    /// to render it on its live side.
     pub(crate) fn run(&mut self, renderer: &mut dyn Renderer, block: &Block<'_>) -> u64 {
+        let mut dropped = self.run_half(renderer, block);
+        if let Some(live) = &mut self.live_half {
+            dropped += live.run(renderer, block);
+        }
+        dropped
+    }
+
+    /// Renders `block` in this half of the graph, as [`run`](Self::run)
+    /// does.
+    fn run_half(&mut self, renderer: &mut dyn Renderer, block: &Block<'_>) -> u64 {
         self.feed_automation(block);
         let mut dropped = 0;
         for stage in 0..self.stages.len() {
@@ -1862,7 +2416,7 @@ impl PreparedGraph {
     /// Stores a block's node events, grouped by node, in order of offset and
     /// otherwise in arrival order. `routed` must fit in `events`.
     pub(crate) fn load_events(&mut self, routed: &mut [Routed]) {
-        routed.sort_unstable_by_key(|r| (r.node, r.event.offset, r.order));
+        routed.sort_unstable_by_key(|r| (r.node, r.event.offset, r.rank, r.order));
         for r in routed.iter() {
             let index = self.events.len() as u32;
             self.events.push(r.event);
@@ -1881,6 +2435,141 @@ impl PreparedGraph {
         }
         self.events.clear();
     }
+}
+
+/// Lets each node of a new graph, which renders in `ahead` and in `live`
+/// if it has a live half, take over from the node with the same key in
+/// `old`, one half of the graph it replaces, and each delay from the delay
+/// at the same joint, and hands over what `old`'s players and makers had
+/// sounding: see [`PreparedGraph::adopt_from`]. The engine calls it for
+/// each half of the old graph, on the side of the engine where that half
+/// renders up to the swap. Runs on the audio thread.
+pub(crate) fn take_over(
+    ahead: &mut PreparedGraph,
+    live: Option<&mut PreparedGraph>,
+    old: &mut PreparedGraph,
+) {
+    ahead.adopt_nodes(old);
+    match live {
+        Some(live) => {
+            live.adopt_nodes(old);
+            hand_over(&mut [ahead, live], old);
+        }
+        None => hand_over(&mut [ahead], old),
+    }
+}
+
+/// Hands over what `old`'s players and makers had sounding to `new`, the
+/// halves of the graph that takes over. Every let go comes first, before
+/// the events queued for the new graph so far, so none comes after a
+/// switch goes on, though the other half of the old graph may have handed
+/// over its switches before, on the other side of the engine: neither half
+/// of the new graph has rendered yet.
+fn hand_over(new: &mut [&mut PreparedGraph], old: &mut PreparedGraph) {
+    let mut queued = [0; 2];
+    for (queued, graph) in queued.iter_mut().zip(new.iter()) {
+        *queued = graph.routed.len();
+    }
+    let_go(new, &old.players, false);
+    let_go(new, &old.makers, true);
+    for (&queued, graph) in queued.iter().zip(new.iter_mut()) {
+        let let_go = graph.routed.len() - queued;
+        graph.routed.rotate_right(let_go);
+        renumber(&mut graph.routed);
+    }
+    hold_on(new, &mut old.players, false);
+    hold_on(new, &mut old.makers, true);
+}
+
+/// Ends the notes each of `gone`, an old graph's players, or with `made`
+/// its makers, had sounding where its notes don't go any more in `new`,
+/// the halves of the graph that takes over, and lets go of the switches it
+/// held on there: see [`PreparedGraph::adopt_from`]. A queue's player plays
+/// on notes another node keeps sounding, so it lets go of nothing.
+fn let_go(new: &mut [&mut PreparedGraph], gone: &[Player], made: bool) {
+    for gone in gone.iter().filter(|gone| gone.key.is_some()) {
+        let player = find_player(new, gone.key, made);
+        for &(to, side) in &gone.target_keys {
+            let targets = |(half, p): (usize, usize)| &new[half].list(made)[p].target_keys;
+            if player.is_some_and(|p| targets(p).contains(&(to, side))) {
+                continue;
+            }
+            let Some((graph, to)) = (new.iter_mut()).find_map(|g| g.find(to).map(|to| (g, to)))
+            else {
+                continue;
+            };
+            let ends = gone.sounding.notes.iter().map(|&note| {
+                let velocity = Note::RELEASE_VELOCITY;
+                NodeEventKind::Note(NoteEvent::Off { note, velocity })
+            });
+            let ups = switches_on(gone.sounding.switches).map(|(controller, channel)| {
+                NodeEventKind::Controller {
+                    controller,
+                    value: 0.0,
+                    channel,
+                }
+            });
+            for kind in ends.chain(ups) {
+                let kind = if side { kind.to_side() } else { kind };
+                graph.route(to, NodeEvent { offset: 0, kind });
+            }
+        }
+    }
+}
+
+/// Has the notes each of `gone`, an old graph's players, or with `made` its
+/// makers, had sounding sound on where its notes still go in `new`, the
+/// halves of the graph that takes over, and the switches it held on hold
+/// on where they go now: see [`PreparedGraph::adopt_from`].
+fn hold_on(new: &mut [&mut PreparedGraph], gone: &mut [Player], made: bool) {
+    for gone in gone.iter_mut().filter(|gone| gone.key.is_some()) {
+        let Some((half, p)) = find_player(new, gone.key, made) else {
+            continue;
+        };
+        let mut kept_any = false;
+        for t in 0..new[half].list(made)[p].target_keys.len() {
+            let (to, side) = new[half].list(made)[p].target_keys[t];
+            if gone.target_keys.contains(&(to, side)) {
+                kept_any = true;
+                continue;
+            }
+            let Some((graph, to)) = (new.iter_mut()).find_map(|g| g.find(to).map(|to| (g, to)))
+            else {
+                continue;
+            };
+            for (controller, channel) in switches_on(gone.sounding.switches) {
+                let kind = NodeEventKind::Controller {
+                    controller,
+                    value: 1.0,
+                    channel,
+                };
+                let kind = if side { kind.to_side() } else { kind };
+                graph.route(to, NodeEvent { offset: 0, kind });
+            }
+        }
+        let player = match made {
+            true => &mut new[half].makers[p],
+            false => &mut new[half].players[p],
+        };
+        // Its notes sound on where it still sends them, if anywhere.
+        if kept_any {
+            std::mem::swap(&mut player.sounding.notes, &mut gone.sounding.notes);
+        }
+        player.sounding.switches = gone.sounding.switches;
+    }
+}
+
+/// Which of `new`'s halves has the player, or with `made` the maker, with
+/// `key`, and where it is among them.
+fn find_player(
+    new: &[&mut PreparedGraph],
+    key: Option<NodeKey>,
+    made: bool,
+) -> Option<(usize, usize)> {
+    (new.iter().enumerate()).find_map(|(half, graph)| {
+        let p = graph.list(made).iter().position(|p| p.key == key)?;
+        Some((half, p))
+    })
 }
 
 /// Numbers the events in `routed` in the order they're in, after some have
@@ -1917,6 +2606,7 @@ impl fmt::Debug for PreparedGraph {
             .field("cue", &self.cue)
             .field("taps", &self.taps.len())
             .field("latency", &self.latency)
+            .field("live_half", &self.live_half)
             .finish_non_exhaustive()
     }
 }
@@ -3154,5 +3844,240 @@ mod tests {
         assert_eq!(prepared.find(NodeKey(10)), Some(b));
         assert_eq!(prepared.find(NodeKey(20)), Some(NodeId(2)));
         assert!(!prepared.contains(NodeKey(15)));
+    }
+
+    /// A track monitoring the device inputs, always: a live source.
+    fn monitoring() -> crate::nodes::InputMonitor {
+        crate::nodes::InputMonitor::new(musicable_model::Monitor::In, false).with_input(0, 1)
+    }
+
+    /// The keys of the nodes in `graph`'s half that renders ahead, and in
+    /// its live half.
+    fn sides(graph: &PreparedGraph) -> [Vec<u64>; 2] {
+        let keys = |graph: &PreparedGraph| graph.by_key.iter().map(|&(key, _)| key.0).collect();
+        let live = graph.live_half.as_deref().map_or_else(Vec::new, keys);
+        [keys(graph), live]
+    }
+
+    #[test]
+    fn what_a_live_source_reaches_renders_live_and_the_rest_ahead() {
+        let mut g = Graph::new();
+        let clips = g.add(NodeKey(0), Constant::new(0.5));
+        let input = g.add(NodeKey(1), monitoring());
+        let track = g.add(NodeKey(2), Gain::new(1.0));
+        let other = g.add(NodeKey(3), Constant::new(0.25));
+        let master = g.add(NodeKey(4), Sum::default());
+        g.connect(clips, input).unwrap();
+        g.connect(input, track).unwrap();
+        g.connect(track, master).unwrap();
+        g.connect(other, master).unwrap();
+        g.set_output(master).unwrap();
+        let graph = g.prepare(&CONFIG).unwrap();
+        assert_eq!(sides(&graph), [vec![0, 3], vec![1, 2, 4]]);
+        assert!(graph.renders_live(NodeKey(2)) && !graph.renders_live(NodeKey(3)));
+        // The output is the live half's.
+        assert_eq!(graph.output_channels(), 0);
+
+        // Nothing live, nothing to split.
+        let mut g = Graph::new();
+        let clips = g.add(NodeKey(0), Constant::new(0.5));
+        g.set_output(clips).unwrap();
+        let graph = g.prepare(&CONFIG).unwrap();
+        assert!(graph.live_half.is_none());
+    }
+
+    #[test]
+    fn nodes_always_live_and_nodes_kept_together_render_live_with_what_they_reach() {
+        let mut g = Graph::new();
+        let a = g.add(NodeKey(0), Constant::new(0.5));
+        let marked = g.add(NodeKey(1), Gain::new(1.0));
+        let after = g.add(NodeKey(2), Gain::new(1.0));
+        let partner = g.add(NodeKey(3), Constant::new(0.25));
+        let reached = g.add(NodeKey(4), Gain::new(1.0));
+        let master = g.add(NodeKey(5), Sum::default());
+        g.connect(a, marked).unwrap();
+        g.connect(marked, after).unwrap();
+        g.connect(partner, reached).unwrap();
+        g.connect(after, master).unwrap();
+        g.connect(reached, master).unwrap();
+        g.set_live(marked).unwrap();
+        g.render_together(reached, after).unwrap();
+        g.set_output(master).unwrap();
+        let graph = g.prepare(&CONFIG).unwrap();
+        // Kept together with a live node, `reached` renders live, but not
+        // what feeds it.
+        assert_eq!(sides(&graph), [vec![0, 3], vec![1, 2, 4, 5]]);
+    }
+
+    /// The node with `key` in either half of `graph`.
+    fn node_in<T: Node>(graph: &mut PreparedGraph, key: u64) -> &mut T {
+        let half = match graph.find(NodeKey(key)) {
+            Some(_) => graph,
+            None => graph.live_half.as_deref_mut().expect("a live half"),
+        };
+        let id = half.find(NodeKey(key)).expect("the node");
+        half.nodes[id.0]
+            .as_mut()
+            .downcast_mut()
+            .expect("the node's type")
+    }
+
+    #[test]
+    fn a_graph_split_in_two_renders_what_it_renders_whole() {
+        // Notes, notes made as a node renders, modulation and sound, each
+        // from nodes that render ahead to nodes that render live, and a
+        // path that delay compensation delays on the live side.
+        let build = |split: bool| {
+            let mut g = Graph::new();
+            let pulse = g.add(NodeKey(10), Pulse::default());
+            let octave = g.add(NodeKey(11), OctaveUp::default());
+            let keep = g.add(NodeKey(12), Keep(Vec::with_capacity(64)));
+            g.send_notes(pulse, octave).unwrap();
+            g.send_notes(octave, keep).unwrap();
+            g.set_live(keep).unwrap();
+
+            let hit = g.add(NodeKey(20), impulse(70));
+            let detects = g.add(NodeKey(21), Detects::new());
+            let echoes = g.add(NodeKey(22), Echoes(Vec::with_capacity(8)));
+            let octave = g.add(NodeKey(23), OctaveUp::default());
+            let kept = g.add(NodeKey(24), Keep(Vec::with_capacity(64)));
+            g.connect(hit, detects).unwrap();
+            g.send_made_notes(detects, echoes).unwrap();
+            g.send_made_notes(echoes, octave).unwrap();
+            g.send_notes(octave, kept).unwrap();
+            g.set_live(octave).unwrap();
+
+            let first = g.add(NodeKey(30), AddOne::default());
+            let second = g.add(NodeKey(31), AddOne::default());
+            let target = Modulated {
+                got: Vec::with_capacity(64),
+                modulated: Vec::new(),
+            };
+            let target = g.add(NodeKey(32), target);
+            g.modulate(first, second, ParamId(3)).unwrap();
+            g.modulate(second, target, ParamId(7)).unwrap();
+            g.set_live(second).unwrap();
+
+            let dry = g.add(NodeKey(40), impulse(100));
+            let wet = g.add(NodeKey(41), latent(10));
+            let out = g.add(NodeKey(42), Sum::default());
+            g.connect(dry, wet).unwrap();
+            g.connect(dry, out).unwrap();
+            g.connect(wet, out).unwrap();
+            g.set_live(out).unwrap();
+            for node in [keep, kept, target] {
+                g.connect(node, out).unwrap();
+            }
+            g.set_output(out).unwrap();
+            g.prepare_split(&CONFIG, split).unwrap()
+        };
+        let (mut whole, mut split) = (build(false), build(true));
+        assert_eq!(
+            sides(&split),
+            [
+                vec![10, 11, 20, 21, 22, 30, 40, 41],
+                vec![12, 23, 24, 31, 32, 42]
+            ]
+        );
+        assert_eq!(sides(&whole)[1], Vec::<u64>::new());
+        let mut outputs = [Vec::new(), Vec::new()];
+        for time in (0..256).step_by(64) {
+            for (graph, output) in [&mut whole, &mut split].into_iter().zip(&mut outputs) {
+                run_block(graph, &mut ReferenceRenderer, time);
+                output.extend_from_slice(graph.output(64).channel(0));
+            }
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        // Both impulses, lined up on the live side.
+        assert_eq!(peaks(&outputs[1]), [(110, 2.0)]);
+        let keep = |graph: &mut PreparedGraph, key| node_in::<Keep>(graph, key).0.clone();
+        for key in [12, 24] {
+            assert_eq!(keep(&mut whole, key), keep(&mut split, key), "{key}");
+        }
+        assert!(!keep(&mut split, 24).is_empty(), "the echo's notes came");
+        let got = |graph: &mut PreparedGraph| node_in::<Modulated>(graph, 32).got.clone();
+        assert_eq!(got(&mut whole), got(&mut split));
+        assert_eq!(got(&mut split)[0], (0, ParamId(7), 2.0));
+    }
+
+    /// Plays on the notes and the switches it gets, as a MIDI effect that
+    /// changes nothing would.
+    struct PassesOn;
+
+    impl Node for PassesOn {
+        fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            output.clear();
+        }
+
+        fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for event in ctx.events {
+                match event.kind {
+                    NodeEventKind::Note(note) => {
+                        notes.send(event.offset, note);
+                    }
+                    NodeEventKind::Controller {
+                        controller,
+                        value,
+                        channel,
+                    } => {
+                        notes.send_controller_on(event.offset, controller, value, channel);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pedal_let_go_in_one_half_comes_up_before_one_held_on_from_the_other() {
+        // A player holding the pedal down and a note, which renders ahead,
+        // and a node that keeps what it gets. In the first graph the notes
+        // go through a node that plays them on, which renders live; in the
+        // second they go straight to the node that keeps them, and nothing
+        // renders live. The old graph's halves hand over one after the
+        // other, as the engine's two sides do, the ahead half first.
+        let build = |between: bool| {
+            let mut g = Graph::new();
+            let pedal = g.add(NodeKey(0), Pedal::default());
+            let keep = g.add(NodeKey(1), KeepAll(Vec::with_capacity(8)));
+            match between {
+                true => {
+                    let passes = g.add(NodeKey(2), PassesOn);
+                    g.send_notes(pedal, passes).unwrap();
+                    g.send_notes(passes, keep).unwrap();
+                    g.set_live(passes).unwrap();
+                }
+                false => g.send_notes(pedal, keep).unwrap(),
+            }
+            g.set_output(keep).unwrap();
+            g.prepare(&CONFIG).unwrap()
+        };
+        let mut first = build(true);
+        assert_eq!(sides(&first), [vec![0], vec![1, 2]]);
+        run_block(&mut first, &mut ReferenceRenderer, 0);
+        let mut second = build(false);
+        assert_eq!(sides(&second), [vec![0, 1], vec![]]);
+        rt::scope(|| second.adopt_from(&mut first));
+        node_in::<Pedal>(&mut second, 0).started = true;
+        run_block(&mut second, &mut ReferenceRenderer, 64);
+        // The node between ends the note and lets the pedal come up on
+        // each channel, and only then does the pedal the player holds go
+        // down where its notes go now, so it holds on.
+        let off = NodeEventKind::Note(NoteEvent::Off {
+            note: NoteId(7),
+            velocity: Note::RELEASE_VELOCITY,
+        });
+        let pedal = |value, channel| {
+            let kind = NodeEventKind::Controller {
+                controller: Controller::SUSTAIN,
+                value,
+                channel,
+            };
+            (0, kind)
+        };
+        let got = std::mem::take(&mut node_in::<KeepAll>(&mut second, 1).0);
+        let up = [(0, off), pedal(0.0, None), pedal(0.0, Some(2))];
+        let down = [pedal(1.0, None), pedal(1.0, Some(2))];
+        assert_eq!(got, [&up[..], &down[..]].concat());
     }
 }

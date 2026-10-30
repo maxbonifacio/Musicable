@@ -1,11 +1,14 @@
 //! Rendering ahead, against rendering each block as the device asks for it.
 //!
 //! An engine with a lead plays just what an engine without one plays, when
-//! the other is given what it applied at the times it applied it and renders
-//! the same blocks: the random tests below have an engine without a lead
-//! replay what one with a lead logged ([`Applied`]), and compare everything
-//! they played, sample for sample. The others check what it applies when,
-//! that live sources turn it off, and the threads that render it.
+//! the other is given what it applied on the frames it applied it: the
+//! random tests below have an engine without a lead, rendering each graph
+//! whole, replay what both sides of one with a lead logged ([`Applied`]),
+//! the live side rendering each graph's live half, and compare everything
+//! they played, sample for sample. Their nodes play the same whatever
+//! blocks they render, as the two engines render different ones. The
+//! others check what it applies when, that live sources turn it off, and
+//! the threads that render it.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -934,7 +937,8 @@ enum Kind {
 }
 
 impl Kind {
-    fn node(self) -> Box<dyn Node> {
+    /// The node, for place `place` in a graph built as `build` says.
+    fn node(self, place: usize, build: &Build) -> Box<dyn Node> {
         match self {
             Kind::Probe { seed, channels } => Box::new(Probe::new(seed, channels)),
             Kind::Latent { frames, channels } => {
@@ -951,18 +955,51 @@ impl Kind {
                     input: None,
                     channel: None,
                 };
-                Box::new(MidiMonitor::new(monitor, armed).with_source(every))
+                let monitor = MidiMonitor::new(monitor, armed).with_source(every);
+                Box::new(MidiTrack::new(monitor, place, build))
             }
+        }
+    }
+
+    /// The same track armed if it isn't, and disarmed if it is, and
+    /// whether it's armed then, if it's a track.
+    fn rearmed(self) -> Option<(Kind, bool)> {
+        match self {
+            Kind::Monitor {
+                monitor,
+                armed,
+                first,
+                channels,
+            } => {
+                let armed = !armed;
+                let kind = Kind::Monitor {
+                    monitor,
+                    armed,
+                    first,
+                    channels,
+                };
+                Some((kind, armed))
+            }
+            Kind::Midi { monitor, armed } => Some((
+                Kind::Midi {
+                    monitor,
+                    armed: !armed,
+                },
+                !armed,
+            )),
+            Kind::Probe { .. } | Kind::Latent { .. } => None,
         }
     }
 }
 
-/// A node whose output depends on everything a block gives it but the
+/// A node whose output depends on everything a frame gives it but the
 /// device inputs and the MIDI inputs: its inputs, its events, notes
-/// included, the block's time, length and transport, the tempo, and its
-/// own history, which it takes over from the probe it replaces. A
-/// difference in any of them carries on through its output. It only uses
-/// arithmetic that IEEE 754 rounds exactly.
+/// included, the frame's engine time and the transport there, the tempo,
+/// and its own history, which it takes over from the probe it replaces. A
+/// difference in any of them carries on through its output, but which
+/// blocks its frames come in makes none, as the two engines of a random
+/// test render different blocks. It only uses arithmetic that IEEE 754
+/// rounds exactly.
 struct Probe {
     channels: usize,
     seed: f32,
@@ -991,6 +1028,8 @@ impl Node for Probe {
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        // What each frame of the block has the same, which only changes
+        // where a block ends.
         let transport = ctx.transport;
         let flags = [
             transport.playing,
@@ -1000,9 +1039,6 @@ impl Node for Probe {
         ];
         let flags = (flags.iter().enumerate()).fold(0, |sum, (i, &on)| sum + (u8::from(on) << i));
         let block = self.seed
-            + (ctx.time % 1000) as f32 * 1e-3
-            + ctx.frames as f32 * 1e-2
-            + (transport.position % 1000) as f32 * 1e-4
             + f32::from(flags)
             + (transport.jumps % 16) as f32 * 0.125
             + ctx.tempo.bpm_at(Beats::ZERO) as f32 * 1e-3
@@ -1017,8 +1053,14 @@ impl Node for Probe {
                     _ => 0.0,
                 };
             }
+            let time = ctx.time + frame as u64;
+            let position = match transport.playing {
+                true => transport.position + frame as u64,
+                false => transport.position,
+            };
+            let here = block + (time % 1000) as f32 * 1e-3 + (position % 1000) as f32 * 1e-4;
             for c in 0..self.channels {
-                let mut acc = self.state + block;
+                let mut acc = self.state + here;
                 for (i, input) in inputs.iter().enumerate() {
                     let x = input.channel(c % input.channels())[frame];
                     acc = acc * 0.5 + x * (i as f32 + 1.5);
@@ -1045,6 +1087,151 @@ fn weight(note: NoteEvent) -> f32 {
     }
 }
 
+/// Which MIDI messages the MIDI tracks of a run's graphs played, place by
+/// place, as the engine rendering ahead gave them, for the engine
+/// replaying the run to give each the same: a monitor that renders ahead
+/// gets none, and a monitor takes in those it gets while it doesn't play
+/// them, holding the sustain pedal, say. A bit for each frame of engine
+/// time, as the MIDI inputs have a message on a frame at most.
+struct MidiLog(Box<[AtomicU64]>);
+
+impl MidiLog {
+    /// The frames of engine time it has a bit for: more than a run plays.
+    const FRAMES: usize = 1 << 16;
+    /// The places in a graph it keeps them for: more than a graph has.
+    const PLACES: usize = 8;
+
+    fn new() -> Arc<Self> {
+        let words = Self::PLACES * Self::FRAMES / 64;
+        Arc::new(Self((0..words).map(|_| AtomicU64::new(0)).collect()))
+    }
+
+    /// The word and the bit of a message on engine time `time` at `place`.
+    fn bit(place: usize, time: u64) -> (usize, u64) {
+        let time = time as usize;
+        assert!(
+            place < Self::PLACES && time < Self::FRAMES,
+            "a run this long"
+        );
+        let at = place * Self::FRAMES + time;
+        (at / 64, 1 << (at % 64))
+    }
+
+    fn keep(&self, place: usize, time: u64) {
+        let (word, bit) = Self::bit(place, time);
+        self.0[word].fetch_or(bit, Relaxed);
+    }
+
+    fn played(&self, place: usize, time: u64) -> bool {
+        let (word, bit) = Self::bit(place, time);
+        self.0[word].load(Relaxed) & bit != 0
+    }
+}
+
+/// A random graph's MIDI track: a [`MidiMonitor`] that keeps in a
+/// [`MidiLog`] the messages it played, or in a graph to replay a run,
+/// plays only those it played then. It leaves arming it to the graphs, as
+/// an app builds the graph again when it arms a track: an event arms a
+/// MIDI monitor from the block after its own, which the engine replaying a
+/// run, rendering other blocks, can't match.
+struct MidiTrack {
+    monitor: MidiMonitor,
+    place: usize,
+    log: Arc<MidiLog>,
+    replay: bool,
+    /// Room for the events and the messages it passes on.
+    events: Vec<NodeEvent>,
+    midi: Vec<MidiMessage>,
+}
+
+impl MidiTrack {
+    fn new(monitor: MidiMonitor, place: usize, build: &Build) -> Self {
+        Self {
+            monitor,
+            place,
+            log: Arc::clone(&build.midi),
+            replay: build.whole,
+            events: Vec::with_capacity(EVENT_CAPACITY),
+            midi: Vec::with_capacity(EVENT_CAPACITY),
+        }
+    }
+
+    /// Has the monitor play `ctx`'s notes or render it, `play` says, with
+    /// neither its arming nor its monitoring, and with the messages the
+    /// track plays.
+    fn run(
+        &mut self,
+        ctx: &ProcessContext<'_>,
+        play: impl FnOnce(&mut MidiMonitor, &ProcessContext<'_>),
+    ) {
+        let Self {
+            monitor,
+            place,
+            log,
+            replay,
+            events,
+            midi,
+        } = self;
+        let arming = |e: &&NodeEvent| match e.kind {
+            NodeEventKind::Param { param, .. } => {
+                param == MidiMonitor::ARMED || param == MidiMonitor::MONITOR
+            }
+            _ => false,
+        };
+        events.clear();
+        events.extend(ctx.events.iter().filter(|e| !arming(e)));
+        midi.clear();
+        for &message in ctx.midi {
+            match replay {
+                true if !log.played(*place, message.time) => continue,
+                true => {}
+                false => log.keep(*place, message.time),
+            }
+            midi.push(message);
+        }
+        let ctx = ProcessContext {
+            events,
+            midi,
+            ..*ctx
+        };
+        play(monitor, &ctx);
+    }
+}
+
+impl Node for MidiTrack {
+    fn channels(&self) -> usize {
+        self.monitor.channels()
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        if let Some(previous) = previous.downcast_mut::<MidiTrack>() {
+            self.monitor.adopt(&mut previous.monitor);
+        }
+    }
+
+    fn live(&self) -> Option<bool> {
+        self.monitor.live()
+    }
+
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        self.run(ctx, |monitor, ctx| monitor.play_notes(ctx, notes));
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        self.run(ctx, |monitor, ctx| monitor.process(ctx, inputs, output));
+    }
+}
+
+/// How to build a random graph.
+struct Build {
+    config: EngineConfig,
+    /// What its MIDI tracks played, or replaying a run, play.
+    midi: Arc<MidiLog>,
+    /// Whether it's for the engine replaying a run, which renders each
+    /// graph whole, without a live half.
+    whole: bool,
+}
+
 /// A random graph. Each node is fed by earlier ones, and keyed by its
 /// place, so the node in the same place in the next graph takes over from
 /// it.
@@ -1058,16 +1245,18 @@ struct Spec {
     /// How often a [`Ticks`] node plays into the first node, with a note
     /// record for the writer, if there's one.
     ticks: Option<u64>,
+    /// The nodes that are always live ([`Graph::set_live`]).
+    live: Vec<usize>,
 }
 
 /// The key of a random graph's [`Ticks`].
 const TICKS: NodeKey = NodeKey(100);
 
 impl Spec {
-    fn build(&self, config: EngineConfig) -> PreparedGraph {
+    fn build(&self, build: &Build) -> PreparedGraph {
         let mut g = Graph::new();
         let ids: Vec<NodeId> = (self.nodes.iter().enumerate())
-            .map(|(i, (kind, _))| g.add_boxed(NodeKey(i as u64), kind.node()))
+            .map(|(i, (kind, _))| g.add_boxed(NodeKey(i as u64), kind.node(i, build)))
             .collect();
         for (i, (kind, inputs)) in self.nodes.iter().enumerate() {
             for &input in inputs {
@@ -1089,7 +1278,10 @@ impl Spec {
             g.send_notes(ticks, ids[0]).unwrap();
             g.add_note_record(WRITER, ticks).unwrap();
         }
-        g.prepare(&config).unwrap()
+        for &live in &self.live {
+            g.set_live(ids[live]).unwrap();
+        }
+        g.prepare_split(&build.config, !build.whole).unwrap()
     }
 }
 
@@ -1106,6 +1298,10 @@ enum Step {
     /// An event for this many frames after the engine's time.
     SendAt(u64, Event),
     Swap(Spec),
+    /// Arms the track at a place in the graph if it isn't armed, and
+    /// disarms it if it is, as an app does: with an event, and in the graph
+    /// it builds again.
+    Arm(Index),
     Tempo(TempoMap),
     Lead(Lead),
     /// Waits a little while for the workers to fill the lead.
@@ -1164,15 +1360,20 @@ fn spec() -> impl Strategy<Value = Spec> {
     (1..=6usize)
         .prop_flat_map(|n| {
             let inputs = prop::collection::vec(any::<Index>(), 0..=3);
+            let live = prop_oneof![
+                3 => Just(Vec::new()),
+                1 => prop::collection::vec(any::<Index>(), 1..=2),
+            ];
             (
                 prop::collection::vec((kind(), inputs), n),
                 any::<Index>(),
                 prop::option::of(any::<Index>()),
                 prop::option::of(any::<Index>()),
                 prop::option::of(16..=64u64),
+                live,
             )
         })
-        .prop_map(|(nodes, output, cue, record, ticks)| {
+        .prop_map(|(nodes, output, cue, record, ticks, live)| {
             let n = nodes.len();
             let nodes = (nodes.into_iter().enumerate())
                 .map(|(i, (kind, inputs))| {
@@ -1189,6 +1390,7 @@ fn spec() -> impl Strategy<Value = Spec> {
                 cue: cue.map(|cue| cue.index(n)),
                 record: record.map(|record| record.index(n)),
                 ticks,
+                live: live.iter().map(|live| live.index(n)).collect(),
             }
         })
 }
@@ -1253,6 +1455,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => event().prop_map(Step::Send),
         3 => (0..2000u64, event()).prop_map(|(after, event)| Step::SendAt(after, event)),
         1 => spec().prop_map(Step::Swap),
+        2 => any::<Index>().prop_map(Step::Arm),
         1 => tempo().prop_map(Step::Tempo),
         1 => prop::sample::select(Lead::ALL.to_vec()).prop_map(Step::Lead),
         2 => Just(Step::Wait),
@@ -1316,15 +1519,14 @@ fn midi_input(t: u64) -> Option<MidiMessage> {
 
 /// Plays a device callback of `frames` frames with `channels` channels on
 /// `engine`, into a planar buffer or an interleaved one, with two channels
-/// of [`device_input`] from the engine's time on, and the messages of
-/// [`midi_input`] if `midi`, and puts what it played on the end of
-/// `output`, interleaved.
+/// of [`device_input`] from the engine's time on and the messages of
+/// [`midi_input`], and puts what it played on the end of `output`,
+/// interleaved.
 fn callback(
     engine: &mut Engine,
     frames: usize,
     channels: usize,
     planar: bool,
-    midi: bool,
     output: &mut Vec<f32>,
 ) {
     let mut input = AudioBuffer::new(2, frames);
@@ -1335,12 +1537,9 @@ fn callback(
             *x = device_input(time + i as u64, c);
         }
     }
-    let messages: Vec<MidiMessage> = match midi {
-        true => (time..time + frames as u64)
-            .filter_map(midi_input)
-            .collect(),
-        false => Vec::new(),
-    };
+    let messages: Vec<MidiMessage> = (time..time + frames as u64)
+        .filter_map(midi_input)
+        .collect();
     let start = output.len();
     output.resize(start + frames * channels, 0.0);
     let out = &mut output[start..];
@@ -1381,25 +1580,36 @@ struct Played {
 /// What an engine rendering ahead did in a run.
 struct Ahead {
     played: Played,
+    /// What its two sides applied, in order of engine time, the ahead
+    /// side's first.
     applied: Vec<(u64, Applied)>,
+    /// How far its ahead side rendered.
+    rendered: u64,
     /// Its stats, as of its last block.
     stats: Stats,
     /// The graphs and the tempo maps it was sent, in order.
     graphs: Vec<Spec>,
     tempos: Vec<TempoMap>,
+    midi: Arc<MidiLog>,
 }
 
 /// Plays `run` on an engine with its lead and `renderer`, and `workers` of
 /// its own.
 fn ahead(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Ahead {
     let config = run.config();
+    let build = Build {
+        config,
+        midi: MidiLog::new(),
+        whole: false,
+    };
     let (mut engine, mut handle) = Engine::with_renderer(config, renderer);
     engine.with_core(|core, _| core.keep_log());
+    engine.keep_live_log();
     let mut timeline = handle.take_timeline().unwrap();
     let (writer, mut keeping) = kept(0);
     assert!(handle.add_writer(WRITER, writer).is_ok());
     handle.set_lead(run.lead);
-    handle.swap_graph(run.graph.build(config)).unwrap();
+    handle.swap_graph(run.graph.build(&build)).unwrap();
     let mut graphs = vec![run.graph.clone()];
     let mut tempos = Vec::new();
     let mut played = Played::default();
@@ -1411,7 +1621,6 @@ fn ahead(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Ahead {
                     frames,
                     run.channels,
                     planar,
-                    true,
                     &mut played.output,
                 );
                 handle.collect_garbage();
@@ -1424,8 +1633,24 @@ fn ahead(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Ahead {
                 let _ = handle.send_at(engine.time() + after, event);
             }
             Step::Swap(spec) => {
-                if handle.swap_graph(spec.build(config)).is_ok() {
+                if handle.swap_graph(spec.build(&build)).is_ok() {
                     graphs.push(spec.clone());
+                }
+            }
+            &Step::Arm(place) => {
+                let mut spec = graphs.last().expect("a graph").clone();
+                let place = place.index(spec.nodes.len());
+                if let Some((kind, armed)) = spec.nodes[place].0.rearmed() {
+                    spec.nodes[place].0 = kind;
+                    let arm = Event::Param {
+                        node: NodeKey(place as u64),
+                        param: InputMonitor::ARMED,
+                        value: if armed { 1.0 } else { 0.0 },
+                    };
+                    let _ = handle.send(arm);
+                    if handle.swap_graph(spec.build(&build)).is_ok() {
+                        graphs.push(spec);
+                    }
                 }
             }
             Step::Tempo(tempo) => {
@@ -1438,21 +1663,36 @@ fn ahead(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Ahead {
             Step::Wait => {}
         }
     }
-    // With no thread rendering it, for a log that ends where its counters
-    // and its timeline do.
-    let (applied, stats) = engine.with_core(|core, _| {
+    // With no thread rendering it, for a log that ends where its time, its
+    // counters and its timeline do.
+    let (mut applied, rendered, stats) = engine.with_core(|core, _| {
         timeline.read(&mut played.segments);
-        (core.applied.clone().expect("a log"), handle.stats())
+        let applied = core.applied.clone().expect("a log");
+        (applied, core.time, handle.stats())
     });
+    applied.extend(engine.live_log());
+    applied.sort_by_key(|&(time, _)| time);
     played.frames = keeping.frames();
     played.notes = keeping.notes();
     Ahead {
         played,
         applied,
+        rendered,
         stats,
         graphs,
         tempos,
+        midi: build.midi,
     }
+}
+
+/// How far the start of the next block on the frame a replay is at has
+/// to go, for what's been sent for it so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Begun {
+    Nothing,
+    TakenIn,
+    Applied,
+    Wrapped,
 }
 
 /// What an engine without a lead did, replaying another's run.
@@ -1462,11 +1702,16 @@ struct Replayed {
     stats: Stats,
 }
 
-/// Has an engine without a lead apply what `ahead` applied, at the times it
-/// applied it, and render each block it rendered, as a device callback of
-/// its own.
-fn replay(run: &Run, ahead: &Ahead) -> Result<Replayed, TestCaseError> {
+/// Has an engine without a lead, rendering each graph whole, apply what
+/// `ahead` applied on the frames it applied it, and play up to each of them
+/// in callbacks of its own, and on up to where `ahead` rendered.
+fn replay(run: &Run, ahead: &Ahead) -> Replayed {
     let config = run.config();
+    let build = Build {
+        config,
+        midi: Arc::clone(&ahead.midi),
+        whole: true,
+    };
     let (mut engine, mut handle) = Engine::new(config);
     engine.with_core(|core, _| core.keep_log());
     let mut timeline = handle.take_timeline().unwrap();
@@ -1475,59 +1720,78 @@ fn replay(run: &Run, ahead: &Ahead) -> Result<Replayed, TestCaseError> {
     let mut graphs = ahead.graphs.iter();
     let mut tempos = ahead.tempos.iter();
     let mut played = Played::default();
+    let mut play_to = |engine: &mut Engine, handle: &mut EngineHandle, time: u64| {
+        while engine.time() < time {
+            let frames = (time - engine.time()).min(4096) as usize;
+            callback(engine, frames, run.channels, false, &mut played.output);
+            handle.collect_garbage();
+            timeline.read(&mut played.segments);
+        }
+    };
+    // Each block starts by taking in graphs and tempo maps, then applying
+    // the transport changes due, and then jumping back if it's at the loop
+    // end. Where the other did that more than once on a frame, applying
+    // some of them each time, this does too, as the order matters.
+    let mut begun = Begun::Nothing;
     for &(time, applied) in &ahead.applied {
-        prop_assert_eq!(engine.time(), time);
-        match applied {
-            Applied::Event { time, event } => {
-                handle.send_message(CoreMessage::Event { time, event });
-            }
-            Applied::Resend { time, event } => {
-                handle.send_message(CoreMessage::Resend { time, event });
-            }
+        if engine.time() < time {
+            play_to(&mut engine, &mut handle, time);
+            begun = Begun::Nothing;
+        }
+        assert_eq!(engine.time(), time, "the log is in order of time");
+        let next = match applied {
+            Applied::Swap | Applied::Tempo => Begun::TakenIn,
+            Applied::Event(Event::Transport(_)) => Begun::Applied,
+            Applied::Wrap => Begun::Wrapped,
+            Applied::Event(_) => begun,
+        };
+        if next < begun {
+            engine.with_core(|core, shared| core.take_in(shared));
+        }
+        begun = next;
+        let message = match applied {
+            Applied::Event(event) => CoreMessage::Event {
+                time: Some(time),
+                event,
+            },
             Applied::Swap => {
                 let graph = graphs.next().expect("a graph for each swap");
-                handle.send_message(CoreMessage::Swap(Box::new(graph.build(config))));
+                CoreMessage::Swap(Box::new(graph.build(&build)))
             }
             Applied::Tempo => {
                 let tempo = tempos.next().expect("a tempo map for each");
-                handle.send_message(CoreMessage::Tempo(Box::new(tempo.clone())));
+                CoreMessage::Tempo(Box::new(tempo.clone()), Box::new(tempo.clone()))
             }
-            // With the MIDI messages for its frames if the other rendered
-            // it as the device asked, and none, as the other had, if ahead.
-            Applied::Block { frames, live } => {
-                let output = &mut played.output;
-                callback(&mut engine, frames, run.channels, false, live, output);
+            // The start of a block that took in and applied what came
+            // before on the frame.
+            Applied::Wrap => {
+                engine.with_core(|core, shared| core.take_in(shared));
+                begun = Begun::Nothing;
+                continue;
             }
-            Applied::Held => {
-                // As the other did, it takes what was sent and applies the
-                // transport changes due, and renders nothing: it can't
-                // render ahead without a lead.
-                let held = engine.with_core(|core, shared| core.render(shared, Drive::Ahead));
-                prop_assert_eq!(held, None);
-            }
-        }
-        handle.collect_garbage();
-        timeline.read(&mut played.segments);
+        };
+        handle.send_message(message);
     }
-    let applied = engine.with_core(|core, _| core.applied.clone().expect("a log"));
+    if engine.time() < ahead.rendered {
+        play_to(&mut engine, &mut handle, ahead.rendered);
+        begun = Begun::Nothing;
+    }
+    // What the other took in where it stopped, without rendering on.
+    let applied = engine.with_core(|core, shared| {
+        if begun != Begun::Nothing {
+            core.take_in(shared);
+        }
+        core.applied.clone().expect("a log")
+    });
+    handle.collect_garbage();
+    timeline.read(&mut played.segments);
     played.frames = keeping.frames();
     played.notes = keeping.notes();
-    Ok(Replayed {
+    Replayed {
         played,
         applied,
         stats: handle.stats(),
-    })
-}
-
-/// What a log says was applied, whether its blocks rendered live or ahead:
-/// the replay renders them all live.
-fn either_side(log: &[(u64, Applied)]) -> Vec<(u64, Applied)> {
-    (log.iter())
-        .map(|&(time, applied)| match applied {
-            Applied::Block { frames, .. } => (time, Applied::Block { frames, live: true }),
-            applied => (time, applied),
-        })
-        .collect()
+    }
 }
 
 /// Where `a` first differs from the start of `b`, bit for bit.
@@ -1546,11 +1810,16 @@ fn check(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Result<(), Te
         played: reference,
         applied,
         stats,
-    } = replay(run, &ahead)?;
-    prop_assert!(
-        either_side(&applied) == either_side(&ahead.applied),
-        "the replay applied something else"
-    );
+    } = replay(run, &ahead);
+    if let Some(at) = (0..applied.len().max(ahead.applied.len()))
+        .find(|&i| applied.get(i) != ahead.applied.get(i))
+    {
+        let (got, expected) = (ahead.applied.get(at), applied.get(at));
+        prop_assert!(
+            false,
+            "the replay's application {at} differs: {expected:?} for {got:?}"
+        );
+    }
     let played = &ahead.played;
     let frames = played.output.len() / run.channels;
     prop_assert_eq!(ahead.stats.time, frames as u64);
@@ -1591,7 +1860,8 @@ fn check(run: &Run, renderer: Box<dyn Renderer>, workers: bool) -> Result<(), Te
         let expected = (segment.position_at(time), segment.playing, segment.latency);
         prop_assert_eq!(at, expected);
     }
-    let counts = |s: &Stats| (s.swaps, s.events_late, s.events_dropped, s.events_unmatched);
+    // Events it applied late, it applied on their frames in the replay.
+    let counts = |s: &Stats| (s.swaps, s.events_unmatched);
     prop_assert_eq!(counts(&ahead.stats), counts(&stats));
     Ok(())
 }

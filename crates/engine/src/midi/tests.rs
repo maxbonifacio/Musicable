@@ -479,7 +479,9 @@ fn graph(
         g.send_side_notes(other, monitor).unwrap();
     }
     g.set_output(instrument).unwrap();
-    g.prepare(&CONFIG).unwrap()
+    // Whole, so the rig finds its nodes where it put them, though an armed
+    // monitor would have them render in a live half of their own.
+    g.prepare_split(&CONFIG, false).unwrap()
 }
 
 impl Rig {

@@ -241,6 +241,7 @@ fn render(
         .enumerate()
         .map(|(order, &(node, offset, param, value))| Routed {
             node: ids[node],
+            rank: 0,
             order: order as u32,
             event: NodeEvent {
                 offset,

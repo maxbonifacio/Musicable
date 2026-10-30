@@ -259,7 +259,7 @@ impl ParallelRenderer {
             stage: graph.stage,
             block: (block as *const Block<'_>).cast(),
             sample_rate: graph.config.sample_rate,
-            loads: graph.loads.loads.as_ptr(),
+            loads: graph.loads.loads[graph.load_base..].as_ptr(),
         };
         let started = Instant::now();
         self.epoch += 1;
