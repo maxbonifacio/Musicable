@@ -2,10 +2,13 @@
 //! positions and times.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
+use egui::text::TextWrapping;
 use egui::{
-    Align2, Button, Color32, FontId, Id, Key, Modal, Modifiers, Painter, Rect, Response, Role,
-    Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
+    Align, Align2, Button, Color32, FontId, FontSelection, Id, Key, Label, Modal, Modifiers,
+    Painter, Rect, Response, RichText, Role, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2,
+    WidgetInfo, WidgetText, pos2, vec2,
 };
 use musicable_model::time::{Beats, TempoMap};
 
@@ -257,6 +260,25 @@ pub(crate) fn drop_down_mark(painter: &Painter, theme: &Theme, name: Rect) {
     ));
 }
 
+/// What a panel says while it has nothing to show: `text`, weak, in the
+/// middle of the room `ui` has left and wrapped to it. The label is only as
+/// big as its text, so the pointer turns to the text cursor over the text,
+/// as it does over other labels, and not over the whole panel.
+pub(crate) fn placeholder(ui: &mut Ui, text: &str) -> Response {
+    let room = ui.available_rect_before_wrap();
+    let text = WidgetText::from(RichText::new(text).weak());
+    let job = text.into_layout_job(ui.style(), FontSelection::Default, ui.text_valign());
+    let mut job = Arc::unwrap_or_clone(job);
+    job.wrap = TextWrapping::wrap_at_width(room.width());
+    job.halign = Align::Center;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let rect = Align2::CENTER_CENTER.align_size_within_rect(galley.size(), room);
+    // From the top, if the room's too short for it, so it's never over what
+    // the panel has above it.
+    let rect = rect.translate(vec2(0.0, (room.top() - rect.top()).max(0.0)));
+    ui.put(rect, Label::new(galley))
+}
+
 /// A box over the window that asks for a name: `title` over a field with
 /// `text` in it, all of it selected to be typed over when the box is
 /// `first` shown, and buttons to `confirm` it or cancel. Enter confirms,
@@ -367,9 +389,52 @@ pub fn confirm_box(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use egui::CursorIcon;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
     use musicable_model::time::TimeSignature;
 
     use super::*;
+    use crate::testing::cursor_at;
+
+    const NOTHING: &str = "Nothing to show here yet.";
+
+    #[test]
+    fn a_placeholder_takes_the_text_cursor_only_over_its_words() {
+        let room = Cell::new(Rect::NOTHING);
+        let mut harness = Harness::builder().with_size([600.0, 300.0]).build_ui(|ui| {
+            room.set(ui.available_rect_before_wrap());
+            placeholder(ui, NOTHING);
+        });
+        let room = room.get();
+        // In the middle of the room, no bigger than its words.
+        let words = harness.get_by_label(NOTHING).rect();
+        let off = words.center().distance(room.center());
+        assert!(off < 1.0, "{words:?} {room:?}");
+        assert!(words.width() < room.width() / 2.0, "{words:?}");
+        assert!(words.height() < room.height() / 4.0, "{words:?}");
+        assert_eq!(cursor_at(&mut harness, words.center()), CursorIcon::Text);
+        let corner = room.left_top() + vec2(10.0, 10.0);
+        assert_eq!(cursor_at(&mut harness, corner), CursorIcon::Default);
+    }
+
+    #[test]
+    fn a_placeholder_too_tall_for_its_room_starts_at_the_top() {
+        let room = Cell::new(Rect::NOTHING);
+        let harness = Harness::builder().with_size([600.0, 300.0]).build_ui(|ui| {
+            ui.allocate_ui(vec2(60.0, 10.0), |ui| {
+                room.set(ui.available_rect_before_wrap());
+                placeholder(ui, NOTHING);
+            });
+        });
+        let room = room.get();
+        // Wrapped to the room, so a few lines tall.
+        let words = harness.get_by_label(NOTHING).rect();
+        assert!(words.height() > 2.0 * room.height(), "{words:?} {room:?}");
+        assert_eq!(words.top(), room.top());
+    }
 
     #[test]
     fn positions_count_from_one() {
