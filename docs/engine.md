@@ -1779,10 +1779,10 @@ runs its own tasks itself. Tasks follow the real-time rules and are checked
 like nodes, and a panic in one comes out once every task has run.
 
 **Counters.** `ParallelRenderer::monitor` returns a `ParallelMonitor`, which
-reads `ParallelStats` from any thread: blocks shared and rendered alone, time
-spent running nodes, the wall time of shared blocks, and the workers' time
-awake, which is the CPU they cost. `ParallelStats::cores_used` is how many
-threads were running nodes, on average, during shared blocks.
+reads `ParallelStats` from any thread: blocks shared, pipelined and rendered
+alone, time spent running nodes, the wall time of shared blocks, and the
+workers' time awake, which is the CPU they cost. `ParallelStats::cores_used`
+is how many threads were running nodes, on average, during shared blocks.
 
 **Benchmarks.** `cargo bench -p musicable-engine --bench scheduler` times
 blocks of wide, deep and project-shaped graphs, with and without filled
@@ -1791,7 +1791,11 @@ up to the number in the `MUSICABLE_BENCH_THREADS` environment variable.
 `--bench realtime` renders at a device's pace and prints tables: a 64-track
 project scheduled per node against one thread per signal path (how Ableton's
 documentation says Live does it), block times and worker CPU for different
-spin settings, and small graphs alone against shared. On a Ryzen 9 3900X
+spin settings, small graphs alone against shared, block lengths ahead of
+the device, and pipelining (below): a 64-device chain, the 64-track
+project and four tracks ahead in 1024-frame blocks and as an export in
+4096, on one thread, shared whole and pipelined, with whether pipelined
+played the same as one thread. On a Ryzen 9 3900X
 (12 cores), a 64-track project whose tracks all send to two return tracks
 rendered a 64-frame block in 118 µs per node, on 8.8 cores, and in 671 µs
 per signal path, on 1: 5.7 times faster. Graphs with plenty to share ran 6.7
@@ -1802,6 +1806,59 @@ to 8.1 times faster on 12 threads than on one, and spinning longer than
 ahead of the device between callbacks: a second kind of work, which a
 worker takes on when the engine asks and puts down when the audio thread
 needs the engine ([Rendering ahead](#rendering-ahead)).
+
+**Pipelining.** A long chain of devices, such as a mastering chain, renders
+on one thread when its blocks render whole, however many there are: each
+device waits for the one before. So the renderer can pipeline a block
+(`ParallelOptions::pipeline`): split it into parts that run down the graph
+at once, one device rendering a part as the device after it renders the
+part before. Each part of a node is a piece of work of its own, ready once
+that part of each of its inputs and its own part before have run, so each
+node still renders its parts in order, and the schedule keeps a counter
+for each part of each node. The thread that finishes a part goes on with
+the node's next part, whose state it has warm, and leaves the parts it made
+ready for the nodes after it to other threads.
+
+- **The parts.** Each part is a block of its own to the node
+  (`Block::part`): from its frame on, with the events in its frames moved
+  to them, the song's position moved on while the transport plays, and the
+  device inputs and MIDI messages there (the first part has any that came
+  late, and the last any for after the block). A node's output for a part
+  is those frames of its buffer, so nothing outside the renderer changes:
+  the notes pass, modulation, automation, notes made while rendering and
+  the rings all go a block at a time. A node that plays the same whatever
+  blocks it renders, as rendering ahead already needs (see [Rendering
+  ahead](#rendering-ahead)), plays the same pipelined, sample for sample.
+  Audio views (`AudioRef`, `AudioMut`) hold an address and reach only their
+  own frames of each channel, not the samples between them, so one thread
+  writes a node's next part while another reads the part before.
+- **How many.** Whole, a block takes about as long as the longer of its
+  longest path and its nodes spread over the threads, counting each node
+  alike. A graph whose longest path takes less than half as long again as
+  its nodes spread out keeps the threads busy whole, near enough, and
+  renders in one part: a 64-track project, or four tracks. Others take
+  about twice as many parts as there are threads over how many of their
+  nodes can run at once on average (the nodes over the most on any path),
+  so twice as many pieces can run at once as there are threads and one that
+  falls behind holds up none of the others: up to `PARTS` (16), none
+  shorter than `SHORTEST_PART` (128 frames). A 64-device chain's 1024-frame
+  block takes 8 parts of 128 frames on 4 threads or more. The nodes' loads
+  ([Node timing](#node-timing)) could weigh them, for a project with one
+  heavy master chain; that's for tuning on the PC.
+- **Which blocks.** `Pipeline::Ahead`, the default, pipelines the blocks
+  rendered ahead of the device, which it waits for only once the lead runs
+  out. `Pipeline::Always` pipelines every block, as an export does, and
+  `Pipeline::Never` none. It never pipelines a live half, which the device
+  waits for a block at a time, nor a stage with a node that makes notes as
+  it renders, which hands them on once it has rendered the whole block.
+  Feedback loops, when the branching design brings them, are to render as
+  one node in the pipeline.
+
+In the benchmark's pipelining table on a 4-thread cloud machine, a
+64-device chain rendered 3.3 times faster than on one thread ahead and 3.4
+times in an export, where whole it rendered no faster, and played the same,
+while the 64-track project and four tracks rendered whole as before. The
+design's mark is four times on the 3900X's 12 threads.
 
 **Two boards.** The pool has two boards, each with a block of its own, so
 a graph's live half renders on the audio thread while workers render the

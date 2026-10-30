@@ -47,7 +47,11 @@ time.
 heavy mix. Musicable renders the project ahead of the device, on all its
 cores, and each buffer the device asks for is ready already. A plugin can
 then take longer than a buffer lasts now and then without a dropout, as
-long as the project keeps up on the whole.
+long as the project keeps up on the whole. A long chain of plugins on one
+track, as on the master, renders on several cores too: Musicable splits
+what it renders ahead into parts that run down the chain at once, each
+plugin rendering one part while the plugin after it renders the part
+before.
 
 - **Off**: every block renders as the device asks for it, within its
   buffer.

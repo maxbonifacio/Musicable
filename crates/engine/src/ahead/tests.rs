@@ -241,6 +241,7 @@ fn workers() -> ParallelOptions {
         inline_below: None,
         max_nodes: 64,
         realtime: false,
+        ..ParallelOptions::default()
     }
 }
 

@@ -48,6 +48,23 @@
 //!
 //! [`Graph::prepare`]: crate::Graph::prepare
 //!
+//! A block rendered ahead can be pipelined ([`Pipeline`]): split into
+//! parts that run down the graph at once, each node rendering its parts in
+//! order, so a long chain of nodes renders on several threads, one node on
+//! one part as the node after it renders the part before. Each part of a
+//! node is a piece of work of its own, ready once that part of each of its
+//! inputs and its own part before have run: the lane that finishes a part
+//! goes on with the node's next part, whose state it has warm, and leaves
+//! the parts it made ready for the nodes after for other lanes to take.
+//! Each part is a block of its own to the node ([`Block::part`]), with the
+//! events for its frames, and a node's output for it is those frames of its
+//! buffer, so nothing outside the renderer changes. Nodes that play the same
+//! whatever blocks they render, as rendering ahead already needs, play the
+//! same pipelined, sample for sample. How many parts a block takes depends
+//! on how many of the graph's nodes can run at once on average: a wide graph
+//! keeps the lanes busy whole, and a chain takes two parts for each lane,
+//! so a lane that falls behind holds up none of the others.
+//!
 //! A node can split its own work into tasks ([`tasks::run`](crate::tasks)),
 //! as a plugin using CLAP's thread pool does. Its lane puts them in its
 //! [`Tasks`], wakes up to two sleeping workers, and takes tasks itself until
@@ -66,7 +83,7 @@ mod tests;
 use std::any::Any;
 use std::cell::{Cell, UnsafeCell};
 use std::hint::spin_loop;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize};
@@ -108,7 +125,41 @@ pub struct ParallelOptions {
     /// Run the workers at real-time priority: in the MMCSS "Pro Audio" class
     /// on Windows. Other platforms don't raise the priority yet.
     pub realtime: bool,
+    /// Which blocks to pipeline: split into parts that run down the graph
+    /// at once, so a long chain renders on several threads. The default
+    /// pipelines the blocks rendered ahead of the device.
+    pub pipeline: Pipeline,
 }
+
+/// Which blocks a [`ParallelRenderer`] pipelines: splits into parts, up to
+/// [`PARTS`] and none shorter than [`SHORTEST_PART`] frames, that run down
+/// the graph at once, each node rendering its parts in order. It never
+/// pipelines a graph's live half, nor a stage of a graph with a node that
+/// makes notes as it renders, which hands them on after the whole block
+/// ([`Graph::send_made_notes`](crate::Graph::send_made_notes)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pipeline {
+    /// None: each block renders whole.
+    Never,
+    /// Those rendered ahead of the device ([`Block::ahead`]), which it
+    /// waits for only once the lead runs out.
+    #[default]
+    Ahead,
+    /// Every block, as for an export, where no device waits for any.
+    Always,
+}
+
+/// The most parts a block is pipelined in.
+pub const PARTS: usize = 16;
+
+/// The fewest frames in a part of a pipelined block: a shorter part would
+/// cost more in handing it over than its node saves.
+pub const SHORTEST_PART: usize = 128;
+
+/// How a pipelined block's pieces of work are numbered: node `n`'s part
+/// `p` is `n << PART_BITS | p`.
+const PART_BITS: u32 = PARTS.trailing_zeros();
+const _: () = assert!(PARTS.is_power_of_two(), "a part's number takes its bits");
 
 impl Default for ParallelOptions {
     fn default() -> Self {
@@ -118,6 +169,7 @@ impl Default for ParallelOptions {
             inline_below: Some(Duration::from_micros(100)),
             max_nodes: 1 << 14,
             realtime: true,
+            pipeline: Pipeline::default(),
         }
     }
 }
@@ -138,6 +190,7 @@ pub struct ParallelRenderer {
     board: usize,
     inline_below: Option<Duration>,
     max_nodes: usize,
+    pipeline: Pipeline,
     /// Parallel blocks rendered on its board.
     epoch: u64,
     /// Whether the last block ran on the audio thread alone, for each of
@@ -148,6 +201,9 @@ pub struct ParallelRenderer {
     last_work: [Duration; STAGES],
     /// The address of the graph the last block ran, to notice a new one.
     last_graph: usize,
+    /// How many parts to pipeline each block in, for a test.
+    #[cfg(test)]
+    forced_parts: Option<usize>,
 }
 
 impl ParallelRenderer {
@@ -203,10 +259,13 @@ impl ParallelRenderer {
             board: MAIN,
             inline_below: options.inline_below,
             max_nodes: options.max_nodes,
+            pipeline: options.pipeline,
             epoch: 0,
             inline: [false; STAGES],
             last_work: [Duration::MAX; STAGES],
             last_graph: 0,
+            #[cfg(test)]
+            forced_parts: None,
         }
     }
 
@@ -221,8 +280,39 @@ impl ParallelRenderer {
         ParallelMonitor(self.shared.clone())
     }
 
-    /// Whether to share this block between threads.
-    fn share(&mut self, graph: &PreparedGraph) -> bool {
+    /// Has the renderer pipeline every block in `parts` parts, or as many
+    /// as it has frames, whatever the graph, as long as it may pipeline it.
+    #[cfg(test)]
+    pub(crate) fn force_parts(&mut self, parts: usize) {
+        self.forced_parts = Some(parts.clamp(1, PARTS));
+    }
+
+    /// How many parts to render `block` of `graph`'s current stage in: one,
+    /// unless it pipelines the block, on `lanes` lanes.
+    fn parts(&self, graph: &PreparedGraph, block: &Block<'_>, lanes: usize) -> usize {
+        let pipelines = match self.pipeline {
+            Pipeline::Never => false,
+            Pipeline::Ahead => block.ahead,
+            Pipeline::Always => true,
+        };
+        // Its pieces of work have to fit their numbers.
+        let fits = graph.len() < 1 << (u32::BITS - PART_BITS);
+        if !pipelines || !fits || graph.stage_makes_notes() {
+            return 1;
+        }
+        #[cfg(test)]
+        if let Some(parts) = self.forced_parts {
+            return parts.min(block.frames).max(1);
+        }
+        let most = (block.frames / SHORTEST_PART).min(PARTS);
+        graph
+            .schedule
+            .parts(graph.stage, lanes)
+            .clamp(1, most.max(1))
+    }
+
+    /// Whether to share this block, in `parts` parts, between threads.
+    fn share(&mut self, graph: &PreparedGraph, parts: usize) -> bool {
         let tasks = self.shared.boards[self.board]
             .tasks_asked
             .swap(false, Relaxed);
@@ -244,7 +334,8 @@ impl ParallelRenderer {
         // doesn't flip every block.
         let stage = graph.stage.min(STAGES - 1);
         let below = if self.inline[stage] { below * 2 } else { below };
-        (graph.schedule.width(graph.stage) > 1 || tasks) && self.last_work[stage] >= below
+        let wide = graph.schedule.width(graph.stage) > 1 || parts > 1;
+        (wide || tasks) && self.last_work[stage] >= below
     }
 
     fn render_inline(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
@@ -259,9 +350,15 @@ impl ParallelRenderer {
         self.shared.counters.inline_blocks.fetch_add(1, Relaxed);
     }
 
-    /// Shares the block between the lanes, all but the last
-    /// [`Shared::kept`] if `capped`.
-    fn render_shared(&mut self, graph: &mut PreparedGraph, block: &Block<'_>, capped: bool) {
+    /// Shares the block, in `parts` parts, between `open` lanes: all, or
+    /// all but the last [`Shared::kept`].
+    fn render_shared(
+        &mut self,
+        graph: &mut PreparedGraph,
+        block: &Block<'_>,
+        open: usize,
+        parts: usize,
+    ) {
         let shared = &*self.shared;
         let board = &shared.boards[self.board];
         // The audio thread's lane, or the worker's that renders ahead.
@@ -271,11 +368,12 @@ impl ParallelRenderer {
             nodes: graph.nodes.as_mut_ptr(),
             inputs: graph.inputs.as_ptr(),
             ports: graph.ports.as_ptr(),
-            events: graph.events.as_ptr(),
+            events: graph.events.as_mut_ptr(),
             event_ranges: graph.event_ranges.as_ptr(),
             schedule: &graph.schedule,
             stage: graph.stage,
             block: (block as *const Block<'_>).cast(),
+            parts,
             sample_rate: graph.config.sample_rate,
             loads: graph.loads.loads[graph.load_base..].as_ptr(),
         };
@@ -285,14 +383,14 @@ impl ParallelRenderer {
         // the store to `sources` makes possible.
         debug_assert!(board.job.load(Relaxed).is_null(), "one block at a time");
         board.job.store((&job as *const Job).cast_mut(), Relaxed);
-        board.remaining.store(graph.stage_nodes().len(), Relaxed);
-        let lanes = shared.lanes.len();
-        let open = if capped { lanes - shared.kept } else { lanes };
+        board
+            .remaining
+            .store(graph.stage_nodes().len() * parts, Relaxed);
         board.open.store(open, Relaxed);
         // A worker starting the block works in place of lane 0, which is
         // the audio thread's and idle unless it comes to help: one lane
         // more keeps as many threads busy.
-        let width = graph.schedule.width(graph.stage);
+        let width = graph.schedule.width(graph.stage) * parts;
         let wanted = width + usize::from(lane != 0 && lane < width);
         board.wanted.store(wanted.min(open), Relaxed);
         let sources = graph.schedule.sources(graph.stage).len() as u64;
@@ -318,6 +416,9 @@ impl ParallelRenderer {
         self.inline[stage] = false;
         let counters = &shared.counters;
         counters.parallel_blocks.fetch_add(1, Relaxed);
+        if parts > 1 {
+            counters.pipelined_blocks.fetch_add(1, Relaxed);
+        }
         counters.busy.fetch_add(nanos(busy), Relaxed);
         counters.wall.fetch_add(nanos(wall), Relaxed);
         if let Some(payload) = board.failure.take() {
@@ -337,10 +438,17 @@ impl Renderer for ParallelRenderer {
         // A block rendered ahead leaves the live half its workers, while
         // there's one.
         let capped = self.board == MAIN && block.ahead && graph.has_live_half();
+        let lanes = self.shared.lanes.len();
+        let open = if capped {
+            lanes - self.shared.kept
+        } else {
+            lanes
+        };
+        let parts = self.parts(graph, block, open);
         // The workers flush denormals for as long as they run.
         rt::flush_denormals(|| {
-            if self.share(graph) {
-                self.render_shared(graph, block, capped);
+            if self.share(graph, parts) {
+                self.render_shared(graph, block, open, parts);
             } else {
                 self.render_inline(graph, block);
             }
@@ -363,10 +471,13 @@ impl Renderer for ParallelRenderer {
             board: LIVE,
             inline_below: self.inline_below,
             max_nodes: self.max_nodes,
+            pipeline: Pipeline::Never,
             epoch: 0,
             inline: [false; STAGES],
             last_work: [Duration::MAX; STAGES],
             last_graph: 0,
+            #[cfg(test)]
+            forced_parts: None,
         })
     }
 }
@@ -412,6 +523,7 @@ impl ParallelMonitor {
         ParallelStats {
             threads: self.0.lanes.len() - 1,
             parallel_blocks: c.parallel_blocks.load(Relaxed),
+            pipelined_blocks: c.pipelined_blocks.load(Relaxed),
             inline_blocks: c.inline_blocks.load(Relaxed),
             busy: time(&c.busy),
             wall: time(&c.wall),
@@ -435,6 +547,9 @@ pub struct ParallelStats {
     pub threads: usize,
     /// Blocks shared between threads.
     pub parallel_blocks: u64,
+    /// Of those, the ones pipelined in parts ([`Pipeline`]), counting each
+    /// stage of a graph with notes made while rendering.
+    pub pipelined_blocks: u64,
     /// Blocks the audio thread rendered alone.
     pub inline_blocks: u64,
     /// Time spent running nodes in shared blocks, summed over threads.
@@ -558,12 +673,18 @@ struct Job {
     nodes: *mut Box<dyn Node>,
     inputs: *const Vec<NodeId>,
     ports: *const Vec<InputPort>,
-    events: *const NodeEvent,
+    /// A pipelined block moves each node's events to the frames of the
+    /// part they're in as the node gets them.
+    events: *mut NodeEvent,
     event_ranges: *const (u32, u32),
     schedule: *const Schedule,
     /// The graph's stage the block renders.
     stage: usize,
     block: *const Block<'static>,
+    /// How many parts the block is pipelined in: 1 for none. Each piece of
+    /// work is a node then, and otherwise a part of one, as [`piece`]
+    /// numbers them.
+    parts: usize,
     sample_rate: u32,
     /// Each node's load.
     loads: *const Load,
@@ -572,6 +693,7 @@ struct Job {
 #[derive(Default)]
 struct Counters {
     parallel_blocks: AtomicU64,
+    pipelined_blocks: AtomicU64,
     inline_blocks: AtomicU64,
     busy: AtomicU64,
     wall: AtomicU64,
@@ -862,7 +984,8 @@ impl Shared {
         false
     }
 
-    /// Takes one of the sources of `board`'s block `epoch`.
+    /// Takes one of the sources of `board`'s block `epoch`: its first part,
+    /// in a pipelined block.
     fn take_source(&self, board: usize, epoch: u64) -> Option<u32> {
         let b = &self.boards[board];
         let mut word = b.sources.load(Acquire);
@@ -877,7 +1000,11 @@ impl Shared {
                     // can't end before we count it, so its job is valid.
                     let job = unsafe { &*b.job.load(Acquire) };
                     let schedule = unsafe { &*job.schedule };
-                    return Some(schedule.sources(job.stage)[left as usize - 1]);
+                    let source = schedule.sources(job.stage)[left as usize - 1];
+                    return Some(match job.parts {
+                        1 => source,
+                        _ => piece(source, 0),
+                    });
                 }
                 Err(actual) => word = actual,
             }
@@ -935,6 +1062,10 @@ impl Shared {
         // SAFETY: the block can't end while this lane holds nodes it hasn't
         // counted, so the job and everything it points to stay valid.
         let job = unsafe { &*b.job.load(Acquire) };
+        if job.parts > 1 {
+            // SAFETY: the caller's promise.
+            return unsafe { self.run_parts(board, job, lane, first, finished) };
+        }
         let schedule = unsafe { &*job.schedule };
         let (frames, ahead) = unsafe { ((*job.block).frames, (*job.block).ahead) };
         let Lane { deques, tasks, .. } = &self.lanes[lane];
@@ -958,6 +1089,112 @@ impl Shared {
             last = now;
             next = finish(schedule, node, deque);
             *finished += 1;
+        }
+    }
+
+    /// [`run`](Self::run) for a pipelined block: runs `first`, a part of a
+    /// node, then each part this lane makes ready that it doesn't push,
+    /// then whatever is on its own deque. Counts each in `finished`.
+    ///
+    /// # Safety
+    ///
+    /// This lane has taken `first` in `board`'s running block, which `job`
+    /// describes.
+    unsafe fn run_parts(
+        &self,
+        board: usize,
+        job: &Job,
+        lane: usize,
+        first: u32,
+        finished: &mut usize,
+    ) {
+        let b = &self.boards[board];
+        // SAFETY: as in `run`.
+        let schedule = unsafe { &*job.schedule };
+        let ahead = unsafe { (*job.block).ahead };
+        let Lane { deques, tasks, .. } = &self.lanes[lane];
+        let deque = &deques[board];
+        let mut next = Some(first);
+        let mut last = load::now();
+        while let Some(piece) = next.or_else(|| deque.pop()) {
+            let (node, part) = (piece >> PART_BITS, piece as usize % PARTS);
+            // SAFETY: the job has a load for each of its nodes.
+            let load = unsafe { &*job.loads.add(node as usize) };
+            tasks
+                .load
+                .store(std::ptr::from_ref(load).cast_mut(), Relaxed);
+            // SAFETY: this lane took the part, from the counter, a deque or
+            // by making it ready, so no other thread runs any part of the
+            // node meanwhile.
+            let frames = unsafe { self.run_part(b, job, node, part) };
+            let now = load::now();
+            load.add(now.wrapping_sub(last), tasks.take_waited(), frames, ahead);
+            last = now;
+            next = finish_part(schedule, node, part, job.parts, deque);
+            *finished += 1;
+        }
+    }
+
+    /// Processes part `part` of `node`, as a block of its own, and returns
+    /// how many frames it was. A panic is caught and recorded on `board`,
+    /// as in [`run_node`](Self::run_node).
+    ///
+    /// # Safety
+    ///
+    /// This lane has taken the part in the pipelined block `job`
+    /// describes, which is running: the same part of each of the node's
+    /// inputs has run, and its own part before.
+    unsafe fn run_part(&self, board: &Board, job: &Job, node: u32, part: usize) -> usize {
+        let n = node as usize;
+        // SAFETY: the job's pointers are valid while its block runs. This
+        // lane is the only one using node `n`, its events and its output's
+        // frames for the part; the inputs' parts it reads have run, and
+        // nothing writes to those frames of their buffers until the next
+        // block. Each part's frames are the block's, within the capacity.
+        unsafe {
+            let block = &*job.block;
+            let schedule = &*job.schedule;
+            let frames = part_frames(block.frames, job.parts, part);
+            // Its events for the part, from where those for its part before
+            // ended, which are in order of offset, moved to the part's
+            // frames. The last part has any after the block too.
+            let (start, end) = *job.event_ranges.add(n);
+            let cursor = &schedule.cursors[n];
+            let from = if part == 0 {
+                start
+            } else {
+                cursor.load(Relaxed)
+            };
+            let mut to = from;
+            while to < end {
+                let event = &mut *job.events.add(to as usize);
+                if event.offset >= frames.end && frames.end < block.frames {
+                    break;
+                }
+                event.offset -= frames.start;
+                to += 1;
+            }
+            cursor.store(to, Relaxed);
+            let events =
+                std::slice::from_raw_parts(job.events.add(from as usize), (to - from) as usize);
+            let part_block = block.part(frames.clone());
+            let ctx = part_block.context(job.sample_rate, events);
+            let inputs = Inputs::shared(
+                &schedule.buffers,
+                &*job.inputs.add(n),
+                &*job.ports.add(n),
+                block.frames,
+            )
+            .range(frames.clone());
+            let mut output = schedule.buffers[n].part_mut(frames.clone());
+            let node = &mut **job.nodes.add(n);
+            let ran = panic::catch_unwind(AssertUnwindSafe(|| {
+                node.process(&ctx, inputs, &mut output);
+            }));
+            if let Err(payload) = ran {
+                board.failure.record(payload);
+            }
+            frames.len()
         }
     }
 
@@ -1212,6 +1449,44 @@ fn finish(schedule: &Schedule, node: u32, deque: &Deque) -> Option<u32> {
             match next {
                 None => next = Some(fed),
                 Some(_) => deque.push(fed),
+            }
+        }
+    }
+    next
+}
+
+/// Node `node`'s part `part`, as a piece of work of a pipelined block.
+fn piece(node: u32, part: usize) -> u32 {
+    node << PART_BITS | part as u32
+}
+
+/// The frames of part `part` of a block of `frames` pipelined in `parts`:
+/// each about as long as the others, and none empty, as a block has at
+/// least as many frames as parts.
+fn part_frames(frames: usize, parts: usize, part: usize) -> Range<usize> {
+    part * frames / parts..(part + 1) * frames / parts
+}
+
+/// Counts part `part` of `node` as finished for what waits for it, in a
+/// block pipelined in `parts`: the same part of each node it feeds, and
+/// its own next part. Of the parts that makes ready, returns the node's
+/// next, whose state is warm on this lane, or else the first, of the node
+/// with the longest way to go, for this lane to run next, and pushes the
+/// others onto `deque`.
+fn finish_part(
+    schedule: &Schedule,
+    node: u32,
+    part: usize,
+    parts: usize,
+    deque: &Deque,
+) -> Option<u32> {
+    let own = part + 1 < parts && schedule.part_done(node, part + 1);
+    let mut next = own.then(|| piece(node, part + 1));
+    for &fed in schedule.dependents(node) {
+        if schedule.part_done(fed, part) {
+            match next {
+                None => next = Some(piece(fed, part)),
+                Some(_) => deque.push(piece(fed, part)),
             }
         }
     }

@@ -37,6 +37,10 @@ CLAP names two threads, and Musicable's are:
   thread pool tasks (a thread-local count), not for a thread fixed at the
   start, since the thread processing a plugin can change from block to
   block, and an ASIO driver can make its first call from another thread.
+  A block the renderer pipelines reaches a plugin as a process call for
+  each part, in order, each with the frames, events and transport of its
+  part, on whichever thread renders that part
+  ([engine.md](engine.md#parallel-rendering), Pipelining).
 - **The thread pool.** A plugin that asks the host to run tasks while it
   processes gets them run on the renderer's threads, as many at once as are
   free, through the engine's `tasks::run` (see
@@ -340,7 +344,9 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   engine renders ahead of the device (`ProcessContext::ahead`,
   [engine.md](engine.md#rendering-ahead)), which needn't be ready within
   a callback, and `kRealtime` for the rest, and for the parameters the main
-  thread flushes. Exports render with real-time blocks for now.
+  thread flushes. An export's blocks are pipelined, but real-time ones
+  all the same, since some plugins change their oversampling or voices
+  under `kPrefetch`.
 - **Parameters** are normalized, from 0 to 1, whatever they stand for.
   `steps` is VST3's step count, and the module is the unit the parameter is
   in, with its parents', such as `Oscillators/Osc 1`. VST3 has no

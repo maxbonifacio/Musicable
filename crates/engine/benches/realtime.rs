@@ -11,11 +11,15 @@
 //!    of a few tracks: where `ParallelOptions::inline_below` belongs.
 //! 4. **Rendering ahead.** What longer blocks save when the engine renders
 //!    ahead of the device: where `AHEAD_BLOCK` belongs.
+//! 5. **Pipelining.** What splitting each block into parts that run down the
+//!    graph at once does for a long chain, ahead and in an export, and that
+//!    it plays the same.
 //!
 //! ```sh
 //! cargo bench -p musicable-engine --bench realtime
 //! cargo bench -p musicable-engine --bench realtime -- small   # one table
 //! cargo bench -p musicable-engine --bench realtime -- ahead
+//! cargo bench -p musicable-engine --bench realtime -- pipelining
 //! ```
 
 // A report, not engine code: it prints, and it sleeps between blocks like a
@@ -26,10 +30,10 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{AHEAD, CONFIG, Project, Routing, cores, cost, deep_for, renderer};
+use common::{AHEAD, CONFIG, EXPORT, Project, Routing, cores, cost, deep_for, renderer};
 use musicable_engine::{
-    AudioRef, Block, ParallelOptions, ParallelRenderer, ParallelStats, PreparedGraph,
-    ReferenceRenderer, Renderer, TransportState,
+    AudioRef, Block, EngineConfig, ParallelOptions, ParallelRenderer, ParallelStats, Pipeline,
+    PreparedGraph, ReferenceRenderer, Renderer, TransportState,
 };
 use musicable_model::time::TempoMap;
 
@@ -117,6 +121,7 @@ fn since(before: ParallelStats, after: ParallelStats) -> ParallelStats {
     ParallelStats {
         threads: after.threads,
         parallel_blocks: after.parallel_blocks - before.parallel_blocks,
+        pipelined_blocks: after.pipelined_blocks - before.pipelined_blocks,
         inline_blocks: after.inline_blocks - before.inline_blocks,
         busy: after.busy - before.busy,
         wall: after.wall - before.wall,
@@ -358,6 +363,155 @@ fn ahead_blocks() {
     println!();
 }
 
+/// What rendering a graph back to back took, and what its output played.
+struct Rendered {
+    times: Times,
+    output: Vec<f32>,
+}
+
+impl Rendered {
+    /// Whether it played what `other` played, sample for sample.
+    fn same(&self, other: &Rendered) -> bool {
+        let bits = |output: &[f32]| output.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
+        bits(&self.output) == bits(&other.output)
+    }
+}
+
+/// Renders `blocks` blocks of `frames` back to back, ahead of the device or
+/// not, and keeps what the output played.
+fn render_keeping(
+    renderer: &mut dyn Renderer,
+    graph: &mut PreparedGraph,
+    frames: usize,
+    blocks: usize,
+    ahead: bool,
+) -> Rendered {
+    let tempo = TempoMap::default();
+    let mut times = Vec::with_capacity(blocks);
+    let mut output = Vec::with_capacity(2 * frames * blocks);
+    for i in 0..blocks {
+        let block = Block {
+            frames,
+            time: (i * frames) as u64,
+            transport: TransportState::default(),
+            tempo: &tempo,
+            input: AudioRef::empty(frames),
+            midi: &[],
+            ahead,
+        };
+        let started = Instant::now();
+        renderer.render(graph, &block);
+        times.push(started.elapsed());
+        output.extend(graph.output(frames).iter().flatten());
+    }
+    times.sort();
+    Rendered {
+        times: Times(times),
+        output,
+    }
+}
+
+/// Builds a graph for a config.
+type BuildFor = fn(EngineConfig) -> PreparedGraph;
+
+fn pipelining() {
+    println!("## Pipelining\n");
+    println!(
+        "Each graph renders {AHEAD_SECONDS} s of audio at 48 kHz back to back: ahead of the \
+         device in blocks of {} frames, as workers do while the lead fills, and as an export \
+         does, in blocks of {}. One thread is the reference renderer. Whole and pipelined \
+         share each block between {} threads: whole renders it whole, and pipelined in parts \
+         that run down the graph at once, as `Pipeline::Ahead` does ahead and \
+         `Pipeline::Always` in an export. Each is the faster of two runs. Speed-up is one \
+         thread's time over pipelined's. Same says whether pipelined played what one \
+         thread played, sample for sample. A graph that keeps the threads busy whole \
+         renders whole either way.\n",
+        AHEAD.max_block,
+        EXPORT.max_block,
+        cores()
+    );
+    println!(
+        "| Graph | Rendering | One thread, per second | Whole, per second | \
+         Pipelined, per second | Speed-up | Same |"
+    );
+    println!("|---|---|---|---|---|---|---|");
+    let graphs: [(&str, BuildFor); 3] = [
+        ("64 devices in a chain", |config| {
+            deep_for(config, 64, cost::DEVICE)
+        }),
+        ("64 tracks, sends, slots", |config| {
+            let project = Project {
+                tracks: 64,
+                routing: Routing::Sends,
+                slots: true,
+            };
+            project.per_node_for(config)
+        }),
+        ("4 tracks", |config| {
+            let project = Project {
+                tracks: 4,
+                routing: Routing::Direct,
+                slots: false,
+            };
+            project.per_node_for(config)
+        }),
+    ];
+    let ways = [
+        ("ahead", AHEAD, true, Pipeline::Ahead),
+        ("export", EXPORT, false, Pipeline::Always),
+    ];
+    for (name, build) in graphs {
+        for (way, config, ahead, pipeline) in ways {
+            let frames = config.max_block;
+            let blocks = AHEAD_SECONDS * config.sample_rate as usize / frames;
+            let alone = || {
+                let mut graph = build(config);
+                render_keeping(&mut ReferenceRenderer, &mut graph, frames, blocks, ahead)
+            };
+            let shared = |pipeline| {
+                let mut renderer = ParallelRenderer::new(ParallelOptions {
+                    threads: cores() - 1,
+                    pipeline,
+                    ..ParallelOptions::default()
+                });
+                // The workers warm up on a copy.
+                render_keeping(
+                    &mut renderer,
+                    &mut build(config),
+                    frames,
+                    blocks / 10,
+                    ahead,
+                );
+                render_keeping(&mut renderer, &mut build(config), frames, blocks, ahead)
+            };
+            // Each twice, taking turns, and the faster of each: either of
+            // two runs can be slower for no reason of its own.
+            let second = |rendered: &Rendered| per_second(&rendered.times, frames);
+            let mut one = Duration::MAX;
+            let (mut whole, mut pipelined) = (Duration::MAX, Duration::MAX);
+            let mut same = true;
+            for _ in 0..2 {
+                let reference = alone();
+                one = one.min(second(&reference));
+                whole = whole.min(second(&shared(Pipeline::Never)));
+                let run = shared(pipeline);
+                same &= run.same(&reference);
+                pipelined = pipelined.min(second(&run));
+            }
+            let alone_second = one;
+            println!(
+                "| {name} | {way}, {frames} | {} | {} | {} | {:.1}× | {} |",
+                millis(alone_second),
+                millis(whole),
+                millis(pipelined),
+                alone_second.as_secs_f64() / pipelined.as_secs_f64(),
+                if same { "yes" } else { "no" },
+            );
+        }
+    }
+    println!();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Only under `cargo bench`, not when tests build every target.
@@ -367,11 +521,12 @@ fn main() {
     // `cargo bench --bench realtime -- small` runs the tables with "small"
     // in their names.
     let filters: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    let tables: [(&str, fn()); 4] = [
+    let tables: [(&str, fn()); 5] = [
         ("paths", per_node_against_per_path),
         ("waiting", waiting_between_blocks),
         ("small", small_graphs),
         ("ahead", ahead_blocks),
+        ("pipelining", pipelining),
     ];
     println!("# The parallel scheduler at device pace\n");
     for (name, table) in tables {

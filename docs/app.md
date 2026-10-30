@@ -1178,13 +1178,19 @@ priority, and its own instances of the project's plugins, loaded on the
 main thread, which serves what they ask of it while the export runs. The
 copy plays without the metronome, looping or punching in, from the start of
 the range, and the transport stops at its end, to the frame. The render
-thread asks the engine for 4,096 frames at a time and skips the frames the
-graph's latency delays the output by, so a file starts with the range,
-lined up to the sample however late the plugins are. Stems are taps on the
-graph ([engine.md](engine.md#delay-compensation)), lined up with the mix by
-delay compensation, and render with solo cleared, so a group's stem has all
-its unmuted tracks; when solo is on and the mix is wanted too, the mix
-renders as it's heard, in a pass of its own.
+thread asks the engine for 4,096 frames at a time, which it renders as one
+block, pipelined (`Pipeline::Always`,
+[engine.md](engine.md#parallel-rendering)), so a long chain of plugins, as
+on a master, renders on several cores. Plugins hear each as a block the
+device asked for, not one rendered ahead (VST3's `kRealtime`, not
+`kPrefetch`), since some change their oversampling or voices when rendering
+ahead. It skips the frames the graph's latency delays the output by, so a
+file starts with the range, lined up to the sample however late the plugins
+are. Stems are taps on the graph
+([engine.md](engine.md#delay-compensation)), lined up with the mix by delay
+compensation, and render with solo cleared, so a group's stem has all its
+unmuted tracks; when solo is on and the mix is wanted too, the mix renders
+as it's heard, in a pass of its own.
 
 Files are written by `musicable_io::audio::Writer`, which streams WAV, AIFF
 and FLAC files with our own FLAC encoder, and named `NAME.part` until

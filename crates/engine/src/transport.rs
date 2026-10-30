@@ -123,9 +123,7 @@ impl Transport {
 
     /// Moves the playhead past a block of `frames`.
     pub fn advance(&mut self, frames: u64) {
-        if self.state.playing {
-            self.state.position += frames;
-        }
+        self.state = self.state.after(frames);
     }
 
     /// The song position `at` plays on. The song starts at zero.

@@ -2436,6 +2436,12 @@ impl PreparedGraph {
         self.stages[self.stage].nodes.clone()
     }
 
+    /// Whether a node in the current stage makes notes as it renders,
+    /// which it hands on once it has rendered the whole block.
+    pub(crate) fn stage_makes_notes(&self) -> bool {
+        !self.stages[self.stage].makers.is_empty()
+    }
+
     /// Stores a block's node events, grouped by node, in order of offset and
     /// otherwise in arrival order. `routed` must fit in `events`.
     pub(crate) fn load_events(&mut self, routed: &mut [Routed]) {
@@ -3388,6 +3394,7 @@ mod tests {
             inline_below: None,
             max_nodes: 64,
             realtime: false,
+            ..ParallelOptions::default()
         });
         let renderers: [Box<dyn Renderer>; 2] = [Box::new(ReferenceRenderer), Box::new(parallel)];
         for mut renderer in renderers {

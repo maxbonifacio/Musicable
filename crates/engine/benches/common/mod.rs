@@ -19,6 +19,12 @@ pub const AHEAD: EngineConfig = EngineConfig {
     max_block: 1024,
 };
 
+/// For graphs rendered as an export renders them, in blocks of 4096.
+pub const EXPORT: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 4096,
+};
+
 /// What nodes cost, in rounds of [`Burn`] work per sample. One round is a
 /// multiply-add that has to wait for the one before, a few nanoseconds per
 /// sample, so a stereo node with 10 rounds takes about 2 µs per 64 frames.
@@ -35,15 +41,20 @@ pub mod cost {
 
 /// Stands in for a plugin or a native stage: sums its inputs, then does
 /// `work` rounds of arithmetic on every sample, each round depending on the
-/// one before, so the work can't be skipped or vectorised away.
+/// one before, so the work can't be skipped or vectorised away. Each
+/// channel carries on from its own last sample, so it plays the same
+/// whatever blocks it renders.
 pub struct Burn {
     work: u32,
-    state: f32,
+    state: [f32; 2],
 }
 
 impl Burn {
     pub fn new(work: u32) -> Self {
-        Self { work, state: 0.0 }
+        Self {
+            work,
+            state: [0.0; 2],
+        }
     }
 }
 
@@ -53,13 +64,14 @@ impl Node for Burn {
         for input in inputs.iter() {
             output.add_from(input);
         }
-        for channel in output.channels_mut() {
+        for (c, channel) in output.channels_mut().enumerate() {
+            let state = &mut self.state[c % 2];
             for sample in channel {
-                let mut x = *sample + self.state;
+                let mut x = *sample + *state;
                 for _ in 0..self.work {
                     x = x.mul_add(0.999, 0.001);
                 }
-                self.state = x * 1e-3;
+                *state = x * 1e-3;
                 *sample = x;
             }
         }
