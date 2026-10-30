@@ -359,7 +359,10 @@ where a part has started, what's built.
   play its notes on an instrument or a MIDI effect on another track,
   through a relay that gives them ids of their own and a MIDI channel, if
   the wire has one, for a part of a multi-timbral plugin
-  ([engine.md](engine.md#notes)). A node's output is one
+  ([engine.md](engine.md#notes)). Format 25 adds whether a plugin has a
+  note output, so the point after an instrument or an audio effect plugin
+  carries the notes it plays out as it renders, and the graph renders in
+  stages, so what takes them plays them in the same block. A node's output is one
   buffer of `Node::channels()` channels, so a multi-output instrument is a
   node with more of them, and a node for each of its outputs picks that
   output's channels out for a strip of its own. In the model, a track feeds the

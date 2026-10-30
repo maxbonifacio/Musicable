@@ -808,8 +808,8 @@ impl Mixer<'_> {
     /// Where an audio track records from: a menu of the inputs, each a pair
     /// of channels or a channel at a time, with the default input first,
     /// then the other tracks, each opening to its taps, and Resampling. For
-    /// a MIDI track, a menu of the MIDI inputs, then the other MIDI tracks,
-    /// each opening to its notes.
+    /// a MIDI track, a menu of the MIDI inputs, then the other tracks with
+    /// notes, each opening to its taps that carry them.
     fn input(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
         if track.kind == TrackKind::Midi {
             self.midi_input(ui, track, actions);
@@ -1068,7 +1068,7 @@ impl Mixer<'_> {
             _ if missing => {
                 "Where the track records from. This MIDI input isn't there: it's not plugged in."
             }
-            Some(_) => "Where the track records from: another MIDI track's notes, which it plays",
+            Some(_) => "Where the track records from: another track's notes, which it plays",
             None => {
                 "Where the track records from: a MIDI input, or all of them, and one channel or \
                  all of them, as MPE controllers need"
@@ -3055,6 +3055,7 @@ mod tests {
             name: "Arp".into(),
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         }));
         let arp_id = arp.id;
@@ -3093,6 +3094,45 @@ mod tests {
         let project = harness.state().document.project();
         assert_eq!(project.track(keys).unwrap().monitor, Monitor::In);
         let notes = Input::Tap(Tap::Device(arp_id));
+        assert_eq!(mixed(&harness), [Change::Input(keys, Some(notes))]);
+    }
+
+    #[test]
+    fn midi_tracks_take_the_notes_a_plugin_plays_out_on_any_track() {
+        let (mut project, [lead, keys, ..]) = project();
+        // A plugin that hears the notes in the Lead's sound, and plays
+        // them out as it renders.
+        let detector = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.detector".into(),
+            name: "Detector".into(),
+            kind: PluginKind::AudioEffect,
+            inputs: Vec::new(),
+            note_output: true,
+            settings: PluginSettings::default(),
+        }));
+        let detector_id = detector.id;
+        project.track_mut(lead).unwrap().devices.push(detector);
+        let mut harness = harness(project);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys Input")
+            .click();
+        harness.run();
+        harness.get_by_label("Tracks").scroll_to_me();
+        harness.run();
+        // The Lead, an audio track, has notes after the detector, and
+        // nowhere else.
+        harness.get_by_role_and_label(Role::Button, "Lead").hover();
+        harness.run();
+        for point in ["Pre FX", "Post FX", "Post Fader"] {
+            assert!(harness.query_by_label(point).is_none(), "{point}");
+        }
+        harness.get_by_label("after Detector").click();
+        harness.run();
+        let input = harness.get_by_role_and_label(Role::ComboBox, "Keys Input");
+        assert_eq!(input.value().as_deref(), Some("from Lead, after Detector"));
+        let notes = Input::Tap(Tap::Device(detector_id));
         assert_eq!(mixed(&harness), [Change::Input(keys, Some(notes))]);
     }
 

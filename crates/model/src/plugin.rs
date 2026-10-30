@@ -27,6 +27,11 @@ pub struct PluginDevice {
     /// input it no longer had then stays, after the others, if a wire went
     /// into it. Empty until it first loads.
     pub inputs: Vec<PluginInput>,
+    /// Whether it has a note output, as the plugin said when it last loaded,
+    /// so what takes its notes keeps them while it's missing. It stays on
+    /// while something takes them, if the plugin no longer had one then.
+    /// Off until it first loads.
+    pub note_output: bool,
     pub settings: PluginSettings,
 }
 
@@ -34,6 +39,14 @@ impl PluginDevice {
     /// The side input with the plugin's id `id`, if it has it.
     pub fn input(&self, id: u32) -> Option<&PluginInput> {
         self.inputs.iter().find(|input| input.id == id)
+    }
+
+    /// Whether it plays notes out as it renders: an instrument or an audio
+    /// effect with a note output, such as a synth that plays its arpeggios
+    /// out, or a note detector, which hears notes in what comes into it. A
+    /// MIDI effect plays its notes on in the notes' way instead.
+    pub fn makes_notes(&self) -> bool {
+        self.note_output && self.kind != PluginKind::MidiEffect
     }
 }
 

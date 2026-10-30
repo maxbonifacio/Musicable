@@ -234,6 +234,7 @@ fn plugin(
         name: name.to_owned(),
         kind,
         inputs: Vec::new(),
+        note_output: false,
         settings,
     }))
 }
@@ -1116,6 +1117,75 @@ fn doubles_an_arpeggiator_through_midi_from(format: PluginFormat) {
         }
         assert!(left[start + beat + 1..].iter().all(|s| *s == 0.0));
     }
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_second_track_doubles_what_a_clap_synth_plays_out_through_midi_from() {
+    doubles_what_a_synth_plays_out_through_midi_from(PluginFormat::Clap);
+}
+
+#[test]
+fn a_second_track_doubles_what_a_vst3_synth_plays_out_through_midi_from() {
+    doubles_what_a_synth_plays_out_through_midi_from(PluginFormat::Vst3);
+}
+
+fn doubles_what_a_synth_plays_out_through_midi_from(format: PluginFormat) {
+    // Named so, the library's synth plays each note it gets out again as
+    // it renders, an octave up, on the same frame.
+    let plugins = TestPlugins::new(format, "echo");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    let double = song.add_track("Double", TrackKind::Midi);
+    let mut c = MidiClip::default();
+    c.add_note(Beats::ZERO, Beats::new(1), 60, 1.0);
+    let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+    let clip = song.new_clip("C", range, ClipContent::Midi(c));
+    let synth = plugins.synth(&mut song);
+    let track = song.track_mut(keys).unwrap();
+    track.clips.push(clip);
+    track.devices.push(synth.clone());
+    let doubling = plugins.synth(&mut song);
+    song.track_mut(double).unwrap().devices.push(doubling);
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    // It says it has a note output as it loads, and its device takes it,
+    // as no step to undo.
+    rig.render(240);
+    let (_, _, device) = rig.session.project().find_device(synth.id).unwrap();
+    assert!(device.kind.plugin().unwrap().note_output);
+    assert_eq!(rig.session.undo_name(), None);
+
+    // The Keys' synth alone, for where it starts.
+    let beat = 24_000;
+    let (left, _) = rig.play_from_start(beat + 4_800);
+    let start = left.iter().position(|s| *s != 0.0).unwrap();
+    assert!(start < 256, "the Keys started at {start}");
+    assert_plays_key(&left[start + 100..start + beat - 100], 60);
+
+    // Muted, and its notes taken after its synth, chosen in the mixer: the
+    // Double plays them an octave up, from the same frame, a block late
+    // never.
+    let mute = Args::new().with("track", keys).with("muted", true);
+    rig.session.run_with(&mixer::SET_MUTE, &mute).unwrap();
+    let args = Args::new().with("track", double).with("after", synth.id);
+    rig.session.run_with(&mixer::SET_INPUT, &args).unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(beat + 4_800);
+    let doubled = left.iter().position(|s| *s != 0.0).unwrap();
+    assert_eq!(doubled, start);
+    assert_plays_key(&left[start + 100..start + beat - 100], 72);
+    assert!(left[start + beat + 1..].iter().all(|s| *s == 0.0));
+
+    // Bypassed, the synth plays none out, and the Double's silent.
+    let bypass = Args::new().with("devices", vec![synth.id]);
+    let bypass = bypass.with("bypassed", true);
+    rig.session.run_with(&device::SET_BYPASS, &bypass).unwrap();
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(beat + 4_800);
+    assert_eq!(peak(&left), 0.0);
     assert_eq!(rig.session.take_problems(), Vec::<String>::new());
     drop(rig);
     plugins.assert_alright();

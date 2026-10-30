@@ -41,6 +41,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     plugin_kinds,
     notes_after_effects,
     note_wires,
+    note_outputs,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -458,6 +459,34 @@ fn note_wires(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     for (i, wire) in wires.into_iter().flatten().enumerate() {
         if let Some(wire) = wire.as_object_mut() {
             add(wire, &format!("wires[{i}]"), "channel", Value::Null)?;
+        }
+    }
+    Ok(())
+}
+
+/// Version 25 added whether each plugin has a note output, so the point
+/// after it carries the notes it plays out as it renders. Version 24
+/// plugins have none until they next load.
+fn note_outputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let path = format!("tracks[{i}].devices");
+        no_note_output(track.get_mut("devices"), &path)?;
+    }
+    let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
+    no_note_output(master, "master.devices")
+}
+
+/// Gives each plugin in `devices`, a list at `path`, no note output.
+fn no_note_output(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let devices = devices.and_then(Value::as_array_mut);
+    for (j, device) in devices.into_iter().flatten().enumerate() {
+        let plugin = (device.get_mut("kind"))
+            .and_then(|kind| kind.get_mut("plugin"))
+            .and_then(Value::as_object_mut);
+        if let Some(plugin) = plugin {
+            let path = format!("{path}[{j}].kind.plugin");
+            add(plugin, &path, "note_output", json!(false))?;
         }
     }
     Ok(())
@@ -1092,6 +1121,32 @@ mod tests {
                 "wires[0].channel",
                 "unknown field for the file's version"
             ))
+        );
+    }
+
+    #[test]
+    fn version_24_plugins_have_no_note_outputs() {
+        let plugin = || json!({"kind": {"plugin": {"id": "org.example.arp"}}});
+        let native = json!({"kind": {"native": {"kind": "synth"}}});
+        let mut file = json!({
+            "version": 24,
+            "tracks": [{"devices": [plugin(), native.clone()]}, "not a track"],
+            "master": {"devices": [plugin()]},
+        });
+        run(&STEPS[..24], &mut file, 24).unwrap();
+        let output = |device: &Value| device["kind"]["plugin"]["note_output"].clone();
+        assert_eq!(output(&file["tracks"][0]["devices"][0]), json!(false));
+        assert_eq!(file["tracks"][0]["devices"][1], native);
+        assert_eq!(output(&file["master"]["devices"][0]), json!(false));
+        assert_eq!(file["version"], json!(25));
+        let mut file = json!({
+            "version": 24,
+            "master": {"devices": [{"kind": {"plugin": {"note_output": true}}}]},
+        });
+        assert_eq!(
+            run(&STEPS[..24], &mut file, 24).unwrap_err().path,
+            "master.devices[0].kind.plugin.note_output",
+            "a plugin's note output in a version 24 file"
         );
     }
 

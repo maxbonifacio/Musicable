@@ -2277,6 +2277,7 @@ fn fixture() -> Project {
             id: 2,
             name: "Sidechain".into(),
         }],
+        note_output: false,
         settings: PluginSettings {
             state: Some(PluginState::new(*b"state")),
             params: vec![PluginParam { id: 1, value: 0.5 }],

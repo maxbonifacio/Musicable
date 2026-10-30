@@ -36,9 +36,9 @@ use super::Instance;
 use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
-    Block, CONFIG, Impulse, arpeggiate, assert_arpeggiated, assert_close, bypass,
-    bypassed_at_256_and_back_at_1280, controller, controller_on, ducked, let_go, note, on_channel,
-    param, play, play_blocks, play_keyed, ramp, scaled, scan_path, sine, temp_dir,
+    Block, CONFIG, Impulse, arpeggiate, assert_arpeggiated, assert_close, assert_echoed, bypass,
+    bypassed_at_256_and_back_at_1280, controller, controller_on, ducked, echo, let_go, note,
+    on_channel, param, play, play_blocks, play_keyed, ramp, scaled, scan_path, sine, temp_dir,
 };
 use crate::{Buses, ParentWindow, PluginEvent, PluginInfo, Waker};
 
@@ -1075,6 +1075,23 @@ fn an_arpeggiator_plays_notes_of_its_own() {
     instance.set_param(TRANSPOSE, 0.75);
     instance.activate(CONFIG).unwrap();
     assert_arpeggiated(&arpeggiate(instance.node_source().node()));
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_synth_plays_out_notes_as_it_renders() {
+    // A bundle named so has the synth play out what it gets, through an
+    // event output; without, it has none.
+    let plugins = TestPlugins::new("synth");
+    assert!(!plugins.synth().note_output());
+    drop(plugins);
+    let plugins = TestPlugins::new("echo");
+    let mut instance = plugins.synth();
+    assert!(instance.note_output());
+    instance.activate(CONFIG).unwrap();
+    assert!(instance.note_output());
+    assert_echoed(&echo(instance.node_source().node()));
     drop(instance);
     plugins.assert_alright();
 }

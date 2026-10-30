@@ -63,9 +63,13 @@
 //! input's: at the other's Pre FX, its [`MidiMonitor`]; after one of its
 //! MIDI effects, the switch of the last one that plays up to there, or the
 //! monitor; and at its Post FX, where the notes reach its instrument, the
-//! last of them all. The tap has a note record ([`Graph::add_note_record`])
-//! keyed [`keys::record_notes`]. A track that goes to Sends Only feeds
-//! nothing but its sends.
+//! last of them all. A device in the signal that plays notes out as it
+//! renders, a plugin with a note output that isn't a MIDI effect, on any
+//! channel, has its switch send them from the point after it once it has
+//! rendered ([`Graph::send_made_notes`]), to the monitors and the relays
+//! taking them, which render after it in the same block. The tap has a
+//! note record ([`Graph::add_note_record`]) keyed [`keys::record_notes`].
+//! A track that goes to Sends Only feeds nothing but its sends.
 //!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
@@ -753,6 +757,9 @@ fn build(
     let mut taking = Vec::new();
     let mut taking_notes = Vec::new();
     let mut note_points = HashMap::new();
+    // And the points after the devices that play notes out as they render,
+    // where those notes come from as each has rendered.
+    let mut made_points = HashMap::new();
     // Where each channel's notes are as they reach its first instrument,
     // for its modulators: a MIDI track's after its MIDI effects, which are
     // its Post FX's too, and the note wires' into the instrument. And each
@@ -849,6 +856,7 @@ fn build(
             &mut points,
             &mut ports,
             &mut note_ports,
+            &mut made_points,
         );
         if let Some(instrument) = taps.instrument {
             first_instruments.insert(instrument, Chain::Track(track.id));
@@ -919,7 +927,14 @@ fn build(
         &mut stages,
         None,
     );
-    taps.record(Chain::Master, &mut points, &mut ports, &mut note_ports);
+    let made = &mut made_points;
+    taps.record(
+        Chain::Master,
+        &mut points,
+        &mut ports,
+        &mut note_ports,
+        made,
+    );
     if let Some(instrument) = taps.instrument {
         first_instruments.insert(instrument, Chain::Master);
     }
@@ -933,15 +948,23 @@ fn build(
     // nothing to feed. A note wire plays the notes at its tap into an
     // instrument or a MIDI effect through a relay, which gives them ids of
     // their own and its channel, and a muted track's cuts them.
+    let notes_at = |tap: Tap| {
+        let played = note_points.get(&tap).map(|&node| (node, false));
+        played.or_else(|| made_points.get(&tap).map(|&node| (node, true)))
+    };
     for wire in project.live_wires() {
         if let routing::Port::Notes(device) = wire.to {
-            let (Some(&from), Some(&to)) = (note_points.get(&wire.from), note_ports.get(&device))
+            let (Some((from, made)), Some(&to)) = (notes_at(wire.from), note_ports.get(&device))
             else {
                 continue;
             };
             let relay = NoteWire::new(wire.id, wire.channel).with_muted(silenced.wire(wire.id));
             let relay = graph.add(keys::wire(wire.id), relay);
-            (graph.send_notes(from, relay)).expect("the relay was just added");
+            match made {
+                true => graph.send_made_notes(from, relay),
+                false => graph.send_notes(from, relay),
+            }
+            .expect("the relay was just added");
             graph
                 .send_notes(relay, to)
                 .expect("the model's routing rules leave no loops");
@@ -978,13 +1001,15 @@ fn build(
     }
     // A MIDI track takes another's notes from the node that plays them at
     // the tap: that one's monitor, on their way to its devices, or one of
-    // its MIDI effects.
+    // its MIDI effects, or from a device that plays them out as it
+    // renders, as it has.
     for &(tap, monitor) in &taking_notes {
-        if let Some(&from) = note_points.get(&tap) {
-            graph
-                .send_side_notes(from, monitor)
-                .expect("the model's routing rules leave no loops");
-        }
+        let routed = match notes_at(tap) {
+            Some((from, false)) => graph.send_side_notes(from, monitor),
+            Some((from, true)) => graph.send_side_made_notes(from, monitor),
+            None => continue,
+        };
+        routed.expect("the model's routing rules leave no loops");
     }
     graph.set_cue(cue).expect("the cue bus was just added");
     for node in stems.iter().filter_map(|track| tapped.get(track)) {
@@ -1008,7 +1033,7 @@ fn build(
         }
     }
     for &tap in recorded(TrackKind::Midi) {
-        if let Some(&node) = note_points.get(&tap) {
+        if let Some((node, _)) = notes_at(tap) {
             graph
                 .add_note_record(keys::record_notes(tap), node)
                 .expect("the taps' nodes were just added");
@@ -1191,10 +1216,16 @@ fn modulate(
             debug_assert_eq!(port, n, "the ports are numbered in order");
         }
     }
+    // But for notes made as something rendered that the modulators move,
+    // directly or along the way: they'd have to move it before it made
+    // them, so they don't hear those.
     for (&chain, notes) in instrument_notes {
         if let Some(node) = node_of(chain) {
             for &notes in notes {
-                (graph.send_notes(notes, node)).expect("notes go from the channels to their nodes");
+                match graph.send_notes(notes, node) {
+                    Ok(()) | Err(GraphError::Cycle) => {}
+                    Err(e) => panic!("notes go from the channels to their nodes: {e}"),
+                }
             }
         }
     }
@@ -1277,6 +1308,9 @@ struct Taps {
     /// The switch of each instrument in the signal and each MIDI effect
     /// that plays, for the note wires into them.
     note_ports: Vec<(DeviceId, NodeId)>,
+    /// The switch of each device in the signal that plays notes out as it
+    /// renders, for the MIDI tracks and the note wires taking them.
+    makers: Vec<(DeviceId, NodeId)>,
     /// What each device puts out: its switch's output, or where it has no
     /// node in the signal, what comes into it.
     devices: Vec<(DeviceId, Option<NodeId>)>,
@@ -1286,14 +1320,17 @@ struct Taps {
 
 impl Taps {
     /// Adds where the taps of `chain`, the channel's, are to `points`, but
-    /// for its Pre FX, its devices' switches to `ports`, and those of its
-    /// instruments and MIDI effects to `note_ports`.
+    /// for its Pre FX, its devices' switches to `ports`, those of its
+    /// instruments and MIDI effects to `note_ports`, and those of the
+    /// devices that play notes out as they render to `made_points`, at the
+    /// points after them.
     fn record(
         &self,
         chain: Chain,
         points: &mut HashMap<Tap, NodeId>,
         ports: &mut HashMap<DeviceId, NodeId>,
         note_ports: &mut HashMap<DeviceId, NodeId>,
+        made_points: &mut HashMap<Tap, NodeId>,
     ) {
         let taps = [
             (Tap::PostFx(chain), self.pre_fader),
@@ -1307,6 +1344,11 @@ impl Taps {
         }
         ports.extend(self.switches.iter().copied());
         note_ports.extend(self.note_ports.iter().copied());
+        let makers = self
+            .makers
+            .iter()
+            .map(|&(id, node)| (Tap::Device(id), node));
+        made_points.extend(makers);
     }
 }
 
@@ -1330,7 +1372,9 @@ impl Strip<'_> {
     /// but out of the signal, and in the notes' way on a MIDI track, before
     /// the instrument: notes pass by one without a node, or deactivated.
     /// One that no notes reach, after the instrument or on a channel
-    /// without notes, is left out of their way, as if deactivated. A track
+    /// without notes, is left out of their way, as if deactivated. A device
+    /// in the signal that plays notes out as it renders, such as a plugin
+    /// with a note output, is a maker, for what takes those notes. A track
     /// resampling the master has its `cut` after its devices.
     fn channel(
         &mut self,
@@ -1349,6 +1393,7 @@ impl Strip<'_> {
         let mut midi_effects = Vec::new();
         let mut note_taps = Vec::new();
         let mut note_ports = Vec::new();
+        let mut makers = Vec::new();
         let notes = matches!(channel, Channel::Track(track) if track.kind == TrackKind::Midi);
         let (mut device_taps, mut switches) = (Vec::new(), Vec::new());
         for device in channel.devices() {
@@ -1389,6 +1434,9 @@ impl Strip<'_> {
                 if device.kind.is_instrument() {
                     note_ports.push((device.id, node));
                 }
+                if device.kind.makes_notes() {
+                    makers.push((device.id, node));
+                }
             }
             device_taps.push((device.id, self.tail));
             if device.kind.is_instrument() && instrument.is_none() {
@@ -1411,6 +1459,7 @@ impl Strip<'_> {
             midi_effects,
             note_taps,
             note_ports,
+            makers,
             devices: device_taps,
             switches,
         }
@@ -2112,6 +2161,7 @@ mod tests {
                 false => PluginKind::AudioEffect,
             },
             inputs: Vec::new(),
+            note_output: false,
             settings: Default::default(),
         })
     }
@@ -2270,6 +2320,7 @@ mod tests {
             name: "Arpeggiator".into(),
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
+            note_output: false,
             settings: Default::default(),
         })
     }
@@ -2571,6 +2622,182 @@ mod tests {
         p.tracks[0].devices[0].bypassed = true;
         assert_eq!(heard(&mut p, Tap::Device(octave)), [69]);
         assert_eq!(heard(&mut p, post_fx), [69]);
+    }
+
+    /// Stands in for an instrument plugin that plays its notes out as it
+    /// renders: makes nodes that play nothing, and play the notes they get
+    /// out again, `up` keys up, on the same frames, and counts the times
+    /// they're told their notes go somewhere.
+    struct Echoes {
+        up: u8,
+        told: Arc<AtomicUsize>,
+    }
+
+    impl Echoes {
+        fn new(up: u8) -> Arc<Self> {
+            let told = Arc::new(AtomicUsize::new(0));
+            Arc::new(Self { up, told })
+        }
+
+        fn told(&self) -> usize {
+            self.told.load(Ordering::Relaxed)
+        }
+    }
+
+    impl NodeMaker for Echoes {
+        fn make(&self) -> Box<dyn Node> {
+            Box::new(Echo {
+                up: self.up,
+                made: Vec::with_capacity(8),
+                told: Arc::clone(&self.told),
+            })
+        }
+    }
+
+    struct Echo {
+        up: u8,
+        made: Vec<(usize, NoteEvent)>,
+        told: Arc<AtomicUsize>,
+    }
+
+    impl Node for Echo {
+        fn makes_notes(&mut self) {
+            self.told.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            for event in ctx.events {
+                if let NodeEventKind::Note(mut note) = event.kind
+                    && self.made.len() < self.made.capacity()
+                {
+                    if let NoteEvent::On { key, .. } = &mut note {
+                        *key += self.up;
+                    }
+                    self.made.push((event.offset, note));
+                }
+            }
+            output.clear();
+        }
+
+        fn made_notes(&mut self, _: &ProcessContext<'_>, notes: &mut crate::Notes<'_>) {
+            for (offset, note) in self.made.drain(..) {
+                notes.send(offset, note);
+            }
+        }
+    }
+
+    /// An instrument plugin with a note output, which it plays its notes
+    /// out on as it renders.
+    fn echoing() -> DeviceKind {
+        let mut kind = plugin(true);
+        if let DeviceKind::Plugin(plugin) = &mut kind {
+            plugin.note_output = true;
+        }
+        kind
+    }
+
+    #[test]
+    fn a_midi_track_takes_the_notes_an_instrument_plays_out_in_the_same_block() {
+        // The Keys play their note on an instrument that plays it out an
+        // octave up. The Double plays what it takes on an instrument of its
+        // own, through a MIDI effect.
+        let mut p = note_through(vec![echoing()]);
+        let keys = p.tracks[0].id;
+        let echo = p.tracks[0].devices[0].id;
+        let double = p.add_track("Double", TrackKind::Midi);
+        let ear = p.new_device(midi_effect());
+        let ear_id = ear.id;
+        let synth = p.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let t = p.track_mut(double).unwrap();
+        t.devices = vec![ear, synth];
+        t.monitor = Monitor::In;
+        let play = |p: &mut Project, tap, up| {
+            p.track_mut(double).unwrap().input = Some(Input::Tap(tap));
+            let echoes = Echoes::new(12);
+            let mut devices = Devices::new();
+            devices.insert(echo, echoes.clone());
+            devices.insert(ear_id, Transposes::new(Some(up)));
+            let graph = compile_with_devices(p, &Meters::new(), &Media::new(), &devices);
+            let out = render(graph.prepare(&CONFIG).unwrap(), 1000);
+            (out, echoes.told())
+        };
+        // What it plays out sounds on the Double just as the Keys' own note
+        // would an octave up, on the same frames: never a block late.
+        let (taken, told) = play(&mut p, Tap::Device(echo), 0);
+        let (before, untold) = play(&mut p, Tap::PreFx(keys), 12);
+        assert!(taken.iter().any(|&s| s != 0.0));
+        assert_eq!(taken, before);
+        // Its node keeps them only while they go somewhere.
+        assert_eq!((told, untold), (1, 0));
+    }
+
+    #[test]
+    fn note_wires_and_records_take_the_notes_an_instrument_plays_out() {
+        // The Keys' note wire takes what an instrument of theirs plays out,
+        // on channel 4, into the Strings' multi-timbral plugin.
+        let (mut p, mut devices, parts) = parts();
+        let keys = p.tracks[0].id;
+        let echo = p.new_device(echoing());
+        let echo_id = echo.id;
+        p.track_mut(keys).unwrap().devices.push(echo);
+        devices.insert(echo_id, Echoes::new(12));
+        p.wires[0].from = Tap::Device(echo_id);
+        assert_eq!(heard(&p, &devices, &parts), [(60, None), (81, Some(3))]);
+
+        // A MIDI track recording them has the instrument's notes recorded.
+        let print = p.add_track("Print", TrackKind::Midi);
+        let t = p.track_mut(print).unwrap();
+        t.input = Some(Input::Tap(Tap::Device(echo_id)));
+        t.armed = true;
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices);
+        let graph = graph.prepare(&CONFIG).unwrap();
+        let tap = Tap::Device(echo_id);
+        assert!(graph.note_records().eq([keys::record_notes(tap)]));
+
+        // Without a note output, the point after it carries no notes.
+        if let DeviceKind::Plugin(plugin) = &mut p.track_mut(keys).unwrap().devices[0].kind {
+            plugin.note_output = false;
+        }
+        assert_eq!(heard(&p, &devices, &parts), [(60, None)]);
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices);
+        assert_eq!(graph.prepare(&CONFIG).unwrap().note_records().count(), 0);
+    }
+
+    #[test]
+    fn modulators_dont_hear_notes_made_by_what_they_move() {
+        // The Keys play their note on an instrument that plays it out, which
+        // a note wire takes to an instrument on the master, whose Envelope
+        // hears it.
+        let mut p = note_through(vec![echoing()]);
+        let echo = p.tracks[0].devices[0].id;
+        let synth = p.new_device(plugin(true));
+        let synth_id = synth.id;
+        p.master.devices.push(synth);
+        let wire = p.new_wire(Tap::Device(echo), Port::Notes(synth_id));
+        p.wires.push(wire);
+        let envelope = p.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+        let id = envelope.id;
+        let routing = p.new_routing(Output::new(id, 0), ParamAddress::Device(echo, 3), 0.5);
+        p.master.modulation.modulators.push(envelope);
+        let opened = |p: &Project| {
+            let mut meters = Meters::new();
+            meters.follow(p);
+            let mut devices = Devices::new();
+            devices.insert(echo, Echoes::new(12));
+            devices.insert(synth_id, Arc::new(Arc::new(Parts::default())));
+            let graph = compile_with_devices(p, &meters, &Media::new(), &devices);
+            render(graph.prepare(&CONFIG).unwrap(), 1000);
+            meters.output(Output::new(id, 0)).unwrap().get() > 0.0
+        };
+        assert!(opened(&p));
+        // It hears them moving the instrument they play.
+        let plays = p.new_routing(Output::new(id, 0), ParamAddress::Device(synth_id, 3), 0.5);
+        p.master.modulation.routings.push(plays);
+        assert!(opened(&p));
+        // Moving the instrument that makes them, it can't: it would have to
+        // move it before it made them.
+        p.master.modulation.routings = vec![routing];
+        assert!(!opened(&p));
     }
 
     #[test]

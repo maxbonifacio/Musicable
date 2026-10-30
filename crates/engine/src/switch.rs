@@ -37,6 +37,12 @@ use crate::{
 /// a block, it renders that part of the block as a block of its own, so
 /// the switch renders the same whatever the blocks.
 ///
+/// The notes the device makes as it renders go where the switch's made
+/// notes go ([`Graph::send_made_notes`](crate::Graph::send_made_notes)).
+/// It makes none while it's stopped, and as it stops, the notes it made
+/// that still sound end, on the frame it stops, and the switches it held
+/// on, such as the sustain pedal, come up, so none hangs.
+///
 /// A deactivated device's switch ([`deactivated`](Self::deactivated))
 /// never starts its device, and plays silence. The compiler leaves it out
 /// of the signal, so the device's latency goes too, but keeps it in the
@@ -80,6 +86,9 @@ pub struct Switch {
     /// The events of a part of a block the device renders, moved to their
     /// offsets in the part.
     shifted: Vec<NodeEvent>,
+    /// The frame the device stopped on in the block that rendered last, if
+    /// it stopped: the notes it made that still sound end there.
+    stopped_at: Option<usize>,
 }
 
 /// How many switches can be on their way through a device at once. One
@@ -117,6 +126,7 @@ impl Switch {
             fade: 1,
             due: VecDeque::new(),
             shifted: Vec::new(),
+            stopped_at: None,
         }
     }
 
@@ -258,6 +268,7 @@ impl Switch {
             if self.leaving() && self.settled() {
                 self.device.stop();
                 self.running = false;
+                self.stopped_at = Some(at);
             }
             if at == frames {
                 break;
@@ -367,6 +378,7 @@ impl Node for Switch {
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        self.stopped_at = None;
         if self.deactivated {
             self.device.flush(ctx);
             output.clear();
@@ -413,6 +425,19 @@ impl Node for Switch {
                 _ => {}
             }
         }
+    }
+
+    /// What the device made as it rendered, and, if it stopped, the end of
+    /// the notes it made that still sound and of the switches it held on.
+    fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        self.device.made_notes(ctx, notes);
+        if let Some(at) = self.stopped_at.take() {
+            notes.release_all(at.min(ctx.frames.saturating_sub(1)));
+        }
+    }
+
+    fn makes_notes(&mut self) {
+        self.device.makes_notes();
     }
 
     fn ended_voices(&self) -> &[NoteId] {
@@ -1400,6 +1425,97 @@ mod tests {
     fn kept_by(graph: &mut crate::PreparedGraph, kept: crate::NodeId) -> &Kept {
         let kept = graph.nodes[kept.0].as_mut().downcast_mut::<Kept>();
         kept.unwrap()
+    }
+
+    /// A device that plays its notes out as it renders, as an instrument
+    /// plugin can: a note on the first frame it renders, held, with the
+    /// sustain pedal down, and the times it's told its notes go somewhere.
+    struct Plays {
+        made: Vec<(u64, NoteEvent)>,
+        started: bool,
+        told: usize,
+    }
+
+    impl Node for Plays {
+        fn makes_notes(&mut self) {
+            self.told += 1;
+        }
+
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            if !std::mem::replace(&mut self.started, true) {
+                self.made.push((ctx.time, on(1, 60)));
+            }
+            output.clear();
+        }
+
+        fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for (time, note) in self.made.drain(..) {
+                let offset = (time - ctx.time) as usize;
+                notes.send_controller(offset, Controller::SUSTAIN, 1.0);
+                notes.send(offset, note);
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_s_notes_made_as_it_renders_go_on_and_end_as_it_stops() {
+        use crate::graph::{Graph, NodeKey};
+        use crate::{AudioRef, Block, ReferenceRenderer, TransportState};
+        let plays = Plays {
+            made: Vec::with_capacity(4),
+            started: false,
+            told: 0,
+        };
+        let mut g = Graph::new();
+        let switch_node = g.add(NodeKey(0), Switch::new(Box::new(plays), false));
+        let kept = Kept {
+            notes: Vec::with_capacity(32),
+            controllers: Vec::with_capacity(32),
+        };
+        let kept = g.add(NodeKey(1), kept);
+        g.send_made_notes(switch_node, kept).unwrap();
+        g.set_output(kept).unwrap();
+        let config = EngineConfig {
+            sample_rate: 48_000,
+            max_block: 64,
+        };
+        let mut graph = g.prepare(&config).unwrap();
+        let node = graph.nodes[switch_node.0].as_mut().downcast_mut::<Switch>();
+        let plays = node.unwrap().device_mut().downcast_mut::<Plays>();
+        assert_eq!(plays.unwrap().told, 1);
+        let tempo = musicable_model::time::TempoMap::default();
+        let mut run = |time, events: &[NodeEvent]| {
+            for &event in events {
+                assert!(graph.route(switch_node, event));
+            }
+            let block = Block {
+                frames: 64,
+                time,
+                transport: TransportState::default(),
+                tempo: &tempo,
+                input: AudioRef::empty(64),
+                midi: &[],
+                ahead: false,
+            };
+            crate::rt::scope(|| assert_eq!(graph.run(&mut ReferenceRenderer, &block), 0));
+            let kept = kept_by(&mut graph, kept);
+            (kept.notes.clone(), kept.controllers.clone())
+        };
+        let pedal = |offset, value| vec![(offset, Controller::SUSTAIN, value, None)];
+        // Where its notes go, in the block it makes them.
+        assert_eq!(run(0, &[]), (vec![(0, on(1, 60))], pedal(0, 1.0)));
+        // Bypassed on frame 80, it fades out over 480 frames, stops on
+        // frame 560, 48 frames into its block, and the note ends there, and
+        // the pedal, which would hold it on, comes up.
+        let nothing = (vec![], vec![]);
+        assert_eq!(run(64, &[switch(16, true)]), nothing);
+        for time in (128..512).step_by(64) {
+            assert_eq!(run(time, &[]), nothing);
+        }
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        let stops = (vec![(48, off(1, release))], pedal(48, 0.0));
+        assert_eq!(run(512, &[]), stops);
+        assert_eq!(run(576, &[]), nothing);
     }
 
     #[test]

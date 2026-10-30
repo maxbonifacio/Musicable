@@ -906,6 +906,7 @@ impl Library {
                     name: plugin.name.clone(),
                     kind: plugins.kind_of(plugin),
                     inputs: Vec::new(),
+                    note_output: false,
                     settings: PluginSettings {
                         state: Some(state),
                         params: Vec::new(),

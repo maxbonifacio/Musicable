@@ -92,6 +92,28 @@ synth the chord its track's clip holds, a note at a time.
   on an instrument of its own or record them as a clip ([Taking another
   track's notes](routing.md#taking-another-tracks-notes)).
 
+## Notes a plugin plays out
+
+Some instruments and effects play notes out as they play: a synth with an
+arpeggiator or a sequencer of its own, or an effect that hears the notes
+in what comes into it, such as a pitch tracker on a vocal or a drum
+trigger. Musicable finds out as the plugin loads, from its note output,
+and then the point after it carries those notes as well as its sound.
+
+- **On another track.** A MIDI track can take them, after the plugin, to
+  double them on an instrument of its own or record them as a clip
+  ([Taking another track's notes](routing.md#taking-another-tracks-notes)),
+  and the `wire.connect` command can wire them into an instrument
+  elsewhere. They play there at the same moment the plugin plays them,
+  never a block late.
+- **Bypassed or deactivated**, the plugin plays none out, and the notes it
+  was playing end as it stops, and a sustain pedal it held down comes up,
+  so none hangs.
+- **A plugin that changes.** The project keeps whether a plugin has a note
+  output, so a track taking its notes keeps them while the plugin is
+  missing. If a later version has none, the track still has it as its
+  input, and gets notes again once the plugin plays them.
+
 ## Multi-timbral instruments
 
 A multi-timbral instrument, such as a sampler with a part on each MIDI

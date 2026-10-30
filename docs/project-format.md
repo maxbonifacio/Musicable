@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 24,
+  "version": 25,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -440,7 +440,9 @@ while it records, so it isn't in the mix it records. The master has no
 other tap for an input. A MIDI track takes another MIDI track's notes: at
 its Pre FX, those of its clips and its input; after one of its MIDI
 effects, those that plays; or at its Post FX, those that reach its
-instrument. An input from a tap can't close a loop (see Routing).
+instrument. It also takes the notes a plugin plays out as it renders, on
+any track, after it. An input from a tap can't close a loop (see
+Routing).
 
 An **audio input** is some channels of an audio device's input:
 
@@ -880,6 +882,7 @@ A **plugin**'s settings say which plugin it is and how it's set:
 | `name` | string | The plugin's name when it was added, to show while it's missing. Any text, empty included. |
 | `kind` | string | What it does with notes: `"instrument"`, which plays them, `"midi_effect"`, which plays them on, changed, to the instrument after it, such as an arpeggiator, or `"audio_effect"`, which has none. |
 | `inputs` | array of inputs | The plugin's side inputs, its audio inputs beyond its main one, such as a compressor's sidechain, in the plugin's order, as it said when it last loaded. Empty until it first loads. |
+| `note_output` | boolean | Whether it plays notes out as it renders, as it said when it last loaded: an instrument that plays its arpeggios out, say, or an audio effect that hears the notes in what comes into it. The point after it then carries those notes as well as its sound. It stays `true` while a note wire or a MIDI track's input takes them, if the plugin no longer says so, so they have them again when it does. A MIDI effect's plays its notes on instead, so this says nothing for one. `false` until it first loads. |
 | `state` | string or `null` | The state the plugin last saved, in its own format, as base64 with padding (RFC 4648). `null` for a plugin as it starts, new. |
 | `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
 
@@ -1130,10 +1133,11 @@ Signal flows from tracks to buses without loops:
 ### Wire
 
 A wire takes a tap's signal into a port, at a gain. Wires into the same
-port sum. A **note wire** takes a MIDI track's notes into an instrument's or
-a MIDI effect's note input instead, which is how a track plays an
-instrument on another, its MIDI To. It can put every note on a MIDI channel
-of its own, for a part of a multi-timbral instrument.
+port sum. A **note wire** takes notes into an instrument's or a MIDI
+effect's note input instead: a MIDI track's, which is how a track plays an
+instrument on another, its MIDI To, or those a plugin plays out as it
+renders. It can put every note on a MIDI channel of its own, for a part of
+a multi-timbral instrument.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1152,7 +1156,7 @@ while a track is soloed, only the note wires on paths through it play.
 | Tap | Meaning |
 |---|---|
 | `{"pre_fx": id}` | What comes into the devices of the track with that id: its clips and its input, or on a group or a return track, what feeds it. A MIDI track's is its notes, which only a note wire or another MIDI track's input takes. |
-| `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. A MIDI effect's, on a MIDI track before its first instrument, is the notes it plays, which only a note wire or another MIDI track's input takes. One after the instrument is out of the notes' way, as if deactivated. |
+| `{"device": id}` | What the device with that id puts out, on a track or on the master. A deactivated device's is what comes into it. A MIDI effect's, on a MIDI track before its first instrument, is the notes it plays, which only a note wire or another MIDI track's input takes. One after the instrument is out of the notes' way, as if deactivated. A plugin's with a `note_output` that isn't a MIDI effect's carries the notes it plays out as it renders too, for a note wire or a MIDI track's input, as well as its sound: none while it's bypassed or deactivated. |
 | `{"post_fx": channel}` | What comes out of a channel's last device, where its pre-fader sends take their signal. A MIDI track's carries its notes too, for a note wire or another MIDI track's input: those that reach its instrument. A track's MIDI To is its note wires from here. |
 | `{"post_fader": channel}` | What comes out of a channel's fader and pan, where its post-fader sends take their signal. |
 
@@ -1192,6 +1196,7 @@ A **port** is an object with one field:
 | 22 | 2026-10-29 | Plugins' `kind`, in place of `instrument`, with MIDI effects, which play the notes on to the instrument after them. Version 21 plugins are instruments or audio effects. |
 | 23 | 2026-10-30 | MIDI tracks taking the notes a MIDI effect plays, at the point after it, which carries notes alone, or those that reach a MIDI track's instrument, at its Post FX. Version 22 inputs and wires from after a MIDI effect took its sound, which was silence, so they go, with the lanes and the routings that move those wires' gains. |
 | 24 | 2026-10-30 | Note wires, which play a MIDI track's notes on another's instrument or MIDI effect, through its `{"notes": id}` port, and every wire's `channel`, a note wire's MIDI channel. Version 23 wires are audio wires, so their channel is `null`. |
+| 25 | 2026-10-30 | Plugins' `note_output`, so the point after a plugin carries the notes it plays out as it renders, for a note wire or a MIDI track's input. Version 24 plugins have none until they next load. |
 
 ## Changing the format
 

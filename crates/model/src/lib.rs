@@ -151,6 +151,12 @@ impl DeviceKind {
         }
     }
 
+    /// Whether the device plays notes out as it renders: a plugin with a
+    /// note output that isn't a MIDI effect ([`PluginDevice::makes_notes`]).
+    pub fn makes_notes(&self) -> bool {
+        self.plugin().is_some_and(PluginDevice::makes_notes)
+    }
+
     pub fn plugin(&self) -> Option<&PluginDevice> {
         match self {
             Self::Plugin(plugin) => Some(plugin),
@@ -1019,6 +1025,7 @@ mod tests {
             name: "Plugin".into(),
             kind,
             inputs: Vec::new(),
+            note_output: false,
             settings: plugin::PluginSettings::default(),
         })
     }

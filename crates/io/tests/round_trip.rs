@@ -120,6 +120,7 @@ impl Random {
             name: self.name(),
             kind: self.pick(&PluginKind::ALL),
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings { state, params },
         })
     }

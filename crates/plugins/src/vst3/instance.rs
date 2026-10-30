@@ -114,6 +114,8 @@ pub struct Instance {
     handler: ComWrapper<ComponentHandler>,
     params: Vec<ParamInfo>,
     side_inputs: Vec<PluginInput>,
+    /// Whether it has an event output, as it last described its buses.
+    note_output: bool,
     /// The side inputs wires go into, by index, which are on.
     wired: Vec<u32>,
     /// The engine config it's active for.
@@ -169,6 +171,7 @@ impl Instance {
             handler,
             params: Vec::new(),
             side_inputs: Vec::new(),
+            note_output: false,
             wired: Vec::new(),
             config: None,
             to_audio,
@@ -181,6 +184,7 @@ impl Instance {
         instance.connect();
         instance.params = instance.read_params();
         instance.side_inputs = side_inputs(&instance.buses(kInput as BusDirection));
+        instance.note_output = module::buses(&instance.parts.component).notes_out > 0;
         Ok(instance)
     }
 
@@ -441,6 +445,7 @@ impl Instance {
         let mut inputs = self.buses(kInput as BusDirection);
         let outputs = self.buses(kOutput as BusDirection);
         self.side_inputs = side_inputs(&inputs);
+        self.note_output = module::buses(&parts.component).notes_out > 0;
         let takes_notes = self.activate_buses(&mut inputs, &outputs);
         let controllers = self.midi_mapping();
         let mut setup = ProcessSetup {
@@ -544,6 +549,13 @@ impl Instance {
     /// buses besides the main one, by their indexes.
     pub fn side_inputs(&self) -> &[PluginInput] {
         &self.side_inputs
+    }
+
+    /// Whether the plugin has an event output, as it last described its
+    /// buses: the notes it plays out as it renders, for the point after its
+    /// device to carry, or the notes a MIDI effect plays.
+    pub fn note_output(&self) -> bool {
+        self.note_output
     }
 
     /// Switches on the side inputs with ids in `wired`, the ones wires go
@@ -780,12 +792,14 @@ impl Instance {
                     }
                 }
                 // An inactive plugin restarts as it's activated, which needs
-                // to know it asked, and its side inputs are read now.
+                // to know it asked, and its side inputs and note output are
+                // read now.
                 None => {
                     requests
                         .restart
                         .fetch_or(restart & RESTART, Ordering::AcqRel);
                     self.side_inputs = side_inputs(&self.buses(kInput as BusDirection));
+                    self.note_output = module::buses(&self.parts.component).notes_out > 0;
                 }
             }
         }

@@ -1,0 +1,356 @@
+{
+  "format": "musicable-project",
+  "version": 25,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 6,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Vocal",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Song",
+          "start": 0,
+          "length": 5160960,
+          "content": {
+            "audio": {
+              "file": "Mixes/Song.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": true,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "High",
+          "start": 5160960,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": 7,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": true,
+                  "formants": 75.0,
+                  "envelope": 8.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Low",
+          "start": 6451200,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": -12,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": true,
+                  "formants": 100.0,
+                  "envelope": 512.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "Quick",
+          "start": 7741440,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 64.5
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "Kept",
+          "start": 9031680,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": true,
+                  "formants": 100.0,
+                  "envelope": 200.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 5,
+          "name": "Moving",
+          "start": 10321920,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Vox.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "spectral",
+                "tempo": 96.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": true,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": [
+                {
+                  "param": "transpose",
+                  "points": [
+                    [0, 0.0],
+                    [1290240, 12.0]
+                  ]
+                },
+                {
+                  "param": "formants",
+                  "points": [
+                    [0, 100.0],
+                    [1290240, 0.0]
+                  ]
+                },
+                {
+                  "param": "envelope",
+                  "points": [
+                    [0, 8.0],
+                    [645120, 128.0],
+                    [1290240, 512.0]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null
+}

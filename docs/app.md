@@ -629,7 +629,8 @@ tracks monitoring In take, into a buffer like an input's
 so the recorder reads it the same way, without the recording offset. A
 MIDI track taking another's notes records what the engine played of them
 at that track's tap, its Pre FX, after one of its MIDI effects or at its
-Post FX, which it writes into a buffer like a MIDI input's
+Post FX, or after a plugin that plays notes out, what it made, which it
+writes into a buffer like a MIDI input's
 (`recorder::TapNotes`): each note and controller move, packed in two
 words, with the engine frame it played at, 16,384 of them. A MIDI track's
 Post FX can have both buffers, its sound for an audio track and its notes
@@ -890,7 +891,11 @@ in a process of its own for each library ([Scanning](plugins.md#scanning)),
 and the devices, their windows, their state and undo ([Plugins on
 tracks](plugins.md#plugins-on-tracks)). What a plugin changes on its own, as
 it loads or takes in what undo gave it, or with its window closed, goes into
-the project without a step, so redo carries on past it. Delay compensation
+the project without a step, so redo carries on past it. So do its side
+inputs, as it lists them, and whether it has a note output
+(`Change::NoteOutput`, `Edit::PluginNoteOutput`), which has the point after
+its device carry the notes it plays out, for a MIDI track's input or a note
+wire: the graph is built again for it only if one takes them. Delay compensation
 lines up every track with the latest one, so a plugin that looks ahead
 doesn't put its track out of time
 ([engine.md](engine.md#delay-compensation)).

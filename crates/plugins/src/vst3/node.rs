@@ -34,7 +34,9 @@ use vst3::Steinberg::{int32, kResultOk, tresult, uint16, uint32};
 use super::changes::{EVENT_CAPACITY, Events, InputChanges, OutputChanges, QUEUE_CAPACITY};
 use super::host::Shared;
 use super::module::Module;
-use crate::process::{self, Channels, Made, ParamChange, Sounding, SoundingNote, Transport};
+use crate::process::{
+    Channels, Kept, Made, ParamChange, PlayedTo, Sounding, SoundingNote, Transport,
+};
 use crate::threads::{AudioThread, PROCESSING};
 
 /// Everything processing a plugin needs. Whoever holds the instance's
@@ -52,8 +54,7 @@ pub(crate) struct Audio {
     pub(crate) changes: InputChanges,
     pub(crate) out_changes: OutputChanges,
     pub(crate) events: Events,
-    /// The events the plugin plays in a block, which it keeps while it
-    /// plays in the notes pass.
+    /// The events the plugin plays in a block.
     pub(crate) out_events: Events,
     pub(crate) sounding: Sounding,
     /// The notes it plays, as the engine's.
@@ -208,6 +209,8 @@ impl NodeSource {
             shared: Arc::clone(&self.shared),
             _module: Arc::clone(&self.module),
             resetting: false,
+            making: false,
+            kept: Kept::new(),
         }
     }
 }
@@ -246,13 +249,21 @@ impl fmt::Debug for NodeSource {
 /// where the node's notes go, each under an id of the engine's own (see
 /// [`Made`]). The controllers it plays as VST3's legacy MIDI go as MIDI
 /// does. Those it was playing as it starts again, after its setup changes,
-/// end at once. The plugins that make sound play no notes yet.
+/// end at once. A plugin that makes sound plays its notes out as it
+/// renders, where its notes made while rendering go
+/// ([`Node::made_notes`]), the same way, once its stage has rendered, if
+/// anything takes them ([`Node::makes_notes`]).
 pub struct Vst3Node {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
     _module: Arc<Module>,
     /// Whether the plugin resets before it next processes.
     resetting: bool,
+    /// Whether the notes the plugin plays out as it renders go somewhere.
+    making: bool,
+    /// The notes it played out as it rendered the block, for
+    /// [`Node::made_notes`].
+    kept: Kept,
 }
 
 impl fmt::Debug for Vst3Node {
@@ -286,13 +297,17 @@ impl Node for Vst3Node {
         };
         // SAFETY: `busy` is held, so nothing else touches it.
         let audio = unsafe { &mut *shared.audio.get() };
+        let played_to = match self.making {
+            true => PlayedTo::Kept(&mut self.kept),
+            false => PlayedTo::Nowhere,
+        };
         let played = run(
             shared,
             &mut self.resetting,
             ctx,
             inputs,
             Some(&mut *output),
-            None,
+            played_to,
             audio,
         );
         if !played {
@@ -317,9 +332,18 @@ impl Node for Vst3Node {
             ctx,
             none,
             None,
-            Some(notes),
+            PlayedTo::Notes(notes),
             audio,
         );
+    }
+
+    /// Sends the notes the plugin played out as it rendered the block.
+    fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        self.kept.send(ctx.time, notes);
+    }
+
+    fn makes_notes(&mut self) {
+        self.making = true;
     }
 
     /// The plugin stays processing, as VST3 sees it, so the main thread
@@ -365,14 +389,14 @@ impl Node for Vst3Node {
 
 /// Processes the plugin for one block, holding `busy`: false if it can't.
 /// It resets first if `resetting`. It plays its main output into `output`,
-/// if there's one, and the notes it plays into `notes`, if there are.
+/// if there's one, and the notes it plays to `played_to`.
 fn run(
     shared: &Shared,
     resetting: &mut bool,
     ctx: &ProcessContext<'_>,
     inputs: Inputs<'_>,
     output: Option<&mut AudioMut<'_>>,
-    notes: Option<&mut Notes<'_>>,
+    mut played_to: PlayedTo<'_, '_>,
     audio: &mut Audio,
 ) -> bool {
     if shared.lifecycle() != PROCESSING {
@@ -426,14 +450,15 @@ fn run(
     if result != kResultOk {
         return false;
     }
-    if let Some(notes) = notes {
+    if played_to.takes() {
         let Audio {
             out_events, made, ..
         } = audio;
-        made.start_block(&mut |p| process::send(notes, 0, p));
+        let time = ctx.time;
+        made.start_block(&mut |p| played_to.play(time, 0, p));
         for event in out_events.list() {
             let offset = usize::try_from(event.sampleOffset).unwrap_or(0);
-            played(event, made, &mut |p| process::send(notes, offset, p));
+            played(event, made, &mut |p| played_to.play(time, offset, p));
         }
     }
     let Some(output) = output else {

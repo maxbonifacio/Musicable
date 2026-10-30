@@ -44,8 +44,9 @@ what it takes too, while it's armed or monitors In, as it holds an input
 
 ## Taking another track's notes
 
-A MIDI track's input menu lists the other MIDI tracks after the MIDI
-inputs, under **Tracks**, each opening to its points that carry notes:
+A MIDI track's input menu lists the other tracks with notes after the MIDI
+inputs, under **Tracks**, each opening to its points that carry notes. On
+a MIDI track, they're:
 
 - **Pre FX**: its notes, from its clips and its input, with its
   controllers, such as the sustain pedal.
@@ -54,6 +55,11 @@ inputs, under **Tracks**, each opening to its points that carry notes:
   deactivated, the notes that come into it.
 - **Post FX**: the notes that reach its instrument, after all its MIDI
   effects.
+
+And on any track, the point **after** a [plugin that plays notes
+out](plugins.md#notes-a-plugin-plays-out) carries the notes it plays, such
+as a synth's own arpeggios, or the notes a pitch tracker hears in a vocal.
+The track taking them plays them at the same moment the plugin does.
 
 Picking one has the track play those notes as it would a keyboard's, along
 with its own clips', and the strip reads, say, **from Lead, after Arp**. It
@@ -67,8 +73,8 @@ track's mute and solo.
 Arm the track and record, and it records the notes it takes. The other
 track's clips' notes land exactly where they are, with their velocities and
 the controllers' moves, as a clip of its own you can edit, and so do the
-notes a MIDI effect plays on them: recording what an arpeggiator plays
-turns the arpeggio into notes you can edit. Notes played
+notes a MIDI effect plays on them, and those a plugin plays out: recording
+what an arpeggiator plays turns the arpeggio into notes you can edit. Notes played
 live on the other track land where Musicable played them, a moment after
 that track's own take would have them: as long as monitoring them took.
 Capture holds them too, while the track is armed or monitors In.

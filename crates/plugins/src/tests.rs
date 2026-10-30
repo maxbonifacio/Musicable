@@ -23,7 +23,7 @@ use musicable_engine::{
     NodeEventKind, NodeKey, NoteEvent, NoteId, ParallelOptions, ParallelRenderer, ParamId,
     ProcessContext, TransportState, rt,
 };
-use musicable_model::clip::{Controller, Dimension};
+use musicable_model::clip::{Controller, Dimension, Note};
 use musicable_model::plugin::{PluginInput, PluginKind};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
@@ -1577,6 +1577,114 @@ fn an_arpeggiator_plays_notes_of_its_own_as_clap_notes_or_midi() {
         drop(instance);
         plugins.assert_alright();
     }
+}
+
+/// Plays `synth`, the node of a synth that plays each note it gets out
+/// again an octave up, in its switch, as a track has it, bypassed to begin
+/// with, and returns the notes it plays out, by engine time. Brought back
+/// at 1,000, partway through a block, it gets C from 1,010 to 1,100, in
+/// the part of that block it renders and in the next, and E from 1,500.
+/// Bypassed at 2,000, it stops as its fade ends, with E sounding, and D
+/// from 3,000 finds it stopped.
+pub(crate) fn echo(synth: impl Node) -> Vec<(u64, NoteEvent)> {
+    let mut g = Graph::new();
+    let switch = g.add(NodeKey(0), Switch::new(Box::new(synth), true));
+    let (notes, mut played) = rtrb::RingBuffer::new(64);
+    let kept = g.add(NodeKey(1), Kept(notes));
+    g.send_made_notes(switch, kept).unwrap();
+    g.set_output(kept).unwrap();
+    let (mut engine, mut handle) = Engine::new(CONFIG);
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    let node = NodeKey(0);
+    let bypass = |value| Event::Param {
+        node,
+        param: Switch::BYPASS,
+        value,
+    };
+    let note = |note| Event::Note { node, note };
+    let on = |id, key| {
+        note(NoteEvent::On {
+            note: NoteId(id),
+            key,
+            velocity: 0.75,
+            channel: None,
+        })
+    };
+    let off = |id| {
+        note(NoteEvent::Off {
+            note: NoteId(id),
+            velocity: 0.25,
+        })
+    };
+    for (time, event) in [
+        (1_000, bypass(0.0)),
+        (1_010, on(1, 60)),
+        (1_100, off(1)),
+        (1_500, on(2, 64)),
+        (2_000, bypass(1.0)),
+        (3_000, on(3, 62)),
+    ] {
+        handle.send_at(time, event).unwrap();
+    }
+    let mut block = vec![0.0; 2 * 256];
+    for _ in 0..16 {
+        engine.process(&mut AudioMut::from_planar(&mut block, 2));
+    }
+    assert_eq!(engine.stats().events_late, 0);
+    drop((engine, handle));
+    std::iter::from_fn(|| played.pop().ok()).collect()
+}
+
+/// Checks that a synth [`echo`] played played C and E out an octave up,
+/// on the frames it got them, with ids of their own, and that C ended
+/// where it was let go, and E where the synth stopped, at the end of its
+/// fade, 10 ms after it was bypassed.
+pub(crate) fn assert_echoed(played: &[(u64, NoteEvent)]) {
+    let ids: Vec<_> = played
+        .iter()
+        .filter_map(|(_, note)| match note {
+            NoteEvent::On { note, .. } => Some(*note),
+            _ => None,
+        })
+        .collect();
+    let [c, e] = ids[..] else {
+        panic!("two notes: {played:?}");
+    };
+    let on = |note, key| NoteEvent::On {
+        note,
+        key,
+        velocity: 0.75,
+        channel: None,
+    };
+    let off = |note, velocity| NoteEvent::Off { note, velocity };
+    let stopped = 2_000 + 480;
+    assert_eq!(
+        played,
+        [
+            (1_010, on(c, 72)),
+            (1_100, off(c, 0.25)),
+            (1_500, on(e, 76)),
+            (stopped, off(e, Note::RELEASE_VELOCITY)),
+        ]
+    );
+    assert!(c != e && ![1, 2, 3].contains(&c.0), "{ids:?}");
+}
+
+#[test]
+fn a_synth_plays_out_notes_as_it_renders() {
+    // A library named so has the synth play out what it gets; without,
+    // it has no note output.
+    let plugins = TestPlugins::new("synth");
+    assert!(!plugins.synth().note_output());
+    drop(plugins);
+    let plugins = TestPlugins::new("echo");
+    let mut instance = plugins.synth();
+    assert!(instance.note_output());
+    instance.activate(CONFIG).unwrap();
+    assert!(instance.note_output());
+    assert_echoed(&echo(instance.node_source().node()));
+    drop(instance);
+    plugins.assert_alright();
 }
 
 #[test]

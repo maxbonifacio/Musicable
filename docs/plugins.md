@@ -206,6 +206,32 @@ output, which activating turns on.
   output queue says it's full beyond them, and VST3's `addEvent` says
   `kResultFalse`.
 
+**Notes a plugin plays out as it renders.** An instrument or an audio
+effect can have a note output too: a synth that plays its arpeggios out,
+or a note detector, which hears notes in what comes into it. `note_output`
+says whether it has one: a CLAP plugin's note output port, or a VST3
+plugin's event output bus, read as it loads, activates and restarts. The
+project keeps it on the plugin's device, so the point after the device
+carries the notes ([engine.md](engine.md#notes)), and the app follows it
+as the plugin changes, as it follows the side inputs
+([app.md](app.md#plugins)).
+
+- The plugin plays them as it renders, so the node collects them from its
+  output events in `process` and hands them over in `Node::made_notes`,
+  after the block. It collects them only once the graph says they go
+  somewhere (`Node::makes_notes`), and keeps them by engine time
+  (`process::Kept`), so the parts of a block its switch renders apart, as
+  the device stops or starts partway through, each land where the plugin
+  played them. `process::PlayedTo` says where a render's notes go:
+  nowhere, straight into the notes pass's `Notes`, as a MIDI effect's do,
+  or into the kept notes.
+- They're made notes as a MIDI effect's are, with ids of the engine's own,
+  and the same conversions, from CLAP's own notes and MIDI or VST3's
+  events.
+- The test synth (`crates/test-plugins`) in a library named `echo…` has a
+  note output, CLAP's port or a VST3 event bus called Notes Out, and plays
+  each note it gets out again an octave up, on its frame, for the tests.
+
 ## Side inputs
 
 A plugin's audio inputs beyond its main one, such as a compressor's

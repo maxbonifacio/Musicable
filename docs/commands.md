@@ -1085,7 +1085,7 @@ and removing clips, and their timing, fades and names; adding and removing
 notes, and their timing, keys and velocities; adding, naming and removing
 takes; adding, moving, naming and removing locators; adding and removing
 devices, bypassing and deactivating them, and a plugin's parameters,
-settings and side inputs; and each parameter's automation, and whether
+settings, side inputs and note output; and each parameter's automation, and whether
 it's overridden.
 `Transaction::editor` reads the editor's state, such as the files' sample
 rates. Each setter records an `Edit` with the new value and the one it replaced. A

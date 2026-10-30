@@ -63,7 +63,9 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
 use crate::arp::{Arp, Stepped};
-use crate::{ALIVE, FIXED_PORTS, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation};
+use crate::{
+    ALIVE, ECHO, ECHO_UP, FIXED_PORTS, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation,
+};
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
 pub const SYNTH_ID: &CStr = c"org.musicable.test.synth";
@@ -391,6 +393,8 @@ pub(crate) struct TestPlugin {
     mpe: bool,
     /// Whether it's the synth playing each channel as a part of its own.
     parts: bool,
+    /// Whether it's the synth playing the notes it gets out again.
+    echo: bool,
     host: *const clap_host,
     /// Written once, in `init`, on the main thread.
     ext: UnsafeCell<HostExtensions>,
@@ -484,6 +488,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         kind,
         mpe: kind == Kind::Synth && MPE.load(Ordering::SeqCst),
         parts: kind == Kind::Synth && PARTS.load(Ordering::SeqCst),
+        echo: kind == Kind::Synth && ECHO.load(Ordering::SeqCst),
         host,
         ext: UnsafeCell::new(HostExtensions::NONE),
         initialized: AtomicBool::new(false),
@@ -619,6 +624,12 @@ impl TestPlugin {
         let check = self.ext().thread_check;
         // SAFETY: as above.
         unsafe { check.as_ref()?.is_audio_thread.map(|f| f(self.host)) }
+    }
+
+    /// Whether it has a note output: the arpeggiator's, and the echoing
+    /// synth's.
+    fn plays_notes(&self) -> bool {
+        self.kind == Kind::Arpeggiator || self.echo
     }
 
     /// Checks that the host called `what` on its main thread.
@@ -986,6 +997,10 @@ impl TestPlugin {
                         audio.arp.let_go(key, time, emit);
                     }
                     return;
+                }
+                if self.echo && header.type_ != CLAP_EVENT_NOTE_CHOKE {
+                    // SAFETY: the caller's promise.
+                    unsafe { echo(header, event, out) };
                 }
                 if header.type_ == CLAP_EVENT_NOTE_ON {
                     note_on(
@@ -1481,6 +1496,23 @@ unsafe fn play_stepped(note: Stepped, out: *const clap_output_events) {
         // SAFETY: the caller's promise.
         unsafe { push(out, &event.header) };
     }
+}
+
+/// Plays a note event the echoing synth gets out again, an octave up, on
+/// its frame.
+///
+/// # Safety
+///
+/// `out` must be the host's output events, or null.
+unsafe fn echo(header: &clap_event_header, note: &clap_event_note, out: *const clap_output_events) {
+    let echoed = clap_event_note {
+        header: *header,
+        key: note.key + ECHO_UP,
+        port_index: 0,
+        ..*note
+    };
+    // SAFETY: the caller's promise.
+    unsafe { push(out, &echoed.header) };
 }
 
 /// Pushes an event to the host's output events.
@@ -2159,8 +2191,8 @@ unsafe extern "C" fn note_ports_count(plugin: *const clap_plugin, is_input: bool
     // SAFETY: the host calls back with its plugin.
     let this = unsafe { this(plugin) };
     this.on_main("note_ports.count");
-    // The arpeggiator plays notes too.
-    u32::from(is_input || this.kind == Kind::Arpeggiator)
+    // The arpeggiator plays notes too, and so does the echoing synth.
+    u32::from(is_input || this.plays_notes())
 }
 
 unsafe extern "C" fn note_ports_get(
@@ -2172,7 +2204,7 @@ unsafe extern "C" fn note_ports_get(
     // SAFETY: the host calls back with its plugin.
     let this = unsafe { this(plugin) };
     this.on_main("note_ports.get");
-    if index != 0 || !(is_input || this.kind == Kind::Arpeggiator) {
+    if index != 0 || !(is_input || this.plays_notes()) {
         return false;
     }
     let mut name = [0; 256];

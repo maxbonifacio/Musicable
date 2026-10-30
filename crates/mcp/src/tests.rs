@@ -882,6 +882,7 @@ fn a_plugins_side_inputs_are_its_ports_by_its_ids_for_them() {
         name: "Vocoder".into(),
         kind: PluginKind::AudioEffect,
         inputs: vec![input(1, "Carrier"), input(3, "Aux")],
+        note_output: false,
         settings: PluginSettings::default(),
     }));
     project.track_mut(bass).unwrap().devices.push(vocoder);

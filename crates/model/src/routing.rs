@@ -383,14 +383,23 @@ impl Project {
     /// Whether `tap` carries notes, for a MIDI track to take: a MIDI
     /// track's Pre FX, its clips' notes and its input's, the point after
     /// one of its MIDI effects, what that plays, and its Post FX, what
-    /// reaches its instrument, after them all.
+    /// reaches its instrument, after them all. So does the point after a
+    /// plugin that plays notes out as it renders, on any channel
+    /// ([`DeviceKind::makes_notes`]): the notes it makes.
     pub fn carries_notes(&self, tap: Tap) -> bool {
         let midi = |track| self.track(track).is_some_and(|t| t.kind == TrackKind::Midi);
         match tap {
             Tap::PreFx(track) | Tap::PostFx(Chain::Track(track)) => midi(track),
-            Tap::Device(device) => self.is_midi_effect_tap(device),
+            Tap::Device(device) => self.is_midi_effect_tap(device) || self.makes_notes(device),
             Tap::PostFx(Chain::Master) | Tap::PostFader(_) => false,
         }
+    }
+
+    /// Whether the device with id `device` plays notes out as it renders
+    /// ([`DeviceKind::makes_notes`]), so the point after it carries them,
+    /// as well as its sound.
+    pub fn makes_notes(&self, device: DeviceId) -> bool {
+        (self.find_device(device)).is_some_and(|(_, _, found)| found.kind.makes_notes())
     }
 
     /// Whether `tap` carries sound, for an audio track or a wire to take:
@@ -942,6 +951,7 @@ mod tests {
                 name: name.into(),
                 kind,
                 inputs: Vec::new(),
+                note_output: false,
                 settings: PluginSettings::default(),
             }))
         };
@@ -1285,6 +1295,7 @@ mod tests {
             name: "Vocoder".into(),
             kind: PluginKind::AudioEffect,
             inputs: vec![input(1, "Carrier"), input(3, "Aux")],
+            note_output: false,
             settings: PluginSettings::default(),
         }));
         let vocoder_id = vocoder.id;

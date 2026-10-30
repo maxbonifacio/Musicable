@@ -467,6 +467,8 @@ struct PluginDevice {
     kind: PluginKind,
     /// Its side inputs, as the plugin last said.
     inputs: Vec<PluginInput>,
+    /// Whether it plays notes out as it renders, as the plugin last said.
+    note_output: bool,
     /// Base64, or `None` for a plugin as new.
     #[serde(deserialize_with = "Option::deserialize")]
     state: Option<String>,
@@ -2695,6 +2697,7 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             name,
             kind,
             inputs,
+            note_output,
             settings,
         } = plugin;
         let model::plugin::PluginSettings { state, params } = settings;
@@ -2712,6 +2715,7 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
                     name: input.name.clone(),
                 })
                 .collect(),
+            note_output: *note_output,
             state: state.as_ref().map(|state| BASE64.encode(state.bytes())),
             params: params.iter().map(|p| (p.id, p.value)).collect(),
         }
@@ -2726,6 +2730,7 @@ impl PluginDevice {
             name,
             kind,
             inputs,
+            note_output,
             state,
             params,
         } = self;
@@ -2770,6 +2775,7 @@ impl PluginDevice {
                     name: input.name.clone(),
                 })
                 .collect(),
+            note_output: *note_output,
             settings: model::plugin::PluginSettings {
                 state,
                 params: checked,

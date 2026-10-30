@@ -19,7 +19,7 @@ From the top, a strip has these parts, which can be hidden and moved
 - **The input**, on audio and MIDI tracks: what the track records from
   ([Recording and comping](../using/recording.md#inputs)), and on an audio
   track, another track's sound or Resampling, the master, or on a MIDI
-  track, another MIDI track's notes ([Routing](../using/routing.md)).
+  track, another track's notes ([Routing](../using/routing.md)).
 - **Monitoring**, on audio and MIDI tracks: **In**, **Auto** or **Off**
   ([Recording and comping](../using/recording.md#monitoring)).
 - **The output**: the master, a group track the track can feed, or **Sends

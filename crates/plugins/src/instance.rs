@@ -132,6 +132,13 @@ impl Instance {
         either!(self, plugin => plugin.side_inputs())
     }
 
+    /// Whether the plugin has a note output, as it last described it: what
+    /// a MIDI effect plays, or the notes an instrument or an audio effect
+    /// plays out as it renders.
+    pub fn note_output(&self) -> bool {
+        either!(self, plugin => plugin.note_output())
+    }
+
     /// Switches on the side inputs with ids in `wired`, the ones wires go
     /// into, and off the others, restarting an active plugin if that changes
     /// which are on. Says whether it restarted.

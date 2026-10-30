@@ -162,7 +162,8 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 17] = [
                 "after",
                 Type::Device,
                 "Takes what this device, on another track, puts out instead: for a MIDI track, \
-                 the notes a MIDI effect plays.",
+                 the notes a MIDI effect plays, or those a plugin plays out as it renders, \
+                 such as a synth's arpeggios.",
             ),
             Param::optional(
                 "resampling",
@@ -513,7 +514,7 @@ fn check_tap(project: &Project, track: TrackId, tap: Tap) -> Result<(), CommandE
         InputError::Bus => "a group or a return track takes what feeds it, not an input".into(),
         InputError::Notes => format!("{} is notes: an audio track takes sound", tap_name()),
         InputError::Sound => format!(
-            "{} is sound: a MIDI track takes another MIDI track's notes",
+            "{} is sound: a MIDI track takes another track's notes",
             tap_name()
         ),
         InputError::Master => {
@@ -1337,6 +1338,7 @@ mod tests {
             name: "Arp".into(),
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         }));
         let arp_id = arp.id;
@@ -1363,7 +1365,7 @@ mod tests {
         let post_fader = Args::new().with("from", keys).with("tap", "post_fader");
         assert_eq!(
             set_input(&mut setup, double, post_fader),
-            invalid("Keys Post Fader is sound: a MIDI track takes another MIDI track's notes")
+            invalid("Keys Post Fader is sound: a MIDI track takes another track's notes")
         );
         // An audio track takes the Keys' sound at Post FX, but there's none
         // after the arpeggiator.
@@ -1382,13 +1384,84 @@ mod tests {
     }
 
     #[test]
+    fn midi_tracks_take_the_notes_a_plugin_plays_out_and_keep_them() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let double = project.add_track("Double", TrackKind::Midi);
+        let print = project.add_track("Print", TrackKind::Audio);
+        let synth = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.synth".into(),
+            name: "Synth".into(),
+            kind: PluginKind::Instrument,
+            inputs: Vec::new(),
+            note_output: false,
+            settings: PluginSettings::default(),
+        }));
+        let synth_id = synth.id;
+        project.track_mut(keys).unwrap().devices.push(synth);
+        let bass = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+        let bass_id = bass.id;
+        project.track_mut(double).unwrap().devices.push(bass);
+        let mut setup = Setup::new(project);
+        let says = |setup: &mut Setup, on: bool| {
+            (setup.document).follow("Change Synth", |tx| tx.set_plugin_note_output(synth_id, on));
+        };
+        let note_output = |setup: &Setup| {
+            let (_, _, device) = setup.document.project().find_device(synth_id).unwrap();
+            device.kind.plugin().unwrap().note_output
+        };
+        let after = || Args::new().with("after", synth_id);
+        // Until the plugin says it plays notes out, the point after it is
+        // its sound alone.
+        assert_eq!(
+            set_input(&mut setup, double, after()),
+            Err(CommandError::invalid(
+                "Keys after Synth is sound: a MIDI track takes another track's notes"
+            ))
+        );
+        // It says so as it loads: no step to undo.
+        says(&mut setup, true);
+        assert!(note_output(&setup));
+        assert_eq!(setup.committed_names(), ["Change Synth"]);
+        assert_eq!(setup.document.undo_name(), None);
+        // Then the point carries both: the Double takes the notes, and the
+        // Print the sound.
+        set_input(&mut setup, double, after()).unwrap();
+        set_input(&mut setup, print, after()).unwrap();
+        assert_eq!(
+            track(&setup, double).input,
+            Some(Input::Tap(Tap::Device(synth_id)))
+        );
+        // A later version of the plugin without one leaves it the note
+        // output while the Double takes its notes, and a note wire too, so
+        // neither loses them.
+        says(&mut setup, false);
+        assert!(note_output(&setup));
+        set_input(&mut setup, double, Args::new().with("from", keys)).unwrap();
+        let wire = setup.document.transact("Connect Wire", |tx| {
+            let wire = tx.new_wire(Tap::Device(synth_id), Port::Notes(bass_id));
+            tx.add_wire(usize::MAX, wire).map(|()| wire.id)
+        });
+        let wire = wire.unwrap();
+        says(&mut setup, false);
+        assert!(note_output(&setup));
+        // With nothing taking them, it goes.
+        (setup.document).transact("Delete Wire", |tx| tx.remove_wire(wire));
+        says(&mut setup, false);
+        assert!(!note_output(&setup));
+        let names = setup.committed_names();
+        assert_eq!(names[3..], ["Connect Wire", "Delete Wire", "Change Synth"]);
+    }
+
+    #[test]
     fn inputs_from_taps_are_refused_where_they_dont_fit() {
         let (mut setup, [kick, print, keys, group, _], _) = printing();
         let invalid = |message: &str| Err(CommandError::invalid(message));
         let from = |track: TrackId| Args::new().with("from", track);
         assert_eq!(
             set_input(&mut setup, keys, from(kick)),
-            invalid("Kick Pre FX is sound: a MIDI track takes another MIDI track's notes")
+            invalid("Kick Pre FX is sound: a MIDI track takes another track's notes")
         );
         assert_eq!(
             set_input(&mut setup, group, from(kick)),
@@ -1582,6 +1655,7 @@ mod tests {
             name: "Rack".into(),
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
+            note_output: false,
             settings: PluginSettings::default(),
         }));
         let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
@@ -1632,6 +1706,7 @@ mod tests {
                 id: 1,
                 name: "Key".into(),
             }],
+            note_output: false,
             settings: PluginSettings::default(),
         });
         setup.document.transact("Keyed Arp", |tx| {

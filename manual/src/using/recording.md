@@ -50,7 +50,7 @@ channel or all sixteen. A new MIDI track takes every channel of every input,
 keyboard's single channel plays as it is. The input menu lists All Inputs
 and then each MIDI input plugged in, each with **All** and its channels 1 to
 16, and lists them again when it opens. After them, it lists the other
-MIDI tracks, whose notes a track can play and record
+tracks with notes, which a track can play and record
 ([Taking another track's notes](routing.md#taking-another-tracks-notes)).
 
 Musicable opens the MIDI inputs that armed MIDI tracks and MIDI tracks
