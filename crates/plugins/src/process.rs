@@ -8,7 +8,7 @@ use std::slice;
 use musicable_engine::{
     AudioMut, AudioRef, MidiNotes, NoteEvent, NoteId, Notes, Played, ProcessContext,
 };
-use musicable_model::clip::Dimension;
+use musicable_model::clip::{Dimension, Note};
 use musicable_model::time::{Beats, TimeSignature};
 
 /// How many notes can sound on a plugin at once.
@@ -222,25 +222,49 @@ impl Sounding {
 
 /// The notes a plugin plays, as a MIDI effect does, as the engine's notes:
 /// each under an id of the engine's own, so none clashes with the notes
-/// that come into the plugin. Whether it plays notes of its format, which
-/// name a note by its id for it or by channel and key, or MIDI, they're
-/// read as MIDI is ([`MidiNotes`]), each channel as a keyboard plays it:
-/// a key held again ends the note on it first. Allocated once.
+/// that come into the plugin. The notes of its format name their note by
+/// any of an id, a channel and a key, as CLAP's do, each -1 for any: an end
+/// or a change of expression is for every note sounding that has all those
+/// it gives. A note the plugin gives an id of its own sounds until it's
+/// ended, whatever starts on its key, as CLAP's voice stacking and VST3's
+/// note ids allow. One without an id, and MIDI, are read as MIDI is
+/// ([`MidiNotes`]), each channel as a keyboard plays it: a key held again
+/// ends the note on it first. Allocated once.
 pub(crate) struct Made {
     midi: MidiNotes,
-    /// The plugin's ids for the notes sounding that it gave one, with their
-    /// channels and keys.
-    ids: Vec<(i32, u8, u8)>,
+    /// The notes sounding that the plugin gave an id of its own.
+    own: Vec<Own>,
     /// Whether the notes sounding end at the start of the next block, as
     /// the plugin starts again.
     ending: bool,
+}
+
+/// A note sounding that a plugin gave an id of its own.
+#[derive(Debug, Clone, Copy)]
+struct Own {
+    /// The plugin's id for it.
+    id: i32,
+    channel: u8,
+    key: u8,
+    /// The engine's id for it.
+    note: NoteId,
+}
+
+impl Own {
+    /// Whether the plugin names it with `id`, `channel` and `key`, each -1
+    /// for any.
+    fn named(&self, id: i32, channel: i16, key: i16) -> bool {
+        (id < 0 || id == self.id)
+            && (channel < 0 || channel == i16::from(self.channel))
+            && (key < 0 || key == i16::from(self.key))
+    }
 }
 
 impl Made {
     pub(crate) fn new() -> Self {
         Self {
             midi: MidiNotes::every_channel(MADE_NOTES),
-            ids: Vec::with_capacity(SOUNDING_CAPACITY),
+            own: Vec::with_capacity(SOUNDING_CAPACITY),
             ending: false,
         }
     }
@@ -257,8 +281,13 @@ impl Made {
     /// switches it held on, such as the sustain pedal.
     pub(crate) fn start_block(&mut self, emit: &mut dyn FnMut(Played)) {
         if std::mem::take(&mut self.ending) {
+            for own in self.own.drain(..) {
+                emit(Played::Note(NoteEvent::Off {
+                    note: own.note,
+                    velocity: Note::RELEASE_VELOCITY,
+                }));
+            }
             self.midi.release_all(&mut *emit);
-            self.ids.clear();
         }
     }
 
@@ -266,7 +295,7 @@ impl Made {
     /// afresh where its notes were ended for it.
     pub(crate) fn forget(&mut self) {
         self.midi.forget_notes();
-        self.ids.clear();
+        self.own.clear();
     }
 
     /// The plugin starts a note on `key` on `channel`, and calls it `id`,
@@ -285,17 +314,27 @@ impl Made {
         if channel > 15 || key > 127 {
             return;
         }
-        // The note on the key ends, and its id with it.
-        self.ids
-            .retain(|&(i, c, k)| (c, k) != (channel, key) && i != id);
-        self.midi.start(channel, key, velocity as f32, &mut *emit);
-        if id >= 0 && self.ids.len() < self.ids.capacity() {
-            self.ids.push((id, channel, key));
+        let velocity = (velocity as f32).clamp(0.0, 1.0);
+        if id < 0 {
+            self.midi.start(channel, key, velocity, &mut *emit);
+        } else if self.own.len() < self.own.capacity() {
+            let note = self.midi.fresh_id();
+            self.own.push(Own {
+                id,
+                channel,
+                key,
+                note,
+            });
+            emit(Played::Note(NoteEvent::On {
+                note,
+                key,
+                velocity,
+            }));
         }
     }
 
-    /// The plugin ends a note: the one it calls `id`, or with -1, the one
-    /// on `key` on `channel`, either -1 for any.
+    /// The plugin ends the notes it names with `id`, `channel` and `key`,
+    /// each -1 for any.
     pub(crate) fn end(
         &mut self,
         id: i32,
@@ -304,18 +343,29 @@ impl Made {
         velocity: f64,
         emit: &mut dyn FnMut(Played),
     ) {
-        let (channels, keys) = self.named(id, channel, key);
-        for c in channels {
-            for k in keys.clone() {
-                if self.midi.sounding(c, k).is_some() {
-                    self.midi.end(c, k, velocity as f32, &mut *emit);
-                    self.ids.retain(|&(_, ic, ik)| (ic, ik) != (c, k));
+        let velocity = (velocity as f32).clamp(0.0, 1.0);
+        self.own.retain(|own| {
+            let named = own.named(id, channel, key);
+            if named {
+                let note = own.note;
+                emit(Played::Note(NoteEvent::Off { note, velocity }));
+            }
+            !named
+        });
+        // A note without an id has none to name it by.
+        if id < 0 {
+            let (channels, keys) = keys(channel, key);
+            for c in channels {
+                for k in keys.clone() {
+                    if self.midi.sounding(c, k).is_some() {
+                        self.midi.end(c, k, velocity, &mut *emit);
+                    }
                 }
             }
         }
     }
 
-    /// The plugin changes the expression of a note, or of notes, named as
+    /// The plugin changes the expression of the notes it names, as
     /// [`end`](Self::end) names them.
     pub(crate) fn express(
         &mut self,
@@ -326,47 +376,50 @@ impl Made {
         value: f64,
         emit: &mut dyn FnMut(Played),
     ) {
-        let (channels, keys) = self.named(id, channel, key);
-        for c in channels {
-            for k in keys.clone() {
-                if let Some(note) = self.midi.sounding(c, k) {
-                    let value = value as f32;
-                    emit(Played::Note(NoteEvent::Expression {
-                        note,
-                        dimension,
-                        value,
-                    }));
+        let value = value as f32;
+        let express = |note| {
+            Played::Note(NoteEvent::Expression {
+                note,
+                dimension,
+                value,
+            })
+        };
+        for own in self.own.iter().filter(|own| own.named(id, channel, key)) {
+            emit(express(own.note));
+        }
+        if id < 0 {
+            let (channels, keys) = keys(channel, key);
+            for c in channels {
+                for k in keys.clone() {
+                    if let Some(note) = self.midi.sounding(c, k) {
+                        emit(express(note));
+                    }
                 }
             }
         }
     }
 
-    /// The plugin plays a MIDI message.
+    /// The plugin plays a MIDI message. All Sound Off and All Notes Off end
+    /// the notes on its channel, those with ids of the plugin's own too.
     pub(crate) fn midi(&mut self, bytes: [u8; 3], emit: &mut dyn FnMut(Played)) {
-        if matches!(bytes[0] & 0xF0, 0x80 | 0x90) {
-            let (channel, key) = (bytes[0] & 0x0F, bytes[1] & 0x7F);
-            self.ids.retain(|&(_, c, k)| (c, k) != (channel, key));
+        if bytes[0] & 0xF0 == 0xB0 && matches!(bytes[1], 120 | 123) {
+            let channel = i16::from(bytes[0] & 0x0F);
+            let velocity = Note::RELEASE_VELOCITY.into();
+            self.end(-1, channel, -1, velocity, &mut *emit);
         }
         self.midi.take(bytes, &mut *emit);
     }
+}
 
-    /// The channels and keys of the notes the plugin names: the one it
-    /// calls `id`, or with -1, those on `key` on `channel`, either -1 for
-    /// any.
-    fn named(&self, id: i32, channel: i16, key: i16) -> (Range<u8>, Range<u8>) {
-        if id >= 0 {
-            return match self.ids.iter().find(|&&(i, ..)| i == id) {
-                Some(&(_, c, k)) => (c..c + 1, k..k + 1),
-                None => (0..0, 0..0),
-            };
-        }
-        let range = |value: i16, count: u8| match u8::try_from(value) {
-            Ok(v) if v < count => v..v + 1,
-            Ok(_) => 0..0,
-            Err(_) => 0..count,
-        };
-        (range(channel, 16), range(key, 128))
-    }
+/// The channels and keys a plugin names with `channel` and `key`, either
+/// -1 for any.
+fn keys(channel: i16, key: i16) -> (Range<u8>, Range<u8>) {
+    let range = |value: i16, count: u8| match u8::try_from(value) {
+        Ok(v) if v < count => v..v + 1,
+        Ok(_) => 0..0,
+        Err(_) => 0..count,
+    };
+    (range(channel, 16), range(key, 128))
 }
 
 /// Sends what a plugin played, `offset` frames into the block, where its
@@ -484,12 +537,13 @@ mod tests {
             m.end(-1, 1, 64, 0.0, &mut *emit);
         });
         assert_eq!(ended, [off(0, 0.5), off(1, 0.0)]);
-        // An id it gives again names the new note, and naming nothing ends
-        // every note, on any channel.
+        // An id it gives again names both notes, which their channels and
+        // keys tell apart, and naming nothing ends every note, on any
+        // channel.
         let again = played(&mut made, |m, emit| {
             m.start(7, 2, 60, 1.0, &mut *emit);
             m.start(7, 3, 62, 1.0, &mut *emit);
-            m.end(7, -1, -1, 0.5, &mut *emit);
+            m.end(7, 3, 62, 0.5, &mut *emit);
             m.start(-1, 4, 67, 1.0, &mut *emit);
             m.end(-1, -1, -1, 0.5, &mut *emit);
         });
@@ -507,6 +561,38 @@ mod tests {
     }
 
     #[test]
+    fn notes_a_plugin_gives_ids_of_its_own_sound_together_on_one_key() {
+        let mut made = Made::new();
+        let started = played(&mut made, |m, emit| {
+            m.start(10, 0, 60, 1.0, &mut *emit);
+            m.start(11, 0, 60, 0.5, &mut *emit);
+            m.start(12, 0, 60, 0.25, &mut *emit);
+        });
+        assert_eq!(started, [on(0, 60, 1.0), on(1, 60, 0.5), on(2, 60, 0.25)]);
+        // Each goes on answering to its id, and the key names those left.
+        let timbre = |n: u64| {
+            Played::Note(NoteEvent::Expression {
+                note: NoteId(MADE_NOTES + n),
+                dimension: Dimension::Timbre,
+                value: 0.5,
+            })
+        };
+        let ended = played(&mut made, |m, emit| {
+            m.end(10, 0, 60, 0.5, &mut *emit);
+            m.express(11, 0, 60, Dimension::Timbre, 0.5, &mut *emit);
+            m.end(-1, 0, 60, 0.25, &mut *emit);
+        });
+        assert_eq!(ended, [off(0, 0.5), timbre(1), off(1, 0.25), off(2, 0.25)]);
+        // MIDI's All Notes Off ends them too.
+        let all_off = played(&mut made, |m, emit| {
+            m.start(13, 1, 64, 1.0, &mut *emit);
+            m.start(14, 2, 64, 1.0, &mut *emit);
+            m.midi([0xB1, 123, 0], &mut *emit);
+        });
+        assert_eq!(all_off, [on(3, 64, 1.0), on(4, 64, 1.0), off(3, RELEASE)]);
+    }
+
+    #[test]
     fn a_plugins_expression_and_midi_play_as_midi_does() {
         let mut made = Made::new();
         let pressure = |n: u64, value: f32| {
@@ -520,8 +606,10 @@ mod tests {
             m.start(3, 0, 60, 1.0, &mut *emit);
             m.express(3, -1, -1, Dimension::Pressure, 0.5, &mut *emit);
             m.express(-1, 0, 60, Dimension::Pressure, 0.75, &mut *emit);
-            // As MIDI: a note on the same key ends the first, whose id
-            // then names nothing.
+            // As MIDI: a note on the same key ends one there without an id,
+            // and one with an id of the plugin's own plays on.
+            m.start(-1, 0, 62, 1.0, &mut *emit);
+            m.midi([0x90, 62, 127], &mut *emit);
             m.midi([0x90, 60, 127], &mut *emit);
             m.express(3, -1, -1, Dimension::Pressure, 1.0, &mut *emit);
             m.midi([0xB0, 64, 127], &mut *emit);
@@ -536,8 +624,11 @@ mod tests {
                 on(0, 60, 1.0),
                 pressure(0, 0.5),
                 pressure(0, 0.75),
-                off(0, RELEASE),
-                on(1, 60, 1.0),
+                on(1, 62, 1.0),
+                off(1, RELEASE),
+                on(2, 62, 1.0),
+                on(3, 60, 1.0),
+                pressure(0, 1.0),
                 sustain
             ]
         );

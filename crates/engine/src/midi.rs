@@ -131,17 +131,17 @@ fn moved(controller: u8) -> Option<Controller> {
 
 /// What each controller holds, as it last moved, for those that have.
 #[derive(Debug, Clone, Copy)]
-struct Held([Option<f32>; Controller::MAX as usize + 1]);
+pub(crate) struct Held([Option<f32>; Controller::MAX as usize + 1]);
 
 impl Held {
-    const NONE: Self = Self([None; Controller::MAX as usize + 1]);
+    pub(crate) const NONE: Self = Self([None; Controller::MAX as usize + 1]);
 
-    fn set(&mut self, controller: Controller, value: f32) {
+    pub(crate) fn set(&mut self, controller: Controller, value: f32) {
         self.0[usize::from(controller.number())] = Some(value);
     }
 
     /// The controllers that have moved, and what they hold, in order.
-    fn moved(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
+    pub(crate) fn moved(&self) -> impl Iterator<Item = (Controller, f32)> + '_ {
         Controller::all().filter_map(|c| Some((c, self.0[usize::from(c.number())]?)))
     }
 
@@ -443,8 +443,9 @@ impl MidiNotes {
         }
     }
 
-    /// An id no note it has played had.
-    fn fresh_id(&mut self) -> NoteId {
+    /// An id no note it has played had: for a note played alongside those
+    /// it reads, such as one a plugin names by an id of its own.
+    pub fn fresh_id(&mut self) -> NoteId {
         let note = NoteId(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         note

@@ -76,10 +76,17 @@ synth the chord its track's clip holds, a note at a time.
   ([Modulation](modulation.md)).
 - **Bypassed**, a MIDI effect passes the notes on as they come, and
   **deactivated**, it's out of their way. Either way the notes it was
-  playing end, so none hangs, and brought back, it starts afresh.
+  playing end, and a sustain pedal it held down comes up, so none hangs.
+  Brought back, it starts afresh. A pedal the track's clips or input hold
+  down holds on whichever way the notes go, and an effect brought back
+  hears it's down.
 - **Notes of its own.** What it plays are notes of its own, which the
   instrument tells apart from those played into it, each with the
-  expression the plugin gives it, such as a pitch bend of its own.
+  expression the plugin gives it, such as a pitch bend of its own. A
+  plugin that names its notes, as CLAP and VST3 plugins can, can play
+  several on one key at once, such as a note repeater's overlapping
+  notes, and each sounds until the plugin ends it. Notes it plays as MIDI
+  play as a keyboard's do: a key played again ends the note on it first.
 
 ## Plugin windows
 

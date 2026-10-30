@@ -180,9 +180,13 @@ output, which activating turns on.
 
 - `process::Made` gives each note the plugin plays an id of the engine's
   own, from 2^63 up, as `midi::MidiNotes` does a MIDI input's, so they
-  can't clash with the notes played into it, and finds the notes it ends
-  or expresses by its ids, or by channel and key: -1 for any, as CLAP has
-  it. A note on a key and channel already sounding ends the one there.
+  can't clash with the notes played into it. It finds the notes the plugin
+  ends or expresses by all it gives of an id, a channel and a key, -1 for
+  any, as CLAP has it. A note with an id of the plugin's own sounds until
+  the plugin ends it, whatever starts on its key, as CLAP's voice stacking
+  and VST3's note ids allow, so a note repeater's overlapping notes on one
+  key each play out. One without an id, and MIDI, play as a keyboard does:
+  a note on a key and channel already sounding ends the one there.
 - Its expression and MIDI play as an MPE controller's would
   ([engine.md](engine.md#notes)): tuning is pitch bend, pressure is
   pressure, and brightness is timbre. MIDI reads each channel as a

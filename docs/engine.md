@@ -1120,10 +1120,14 @@ for either), in order with them, and takes room in a block as a note does.
   to send them, as a MIDI effect without an instrument after it does, so
   it keeps its time and its record.
 - Each node that plays notes keeps track of the notes it has sounding
-  where its notes go, up to `Notes::CAPACITY`. When a swap takes a route
-  away, the node ends the notes it had sounding along it, at the start of
-  the next block, so nothing hangs where its notes no longer go
-  (`Notes::end_all` ends them all at once, as a switch does).
+  where its notes go, up to `Notes::CAPACITY`, and the switches it holds on
+  there, such as the sustain pedal. When a swap takes a route away, the
+  node ends the notes it had sounding along it, at the start of the next
+  block, and lets go of the switches, which would hold them on, so nothing
+  hangs where its notes no longer go (`Notes::release_all` does both at
+  once, as a switch does). Then the switches it holds on go on along the
+  routes the swap adds, so a pedal a track's clips hold down holds
+  whichever way their notes go.
 
 **MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
 their expression, to the track's first instrument (`Track::instrument`),
@@ -1202,10 +1206,15 @@ no sound, and none goes through it.
 - Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead, and
   stops the device, which takes its events through `flush`, until it
   comes back afresh (`Node::reset`). Either way, the switch ends the notes
-  sounding where it lands, so none hangs: the device's, which it plays no
-  more, and those passed on, whose ends it would never hear. Where the
-  device starts or stops partway through a block, it plays that part of
-  the block as a block of its own.
+  sounding where it lands, and lets go of the switches held on there, such
+  as the sustain pedal, so none hangs: the device's, which it plays no
+  more, and those passed on, whose ends it would never hear. What plays
+  from there starts from what the controllers that come in hold, as the
+  switch keeps them (`midi::Held`), so a pedal held down on the track
+  holds on: bypassed, they go on as they are, and the device brought back
+  hears them before the rest of its first part. Where the device starts or
+  stops partway through a block, it plays that part of the block as a
+  block of its own.
 - A deactivated MIDI effect is out of the notes' way, as a deactivated
   device is out of the signal, and its switch (`NoteSwitch::deactivated`)
   stays in the graph, so a plugin stops on the audio thread, and goes on

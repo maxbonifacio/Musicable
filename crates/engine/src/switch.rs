@@ -4,7 +4,10 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use musicable_model::clip::Controller;
+
 use crate::graph::Routed;
+use crate::midi::Held;
 use crate::nodes::{Delay, Smoothed};
 use crate::{
     AudioBuffer, AudioMut, Automation, EngineConfig, Inputs, MidiMessage, Node, NodeEvent,
@@ -429,10 +432,14 @@ impl Node for Switch {
 /// the notes on unchanged instead, and stops the device ([`Node::stop`]),
 /// which gets its events through [`Node::flush`] until it's brought back,
 /// as if it had played nothing yet ([`Node::reset`]). Either way, a switch
-/// ends the notes sounding where it lands, so none hangs: the device's,
-/// which it plays no more, and those passed on, whose ends it would never
-/// hear. Where the device starts or stops partway through a block, it plays
-/// that part of the block as a block of its own.
+/// ends the notes sounding where it lands, and lets go of the switches held
+/// on there, such as the sustain pedal, so none hangs: the device's, which
+/// it plays no more, and those passed on, whose ends it would never hear.
+/// What plays from there starts from what the controllers that come in
+/// hold, so a pedal held down on the track holds on: passed by, they go on
+/// as they are, and the device brought back hears them first. Where the
+/// device starts or stops partway through a block, it plays that part of
+/// the block as a block of its own.
 ///
 /// The modulation of the device's parameters comes as the block renders,
 /// after the notes have played, so it reaches the device at the start of
@@ -457,6 +464,10 @@ pub struct NoteSwitch {
     pending: Option<bool>,
     /// What the device plays in a part of a block, on its way on.
     played: Vec<Routed>,
+    /// What the controllers that come in hold, as they last moved.
+    input: Held,
+    /// What they hold, for the device to hear first as it starts afresh.
+    chased: Vec<NodeEvent>,
     /// The modulation that came as the last block rendered, for the
     /// device's next block.
     late: Vec<NodeEvent>,
@@ -485,6 +496,8 @@ impl NoteSwitch {
             automated: false,
             pending: None,
             played: Vec::new(),
+            input: Held::NONE,
+            chased: Vec::new(),
             late: Vec::new(),
             merged: Vec::new(),
             shifted: Vec::new(),
@@ -525,6 +538,7 @@ impl Node for NoteSwitch {
     fn prepare(&mut self, config: &EngineConfig) {
         self.device.prepare(config);
         self.played = Vec::with_capacity(Notes::CAPACITY);
+        self.chased = Vec::with_capacity(usize::from(Controller::MAX) + 1);
         self.late = Vec::with_capacity(LATE);
         self.merged = Vec::with_capacity(MERGED);
         self.shifted = Vec::with_capacity(SHIFTED);
@@ -550,10 +564,11 @@ impl Node for NoteSwitch {
         }
     }
 
-    /// Carries on with the switch it replaces and its device's state. Once
-    /// a lane stops moving it, it goes back to the project's state, which a
-    /// value sent since overrides. A device that was deactivated starts
-    /// afresh, and one that's deactivated now stops.
+    /// Carries on with the switch it replaces, its device's state and what
+    /// the controllers that came in hold. Once a lane stops moving it, it
+    /// goes back to the project's state, which a value sent since
+    /// overrides. A device that was deactivated starts afresh, and one
+    /// that's deactivated now stops.
     fn adopt(&mut self, previous: &mut dyn Node) {
         let Some(previous) = previous.downcast_mut::<NoteSwitch>() else {
             return;
@@ -566,6 +581,7 @@ impl Node for NoteSwitch {
                 if previous.automated && !self.automated {
                     self.pending = Some(self.built);
                 }
+                self.input = previous.input;
                 std::mem::swap(&mut self.late, &mut previous.late);
             }
             (false, true) if !previous.bypassed => self.device.stop(),
@@ -602,6 +618,8 @@ impl Node for NoteSwitch {
             deactivated,
             pending,
             played,
+            input,
+            chased,
             late,
             merged,
             shifted,
@@ -624,8 +642,13 @@ impl Node for NoteSwitch {
             late.clear();
         }
         let ctx = &ProcessContext { events, ..*ctx };
-        if let Some(to) = pending.take() {
-            switch(&mut **device, bypassed, to, 0, notes);
+        // Whether the device, started afresh, is yet to hear what the
+        // controllers that come in hold.
+        let mut fresh = false;
+        if let Some(to) = pending.take()
+            && switch(&mut **device, bypassed, to, 0, input, notes)
+        {
+            fresh = !*bypassed;
         }
         let frames = ctx.frames;
         let (mut at, mut next) = (0, 0);
@@ -633,20 +656,29 @@ impl Node for NoteSwitch {
             while let Some(event) = ctx.events.get(next)
                 && event.offset <= at
             {
-                if let Some(to) = switch_value(event) {
-                    switch(&mut **device, bypassed, to, at, notes);
+                if let Some(to) = switch_value(event)
+                    && switch(&mut **device, bypassed, to, at, input, notes)
+                {
+                    fresh = !*bypassed;
                 }
                 next += 1;
             }
             let end = (ctx.events[next..].iter())
                 .find(|e| switch_value(e).is_some())
                 .map_or(frames, |e| e.offset);
+            let events = events_in(ctx.events, at..end);
             if *bypassed {
-                let events = events_in(ctx.events, at..end);
                 device.flush(&ProcessContext { events, ..*ctx });
                 pass_on(events, notes);
             } else {
-                in_parts(ctx, at..end, shifted, |part, frames| {
+                chased.clear();
+                if std::mem::take(&mut fresh) {
+                    chased.extend(input.moved().map(|(controller, value)| NodeEvent {
+                        offset: 0,
+                        kind: NodeEventKind::Controller { controller, value },
+                    }));
+                }
+                in_parts(ctx, at..end, chased, shifted, |part, frames| {
                     played.clear();
                     let mut buffer = Notes::buffer(played, part.frames);
                     device.play_notes(part, &mut buffer);
@@ -660,6 +692,11 @@ impl Node for NoteSwitch {
                     }
                 });
             }
+            for event in events {
+                if let NodeEventKind::Controller { controller, value } = event.kind {
+                    input.set(controller, value);
+                }
+            }
             at = end;
         }
     }
@@ -669,20 +706,33 @@ impl Node for NoteSwitch {
     }
 }
 
-/// A MIDI effect's switch to `bypassed`, `at` frames into the block: the
-/// notes sounding where the switch's notes go end there, and the device
-/// stops or starts afresh.
-fn switch(device: &mut dyn Node, bypassed: &mut bool, to: bool, at: usize, notes: &mut Notes<'_>) {
+/// A MIDI effect's switch to `bypassed`, `at` frames into the block, if
+/// it's a change, and returns whether it was. The notes sounding where the
+/// switch's notes go end there, the switches held on there are let go, and
+/// the device stops or starts afresh. Bypassed, what the controllers that
+/// come in hold goes on from there, as `input` says.
+fn switch(
+    device: &mut dyn Node,
+    bypassed: &mut bool,
+    to: bool,
+    at: usize,
+    input: &Held,
+    notes: &mut Notes<'_>,
+) -> bool {
     if to == *bypassed {
-        return;
+        return false;
     }
     *bypassed = to;
-    notes.end_all(at);
+    notes.release_all(at);
     if to {
         device.stop();
+        for (controller, value) in input.moved() {
+            notes.send_controller(at, controller, value);
+        }
     } else {
         device.reset();
     }
+    true
 }
 
 /// Sends the notes and controllers among `events` on, unchanged.
@@ -730,33 +780,37 @@ fn render_part(
     frames: Range<usize>,
     output: &mut AudioMut<'_>,
 ) {
-    in_parts(ctx, frames, shifted, |part, frames| {
+    in_parts(ctx, frames, &[], shifted, |part, frames| {
         process_part(device, part, inputs, frames, output);
     });
 }
 
 /// Has `each` render or play `frames` of the block `ctx` is for, as a block
 /// of its own, with its context and frames, its events moved to their
-/// offsets in it through `shifted`, which has room for [`SHIFTED`]. Where
-/// more events than that fall in them, the frames are cut into parts.
+/// offsets in it through `shifted`, which has room for [`SHIFTED`], after
+/// `first`, events for its first frame, fewer than that. Where more events
+/// than that fall in them, the frames are cut into parts.
 fn in_parts(
     ctx: &ProcessContext<'_>,
     frames: Range<usize>,
+    mut first: &[NodeEvent],
     shifted: &mut Vec<NodeEvent>,
     mut each: impl FnMut(&ProcessContext<'_>, Range<usize>),
 ) {
-    if frames == (0..ctx.frames) {
+    debug_assert!(first.len() < SHIFTED, "the first events leave room");
+    if first.is_empty() && frames == (0..ctx.frames) {
         each(ctx, frames);
         return;
     }
     let mut events = events_in(ctx.events, frames.clone());
-    if frames.start == 0 {
+    if first.is_empty() && frames.start == 0 {
         each(&part(*ctx, frames.clone(), events), frames);
         return;
     }
     let mut start = frames.start;
     while start < frames.end {
-        let (end, count) = match events.get(SHIFTED) {
+        let room = SHIFTED - first.len();
+        let (end, count) = match events.get(room) {
             None => (frames.end, events.len()),
             Some(cut) if cut.offset > start => {
                 let count = events.partition_point(|e| e.offset < cut.offset);
@@ -764,9 +818,10 @@ fn in_parts(
             }
             // More events on one frame than there's room for: the rest
             // come on the next.
-            Some(_) => (start + 1, SHIFTED),
+            Some(_) => (start + 1, room),
         };
         shifted.clear();
+        shifted.extend_from_slice(std::mem::take(&mut first));
         shifted.extend(events[..count].iter().map(|e| NodeEvent {
             offset: e.offset.saturating_sub(start),
             ..*e
@@ -1097,9 +1152,9 @@ mod tests {
     }
 
     /// What a test MIDI effect went through: the blocks it played, by
-    /// engine time and length, the parameter changes and modulation in
-    /// them, with the engine time of each, and how many times it was
-    /// stopped, reset and flushed.
+    /// engine time and length, the parameter changes, modulation and
+    /// controllers in them, with the engine time of each, and how many
+    /// times it was stopped, reset and flushed.
     #[derive(Debug)]
     struct Log {
         blocks: Vec<(u64, usize)>,
@@ -1110,7 +1165,8 @@ mod tests {
     }
 
     /// A MIDI effect for tests: plays the notes it gets an octave up, as
-    /// themselves, and keeps a log, which [`log`] reads.
+    /// themselves, and keeps a log, which [`log`] reads. The controllers it
+    /// gets go no further.
     struct Octave(Log);
 
     impl Octave {
@@ -1149,7 +1205,9 @@ mod tests {
                         }
                         notes.send(event.offset, note);
                     }
-                    NodeEventKind::Param { .. } | NodeEventKind::Modulation { .. } => {
+                    NodeEventKind::Param { .. }
+                    | NodeEventKind::Modulation { .. }
+                    | NodeEventKind::Controller { .. } => {
                         log.changes.push((time, event.kind));
                     }
                     _ => {}
@@ -1189,15 +1247,24 @@ mod tests {
         }
     }
 
-    /// Keeps the notes it gets, with their offsets.
-    struct Kept(Vec<(usize, NoteEvent)>);
+    /// Keeps the notes and the controllers it gets in a block, with their
+    /// offsets.
+    struct Kept {
+        notes: Vec<(usize, NoteEvent)>,
+        controllers: Vec<(usize, Controller, f32)>,
+    }
 
     impl Node for Kept {
         fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
-            self.0.clear();
+            self.notes.clear();
+            self.controllers.clear();
             for event in ctx.events {
-                if let NodeEventKind::Note(note) = event.kind {
-                    self.0.push((event.offset, note));
+                match event.kind {
+                    NodeEventKind::Note(note) => self.notes.push((event.offset, note)),
+                    NodeEventKind::Controller { controller, value } => {
+                        self.controllers.push((event.offset, controller, value));
+                    }
+                    _ => {}
                 }
             }
             output.clear();
@@ -1235,7 +1302,13 @@ mod tests {
             },
         );
         let switch = g.add(NodeKey(1), switch);
-        let kept = g.add(NodeKey(2), Kept(Vec::with_capacity(32)));
+        let kept = g.add(
+            NodeKey(2),
+            Kept {
+                notes: Vec::with_capacity(32),
+                controllers: Vec::with_capacity(32),
+            },
+        );
         g.send_notes(script, switch).unwrap();
         g.send_notes(switch, kept).unwrap();
         g.set_output(kept).unwrap();
@@ -1279,8 +1352,13 @@ mod tests {
             ReferenceRenderer.render(graph, &block);
             graph.clear_routed();
         });
+        kept_by(graph, kept).notes.clone()
+    }
+
+    /// What the node `kept` of `graph` kept in the last block.
+    fn kept_by(graph: &mut crate::PreparedGraph, kept: crate::NodeId) -> &Kept {
         let kept = graph.nodes[kept.0].as_mut().downcast_mut::<Kept>();
-        kept.unwrap().0.clone()
+        kept.unwrap()
     }
 
     #[test]
@@ -1313,6 +1391,84 @@ mod tests {
         // While stopped, it took its events through `flush`, in each part
         // of a block it was bypassed for.
         assert_eq!(log.flushes, 2);
+    }
+
+    /// A MIDI effect for tests that holds the sustain pedal down and plays
+    /// note 1 on key 60 in its first block, and nothing after.
+    struct Pedal(bool);
+
+    impl Node for Pedal {
+        fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, _: &mut AudioMut<'_>) {
+            panic!("a MIDI effect plays its notes and renders nothing");
+        }
+
+        fn play_notes(&mut self, _: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            if !std::mem::replace(&mut self.0, true) {
+                notes.send_controller(0, Controller::SUSTAIN, 1.0);
+                notes.send(0, on(1, 60));
+            }
+        }
+    }
+
+    #[test]
+    fn bypassing_a_midi_effect_lets_go_of_the_pedal_it_holds_down() {
+        let effect = Box::new(Pedal(false));
+        let (mut graph, nodes) = notes_through(NoteSwitch::new(effect, false), Vec::new());
+        let sustain = Controller::SUSTAIN;
+        assert_eq!(play(&mut graph, nodes, 0, &[], &[]), [(0, on(1, 60))]);
+        assert_eq!(
+            kept_by(&mut graph, nodes[2]).controllers,
+            [(0, sustain, 1.0)]
+        );
+        // The pedal would hold the note on, so it comes up as the note
+        // ends.
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        assert_eq!(
+            play(&mut graph, nodes, 64, &[switch(16, true)], &[]),
+            [(16, off(1, release))]
+        );
+        assert_eq!(
+            kept_by(&mut graph, nodes[2]).controllers,
+            [(16, sustain, 0.0)]
+        );
+    }
+
+    #[test]
+    fn a_pedal_held_down_on_the_track_holds_on_as_a_midi_effect_switches() {
+        let script = vec![vec![(0, on(1, 60))]];
+        let (mut graph, nodes) = notes_through(NoteSwitch::new(Octave::boxed(), false), script);
+        let sustain = Controller::SUSTAIN;
+        let down = NodeEventKind::Controller {
+            controller: sustain,
+            value: 1.0,
+        };
+        let pedal = NodeEvent {
+            offset: 0,
+            kind: down,
+        };
+        assert_eq!(play(&mut graph, nodes, 0, &[pedal], &[]), [(0, on(1, 72))]);
+        // The effect keeps the pedal to itself. Bypassed, the pedal passes
+        // by as it is, down, once the effect's note has ended.
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        assert_eq!(
+            play(&mut graph, nodes, 64, &[switch(16, true)], &[]),
+            [(16, off(1, release))]
+        );
+        assert_eq!(
+            kept_by(&mut graph, nodes[2]).controllers,
+            [(16, sustain, 1.0)]
+        );
+        // Brought back, the pedal that passed by comes up, and the effect
+        // hears it's down before anything else.
+        assert!(play(&mut graph, nodes, 128, &[switch(8, false)], &[]).is_empty());
+        assert_eq!(
+            kept_by(&mut graph, nodes[2]).controllers,
+            [(8, sustain, 0.0)]
+        );
+        assert_eq!(
+            log(&mut graph, nodes[1]).changes,
+            [(0, down), (136, down), (136, switch(8, false).kind)]
+        );
     }
 
     #[test]
