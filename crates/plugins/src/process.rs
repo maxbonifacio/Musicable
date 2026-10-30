@@ -178,7 +178,8 @@ pub(crate) struct SoundingNote {
     /// Never negative: CLAP's and VST3's note ids both use -1 for none.
     pub(crate) id: i32,
     pub(crate) key: i16,
-    /// The MIDI channel it plays on, for a plugin that takes MPE.
+    /// The MIDI channel it plays on: its own, for a plugin that takes MPE,
+    /// or the one a note wire gives it.
     pub(crate) channel: i16,
 }
 
@@ -194,8 +195,9 @@ impl Sounding {
         self.notes.clear();
     }
 
-    /// Starts `note` on `key`, unless too many notes are sounding.
-    pub(crate) fn start(&mut self, note: NoteId, key: u8) -> Option<SoundingNote> {
+    /// Starts `note` on `key` on `channel`, unless too many notes are
+    /// sounding.
+    pub(crate) fn start(&mut self, note: NoteId, key: u8, channel: u8) -> Option<SoundingNote> {
         if self.notes.len() == self.notes.capacity() {
             return None;
         }
@@ -203,7 +205,7 @@ impl Sounding {
             note,
             id: self.next_id,
             key: key.into(),
-            channel: 0,
+            channel: channel.into(),
         };
         self.next_id = self.next_id.checked_add(1).unwrap_or(0);
         self.notes.push(sounding);
@@ -329,6 +331,7 @@ impl Made {
                 note,
                 key,
                 velocity,
+                channel: None,
             }));
         }
     }
@@ -502,6 +505,7 @@ mod tests {
             note: NoteId(MADE_NOTES + n),
             key,
             velocity,
+            channel: None,
         })
     }
 

@@ -68,7 +68,7 @@ pub use event::{
 pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, PreparedGraph};
 pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
-pub use midi::{MidiMessage, MidiMonitor, MidiNotes, Played};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played};
 pub use parallel::{AheadWaker, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats};
 pub use preview::Preview;
 pub use render::{Block, ReferenceRenderer, Renderer};

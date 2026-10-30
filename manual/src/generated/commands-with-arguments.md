@@ -98,6 +98,7 @@
 | Set Master Clip Type | `mixer.set_master_clip_type` |
 | Set Master Pan | `mixer.set_master_pan` |
 | Set Master Volume | `mixer.set_master_volume` |
+| Set MIDI To | `mixer.set_midi_to` |
 | Set Monitor | `mixer.set_monitor` |
 | Set Mute | `mixer.set_mute` |
 | Set Output | `mixer.set_output` |
@@ -213,5 +214,6 @@
 |---|---|
 | Connect Wire | `wire.connect` |
 | Disconnect Wire | `wire.disconnect` |
+| Set Wire Channel | `wire.set_channel` |
 | Set Wire Gain | `wire.set_gain` |
 | Set Wire Source | `wire.set_source` |

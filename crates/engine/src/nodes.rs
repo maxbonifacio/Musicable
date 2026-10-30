@@ -1411,6 +1411,7 @@ impl TestInstrument {
                 note,
                 key,
                 velocity,
+                ..
             }) => {
                 let voice = match self.voices.iter().position(|v| !v.active) {
                     Some(free) => free,
@@ -1461,6 +1462,7 @@ impl TestInstrument {
             NodeEventKind::Controller {
                 controller: Controller::SUSTAIN,
                 value,
+                ..
             } => {
                 self.sustain = Controller::is_on(value);
                 if !self.sustain {
@@ -2316,6 +2318,7 @@ mod tests {
                 note: note_id,
                 key,
                 velocity,
+                channel: None,
             },
         )
     }
@@ -2427,6 +2430,7 @@ mod tests {
             kind: NodeEventKind::Controller {
                 controller: Controller::SUSTAIN,
                 value: if down { 1.0 } else { 0.0 },
+                channel: None,
             },
         };
         let mut keys = instrument();
@@ -2440,6 +2444,7 @@ mod tests {
                 kind: NodeEventKind::Controller {
                     controller: Controller::MOD_WHEEL,
                     value: 0.0,
+                    channel: None,
                 },
             },
             pedal(3000, false),

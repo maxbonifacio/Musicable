@@ -71,6 +71,8 @@ pub(crate) fn sources(
     let gain = match port {
         Port::Sidechain(_) => &GAIN,
         Port::PluginInput(..) => &INPUT_GAIN,
+        // A note input's wires are the Routing panel's.
+        Port::Notes(_) => return,
     };
     let wires: Vec<Wire> = project.wires_into(port).copied().collect();
     if wires.is_empty() {
@@ -114,6 +116,8 @@ pub(crate) fn gain(
     let info = match wire.to {
         Port::Sidechain(_) => &GAIN,
         Port::PluginInput(..) => &INPUT_GAIN,
+        // A note wire has no gain.
+        Port::Notes(_) => return,
     };
     let setting = Setting::WireGain(wire.id);
     let playhead = view.playback.playhead;
@@ -133,7 +137,8 @@ pub(crate) fn gain(
 /// The menu of what `wire` can take from, as its picker has it: No Input,
 /// which takes the wire away, then the other tracks, each opening to its
 /// taps, then This track. Asks for the change the user picked: the
-/// Routing panel shows it beside the wire's source.
+/// Routing panel shows it beside the wire's source, a note wire's too,
+/// whose menu has the taps that carry notes.
 pub(crate) fn source_menu(ui: &mut Ui, project: &Project, wire: &Wire, actions: &mut Vec<Action>) {
     let Some(chain) = project.port_chain(wire.to) else {
         return;
@@ -237,6 +242,8 @@ fn picker(
         (Port::PluginInput(..), None) => {
             format!("Where {input} comes from. With No Input, it's off.")
         }
+        (Port::Notes(_), Some(tap)) => format!("The notes come from {tap}."),
+        (Port::Notes(_), None) => "Where the notes come from.".to_owned(),
     };
     let response = response.on_hover_text(hint);
     Popup::menu(&response)
@@ -281,10 +288,11 @@ fn paint_picker(ui: &Ui, response: &Response, rect: Rect, text: &str, theme: &Th
     painter.galley(at, galley, ink);
 }
 
-/// The menu of what `port`, the side input of a device on `chain`, can take
-/// from: No Input, if `none`, then the other tracks, each opening to its
-/// taps, then This track, opening to the points before the device. The
-/// `current` tap is ticked. Returns what the user picked, if it's a change.
+/// The menu of what `port`, the side input or the note input of a device on
+/// `chain`, can take from: No Input, if `none`, then the other tracks, each
+/// opening to its taps, then This track, opening to the points before the
+/// device. The `current` tap is ticked. Returns what the user picked, if
+/// it's a change.
 fn menu(
     ui: &mut Ui,
     project: &Project,
@@ -304,9 +312,14 @@ fn menu(
         }
         ui.close();
     }
-    // A tap carries sound, unless it's a MIDI track's notes: its Pre FX,
-    // or after one of its MIDI effects.
-    let sound = |tap: &Tap| project.carries_sound(*tap);
+    // What the port takes: notes, into a note input, from a MIDI track's
+    // taps, and sound, into a side input, from any tap but the points of a
+    // MIDI track's that carry notes alone, its Pre FX and those after its
+    // MIDI effects.
+    let carries = |tap: &Tap| match port.takes_notes() {
+        true => project.carries_notes(*tap),
+        false => project.carries_sound(*tap),
+    };
     let refused = |tap: Tap| match current == Some(tap) {
         true => None,
         false => project.check_wire(tap, port).err(),
@@ -335,7 +348,7 @@ fn menu(
     }
     for track in others {
         let taps: Vec<Tap> = project.taps(Chain::Track(track.id));
-        let taps: Vec<Tap> = taps.into_iter().filter(sound).collect();
+        let taps: Vec<Tap> = taps.into_iter().filter(carries).collect();
         let open = taps.iter().any(|&tap| refused(tap).is_none());
         ui.add_enabled_ui(open, |ui| {
             ui.menu_button(track.name.as_str(), |ui| {
@@ -348,7 +361,7 @@ fn menu(
     // The points before the device, on its own chain.
     let before: Vec<Tap> = (project.taps(chain).into_iter())
         .take_while(|&tap| tap != Tap::Device(port.device()))
-        .filter(sound)
+        .filter(carries)
         .collect();
     if !before.is_empty() {
         ui.separator();
@@ -364,9 +377,10 @@ fn menu(
 /// Why a tap can't be picked, for its item's hover text.
 fn why_not(why: WireError) -> &'static str {
     match why {
-        WireError::Wired(_) => "This side input takes it already.",
+        WireError::Wired(_) => "It's wired in already.",
         WireError::Loop => "That would make a loop: what the device puts out reaches it.",
-        WireError::Notes => "It's notes, which no wire takes yet.",
+        WireError::Notes => "It's notes, which go only into an instrument or a MIDI effect.",
+        WireError::Sound => "It's sound, and this takes notes.",
         WireError::NoTap | WireError::NoPort => "It isn't there.",
     }
 }

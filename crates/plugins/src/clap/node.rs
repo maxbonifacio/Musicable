@@ -692,11 +692,15 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio, stale: &mut Vec
                 note_events(audio, event.offset, note, &ctx.events[i + 1..])
             }
             // Controllers go as MIDI, to a plugin that takes it.
-            NodeEventKind::Controller { controller, value } => {
+            NodeEventKind::Controller {
+                controller,
+                value,
+                channel,
+            } => {
                 if let Some(port) = audio.note_port.filter(|p| p.midi) {
                     let Audio { midi, events, .. } = audio;
                     let mut emit = |bytes| events.push(Event::midi(time, port.index, bytes));
-                    midi.controller(controller, value, &mut emit);
+                    midi.controller(controller, value, channel, &mut emit);
                 }
             }
             _ => {}
@@ -728,10 +732,9 @@ fn note_events(audio: &mut Audio, offset: usize, note: NoteEvent, after: &[NodeE
         NoteEvent::On { note, key, .. } => {
             sounding.end(note);
             // The voice, on the channel it went to, for modulation.
-            if let (Some(mut voice), Some((channel, _))) =
-                (sounding.start(note, key.min(127)), midi.find(note))
+            if let Some((channel, _)) = midi.find(note)
+                && let Some(voice) = sounding.start(note, key.min(127), channel)
             {
-                voice.channel = channel.into();
                 voices.start(voice);
             }
         }
@@ -742,7 +745,8 @@ fn note_events(audio: &mut Audio, offset: usize, note: NoteEvent, after: &[NodeE
     }
 }
 
-/// The events that play `note` on a plugin that takes CLAP's own.
+/// The events that play `note` on a plugin that takes CLAP's own, on the
+/// first channel, or the one a note wire gives it.
 fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEvent) {
     let index = port.index as i16;
     let end = |audio: &mut Audio, sounding: SoundingNote, velocity: f32| {
@@ -751,6 +755,7 @@ fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEven
             time,
             sounding.id,
             index,
+            sounding.channel,
             sounding.key,
             velocity.into(),
         ));
@@ -760,11 +765,13 @@ fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEven
             note,
             key,
             velocity,
+            channel,
         } => {
             if let Some(old) = audio.sounding.end(note) {
                 end(audio, old, 0.0);
             }
-            let Some(sounding) = audio.sounding.start(note, key.min(127)) else {
+            let channel = channel.map_or(0, |c| c.min(15));
+            let Some(sounding) = audio.sounding.start(note, key.min(127), channel) else {
                 audio.events.dropped += 1;
                 return;
             };
@@ -774,6 +781,7 @@ fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEven
                 time,
                 sounding.id,
                 index,
+                sounding.channel,
                 sounding.key,
                 velocity.into(),
             ));
@@ -796,6 +804,7 @@ fn clap_note_events(audio: &mut Audio, port: NotePort, time: u32, note: NoteEven
                 expression,
                 sounding.id,
                 index,
+                sounding.channel,
                 sounding.key,
                 value.into(),
             ));

@@ -343,6 +343,7 @@ mod tests {
                 note: NoteId(1),
                 key: 60,
                 velocity: 1.0,
+                channel: None,
             }),
         };
         let events = [param_event(5, utility::PAN, 0.5), note];

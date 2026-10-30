@@ -169,6 +169,7 @@ fn handle(
             note,
             key,
             velocity,
+            ..
         }) => {
             for voice in voices.with_note(note) {
                 voice.release();
@@ -219,6 +220,7 @@ fn handle(
         NodeEventKind::Controller {
             controller: Controller::SUSTAIN,
             value,
+            ..
         } => voices.pedal(value, Voice::release),
         _ => {}
     }

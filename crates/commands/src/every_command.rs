@@ -38,7 +38,7 @@ use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::plugin::{
     PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
-use musicable_model::routing::{Port, Tap};
+use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::{
     Onset, Onsets, Origin, Preserve, TransientLoop, Warp, WarpMarker, WarpMode,
@@ -816,6 +816,12 @@ fn examples() -> Vec<Example> {
             let (tap, port) = find_wireable(s, |_, _, port| matches!(port, Port::PluginInput(..)))?;
             Some(connect_args(tap, port))
         }),
+        // A MIDI track's notes into an instrument's note input, on a
+        // channel.
+        edits(wire::CONNECT, |s| {
+            let (tap, port) = find_wireable(s, |_, _, port| port.takes_notes())?;
+            Some(connect_args(tap, port).with("channel", 9_i64))
+        }),
         edits(wire::DISCONNECT, |s| {
             let wire = pick(s, project(s).wires.iter())?;
             Some(Args::new().with("wire", wire.id))
@@ -825,8 +831,16 @@ fn examples() -> Vec<Example> {
             let (tap, _) = find_wireable(s, |_, _, port| port == wire.to)?;
             Some(wire::with_tap(Args::new().with("wire", wire.id), tap))
         }),
+        edits(wire::SET_CHANNEL, |s| {
+            let wire = pick(s, project(s).wires.iter().filter(|w| w.takes_notes()))?;
+            let args = Args::new().with("wire", wire.id);
+            Some(match wire.channel {
+                Some(_) => args,
+                None => args.with("channel", 3_i64),
+            })
+        }),
         edits(wire::SET_GAIN, |s| {
-            let wire = pick(s, project(s).wires.iter())?;
+            let wire = pick(s, project(s).wires.iter().filter(|w| !w.takes_notes()))?;
             let gain = if wire.gain == 0.5 { 1.0 } else { 0.5 };
             Some(Args::new().with("wire", wire.id).with("gain", gain))
         }),
@@ -923,6 +937,29 @@ fn examples() -> Vec<Example> {
                 Some(ref input) if input.is_resampling() => args.with("device", "in-1"),
                 _ => args.with("resampling", true),
             })
+        }),
+        // Another track's instrument, on a channel it doesn't play on yet.
+        edits(mixer::SET_MIDI_TO, |s| {
+            let p = project(s);
+            let midi = p.tracks.iter().filter(|t| t.kind == TrackKind::Midi);
+            let plays = midi.flat_map(|t| {
+                let instruments = p.midi_to_instruments(t.id).into_iter();
+                instruments.map(move |device| (t.id, device))
+            });
+            let (track, device) = pick(s, plays)?;
+            let wired = p.midi_to(track).find(|w| w.to == Port::Notes(device));
+            let channel = wired.map_or(0, |w| w.channel.map_or(1, |c| (c + 1) % 16));
+            let args = Args::new().with("track", track).with("device", device);
+            Some(args.with("channel", i64::from(channel)))
+        }),
+        // None.
+        edits(mixer::SET_MIDI_TO, |s| {
+            let p = project(s);
+            let track = pick(
+                s,
+                p.tracks.iter().filter(|t| p.midi_to(t.id).next().is_some()),
+            )?;
+            Some(Args::new().with("track", track.id))
         }),
         edits(mixer::SET_MASTER_CLIP_TYPE, |s| {
             let clip_type = next_clip_type(project(s).master.clip_type);
@@ -1971,7 +2008,13 @@ fn find_placed(s: &Rig, keep: impl Fn(usize, usize) -> bool) -> Option<(Chain, D
 fn find_wireable(s: &Rig, keep: impl Fn(&Project, Tap, Port) -> bool) -> Option<(Tap, Port)> {
     let project = project(s);
     let devices = project.chains().flat_map(|(_, devices)| devices);
-    let ports: Vec<Port> = devices.flat_map(|d| project.ports(d.id)).collect();
+    let ports = devices.flat_map(|d| {
+        project
+            .ports(d.id)
+            .into_iter()
+            .chain(project.note_input(d.id))
+    });
+    let ports: Vec<Port> = ports.collect();
     let taps = project.chains().flat_map(|(chain, _)| project.taps(chain));
     let pairs = taps.flat_map(|tap| ports.iter().map(move |&port| (tap, port)));
     let wireable =
@@ -2275,6 +2318,13 @@ fn fixture() -> Project {
     overridden.overridden = true;
     let key = project.new_wire(Tap::PostFx(Chain::Track(spare)), Port::Sidechain(ids[1]));
     project.wires.push(key);
+    // A lead playing the MIDI track's sampler on a channel: its MIDI To.
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    let midi_to = project.new_wire(Tap::PostFx(Chain::Track(lead)), Port::Notes(ids[2]));
+    project.wires.push(Wire {
+        channel: Some(1),
+        ..midi_to
+    });
     project.automation = vec![
         Lane::new(
             ParamAddress::Volume(Chain::Track(audio)),
@@ -2712,7 +2762,7 @@ fn commands_run_as_a_batch_make_one_step_or_none() {
     ];
     let values = s.run_batch("Start a Beat", &batch).unwrap();
     let after = project(&s).clone();
-    let track = after.tracks.iter().find(|t| t.name == "MIDI 2");
+    let track = after.tracks.iter().find(|t| t.name == "MIDI 3");
     assert_eq!(values[0], Value::Track(track.expect("the new track").id));
     assert_eq!(values.len(), 3);
     // Each transaction keeps its name for the engine, and the undo history

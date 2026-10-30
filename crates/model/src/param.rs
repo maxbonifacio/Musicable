@@ -512,7 +512,7 @@ impl Project {
 
     /// The channel the parameter at `address` is on: the track or the
     /// master whose fader, send, device or modulator it belongs to, or for
-    /// a wire's gain, the device it feeds.
+    /// a wire's gain, the device it feeds. A note wire has no gain.
     pub fn param_chain(&self, address: ParamAddress) -> Option<Chain> {
         match address {
             ParamAddress::Volume(Chain::Master) | ParamAddress::Pan(Chain::Master) => {
@@ -535,7 +535,10 @@ impl Project {
                 let (chain, _, modulator) = self.find_modulator(modulator)?;
                 modulator.param(n).map(|_| chain)
             }
-            ParamAddress::Wire(wire) => self.port_chain(self.wire(wire)?.to),
+            ParamAddress::Wire(wire) => {
+                let wire = self.wire(wire).filter(|w| !w.takes_notes())?;
+                self.port_chain(wire.to)
+            }
             ParamAddress::Device(device, n) => {
                 let (chain, _, device) = self.find_device(device)?;
                 let known = match &device.kind {
@@ -580,7 +583,9 @@ impl Project {
                 Some(if device.bypassed { 1.0 } else { 0.0 })
             }
             ParamAddress::Modulator(modulator, n) => self.find_modulator(modulator)?.2.value(n),
-            ParamAddress::Wire(wire) => self.wire(wire).map(|w| f64::from(w.gain)),
+            ParamAddress::Wire(wire) => (self.wire(wire))
+                .filter(|w| !w.takes_notes())
+                .map(|w| f64::from(w.gain)),
             ParamAddress::Device(device, n) => {
                 let (_, _, device) = self.find_device(device)?;
                 match (&device.kind, n) {

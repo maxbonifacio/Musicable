@@ -8,7 +8,7 @@
 
 use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
-use musicable_model::routing::{InputError, Tap};
+use musicable_model::routing::{InputError, Port, Tap, Wire, WireError};
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceId, Input, MidiInput, Monitor, Project, SendId, TrackId,
     TrackKind,
@@ -52,6 +52,9 @@ pub const SET_MASTER_VOLUME: CommandId = CommandId::new("mixer.set_master_volume
 pub const SET_MASTER_PAN: CommandId = CommandId::new("mixer.set_master_pan");
 /// Sets the master's clip type.
 pub const SET_MASTER_CLIP_TYPE: CommandId = CommandId::new("mixer.set_master_clip_type");
+/// Sets the instrument a MIDI track's notes play on another track, and
+/// the channel: its MIDI To.
+pub const SET_MIDI_TO: CommandId = CommandId::new("mixer.set_midi_to");
 
 const TRACK: Param = Param::required("track", Type::Track, "The track.");
 const TO: Param = Param::required("to", Type::Track, "The return track the send goes to.");
@@ -64,7 +67,7 @@ type Build = fn(&Args, &Project) -> Result<Change, CommandError>;
 
 /// The mixer's commands, with their titles, parameters and the change each
 /// makes.
-const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
+const COMMANDS: [(CommandId, &str, &[Param], Build); 17] = [
     (SET_VOLUME, "Set Volume", &[TRACK, GAIN], |args, _| {
         Ok(Change::Gain(args.get("track")?, number(args, "gain")?))
     }),
@@ -274,7 +277,81 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
         &[CLIP_TYPE],
         |args, _| Ok(Change::MasterClipType(clip_type(args)?)),
     ),
+    (
+        SET_MIDI_TO,
+        "Set MIDI To",
+        &[
+            TRACK,
+            Param::optional(
+                "device",
+                Type::Device,
+                "The instrument on another track that the track's notes play, those that reach \
+                 its own instrument, or would: none without it.",
+            ),
+            Param::optional(
+                "channel",
+                Type::Int,
+                "The MIDI channel to play every note on, from 0 to 15, such as a part of a \
+                 multi-timbral instrument: each note on its own without it, with its own \
+                 expression.",
+            ),
+        ],
+        |args, project| {
+            let track = args.get("track")?;
+            let to = args.opt("device")?;
+            let channel = wire::channel(args)?;
+            if let Some(device) = to {
+                check_midi_to(project, track, device)?;
+            }
+            Ok(Change::MidiTo { track, to, channel })
+        },
+    ),
 ];
+
+/// Whether the MIDI To of the track with id `track` can play the device
+/// with id `device`: an instrument on another track, where its notes make
+/// no loop.
+fn check_midi_to(project: &Project, track: TrackId, device: DeviceId) -> Result<(), CommandError> {
+    let Some(taker) = project.track(track) else {
+        return Err(CommandError::invalid(format!(
+            "there's no track {}",
+            track.0
+        )));
+    };
+    let Some((chain, _, found)) = project.find_device(device) else {
+        return Err(CommandError::invalid(format!(
+            "there's no device {}",
+            device.0
+        )));
+    };
+    let (name, instrument) = (&taker.name, found.kind.name());
+    if taker.kind != TrackKind::Midi {
+        return Err(CommandError::invalid(format!(
+            "{name} isn't a MIDI track: only a MIDI track's notes play an instrument"
+        )));
+    }
+    if !found.kind.is_instrument() {
+        return Err(CommandError::invalid(format!(
+            "{instrument} isn't an instrument"
+        )));
+    }
+    if chain == Chain::Track(track) {
+        return Err(CommandError::invalid(format!(
+            "{instrument} is on {name} itself, which plays it already"
+        )));
+    }
+    if chain == Chain::Master {
+        return Err(CommandError::invalid(format!(
+            "{instrument} is on the master: MIDI To plays an instrument on another track"
+        )));
+    }
+    match project.check_wire(Tap::PostFx(Chain::Track(track)), Port::Notes(device)) {
+        Ok(()) | Err(WireError::Wired(_)) => Ok(()),
+        Err(_) => Err(CommandError::invalid(format!(
+            "that would make a loop: what {instrument} puts out reaches {name}'s notes"
+        ))),
+    }
+}
 
 /// Registers the mixer's commands.
 pub fn register(registry: &mut Registry) {
@@ -538,6 +615,15 @@ pub enum Change {
     MasterGain(f32),
     MasterPan(f32),
     MasterClipType(ClipType),
+    /// The instrument on another track that `track`'s notes play, on
+    /// `channel`, from 0 to 15, or on the notes' own: its MIDI To, a note
+    /// wire from its Post FX, in place of those it has. `None` plays none.
+    /// The MIDI To's wire stays where it plays the same instrument.
+    MidiTo {
+        track: TrackId,
+        to: Option<DeviceId>,
+        channel: Option<u8>,
+    },
 }
 
 impl Change {
@@ -641,6 +727,16 @@ impl Change {
                 SET_MASTER_CLIP_TYPE,
                 Args::new().with("clip_type", clip_type_name(clip_type)),
             ),
+            Self::MidiTo { track, to, channel } => {
+                let (id, mut args) = on(SET_MIDI_TO, track);
+                if let Some(device) = to {
+                    args.set("device", device);
+                }
+                if let Some(channel) = channel {
+                    args.set("channel", i64::from(channel));
+                }
+                (id, args)
+            }
         }
     }
 
@@ -664,6 +760,7 @@ impl Change {
             Self::SendPreFader { .. } => "Pre/Post",
             Self::RemoveSend { .. } => "Remove Send",
             Self::Delete(_) => "Delete Track",
+            Self::MidiTo { .. } => "MIDI To",
         }
     }
 }
@@ -758,10 +855,42 @@ pub fn change(document: &mut Document, change: Change) -> Result<(), CommandErro
             Change::MasterGain(gain) => by_hand(tx, ParamAddress::Volume(Chain::Master), gain),
             Change::MasterPan(pan) => by_hand(tx, ParamAddress::Pan(Chain::Master), pan),
             Change::MasterClipType(clip_type) => tx.set_master_clip_type(clip_type),
+            Change::MidiTo { track, to, channel } => set_midi_to(tx, track, to, channel),
         }
         Ok(())
     });
     made.map_err(|refused| wire::refused(document.project(), refused))
+}
+
+/// Has `track`'s MIDI To play the instrument with id `to` on `channel`, or
+/// none: the note wires from its Post FX go, but one into `to`, which takes
+/// `channel`, and a new one goes there if there's none. One that can't join
+/// the project, which [`check_midi_to`] refuses, is left out.
+fn set_midi_to(
+    tx: &mut Transaction<'_>,
+    track: TrackId,
+    to: Option<DeviceId>,
+    channel: Option<u8>,
+) {
+    let project = tx.project();
+    let wires: Vec<Wire> = project.midi_to(track).copied().collect();
+    let kept = to.and_then(|device| wires.iter().find(|w| w.to == Port::Notes(device)));
+    let kept = kept.map(|w| w.id);
+    for wire in wires.iter().filter(|w| Some(w.id) != kept) {
+        tx.remove_wire(wire.id);
+    }
+    match (kept, to) {
+        (Some(wire), _) => tx.set_wire_channel(wire, channel),
+        (None, Some(device)) => {
+            let from = Tap::PostFx(Chain::Track(track));
+            let wire = Wire {
+                channel,
+                ..tx.new_wire(from, Port::Notes(device))
+            };
+            let _ = tx.add_wire(usize::MAX, wire);
+        }
+        (None, None) => {}
+    }
 }
 
 /// The id of `track`'s send to the track `to`, if it has one.
@@ -789,7 +918,7 @@ fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Result<Opt
 #[cfg(test)]
 mod tests {
     use musicable_model::native::{NativeDevice, NativeKind};
-    use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
+    use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
     use musicable_model::{DeviceKind, PluginFormat, Project, Send, TrackKind};
 
     use super::*;
@@ -1439,5 +1568,80 @@ mod tests {
             project.find_device(eq).map(|(chain, ..)| chain),
             Some(Chain::Master)
         );
+    }
+
+    #[test]
+    fn a_midi_tracks_midi_to_plays_a_part_of_an_instrument_on_another_track() {
+        let mut project = Project::new();
+        let violins = project.add_track("Violins", TrackKind::Midi);
+        let strings = project.add_track("Strings", TrackKind::Midi);
+        let kick = project.add_track("Kick", TrackKind::Audio);
+        let rack = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.rack".into(),
+            name: "Rack".into(),
+            kind: PluginKind::Instrument,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        }));
+        let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
+        let (rack_id, eq_id) = (rack.id, eq.id);
+        project.track_mut(strings).unwrap().devices = vec![rack, eq];
+        let mut setup = Setup::new(project);
+        let midi_to = |setup: &Setup| -> Vec<(Port, Option<u8>)> {
+            let project = setup.document.project();
+            project
+                .midi_to(violins)
+                .map(|w| (w.to, w.channel))
+                .collect()
+        };
+        let set = |setup: &mut Setup, track, to, channel| {
+            let (id, args) = Change::MidiTo { track, to, channel }.command();
+            setup.run_with(&id, args).map(|_| ())
+        };
+        let rack = Some(rack_id);
+        set(&mut setup, violins, rack, Some(2)).unwrap();
+        assert_eq!(midi_to(&setup), [(Port::Notes(rack_id), Some(2))]);
+        let wire = setup.document.project().midi_to(violins).next().unwrap().id;
+        // Another channel keeps the wire.
+        set(&mut setup, violins, rack, None).unwrap();
+        assert_eq!(midi_to(&setup), [(Port::Notes(rack_id), None)]);
+        assert_eq!(setup.document.project().wires[0].id, wire);
+        assert_eq!(setup.committed_names(), ["MIDI To", "MIDI To"]);
+        // Only a MIDI track's notes play an instrument, on another track.
+        let refused =
+            |setup: &mut Setup, track, to| set(setup, track, to, None).unwrap_err().to_string();
+        let error = refused(&mut setup, kick, rack);
+        assert!(error.contains("Kick isn't a MIDI track"), "{error}");
+        let error = refused(&mut setup, violins, Some(eq_id));
+        assert!(error.contains("EQ isn't an instrument"), "{error}");
+        let error = refused(&mut setup, strings, rack);
+        assert!(error.contains("Rack is on Strings itself"), "{error}");
+        // None takes it away.
+        set(&mut setup, violins, None, None).unwrap();
+        assert_eq!(midi_to(&setup), []);
+        assert!(setup.document.project().wires.is_empty());
+        // Not round a loop: the rack keys an arpeggiator the violins' notes
+        // go through.
+        let arp = DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.arp".into(),
+            name: "Arp".into(),
+            kind: PluginKind::MidiEffect,
+            inputs: vec![PluginInput {
+                id: 1,
+                name: "Key".into(),
+            }],
+            settings: PluginSettings::default(),
+        });
+        setup.document.transact("Keyed Arp", |tx| {
+            let arp = tx.new_device(arp);
+            let id = arp.id;
+            tx.add_device(Chain::Track(violins), 0, arp);
+            let key = tx.new_wire(Tap::Device(rack_id), Port::PluginInput(id, 1));
+            tx.add_wire(usize::MAX, key).unwrap();
+        });
+        let error = refused(&mut setup, violins, rack);
+        assert!(error.contains("that would make a loop"), "{error}");
     }
 }

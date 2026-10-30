@@ -1,23 +1,25 @@
 //! The Routing panel: every connection in the project, a row each, under
 //! the kind it is: each track's output, the sends, the inputs tracks take
-//! from other tracks, their sound or another MIDI track's notes, and the
-//! keys wired into devices' side inputs. A row has where the connection
-//! comes from, where it goes, and its gain: an output's is its track's
-//! fader, a send's its level and a key's its wire's gain. The panel shows
-//! them all, or one track's alone: those that come from it, or go to it or
-//! to one of its devices.
+//! from other tracks, their sound or another MIDI track's notes, the keys
+//! wired into devices' side inputs, and the notes wired into instruments
+//! and MIDI effects. A row has where the connection comes from, where it
+//! goes, and its gain: an output's is its track's fader, a send's its level
+//! and a key's its wire's gain. A note wire has its MIDI channel in its
+//! place. The panel shows them all, or one track's alone: those that come
+//! from it, or go to it or to one of its devices.
 //!
 //! Clicking either end shows it: a track, selected as clicking its strip
 //! selects it, or a device, in the devices panel. The end a connection's
 //! own control picks has that control's menu beside it: where an output
-//! goes, and where an input or a key comes from. Each gain edits as its
-//! control does, with the same drags, double-clicks and right-click menus,
-//! and shows its automation and its modulators as that does.
+//! goes, and where an input, a key or notes come from. Each gain edits as
+//! its control does, with the same drags, double-clicks and right-click
+//! menus, and shows its automation and its modulators as that does.
 
 #[cfg(test)]
 mod tests;
 
 use std::cell::Cell;
+use std::iter;
 
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
@@ -25,13 +27,13 @@ use egui::{
     Role, ScrollArea, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::mixer::Change;
-use musicable_commands::{Args, device, edit};
+use musicable_commands::{Args, device, edit, wire};
 use musicable_model::mixer::Bus;
 use musicable_model::param::ParamAddress;
 use musicable_model::routing::{Port, Tap, Wire, WireId};
 use musicable_model::{Chain, DeviceId, Input, Project, TrackId, TrackKind};
 
-use super::{Choices, FADER_TOP, Mixer, foot, height_of, mix, moved, name_menu};
+use super::{Choices, FADER_TOP, Mixer, foot, height_of, midi_channel_name, mix, moved, name_menu};
 use crate::modulators;
 use crate::mouse::MouseMap;
 use crate::native::sidechain;
@@ -41,8 +43,8 @@ use crate::theme::Theme;
 
 /// What the panel lists without tracks.
 const NO_TRACKS: &str = "Each track's output, its sends, the inputs tracks take from other \
-                         tracks and the keys wired into devices are listed here, once there are \
-                         tracks.";
+                         tracks, the keys wired into devices and the notes wired into \
+                         instruments are listed here, once there are tracks.";
 
 /// What the panel's menu calls every track's connections.
 const ALL_TRACKS: &str = "All Tracks";
@@ -68,6 +70,8 @@ enum Connection {
     Input(TrackId, Tap),
     /// A wire into a device's side input.
     Key(WireId),
+    /// A note wire into an instrument's or a MIDI effect's note input.
+    Note(WireId),
 }
 
 impl Connection {
@@ -77,7 +81,7 @@ impl Connection {
         match self {
             Connection::Output(_) => [false, true],
             Connection::Send { .. } => [false, false],
-            Connection::Input(..) | Connection::Key(_) => [true, false],
+            Connection::Input(..) | Connection::Key(_) | Connection::Note(_) => [true, false],
         }
     }
 }
@@ -245,12 +249,19 @@ fn lines(project: &Project, only: Option<Chain>) -> Vec<Line> {
         })
         .collect();
     wires.sort_by_key(|&(place, index, _)| (place, index));
-    let keys = wires.into_iter().map(|(_, _, wire)| Connection::Key(wire));
+    let (mut keys, mut notes) = (Vec::new(), Vec::new());
+    for (_, _, id) in wires {
+        match project.wire(id).is_some_and(Wire::takes_notes) {
+            true => notes.push(Connection::Note(id)),
+            false => keys.push(Connection::Key(id)),
+        }
+    }
     let kinds = [
         ("Outputs", outputs),
         ("Sends", sends),
         ("Inputs", inputs),
-        ("Keys", keys.collect()),
+        ("Keys", keys),
+        ("Notes", notes),
     ];
     let mut lines = Vec::new();
     for (heading, connections) in kinds {
@@ -290,7 +301,7 @@ fn ends(project: &Project, connection: Connection) -> (End, End) {
             End::Channel(Chain::Track(to)),
         ),
         Connection::Input(track, tap) => (tap_end(tap), End::Channel(Chain::Track(track))),
-        Connection::Key(wire) => match project.wire(wire) {
+        Connection::Key(wire) | Connection::Note(wire) => match project.wire(wire) {
             Some(wire) => (tap_end(wire.from), End::Device(wire.to.device())),
             None => (End::Nowhere, End::Nowhere),
         },
@@ -315,7 +326,7 @@ fn names(mixer: &Mixer<'_>, connection: Connection) -> [String; 2] {
         }
         Connection::Send { track: id, to } => [track(id), track(to)],
         Connection::Input(id, tap) => [tap_text(project, tap), track(id)],
-        Connection::Key(wire) => match project.wire(wire) {
+        Connection::Key(wire) | Connection::Note(wire) => match project.wire(wire) {
             Some(wire) => [tap_text(project, wire.from), port_text(project, wire.to)],
             None => [String::new(), String::new()],
         },
@@ -398,6 +409,10 @@ fn port_text(project: &Project, port: Port) -> String {
 /// Sidechain column calls them, after the track or the master the device
 /// is on, as in "Bass Compressor Sidechain Source", and numbered after the
 /// first wire into the side input, as in "Bass Compressor Sidechain Gain 2".
+/// A note wire's are its source and its channel, as in "Strings Test Synth
+/// Notes Source" and "Strings Test Synth Notes Channel", numbered before
+/// them, as in "Strings Test Synth Notes 2 Channel", so the number reads
+/// as no channel's.
 fn key_labels(project: &Project, wire: &Wire) -> (String, String) {
     let found = project.find_device(wire.to.device());
     let (chain, device) = found.map_or(("?", "?"), |(chain, _, device)| {
@@ -409,10 +424,16 @@ fn key_labels(project: &Project, wire: &Wire) -> (String, String) {
         Some(0) | None => String::new(),
         Some(n) => format!(" {}", n + 1),
     };
-    (
-        format!("{named} Source{number}"),
-        format!("{named} Gain{number}"),
-    )
+    match wire.takes_notes() {
+        true => (
+            format!("{named}{number} Source"),
+            format!("{named}{number} Channel"),
+        ),
+        false => (
+            format!("{named} Source{number}"),
+            format!("{named} Gain{number}"),
+        ),
+    }
 }
 
 /// The command that shows `end`, when it's clicked: selecting its track or
@@ -508,7 +529,7 @@ impl Rows<'_> {
                 Connection::Output(track) => self.output(ui, track, actions),
                 Connection::Send { track, to } => self.send(ui, track, to, actions),
                 Connection::Input(track, tap) => self.input(ui, track, tap, actions),
-                Connection::Key(wire) => {
+                Connection::Key(wire) | Connection::Note(wire) => {
                     if let Some(wire) = self.mixer.project.wire(wire) {
                         self.key(ui, wire, actions);
                     }
@@ -626,26 +647,75 @@ impl Rows<'_> {
     }
 
     /// A key: the tap it comes from, with the source menu of the Sidechain
-    /// column beside it, the device it keys, and its gain.
+    /// column beside it, the device it keys, and its gain. Or a note wire:
+    /// the tap its notes come from, with the taps that carry notes in the
+    /// menu, the instrument or MIDI effect it plays, and its channel.
     fn key(&self, ui: &mut Ui, wire: &Wire, actions: &mut Vec<Action>) {
         let project = self.mixer.project;
-        let connection = Connection::Key(wire.id);
+        let notes = wire.takes_notes();
+        let connection = match notes {
+            true => Connection::Note(wire.id),
+            false => Connection::Key(wire.id),
+        };
         let (from, to) = ends(project, connection);
         let [text, device] = names(self.mixer, connection);
         let columns = self.columns;
-        let (source, gain) = key_labels(project, wire);
+        let (source, setting) = key_labels(project, wire);
         let menu = Menu {
             label: source,
             value: &text,
-            hint: "Where the key comes from",
+            hint: match notes {
+                true => "Where the notes come from",
+                false => "Where the key comes from",
+            },
         };
         if let Some(button) = self.end(ui, from, &text, Some(menu), columns.from, actions) {
             Popup::menu(&button).show(|ui| sidechain::source_menu(ui, project, wire, actions));
         }
         self.arrow(ui);
         self.end(ui, to, &device, None, columns.to, actions);
+        if notes {
+            self.channel(ui, wire, setting, actions);
+            return;
+        }
         let (view, theme, mouse) = (self.view, self.theme(), self.mixer.mouse);
-        sidechain::gain(ui, wire, gain, columns.gain, view, theme, mouse, actions);
+        sidechain::gain(ui, wire, setting, columns.gain, view, theme, mouse, actions);
+    }
+
+    /// A note wire's MIDI channel, in the gain's place: a menu of Any Channel
+    /// and Channel 1 to 16, called `label`. Asks for the channel picked.
+    fn channel(&self, ui: &mut Ui, wire: &Wire, label: String, actions: &mut Vec<Action>) {
+        let text = midi_channel_name(wire.channel);
+        let mut picked = None;
+        let menu = ComboBox::from_id_salt(("note channel", wire.id))
+            .width(self.columns.gain)
+            .truncate()
+            .selected_text(&text)
+            .show_ui(ui, |ui| {
+                for channel in iter::once(None).chain((0..Wire::CHANNELS).map(Some)) {
+                    let on = channel == wire.channel;
+                    if ui
+                        .selectable_label(on, midi_channel_name(channel))
+                        .clicked()
+                        && !on
+                    {
+                        picked = Some(channel);
+                    }
+                }
+            });
+        name_menu(&menu.response, label, &text);
+        menu.response.on_hover_text(
+            "The MIDI channel the notes play on, as a part of a multi-timbral instrument \
+             plays, or with Any Channel, each note on its own, as the instrument's own track's \
+             notes do",
+        );
+        if let Some(channel) = picked {
+            let mut args = Args::new().with("wire", wire.id);
+            if let Some(channel) = channel {
+                args.set("channel", i64::from(channel));
+            }
+            actions.push(Action::RunWith(wire::SET_CHANNEL, args));
+        }
     }
 
     /// One end of a row, `width` wide: `text`, its name, which shows `end`

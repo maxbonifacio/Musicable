@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::routing::WireId;
 use crate::{Chain, Project, Send, SendId, Track, TrackId, TrackKind};
 
 /// Where a track's output goes: a bus it feeds, or none.
@@ -44,7 +45,7 @@ pub fn pan_gains(pan: f32) -> [f32; 2] {
     }
 }
 
-/// The track outputs and sends that mute and solo cut. See
+/// The track outputs, sends and note wires that mute and solo cut. See
 /// [`Project::silenced`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Silenced {
@@ -52,6 +53,9 @@ pub struct Silenced {
     pub outputs: BTreeSet<TrackId>,
     /// Sends that are cut.
     pub sends: BTreeSet<SendId>,
+    /// Note wires that are cut: the notes a track plays on another's
+    /// instrument.
+    pub wires: BTreeSet<WireId>,
 }
 
 impl Silenced {
@@ -61,6 +65,10 @@ impl Silenced {
 
     pub fn send(&self, send: SendId) -> bool {
         self.sends.contains(&send)
+    }
+
+    pub fn wire(&self, wire: WireId) -> bool {
+        self.wires.contains(&wire)
     }
 }
 
@@ -155,17 +163,20 @@ impl Project {
         }
     }
 
-    /// The track outputs and sends that mute and solo cut.
+    /// The track outputs, sends and note wires that mute and solo cut.
     ///
     /// A muted track's output and all its sends, pre-fader ones included,
-    /// are cut. What other tracks take from it at its taps carries on, as an
-    /// input or a key. While no track is soloed, that's all. While any track
-    /// is, only the signal paths through a soloed track are heard:
+    /// are cut, and so are the notes it plays on other tracks' instruments,
+    /// through note wires. What other tracks take from it at its taps
+    /// carries on, as an input or a key. While no track is soloed, that's
+    /// all. While any track is, only the signal paths through a soloed
+    /// track are heard:
     ///
     /// - A soloed group solos every track that feeds it.
-    /// - A soloed track's output and sends pass, and so does everything
-    ///   downstream of it: its group, the returns it sends to, the tracks
-    ///   that take their input from it, and theirs.
+    /// - A soloed track's output, sends and note wires pass, and so does
+    ///   everything downstream of it: its group, the returns it sends to,
+    ///   the tracks that take their input from it, those whose instruments
+    ///   it plays, and theirs.
     /// - Everything that feeds a soloed track passes into it. Soloing a
     ///   return plays what the sends put into it, without the tracks' own
     ///   outputs: the wet signal alone.
@@ -205,6 +216,17 @@ impl Project {
                 takers[*from].push(to);
             }
         }
+        // Each track's note wires, and the tracks whose instruments they
+        // play. `None` is the master's.
+        let mut notes: Vec<Vec<(WireId, Option<usize>)>> = vec![Vec::new(); tracks.len()];
+        for wire in self.live_wires().into_iter().filter(|w| w.takes_notes()) {
+            let from = self.tap_chain(wire.from).and_then(Chain::track);
+            let to = self.port_chain(wire.to).and_then(Chain::track);
+            if let Some(&from) = from.and_then(|t| index.get(&t)) {
+                let to = to.and_then(|t| index.get(&t).copied());
+                notes[from].push((wire.id, to));
+            }
+        }
 
         let mut silenced = Silenced::default();
         let soloing = tracks.iter().any(|t| t.solo);
@@ -225,6 +247,7 @@ impl Project {
             (outputs[i].into_iter())
                 .chain(sends[i].iter().map(|&(_, to)| to))
                 .chain(takers[i].iter().copied())
+                .chain(notes[i].iter().filter_map(|&(_, to)| to))
         };
         // Downstream of a soloed or solo-safe track.
         let upstream_open = reach(
@@ -256,6 +279,11 @@ impl Project {
             for &(send, to) in &sends[i] {
                 if !passes(i, Some(to)) {
                     silenced.sends.insert(send);
+                }
+            }
+            for &(wire, to) in &notes[i] {
+                if !passes(i, to) {
+                    silenced.wires.insert(wire);
                 }
             }
             // Sends that feed nothing are silent anyway; cut them too, so a
@@ -655,6 +683,45 @@ mod tests {
         mix.project.wires.push(wire);
         mix.set("Vocal", |t| t.solo = true);
         assert!(!mix.heard().contains(&"Drums".to_owned()));
+    }
+
+    #[test]
+    fn muting_a_track_cuts_the_notes_it_plays_on_another_tracks_instrument() {
+        let mut mix = mix();
+        // Lead, a MIDI track without an instrument, plays the Keys' synth.
+        let lead = mix.track("Lead", Midi);
+        let synth =
+            (mix.project).new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+        let port = Port::Notes(synth.id);
+        mix.set("Keys", |t| t.devices.push(synth));
+        let wire = mix.project.new_wire(Tap::PostFx(Chain::Track(lead)), port);
+        mix.project.wires.push(wire);
+        let cut = |mix: &Mix| mix.project.silenced().wire(wire.id);
+        assert!(!cut(&mix));
+        mix.set("Lead", |t| t.muted = true);
+        assert!(cut(&mix));
+        // Muting the Keys cuts their output, not the notes that play them.
+        mix.set("Lead", |t| t.muted = false);
+        mix.set("Keys", |t| t.muted = true);
+        assert!(!cut(&mix));
+        mix.set("Keys", |t| t.muted = false);
+        // Soloing the lead lets the Keys through, downstream of it.
+        mix.set("Lead", |t| t.solo = true);
+        assert!(!cut(&mix));
+        assert_eq!(
+            mix.heard(),
+            ["Keys", "Keys>Reverb", "Reverb", "Delay", "Lead"]
+        );
+        // Soloing the Keys plays the lead's notes on them, without the
+        // lead's own output.
+        mix.set("Lead", |t| t.solo = false);
+        mix.set("Keys", |t| t.solo = true);
+        assert!(!cut(&mix));
+        assert_eq!(mix.heard(), ["Keys", "Keys>Reverb", "Reverb", "Delay"]);
+        // Soloing another track cuts them.
+        mix.set("Keys", |t| t.solo = false);
+        mix.set("Drums", |t| t.solo = true);
+        assert!(cut(&mix));
     }
 
     #[test]

@@ -660,27 +660,34 @@ opens again.
 A wire takes the signal at a tap, a point on a track or the master, into a
 device's port, the Compressor's and the Gate's Sidechain or one of a
 plugin's side inputs, at a gain, and wires into the same port sum
-([project-format.md](project-format.md#wire)). The devices panel's
-Sidechain column, and a plugin's rows for its side inputs, run these
-([app.md](app.md#the-devices-panel)).
+([project-format.md](project-format.md#wire)). A note wire takes a MIDI
+track's notes into an instrument's or a MIDI effect's note input instead,
+on a MIDI channel or on their own, which is how a track plays an
+instrument on another. The devices panel's Sidechain column, a plugin's
+rows for its side inputs, the mixer's MIDI To and the Routing panel run
+these ([app.md](app.md#the-devices-panel)).
 
 | Command | Title | What it does | Default key | Live |
 |---|---|---|---|---|
-| `wire.connect` | Connect Wire | Wires a tap into a side input of `device`, at `gain` (linear, 1 without it): the Sidechain of a Compressor or a Gate, which it turns on, or a plugin's side input `input`, by the plugin's id for it, its first without it. Returns the new wire | none | Audio From, in a compressor's Sidechain |
+| `wire.connect` | Connect Wire | Wires a tap into a side input of `device`, at `gain` (linear, 1 without it): the Sidechain of a Compressor or a Gate, which it turns on, or a plugin's side input `input`, by the plugin's id for it, its first without it. With `notes`, it wires a MIDI track's notes into the note input of `device`, an instrument or a MIDI effect, on `channel`, from 0 to 15, or each note on its own without it. Returns the new wire | none | Audio From, in a compressor's Sidechain; MIDI To |
 | `wire.disconnect` | Disconnect Wire | Removes the wire `wire`, with the lane on its gain and the routings to it | none | No Input |
 | `wire.set_source` | Set Wire Source | Has the wire `wire` take its signal from another tap, keeping its gain, its lane and its place | none | Audio From |
 | `wire.set_gain` | Set Wire Gain | Sets the wire's `gain`, linear, from silence to about 15.85, +24 dB. It overrides the lane on it, as moving a control does | none | The sidechain's Gain |
+| `wire.set_channel` | Set Wire Channel | Sets the MIDI channel the note wire `wire` plays every note on, from 0 to 15, or each note on its own without `channel` | none | MIDI To's channel |
 
 A tap is `after`, a device, for what that device puts out, on any track;
 or `track` or `master` with `tap`: `pre_fx` for what comes into a track's
 devices, `post_fx` (without `tap`) for what comes out of the last of them,
 and `post_fader` for what comes out of the fader and pan. The master has
 no Pre FX, and a MIDI track's is notes, and so is the point after each of
-its MIDI effects in front of its instrument, which no wire takes yet. The
-steps
-are "Connect Wire", "Disconnect Wire", "Wire Source" and "Wire Gain", and
-a wire's gain is a parameter like any other, which scripts write as
-"wire 1" ([Automation](#automation)). Modulators move it as they move a
+its MIDI effects in front of its instrument, which only a note wire takes,
+as does a MIDI track's Post FX, for the notes that reach its instrument.
+The steps are "Connect Wire", "Disconnect Wire", "Wire Source", "Wire
+Gain" and "Wire Channel", and an audio wire's gain is a parameter like any
+other, which scripts write as "wire 1" ([Automation](#automation)). A note
+wire has none, and an audio wire no channel, so `gain` with `notes`,
+`channel` without it, `wire.set_gain` on a note wire and `wire.set_channel`
+on an audio wire are refused. Modulators move it as they move a
 send's level, as far as the wire's own range, and a modulator reaches it
 where it reaches the device the wire feeds ([Modulation](#modulation)).
 
@@ -849,12 +856,13 @@ Edit menu:
 | `SendPreFader` | Takes a send before or after the fader | Pre/Post |
 | `RemoveSend` | Removes a send | Remove Send |
 | `Delete` | Deletes a track; what fed it feeds the master, sends to it go, and tracks taking their input from it go to No Input | Delete Track |
+| `MidiTo` | Has a MIDI track play an instrument on another track, on a MIDI channel or on the notes' own, or none | MIDI To |
 
 The commands are `mixer.set_volume`, `set_pan`, `set_mute`, `set_solo`,
 `set_solo_safe`, `set_arm`, `set_input`, `set_monitor`, `set_output`,
 `set_clip_type`, `set_send_level`, `set_send_pre_fader`, `remove_send`,
-`set_master_volume`, `set_master_pan` and `set_master_clip_type`; deleting a
-track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
+`set_midi_to`, `set_master_volume`, `set_master_pan` and
+`set_master_clip_type`; deleting a track is `track.delete`. Gains are linear, 1 is unity; pans go from -1
 (left) to 1. A change the routing rules don't allow, such as an output to
 a group that feeds the track, does nothing. An input, an output or a new
 send that would close a loop through a track's input or a wire is refused,
@@ -887,6 +895,18 @@ that reach its instrument: a tap that carries sound alone is refused. An input t
 the track's own sound reaches, is refused with an error that says so, such
 as "That would make a loop: what comes out of Print reaches Kick Post FX"
 (`Project::check_input`). Resampling never closes one.
+
+`mixer.set_midi_to` sets a MIDI track's MIDI To: the note wires from its
+Post FX, which play the notes that reach its instrument, or would, on
+another track's. It plays `device`, an instrument on another track, on
+`channel`, from 0 to 15, or each note on its own without it, and nothing
+without `device`. It keeps the wire into `device`, if there is one, with
+its id and its place, and removes the track's others, so a track wired
+into several in the Routing panel plays one again. An instrument on the
+track itself or on the master, one that isn't an instrument, a track that
+isn't a MIDI track, and an instrument whose sound reaches the track's
+notes are refused, such as "Synth is on Strings itself, which plays it
+already".
 
 ### Options and View
 

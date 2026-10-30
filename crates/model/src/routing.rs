@@ -6,10 +6,14 @@
 //! and pan (Post Fader). The master has Post FX and Post Fader. Taps come
 //! before mute and solo, so what's taken from a muted track carries on: a
 //! muted ghost kick still keys a compressor. A [`Port`] takes a signal into
-//! a device: the Compressor's and the Gate's Sidechain, or one of a
-//! plugin's side inputs. A [`Wire`]
-//! joins a tap to a port, with a gain, and wires into the same port sum.
-//! The project keeps one list of them.
+//! a device: the Compressor's and the Gate's Sidechain, one of a plugin's
+//! side inputs, or an instrument's or a MIDI effect's note input. A
+//! [`Wire`] joins a tap to a port, with a gain, and wires into the same
+//! port sum. A note wire takes a MIDI track's notes into a note input,
+//! on a MIDI channel if it has one, which is how one track plays another's
+//! instrument, or a part of a multi-timbral one: its MIDI To. Muting the
+//! track silences the notes it plays that way. The project keeps one list
+//! of wires.
 //!
 //! A track's input can be a tap on another track too ([`Input::Tap`]): an
 //! audio track records and monitors another's sound, and a MIDI track
@@ -64,13 +68,16 @@ pub enum Port {
     /// One of a plugin's side inputs, by the plugin's id for it
     /// ([`PluginInput`](crate::plugin::PluginInput)).
     PluginInput(DeviceId, u32),
+    /// An instrument's or a MIDI effect's note input, which plays the notes
+    /// that come into it as it plays its own track's.
+    Notes(DeviceId),
 }
 
 impl Port {
     /// The device it takes the signal into.
     pub fn device(self) -> DeviceId {
         match self {
-            Self::Sidechain(device) | Self::PluginInput(device, _) => device,
+            Self::Sidechain(device) | Self::PluginInput(device, _) | Self::Notes(device) => device,
         }
     }
 
@@ -80,23 +87,44 @@ impl Port {
         match self {
             Self::Sidechain(_) => Self::Sidechain(device),
             Self::PluginInput(_, input) => Self::PluginInput(device, input),
+            Self::Notes(_) => Self::Notes(device),
         }
+    }
+
+    /// Whether it takes notes: a note input.
+    pub fn takes_notes(self) -> bool {
+        matches!(self, Self::Notes(_))
     }
 }
 
-/// A tap's signal, fed into a port at a gain.
+/// A tap's signal, fed into a port at a gain, or a tap's notes, fed into a
+/// note input on a channel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Wire {
     pub id: WireId,
     pub from: Tap,
     pub to: Port,
-    /// Linear gain, 1.0 = unity, up to [`GAIN_MAX`](Self::GAIN_MAX).
+    /// Linear gain, 1.0 = unity, up to [`GAIN_MAX`](Self::GAIN_MAX). A note
+    /// wire's is 1.0.
     pub gain: f32,
+    /// The MIDI channel a note wire plays every note on, from 0 to 15, as a
+    /// part of a multi-timbral instrument plays, or `None` for none of their
+    /// own, so each plays as the notes of the instrument's own track do,
+    /// with its own expression. An audio wire's is `None`.
+    pub channel: Option<u8>,
 }
 
 impl Wire {
     /// The loudest a wire's gain goes: +24 dB, as linear gain.
     pub const GAIN_MAX: f32 = 15.848_932;
+
+    /// How many MIDI channels a note wire can play on.
+    pub const CHANNELS: u8 = 16;
+
+    /// Whether it's a note wire: into a note input.
+    pub fn takes_notes(&self) -> bool {
+        self.to.takes_notes()
+    }
 
     /// Whether it runs to or from the device with id `device`: from its
     /// tap, or into one of its ports.
@@ -110,9 +138,11 @@ impl Wire {
 pub enum WireError {
     /// The project hasn't the tap's track or device.
     NoTap,
-    /// The tap carries notes alone: a MIDI track's Pre FX, or the point
-    /// after one of its MIDI effects.
+    /// The tap carries notes alone, a MIDI track's Pre FX or the point
+    /// after one of its MIDI effects, and the port takes sound.
     Notes,
+    /// The tap carries sound alone, and the port is a note input.
+    Sound,
     /// The project hasn't the port: its device, or a device of a kind that
     /// has it.
     NoPort,
@@ -158,8 +188,8 @@ pub enum Route {
 }
 
 impl Project {
-    /// A wire from `from` to `to` at unity gain, with the next wire id, for
-    /// the caller to add.
+    /// A wire from `from` to `to` at unity gain, or for a note input, on the
+    /// notes' own channels, with the next wire id, for the caller to add.
     ///
     /// # Panics
     ///
@@ -170,6 +200,7 @@ impl Project {
             from,
             to,
             gain: 1.0,
+            channel: None,
         }
     }
 
@@ -244,13 +275,14 @@ impl Project {
     }
 
     /// What the port is called on its device: "Sidechain" on a Compressor
-    /// or a Gate, and a plugin's side input what the plugin calls it, or
-    /// "Side Input" where that's nothing. `None` for a port the project
-    /// hasn't.
+    /// or a Gate, a plugin's side input what the plugin calls it, or "Side
+    /// Input" where that's nothing, and a note input "Notes". `None` for a
+    /// port the project hasn't.
     pub fn input_name(&self, port: Port) -> Option<&str> {
         let (_, _, device) = self.find_device(port.device())?;
         match (port, &device.kind) {
             (Port::Sidechain(_), _) => self.has_port(port).then_some("Sidechain"),
+            (Port::Notes(_), _) => self.has_port(port).then_some("Notes"),
             (Port::PluginInput(_, input), DeviceKind::Plugin(plugin)) => {
                 let name = plugin.input(input)?.name.trim();
                 Some(if name.is_empty() { "Side Input" } else { name })
@@ -260,15 +292,18 @@ impl Project {
     }
 
     /// What the port is called anywhere: its device and its channel, such
-    /// as "Compressor on Bass", and a plugin's side input's name after the
-    /// plugin's, such as "Pro-C 2 Sidechain on Bass". `None` for a device
-    /// the project hasn't, or a side input its plugin hasn't.
+    /// as "Compressor on Bass", a plugin's side input's name after the
+    /// plugin's, such as "Pro-C 2 Sidechain on Bass", and a note input its
+    /// device's, such as "Kontakt on Strings". `None` for a device the
+    /// project hasn't, or a port it hasn't.
     pub fn port_name(&self, port: Port) -> Option<String> {
         let (chain, _, device) = self.find_device(port.device())?;
         let name = device.kind.name();
         let device = match port {
             Port::Sidechain(_) => name.to_owned(),
             Port::PluginInput(..) => format!("{name} {}", self.input_name(port)?),
+            Port::Notes(_) if self.has_port(port) => name.to_owned(),
+            Port::Notes(_) => return None,
         };
         Some(format!("{device} on {}", self.channel_name(chain)?))
     }
@@ -281,9 +316,10 @@ impl Project {
         }
     }
 
-    /// The ports of the device with id `device`: a Compressor's or a Gate's
-    /// Sidechain, or a plugin's side inputs, in the plugin's order. None
-    /// for other devices, or a device the project hasn't.
+    /// The side inputs of the device with id `device`: a Compressor's or a
+    /// Gate's Sidechain, or a plugin's, in the plugin's order. None for
+    /// other devices, or a device the project hasn't. Its note input, if it
+    /// has one, is [`note_input`](Self::note_input).
     pub fn ports(&self, device: DeviceId) -> Vec<Port> {
         let Some((_, _, found)) = self.find_device(device) else {
             return Vec::new();
@@ -301,9 +337,21 @@ impl Project {
         }
     }
 
+    /// The note input of the device with id `device`, if it has one: an
+    /// instrument's or a MIDI effect's, wherever it is. Notes reach only
+    /// where the device plays them, so one the engine has out of the
+    /// notes' way, such as a MIDI effect after the instrument, plays none.
+    pub fn note_input(&self, device: DeviceId) -> Option<Port> {
+        let (_, _, found) = self.find_device(device)?;
+        (found.kind.is_instrument() || found.kind.is_midi_effect()).then_some(Port::Notes(device))
+    }
+
     /// Whether the project has `port`: its device, of a kind that has it.
     pub fn has_port(&self, port: Port) -> bool {
-        self.ports(port.device()).contains(&port)
+        match port {
+            Port::Notes(device) => self.note_input(device) == Some(port),
+            _ => self.ports(port.device()).contains(&port),
+        }
     }
 
     /// Whether a wire from `from` to `to` can join the project: see
@@ -313,9 +361,10 @@ impl Project {
     }
 
     /// Whether a wire from `from` to `to` can join the project, and if not,
-    /// why not. It can if the project has both ends, the tap carries sound,
-    /// they aren't wired together already, and the signal from the port's
-    /// device doesn't reach the tap, so the wire makes no loop.
+    /// why not. It can if the project has both ends, the tap carries what
+    /// the port takes, sound or notes, they aren't wired together already,
+    /// and the signal from the port's device doesn't reach the tap, so the
+    /// wire makes no loop.
     pub fn check_wire(&self, from: Tap, to: Port) -> Result<(), WireError> {
         self.check_ends(from, to)?;
         if let Some(wired) = self.wires.iter().find(|w| (w.from, w.to) == (from, to)) {
@@ -324,7 +373,7 @@ impl Project {
         if self
             .live(None)
             .flow
-            .reaches(Point::port(to), Point::tap(from))
+            .reaches(Point::port(to), self.wire_point(from, to))
         {
             return Err(WireError::Loop);
         }
@@ -372,18 +421,31 @@ impl Project {
     }
 
     /// Whether the project has the ends of a wire from `from` to `to`, and
-    /// the tap carries sound.
+    /// the tap carries what the port takes.
     fn check_ends(&self, from: Tap, to: Port) -> Result<(), WireError> {
-        if !self.carries_sound(from) {
-            return Err(WireError::Notes);
-        }
         if self.tap_chain(from).is_none() {
             return Err(WireError::NoTap);
+        }
+        if to.takes_notes() && !self.carries_notes(from) {
+            return Err(WireError::Sound);
+        }
+        if !to.takes_notes() && !self.carries_sound(from) {
+            return Err(WireError::Notes);
         }
         if !self.has_port(to) {
             return Err(WireError::NoPort);
         }
         Ok(())
+    }
+
+    /// Where a wire from `from` into `to` takes its signal in the flow: for
+    /// a note wire from a MIDI track's Post FX, where the notes reach its
+    /// instrument, as [`notes_point`](Self::notes_point) says.
+    fn wire_point(&self, from: Tap, to: Port) -> Point {
+        match to.takes_notes() {
+            true => self.notes_point(from),
+            false => Point::tap(from),
+        }
     }
 
     /// Whether the track with id `track` can take its input from `tap`:
@@ -415,13 +477,21 @@ impl Project {
     }
 
     /// Where the input of the track with id `track` from `tap` takes its
-    /// signal in the flow: for a MIDI track's notes from another's Post
+    /// signal in the flow: for a MIDI track, the notes, as
+    /// [`notes_point`](Self::notes_point) says.
+    fn input_point(&self, track: TrackId, tap: Tap) -> Point {
+        match self.track(track).is_some_and(|t| t.kind == TrackKind::Midi) {
+            true => self.notes_point(tap),
+            false => Point::tap(tap),
+        }
+    }
+
+    /// Where the notes `tap` carries are in the flow: at a MIDI track's Post
     /// FX, what reaches its instrument, after its last MIDI effect, rather
     /// than what comes out of its last device.
-    fn input_point(&self, track: TrackId, tap: Tap) -> Point {
-        let notes = self.track(track).is_some_and(|t| t.kind == TrackKind::Midi);
+    fn notes_point(&self, tap: Tap) -> Point {
         match tap {
-            Tap::PostFx(Chain::Track(on)) if notes => {
+            Tap::PostFx(Chain::Track(on)) => {
                 let devices = self.track(on).map_or(&[][..], |t| &t.devices);
                 (devices.iter())
                     .take_while(|device| !device.kind.is_instrument())
@@ -466,11 +536,11 @@ impl Project {
     }
 
     /// The wires the engine plays, in the order the project lists them:
-    /// each whose ends the project has and whose tap carries sound, unless
-    /// it would close a loop with the outputs, the sends, the inputs the
-    /// engine plays and the wires before it. That's all of them in a
-    /// project the commands edit, which refuse a wire that would make a
-    /// loop.
+    /// each whose ends the project has and whose tap carries what its port
+    /// takes, unless it would close a loop with the outputs, the sends, the
+    /// inputs the engine plays and the wires before it. That's all of them
+    /// in a project the commands edit, which refuse a wire that would make
+    /// a loop.
     pub fn live_wires(&self) -> Vec<&Wire> {
         self.live(None).wires
     }
@@ -517,7 +587,7 @@ impl Project {
             if self.check_ends(wire.from, wire.to).is_err() {
                 continue;
             }
-            let (from, to) = (Point::tap(wire.from), Point::port(wire.to));
+            let (from, to) = (self.wire_point(wire.from, wire.to), Point::port(wire.to));
             if flow.reaches(to, from) {
                 live.in_a_loop.get_or_insert(Route::Wire(wire.id));
             } else {
@@ -575,6 +645,38 @@ impl Project {
         (self.wires.iter())
             .filter(|w| w.touches(device))
             .map(|w| w.id)
+            .collect()
+    }
+
+    /// The MIDI To of the track with id `track`: the note wires from its
+    /// Post FX, which play the notes that reach its instrument, or would,
+    /// on other tracks' instruments, in the order the project lists them.
+    pub fn midi_to(&self, track: TrackId) -> impl Iterator<Item = &Wire> + '_ {
+        let from = Tap::PostFx(Chain::Track(track));
+        (self.wires.iter()).filter(move |w| w.from == from && w.takes_notes())
+    }
+
+    /// The instruments the MIDI To of the track with id `track` can play,
+    /// on other tracks, in track order and in the order of their devices:
+    /// each whose note input a wire from the track's Post FX could join
+    /// without closing a loop, or joins already. None if the track isn't a
+    /// MIDI track.
+    pub fn midi_to_instruments(&self, track: TrackId) -> Vec<DeviceId> {
+        let from = Tap::PostFx(Chain::Track(track));
+        if !self.carries_notes(from) {
+            return Vec::new();
+        }
+        let flow = self.live(None).flow;
+        (self.tracks.iter())
+            .filter(|t| t.id != track)
+            .flat_map(|t| &t.devices)
+            .filter(|device| device.kind.is_instrument())
+            .filter(|device| {
+                let to = Port::Notes(device.id);
+                let wired = self.midi_to(track).any(|w| w.to == to);
+                wired || !flow.reaches(Point::port(to), self.notes_point(from))
+            })
+            .map(|device| device.id)
             .collect()
     }
 }
@@ -898,6 +1000,111 @@ mod tests {
         assert_eq!(
             m.project.check_wire(print_out, Port::Sidechain(compressor)),
             Err(WireError::Loop)
+        );
+    }
+
+    #[test]
+    fn instruments_and_midi_effects_take_notes() {
+        let mut m = mix();
+        let (_, [arp, synth, compressor]) = arpeggiated(&mut m);
+        for device in [arp, synth] {
+            let port = m.project.note_input(device);
+            assert_eq!(port, Some(Port::Notes(device)));
+            assert!(m.project.has_port(Port::Notes(device)));
+            // Not a side input.
+            assert!(m.project.ports(device).is_empty());
+        }
+        assert_eq!(m.project.note_input(compressor), None);
+        assert!(!m.project.has_port(Port::Notes(compressor)));
+        let notes = Port::Notes(synth);
+        assert_eq!(m.project.input_name(notes), Some("Notes"));
+        assert_eq!(m.project.port_name(notes).as_deref(), Some("synth on Keys"));
+        assert_eq!(m.project.port_name(Port::Notes(compressor)), None);
+        assert_eq!(notes.on(arp), Port::Notes(arp));
+        assert!(notes.takes_notes() && !Port::Sidechain(compressor).takes_notes());
+    }
+
+    #[test]
+    fn a_midi_track_plays_another_tracks_instrument_through_a_note_wire() {
+        let mut m = mix();
+        let (keys, [arp, synth, compressor]) = arpeggiated(&mut m);
+        let lead = m.project.add_track("Lead", TrackKind::Midi);
+        let lead_post = Tap::PostFx(Chain::Track(lead));
+        let notes = Port::Notes(synth);
+        // Notes go into a note input, from any tap that carries them.
+        for tap in [Tap::PreFx(lead), lead_post] {
+            assert_eq!(m.project.check_wire(tap, notes), Ok(()), "{tap:?}");
+            assert_eq!(m.project.check_wire(tap, Port::Notes(arp)), Ok(()));
+        }
+        // Sound doesn't, and notes go nowhere else.
+        for tap in [
+            Tap::PostFader(Chain::Track(lead)),
+            Tap::PostFx(Chain::Track(m.kick)),
+            Tap::Device(synth),
+        ] {
+            assert_eq!(m.project.check_wire(tap, notes), Err(WireError::Sound));
+        }
+        let key = Port::Sidechain(compressor);
+        assert_eq!(
+            m.project.check_wire(Tap::PreFx(lead), key),
+            Err(WireError::Notes)
+        );
+        assert_eq!(
+            m.project.check_wire(lead_post, Port::Notes(compressor)),
+            Err(WireError::NoPort)
+        );
+        // Its MIDI To: the note wires from its Post FX.
+        assert_eq!(m.project.midi_to_instruments(lead), [synth]);
+        assert_eq!(m.project.midi_to_instruments(m.kick), []);
+        let wire = m.wire(lead_post, notes);
+        let midi_to: Vec<WireId> = m.project.midi_to(lead).map(|w| w.id).collect();
+        assert_eq!(midi_to, [wire]);
+        assert_eq!(m.project.midi_to(keys).count(), 0);
+        let wire = *m.project.wire(wire).unwrap();
+        assert!(wire.takes_notes() && wire.channel.is_none());
+        // A note wire has no gain to automate or modulate.
+        assert!(
+            !m.project
+                .has_param(crate::param::ParamAddress::Wire(wire.id))
+        );
+        assert_eq!(m.project.live_wires(), [&wire]);
+    }
+
+    #[test]
+    fn note_wires_that_would_loop_are_refused() {
+        let mut m = mix();
+        let (keys, [arp, synth, compressor]) = arpeggiated(&mut m);
+        let lead = m.project.add_track("Lead", TrackKind::Midi);
+        let lead_post = Tap::PostFx(Chain::Track(lead));
+        // The lead takes what reaches the Keys' synth, after the arpeggiator.
+        m.take(lead, Tap::PostFx(Chain::Track(keys)));
+        // So it can play the synth, but not the arpeggiator before it.
+        assert_eq!(m.project.check_wire(lead_post, Port::Notes(synth)), Ok(()));
+        assert_eq!(
+            m.project.check_wire(lead_post, Port::Notes(arp)),
+            Err(WireError::Loop)
+        );
+        assert_eq!(m.project.midi_to_instruments(lead), [synth]);
+        // Played by the lead, the synth can still key a compressor on the
+        // lead, which comes after the notes the lead plays it, and the
+        // lead's sound the compressor after the synth.
+        m.wire(lead_post, Port::Notes(synth));
+        let lead_comp = device(&mut m.project, NativeKind::Compressor);
+        let lead_key = Port::Sidechain(lead_comp.id);
+        m.project.track_mut(lead).unwrap().devices.push(lead_comp);
+        assert_eq!(m.project.check_wire(Tap::Device(synth), lead_key), Ok(()));
+        let lead_out = Tap::PostFader(Chain::Track(lead));
+        assert_eq!(
+            m.project.check_wire(lead_out, Port::Sidechain(compressor)),
+            Ok(())
+        );
+        // A track can't take notes from where a wire of its own feeds them.
+        let pad = m.project.add_track("Pad", TrackKind::Midi);
+        m.wire(Tap::PreFx(pad), Port::Notes(arp));
+        assert_eq!(m.input(pad, Tap::Device(arp)), Err(InputError::Loop));
+        assert_eq!(
+            m.input(pad, Tap::PostFx(Chain::Track(keys))),
+            Err(InputError::Loop)
         );
     }
 

@@ -14,7 +14,10 @@
 //! arpeggiator in front of a synth plays it the notes of its track's clips
 //! in turn, and bypassed or deactivated lets the notes through. A second
 //! track doubles what it plays, taking the notes after it or at its
-//! track's Post FX, with the first track muted. And the
+//! track's Post FX, with the first track muted. Four tracks without an
+//! instrument play four parts of a multi-timbral synth on another, through
+//! their MIDI To, each on a MIDI channel of its own, and mute and solo cut a
+//! part as they would its track. And the
 //! app's binary scans each library in a process of its own, so a library
 //! that crashes takes only that process down.
 
@@ -32,7 +35,9 @@ use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
 use musicable_model::param::ParamAddress;
 use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackKind};
+use musicable_model::{
+    Device, DeviceId, DeviceKind, PluginFormat, Project, TestTone, TrackId, TrackKind,
+};
 use musicable_plugins::scan::{self, Outcome};
 use musicable_plugins::{Instance, ParentWindow, PluginInfo};
 use musicable_test_plugins::testing::{self, Library};
@@ -1111,6 +1116,96 @@ fn doubles_an_arpeggiator_through_midi_from(format: PluginFormat) {
         }
         assert!(left[start + beat + 1..].iter().all(|s| *s == 0.0));
     }
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn four_tracks_play_four_parts_of_a_multi_timbral_clap_synth() {
+    plays_four_parts_of_a_multi_timbral_synth(PluginFormat::Clap);
+}
+
+#[test]
+fn four_tracks_play_four_parts_of_a_multi_timbral_vst3_synth() {
+    plays_four_parts_of_a_multi_timbral_synth(PluginFormat::Vst3);
+}
+
+/// Plays the four beats of [`plays_four_parts_of_a_multi_timbral_synth`]'s
+/// song, and checks the key each sounds, or that it's silent.
+#[track_caller]
+fn assert_parts(rig: &mut Rig, keys: [Option<u8>; 4]) {
+    let beat = 24_000;
+    rig.session.wait_for_graph();
+    let (left, _) = rig.play_from_start(4 * beat);
+    for (i, key) in keys.into_iter().enumerate() {
+        // Clear of where the beats meet, however late the first starts.
+        let heard = &left[i * beat + 300..(i + 1) * beat - 300];
+        match key {
+            Some(key) => assert_plays_key(heard, key),
+            None => assert_eq!(peak(heard), 0.0, "beat {i} isn't silent"),
+        }
+    }
+}
+
+fn plays_four_parts_of_a_multi_timbral_synth(format: PluginFormat) {
+    // Named so, the library's synth plays each MIDI channel an octave above
+    // the one before, as a part of its own.
+    let plugins = TestPlugins::new(format, "parts");
+    let mut song = Project::new();
+    let strings = song.add_track("Strings", TrackKind::Midi);
+    let synth = plugins.synth(&mut song);
+    song.track_mut(strings).unwrap().devices.push(synth.clone());
+    // Four tracks without an instrument, each playing the A below middle C
+    // for a beat, in turn.
+    let parts: Vec<TrackId> = (0..4)
+        .map(|i| {
+            let part = song.add_track(format!("Part {}", i + 1), TrackKind::Midi);
+            let mut a = MidiClip::default();
+            a.add_note(Beats::ZERO, Beats::new(1), 57, 1.0);
+            let range = BeatRange::new(Beats::new(i), Beats::new(i + 1));
+            let clip = song.new_clip("A", range, ClipContent::Midi(a));
+            song.track_mut(part).unwrap().clips.push(clip);
+            part
+        })
+        .collect();
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+
+    // Chosen in each part's mixer strip: the synth, on a channel of its
+    // own. The parts play in turn, each an octave above the one before.
+    for (channel, &part) in (0_i64..).zip(&parts) {
+        let args = (Args::new().with("track", part))
+            .with("device", synth.id)
+            .with("channel", channel);
+        rig.session.run_with(&mixer::SET_MIDI_TO, &args).unwrap();
+    }
+    assert_parts(&mut rig, [Some(57), Some(69), Some(81), Some(93)]);
+
+    // A muted part is cut, and a soloed one plays alone, through the synth
+    // it plays.
+    let part = |i: usize| Args::new().with("track", parts[i]);
+    let mute = |muted: bool| part(1).with("muted", muted);
+    rig.session.run_with(&mixer::SET_MUTE, &mute(true)).unwrap();
+    assert_parts(&mut rig, [Some(57), None, Some(81), Some(93)]);
+    rig.session
+        .run_with(&mixer::SET_MUTE, &mute(false))
+        .unwrap();
+    let solo = |solo: bool| part(2).with("solo", solo);
+    rig.session.run_with(&mixer::SET_SOLO, &solo(true)).unwrap();
+    assert_parts(&mut rig, [None, None, Some(81), None]);
+    rig.session
+        .run_with(&mixer::SET_SOLO, &solo(false))
+        .unwrap();
+
+    // Another channel, picked in the Routing panel, plays another part, and
+    // undone, the fourth part's back.
+    let wire = rig.session.project().midi_to(parts[3]).next().unwrap().id;
+    let args = Args::new().with("wire", wire).with("channel", 0_i64);
+    rig.session.run_with(&wire::SET_CHANNEL, &args).unwrap();
+    assert_parts(&mut rig, [Some(57), Some(69), Some(81), Some(57)]);
+    rig.session.run(&edit::UNDO).unwrap();
+    assert_parts(&mut rig, [Some(57), Some(69), Some(81), Some(93)]);
     assert_eq!(rig.session.take_problems(), Vec::<String>::new());
     drop(rig);
     plugins.assert_alright();

@@ -4,8 +4,9 @@ Each track's sound goes to the master, or to a group track that feeds it,
 and its sends take it to return tracks too. Beyond that, a track can take
 its input from another track, to record it or to play it through devices
 of its own, a MIDI track can play and record another's notes, a track can
-resample the master, and a track can be heard through its sends alone. A
-key from one track into a device on another is a [sidechain](sidechains.md).
+resample the master, a MIDI track can play an instrument on another, and a
+track can be heard through its sends alone. A key from one track into a
+device on another is a [sidechain](sidechains.md).
 The [Routing panel](../window/routing.md) lists them all, with their gains,
 and changes them as the strips do.
 
@@ -71,6 +72,39 @@ turns the arpeggio into notes you can edit. Notes played
 live on the other track land where Musicable played them, a moment after
 that track's own take would have them: as long as monitoring them took.
 Capture holds them too, while the track is armed or monitors In.
+
+## Playing another track's instrument
+
+A MIDI track without an instrument has **MIDI To** in its strip, where its
+output would be: it plays the track's notes on an instrument on another
+track. Its menu lists **No Output**, then the instruments on the other
+tracks, by their tracks' names, each opening to the MIDI channels: **Any
+Channel**, then **Channel 1** to **Channel 16**. Picking one plays the
+track's notes, after its [MIDI effects](plugins.md#midi-effects), on that
+instrument, along with the notes of the instrument's own track, and the
+strip reads, say, **Strings 3**.
+**No Output** stops it.
+
+- **Any Channel** plays each note on its own, as the instrument's own
+  track's notes play, with its own pitch bend and expression.
+- **A channel** plays every note on it, as a keyboard set to that channel
+  would. That's how a **multi-timbral** instrument, such as a sampler with
+  a part on each MIDI channel, plays a part for each track: four tracks on
+  channels 1 to 4 play its four parts. Musicable's own instruments play
+  every channel alike.
+
+The instrument's track's modulators hear the notes too, so an Envelope
+there starts on each of them. Unlike notes taken as an input, MIDI To
+follows the track's mute and solo, as its sound would: a muted track plays
+nothing on the instrument, and soloing it plays its notes on the
+instrument's track, with the rest quiet. Soloing the instrument's track
+plays them as well.
+
+Choosing MIDI To, or another channel, is a step in the undo history, **MIDI
+To**, and the [Routing panel](../window/routing.md) lists each under
+**Notes**, with its channel. A track wired into several instruments, by the
+`wire.connect` command, reads, say, **2 Instruments**, and picking one
+plays that one alone.
 
 ## Resampling
 

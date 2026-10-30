@@ -27,7 +27,7 @@ use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{
     PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
-use musicable_model::routing::{Port, Tap};
+use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_model::warp::{
     GranularSettings, Onset, Onsets, Origin, Preserve, SliceSettings, SpectralSettings,
@@ -66,6 +66,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("tracks-from-tracks", tracks_from_tracks()),
         ("midi-effects", midi_effects()),
         ("notes-from-tracks", notes_from_tracks()),
+        ("midi-to", midi_to()),
     ]
 }
 
@@ -1516,6 +1517,48 @@ fn notes_from_tracks() -> Project {
     };
     take(&mut project, double, Tap::Device(arp_id));
     take(&mut project, played, Tap::PostFx(Chain::Track(keys)));
+    project
+}
+
+/// Four MIDI tracks playing four parts of a multi-timbral instrument on
+/// another, each on a channel of its own through its MIDI To, and an
+/// arpeggiator's notes going into another's note input on their own
+/// channels.
+fn midi_to() -> Project {
+    let mut project = Project::new();
+    let strings = project.add_track("Strings", TrackKind::Midi);
+    let plugin = |id: &str, name: &str, kind| {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: id.into(),
+            name: name.into(),
+            kind,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        })
+    };
+    let rack = plugin("com.example.rack", "Rack", PluginKind::Instrument);
+    let rack = project.new_device(rack);
+    let rack_id = rack.id;
+    project.track_mut(strings).unwrap().devices.push(rack);
+    for (channel, name) in ["Violins", "Violas", "Cellos", "Basses"]
+        .into_iter()
+        .enumerate()
+    {
+        let part = project.add_track(name, TrackKind::Midi);
+        let wire = Wire {
+            channel: Some(channel as u8),
+            ..project.new_wire(Tap::PostFx(Chain::Track(part)), Port::Notes(rack_id))
+        };
+        project.wires.push(wire);
+    }
+    let arps = project.add_track("Arps", TrackKind::Midi);
+    let arp = plugin("com.example.arp", "Arp", PluginKind::MidiEffect);
+    let arp = project.new_device(arp);
+    let arp_id = arp.id;
+    project.track_mut(arps).unwrap().devices.push(arp);
+    let wire = project.new_wire(Tap::Device(arp_id), Port::Notes(rack_id));
+    project.wires.push(wire);
     project
 }
 

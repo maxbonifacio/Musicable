@@ -13,9 +13,11 @@
 //!   them on and off only while the plugin is inactive.
 //! - **Test Synth** is one object, component and controller at once. It
 //!   plays each note as the CLAP synth does, shaped by VST3's tuning and
-//!   brightness note expressions and its poly pressure. Its MIDI mapping
-//!   has MIDI's volume controller, 7, move its Level, as VST3 plugins take
-//!   controllers.
+//!   brightness note expressions and its poly pressure, and in a module
+//!   named to, each channel as a part of its own, an octave above the one
+//!   before. Its MIDI mapping has MIDI's volume controller, 7, move its
+//!   Level, as VST3 plugins take controllers: multi-timbral, the first
+//!   channel's alone.
 //! - **Test Arpeggiator** is one object too: a MIDI effect, with an event
 //!   input and an event output and no audio, under VST3's Fx subcategory,
 //!   as VST3 has none for MIDI effects. It plays the keys held as the CLAP
@@ -160,6 +162,7 @@ fn enter() -> bool {
     if name.starts_with("refuse") {
         return false;
     }
+    crate::PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
     if ENTERED.swap(true, Ordering::SeqCst) {
         violation("the VST3 module was entered twice without exiting");
     }
@@ -1484,6 +1487,7 @@ struct Voice {
     active: bool,
     note_id: i32,
     pitch: i16,
+    channel: i16,
     velocity: f64,
     /// Semitones.
     tuning: f64,
@@ -1497,6 +1501,9 @@ struct Voice {
 struct Synth {
     checks: Checks,
     lifecycle: Lifecycle,
+    /// Whether it plays each channel as a part of its own, from a module
+    /// named so.
+    parts: bool,
     /// Level, normalized, as the processor has it, and as the controller
     /// does.
     level: AtomicU64,
@@ -1527,6 +1534,7 @@ impl Synth {
         let synth = Arc::new(Self {
             checks: Checks::new("Test Synth"),
             lifecycle: Lifecycle::default(),
+            parts: crate::PARTS.load(Ordering::SeqCst),
             level: AtomicU64::new(0.5f64.to_bits()),
             controller_level: AtomicU64::new(0.5f64.to_bits()),
             label: Mutex::new(String::new()),
@@ -1607,6 +1615,7 @@ impl Synth {
                     active: true,
                     note_id: on.noteId,
                     pitch: on.pitch,
+                    channel: on.channel,
                     velocity: f64::from(on.velocity),
                     tuning: f64::from(on.tuning) / 100.0,
                     ..Voice::default()
@@ -1860,8 +1869,9 @@ impl IAudioProcessorTrait for SynthComponent {
             let level = synth.level();
             let mut sample = 0.0;
             for voice in audio.voices.iter_mut().filter(|v| v.active) {
-                let frequency =
-                    440.0 * ((f64::from(voice.pitch) + voice.tuning - 69.0) / 12.0).exp2();
+                let pitch =
+                    f64::from(voice.pitch) + crate::part_transpose(synth.parts, voice.channel);
+                let frequency = 440.0 * ((pitch + voice.tuning - 69.0) / 12.0).exp2();
                 let amplitude = voice.velocity * level * (1.0 + voice.pressure);
                 let phase = voice.phase * TAU;
                 sample += amplitude * (phase.sin() + 0.5 * voice.brightness * (2.0 * phase).sin());
@@ -1991,14 +2001,19 @@ impl IEditControllerTrait for SynthComponent {
 }
 
 impl IMidiMappingTrait for SynthComponent {
+    /// A multi-timbral synth's Level is its first part's, so only the first
+    /// channel's volume moves it.
     unsafe fn getMidiControllerAssignment(
         &self,
         bus: int32,
-        _channel: int16,
+        channel: int16,
         number: CtrlNumber,
         id: *mut ParamID,
     ) -> tresult {
         self.0.checks.ui("getMidiControllerAssignment");
+        if self.0.parts && channel != 0 {
+            return kResultFalse;
+        }
         // SAFETY: the host passes somewhere to write, or null.
         let (0, VOLUME, Some(id)) = (bus, number, unsafe { id.as_mut() }) else {
             return kResultFalse;

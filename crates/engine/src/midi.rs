@@ -1,7 +1,9 @@
 //! MIDI from devices: the messages the stream's MIDI inputs bring the
 //! engine ([`MidiMessage`]), turning them into notes ([`MidiNotes`]), and
 //! the node that plays a MIDI track's input on its instrument
-//! ([`MidiMonitor`]), from a MIDI input or another track's notes.
+//! ([`MidiMonitor`]), from a MIDI input or another track's notes. And the
+//! node that plays a note wire's notes into an instrument or a MIDI effect
+//! ([`NoteWire`]), on a MIDI channel if the wire has one.
 //!
 //! Notes from MIDI carry their expression as the engine's notes do, a note
 //! at a time: a channel's pitch bend, pressure and slide belong to the
@@ -12,7 +14,7 @@
 
 use musicable_model::Monitor;
 use musicable_model::clip::{Controller, Dimension};
-use musicable_model::routing::Tap;
+use musicable_model::routing::{Tap, WireId};
 
 use crate::compile::MidiSource;
 use crate::{
@@ -368,6 +370,7 @@ impl MidiNotes {
             note,
             key,
             velocity,
+            channel: None,
         });
         let pitch = self.pitch(channel);
         let Channel {
@@ -610,9 +613,9 @@ const LIVE_NOTES: u64 = 1 << 63;
 /// player does, and the most notes from its side input.
 const MAX_CLIP_NOTES: usize = 1024;
 
-/// The notes a [`MidiMonitor`] plays on from its side input for notes, each
-/// under an id of its own, and the controllers, as the side input last
-/// moved them.
+/// The notes a node plays on from another's, each under an id of its own,
+/// and the controllers, as they last moved: a [`MidiMonitor`]'s from its
+/// side input for notes, and a [`NoteWire`]'s.
 struct Taken {
     /// Each note sounding: its id as it came, and as it went on.
     sounding: Vec<(NoteId, NoteId)>,
@@ -627,19 +630,83 @@ impl Taken {
         }
     }
 
-    /// Ends every note sounding, as if let go at no particular speed, and
-    /// lets go of the switches held on, as
-    /// [`MidiNotes::release_all`] does.
-    fn release_all(&mut self, notes: &mut Notes<'_>) {
+    /// Sends `note` on, `offset` frames into the block, under an id of its
+    /// own, which a note starting takes from `fresh`, and a start on
+    /// `channel`.
+    fn play(
+        &mut self,
+        offset: usize,
+        note: NoteEvent,
+        channel: Option<u8>,
+        fresh: impl FnOnce() -> NoteId,
+        notes: &mut Notes<'_>,
+    ) {
+        let sounding = &mut self.sounding;
+        let at = sounding.iter().position(|&(taken, _)| taken == note.note());
+        match note {
+            NoteEvent::On { key, velocity, .. } => {
+                // The same note starting again ends the last.
+                if let Some(i) = at {
+                    let (_, note) = sounding.swap_remove(i);
+                    let velocity = RELEASE;
+                    notes.send(offset, NoteEvent::Off { note, velocity });
+                }
+                if sounding.len() < MAX_CLIP_NOTES {
+                    let fresh = fresh();
+                    let on = NoteEvent::On {
+                        note: fresh,
+                        key,
+                        velocity,
+                        channel,
+                    };
+                    if notes.send(offset, on) {
+                        sounding.push((note.note(), fresh));
+                    }
+                }
+            }
+            NoteEvent::Expression {
+                dimension, value, ..
+            } => {
+                if let Some(i) = at {
+                    let note = sounding[i].1;
+                    let changed = NoteEvent::Expression {
+                        note,
+                        dimension,
+                        value,
+                    };
+                    notes.send(offset, changed);
+                }
+            }
+            NoteEvent::Off { velocity, .. } => {
+                if let Some(i) = at {
+                    let (_, note) = sounding.swap_remove(i);
+                    notes.send(offset, NoteEvent::Off { note, velocity });
+                }
+            }
+        }
+    }
+
+    /// Ends every note sounding, `offset` frames into the block, as if let
+    /// go at no particular speed, and lets go of the switches held on, on
+    /// `channel`, as [`MidiNotes::release_all`] does.
+    fn release_all(&mut self, offset: usize, channel: Option<u8>, notes: &mut Notes<'_>) {
         for (_, note) in self.sounding.drain(..) {
             let off = NoteEvent::Off {
                 note,
                 velocity: RELEASE,
             };
-            notes.send(0, off);
+            notes.send(offset, off);
         }
         for controller in self.controllers.switches_on() {
-            notes.send_controller(0, controller, 0.0);
+            notes.send_controller_on(offset, controller, 0.0, channel);
+        }
+    }
+
+    /// Sends what the controllers hold on, `offset` frames into the block,
+    /// on `channel`, for a node that starts playing them again.
+    fn chase(&self, offset: usize, channel: Option<u8>, notes: &mut Notes<'_>) {
+        for (controller, value) in self.controllers.moved() {
+            notes.send_controller_on(offset, controller, value, channel);
         }
     }
 }
@@ -668,7 +735,9 @@ impl Taken {
 /// in ([`ProcessContext::midi`]). Or with a side input for notes, its input
 /// is the notes that come into that, another track's: it plays them as it
 /// would a MIDI input's, each under an id of its own, so they can't clash
-/// with its clips' notes.
+/// with its clips' notes, and on no channel of its own, as a MIDI input's
+/// are, whatever channel a note wire gave them on the way
+/// ([`NoteEvent::On`]'s `channel`).
 pub struct MidiMonitor {
     monitor: Monitor,
     armed: bool,
@@ -776,50 +845,10 @@ impl MidiMonitor {
     }
 
     /// Sends on a note from the side input, which plays, under an id of its
-    /// own.
+    /// own, on no channel.
     fn take_note(&mut self, offset: usize, note: NoteEvent, notes: &mut Notes<'_>) {
-        let sounding = &mut self.taken.sounding;
-        let at = sounding.iter().position(|&(taken, _)| taken == note.note());
-        match note {
-            NoteEvent::On { key, velocity, .. } => {
-                // The same note starting again ends the last.
-                if let Some(i) = at {
-                    let (_, note) = sounding.swap_remove(i);
-                    let velocity = RELEASE;
-                    notes.send(offset, NoteEvent::Off { note, velocity });
-                }
-                if sounding.len() < MAX_CLIP_NOTES {
-                    let fresh = self.notes.fresh_id();
-                    let on = NoteEvent::On {
-                        note: fresh,
-                        key,
-                        velocity,
-                    };
-                    if notes.send(offset, on) {
-                        sounding.push((note.note(), fresh));
-                    }
-                }
-            }
-            NoteEvent::Expression {
-                dimension, value, ..
-            } => {
-                if let Some(i) = at {
-                    let note = sounding[i].1;
-                    let changed = NoteEvent::Expression {
-                        note,
-                        dimension,
-                        value,
-                    };
-                    notes.send(offset, changed);
-                }
-            }
-            NoteEvent::Off { velocity, .. } => {
-                if let Some(i) = at {
-                    let (_, note) = sounding.swap_remove(i);
-                    notes.send(offset, NoteEvent::Off { note, velocity });
-                }
-            }
-        }
+        let fresh = || self.notes.fresh_id();
+        self.taken.play(offset, note, None, fresh, notes);
     }
 
     /// Whether `previous` took the same input.
@@ -906,7 +935,7 @@ impl Node for MidiMonitor {
             match self.playing_input {
                 true => {
                     self.retired.release_all(|played| send(notes, 0, played));
-                    self.retired_taken.release_all(notes);
+                    self.retired_taken.release_all(0, None, notes);
                 }
                 false => self.retired.forget_notes(),
             }
@@ -941,16 +970,14 @@ impl Node for MidiMonitor {
         match (self.playing_input, input) {
             (true, false) => {
                 self.notes.release_all(|played| send(notes, 0, played));
-                self.taken.release_all(notes);
+                self.taken.release_all(0, None, notes);
             }
             // What's held now never played. The side input's notes held
             // weren't kept, but its controllers go back to what it holds,
             // as the clips' do.
             (false, true) => {
                 self.notes.forget_notes();
-                for (controller, value) in self.taken.controllers.moved() {
-                    notes.send_controller(0, controller, value);
-                }
+                self.taken.chase(0, None, notes);
             }
             _ => {}
         }
@@ -975,16 +1002,22 @@ impl Node for MidiMonitor {
             }
             match event.kind {
                 NodeEventKind::Note(note) => self.clip_note(event.offset, note, clips, notes),
-                NodeEventKind::Controller { controller, value } => {
+                NodeEventKind::Controller {
+                    controller,
+                    value,
+                    channel,
+                } => {
                     self.clip_controllers.set(controller, value);
                     if clips {
-                        notes.send_controller(event.offset, controller, value);
+                        notes.send_controller_on(event.offset, controller, value, channel);
                     }
                 }
                 NodeEventKind::SideNote(note) if self.side.is_some() && input => {
                     self.take_note(event.offset, note, notes);
                 }
-                NodeEventKind::SideController { controller, value } if self.side.is_some() => {
+                NodeEventKind::SideController {
+                    controller, value, ..
+                } if self.side.is_some() => {
                     self.taken.controllers.set(controller, value);
                     if input {
                         notes.send_controller(event.offset, controller, value);
@@ -1000,6 +1033,153 @@ impl Node for MidiMonitor {
                     send(notes, at, played);
                 }
             });
+        }
+    }
+}
+
+/// The ids of the notes a [`NoteWire`] plays have the top two bits set,
+/// clear of the ids of clips' notes, whose top bit is clear, and of those a
+/// [`MidiMonitor`] or a plugin's notes count up from [`LIVE_NOTES`], which
+/// never reach the next bit. The wire's id goes in the 30 bits below them,
+/// so the notes of two wires never clash where they meet, and a count in
+/// the 32 below that.
+const WIRED_NOTES: u64 = 3 << 62;
+
+/// Plays the notes a note wire takes on into where it goes: an
+/// instrument's or a MIDI effect's note input
+/// ([`Port::Notes`](musicable_model::routing::Port::Notes)). It sits on the
+/// way the notes go ([`Graph::send_notes`](crate::Graph::send_notes)),
+/// after the node that plays them at the wire's tap.
+///
+/// Each note goes on under an id of its own, so it never clashes with the
+/// notes that meet it there, such as those of the instrument's own track.
+/// With a channel, every note and controller goes on that channel
+/// ([`NoteEvent::On`]'s `channel`), as a part of a multi-timbral instrument
+/// plays it, and without one, on none of its own.
+///
+/// Muted ([`MUTE`](Self::MUTE)), as a muted track's note wires are, it
+/// plays nothing: the notes sounding through it end, and the switches held
+/// on through it, such as the sustain pedal, are let go. Unmuted again, the
+/// controllers go back to what they hold, and notes play from the next
+/// that starts. A note wire that takes over from one on another channel
+/// lets go of the switches on the old channel, and sends what the
+/// controllers hold on the new.
+pub struct NoteWire {
+    /// The wire's id, in the bits its notes' ids carry it in.
+    wire: u64,
+    channel: Option<u8>,
+    muted: bool,
+    /// Whether it played in the last block.
+    playing: bool,
+    taken: Taken,
+    /// The ids it gives notes count up from here, below the wire's.
+    next: u32,
+    /// The channel the wire it took over from played on, until it's let go
+    /// of the switches held on it.
+    retired: Option<Option<u8>>,
+}
+
+impl NoteWire {
+    /// 1.0 mutes it, 0.0 unmutes it, as [`Gain::MUTE`](crate::nodes::Gain::MUTE)
+    /// does a gain.
+    pub const MUTE: ParamId = crate::nodes::Gain::MUTE;
+
+    /// The relay of note wire `wire`, playing every note on `channel`, from
+    /// 0 to 15, or with `None`, on none of its own.
+    pub fn new(wire: WireId, channel: Option<u8>) -> Self {
+        Self {
+            wire: WIRED_NOTES | u64::from(wire.0 & 0x3FFF_FFFF) << 32,
+            channel,
+            muted: false,
+            playing: true,
+            taken: Taken::new(),
+            next: 0,
+            retired: None,
+        }
+    }
+
+    pub fn with_muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self.playing = !muted;
+        self
+    }
+
+    /// Starts or stops playing, `at` frames into the block.
+    fn play(&mut self, play: bool, at: usize, notes: &mut Notes<'_>) {
+        if std::mem::replace(&mut self.playing, play) == play {
+            return;
+        }
+        match play {
+            true => self.taken.chase(at, self.channel, notes),
+            false => self.taken.release_all(at, self.channel, notes),
+        }
+    }
+}
+
+impl Node for NoteWire {
+    /// It plays notes alone, so it has one channel, which stays silent.
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        let Some(previous) = previous.downcast_mut::<NoteWire>() else {
+            return;
+        };
+        std::mem::swap(&mut self.taken, &mut previous.taken);
+        self.next = previous.next;
+        self.playing = previous.playing;
+        self.retired = match previous.retired {
+            Some(channel) => Some(channel),
+            None if previous.channel != self.channel && previous.playing => Some(previous.channel),
+            None => None,
+        };
+    }
+
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+    }
+
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        if let Some(channel) = self.retired.take() {
+            for controller in self.taken.controllers.switches_on() {
+                notes.send_controller_on(0, controller, 0.0, channel);
+            }
+            if self.playing {
+                self.taken.chase(0, self.channel, notes);
+            }
+        }
+        // Muted or not as the graph it took over from left it.
+        self.play(!self.muted, 0, notes);
+        for event in ctx.events {
+            match event.kind {
+                NodeEventKind::Param {
+                    param: Self::MUTE,
+                    value,
+                } => {
+                    self.muted = value >= 0.5;
+                    self.play(!self.muted, event.offset, notes);
+                }
+                NodeEventKind::Note(note) if self.playing => {
+                    let (wire, next) = (self.wire, &mut self.next);
+                    let fresh = || {
+                        let note = NoteId(wire | u64::from(*next));
+                        *next = next.wrapping_add(1);
+                        note
+                    };
+                    self.taken
+                        .play(event.offset, note, self.channel, fresh, notes);
+                }
+                NodeEventKind::Controller {
+                    controller, value, ..
+                } => {
+                    self.taken.controllers.set(controller, value);
+                    if self.playing {
+                        notes.send_controller_on(event.offset, controller, value, self.channel);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }

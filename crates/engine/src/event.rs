@@ -128,9 +128,15 @@ pub enum NodeEventKind {
     /// A MIDI controller moves, for every note the node plays, to `value`,
     /// from 0.0 to 1.0, as a MIDI control change does: the mod wheel, the
     /// sustain pedal. It goes where notes go, from a clip player to its
-    /// instrument, and holds until it moves again. Nodes that don't play
-    /// notes ignore it.
-    Controller { controller: Controller, value: f32 },
+    /// instrument, and holds until it moves again. With a `channel`, from 0
+    /// to 15, it's for the notes on that channel, as a note wire with a
+    /// channel plays it ([`NoteEvent::On`]'s `channel`). Nodes that don't
+    /// play notes ignore it.
+    Controller {
+        controller: Controller,
+        value: f32,
+        channel: Option<u8>,
+    },
     /// A note from the node's side input for notes
     /// ([`Graph::send_side_notes`](crate::Graph::send_side_notes)), as
     /// [`Note`](Self::Note) is from its main one: another track's notes
@@ -139,7 +145,11 @@ pub enum NodeEventKind {
     SideNote(NoteEvent),
     /// A controller's move from the node's side input for notes, as
     /// [`Controller`](Self::Controller) is from its main one.
-    SideController { controller: Controller, value: f32 },
+    SideController {
+        controller: Controller,
+        value: f32,
+        channel: Option<u8>,
+    },
 }
 
 impl NodeEventKind {
@@ -161,7 +171,15 @@ impl NodeEventKind {
     pub(crate) fn to_side(self) -> Self {
         match self {
             Self::Note(note) => Self::SideNote(note),
-            Self::Controller { controller, value } => Self::SideController { controller, value },
+            Self::Controller {
+                controller,
+                value,
+                channel,
+            } => Self::SideController {
+                controller,
+                value,
+                channel,
+            },
             other => other,
         }
     }
@@ -190,6 +208,14 @@ pub enum NoteEvent {
         /// The MIDI note number, from 0 to 127.
         key: u8,
         velocity: f32,
+        /// The MIDI channel it plays on, from 0 to 15, for an instrument
+        /// that plays each channel as a part of its own: what a note wire
+        /// with a channel gives the notes it plays
+        /// ([`NoteWire`](crate::midi::NoteWire)). `None` for a note on no
+        /// channel of its own, as the notes of clips, MIDI inputs and
+        /// plugins are, which a plugin hears as it takes notes: each on a
+        /// channel of its own as MPE, or all on the first.
+        channel: Option<u8>,
     },
     /// One dimension of the note's expression changes, and holds until it
     /// changes again: pitch bend in semitones, pressure and timbre from 0.0

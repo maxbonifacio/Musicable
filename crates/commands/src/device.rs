@@ -889,8 +889,10 @@ fn keep_order(tx: &mut Transaction<'_>, chain: Chain) -> Result<(), CommandError
 }
 
 /// `devices` as copies take them, each with the lanes that automate it and
-/// the wires into it: a plugin's state taken afresh, as Save as Preset
-/// takes it, since a change made in its window can reach the project late.
+/// the wires into its side inputs: a plugin's state taken afresh, as Save
+/// as Preset takes it, since a change made in its window can reach the
+/// project late. Note wires stay with the original: a track's MIDI To
+/// plays the instrument it chose.
 fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<TakenDevice> {
     let mut taken = Vec::with_capacity(devices.len());
     for &id in devices {
@@ -908,7 +910,7 @@ fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<TakenDevice> {
             .cloned()
             .collect();
         let wires = (project.wires.iter())
-            .filter(|wire| wire.to.device() == id)
+            .filter(|wire| wire.to.device() == id && !wire.takes_notes())
             .map(|wire| (*wire, project.lane(ParamAddress::Wire(wire.id)).cloned()))
             .collect();
         taken.push(TakenDevice {
@@ -925,10 +927,10 @@ fn taken(ctx: &mut Context<'_>, devices: &[DeviceId]) -> Vec<TakenDevice> {
 /// with the original's settings, and with `lanes`, lanes of its own with
 /// the original's points.
 ///
-/// Each copy keeps the wires into the original, so a copied compressor
-/// keeps its key: from the same taps, or from the copy of a device copied
-/// with it. A wire that would close a loop, as into a copy put before the
-/// device it's keyed after, is left out.
+/// Each copy keeps the wires into the original's side inputs, so a copied
+/// compressor keeps its key: from the same taps, or from the copy of a
+/// device copied with it. A wire that would close a loop, as into a copy
+/// put before the device it's keyed after, is left out.
 fn add_copies(
     tx: &mut Transaction<'_>,
     taken: Vec<TakenDevice>,

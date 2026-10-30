@@ -638,15 +638,18 @@ enum Channel {
     Master,
 }
 
-/// A wire: a tap's signal, into a port.
+/// A wire: a tap's signal, into a port, or its notes, into a note input.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wire {
     id: u32,
     from: Tap,
     to: Port,
-    /// Linear.
+    /// Linear. A note wire's is 1.0.
     gain: f32,
+    /// The MIDI channel a note wire plays on, from 0 to 15, or `None` for
+    /// the notes' own. An audio wire's is `None`.
+    channel: Option<u8>,
 }
 
 /// Externally tagged: `{"pre_fx": 3}` for track 3's Pre FX, `{"device": 5}`
@@ -663,9 +666,10 @@ enum Tap {
     PostFader(Channel),
 }
 
-/// Externally tagged: `{"sidechain": 7}` for device 7's Sidechain, or
+/// Externally tagged: `{"sidechain": 7}` for device 7's Sidechain,
 /// `{"plugin_input": {"device": 7, "input": 2}}` for the side input that
-/// the plugin of device 7 calls 2.
+/// the plugin of device 7 calls 2, or `{"notes": 7}` for device 7's note
+/// input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Port {
@@ -674,6 +678,8 @@ enum Port {
     /// A plugin's side input, by the device's id and the plugin's id for
     /// the input.
     PluginInput { device: u32, input: u32 },
+    /// An instrument's or a MIDI effect's note input, by the device's id.
+    Notes(u32),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1100,9 +1106,10 @@ fn check_loops(project: &model::Project) -> Result<(), Invalid> {
 }
 
 /// Refuses wires that can't join the file's project: from a track or a
-/// device it hasn't, or from a tap that carries notes alone, into a device
-/// it hasn't or one without the port, a second wire joining the same ends,
-/// and a wire that closes a loop.
+/// device it hasn't, from a tap that carries notes alone into a port that
+/// takes sound, or from one that carries sound alone into a note input,
+/// into a device it hasn't or one without the port, a second wire joining
+/// the same ends, and a wire that closes a loop.
 fn check_wires(project: &model::Project) -> Result<(), Invalid> {
     for (i, wire) in project.wires.iter().enumerate() {
         let path = format!("wires[{i}]");
@@ -1119,7 +1126,10 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
             routing::Tap::Device(id) if project.find_device(id).is_none() => {
                 return Err(Invalid::new(from(), no_device(id)));
             }
-            tap if !project.carries_sound(tap) => {
+            tap if wire.takes_notes() && !project.carries_notes(tap) => {
+                return Err(Invalid::new(from(), sound(tap)));
+            }
+            tap if !wire.takes_notes() && !project.carries_sound(tap) => {
                 return Err(Invalid::new(from(), notes(tap)));
             }
             _ => {}
@@ -1136,6 +1146,10 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
                 ),
                 routing::Port::PluginInput(_, input) => format!(
                     "device {} has no side input {input}: a plugin's are those in its inputs",
+                    device.0
+                ),
+                routing::Port::Notes(_) => format!(
+                    "device {} has no note input: only an instrument and a MIDI effect have one",
                     device.0
                 ),
             };
@@ -1162,6 +1176,25 @@ fn notes(tap: routing::Tap) -> String {
             unreachable!("only a Pre FX and the point after a MIDI effect carry notes alone")
         }
     }
+}
+
+/// Says what `tap`, which carries sound alone, is, for a note wire, which
+/// takes notes.
+fn sound(tap: routing::Tap) -> String {
+    let on = |chain| match chain {
+        Chain::Track(id) => format!("track {}'s", id.0),
+        Chain::Master => "the master's".to_owned(),
+    };
+    let tap = match tap {
+        routing::Tap::PreFx(id) => format!("track {}'s Pre FX", id.0),
+        routing::Tap::Device(id) => format!("after device {}", id.0),
+        routing::Tap::PostFx(chain) => format!("{} Post FX", on(chain)),
+        routing::Tap::PostFader(chain) => format!("{} Post Fader", on(chain)),
+    };
+    format!(
+        "is {tap}, which is sound: a note wire takes a MIDI track's Pre FX or Post FX, or the \
+         point after one of its MIDI effects"
+    )
 }
 
 /// Refuses inputs from taps that don't suit their tracks: from a track or a
@@ -1261,7 +1294,13 @@ impl Tap {
 
 impl From<&routing::Wire> for Wire {
     fn from(wire: &routing::Wire) -> Self {
-        let routing::Wire { id, from, to, gain } = *wire;
+        let routing::Wire {
+            id,
+            from,
+            to,
+            gain,
+            channel,
+        } = *wire;
         Self {
             id: id.0,
             from: Tap::from(from),
@@ -1271,27 +1310,56 @@ impl From<&routing::Wire> for Wire {
                     device: device.0,
                     input,
                 },
+                routing::Port::Notes(device) => Port::Notes(device.0),
             },
             gain,
+            channel,
         }
     }
 }
 
 impl Wire {
     /// The wire, with the ids it names as they are: which tracks and
-    /// devices the file has is checked once they're all read.
+    /// devices the file has is checked once they're all read. A note
+    /// wire's gain is 1.0, and its channel from 0 to 15 or `null`, and an
+    /// audio wire's channel is `null`.
     fn to_model(&self, path: &str) -> Result<routing::Wire, Invalid> {
-        let Self { id, from, to, gain } = *self;
+        let Self {
+            id,
+            from,
+            to,
+            gain,
+            channel,
+        } = *self;
+        let to = match to {
+            Port::Sidechain(device) => routing::Port::Sidechain(DeviceId(device)),
+            Port::PluginInput { device, input } => {
+                routing::Port::PluginInput(DeviceId(device), input)
+            }
+            Port::Notes(device) => routing::Port::Notes(DeviceId(device)),
+        };
+        let gain = finite(gain, || format!("{path}.gain"))?;
+        if to.takes_notes() && gain != 1.0 {
+            let message = "must be 1.0: a note wire plays its notes as they come";
+            return Err(Invalid::new(format!("{path}.gain"), message));
+        }
+        match channel {
+            Some(_) if !to.takes_notes() => {
+                let message = "must be null: an audio wire has no channel";
+                return Err(Invalid::new(format!("{path}.channel"), message));
+            }
+            Some(channel) if channel >= routing::Wire::CHANNELS => {
+                let message = "must be from 0 to 15, or null for the notes' own";
+                return Err(Invalid::new(format!("{path}.channel"), message));
+            }
+            _ => {}
+        }
         Ok(routing::Wire {
             id: WireId(id),
             from: from.to_model(),
-            to: match to {
-                Port::Sidechain(device) => routing::Port::Sidechain(DeviceId(device)),
-                Port::PluginInput { device, input } => {
-                    routing::Port::PluginInput(DeviceId(device), input)
-                }
-            },
-            gain: finite(gain, || format!("{path}.gain"))?,
+            to,
+            gain,
+            channel,
         })
     }
 }

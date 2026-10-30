@@ -144,6 +144,14 @@ dialects that Musicable speaks: CLAP's own, then MPE MIDI, then MIDI. Up to
 - **MIDI** puts every note on channel 1, bending 2 semitones either way,
   MIDI's default, with pressure as each key's own (poly pressure). Pitch
   bend and slide are the channel's, so the last note to move them wins.
+- **A channel of their own.** A note wire can put its notes on a MIDI
+  channel, as a part of a multi-timbral instrument plays
+  ([engine.md](engine.md#notes)). They go on that channel, whatever the
+  dialect: CLAP's own notes name it, and MIDI shares it among them, as
+  MIDI does, with the channel's pitch bend and slide and each key's own
+  pressure. The channel bends as far as the plugin expects it to: 48
+  semitones on an MPE member channel, for a plugin that takes MPE, and 2
+  otherwise. A note on no channel of its own goes as above.
 - MIDI notes start at velocity 1 or more, as a note on at 0 is a note off.
   `crate::midi` writes MIDI as the engine reads it from MIDI inputs, so a
   performance recorded from MIDI plays back as it was played.
@@ -151,7 +159,7 @@ dialects that Musicable speaks: CLAP's own, then MPE MIDI, then MIDI. Up to
 **Controllers**, such as the mod wheel and the sustain pedal
 ([engine.md](engine.md#notes)), go as MIDI control changes on channel 1,
 MPE's master channel, to a plugin that takes MIDI, whatever its notes go
-as. A CLAP plugin that only takes CLAP's own notes doesn't get them, as
+as, or on the channel a note wire gives them, with its notes. A CLAP plugin that only takes CLAP's own notes doesn't get them, as
 CLAP has no event of its own for them. A VST3 plugin gets them as
 parameters ([below](#vst3)).
 
@@ -309,16 +317,18 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   the thread that processes it, where the plugin "has to reset its inner
   processing state".
 - **Notes** go to the first event input, with note ids, which notes off
-  name. Pitch bend is VST3's tuning expression, which goes from 120
+  name, on MIDI's first channel, or the one a note wire gives them. Pitch
+  bend is VST3's tuning expression, which goes from 120
   semitones down to 120 up; pressure is poly pressure, and timbre is
   brightness. The transport is VST3's process context, with the frames
   since the plugin was activated.
 - **Controllers.** VST3 has plugins take MIDI controllers as parameters:
   as it activates, the instance asks the plugin's MIDI mapping
-  (`IMidiMapping`) which parameter each controller moves, on MIDI's first
-  channel of its first event input. A controller's move is then a change of
-  that parameter, at its frame, and the controller hears of it too, so the
-  plugin's window shows it. It doesn't come back from `poll`, so the
+  (`IMidiMapping`) which parameter each controller moves, on each of MIDI's
+  16 channels of its first event input, as a multi-timbral plugin maps each
+  part's. A controller's move is then a change of the parameter it moves on
+  its channel, the first unless a note wire gives it one, at its frame, and
+  the controller hears of it too, so the plugin's window shows it. It doesn't come back from `poll`, so the
   project keeps the parameter's own value. A plugin without a mapping
   doesn't get controllers. A plugin without note expression doesn't get
   per-note pitch bend: VST3 has no MPE MIDI to fall back on.
@@ -509,7 +519,10 @@ its voices on the host's thread pool, noting which threads run them. It
 takes notes as CLAP's own or as MIDI, holds them with the sustain pedal,
 and keeps a log of the MIDI it gets. A copy whose name starts with `mpe`
 takes only MPE MIDI, so tests can check that an MPE performance sounds as
-it does through CLAP's note expression. Test Arpeggiator, a note effect,
+it does through CLAP's note expression. A copy whose name starts with
+`parts` makes it multi-timbral, playing each MIDI channel an octave above
+the one before, so tests hear which channel each note came on, in either
+dialect. Test Arpeggiator, a note effect,
 plays the keys held in turn, lowest first, an eighth of a second each,
 transposed by its Transpose, as CLAP's own notes with ids of its own, or as
 MIDI from a copy whose name starts with `midi`. All three
@@ -523,7 +536,8 @@ Gain is a component with a controller of its own, which tells the
 component about state that isn't a parameter in a message, asks to restart
 for a new latency, and has a meter, Peak, which the processor sets. Test
 Synth is one object, plays notes with VST3's note expression, and maps
-CC 7 to its Level through its MIDI mapping. Test Arpeggiator is one object
+CC 7 to its Level through its MIDI mapping, on the first channel alone in
+a `parts` copy, which plays each channel as the CLAP one does. Test Arpeggiator is one object
 too, with an event bus each way and no audio, which only its buses mark as
 a MIDI effect. All three
 check VST3's rules, in the same count: what's called on which thread and in
@@ -559,7 +573,9 @@ missing plugin, lines a latent plugin up with a dry track to the sample,
 also after its latency changes, has a muted kick duck a bass through Test
 Gain's side input, lined up to the sample whichever track is late, has
 Test Arpeggiator play Test Synth a chord a note at a time, bypassed and
-deactivated too, and runs the app's binary as the scanner.
+deactivated too, has a second track double it through its input, has four
+tracks play four parts of a `parts` Test Synth, each on a channel of its
+own, and runs the app's binary as the scanner.
 [`crates/app/tests/export.rs`](../crates/app/tests/export.rs) exports the
 ducking too, in both formats.
 [`crates/app/src/app/plugins_on_tracks.rs`](../crates/app/src/app/plugins_on_tracks.rs)

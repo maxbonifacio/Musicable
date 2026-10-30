@@ -1482,14 +1482,19 @@ impl Transaction<'_> {
 
     /// Puts `wire` at `index` in the project's wires, or at the end if
     /// `index` is past them, with its gain kept to its range, if it can join
-    /// the project: see [`Project::check_wire`]. A wire with the id of one
-    /// the project has is refused as wired already.
+    /// the project: see [`Project::check_wire`]. A note wire's gain is 1.0,
+    /// and its channel one there is, or its notes' own, and an audio wire
+    /// has none. A wire with the id of one the project has is refused as
+    /// wired already.
     pub fn add_wire(&mut self, index: usize, mut wire: Wire) -> Result<(), WireError> {
         if self.project.wire(wire.id).is_some() {
             return Err(WireError::Wired(wire.id));
         }
         self.project.check_wire(wire.from, wire.to)?;
-        wire.gain = wire_gain(wire.gain).unwrap_or(1.0);
+        (wire.gain, wire.channel) = match wire.takes_notes() {
+            true => (1.0, wire.channel.filter(|&c| c < Wire::CHANNELS)),
+            false => (wire_gain(wire.gain).unwrap_or(1.0), None),
+        };
         let index = index.min(self.project.wires.len());
         self.project.wires.insert(index, wire);
         self.edits.push(Edit::AddWire { index, wire });
@@ -1533,12 +1538,14 @@ impl Transaction<'_> {
     }
 
     /// Sets a wire's gain. Linear, 1.0 is unity, kept from silence to
-    /// [`Wire::GAIN_MAX`]. A gain that isn't a finite number does nothing.
+    /// [`Wire::GAIN_MAX`]. A gain that isn't a finite number does nothing,
+    /// and so does a note wire's, which has none.
     pub fn set_wire_gain(&mut self, wire: WireId, gain: f32) {
         let Some(gain) = wire_gain(gain) else {
             return;
         };
         if let Some(w) = self.project.wire_mut(wire)
+            && !w.takes_notes()
             && w.gain != gain
         {
             let from = std::mem::replace(&mut w.gain, gain);
@@ -1546,6 +1553,26 @@ impl Transaction<'_> {
                 wire,
                 from,
                 to: gain,
+            });
+        }
+    }
+
+    /// Sets the MIDI channel a note wire plays its notes on, from 0 to 15,
+    /// or with `None`, has it pass each note on as it comes. A channel past
+    /// 15 does nothing, and so does an audio wire's, which has none.
+    pub fn set_wire_channel(&mut self, wire: WireId, channel: Option<u8>) {
+        if channel.is_some_and(|c| c >= Wire::CHANNELS) {
+            return;
+        }
+        if let Some(w) = self.project.wire_mut(wire)
+            && w.takes_notes()
+            && w.channel != channel
+        {
+            let from = std::mem::replace(&mut w.channel, channel);
+            self.edits.push(Edit::WireChannel {
+                wire,
+                from,
+                to: channel,
             });
         }
     }
@@ -2285,6 +2312,7 @@ impl Transaction<'_> {
                 let _ = self.set_wire_from(*wire, *to);
             }
             Edit::WireGain { wire, to, .. } => self.set_wire_gain(*wire, *to),
+            Edit::WireChannel { wire, to, .. } => self.set_wire_channel(*wire, *to),
             Edit::AddLane { index, lane } => self.add_lane(*index, lane.clone()),
             Edit::RemoveLane { lane, .. } => {
                 self.remove_lane(lane.param);
@@ -2762,6 +2790,12 @@ pub enum Edit {
         from: f32,
         to: f32,
     },
+    /// The channel the note wire with id `wire` plays on changed.
+    WireChannel {
+        wire: WireId,
+        from: Option<u8>,
+        to: Option<u8>,
+    },
     /// `lane` went in at `index` in the project's lanes: its parameter is
     /// automated.
     AddLane {
@@ -3187,6 +3221,11 @@ impl Edit {
                 to: from,
             },
             Edit::WireGain { wire, from, to } => Edit::WireGain {
+                wire,
+                from: to,
+                to: from,
+            },
+            Edit::WireChannel { wire, from, to } => Edit::WireChannel {
                 wire,
                 from: to,
                 to: from,
@@ -3727,6 +3766,7 @@ impl Edit {
                 | Edit::RemoveWire { .. }
                 | Edit::WireFrom { .. }
                 | Edit::WireGain { .. }
+                | Edit::WireChannel { .. }
                 | Edit::AddLane { .. }
                 | Edit::RemoveLane { .. }
                 | Edit::LanePoints { .. }
@@ -3797,6 +3837,7 @@ impl Edit {
             | Edit::DeviceActive { from, to, .. } => from == to,
             Edit::TrackOutput { from, to, .. } => from == to,
             Edit::WireFrom { from, to, .. } => from == to,
+            Edit::WireChannel { from, to, .. } => from == to,
             Edit::MoveDevice { from, to, .. } => from == to,
             Edit::TrackInput { from, to, .. } => from == to,
             Edit::TrackMonitor { from, to, .. } => from == to,

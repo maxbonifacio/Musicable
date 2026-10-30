@@ -270,9 +270,23 @@ pub(crate) fn note(offset: usize, event: NoteEvent) -> NodeEvent {
 }
 
 pub(crate) fn controller(offset: usize, controller: Controller, value: f32) -> NodeEvent {
+    controller_on(offset, controller, value, None)
+}
+
+/// A controller's move on `channel`, as a note wire with one plays it.
+pub(crate) fn controller_on(
+    offset: usize,
+    controller: Controller,
+    value: f32,
+    channel: Option<u8>,
+) -> NodeEvent {
     NodeEvent {
         offset,
-        kind: NodeEventKind::Controller { controller, value },
+        kind: NodeEventKind::Controller {
+            controller,
+            value,
+            channel,
+        },
     }
 }
 
@@ -919,6 +933,7 @@ fn the_synth_plays_notes_with_their_expression() {
             note: a,
             key: 69,
             velocity: 1.0,
+            channel: None,
         },
     )];
     let block = |events| Block {
@@ -963,6 +978,7 @@ fn the_synth_plays_notes_with_their_expression() {
                 note: b,
                 key: 69,
                 velocity: 0.5,
+                channel: None,
             },
         ),
         note(
@@ -999,6 +1015,7 @@ fn two_notes(a: NoteId, b: NoteId) -> [NodeEvent; 2] {
                 note,
                 key: 69,
                 velocity,
+                channel: None,
             },
         )
     };
@@ -1103,6 +1120,7 @@ fn the_synth_runs_its_voices_on_the_thread_pool() {
             note: NoteId(1),
             key: 60,
             velocity: 1.0,
+            channel: None,
         },
     )];
     let block = Block {
@@ -1143,6 +1161,7 @@ fn the_synths_voices_run_on_the_renderers_threads() {
             note: NoteId(key),
             key: 48 + key as u8,
             velocity: 1.0,
+            channel: None,
         };
         handle
             .send(Event::Note {
@@ -1191,6 +1210,7 @@ fn note_with(
                 note,
                 key,
                 velocity,
+                channel: None,
             },
         ),
         express(Dimension::PitchBend, bend),
@@ -1210,7 +1230,7 @@ fn express(offset: usize, note: NoteId, dimension: Dimension, value: f32) -> Nod
     )
 }
 
-fn let_go(offset: usize, note: NoteId) -> NodeEvent {
+pub(crate) fn let_go(offset: usize, note: NoteId) -> NodeEvent {
     self::note(
         offset,
         NoteEvent::Off {
@@ -1351,6 +1371,70 @@ fn the_sustain_pedal_holds_the_notes_let_go_until_it_comes_up() {
     }
 }
 
+/// A note starting on `key` at velocity 1, on `channel` if it's given one.
+pub(crate) fn on_channel(offset: usize, id: u64, key: u8, channel: Option<u8>) -> NodeEvent {
+    note(
+        offset,
+        NoteEvent::On {
+            note: NoteId(id),
+            key,
+            velocity: 1.0,
+            channel,
+        },
+    )
+}
+
+#[test]
+fn a_multi_timbral_synth_plays_the_notes_a_note_wire_gives_a_channel_on_it() {
+    let plugins = TestPlugins::new("parts synth");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let silence = vec![0.0; 128];
+    fn block(events: &[NodeEvent]) -> Block<'_> {
+        Block {
+            events,
+            ..Block::default()
+        }
+    }
+    // A, 220 Hz, on no channel of its own: the first, its first part.
+    let [left, _] = play(&mut node, &silence, &block(&[on_channel(0, 1, 57, None)]));
+    let (first, _) = sine(220.0, 0.5, 0.0, 128);
+    assert_close(&left, &first);
+    let [left, _] = play(&mut node, &silence, &block(&[let_go(0, NoteId(1))]));
+    assert_eq!(left, silence);
+    // On the third, its part plays it two octaves up.
+    let [left, _] = play(
+        &mut node,
+        &silence,
+        &block(&[on_channel(0, 2, 57, Some(2))]),
+    );
+    assert_close(&left, &sine(880.0, 0.5, 0.0, 128).0);
+    let [left, _] = play(&mut node, &silence, &block(&[let_go(0, NoteId(2))]));
+    assert_eq!(left, silence);
+    drop((node, instance));
+    plugins.assert_alright();
+
+    // An MPE synth hears a note on its channel, sharing it.
+    let plugins = TestPlugins::new("mpe synth");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let events = [
+        on_channel(0, 1, 60, Some(4)),
+        on_channel(0, 2, 64, Some(4)),
+        controller_on(0, Controller::SUSTAIN, 1.0, Some(4)),
+    ];
+    play(&mut node, &silence, &block(&events));
+    let midi = plugins.midi(&instance);
+    assert_eq!(
+        midi[96..],
+        [[0x94, 60, 127], [0x94, 64, 127], [0xB4, 64, 127]]
+    );
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
 #[test]
 fn controllers_go_as_midi_to_a_plugin_that_takes_notes_as_clap_s_own() {
     let plugins = TestPlugins::new("controllers");
@@ -1366,6 +1450,7 @@ fn controllers_go_as_midi_to_a_plugin_that_takes_notes_as_clap_s_own() {
                 note: NoteId(1),
                 key: 60,
                 velocity: 1.0,
+                channel: None,
             },
         ),
     ];
@@ -1420,6 +1505,7 @@ pub(crate) fn arpeggiate(arpeggiator: impl Node) -> Vec<(u64, NoteEvent)> {
             note,
             key,
             velocity,
+            channel: None,
         });
     }
     let mut block = vec![0.0; 2 * 256];
@@ -1456,6 +1542,7 @@ pub(crate) fn assert_arpeggiated(played: &[(u64, NoteEvent)]) {
         note,
         key,
         velocity: 1.0,
+        channel: None,
     };
     let off = |note| NoteEvent::Off {
         note,

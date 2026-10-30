@@ -1438,6 +1438,7 @@ fn started(note: u64, key: u8) -> NodeEventKind {
         note: NoteId(note),
         key,
         velocity: 0.5,
+        channel: None,
     })
 }
 
@@ -1481,6 +1482,7 @@ fn a_note_tap_holds_what_the_engine_played_at_its_frames() {
     let pedal = NodeEventKind::Controller {
         controller: Controller::SUSTAIN,
         value: 1.0,
+        channel: None,
     };
     let param = NodeEventKind::Param {
         param: musicable_engine::ParamId(1),
@@ -1501,7 +1503,9 @@ fn a_note_tap_holds_what_the_engine_played_at_its_frames() {
         .collect();
     let played = |kind| match kind {
         NodeEventKind::Note(note) => Played::Note(note),
-        NodeEventKind::Controller { controller, value } => Played::Controller { controller, value },
+        NodeEventKind::Controller {
+            controller, value, ..
+        } => Played::Controller { controller, value },
         _ => unreachable!("only notes and controllers are played"),
     };
     // Everything but what isn't played as notes are, such as a parameter.
@@ -1527,6 +1531,7 @@ fn a_midi_track_records_the_notes_it_takes_where_they_played() {
     let pedal = NodeEventKind::Controller {
         controller: Controller::SUSTAIN,
         value: 1.0,
+        channel: None,
     };
     let notes = [
         (500, started(1, 48)),

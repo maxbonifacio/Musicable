@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use musicable_model::clip::Controller;
 
-use crate::graph::Routed;
+use crate::graph::{Routed, channel_lane};
 use crate::midi::Held;
 use crate::nodes::{Delay, Smoothed};
 use crate::{
@@ -403,8 +403,12 @@ impl Node for Switch {
                 NodeEventKind::Note(note) => {
                     notes.send(event.offset, note);
                 }
-                NodeEventKind::Controller { controller, value } => {
-                    notes.send_controller(event.offset, controller, value);
+                NodeEventKind::Controller {
+                    controller,
+                    value,
+                    channel,
+                } => {
+                    notes.send_controller_on(event.offset, controller, value, channel);
                 }
                 _ => {}
             }
@@ -464,8 +468,9 @@ pub struct NoteSwitch {
     pending: Option<bool>,
     /// What the device plays in a part of a block, on its way on.
     played: Vec<Routed>,
-    /// What the controllers that come in hold, as they last moved.
-    input: Held,
+    /// What the controllers that come in hold, as they last moved: on no
+    /// channel of their own, then on each MIDI channel.
+    input: [Held; 17],
     /// What they hold, for the device to hear first as it starts afresh.
     chased: Vec<NodeEvent>,
     /// The modulation that came as the last block rendered, for the
@@ -480,6 +485,10 @@ pub struct NoteSwitch {
 /// How much modulation can wait for a MIDI effect's next block. Beyond it,
 /// more is dropped.
 const LATE: usize = 256;
+
+/// How many controllers a MIDI effect started afresh can hear before
+/// anything else. Beyond them, more are dropped.
+const CHASED: usize = 128;
 
 /// How many events a MIDI effect's block can have with the modulation that
 /// came late. Beyond them, that modulation is dropped.
@@ -496,7 +505,7 @@ impl NoteSwitch {
             automated: false,
             pending: None,
             played: Vec::new(),
-            input: Held::NONE,
+            input: [Held::NONE; 17],
             chased: Vec::new(),
             late: Vec::new(),
             merged: Vec::new(),
@@ -538,7 +547,7 @@ impl Node for NoteSwitch {
     fn prepare(&mut self, config: &EngineConfig) {
         self.device.prepare(config);
         self.played = Vec::with_capacity(Notes::CAPACITY);
-        self.chased = Vec::with_capacity(usize::from(Controller::MAX) + 1);
+        self.chased = Vec::with_capacity(CHASED);
         self.late = Vec::with_capacity(LATE);
         self.merged = Vec::with_capacity(MERGED);
         self.shifted = Vec::with_capacity(SHIFTED);
@@ -673,10 +682,17 @@ impl Node for NoteSwitch {
             } else {
                 chased.clear();
                 if std::mem::take(&mut fresh) {
-                    chased.extend(input.moved().map(|(controller, value)| NodeEvent {
-                        offset: 0,
-                        kind: NodeEventKind::Controller { controller, value },
-                    }));
+                    let moves = held_moves(input).map(|(controller, value, channel)| {
+                        let kind = NodeEventKind::Controller {
+                            controller,
+                            value,
+                            channel,
+                        };
+                        NodeEvent { offset: 0, kind }
+                    });
+                    chased.extend(moves.take(CHASED));
+                    let all = held_moves(input).count();
+                    notes.drop_more((all - chased.len()) as u64);
                 }
                 in_parts(ctx, at..end, chased, shifted, |part, frames| {
                     played.clear();
@@ -693,8 +709,13 @@ impl Node for NoteSwitch {
                 });
             }
             for event in events {
-                if let NodeEventKind::Controller { controller, value } = event.kind {
-                    input.set(controller, value);
+                if let NodeEventKind::Controller {
+                    controller,
+                    value,
+                    channel,
+                } = event.kind
+                {
+                    input[channel_lane(channel)].set(controller, value);
                 }
             }
             at = end;
@@ -716,7 +737,7 @@ fn switch(
     bypassed: &mut bool,
     to: bool,
     at: usize,
-    input: &Held,
+    input: &[Held; 17],
     notes: &mut Notes<'_>,
 ) -> bool {
     if to == *bypassed {
@@ -726,13 +747,23 @@ fn switch(
     notes.release_all(at);
     if to {
         device.stop();
-        for (controller, value) in input.moved() {
-            notes.send_controller(at, controller, value);
+        for (controller, value, channel) in held_moves(input) {
+            notes.send_controller_on(at, controller, value, channel);
         }
     } else {
         device.reset();
     }
     true
+}
+
+/// The controllers that have moved in `input`, a [`NoteSwitch`]'s, with
+/// what they hold and their channels, in order of channel.
+fn held_moves(input: &[Held; 17]) -> impl Iterator<Item = (Controller, f32, Option<u8>)> + '_ {
+    (0u8..).zip(input).flat_map(|(lane, held)| {
+        let channel = lane.checked_sub(1);
+        let moved = held.moved();
+        moved.map(move |(controller, value)| (controller, value, channel))
+    })
 }
 
 /// Sends the notes and controllers among `events` on, unchanged.
@@ -742,8 +773,12 @@ fn pass_on(events: &[NodeEvent], notes: &mut Notes<'_>) {
             NodeEventKind::Note(note) => {
                 notes.send(event.offset, note);
             }
-            NodeEventKind::Controller { controller, value } => {
-                notes.send_controller(event.offset, controller, value);
+            NodeEventKind::Controller {
+                controller,
+                value,
+                channel,
+            } => {
+                notes.send_controller_on(event.offset, controller, value, channel);
             }
             _ => {}
         }
@@ -1248,10 +1283,10 @@ mod tests {
     }
 
     /// Keeps the notes and the controllers it gets in a block, with their
-    /// offsets.
+    /// offsets, and the controllers' channels.
     struct Kept {
         notes: Vec<(usize, NoteEvent)>,
-        controllers: Vec<(usize, Controller, f32)>,
+        controllers: Vec<(usize, Controller, f32, Option<u8>)>,
     }
 
     impl Node for Kept {
@@ -1261,8 +1296,13 @@ mod tests {
             for event in ctx.events {
                 match event.kind {
                     NodeEventKind::Note(note) => self.notes.push((event.offset, note)),
-                    NodeEventKind::Controller { controller, value } => {
-                        self.controllers.push((event.offset, controller, value));
+                    NodeEventKind::Controller {
+                        controller,
+                        value,
+                        channel,
+                    } => {
+                        let offset = event.offset;
+                        self.controllers.push((offset, controller, value, channel));
                     }
                     _ => {}
                 }
@@ -1276,6 +1316,7 @@ mod tests {
             note: NoteId(note),
             key,
             velocity: 1.0,
+            channel: None,
         }
     }
 
@@ -1416,10 +1457,8 @@ mod tests {
         let (mut graph, nodes) = notes_through(NoteSwitch::new(effect, false), Vec::new());
         let sustain = Controller::SUSTAIN;
         assert_eq!(play(&mut graph, nodes, 0, &[], &[]), [(0, on(1, 60))]);
-        assert_eq!(
-            kept_by(&mut graph, nodes[2]).controllers,
-            [(0, sustain, 1.0)]
-        );
+        let controllers = |graph: &mut _| kept_by(graph, nodes[2]).controllers.clone();
+        assert_eq!(controllers(&mut graph), [(0, sustain, 1.0, None)]);
         // The pedal would hold the note on, so it comes up as the note
         // ends.
         let release = musicable_model::clip::Note::RELEASE_VELOCITY;
@@ -1427,10 +1466,7 @@ mod tests {
             play(&mut graph, nodes, 64, &[switch(16, true)], &[]),
             [(16, off(1, release))]
         );
-        assert_eq!(
-            kept_by(&mut graph, nodes[2]).controllers,
-            [(16, sustain, 0.0)]
-        );
+        assert_eq!(controllers(&mut graph), [(16, sustain, 0.0, None)]);
     }
 
     #[test]
@@ -1438,14 +1474,17 @@ mod tests {
         let script = vec![vec![(0, on(1, 60))]];
         let (mut graph, nodes) = notes_through(NoteSwitch::new(Octave::boxed(), false), script);
         let sustain = Controller::SUSTAIN;
+        // On a channel, as a note wire with one plays it.
         let down = NodeEventKind::Controller {
             controller: sustain,
             value: 1.0,
+            channel: Some(3),
         };
         let pedal = NodeEvent {
             offset: 0,
             kind: down,
         };
+        let controllers = |graph: &mut _| kept_by(graph, nodes[2]).controllers.clone();
         assert_eq!(play(&mut graph, nodes, 0, &[pedal], &[]), [(0, on(1, 72))]);
         // The effect keeps the pedal to itself. Bypassed, the pedal passes
         // by as it is, down, once the effect's note has ended.
@@ -1454,17 +1493,11 @@ mod tests {
             play(&mut graph, nodes, 64, &[switch(16, true)], &[]),
             [(16, off(1, release))]
         );
-        assert_eq!(
-            kept_by(&mut graph, nodes[2]).controllers,
-            [(16, sustain, 1.0)]
-        );
+        assert_eq!(controllers(&mut graph), [(16, sustain, 1.0, Some(3))]);
         // Brought back, the pedal that passed by comes up, and the effect
         // hears it's down before anything else.
         assert!(play(&mut graph, nodes, 128, &[switch(8, false)], &[]).is_empty());
-        assert_eq!(
-            kept_by(&mut graph, nodes[2]).controllers,
-            [(8, sustain, 0.0)]
-        );
+        assert_eq!(controllers(&mut graph), [(8, sustain, 0.0, Some(3))]);
         assert_eq!(
             log(&mut graph, nodes[1]).changes,
             [(0, down), (136, down), (136, switch(8, false).kind)]

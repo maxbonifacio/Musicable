@@ -63,7 +63,7 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
 use crate::arp::{Arp, Stepped};
-use crate::{ALIVE, FIXED_PORTS, MIDI_OUT, MPE, gui, violation};
+use crate::{ALIVE, FIXED_PORTS, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation};
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
 pub const SYNTH_ID: &CStr = c"org.musicable.test.synth";
@@ -389,6 +389,8 @@ pub(crate) struct TestPlugin {
     kind: Kind,
     /// Whether it's the synth taking notes only as MIDI with MPE.
     mpe: bool,
+    /// Whether it's the synth playing each channel as a part of its own.
+    parts: bool,
     host: *const clap_host,
     /// Written once, in `init`, on the main thread.
     ext: UnsafeCell<HostExtensions>,
@@ -481,6 +483,7 @@ pub(crate) fn create(host: *const clap_host, id: &CStr) -> *const clap_plugin {
         },
         kind,
         mpe: kind == Kind::Synth && MPE.load(Ordering::SeqCst),
+        parts: kind == Kind::Synth && PARTS.load(Ordering::SeqCst),
         host,
         ext: UnsafeCell::new(HostExtensions::NONE),
         initialized: AtomicBool::new(false),
@@ -1201,7 +1204,8 @@ impl TestPlugin {
         if !v.active {
             return;
         }
-        let frequency = 440.0 * ((f64::from(v.key) + v.tuning - 69.0) / 12.0).exp2();
+        let key = f64::from(v.key) + part_transpose(self.parts, v.channel);
+        let frequency = 440.0 * ((key + v.tuning - 69.0) / 12.0).exp2();
         let amplitude = v.velocity * (level + v.modulation) * (1.0 + v.pressure);
         for sample in &mut buffer[start..end] {
             let phase = v.phase * TAU;
