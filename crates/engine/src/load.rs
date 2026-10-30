@@ -498,125 +498,157 @@ pub(crate) mod tests {
         }
     }
 
-    /// Asserts that `load` reads `spun` nanoseconds, within 5%.
+    /// Checks that `load` reads `spun` nanoseconds, within 5%. Reading less
+    /// is a fault, and fails at once. Reading more can be one too, or the
+    /// thread losing its core between the meter reading its clock and the
+    /// node reading its own, while other tests keep every core busy, so
+    /// that's an error for [`timed`] to try again on.
     #[track_caller]
-    pub(crate) fn assert_reads(load: &Load, spun: &AtomicU64) {
+    pub(crate) fn reads(load: &Load, spun: &AtomicU64) -> Result<(), String> {
         let spun = spun.load(Relaxed) as f64 * 1e-9;
         let busy = load.busy().as_secs_f64();
         assert!(spun > 0.0, "the node spun");
-        assert!(
-            (busy / spun - 1.0).abs() < 0.05,
-            "{busy} s read for {spun} s spun"
-        );
+        let read = format!("{busy} s read for {spun} s spun");
+        assert!(busy / spun > 0.95, "{read}");
+        match busy / spun < 1.05 {
+            true => Ok(()),
+            false => Err(read),
+        }
+    }
+
+    /// Runs `check`, a test of the time nodes take, until it passes, up to
+    /// three times. A meter that reads high reads high every time, and a
+    /// thread losing its core only now and then.
+    #[track_caller]
+    pub(crate) fn timed(mut check: impl FnMut() -> Result<(), String>) {
+        let mut readings = Vec::new();
+        for _ in 0..3 {
+            match check() {
+                Ok(()) => return,
+                Err(reading) => readings.push(reading),
+            }
+        }
+        panic!("read high three times: {}", readings.join(", "));
     }
 
     #[test]
     fn each_node_reads_the_time_it_takes() {
-        let mut g = Graph::new();
-        let sum = g.add(NodeKey(0), Sum::default());
-        let (short, short_spun) = spin(Duration::from_micros(200));
-        let (long, long_spun) = spin(Duration::from_micros(500));
-        for (key, node) in [(1, short), (2, long)] {
-            let node = g.add(NodeKey(key), node);
-            g.connect(node, sum).unwrap();
-        }
-        g.set_output(sum).unwrap();
-        let mut graph = g.prepare(&CONFIG).unwrap();
-        let loads = graph.loads();
-        play(&mut ReferenceRenderer, &mut graph, 0, 40);
-        let short = loads.get(NodeKey(1)).unwrap();
-        let long = loads.get(NodeKey(2)).unwrap();
-        assert_reads(short, &short_spun);
-        assert_reads(long, &long_spun);
-        assert_eq!(long.frames(), 40 * 64);
-        let longest = long.take_longest();
-        assert!(longest >= Duration::from_micros(500), "{longest:?}");
-        // Blocks rendered ahead take their time, but none is the longest.
-        play_ahead(&mut ReferenceRenderer, &mut graph, 40 * 64, 10);
-        assert_eq!(long.frames(), 50 * 64);
-        assert_eq!(long.take_longest(), Duration::ZERO);
-        // Summing silence takes next to nothing.
-        let sum = loads.get(NodeKey(0)).unwrap();
-        assert!(sum.busy() * 20 < short.busy(), "{:?}", sum.busy());
-        assert_eq!(sum.frames(), 50 * 64);
+        timed(|| {
+            let mut g = Graph::new();
+            let sum = g.add(NodeKey(0), Sum::default());
+            let (short, short_spun) = spin(Duration::from_micros(200));
+            let (long, long_spun) = spin(Duration::from_micros(500));
+            for (key, node) in [(1, short), (2, long)] {
+                let node = g.add(NodeKey(key), node);
+                g.connect(node, sum).unwrap();
+            }
+            g.set_output(sum).unwrap();
+            let mut graph = g.prepare(&CONFIG).unwrap();
+            let loads = graph.loads();
+            play(&mut ReferenceRenderer, &mut graph, 0, 40);
+            let short = loads.get(NodeKey(1)).unwrap();
+            let long = loads.get(NodeKey(2)).unwrap();
+            reads(short, &short_spun)?;
+            reads(long, &long_spun)?;
+            assert_eq!(long.frames(), 40 * 64);
+            let longest = long.take_longest();
+            assert!(longest >= Duration::from_micros(500), "{longest:?}");
+            // Blocks rendered ahead take their time, but none is the longest.
+            play_ahead(&mut ReferenceRenderer, &mut graph, 40 * 64, 10);
+            assert_eq!(long.frames(), 50 * 64);
+            assert_eq!(long.take_longest(), Duration::ZERO);
+            // Summing silence takes next to nothing.
+            let sum = loads.get(NodeKey(0)).unwrap();
+            assert_eq!(sum.frames(), 50 * 64);
+            match sum.busy() * 20 < short.busy() {
+                true => Ok(()),
+                false => Err(format!("{:?} read summing silence", sum.busy())),
+            }
+        });
     }
 
     #[test]
     fn playing_notes_and_modulating_count_towards_a_node() {
-        let mut g = Graph::new();
-        let sum = g.add(NodeKey(0), Sum::default());
-        let before = Duration::from_micros(150);
-        let player = Spin {
-            render: Duration::from_micros(50),
-            before,
-            ..Spin::default()
-        };
-        let modulator = Spin {
-            before,
-            ..Spin::default()
-        };
-        let (played, modulated) = (player.spun.clone(), modulator.spun.clone());
-        let player = g.add(NodeKey(1), player);
-        let modulator = g.add(NodeKey(2), modulator);
-        g.send_notes(player, sum).unwrap();
-        g.modulate(modulator, sum, ParamId(0)).unwrap();
-        g.set_output(sum).unwrap();
-        let mut graph = g.prepare(&CONFIG).unwrap();
-        let loads = graph.loads();
-        play(&mut ReferenceRenderer, &mut graph, 0, 40);
-        let player = loads.get(NodeKey(1)).unwrap();
-        assert_reads(player, &played);
-        assert_reads(loads.get(NodeKey(2)).unwrap(), &modulated);
-        // A block's time counts from the notes it plays.
-        let longest = player.take_longest();
-        assert!(longest >= Duration::from_micros(200), "{longest:?}");
+        timed(|| {
+            let mut g = Graph::new();
+            let sum = g.add(NodeKey(0), Sum::default());
+            let before = Duration::from_micros(150);
+            let player = Spin {
+                render: Duration::from_micros(50),
+                before,
+                ..Spin::default()
+            };
+            let modulator = Spin {
+                before,
+                ..Spin::default()
+            };
+            let (played, modulated) = (player.spun.clone(), modulator.spun.clone());
+            let player = g.add(NodeKey(1), player);
+            let modulator = g.add(NodeKey(2), modulator);
+            g.send_notes(player, sum).unwrap();
+            g.modulate(modulator, sum, ParamId(0)).unwrap();
+            g.set_output(sum).unwrap();
+            let mut graph = g.prepare(&CONFIG).unwrap();
+            let loads = graph.loads();
+            play(&mut ReferenceRenderer, &mut graph, 0, 40);
+            let player = loads.get(NodeKey(1)).unwrap();
+            reads(player, &played)?;
+            reads(loads.get(NodeKey(2)).unwrap(), &modulated)?;
+            // A block's time counts from the notes it plays.
+            let longest = player.take_longest();
+            assert!(longest >= Duration::from_micros(200), "{longest:?}");
+            Ok(())
+        });
     }
 
     #[test]
     fn loads_carry_on_across_swaps() {
-        // A spinning node on a latent path and a dry one, so delay
-        // compensation adds a delay after the dry one.
-        let graph = |latency: usize| {
-            let mut g = Graph::new();
-            let sum = g.add(NodeKey(0), Sum::default());
-            let (node, spun) = spin(Duration::from_micros(100));
-            let source = g.add(NodeKey(1), node);
-            let wet = g.add(NodeKey(2), Latent(Delay::new(latency)));
-            g.connect(source, wet).unwrap();
-            g.connect(wet, sum).unwrap();
-            g.connect(source, sum).unwrap();
-            g.set_output(sum).unwrap();
-            (g.prepare(&CONFIG).unwrap(), spun)
-        };
-        let (mut first, spun_first) = graph(10);
-        play(&mut ReferenceRenderer, &mut first, 0, 10);
-        let (mut second, spun_second) = graph(20);
-        let loads = second.loads();
-        let delay = |loads: &NodeLoads| {
-            let after = |key| {
-                matches!(
-                    key,
-                    LoadKey::Delay {
-                        after: NodeKey(1),
-                        ..
-                    }
-                )
+        timed(|| {
+            // A spinning node on a latent path and a dry one, so delay
+            // compensation adds a delay after the dry one.
+            let graph = |latency: usize| {
+                let mut g = Graph::new();
+                let sum = g.add(NodeKey(0), Sum::default());
+                let (node, spun) = spin(Duration::from_micros(100));
+                let source = g.add(NodeKey(1), node);
+                let wet = g.add(NodeKey(2), Latent(Delay::new(latency)));
+                g.connect(source, wet).unwrap();
+                g.connect(wet, sum).unwrap();
+                g.connect(source, sum).unwrap();
+                g.set_output(sum).unwrap();
+                (g.prepare(&CONFIG).unwrap(), spun)
             };
-            let mut delays = loads.iter().filter(|&(key, _)| after(key));
-            let (_, delay) = delays.next().expect("a delay after the dry path");
-            assert!(delays.next().is_none());
-            delay.frames()
-        };
-        assert_eq!(delay(&first.loads()), 640);
-        // Until the engine installs it, a graph's loads read nothing.
-        assert_eq!(loads.get(NodeKey(1)).unwrap().frames(), 0);
-        rt::scope(|| second.adopt_from(&mut first));
-        play(&mut ReferenceRenderer, &mut second, 640, 10);
-        let spinner = loads.get(NodeKey(1)).unwrap();
-        assert_eq!(spinner.frames(), 1280);
-        spun_second.fetch_add(spun_first.load(Relaxed), Relaxed);
-        assert_reads(spinner, &spun_second);
-        assert_eq!(delay(&loads), 1280, "delays carry on from theirs too");
+            let (mut first, spun_first) = graph(10);
+            play(&mut ReferenceRenderer, &mut first, 0, 10);
+            let (mut second, spun_second) = graph(20);
+            let loads = second.loads();
+            let delay = |loads: &NodeLoads| {
+                let after = |key| {
+                    matches!(
+                        key,
+                        LoadKey::Delay {
+                            after: NodeKey(1),
+                            ..
+                        }
+                    )
+                };
+                let mut delays = loads.iter().filter(|&(key, _)| after(key));
+                let (_, delay) = delays.next().expect("a delay after the dry path");
+                assert!(delays.next().is_none());
+                delay.frames()
+            };
+            assert_eq!(delay(&first.loads()), 640);
+            // Until the engine installs it, a graph's loads read nothing.
+            assert_eq!(loads.get(NodeKey(1)).unwrap().frames(), 0);
+            rt::scope(|| second.adopt_from(&mut first));
+            play(&mut ReferenceRenderer, &mut second, 640, 10);
+            let spinner = loads.get(NodeKey(1)).unwrap();
+            assert_eq!(spinner.frames(), 1280);
+            spun_second.fetch_add(spun_first.load(Relaxed), Relaxed);
+            reads(spinner, &spun_second)?;
+            assert_eq!(delay(&loads), 1280, "delays carry on from theirs too");
+            Ok(())
+        });
     }
 
     #[test]

@@ -237,10 +237,12 @@ impl Analyses {
     }
 
     /// Waits until every file asked for is analysed, taking them into
-    /// `editor`. For tests.
+    /// `editor`. For tests. Analysis runs at a lower priority than they do,
+    /// so while other tests keep every core busy it can wait minutes for
+    /// one: the five minutes it has are only so that a hang fails.
     #[cfg(test)]
     pub(crate) fn wait(&mut self, editor: &mut Editor) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         let mut messages = Vec::new();
         while !self.analysing.is_empty() {
             assert!(

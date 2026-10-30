@@ -1940,7 +1940,10 @@ beyond their noise, so every block is timed. The tests
 `each_node_reads_the_time_it_takes` (in `load.rs`) and
 `nodes_read_the_time_they_take_on_any_thread` (in `parallel/tests.rs`)
 check that a node that spins for a known time reads it within 5%, on each
-renderer.
+renderer. Reading less fails at once. Reading more can also be the thread
+losing its core to another test, between the meter's clock and the node's,
+so a test that reads more tries again, up to three times in all
+(`load::tests::timed`): a meter that's wrong is wrong every time.
 
 ## Real-time rules
 
