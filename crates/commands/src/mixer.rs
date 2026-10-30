@@ -145,7 +145,8 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
                 Type::Track,
                 "Another track to take the input from, at its tap, in place of an interface's, \
                  which the track monitors In and records: its sound for an audio track, or for \
-                 a MIDI track, another MIDI track's notes, its pre_fx.",
+                 a MIDI track, another MIDI track's notes: at its pre_fx, those of its clips and \
+                 its input, or at its post_fx, those that reach its instrument.",
             ),
             Param::optional(
                 "tap",
@@ -157,7 +158,8 @@ const COMMANDS: [(CommandId, &str, &[Param], Build); 16] = [
             Param::optional(
                 "after",
                 Type::Device,
-                "Takes what this device, on another track, puts out instead.",
+                "Takes what this device, on another track, puts out instead: for a MIDI track, \
+                 the notes a MIDI effect plays.",
             ),
             Param::optional(
                 "resampling",
@@ -356,7 +358,7 @@ fn input(args: &Args, project: &Project) -> Result<Option<Input>, CommandError> 
 /// The tap the arguments of [`SET_INPUT`] name, if they name one: a point
 /// on another track, what a device puts out, or the master's Post Fader,
 /// for Resampling. A point that isn't named is Post FX, or for a MIDI
-/// track, which takes notes, Pre FX.
+/// track, which takes notes, Pre FX, its clips' and its input's.
 fn tap(args: &Args, project: &Project) -> Result<Option<Tap>, CommandError> {
     let from: Option<TrackId> = args.opt("from")?;
     let point: Option<String> = args.opt("tap")?;
@@ -787,7 +789,8 @@ fn add_send(tx: &mut Transaction<'_>, track: TrackId, to: TrackId) -> Result<Opt
 #[cfg(test)]
 mod tests {
     use musicable_model::native::{NativeDevice, NativeKind};
-    use musicable_model::{DeviceKind, Project, Send, TrackKind};
+    use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
+    use musicable_model::{DeviceKind, PluginFormat, Project, Send, TrackKind};
 
     use super::*;
     use crate::Edit;
@@ -1198,6 +1201,17 @@ mod tests {
         let mut project = Project::new();
         let keys = project.add_track("Keys", TrackKind::Midi);
         let double = project.add_track("Double", TrackKind::Midi);
+        let print = project.add_track("Print", TrackKind::Audio);
+        let arp = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.arp".into(),
+            name: "Arp".into(),
+            kind: PluginKind::MidiEffect,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        }));
+        let arp_id = arp.id;
+        project.track_mut(keys).unwrap().devices.push(arp);
         let mut setup = Setup::new(project);
         // Pre FX without a tap: the notes.
         set_input(&mut setup, double, Args::new().with("from", keys)).unwrap();
@@ -1205,12 +1219,32 @@ mod tests {
         assert_eq!(taken.input, Some(Input::Tap(Tap::PreFx(keys))));
         assert_eq!(taken.monitor, Monitor::In);
         assert_eq!(setup.committed_names(), ["Input"]);
-        let invalid = |message: &str| Err(CommandError::invalid(message));
-        let post_fx = Args::new().with("from", keys).with("tap", "post_fx");
+        // What the arpeggiator plays, and what reaches an instrument after
+        // it, at Post FX.
+        set_input(&mut setup, double, Args::new().with("after", arp_id)).unwrap();
         assert_eq!(
-            set_input(&mut setup, double, post_fx),
-            invalid("Keys Post FX is sound: a MIDI track takes another MIDI track's notes")
+            track(&setup, double).input,
+            Some(Input::Tap(Tap::Device(arp_id)))
         );
+        let post_fx = Args::new().with("from", keys).with("tap", "post_fx");
+        set_input(&mut setup, double, post_fx).unwrap();
+        let post_fx = Tap::PostFx(Chain::Track(keys));
+        assert_eq!(track(&setup, double).input, Some(Input::Tap(post_fx)));
+        let invalid = |message: &str| Err(CommandError::invalid(message));
+        let post_fader = Args::new().with("from", keys).with("tap", "post_fader");
+        assert_eq!(
+            set_input(&mut setup, double, post_fader),
+            invalid("Keys Post Fader is sound: a MIDI track takes another MIDI track's notes")
+        );
+        // An audio track takes the Keys' sound at Post FX, but there's none
+        // after the arpeggiator.
+        let after = Args::new().with("after", arp_id);
+        assert_eq!(
+            set_input(&mut setup, print, after),
+            invalid("Keys after Arp is notes: an audio track takes sound")
+        );
+        let post_fx = Args::new().with("from", keys);
+        set_input(&mut setup, print, post_fx).unwrap();
         // The Keys taking the notes the Double takes from them would loop.
         assert_eq!(
             set_input(&mut setup, keys, Args::new().with("from", double)),

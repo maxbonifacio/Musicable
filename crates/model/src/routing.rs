@@ -110,7 +110,8 @@ impl Wire {
 pub enum WireError {
     /// The project hasn't the tap's track or device.
     NoTap,
-    /// The tap is a MIDI track's Pre FX, which is notes.
+    /// The tap carries notes alone: a MIDI track's Pre FX, or the point
+    /// after one of its MIDI effects.
     Notes,
     /// The project hasn't the port: its device, or a device of a kind that
     /// has it.
@@ -133,11 +134,11 @@ pub enum InputError {
     /// The track is a group or a return track, which takes what feeds it,
     /// not an input.
     Bus,
-    /// The tap is a MIDI track's Pre FX, which is notes, and the track is
-    /// an audio track.
+    /// The tap carries notes alone, a MIDI track's Pre FX or the point
+    /// after one of its MIDI effects, and the track is an audio track.
     Notes,
-    /// The tap carries sound, and the track is a MIDI track, which takes
-    /// another MIDI track's notes alone.
+    /// The tap carries sound alone, and the track is a MIDI track, which
+    /// takes another MIDI track's notes alone.
     Sound,
     /// The tap is on the master, but not its Post Fader, which is the
     /// master's one tap for an input: Resampling.
@@ -330,18 +331,50 @@ impl Project {
         Ok(())
     }
 
-    /// Whether `tap` carries notes, not sound: a MIDI track's Pre FX.
+    /// Whether `tap` carries notes, for a MIDI track to take: a MIDI
+    /// track's Pre FX, its clips' notes and its input's, the point after
+    /// one of its MIDI effects, what that plays, and its Post FX, what
+    /// reaches its instrument, after them all.
     pub fn carries_notes(&self, tap: Tap) -> bool {
+        let midi = |track| self.track(track).is_some_and(|t| t.kind == TrackKind::Midi);
         match tap {
-            Tap::PreFx(track) => self.track(track).is_some_and(|t| t.kind == TrackKind::Midi),
-            Tap::Device(_) | Tap::PostFx(_) | Tap::PostFader(_) => false,
+            Tap::PreFx(track) | Tap::PostFx(Chain::Track(track)) => midi(track),
+            Tap::Device(device) => self.is_midi_effect_tap(device),
+            Tap::PostFx(Chain::Master) | Tap::PostFader(_) => false,
         }
+    }
+
+    /// Whether `tap` carries sound, for an audio track or a wire to take:
+    /// every tap but those that carry notes alone, a MIDI track's Pre FX
+    /// and the points after its MIDI effects. A MIDI track's Post FX
+    /// carries both: what comes out of its last device is sound.
+    pub fn carries_sound(&self, tap: Tap) -> bool {
+        match tap {
+            Tap::PreFx(track) => self.track(track).is_none_or(|t| t.kind != TrackKind::Midi),
+            Tap::Device(device) => !self.is_midi_effect_tap(device),
+            Tap::PostFx(_) | Tap::PostFader(_) => true,
+        }
+    }
+
+    /// Whether the device with id `device` is a MIDI effect the notes
+    /// reach, on a MIDI track before its first instrument, so the point
+    /// after it carries the notes it plays. One they don't reach is out of
+    /// their way, as if deactivated, and the point after it carries what
+    /// comes into it.
+    fn is_midi_effect_tap(&self, device: DeviceId) -> bool {
+        self.find_device(device)
+            .is_some_and(|(chain, index, found)| {
+                let devices = self.devices(chain).unwrap_or_default();
+                found.kind.is_midi_effect()
+                    && self.has_notes(chain)
+                    && !devices[..index].iter().any(|d| d.kind.is_instrument())
+            })
     }
 
     /// Whether the project has the ends of a wire from `from` to `to`, and
     /// the tap carries sound.
     fn check_ends(&self, from: Tap, to: Port) -> Result<(), WireError> {
-        if self.carries_notes(from) {
+        if !self.carries_sound(from) {
             return Err(WireError::Notes);
         }
         if self.tap_chain(from).is_none() {
@@ -361,9 +394,10 @@ impl Project {
 
     /// Whether the track with id `track` can take its input from `tap`, in
     /// place of the input it has, and if not, why not. An audio track takes
-    /// sound: any tap on another track but a MIDI track's Pre FX, or the
-    /// master's Post Fader, which is [Resampling](Input::RESAMPLING). A
-    /// MIDI track takes another MIDI track's Pre FX: its notes. Group and
+    /// sound ([`carries_sound`](Self::carries_sound)) from any tap on another
+    /// track, or the master's Post Fader, which is
+    /// [Resampling](Input::RESAMPLING). A MIDI track takes another MIDI
+    /// track's notes ([`carries_notes`](Self::carries_notes)). Group and
     /// return tracks take no input. The signal from the track can't reach
     /// the tap, so the input makes no loop, but for Resampling, which the
     /// track records and never plays.
@@ -373,10 +407,32 @@ impl Project {
             return Ok(());
         }
         let head = Point::Head(Chain::Track(track));
-        if self.live(Some(track)).flow.reaches(head, Point::tap(tap)) {
+        let from = self.input_point(track, tap);
+        if self.live(Some(track)).flow.reaches(head, from) {
             return Err(InputError::Loop);
         }
         Ok(())
+    }
+
+    /// Where the input of the track with id `track` from `tap` takes its
+    /// signal in the flow: for a MIDI track's notes from another's Post
+    /// FX, what reaches its instrument, after its last MIDI effect, rather
+    /// than what comes out of its last device.
+    fn input_point(&self, track: TrackId, tap: Tap) -> Point {
+        let notes = self.track(track).is_some_and(|t| t.kind == TrackKind::Midi);
+        match tap {
+            Tap::PostFx(Chain::Track(on)) if notes => {
+                let devices = self.track(on).map_or(&[][..], |t| &t.devices);
+                (devices.iter())
+                    .take_while(|device| !device.kind.is_instrument())
+                    .filter(|device| device.kind.is_midi_effect())
+                    .last()
+                    .map_or(Point::Head(Chain::Track(on)), |effect| {
+                        Point::Device(effect.id)
+                    })
+            }
+            _ => Point::tap(tap),
+        }
     }
 
     /// Whether the project has the track with id `track` and `tap`, and the
@@ -387,11 +443,10 @@ impl Project {
             return Err(InputError::Bus);
         }
         let chain = self.tap_chain(tap).ok_or(InputError::NoTap)?;
-        let notes = self.carries_notes(tap);
         match taker.kind {
-            TrackKind::Midi if !notes => Err(InputError::Sound),
+            TrackKind::Midi if !self.carries_notes(tap) => Err(InputError::Sound),
             TrackKind::Midi => Ok(()),
-            _ if notes => Err(InputError::Notes),
+            _ if !self.carries_sound(tap) => Err(InputError::Notes),
             _ if chain == Chain::Master && tap != Tap::PostFader(Chain::Master) => {
                 Err(InputError::Master)
             }
@@ -447,7 +502,8 @@ impl Project {
             if self.check_input_ends(track.id, tap).is_err() {
                 continue;
             }
-            let (from, to) = (Point::tap(tap), Point::Head(Chain::Track(track.id)));
+            let from = self.input_point(track.id, tap);
+            let to = Point::Head(Chain::Track(track.id));
             if Input::Tap(tap).is_resampling() {
                 live.inputs.push((track.id, tap));
             } else if flow.reaches(to, from) {
@@ -759,20 +815,89 @@ mod tests {
     }
 
     #[test]
-    fn a_midi_tracks_pre_fx_is_notes() {
+    fn a_midi_tracks_pre_fx_is_notes_and_its_post_fx_both() {
         let mut m = mix();
         let keys = m.project.add_track("Keys", TrackKind::Midi);
-        assert!(m.project.carries_notes(Tap::PreFx(keys)));
-        assert!(!m.project.carries_notes(Tap::PostFx(Chain::Track(keys))));
-        assert!(!m.project.carries_notes(Tap::PreFx(m.kick)));
+        let (pre, post) = (Tap::PreFx(keys), Tap::PostFx(Chain::Track(keys)));
+        assert!(m.project.carries_notes(pre) && !m.project.carries_sound(pre));
+        // What reaches its instrument, and what comes out of its devices.
+        assert!(m.project.carries_notes(post) && m.project.carries_sound(post));
+        let kick = Tap::PreFx(m.kick);
+        assert!(!m.project.carries_notes(kick) && m.project.carries_sound(kick));
         let key = Port::Sidechain(m.compressor);
+        assert_eq!(m.project.check_wire(pre, key), Err(WireError::Notes));
+        assert_eq!(m.project.check_wire(post, key), Ok(()));
+    }
+
+    /// A MIDI track, Keys, with an arpeggiator before its synth and a
+    /// compressor after it, as `mix` has them, and their ids.
+    fn arpeggiated(m: &mut Mix) -> (TrackId, [DeviceId; 3]) {
+        let keys = m.project.add_track("Keys", TrackKind::Midi);
+        let plugin = |m: &mut Mix, name: &str, kind| {
+            m.project.new_device(DeviceKind::Plugin(PluginDevice {
+                format: PluginFormat::Clap,
+                id: format!("org.example.{name}"),
+                name: name.into(),
+                kind,
+                inputs: Vec::new(),
+                settings: PluginSettings::default(),
+            }))
+        };
+        let arp = plugin(m, "arp", PluginKind::MidiEffect);
+        let synth = plugin(m, "synth", PluginKind::Instrument);
+        let compressor = device(&mut m.project, NativeKind::Compressor);
+        let ids = [arp.id, synth.id, compressor.id];
+        m.project.track_mut(keys).unwrap().devices = vec![arp, synth, compressor];
+        (keys, ids)
+    }
+
+    #[test]
+    fn the_points_after_a_midi_tracks_midi_effects_are_notes() {
+        let mut m = mix();
+        let (keys, [arp, synth, _]) = arpeggiated(&mut m);
+        let pad = m.project.add_track("Pad", TrackKind::Midi);
+        let (after_arp, after_synth) = (Tap::Device(arp), Tap::Device(synth));
+        assert!(m.project.carries_notes(after_arp) && !m.project.carries_sound(after_arp));
+        assert!(!m.project.carries_notes(after_synth) && m.project.carries_sound(after_synth));
+        // A MIDI track takes what the arpeggiator plays, and an audio track
+        // or a wire what the synth does.
+        assert_eq!(m.input(pad, after_arp), Ok(()));
+        assert_eq!(m.input(pad, after_synth), Err(InputError::Sound));
+        assert_eq!(m.input(m.kick, after_arp), Err(InputError::Notes));
+        assert_eq!(m.input(m.kick, after_synth), Ok(()));
+        let key = Port::Sidechain(m.compressor);
+        assert_eq!(m.project.check_wire(after_arp, key), Err(WireError::Notes));
+        // Not round a loop.
+        m.take(pad, after_arp);
+        let pad_post = Tap::PostFx(Chain::Track(pad));
+        assert_eq!(m.input(keys, pad_post), Err(InputError::Loop));
+        assert_eq!(m.input(keys, Tap::PreFx(pad)), Err(InputError::Loop));
+        // A file can have a MIDI effect after the instrument. No notes reach
+        // it, so the point after it carries the synth's sound.
+        m.project.track_mut(keys).unwrap().devices.swap(0, 1);
+        assert!(!m.project.carries_notes(after_arp) && m.project.carries_sound(after_arp));
+    }
+
+    #[test]
+    fn a_midi_tracks_notes_from_post_fx_are_what_reaches_its_instrument() {
+        let mut m = mix();
+        let (keys, [_, _, compressor]) = arpeggiated(&mut m);
+        let pad = m.project.add_track("Pad", TrackKind::Midi);
+        m.take(pad, Tap::PostFx(Chain::Track(keys)));
+        // So the pad's sound can key the compressor after the synth that
+        // plays the notes it takes: that makes no loop.
+        let pad_out = Tap::PostFader(Chain::Track(pad));
         assert_eq!(
-            m.project.check_wire(Tap::PreFx(keys), key),
-            Err(WireError::Notes)
-        );
-        assert_eq!(
-            m.project.check_wire(Tap::PostFx(Chain::Track(keys)), key),
+            m.project.check_wire(pad_out, Port::Sidechain(compressor)),
             Ok(())
+        );
+        // But an audio track taking the Keys' sound at Post FX can't key it.
+        let print = m.project.add_track("Print", TrackKind::Audio);
+        m.take(print, Tap::PostFx(Chain::Track(keys)));
+        let print_out = Tap::PostFader(Chain::Track(print));
+        assert_eq!(
+            m.project.check_wire(print_out, Port::Sidechain(compressor)),
+            Err(WireError::Loop)
         );
     }
 
@@ -1063,9 +1188,11 @@ mod tests {
         let keys = m.project.add_track("Keys", TrackKind::Midi);
         let pad = m.project.add_track("Pad", TrackKind::Midi);
         assert_eq!(m.input(pad, Tap::PreFx(keys)), Ok(()));
+        // What reaches its instrument.
+        assert_eq!(m.input(pad, Tap::PostFx(Chain::Track(keys))), Ok(()));
         // Sound is for audio tracks.
         for tap in [
-            Tap::PostFx(Chain::Track(keys)),
+            Tap::PostFader(Chain::Track(keys)),
             Tap::PreFx(m.kick),
             Input::RESAMPLING.tap().unwrap(),
         ] {

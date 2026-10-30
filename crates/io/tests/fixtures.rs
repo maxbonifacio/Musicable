@@ -65,6 +65,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("plugin-inputs", plugin_inputs()),
         ("tracks-from-tracks", tracks_from_tracks()),
         ("midi-effects", midi_effects()),
+        ("notes-from-tracks", notes_from_tracks()),
     ]
 }
 
@@ -1482,6 +1483,39 @@ fn midi_effects() -> Project {
     project.track_mut(keys).unwrap().devices = vec![first, chord, synth, eq];
     let alone = project.new_device(arp());
     project.track_mut(sketch).unwrap().devices = vec![alone];
+    project
+}
+
+/// MIDI tracks taking other tracks' notes, from version 23: those an
+/// arpeggiator plays, at the point after it, and those that reach the synth
+/// after it, at its track's Post FX.
+fn notes_from_tracks() -> Project {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let double = project.add_track("Arp Double", TrackKind::Midi);
+    let played = project.add_track("Played", TrackKind::Midi);
+    let plugin = |id: &str, name: &str, kind| {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: id.into(),
+            name: name.into(),
+            kind,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        })
+    };
+    let arp = project.new_device(plugin("com.example.arp", "Arp", PluginKind::MidiEffect));
+    let arp_id = arp.id;
+    let synth = plugin("com.example.synth", "Synth", PluginKind::Instrument);
+    let synth = project.new_device(synth);
+    project.track_mut(keys).unwrap().devices = vec![arp, synth];
+    let take = |project: &mut Project, track, tap| {
+        let track = project.track_mut(track).unwrap();
+        track.input = Some(Input::Tap(tap));
+        track.monitor = Monitor::In;
+    };
+    take(&mut project, double, Tap::Device(arp_id));
+    take(&mut project, played, Tap::PostFx(Chain::Track(keys)));
     project
 }
 

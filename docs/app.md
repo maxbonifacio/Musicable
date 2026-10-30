@@ -513,10 +513,13 @@ each opening to its taps as a sidechain picker's tracks do
 ([The devices panel](#the-devices-panel)), then Resampling, the master's
 Post Fader, as the manual's [Routing](../manual/src/using/routing.md) page
 shows. A tap that would close a loop is listed but greyed out, and its
-hover text says why (`Project::check_input`); a MIDI track's Pre FX, which
-is notes, isn't listed. A MIDI track's input menu lists the other MIDI
-tracks after the MIDI inputs the same way, each opening to its Pre FX, its
-notes, and nothing that carries sound. The output menu has the buses
+hover text says why (`Project::check_input`); a MIDI track's taps that
+carry notes alone, its Pre FX and the points after its MIDI effects
+(`Project::carries_sound`), aren't listed. A MIDI track's input menu lists
+the other MIDI tracks after the MIDI inputs the same way, each opening to
+its taps that carry notes (`Project::carries_notes`): its Pre FX, the
+points after its MIDI effects and its Post FX, the notes that reach its
+instrument. The output menu has the buses
 `Project::buses_for` gives the track, Sends Only last. They run
 `mixer.set_input` and `mixer.set_output`
 ([commands.md](commands.md#the-mixers-controls)).
@@ -609,9 +612,13 @@ tracks monitoring In take, into a buffer like an input's
 (`recorder::TapInput`), lined up with the output as an input's buffer is,
 so the recorder reads it the same way, without the recording offset. A
 MIDI track taking another's notes records what the engine played of them
-at that track's Pre FX, which it writes into a buffer like a MIDI input's
+at that track's tap, its Pre FX, after one of its MIDI effects or at its
+Post FX, which it writes into a buffer like a MIDI input's
 (`recorder::TapNotes`): each note and controller move, packed in two
-words, with the engine frame it played at, 16,384 of them. They go where
+words, with the engine frame it played at, 16,384 of them. A MIDI track's
+Post FX can have both buffers, its sound for an audio track and its notes
+for a MIDI track, so the session keeps them apart (`recorder::Taps`), and
+each armed track says which it takes by its kind (`Armed::kind`). They go where
 the song was as they played, without the latency, so the other track's
 clips' notes land on them, and the recorder reads them as it reads a MIDI
 input's, for recording and Capture. It asks for `MAX_WRITERS` at most: a

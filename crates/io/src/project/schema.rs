@@ -1100,9 +1100,9 @@ fn check_loops(project: &model::Project) -> Result<(), Invalid> {
 }
 
 /// Refuses wires that can't join the file's project: from a track or a
-/// device it hasn't, or from a MIDI track's Pre FX, which is notes, into a
-/// device it hasn't or one without the port, a second wire joining the same
-/// ends, and a wire that closes a loop.
+/// device it hasn't, or from a tap that carries notes alone, into a device
+/// it hasn't or one without the port, a second wire joining the same ends,
+/// and a wire that closes a loop.
 fn check_wires(project: &model::Project) -> Result<(), Invalid> {
     for (i, wire) in project.wires.iter().enumerate() {
         let path = format!("wires[{i}]");
@@ -1111,23 +1111,18 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
         match wire.from {
             routing::Tap::PreFx(id)
             | routing::Tap::PostFx(Chain::Track(id))
-            | routing::Tap::PostFader(Chain::Track(id)) => match project.track(id) {
-                None => return Err(Invalid::new(from(), no_track(id.0))),
-                Some(track)
-                    if track.kind == model::TrackKind::Midi
-                        && wire.from == routing::Tap::PreFx(id) =>
-                {
-                    let message = format!("is MIDI track {}'s Pre FX, which is notes", id.0);
-                    return Err(Invalid::new(from(), message));
-                }
-                Some(_) => {}
-            },
+            | routing::Tap::PostFader(Chain::Track(id))
+                if project.track(id).is_none() =>
+            {
+                return Err(Invalid::new(from(), no_track(id.0)));
+            }
             routing::Tap::Device(id) if project.find_device(id).is_none() => {
                 return Err(Invalid::new(from(), no_device(id)));
             }
-            routing::Tap::Device(_)
-            | routing::Tap::PostFx(Chain::Master)
-            | routing::Tap::PostFader(Chain::Master) => {}
+            tap if !project.carries_sound(tap) => {
+                return Err(Invalid::new(from(), notes(tap)));
+            }
+            _ => {}
         }
         let device = wire.to.device();
         if project.find_device(device).is_none() {
@@ -1155,11 +1150,25 @@ fn check_wires(project: &model::Project) -> Result<(), Invalid> {
     Ok(())
 }
 
+/// Says what `tap`, which carries notes alone, is: a MIDI track's Pre FX, or
+/// the point after a MIDI effect the notes reach.
+fn notes(tap: routing::Tap) -> String {
+    match tap {
+        routing::Tap::PreFx(id) => format!("is MIDI track {}'s Pre FX, which is notes", id.0),
+        routing::Tap::Device(id) => {
+            format!("is after device {}, a MIDI effect, which plays notes", id.0)
+        }
+        routing::Tap::PostFx(_) | routing::Tap::PostFader(_) => {
+            unreachable!("only a Pre FX and the point after a MIDI effect carry notes alone")
+        }
+    }
+}
+
 /// Refuses inputs from taps that don't suit their tracks: from a track or a
-/// device the file hasn't, a MIDI track's Pre FX, which is notes, on an
-/// audio track, anything but another MIDI track's Pre FX on a MIDI track,
-/// and a tap on the master other than its Post Fader, Resampling. Loops
-/// are left to [`check_route_loops`].
+/// device the file hasn't, a tap that carries notes alone on an audio
+/// track, a tap that carries no notes on a MIDI track, and a tap on the
+/// master other than its Post Fader, Resampling. Loops are left to
+/// [`check_route_loops`].
 fn check_inputs(project: &model::Project) -> Result<(), Invalid> {
     for (i, track) in project.tracks.iter().enumerate() {
         let Some(tap) = track.input.as_ref().and_then(model::Input::tap) else {
@@ -1177,17 +1186,12 @@ fn check_inputs(project: &model::Project) -> Result<(), Invalid> {
                 }
             },
             Err(routing::InputError::Notes) => {
-                let routing::Tap::PreFx(id) = tap else {
-                    unreachable!("only a Pre FX is notes");
-                };
-                format!(
-                    "is MIDI track {}'s Pre FX, which is notes: an audio track takes sound",
-                    id.0
-                )
+                format!("{}: an audio track takes sound", notes(tap))
             }
-            Err(routing::InputError::Sound) => {
-                "must be another MIDI track's Pre FX: a MIDI track takes notes".to_owned()
-            }
+            Err(routing::InputError::Sound) => "must be another MIDI track's Pre FX or Post \
+                                                FX, or after one of its MIDI effects: a MIDI \
+                                                track takes notes"
+                .to_owned(),
             Err(routing::InputError::Master) => "must be the master's Post Fader, for \
                                                  Resampling: the master has no other tap \
                                                  for an input"

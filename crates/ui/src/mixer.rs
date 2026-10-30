@@ -2115,6 +2115,8 @@ mod tests {
     use musicable_model::automation::{Lane, Point};
     use musicable_model::modulation::ModulatorKind;
     use musicable_model::param::Scale;
+    use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
+    use musicable_model::{DeviceKind, PluginFormat};
 
     use super::*;
     use crate::testing::Player;
@@ -2934,6 +2936,16 @@ mod tests {
     fn midi_tracks_take_another_midi_tracks_notes() {
         let (mut project, [_, keys, ..]) = project();
         let pad = project.add_track("Pad", TrackKind::Midi);
+        let arp = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: "org.example.arp".into(),
+            name: "Arp".into(),
+            kind: PluginKind::MidiEffect,
+            inputs: Vec::new(),
+            settings: PluginSettings::default(),
+        }));
+        let arp_id = arp.id;
+        project.track_mut(pad).unwrap().devices.push(arp);
         let mut harness = harness(project);
         harness.run();
         harness
@@ -2951,17 +2963,23 @@ mod tests {
                 .is_none()
         );
         assert!(harness.query_by_label("Resampling").is_none());
+        // Its points with notes: what comes into its devices, what the
+        // arpeggiator plays, and what reaches an instrument, at Post FX,
+        // but not its sound after the fader.
         harness.get_by_role_and_label(Role::Button, "Pad").hover();
         harness.run();
-        assert!(harness.query_by_label("Post FX").is_none());
-        harness.get_by_label("Pre FX").click();
+        for point in ["Pre FX", "after Arp", "Post FX"] {
+            assert!(harness.query_by_label(point).is_some(), "{point}");
+        }
+        assert!(harness.query_by_label("Post Fader").is_none());
+        harness.get_by_label("after Arp").click();
         harness.run();
         let input = harness.get_by_role_and_label(Role::ComboBox, "Keys Input");
-        assert_eq!(input.value().as_deref(), Some("from Pad, Pre FX"));
+        assert_eq!(input.value().as_deref(), Some("from Pad, after Arp"));
         // It plays the notes it takes, as it would a keyboard's.
         let project = harness.state().document.project();
         assert_eq!(project.track(keys).unwrap().monitor, Monitor::In);
-        let notes = Input::Tap(Tap::PreFx(pad));
+        let notes = Input::Tap(Tap::Device(arp_id));
         assert_eq!(mixed(&harness), [Change::Input(keys, Some(notes))]);
     }
 

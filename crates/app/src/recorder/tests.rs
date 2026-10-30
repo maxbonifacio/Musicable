@@ -47,6 +47,7 @@ fn lead(offset: i64) -> Armed {
     Armed {
         track: TrackId(1),
         name: "Lead".to_owned(),
+        kind: TrackKind::Audio,
         input: Input::Audio(AudioInput::default()),
         offset,
     }
@@ -508,6 +509,7 @@ fn keys(device: &str, channel: Option<u8>, offset: i64) -> Armed {
     Armed {
         track: TrackId(2),
         name: "Keys".to_owned(),
+        kind: TrackKind::Midi,
         input: Input::Midi(MidiInput {
             device: device.to_owned(),
             name: String::new(),
@@ -1052,6 +1054,7 @@ fn held_inputs_stay_within_their_memory() {
     let vox = Armed {
         track: TrackId(3),
         name: "Vox".to_owned(),
+        kind: TrackKind::Audio,
         input: Input::Audio(AudioInput {
             stereo: false,
             ..AudioInput::default()
@@ -1251,10 +1254,19 @@ fn kick() -> Tap {
 }
 
 /// Print, track 4, recording the kick's Post Fader.
+/// The taps the engine writes: `tap`'s sound, into `buffer`.
+fn sound(tap: Tap, buffer: InputBuffer) -> Taps {
+    Taps {
+        sound: BTreeMap::from([(tap, buffer)]),
+        ..Taps::default()
+    }
+}
+
 fn print() -> Armed {
     Armed {
         track: TrackId(4),
         name: "Print".to_owned(),
+        kind: TrackKind::Audio,
         input: Input::Tap(kick()),
         offset: 0,
     }
@@ -1311,7 +1323,7 @@ fn a_track_records_the_tap_it_takes_where_the_mix_played_it() {
     let (mic, _mic_writer) = input(0, 4000);
     let (tapped, _tap_writer) = input(0, 4000);
     let mut tape = tape(&folder, &mic, vec![print()]);
-    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
+    tape.set_taps(sound(kick(), tapped));
     // Song positions 5,000 to 7,000 played from engine time 1,000, and were
     // heard 64 frames later, which is where the tap has them: it has no
     // offset, as an input can.
@@ -1346,7 +1358,7 @@ fn capture_holds_the_taps_tracks_take() {
     // The taps come after the tracks to hold, as when Print takes the kick
     // as the engine starts writing it.
     let mut tape = holding(&folder, &mic, Vec::new(), vec![print()], 1);
-    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
+    tape.set_taps(sound(kick(), tapped));
     let segments = [stopped(0, 0), playing(1000, 5000, 64), stopped(3000, 7000)];
     assert!(run(&mut tape, &segments, 3100).is_empty());
     let (recorded, _) = taken(capture_at(&mut tape, 3200));
@@ -1366,7 +1378,7 @@ fn tracks_taking_the_same_tap_share_what_is_held() {
         ..print()
     };
     let mut tape = holding(&folder, &mic, Vec::new(), vec![print(), again], 1);
-    tape.set_taps(Taps::from([(kick(), TapBuffer::Sound(tapped))]));
+    tape.set_taps(sound(kick(), tapped));
     let segments = [playing(0, 0, 0), stopped(100, 100)];
     assert!(run(&mut tape, &segments, 200).is_empty());
     assert_eq!(tape.held.audio.len(), 1);
@@ -1387,10 +1399,19 @@ fn lead_notes() -> Tap {
 }
 
 /// Double, track 6, a MIDI track recording the Lead's notes.
+/// The taps the engine writes: `tap`'s notes, into `buffer`.
+fn notes(tap: Tap, buffer: NoteBuffer) -> Taps {
+    Taps {
+        notes: BTreeMap::from([(tap, buffer)]),
+        ..Taps::default()
+    }
+}
+
 fn double() -> Armed {
     Armed {
         track: TrackId(6),
         name: "Double".to_owned(),
+        kind: TrackKind::Midi,
         input: Input::Tap(lead_notes()),
         offset: 0,
     }
@@ -1497,7 +1518,7 @@ fn a_note_tap_holds_what_the_engine_played_at_its_frames() {
 fn a_midi_track_records_the_notes_it_takes_where_they_played() {
     let (buffer, mut tap) = TapNotes::new();
     let mut tape = midi_tape(&MidiBuffer::new(1).0, vec![double()]);
-    let taps = Taps::from([(lead_notes(), TapBuffer::Notes(buffer.clone()))]);
+    let taps = notes(lead_notes(), buffer.clone());
     tape.set_taps(taps.clone());
     // Song positions 5,000 to 7,000 played from engine time 1,000, where
     // the Lead's notes played as the engine rendered them, whatever the
@@ -1553,7 +1574,7 @@ fn capture_holds_the_notes_tracks_take() {
     tape.restart_held();
     // The taps come after the tracks to hold, as when Double takes the
     // Lead's notes as the engine starts writing them.
-    tape.set_taps(Taps::from([(lead_notes(), TapBuffer::Notes(buffer))]));
+    tape.set_taps(notes(lead_notes(), buffer));
     assert_eq!(tape.held.notes.len(), 1);
     play_notes(&mut tap, 0, 1000, &[(500, started(1, 48)), (600, ended(1))]);
     let segments = [stopped(0, 0), playing(100, 5000, 64), stopped(900, 5800)];

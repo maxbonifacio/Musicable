@@ -3,7 +3,8 @@
 //! renders it, sample for sample, with a latent plugin on a third track,
 //! and Capture takes it the same way. A track resampling the master
 //! records the mixdown without itself in it, and a MIDI track recording
-//! another's notes records its clip's notes where they are.
+//! another's notes records its clip's notes where they are, and those an
+//! arpeggiator plays on the other track where it played them.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -25,7 +26,7 @@ use musicable_model::{
 };
 use musicable_plugins::{PluginInfo, scan};
 use musicable_test_plugins::testing::Library;
-use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY};
+use musicable_test_plugins::{ARP_STEP, ARPEGGIATOR_ID, GAIN, GAIN_ID, LATENCY};
 
 #[global_allocator]
 static ALLOC: rt::CheckedAlloc = rt::CheckedAlloc;
@@ -405,5 +406,54 @@ fn capture_takes_the_notes_a_midi_track_took_from_another() {
     track.monitor = Monitor::In;
     let taken = recorded(&song, &dir, &installed, (false, double), |_| {});
     assert_doubled(&taken, double, &riff);
+    library.assert_alright();
+}
+
+#[test]
+fn a_midi_track_records_what_an_arpeggiator_plays() {
+    let dir = folder("arpeggiated");
+    let (library, installed) = plugins(&dir, "arpeggiated");
+    let (mut song, _, [lead, double]) = riff(&dir);
+    let arpeggiator = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: ARPEGGIATOR_ID.to_str().unwrap().to_owned(),
+        name: "Test Arpeggiator".into(),
+        kind: PluginKind::MidiEffect,
+        inputs: Vec::new(),
+        settings: PluginSettings::default(),
+    }));
+    let id = arpeggiator.id;
+    song.track_mut(lead).unwrap().devices.push(arpeggiator);
+    let taken = recorded(&song, &dir, &installed, (true, double), |session| {
+        let args = Args::new().with("track", double).with("after", id);
+        session.run_with(&mixer::SET_INPUT, &args).unwrap();
+        let track = session.project().track(double).unwrap();
+        assert_eq!(track.input, Some(Input::Tap(Tap::Device(id))));
+        let args = Args::new().with("track", double).with("armed", true);
+        session.run_with(&mixer::SET_ARM, &args).unwrap();
+    });
+    // Each of the riff's keys again and again while it's held, a step of an
+    // eighth of a second each, a quarter of a beat at 120 BPM, at its
+    // velocity: C from half a beat for a beat, and E from beat 2 for a beat
+    // and a half.
+    let step = ARP_STEP * 2.0;
+    let steps = |from: f64, count: usize, key: u8, velocity: f32| {
+        (0..count).map(move |i| {
+            let start = Beats::from_f64(from + step * i as f64);
+            (start, Beats::from_f64(step), key, velocity)
+        })
+    };
+    let expected: Vec<_> = (steps(0.5, 4, 60, 0.75))
+        .chain(steps(2.0, 6, 64, 0.5))
+        .collect();
+    let track = taken.track(double).unwrap();
+    assert_eq!(track.clips.len(), 1);
+    let ClipContent::Midi(midi) = &track.clips[0].content else {
+        panic!("{:?}", track.clips[0]);
+    };
+    let notes: Vec<_> = (midi.notes.iter())
+        .map(|n| (n.start, n.length, n.key, n.velocity))
+        .collect();
+    assert_eq!(notes, expected);
     library.assert_alright();
 }

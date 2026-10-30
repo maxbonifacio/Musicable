@@ -37,7 +37,7 @@ use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
 use crate::plugins::{Change, Plugins};
 use crate::recorder::{
-    self, Armed, Buffers, Place, Recorder, Recording, Report, TapBuffer, TapInput, TapNotes, Taps,
+    self, Armed, Buffers, Place, Recorder, Recording, Report, TapInput, TapNotes, Taps,
 };
 
 /// Builds the graph for a project, with its meters, its audio files, its
@@ -265,7 +265,7 @@ impl Session {
             capture_seconds: 0,
             recording_offset: 0,
             opened: 0,
-            taps: Taps::new(),
+            taps: Taps::default(),
             window_events: Vec::new(),
             problems: Vec::new(),
             requests: Vec::new(),
@@ -491,7 +491,7 @@ impl Session {
                         (Input::Audio(_), TrackKind::Audio) | (Input::Midi(_), TrackKind::Midi) => {
                             true
                         }
-                        (Input::Tap(tap), TrackKind::Audio) => !project.carries_notes(*tap),
+                        (Input::Tap(tap), TrackKind::Audio) => project.carries_sound(*tap),
                         (Input::Tap(tap), TrackKind::Midi) => project.carries_notes(*tap),
                         _ => false,
                     };
@@ -500,6 +500,7 @@ impl Session {
                 .map(|(track, input)| Armed {
                     track: track.id,
                     name: track.name.clone(),
+                    kind: track.kind,
                     input: input.clone(),
                     offset: match input {
                         Input::Audio(_) => audio_offset,
@@ -516,8 +517,15 @@ impl Session {
         } else {
             &armed
         };
-        let taps: BTreeSet<Tap> = taking.iter().filter_map(|t| t.input.tap()).collect();
-        self.write_taps(taps);
+        let (mut sound, mut notes) = (BTreeSet::new(), BTreeSet::new());
+        for track in taking {
+            match (track.notes_tap(), track.input.tap()) {
+                (Some(tap), _) => notes.insert(tap),
+                (None, Some(tap)) => sound.insert(tap),
+                (None, None) => false,
+            };
+        }
+        self.write_taps(sound, notes);
         let place = match &self.engine.folder {
             Some(folder) => Some(Place {
                 folder: folder.join(RECORDINGS),
@@ -535,35 +543,45 @@ impl Session {
         self.recorder.set_held(held, self.capture_seconds);
     }
 
-    /// Has the engine write `taps` into buffers for the recorder, those it
-    /// doesn't yet into new ones, and stop writing the others: the sound of
-    /// a tap of sound, or the notes of a MIDI track's Pre FX. The most it
-    /// can write: past that, tracks taking the others record nothing.
-    fn write_taps(&mut self, taps: BTreeSet<Tap>) {
-        let taps: BTreeSet<Tap> = taps.into_iter().take(MAX_WRITERS).collect();
-        let gone: Vec<Tap> = (self.taps.keys())
-            .filter(|tap| !taps.contains(tap))
-            .copied()
-            .collect();
-        for tap in gone {
-            self.taps.remove(&tap);
-            self.engine.push(Message::Writer(keys::record(tap), None));
-        }
+    /// Has the engine write the sound of the taps in `sound`, and the notes
+    /// of those in `notes`, into buffers for the recorder, those it doesn't
+    /// yet into new ones, and stop writing the others. As many as it can
+    /// write, sound first: past that, tracks taking the others record
+    /// nothing.
+    fn write_taps(&mut self, sound: BTreeSet<Tap>, notes: BTreeSet<Tap>) {
+        let sound: BTreeSet<Tap> = sound.into_iter().take(MAX_WRITERS).collect();
+        let room = MAX_WRITERS - sound.len();
+        let notes: BTreeSet<Tap> = notes.into_iter().take(room).collect();
+        let engine = &mut self.engine;
+        self.taps.sound.retain(|tap, _| {
+            let kept = sound.contains(tap);
+            if !kept {
+                engine.push(Message::Writer(keys::record(*tap), None));
+            }
+            kept
+        });
+        self.taps.notes.retain(|tap, _| {
+            let kept = notes.contains(tap);
+            if !kept {
+                engine.push(Message::Writer(keys::record_notes(*tap), None));
+            }
+            kept
+        });
         let rate = self.engine.handle.config().sample_rate;
-        let project = self.document.project();
-        for tap in taps {
-            if let Entry::Vacant(entry) = self.taps.entry(tap) {
-                let writer: Box<dyn TapWriter> = if project.carries_notes(tap) {
-                    let (buffer, writer) = TapNotes::new();
-                    entry.insert(TapBuffer::Notes(buffer));
-                    Box::new(writer)
-                } else {
-                    let (buffer, writer) = TapInput::new(rate);
-                    entry.insert(TapBuffer::Sound(buffer));
-                    Box::new(writer)
-                };
-                self.engine
-                    .push(Message::Writer(keys::record(tap), Some(writer)));
+        for tap in sound {
+            if let Entry::Vacant(entry) = self.taps.sound.entry(tap) {
+                let (buffer, writer) = TapInput::new(rate);
+                entry.insert(buffer);
+                let writer: Box<dyn TapWriter> = Box::new(writer);
+                (self.engine).push(Message::Writer(keys::record(tap), Some(writer)));
+            }
+        }
+        for tap in notes {
+            if let Entry::Vacant(entry) = self.taps.notes.entry(tap) {
+                let (buffer, writer) = TapNotes::new();
+                entry.insert(buffer);
+                let writer: Box<dyn TapWriter> = Box::new(writer);
+                (self.engine).push(Message::Writer(keys::record_notes(tap), Some(writer)));
             }
         }
     }
@@ -576,7 +594,7 @@ impl Session {
         for key in self.engine.handle.writers().to_vec() {
             self.engine.push(Message::Writer(key, None));
         }
-        self.taps.clear();
+        self.taps = Taps::default();
     }
 
     pub fn project(&self) -> &Project {

@@ -50,12 +50,15 @@
 //! so none of the track is in the mix. Each tap an audio track takes its
 //! input from has a record tap ([`Graph::add_record`]) keyed
 //! [`keys::record`], which the engine hands to the tap's writer for the
-//! recorder. A MIDI track taking another's notes, its Pre FX, has that
-//! track's [`MidiMonitor`] send them into its own monitor's side input for
-//! notes ([`Graph::send_side_notes`]), which plays them as it would a MIDI
-//! input's, and the tap has a note record ([`Graph::add_note_record`])
-//! keyed the same way. A track that goes to Sends Only feeds nothing but
-//! its sends.
+//! recorder. A MIDI track taking another's notes has the node that plays
+//! them at the tap send them into its own monitor's side input for notes
+//! ([`Graph::send_side_notes`]), which plays them as it would a MIDI
+//! input's: at the other's Pre FX, its [`MidiMonitor`]; after one of its
+//! MIDI effects, the switch of the last one that plays up to there, or the
+//! monitor; and at its Post FX, where the notes reach its instrument, the
+//! last of them all. The tap has a note record ([`Graph::add_note_record`])
+//! keyed [`keys::record_notes`]. A track that goes to Sends Only feeds
+//! nothing but its sends.
 //!
 //! Each lane of automation that isn't overridden goes to the node with its
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
@@ -218,20 +221,36 @@ pub mod keys {
     }
 
     /// The record tap ([`Graph::add_record`](crate::Graph::add_record)) of
-    /// `tap`, for a track that takes its input from it, or for a MIDI
-    /// track's Pre FX, its note record
-    /// ([`Graph::add_note_record`](crate::Graph::add_note_record)): the key
-    /// of the [`TapWriter`](crate::TapWriter) it goes to. No node has it.
+    /// `tap`, for an audio track that takes its input from it: the key of
+    /// the [`TapWriter`](crate::TapWriter) it goes to. No node has it.
     pub fn record(tap: Tap) -> NodeKey {
-        let chain = |chain| match chain {
-            Chain::Track(track) => track,
-            Chain::Master => MASTER_STRIP,
-        };
         match tap {
             Tap::PreFx(track) => track_key(15, track),
             Tap::Device(device) => NodeKey(16 << 32 | u64::from(device.0)),
-            Tap::PostFx(on) => track_key(17, chain(on)),
-            Tap::PostFader(on) => track_key(18, chain(on)),
+            Tap::PostFx(on) => track_key(17, strip(on)),
+            Tap::PostFader(on) => track_key(18, strip(on)),
+        }
+    }
+
+    /// The note record ([`Graph::add_note_record`](crate::Graph::add_note_record))
+    /// of `tap`, for a MIDI track that takes its input from it: the key of
+    /// the [`TapWriter`](crate::TapWriter) it goes to, which isn't
+    /// [`record`]'s, so a MIDI track's Post FX can have both. No node has
+    /// it.
+    pub fn record_notes(tap: Tap) -> NodeKey {
+        match tap {
+            Tap::PreFx(track) => track_key(20, track),
+            Tap::Device(device) => NodeKey(21 << 32 | u64::from(device.0)),
+            Tap::PostFx(on) => track_key(22, strip(on)),
+            Tap::PostFader(on) => track_key(23, strip(on)),
+        }
+    }
+
+    /// The track id whose keys `chain`'s strip has.
+    fn strip(chain: Chain) -> TrackId {
+        match chain {
+            Chain::Track(track) => track,
+            Chain::Master => MASTER_STRIP,
         }
     }
 
@@ -724,7 +743,7 @@ fn build(
     let mut taking_notes = Vec::new();
     let mut note_points = HashMap::new();
     // Where each MIDI track's notes are as they reach its instrument, after
-    // its MIDI effects, for its modulators.
+    // its MIDI effects, for its modulators and its Post FX.
     let mut instrument_notes = HashMap::new();
     for track in &project.tracks {
         let player = clip_player(track, media, &project.tempo).map(|player| {
@@ -813,8 +832,11 @@ fn build(
         let taps = strip.channel(Channel::Track(track), devices, media, &mut stages, cut);
         taps.record(Chain::Track(track.id), &mut points, &mut ports);
         // The notes go from the clips through the monitor and the MIDI
-        // effects, each to the next, to the instrument.
+        // effects, each to the next, to the instrument. Other MIDI tracks
+        // take them after any MIDI effect, and at Post FX, where they reach
+        // the instrument.
         if let Some(player) = player.filter(|_| track.kind == TrackKind::Midi) {
+            let head = midi_monitor.unwrap_or(player);
             let chain: Vec<NodeId> = (iter::once(player).chain(midi_monitor))
                 .chain(taps.midi_effects.iter().copied())
                 .collect();
@@ -826,6 +848,10 @@ fn build(
                 (strip.graph.send_notes(notes, instrument)).expect("the nodes were just added");
             }
             instrument_notes.insert(track.id, notes);
+            for &(effect, after) in &taps.note_taps {
+                note_points.insert(Tap::Device(effect), after.unwrap_or(head));
+            }
+            note_points.insert(Tap::PostFx(Chain::Track(track.id)), notes);
         }
         if stems.contains(&track.id) {
             tapped.insert(track.id, strip.tail.expect("the strip has its fader"));
@@ -906,8 +932,9 @@ fn build(
                 .expect("the model's routing rules leave no loops");
         }
     }
-    // A MIDI track takes another's notes from that one's monitor, on their
-    // way to its devices.
+    // A MIDI track takes another's notes from the node that plays them at
+    // the tap: that one's monitor, on their way to its devices, or one of
+    // its MIDI effects.
     for &(tap, monitor) in &taking_notes {
         if let Some(&from) = note_points.get(&tap) {
             graph
@@ -937,10 +964,10 @@ fn build(
         }
     }
     for &tap in recorded(TrackKind::Midi) {
-        if let Some(&monitor) = note_points.get(&tap) {
+        if let Some(&node) = note_points.get(&tap) {
             graph
-                .add_note_record(keys::record(tap), monitor)
-                .expect("the monitors were just added");
+                .add_note_record(keys::record_notes(tap), node)
+                .expect("the taps' nodes were just added");
         }
     }
     modulate(project, meters, &instrument_notes, &mut graph);
@@ -1197,6 +1224,10 @@ struct Taps {
     /// The switches of the MIDI effects that play before the instrument on
     /// a MIDI track, in order.
     midi_effects: Vec<NodeId>,
+    /// Where the notes are after each MIDI effect the notes reach, for the
+    /// MIDI tracks taking them: the switch of the last one that plays, up
+    /// to and including it, or `None` before the first.
+    note_taps: Vec<(DeviceId, Option<NodeId>)>,
     /// What each device puts out: its switch's output, or where it has no
     /// node in the signal, what comes into it.
     devices: Vec<(DeviceId, Option<NodeId>)>,
@@ -1264,6 +1295,7 @@ impl Strip<'_> {
         };
         let mut instrument = None;
         let mut midi_effects = Vec::new();
+        let mut note_taps = Vec::new();
         let notes = matches!(channel, Channel::Track(track) if track.kind == TrackKind::Midi);
         let (mut device_taps, mut switches) = (Vec::new(), Vec::new());
         for device in channel.devices() {
@@ -1283,6 +1315,9 @@ impl Strip<'_> {
                         midi_effects.push(node);
                     }
                     None => {}
+                }
+                if reached {
+                    note_taps.push((device.id, midi_effects.last().copied()));
                 }
                 device_taps.push((device.id, self.tail));
                 continue;
@@ -1317,6 +1352,7 @@ impl Strip<'_> {
             post_fader,
             instrument: instrument.flatten(),
             midi_effects,
+            note_taps,
             devices: device_taps,
             switches,
         }
@@ -1747,8 +1783,10 @@ mod tests {
             assert_eq!(keys::owner(key), Some(owner), "{key:?}");
         }
         // Record taps have keys no node has.
-        let tap = keys::record(musicable_model::routing::Tap::PreFx(track));
-        assert_eq!(keys::owner(tap), None);
+        let tap = musicable_model::routing::Tap::PreFx(track);
+        assert_eq!(keys::owner(keys::record(tap)), None);
+        assert_eq!(keys::owner(keys::record_notes(tap)), None);
+        assert_ne!(keys::record(tap), keys::record_notes(tap));
     }
 
     #[test]
@@ -2290,6 +2328,69 @@ mod tests {
         assert!(!opened(&p, None));
         p.tracks[0].devices[0].bypassed = true;
         assert!(opened(&p, None));
+    }
+
+    #[test]
+    fn a_midi_track_takes_the_notes_after_a_midi_effect_or_at_post_fx() {
+        let synth = DeviceKind::TestInstrument { level: 0.5 };
+        let mut p = note_through(vec![midi_effect(), midi_effect(), synth]);
+        let keys = p.tracks[0].id;
+        let [octave, fifth] = [0, 1].map(|i| p.tracks[0].devices[i].id);
+        // The Double hears what it takes through a MIDI effect of its own.
+        let double = p.add_track("Double", TrackKind::Midi);
+        let ear = p.new_device(midi_effect());
+        let ear_id = ear.id;
+        let t = p.track_mut(double).unwrap();
+        t.devices.push(ear);
+        t.monitor = Monitor::In;
+        let heard = |p: &mut Project, tap| {
+            p.track_mut(double).unwrap().input = Some(Input::Tap(tap));
+            let ear = Transposes::new(Some(0));
+            let mut devices = Devices::new();
+            devices.insert(octave, Transposes::new(Some(12)));
+            devices.insert(fifth, Transposes::new(Some(7)));
+            devices.insert(ear_id, ear.clone());
+            let graph = compile_with_devices(p, &Meters::new(), &Media::new(), &devices);
+            render(graph.prepare(&CONFIG).unwrap(), 1000);
+            ear.heard()
+        };
+        let post_fx = Tap::PostFx(Chain::Track(keys));
+        assert_eq!(heard(&mut p, Tap::PreFx(keys)), [69]);
+        assert_eq!(heard(&mut p, Tap::Device(octave)), [81]);
+        assert_eq!(heard(&mut p, Tap::Device(fifth)), [88]);
+        // What reaches the synth.
+        assert_eq!(heard(&mut p, post_fx), [88]);
+        // After a deactivated one, what comes into it, and after a bypassed
+        // one, the same.
+        p.tracks[0].devices[1].active = false;
+        assert_eq!(heard(&mut p, Tap::Device(fifth)), [81]);
+        assert_eq!(heard(&mut p, post_fx), [81]);
+        p.tracks[0].devices[0].bypassed = true;
+        assert_eq!(heard(&mut p, Tap::Device(octave)), [69]);
+        assert_eq!(heard(&mut p, post_fx), [69]);
+    }
+
+    #[test]
+    fn two_midi_tracks_record_the_same_notes_from_different_taps() {
+        let synth = DeviceKind::TestInstrument { level: 0.5 };
+        let mut p = note_through(vec![midi_effect(), synth]);
+        let keys = p.tracks[0].id;
+        let arp = p.tracks[0].devices[0].id;
+        let taps = [Tap::Device(arp), Tap::PostFx(Chain::Track(keys))];
+        for (name, tap) in ["After Arp", "Post FX"].into_iter().zip(taps) {
+            let track = p.add_track(name, TrackKind::Midi);
+            let t = p.track_mut(track).unwrap();
+            t.input = Some(Input::Tap(tap));
+            t.armed = true;
+        }
+        // An audio track takes the sound at Post FX, with a writer of its
+        // own.
+        let print = p.add_track("Print", TrackKind::Audio);
+        p.track_mut(print).unwrap().input = Some(Input::Tap(taps[1]));
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        // The arpeggiator's switch plays both MIDI tracks' notes.
+        assert!(graph.note_records().eq(taps.map(keys::record_notes)));
+        assert!(graph.records().eq([keys::record(taps[1])]));
     }
 
     /// Halves the signal 37 frames late, standing in for a plugin that
@@ -3432,7 +3533,7 @@ mod tests {
     fn a_midi_track_records_the_notes_it_takes_as_they_play() {
         let p = doubled();
         let lead = p.tracks[0].id;
-        let key = keys::record(Tap::PreFx(lead));
+        let key = keys::record_notes(Tap::PreFx(lead));
         let graph = compile(&p).prepare(&CONFIG).unwrap();
         assert!(graph.note_records().eq([key]));
         assert_eq!(graph.records().count(), 0);

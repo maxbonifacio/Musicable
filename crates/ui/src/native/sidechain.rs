@@ -16,7 +16,7 @@ use egui::{
 use musicable_commands::{Args, wire};
 use musicable_model::native::{ParamInfo, Scale, Unit};
 use musicable_model::routing::{Port, Tap, Wire, WireError};
-use musicable_model::{Chain, Project, TrackKind};
+use musicable_model::{Chain, Project};
 
 use super::{Control, SIDECHAIN, Setting};
 use crate::mixer::{automated_value, name_menu};
@@ -304,13 +304,9 @@ fn menu(
         }
         ui.close();
     }
-    // A tap carries sound, unless it's a MIDI track's notes.
-    let sound = |tap: &Tap| match *tap {
-        Tap::PreFx(track) => project
-            .track(track)
-            .is_some_and(|t| t.kind != TrackKind::Midi),
-        _ => true,
-    };
+    // A tap carries sound, unless it's a MIDI track's notes: its Pre FX,
+    // or after one of its MIDI effects.
+    let sound = |tap: &Tap| project.carries_sound(*tap);
     let refused = |tap: Tap| match current == Some(tap) {
         true => None,
         false => project.check_wire(tap, port).err(),

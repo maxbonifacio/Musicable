@@ -312,12 +312,12 @@ impl Graph {
     /// hand to the [`TapWriter`](crate::TapWriter) with `key`, as
     /// [`add_record`](Graph::add_record) records a node's output: what a
     /// MIDI track records from another's notes. A node plays only notes
-    /// that go somewhere ([`send_notes`](Graph::send_notes)). Each node's
-    /// notes go to one writer, and each writer gets one node's: a record
-    /// of a node, or with a key, that has one already isn't added.
+    /// that go somewhere ([`send_notes`](Graph::send_notes)). Each writer
+    /// gets one node's notes, and writers with different keys can get the
+    /// same node's: a record with a key that has one already isn't added.
     pub fn add_note_record(&mut self, key: NodeKey, node: NodeId) -> Result<(), GraphError> {
         self.check(node)?;
-        if !(self.note_records.iter()).any(|&(k, n)| k == key || n == node) {
+        if !self.note_records.iter().any(|&(k, _)| k == key) {
             self.note_records.push((key, node));
         }
         Ok(())
@@ -414,17 +414,23 @@ impl Graph {
                 });
             }
         }
-        // A record of a node that plays no notes stays empty.
-        let note_records: Vec<NoteRecord> = (self.note_records.iter())
-            .enumerate()
-            .map(|(i, &(key, node))| {
-                if let Some(player) = players.iter_mut().find(|p| p.node == node) {
-                    player.record = Some(i);
-                }
-                NoteRecord {
-                    key,
-                    notes: Vec::with_capacity(Notes::CAPACITY),
-                }
+        // One record for each node recorded, which each of its writers
+        // reads. A record of a node that plays no notes stays empty.
+        let mut note_records: Vec<NoteRecord> = Vec::new();
+        let note_keys: Vec<(NodeKey, usize)> = (self.note_records.iter())
+            .map(|&(key, node)| {
+                let i = (note_records.iter().position(|r| r.node == node)).unwrap_or_else(|| {
+                    let i = note_records.len();
+                    if let Some(player) = players.iter_mut().find(|p| p.node == node) {
+                        player.record = Some(i);
+                    }
+                    note_records.push(NoteRecord {
+                        node,
+                        notes: Vec::with_capacity(Notes::CAPACITY),
+                    });
+                    i
+                });
+                (key, i)
             })
             .collect();
         // Each player after the players whose notes it gets. Notes don't go
@@ -494,6 +500,7 @@ impl Graph {
             taps: self.taps,
             records: self.records,
             note_records,
+            note_keys,
             buffers,
             by_key,
             delays,
@@ -743,9 +750,11 @@ pub struct PreparedGraph {
     taps: Vec<NodeId>,
     /// The record taps, by their writers' keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
-    /// The notes each recorded node played in the current block, by their
-    /// writers' keys.
+    /// The notes each recorded node played in the current block.
     note_records: Vec<NoteRecord>,
+    /// The keys of the writers of the notes, in the order they were added,
+    /// with where their notes are in `note_records`.
+    note_keys: Vec<(NodeKey, usize)>,
     /// Each node's output for the current block.
     pub(crate) buffers: Vec<AudioBuffer>,
     /// Sorted by key.
@@ -884,10 +893,10 @@ fn switches_on(switches: u8) -> impl Iterator<Item = Controller> {
     switch.filter(move |&c| switches & switch_bit(c) != 0)
 }
 
-/// The notes a node played in the current block, for the writer with
-/// `key`: see [`Graph::add_note_record`].
+/// The notes `node` played in the current block, for the writers that
+/// record it: see [`Graph::add_note_record`].
 struct NoteRecord {
-    key: NodeKey,
+    node: NodeId,
     notes: Vec<NodeEvent>,
 }
 
@@ -1157,14 +1166,14 @@ impl PreparedGraph {
     /// block, in order, each at its offset into the block, if the graph
     /// has a note record with that key (see [`Graph::add_note_record`]).
     pub fn record_notes(&self, key: NodeKey) -> Option<&[NodeEvent]> {
-        let record = self.note_records.iter().find(|r| r.key == key)?;
-        Some(&record.notes)
+        let &(_, i) = self.note_keys.iter().find(|&&(k, _)| k == key)?;
+        Some(&self.note_records[i].notes)
     }
 
     /// The keys of the writers the graph has note records for, in the
     /// order they were added.
     pub fn note_records(&self) -> impl Iterator<Item = NodeKey> + '_ {
-        self.note_records.iter().map(|r| r.key)
+        self.note_keys.iter().map(|&(key, _)| key)
     }
 
     /// How many frames late the output plays, after delay compensation: the
@@ -1754,14 +1763,16 @@ mod tests {
         g.send_side_notes(pulse, side).unwrap();
         assert_eq!(g.send_side_notes(side, pulse), Err(GraphError::Cycle));
         g.add_note_record(NodeKey(9), pulse).unwrap();
-        // One writer for each node, and one node for each writer.
-        g.add_note_record(NodeKey(10), pulse).unwrap();
+        // One node for each writer, and as many writers as there are keys
+        // for each node.
         g.add_note_record(NodeKey(9), main).unwrap();
         // A node that plays no notes has an empty record.
         g.add_note_record(NodeKey(11), main).unwrap();
+        g.add_note_record(NodeKey(10), pulse).unwrap();
         g.set_output(main).unwrap();
         let mut graph = g.prepare(&CONFIG).unwrap();
-        assert!(graph.note_records().eq([NodeKey(9), NodeKey(11)]));
+        let keys = [NodeKey(9), NodeKey(11), NodeKey(10)];
+        assert!(graph.note_records().eq(keys));
         let tempo = TempoMap::default();
         let block = Block {
             frames: 64,
@@ -1813,8 +1824,9 @@ mod tests {
             },
         ];
         assert_eq!(graph.record_notes(NodeKey(9)), Some(&recorded[..]));
+        assert_eq!(graph.record_notes(NodeKey(10)), Some(&recorded[..]));
         assert_eq!(graph.record_notes(NodeKey(11)), Some(&[][..]));
-        assert_eq!(graph.record_notes(NodeKey(10)), None);
+        assert_eq!(graph.record_notes(NodeKey(12)), None);
     }
 
     /// Keeps the events `play_notes` gets, and those `process` gets, with

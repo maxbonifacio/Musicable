@@ -87,6 +87,10 @@ synth the chord its track's clip holds, a note at a time.
   several on one key at once, such as a note repeater's overlapping
   notes, and each sounds until the plugin ends it. Notes it plays as MIDI
   play as a keyboard's do: a key played again ends the note on it first.
+- **On another track.** Another MIDI track can take the notes it plays,
+  after it, or those that reach the instrument, at Post FX, to double them
+  on an instrument of its own or record them as a clip ([Taking another
+  track's notes](routing.md#taking-another-tracks-notes)).
 
 ## Plugin windows
 
