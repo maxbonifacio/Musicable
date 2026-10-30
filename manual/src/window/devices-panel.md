@@ -143,6 +143,10 @@ A plugin device has its name, its kind and format ("Instrument · CLAP",
   from, with a gain for each source, and a **+** to add another
   ([Sidechains](../using/sidechains.md#plugins-side-inputs)).
 
+Its right-click menu has the plugin's **Render Ahead**, as the browser's
+does, which holds for every device of the plugin
+([Plugins](../using/plugins.md#rendering-ahead)).
+
 ## Presets
 
 **Save as Preset...**, in a device's right-click menu, saves the device's

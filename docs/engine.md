@@ -1886,7 +1886,11 @@ notes and modulation. A graph without live sources is one half, which
 renders ahead. The compiler sets a track's clip player, input monitor and
 bus live when the track is set to Always Live (`Track::always_live`), so
 the whole of its strip renders live, while what feeds a group or a return
-set to it renders ahead.
+set to it renders ahead. It sets a device's switch live, while the device
+is in the signal, when the app has it render live (`Devices::set_live`),
+as for a plugin that must render in real time
+([plugins.md](plugins.md#rendering-ahead)), so what plays into it renders
+ahead, and what it plays into live.
 
 **The live half** renders on the audio thread, stretch by stretch as each
 callback plays, with the renderer `Renderer::live_renderer` gives: the

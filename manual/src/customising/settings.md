@@ -186,6 +186,9 @@ enabled = true
 
 [plugins.kinds]
 "vst3:ABCDEF0123456789ABCDEF0123456789" = "midi_effect"
+
+[plugins.render_ahead]
+"clap:com.example.outboard" = "never"
 ```
 
 Every setting can be left out:
@@ -196,7 +199,7 @@ Every setting can be left out:
 | `audio.exclusive` | Whether Musicable takes the device for itself, for the lowest latency. | `false` |
 | `audio.sample_rate` | The rate the device plays at. | The rate it runs at |
 | `audio.buffer_size` | The buffer size, in frames. | The smallest the device supports, or an ASIO driver's preferred size |
-| `audio.render_ahead` | How far ahead of the device Musicable renders the project, but for the tracks monitoring an input or set to Always Live and what they play into: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms) ([Render Ahead](../getting-started/audio.md#render-ahead)). | `normal` |
+| `audio.render_ahead` | How far ahead of the device Musicable renders the project, but for what renders live, the tracks monitoring an input or set to Always Live and the plugins that must render live or are set to Render Ahead Never, with what they play into: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms) ([Render Ahead](../getting-started/audio.md#render-ahead)). | `normal` |
 | `behaviour.play_from` | Where Play/Stop plays from: the start marker (`start_marker`) or where the playhead stopped (`playhead`). | `start_marker` |
 | `behaviour.middle_c` | What the piano roll calls MIDI note 60: `c3`, `c4` or `c5`. | `c3` |
 | `behaviour.warp_recordings` | Whether recordings follow the tempo they were played to. | `true` |
@@ -220,9 +223,10 @@ Every setting can be left out:
 | `recording.offsets` | Each is the recording offset, in `frames`, of a `device`, by its id, in exclusive mode or not (`exclusive`), at a `sample_rate`. An offset of 0 isn't kept. | None |
 | `agents.enabled` | Whether agents can control Musicable. | `false` |
 | `plugins.kinds` | The plugins marked as another kind than the scan found, in the browser ([Plugins](../using/plugins.md#finding-them)): each by its format and id, as `"clap:org.example.arp"`, and what it's marked as, `instrument`, `midi_effect` or `audio_effect`. It's not one of a profile's settings. | None |
+| `plugins.render_ahead` | The plugins set to render live wherever they are, in the browser or the devices panel ([Plugins](../using/plugins.md#rendering-ahead)): each by its format and id, as `"clap:com.example.outboard"`, at `never`. The plugins at Auto aren't here. It's not one of a profile's settings. | None |
 
 The Settings window has a control for every setting but the export
 window's, which that window keeps as it was last used, and the plugins'
-kinds, which the browser marks. Settings this
+kinds and Render Ahead, which the browser sets. Settings this
 version doesn't know are ignored, so a file from a later version still
 opens. A file that can't be read leaves the default settings, and says why.

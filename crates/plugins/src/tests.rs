@@ -1688,6 +1688,24 @@ fn a_synth_plays_out_notes_as_it_renders() {
 }
 
 #[test]
+fn a_plugin_with_a_hard_real_time_requirement_must_render_live() {
+    // A library named so has its plugins say they have one, as a plugin
+    // that talks to hardware does. They say it once, as they're made, and
+    // on the main thread.
+    let plugins = TestPlugins::new("gain");
+    assert!(!plugins.gain().must_render_live());
+    drop(plugins);
+    let plugins = TestPlugins::new("live");
+    let mut instance = plugins.gain();
+    assert!(instance.must_render_live());
+    instance.activate(CONFIG).unwrap();
+    assert!(instance.must_render_live());
+    assert!(plugins.synth().must_render_live());
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
 fn plugins_see_the_transport() {
     let plugins = TestPlugins::new("transport");
     let mut instance = plugins.gain();

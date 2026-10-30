@@ -17,9 +17,10 @@
 //! runs out, and the engine leaves those out of a node's longest.
 //!
 //! The Live marks in the tracks' headers come from the same loads: a
-//! channel with a node in the live half renders live, as the track that
-//! put the node there has it, its own track if it's one of them.
+//! channel with a node in the live half renders live, as the track or the
+//! plugin that put the node there has it, its own if it's one of them.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -153,26 +154,43 @@ impl LiveMarks {
 
     /// Works the marks out from `loads`, those of the graph last sent to
     /// the engine, if they're another graph's than last time, or none if
-    /// it has none, or renders nothing ahead.
-    pub fn update(&mut self, loads: Option<&Arc<NodeLoads>>, project: &Project) {
+    /// it has none, or renders nothing ahead. `asks` says whether a plugin
+    /// device's plugin says it must render live, rather than being set to.
+    pub fn update(
+        &mut self,
+        loads: Option<&Arc<NodeLoads>>,
+        project: &Project,
+        asks: impl Fn(DeviceId) -> bool,
+    ) {
         let same = match (&self.loads, loads) {
             (Some(old), Some(new)) => Arc::ptr_eq(old, new),
             (old, new) => old.is_none() && new.is_none(),
         };
         if !same {
             self.loads = loads.cloned();
-            self.marks = loads.map_or_else(BTreeMap::new, |loads| live_marks(loads, project));
+            self.marks = match loads {
+                Some(loads) => live_marks(loads, project, asks),
+                None => BTreeMap::new(),
+            };
         }
     }
 }
 
 /// Each channel with a node in the live half of the graph `loads` are
-/// from, with the track whose input or Always Live put the node there: the
-/// channel's own track if that's one, or else the first node's.
-fn live_marks(loads: &NodeLoads, project: &Project) -> BTreeMap<Chain, Live> {
+/// from, with what put the node there: a track's input or its Always Live,
+/// or a plugin device, which `asks` says the plugin of has to render live,
+/// or else is set to. The channel's own track if it's one, or else one of
+/// its devices, or else the first node's.
+fn live_marks(
+    loads: &NodeLoads,
+    project: &Project,
+    asks: impl Fn(DeviceId) -> bool,
+) -> BTreeMap<Chain, Live> {
     let places = Places::new(project);
     let chain_of = |key| keys::owner(key).and_then(|owner| places.owner_chain(owner));
-    let mut marks = BTreeMap::new();
+    // And how near each mark's source is: the channel's own track, one of
+    // its devices, or what feeds it.
+    let mut marks: BTreeMap<Chain, (u8, Live)> = BTreeMap::new();
     for (key, _, source) in loads.sides() {
         let (LoadKey::Node(key), Some(source)) = (key, source) else {
             continue;
@@ -180,17 +198,34 @@ fn live_marks(loads: &NodeLoads, project: &Project) -> BTreeMap<Chain, Live> {
         let Some(chain) = chain_of(key) else {
             continue;
         };
-        let Some(track) = chain_of(source).and_then(Chain::track) else {
-            continue;
+        let (live, on) = match keys::owner(source) {
+            Some(Owner::Device(device)) => match asks(device) {
+                true => (Live::Plugin(device), places.device(device)),
+                false => (Live::Never(device), places.device(device)),
+            },
+            _ => match chain_of(source) {
+                Some(Chain::Track(track)) => (Live::Track(track), Some(Chain::Track(track))),
+                _ => continue,
+            },
         };
-        let live = Live { track };
-        if chain == Chain::Track(track) {
-            marks.insert(chain, live);
-        } else {
-            marks.entry(chain).or_insert(live);
+        let near = match (on == Some(chain), live) {
+            (true, Live::Track(_)) => 0,
+            (true, _) => 1,
+            (false, _) => 2,
+        };
+        match marks.entry(chain) {
+            Entry::Vacant(entry) => {
+                entry.insert((near, live));
+            }
+            Entry::Occupied(mut entry) if near < entry.get().0 => {
+                entry.insert((near, live));
+            }
+            Entry::Occupied(_) => {}
         }
     }
-    marks
+    (marks.into_iter())
+        .map(|(chain, (_, live))| (chain, live))
+        .collect()
 }
 
 /// The figures over `readings`, oldest first, of an engine rendering at
@@ -330,7 +365,8 @@ impl Places {
 mod tests {
     use musicable_commands::{Keymap, transport};
     use musicable_engine::compile::Slot;
-    use musicable_engine::{Engine, Joint, Lead, NodeKey};
+    use musicable_engine::media::Media;
+    use musicable_engine::{Devices, Engine, Joint, Lead, Meters, NodeKey, compile_with_devices};
     use musicable_model::routing::{Port, Tap, WireId};
     use musicable_model::{DeviceKind, Send, TrackKind};
 
@@ -537,18 +573,49 @@ mod tests {
         let mut session = Session::offline(project, None, Keymap::default_keymap(), handle);
         session.wait_for_graph();
         let mut marks = LiveMarks::default();
-        marks.update(session.loads(), session.project());
-        let mark = |chain| marks.marks().get(&chain).map(|live| live.track);
+        marks.update(session.loads(), session.project(), |_| false);
+        let mark = |chain| marks.marks().get(&chain).copied();
         // Each Always Live track for itself, and the return the bass sends
         // to, and wires into, for the bass.
-        assert_eq!(mark(Chain::Track(ids.bass)), Some(ids.bass));
-        assert_eq!(mark(Chain::Track(keys)), Some(keys));
-        assert_eq!(mark(Chain::Track(reverbs)), Some(ids.bass));
-        assert!([Some(ids.bass), Some(keys)].contains(&mark(Chain::Master)));
+        let (by_bass, by_keys) = (Live::Track(ids.bass), Live::Track(keys));
+        assert_eq!(mark(Chain::Track(ids.bass)), Some(by_bass));
+        assert_eq!(mark(Chain::Track(keys)), Some(by_keys));
+        assert_eq!(mark(Chain::Track(reverbs)), Some(by_bass));
+        assert!([Some(by_bass), Some(by_keys)].contains(&mark(Chain::Master)));
         assert_eq!(mark(Chain::Track(pads)), None);
         // Nothing renders ahead without a graph.
-        marks.update(None, session.project());
+        marks.update(None, session.project(), |_| false);
         assert!(marks.marks().is_empty());
+    }
+
+    #[test]
+    fn live_marks_name_the_plugin_that_has_each_channel_render_live() {
+        let (mut project, ids) = project();
+        let reverbs = project.tracks[1].id;
+        // The drive says it must render live, and the limiter is set to.
+        let mut devices = Devices::new();
+        devices.set_live(ids.drive);
+        devices.set_live(ids.limiter);
+        let loads = |project: &Project| {
+            let graph = compile_with_devices(project, &Meters::new(), &Media::new(), &devices);
+            graph.prepare(&CONFIG).unwrap().loads()
+        };
+        let drive = |device| device == ids.drive;
+        let mut marks = LiveMarks::default();
+        marks.update(Some(&loads(&project)), &project, drive);
+        let mark = |marks: &LiveMarks, chain| marks.marks().get(&chain).copied();
+        // The drive for its track and the return it feeds, and the
+        // limiter for the master, which the drive feeds too.
+        let bass = Chain::Track(ids.bass);
+        assert_eq!(mark(&marks, bass), Some(Live::Plugin(ids.drive)));
+        let reverbs = Chain::Track(reverbs);
+        assert_eq!(mark(&marks, reverbs), Some(Live::Plugin(ids.drive)));
+        assert_eq!(mark(&marks, Chain::Master), Some(Live::Never(ids.limiter)));
+        // A track that renders live of itself names itself first.
+        project.track_mut(ids.bass).unwrap().always_live = true;
+        marks.update(Some(&loads(&project)), &project, drive);
+        assert_eq!(mark(&marks, bass), Some(Live::Track(ids.bass)));
+        assert_eq!(mark(&marks, Chain::Master), Some(Live::Never(ids.limiter)));
     }
 
     #[test]

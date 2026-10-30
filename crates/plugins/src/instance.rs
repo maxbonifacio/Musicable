@@ -139,6 +139,14 @@ impl Instance {
         either!(self, plugin => plugin.note_output())
     }
 
+    /// Whether the plugin must render live, as the audio device asks for
+    /// each block, rather than ahead of it with the rest of the project, as
+    /// it last said: a CLAP plugin with a hard real-time requirement, or a
+    /// VST3 plugin that can't render in prefetch mode.
+    pub fn must_render_live(&self) -> bool {
+        either!(self, plugin => plugin.must_render_live())
+    }
+
     /// Switches on the side inputs with ids in `wired`, the ones wires go
     /// into, and off the others, restarting an active plugin if that changes
     /// which are on. Says whether it restarted.

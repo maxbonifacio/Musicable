@@ -36,7 +36,8 @@ const LONGEST: &str = "Its longest block over the last second, as a share of the
 const RENDERS: &str = "Ahead: rendered ahead of the audio device, on all the cores, as Render \
                        Ahead in Settings > Audio has it. Live: rendered as the device asks for \
                        each buffer, as a track monitoring its input or set to Always Live is, \
-                       with what it plays into, and everything is while Render Ahead is off.";
+                       and a plugin that must, or is set to Render Ahead Never, with what it \
+                       plays into, and everything is while Render Ahead is off.";
 
 /// A share of a core over this turns a figure amber.
 pub const BUSY: f32 = 0.25;
@@ -75,32 +76,59 @@ impl Cpu {
 }
 
 /// What has a channel render live while the rest of the project renders
-/// ahead, for the Live mark in its track's header: the track that renders
-/// live of itself, as it monitors its input or is set to Always Live, and
-/// whose sound, notes or modulation reach the channel. That's the
-/// channel's own track if it's one.
+/// ahead, for the Live mark in its track's header: the track or the plugin
+/// device that renders live of itself, and whose sound, notes or modulation
+/// reach the channel. That's on the channel itself if it can be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Live {
-    pub track: TrackId,
+pub enum Live {
+    /// A track that monitors its input, or is set to Always Live.
+    Track(TrackId),
+    /// A plugin device whose plugin says it must render live, as a plugin
+    /// that talks to hardware does.
+    Plugin(DeviceId),
+    /// A plugin device whose plugin is set to Render Ahead Never.
+    Never(DeviceId),
 }
 
 impl Live {
     /// What has `chain` render live, as its Live mark says, such as "Live:
     /// fed by the armed track Vocal".
     pub(crate) fn reason(&self, project: &Project, chain: Chain) -> String {
-        let Some(source) = project.track(self.track) else {
+        let (device, why) = match *self {
+            Self::Track(track) => return track_reason(project, track, chain),
+            Self::Plugin(device) => (device, "says it must render live"),
+            Self::Never(device) => (device, "is set to Render Ahead Never"),
+        };
+        let Some((on, _, device)) = project.find_device(device) else {
             return "Live".to_owned();
         };
-        let name = &source.name;
-        let own = chain == Chain::Track(source.id);
-        match (own, source.always_live, source.monitor) {
-            (true, true, _) => "Live: set to Always Live".to_owned(),
-            (true, false, Monitor::In) => "Live: monitoring its input".to_owned(),
-            (true, false, _) => "Live: armed, monitoring its input".to_owned(),
-            (false, true, _) => format!("Live: fed by {name}, which is set to Always Live"),
-            (false, false, Monitor::In) => format!("Live: fed by {name}, which monitors its input"),
-            (false, false, _) => format!("Live: fed by the armed track {name}"),
+        let name = device.kind.name();
+        match on {
+            _ if on == chain => format!("Live: {name} {why}"),
+            Chain::Track(track) => match project.track(track) {
+                Some(track) => format!("Live: fed by {name} on {}, which {why}", track.name),
+                None => format!("Live: fed by {name}, which {why}"),
+            },
+            Chain::Master => format!("Live: fed by {name} on the master, which {why}"),
         }
+    }
+}
+
+/// What has `chain` render live, `track` monitoring its input or set to
+/// Always Live.
+fn track_reason(project: &Project, track: TrackId, chain: Chain) -> String {
+    let Some(source) = project.track(track) else {
+        return "Live".to_owned();
+    };
+    let name = &source.name;
+    let own = chain == Chain::Track(source.id);
+    match (own, source.always_live, source.monitor) {
+        (true, true, _) => "Live: set to Always Live".to_owned(),
+        (true, false, Monitor::In) => "Live: monitoring its input".to_owned(),
+        (true, false, _) => "Live: armed, monitoring its input".to_owned(),
+        (false, true, _) => format!("Live: fed by {name}, which is set to Always Live"),
+        (false, false, Monitor::In) => format!("Live: fed by {name}, which monitors its input"),
+        (false, false, _) => format!("Live: fed by the armed track {name}"),
     }
 }
 

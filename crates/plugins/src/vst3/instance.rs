@@ -21,15 +21,17 @@ use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{
 use vst3::Steinberg::Vst::ProcessModes_::kRealtime;
 use vst3::Steinberg::Vst::RestartFlags_::{
     kIoChanged, kLatencyChanged, kParamIDMappingChanged, kParamTitlesChanged, kParamValuesChanged,
-    kReloadComponent,
+    kPrefetchableSupportChanged, kReloadComponent,
 };
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::ViewType::kEditor;
+use vst3::Steinberg::Vst::ePrefetchableSupport_::kIsYetPrefetchable;
 use vst3::Steinberg::Vst::{
     BusDirection, BusInfo as Bus, BusType, IAudioProcessor, IAudioProcessorTrait, IComponent,
     IComponentHandler, IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
-    IEditControllerTrait, IMidiMapping, IMidiMappingTrait, IUnitInfo, IUnitInfoTrait, MediaType,
-    ParamID, ParameterInfo, ProcessSetup, String128, TChar, UnitInfo, kNoParentUnitId, kRootUnitId,
+    IEditControllerTrait, IMidiMapping, IMidiMappingTrait, IPrefetchableSupport,
+    IPrefetchableSupportTrait, IUnitInfo, IUnitInfoTrait, MediaType, ParamID, ParameterInfo,
+    PrefetchableSupport, ProcessSetup, String128, TChar, UnitInfo, kNoParentUnitId, kRootUnitId,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IPlugFrame, IPlugView, IPlugViewContentScaleSupport,
@@ -116,6 +118,8 @@ pub struct Instance {
     side_inputs: Vec<PluginInput>,
     /// Whether it has an event output, as it last described its buses.
     note_output: bool,
+    /// Whether it must render live, as it last said.
+    must_render_live: bool,
     /// The side inputs wires go into, by index, which are on.
     wired: Vec<u32>,
     /// The engine config it's active for.
@@ -172,6 +176,7 @@ impl Instance {
             params: Vec::new(),
             side_inputs: Vec::new(),
             note_output: false,
+            must_render_live: false,
             wired: Vec::new(),
             config: None,
             to_audio,
@@ -185,6 +190,7 @@ impl Instance {
         instance.params = instance.read_params();
         instance.side_inputs = side_inputs(&instance.buses(kInput as BusDirection));
         instance.note_output = module::buses(&instance.parts.component).notes_out > 0;
+        instance.must_render_live = instance.read_must_render_live();
         Ok(instance)
     }
 
@@ -505,6 +511,8 @@ impl Instance {
         // it was set up or before.
         restart.fetch_and(!RESTART, Ordering::AcqRel);
         self.config = Some(config);
+        // Set up, it may know better.
+        self.must_render_live = self.read_must_render_live();
         Ok(())
     }
 
@@ -556,6 +564,26 @@ impl Instance {
     /// device to carry, or the notes a MIDI effect plays.
     pub fn note_output(&self) -> bool {
         self.note_output
+    }
+
+    /// Whether the plugin must render live, as the audio device asks for
+    /// each block, rather than ahead of it with the rest of the project, as
+    /// it last said: its component's `IPrefetchableSupport` says it can't
+    /// render in VST3's prefetch mode, ever or as it is now. One without it
+    /// can. A plugin says when that changes by asking the host to restart
+    /// it, and this has its new answer after the next [`poll`](Self::poll).
+    pub fn must_render_live(&self) -> bool {
+        self.must_render_live
+    }
+
+    fn read_must_render_live(&self) -> bool {
+        let Some(support) = self.parts.component.cast::<IPrefetchableSupport>() else {
+            return false;
+        };
+        let mut prefetchable = kIsYetPrefetchable as PrefetchableSupport;
+        // SAFETY: on the main thread, with somewhere to write.
+        let said = unsafe { support.getPrefetchableSupport(&mut prefetchable) } == kResultOk;
+        said && prefetchable != kIsYetPrefetchable as PrefetchableSupport
     }
 
     /// Switches on the side inputs with ids in `wired`, the ones wires go
@@ -806,6 +834,9 @@ impl Instance {
         if restart & PARAMS_CHANGED != 0 {
             self.params = self.read_params();
             events.push(PluginEvent::ParamsChanged);
+        }
+        if restart & kPrefetchableSupportChanged != 0 {
+            self.must_render_live = self.read_must_render_live();
         }
         self.send_pending();
         let dirty = self.shared.requests.dirty.swap(false, Ordering::AcqRel);

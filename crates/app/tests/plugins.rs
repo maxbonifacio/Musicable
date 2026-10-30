@@ -17,18 +17,24 @@
 //! track's Post FX, with the first track muted. Four tracks without an
 //! instrument play four parts of a multi-timbral synth on another, through
 //! their MIDI To, each on a MIDI channel of its own, and mute and solo cut a
-//! part as they would its track. And the
+//! part as they would its track. A plugin that says it must render live
+//! renders live, with what it plays into, as does one set to Render Ahead
+//! Never, and a VST3 plugin that changes its mind changes sides. And the
 //! app's binary scans each library in a process of its own, so a library
 //! that crashes takes only that process down.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{ptr, thread};
 
 use musicable_app::{PLUGIN_SETTLING, SCAN_PLUGIN, Session};
-use musicable_commands::{Args, Keymap, Value, automation, device, edit, mixer, transport, wire};
-use musicable_engine::{Engine, EngineConfig, rt};
+use musicable_commands::{
+    Args, Keymap, Value, automation, browser, device, edit, mixer, transport, wire,
+};
+use musicable_engine::compile::keys;
+use musicable_engine::{Engine, EngineConfig, LoadKey, rt};
 use musicable_io::audio::{SampleFormat, save_wav};
 use musicable_io::project;
 use musicable_model::clip::{AudioClip, ClipContent, MidiClip};
@@ -212,6 +218,19 @@ impl TestPlugins {
             Instance::Vst3(plugin) => unsafe { self.library.vst3_label(plugin.raw_component()) }
                 .expect("Test Gain's component has a label"),
         }
+    }
+
+    /// Has the VST3 Test Gain say it can render ahead, or can't for now,
+    /// and ask the host to look again, as a plugin whose mode changed does.
+    fn set_prefetchable(&self, instance: &Instance, prefetchable: bool) {
+        let Instance::Vst3(plugin) = instance else {
+            panic!("only VST3 plugins change their minds as they play");
+        };
+        let (component, controller) = (plugin.raw_component(), plugin.raw_controller());
+        // SAFETY: as above.
+        let said =
+            unsafe { (self.library).vst3_set_prefetchable(component, controller, prefetchable) };
+        assert!(said, "Test Gain didn't take it");
     }
 
     fn assert_alright(&self) {
@@ -772,6 +791,100 @@ fn channels(output: &[f32]) -> (Vec<f32>, Vec<f32>) {
 /// Where the first sample louder than a half is.
 fn first_click(samples: &[f32]) -> Option<usize> {
     samples.iter().position(|sample| sample.abs() > 0.5)
+}
+
+/// Whether the graph the session last sent renders the device `device` in
+/// its live half.
+fn renders_live(session: &Session, device: DeviceId) -> bool {
+    let key = LoadKey::Node(keys::device(device));
+    let loads = session.loads().expect("a graph");
+    loads
+        .sides()
+        .any(|(k, _, source)| k == key && source.is_some())
+}
+
+#[test]
+fn a_clap_plugin_that_must_render_live_renders_live_and_plays() {
+    renders_live_and_plays(PluginFormat::Clap);
+}
+
+#[test]
+fn a_vst3_plugin_that_must_render_live_renders_live_and_plays() {
+    renders_live_and_plays(PluginFormat::Vst3);
+}
+
+fn renders_live_and_plays(format: PluginFormat) {
+    // Test Gain, in a library named so, says it must render live, as a
+    // plugin that talks to hardware does: its device renders live, and the
+    // tone into it ahead, and it plays as it would with the lead off.
+    let plugins = TestPlugins::new(format, "live");
+    let quarter = with_param(GAIN, plugins.factor(0.25));
+    let (song, device) = tone_with(|p| plugins.gain(p, quarter));
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    assert!(rig.session.plugin_must_render_live(device.id));
+    assert!(renders_live(&rig.session, device.id));
+    near(rig.peaks(), times(TONE, 0.25));
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_vst3_plugin_that_changes_its_mind_changes_sides_as_it_plays() {
+    let plugins = TestPlugins::new(PluginFormat::Vst3, "prefetchable");
+    let quarter = with_param(GAIN, plugins.factor(0.25));
+    let (song, device) = tone_with(|p| plugins.gain(p, quarter));
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    assert!(!renders_live(&rig.session, device.id));
+    for live in [true, false] {
+        plugins.set_prefetchable(rig.session.plugin(device.id).unwrap(), !live);
+        // It says so as the session ticks, and the graph is built again.
+        near(rig.peaks(), times(TONE, 0.25));
+        assert_eq!(rig.session.plugin_must_render_live(device.id), live);
+        assert_eq!(renders_live(&rig.session, device.id), live);
+    }
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_plugin_set_to_render_ahead_never_renders_live_until_set_back() {
+    let plugins = TestPlugins::new(PluginFormat::Clap, "never");
+    let (song, device) = tone_with(|p| plugins.gain(p, PluginSettings::default()));
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    assert!(!renders_live(&rig.session, device.id));
+    let id = GAIN_ID.to_str().unwrap();
+    let set = |plugin: &str, render_ahead| {
+        let args = Args::new()
+            .with("format", "clap")
+            .with("plugin", plugin)
+            .with("render_ahead", render_ahead);
+        (browser::SET_PLUGIN_RENDER_AHEAD, args)
+    };
+    let (command, never) = set(id, "never");
+    rig.session.run_with(&command, &never).unwrap();
+    rig.session.wait_for_graph();
+    assert!(renders_live(&rig.session, device.id));
+    // It's set to, rather than saying it must, and the app saves it.
+    assert!(!rig.session.plugin_must_render_live(device.id));
+    assert!(rig.session.take_plugin_marks_changed());
+    let marked = BTreeSet::from([(PluginFormat::Clap, id.to_owned())]);
+    assert_eq!(rig.session.plugins_never_ahead(), &marked);
+    // Setting it again changes nothing.
+    rig.session.run_with(&command, &never).unwrap();
+    assert!(!rig.session.take_plugin_marks_changed());
+    let (command, auto) = set(id, "auto");
+    rig.session.run_with(&command, &auto).unwrap();
+    rig.session.wait_for_graph();
+    assert!(!renders_live(&rig.session, device.id));
+    assert!(rig.session.plugins_never_ahead().is_empty());
+    // Only an installed plugin can be set.
+    let (command, missing) = set("org.example.missing", "never");
+    assert!(rig.session.run_with(&command, &missing).is_err());
+    drop(rig);
+    plugins.assert_alright();
 }
 
 #[test]

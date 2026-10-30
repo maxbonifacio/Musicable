@@ -20,6 +20,7 @@
 | Remove Folder from Library | `browser.remove_folder` |
 | Search the Library | `browser.search` |
 | Set Plugin Kind | `browser.set_plugin_kind` |
+| Set Plugin Render Ahead | `browser.set_plugin_render_ahead` |
 | Tag Sample | `browser.tag` |
 
 ### Clip

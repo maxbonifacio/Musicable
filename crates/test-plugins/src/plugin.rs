@@ -43,6 +43,10 @@ use clap_sys::ext::params::{
     CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_STEPPED, clap_host_params,
     clap_param_info, clap_plugin_params,
 };
+use clap_sys::ext::render::{
+    CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME, clap_plugin_render,
+    clap_plugin_render_mode,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
 use clap_sys::ext::thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check};
 use clap_sys::ext::thread_pool::{
@@ -64,7 +68,7 @@ use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
 use crate::arp::{Arp, Stepped};
 use crate::{
-    ALIVE, ECHO, ECHO_UP, FIXED_PORTS, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation,
+    ALIVE, ECHO, ECHO_UP, FIXED_PORTS, LIVE, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation,
 };
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
@@ -1867,6 +1871,8 @@ unsafe extern "C" fn plugin_get_extension(
         (&raw const NOTE_PORTS).cast()
     } else if id == CLAP_EXT_THREAD_POOL && synth {
         (&raw const THREAD_POOL).cast()
+    } else if id == CLAP_EXT_RENDER {
+        (&raw const RENDER).cast()
     } else {
         ptr::null()
     }
@@ -2238,6 +2244,25 @@ static THREAD_POOL: clap_plugin_thread_pool = clap_plugin_thread_pool {
 unsafe extern "C" fn thread_pool_exec(plugin: *const clap_plugin, task: u32) {
     // SAFETY: the host calls back with its plugin.
     unsafe { this(plugin) }.exec(task);
+}
+
+static RENDER: clap_plugin_render = clap_plugin_render {
+    has_hard_realtime_requirement: Some(render_has_hard_realtime_requirement),
+    set: Some(render_set),
+};
+
+unsafe extern "C" fn render_has_hard_realtime_requirement(plugin: *const clap_plugin) -> bool {
+    // SAFETY: the host calls back with its plugin.
+    let this = unsafe { this(plugin) };
+    this.on_main("render.has_hard_realtime_requirement");
+    LIVE.load(Ordering::SeqCst)
+}
+
+unsafe extern "C" fn render_set(plugin: *const clap_plugin, mode: clap_plugin_render_mode) -> bool {
+    // SAFETY: the host calls back with its plugin.
+    let this = unsafe { this(plugin) };
+    this.on_main("render.set");
+    mode == CLAP_RENDER_REALTIME || mode == CLAP_RENDER_OFFLINE
 }
 
 static GUI: clap_plugin_gui = clap_plugin_gui {

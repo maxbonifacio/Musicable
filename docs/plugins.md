@@ -264,6 +264,39 @@ A plugin that changes its ports asks to restart (CLAP's `rescan`, VST3's
 `kIoChanged`), and `poll` reads its side inputs again then, which the app
 gives the device ([Plugins on tracks](#plugins-on-tracks)).
 
+## Rendering ahead
+
+With Render Ahead on, a plugin's node renders ahead of the audio device
+with the rest of the graph ([engine.md](engine.md#rendering-ahead)),
+unless it must render live, as the device asks for each block:
+
+- A CLAP plugin says it must with its render extension's
+  `has_hard_realtime_requirement`, as a plugin that's a proxy for hardware
+  does. The instance asks once, on the main thread, as the plugin is made
+  (`clap::Instance::must_render_live`): CLAP has no way for a plugin to
+  say it changed its mind.
+- A VST3 plugin says it must with its component's `IPrefetchableSupport`:
+  `kIsNeverPrefetchable`, or `kIsNotYetPrefetchable` for now. One without
+  it can render ahead, in `kPrefetch` blocks ([VST3](#vst3)). The instance
+  asks as the plugin is made and each time it's activated, and again when
+  the plugin asks the host to restart it with `kPrefetchableSupportChanged`,
+  which `poll` hears, without restarting it.
+- The user can set any installed plugin to Render Ahead Never
+  (`browser.set_plugin_render_ahead`), for one that misbehaves rendered
+  ahead, such as a plugin that talks to its other instances, which a lead
+  ahead of some of them throws out. The app keeps it with the scan's list
+  rather than the project, in `settings.toml`'s `[plugins.render_ahead]`,
+  by format and id, so it holds in every project.
+
+`Plugins::devices` has the compiler set the devices whose plugins must
+render live, or are set to Never, live (`Devices::set_live`). A plugin
+that changes its answer (`Change::Live`), and a change of the setting for
+a plugin a device plays (`Plugins::take_live_changed`), build the graph
+again, with the device on its new side. The test plugins in a library
+whose file name starts with `live` say they must render live, and Test
+Gain's VST3 component gives the answer a test sets
+(`vst3_set_prefetchable`).
+
 ## State
 
 `save_state` asks the plugin for its state, in its own format, and

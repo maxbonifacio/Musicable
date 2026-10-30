@@ -82,6 +82,12 @@ rest renders ahead has a **LIVE** mark at the end of its name, and its
 tooltip says why, such as "Live: fed by the armed track Vocal". The
 project keeps it, and Undo takes it back.
 
+A plugin that says it must render live, as one that talks to hardware
+does, renders live too, with what it plays into, and so does one set to
+**Never** in its **Render Ahead**, for a plugin that misbehaves rendered
+ahead ([Plugins](../using/plugins.md#rendering-ahead)). Its track's LIVE
+mark says so, such as "Live: Outboard says it must render live".
+
 Render Ahead changes at once, with no **Apply**, since the device needn't
 open again.
 

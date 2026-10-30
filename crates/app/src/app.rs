@@ -236,6 +236,7 @@ impl App {
         session.editor_mut().behaviour = profile.behaviour;
         session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_kinds(settings.plugins.marks());
+        session.set_plugins_never_ahead(settings.plugins.never_ahead());
         session.set_plugin_waker(waker(ctx));
         // The browser's library, whose file work runs on a queue of its own.
         let queue = Arc::new(Queue::for_this_machine());
@@ -618,7 +619,8 @@ impl App {
     }
 
     /// Lists the plugins installed in the browser, each of the kind the
-    /// user marked it as, or the scan found.
+    /// user marked it as, or the scan found, and at the Render Ahead it's
+    /// set to.
     fn list_plugins(&mut self) {
         let session = &self.session;
         let mut entries: Vec<PluginEntry> = (session.installed_plugins().iter())
@@ -628,17 +630,20 @@ impl App {
                 name: plugin.name.clone(),
                 vendor: plugin.vendor.clone(),
                 kind: session.plugin_kind(plugin),
+                never_ahead: session.plugin_never_ahead(plugin),
             })
             .collect();
         entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.vendor.clone()));
         self.plugin_entries = entries;
     }
 
-    /// Saves the plugins the user marked as other kinds, and lists them
-    /// as those, once a mark changes.
-    fn follow_plugin_kinds(&mut self) {
-        if self.session.take_plugin_kinds_changed() {
-            self.settings.plugins = PluginsSettings::from_marks(self.session.plugin_kinds());
+    /// Saves the plugins the user marked as other kinds, or set to Render
+    /// Ahead Never, and lists them as that, once a mark changes.
+    fn follow_plugin_marks(&mut self) {
+        if self.session.take_plugin_marks_changed() {
+            let session = &self.session;
+            let never = session.plugins_never_ahead();
+            self.settings.plugins = PluginsSettings::new(session.plugin_kinds(), never);
             self.save_settings();
             self.list_plugins();
         }
@@ -1692,7 +1697,7 @@ impl eframe::App for App {
             self.set_installed_plugins(scanned.plugins);
         }
         self.session.tick();
-        self.follow_plugin_kinds();
+        self.follow_plugin_marks();
         self.plugin_windows.tick(&mut self.session);
         self.tick_export();
         self.messages.extend(self.session.take_problems());
@@ -1730,7 +1735,9 @@ impl eframe::App for App {
         (self.performance).update(Instant::now(), figured, period, &stats, config, project);
         // Only some of the project renders live while the rest renders ahead.
         let ahead = playing && self.session.lead() != Lead::Off;
-        self.live.update(loads.filter(|_| ahead), project);
+        let session = &self.session;
+        let asks = |device| session.plugin_must_render_live(device);
+        self.live.update(loads.filter(|_| ahead), project, asks);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
