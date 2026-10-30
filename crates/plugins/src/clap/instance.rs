@@ -30,6 +30,7 @@ use clap_sys::ext::params::{
     CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY,
     CLAP_PARAM_IS_STEPPED, clap_param_info, clap_plugin_params,
 };
+use clap_sys::ext::render::{CLAP_EXT_RENDER, clap_plugin_render};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::thread_pool::CLAP_EXT_THREAD_POOL;
 use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_plugin_timer_support};
@@ -116,6 +117,8 @@ pub struct Instance {
     side_inputs: Vec<PluginInput>,
     /// Whether it has a note output, as it last described its note ports.
     note_output: bool,
+    /// Whether it must render live, as it said once it was made.
+    must_render_live: bool,
     /// The side inputs wires go into, by id, which are on.
     wired: Vec<u32>,
     /// The engine config it's active for.
@@ -195,6 +198,11 @@ impl Instance {
             get(CLAP_EXT_THREAD_POOL).cast_mut().cast(),
             Ordering::Release,
         );
+        let render: *const clap_plugin_render = get(CLAP_EXT_RENDER).cast();
+        // SAFETY: the extension lives as long as the plugin.
+        let hard = unsafe { render.as_ref() }.and_then(|r| r.has_hard_realtime_requirement);
+        // SAFETY: on the plugin's main thread, where CLAP has hosts ask.
+        let must_render_live = hard.is_some_and(|hard| unsafe { hard(plugin) });
         shared
             .params
             .store(ext.params.cast_mut(), Ordering::Release);
@@ -206,6 +214,7 @@ impl Instance {
             params: Vec::new(),
             side_inputs: Vec::new(),
             note_output: false,
+            must_render_live,
             wired: Vec::new(),
             config: None,
             to_audio,
@@ -641,6 +650,15 @@ impl Instance {
     /// device to carry, or the notes a MIDI effect plays.
     pub fn note_output(&self) -> bool {
         self.note_output
+    }
+
+    /// Whether the plugin must render live, as the audio device asks for
+    /// each block, rather than ahead of it with the rest of the project: its
+    /// render extension says it has a hard real-time requirement, as a
+    /// plugin that talks to hardware does. CLAP has it say so once, as it's
+    /// made.
+    pub fn must_render_live(&self) -> bool {
+        self.must_render_live
     }
 
     /// Whether the plugin says it has a note output.

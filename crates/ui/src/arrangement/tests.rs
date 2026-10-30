@@ -14,9 +14,10 @@ use musicable_commands::{CommandError, Context, Document, Keymap, Named, Registr
 use musicable_model::automation::Lane;
 use musicable_model::clip::{AudioClip, ClipContent, ClipId, MidiClip, Offset, Timing, Warping};
 use musicable_model::modulation::{ModulatorKind, lfo};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::warp::Warp;
-use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
+use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TakeId, TrackId, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
@@ -833,7 +834,7 @@ fn a_track_rendering_live_has_a_live_mark_that_says_why() {
     project.track_mut(ids.keys).unwrap().always_live = true;
     let mut harness = harness(project);
     assert!(harness.query_by_label_contains("Live:").is_none());
-    let live = |track| Live { track };
+    let live = Live::Track;
     harness.state_mut().live = BTreeMap::from([
         (Chain::Track(ids.drums), live(ids.drums)),
         (Chain::Track(ids.keys), live(ids.keys)),
@@ -867,6 +868,42 @@ fn a_track_rendering_live_has_a_live_mark_that_says_why() {
             .query_by_label("Live: armed, monitoring its input")
             .is_none()
     );
+}
+
+#[test]
+fn a_track_a_plugin_has_render_live_says_so_in_its_live_mark() {
+    let (mut project, ids) = project();
+    let reverb = project.tracks[3].id;
+    let plugin = |project: &mut Project, chain, name: &str| {
+        let device = project.new_device(DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Clap,
+            id: format!("com.example.{}", name.to_lowercase()),
+            name: name.to_owned(),
+            kind: PluginKind::AudioEffect,
+            inputs: Vec::new(),
+            note_output: false,
+            settings: PluginSettings::default(),
+        }));
+        let id = device.id;
+        project.devices_mut(chain).unwrap().push(device);
+        id
+    };
+    let outboard = plugin(&mut project, Chain::Track(ids.bass), "Outboard");
+    let matcher = plugin(&mut project, Chain::Master, "Matcher");
+    let mut harness = harness(project);
+    harness.state_mut().live = BTreeMap::from([
+        (Chain::Track(ids.bass), Live::Plugin(outboard)),
+        (Chain::Track(reverb), Live::Plugin(outboard)),
+        (Chain::Master, Live::Never(matcher)),
+    ]);
+    harness.run();
+    for reason in [
+        "Live: Outboard says it must render live",
+        "Live: fed by Outboard on Bass, which says it must render live",
+        "Live: Matcher is set to Render Ahead Never",
+    ] {
+        harness.get_by_label(reason);
+    }
 }
 
 #[test]

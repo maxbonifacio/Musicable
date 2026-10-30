@@ -182,6 +182,17 @@ impl Library for StubLibrary {
         self.calls.push(format!("kind {format:?} {id} {kind}"));
         Ok(())
     }
+
+    fn set_plugin_render_ahead(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        never: bool,
+    ) -> Result<(), String> {
+        let render_ahead = if never { "never" } else { "auto" };
+        (self.calls).push(format!("render ahead {format:?} {id} {render_ahead}"));
+        Ok(())
+    }
 }
 
 /// A document with every command, and what running them asks for.

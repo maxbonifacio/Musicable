@@ -375,6 +375,7 @@ fn plugin(name: &str, format: PluginFormat, id: &str, kind: PluginKind) -> Plugi
         name: name.to_owned(),
         vendor: "Example".to_owned(),
         kind,
+        never_ahead: false,
     }
 }
 

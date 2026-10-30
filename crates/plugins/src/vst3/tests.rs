@@ -974,6 +974,40 @@ fn plugins_see_the_transport() {
 }
 
 #[test]
+fn a_plugin_that_cant_be_prefetched_must_render_live_and_says_when_that_changes() {
+    let plugins = TestPlugins::new("prefetchable");
+    let mut instance = plugins.gain();
+    assert!(!instance.must_render_live());
+    let set = |instance: &Instance, prefetchable| {
+        let (component, controller) = (instance.raw_component(), instance.raw_controller());
+        // SAFETY: on the UI thread, with the plugin's component and its
+        // controller.
+        let said =
+            unsafe { (plugins.library).vst3_set_prefetchable(component, controller, prefetchable) };
+        assert!(said, "Test Gain took it");
+    };
+    // Its mode changed, so it can't for now, and it asks the host to look
+    // again with a restart, which the instance hears as it polls.
+    set(&instance, false);
+    assert!(!instance.must_render_live());
+    instance.poll();
+    assert!(instance.must_render_live());
+    // Active, as it may tell once it's set up.
+    instance.activate(CONFIG).unwrap();
+    assert!(instance.must_render_live());
+    set(&instance, true);
+    instance.poll();
+    assert!(!instance.must_render_live());
+    // A module named so has its gain say it can never render ahead.
+    drop((instance, plugins));
+    let plugins = TestPlugins::new("live");
+    assert!(plugins.gain().must_render_live());
+    // The synth hasn't the interface, so it can.
+    assert!(!plugins.synth().must_render_live());
+    plugins.assert_alright();
+}
+
+#[test]
 fn blocks_rendered_ahead_come_in_prefetch_mode() {
     let plugins = TestPlugins::new("prefetch");
     let mut instance = plugins.gain();

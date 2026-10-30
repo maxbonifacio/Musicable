@@ -54,7 +54,10 @@
 //! test hears which channel a note came on. And one starting with `echo`
 //! gives the synth a note output, which plays each note it gets out again
 //! as it renders, an octave up, on the same frames, as a synth that plays
-//! its arpeggios out does.
+//! its arpeggios out does. One starting with `live` has the plugins say
+//! they must render live, as the audio device asks for each block, as a
+//! plugin that talks to hardware does: their render extension says they
+//! have a hard real-time requirement.
 //!
 //! The library is also a VST3 module with the same three plugins, which
 //! check VST3's rules, in the same count: see [`vst3`]. Tests make a VST3
@@ -118,6 +121,13 @@ pub(crate) static PARTS: AtomicBool = AtomicBool::new(false);
 /// it renders: the library's file is named so.
 pub(crate) static ECHO: AtomicBool = AtomicBool::new(false);
 
+/// Whether the plugins say they must render live, rather than ahead of the
+/// audio device: the CLAP plugins as their render extension's hard
+/// real-time requirement, and VST3's Test Gain as `IPrefetchableSupport`
+/// saying it can never render in prefetch mode. The library's file is named
+/// so.
+pub(crate) static LIVE: AtomicBool = AtomicBool::new(false);
+
 /// How many semitones up the echoing synth plays the notes it gets out.
 pub const ECHO_UP: i16 = 12;
 
@@ -158,6 +168,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     FIXED_PORTS.store(name.starts_with("fixed"), Ordering::SeqCst);
     PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
     ECHO.store(name.starts_with("echo"), Ordering::SeqCst);
+    LIVE.store(name.starts_with("live"), Ordering::SeqCst);
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         violation("the library was initialized twice without deinit in between");
     }

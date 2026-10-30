@@ -898,7 +898,9 @@ its device carry the notes it plays out, for a MIDI track's input or a note
 wire: the graph is built again for it only if one takes them. Delay compensation
 lines up every track with the latest one, so a plugin that looks ahead
 doesn't put its track out of time
-([engine.md](engine.md#delay-compensation)).
+([engine.md](engine.md#delay-compensation)). A plugin that must render
+live, or is set to Render Ahead Never, has its device render live, with
+what it plays into ([Rendering ahead](plugins.md#rendering-ahead)).
 
 ## The browser
 
@@ -926,7 +928,10 @@ to work for the app ([How it's built](#how-its-built)).
   marked it (`browser.set_plugin_kind`) or the scan found it
   (`Session::plugin_kind`, [plugins.md](plugins.md#plugins-on-tracks)).
   The app keeps the marks in `settings.toml`'s `[plugins.kinds]`, saves
-  them as one changes, and lists the plugins again.
+  them as one changes, and lists the plugins again. The same goes for the
+  plugins set to Render Ahead Never (`browser.set_plugin_render_ahead`),
+  in `[plugins.render_ahead]`, which the plugin's menu in the browser and
+  its devices' menus tick ([plugins.md](plugins.md#rendering-ahead)).
 
 ### Behind the browser
 
@@ -1394,8 +1399,11 @@ tracks' headers. It looks at each node in the live half, and the live
 source that put it there (`NodeLoads::sides`), and maps both to their
 channel as the figures' rows are, through `compile::keys::owner` and
 `Places`. A channel gets a `musicable_ui::Live` naming the track whose
-input, or Always Live, put its nodes there: its own track, if that's one
-of them, or else the source of its first node in the graph's order. It
+input, or Always Live, put its nodes there, or the plugin device that did,
+which says it must render live (`Session::plugin_must_render_live`) or
+else is set to Render Ahead Never: its own track, if that's one of them,
+or else one of its devices, or else the source of its first node in the
+graph's order. It
 works the marks out again only for another graph, which it tells by its
 loads (`Arc::ptr_eq`), and has none while no stream plays or Render Ahead
 is off, as then everything renders live. The `View` carries them as
@@ -1403,8 +1411,9 @@ is off, as then everything renders live. The `View` carries them as
 box in the theme's `monitor` colour, at the end of the name, where there's
 room, and `Live::reason` says in its tooltip, and to screen readers, what
 has it render live, from the project as it is: "Live: armed, monitoring
-its input", "Live: set to Always Live", or for another track's, "Live: fed
-by the armed track Vocal".
+its input", "Live: set to Always Live", "Live: Outboard says it must
+render live", or for another track's, "Live: fed by the armed track Vocal"
+or "Live: fed by Matcher on Bass, which is set to Render Ahead Never".
 
 ## How it's built
 

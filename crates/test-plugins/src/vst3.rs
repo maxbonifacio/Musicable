@@ -10,7 +10,10 @@
 //!   meter: the processor sets it to each block's peak. Its second input
 //!   bus, Sidechain ([`VST3_SIDECHAIN`]), ducks it as the CLAP gain's does,
 //!   while the host has it on: VST3's buses start off, and the host turns
-//!   them on and off only while the plugin is inactive.
+//!   them on and off only while the plugin is inactive. Its component says
+//!   whether it can render in prefetch mode, with `IPrefetchableSupport`:
+//!   it can, but in a module named to say it must render live, and tests
+//!   change its answer with [`musicable_test_vst3_set_prefetchable`].
 //! - **Test Synth** is one object, component and controller at once. It
 //!   plays each note as the CLAP synth does, shaped by VST3's tuning and
 //!   brightness note expressions and its poly pressure, and in a module
@@ -56,17 +59,19 @@ use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsRea
 use vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged;
 use vst3::Steinberg::Vst::SpeakerArr::kStereo;
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
+use vst3::Steinberg::Vst::ePrefetchableSupport_::{kIsNeverPrefetchable, kIsYetPrefetchable};
 use vst3::Steinberg::Vst::{
     BusDirection, BusInfo, BusType, CtrlNumber, Event, Event__type0, IAttributeListTrait,
     IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentHandler2,
     IComponentHandler2Trait, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
     IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList, IEventListTrait,
     IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait, IMidiMapping,
-    IMidiMappingTrait, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, IUnitInfo,
-    IUnitInfoTrait, IoMode, MediaType, NoteExpressionTypeID, NoteOffEvent, NoteOnEvent, ParamID,
-    ParamValue, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, ProgramListID,
-    ProgramListInfo, RoutingInfo, SpeakerArrangement, String128, TChar, UnitID, UnitInfo,
-    kNoParentUnitId, kRootUnitId,
+    IMidiMappingTrait, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait,
+    IPrefetchableSupport, IPrefetchableSupportTrait, IUnitInfo, IUnitInfoTrait, IoMode, MediaType,
+    NoteExpressionTypeID, NoteOffEvent, NoteOnEvent, ParamID, ParamValue, ParameterInfo,
+    PrefetchableSupport, ProcessContext, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo,
+    RoutingInfo, SpeakerArrangement, String128, TChar, UnitID, UnitInfo, kNoParentUnitId,
+    kRootUnitId,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView,
@@ -164,6 +169,7 @@ fn enter() -> bool {
     }
     crate::PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
     crate::ECHO.store(name.starts_with("echo"), Ordering::SeqCst);
+    crate::LIVE.store(name.starts_with("live"), Ordering::SeqCst);
     if ENTERED.swap(true, Ordering::SeqCst) {
         violation("the VST3 module was entered twice without exiting");
     }
@@ -681,6 +687,9 @@ struct Gain {
     /// Whether the host turned its sidechain bus on. VST3's buses start
     /// off.
     sidechain: AtomicBool,
+    /// What it says of rendering in prefetch mode, as VST3's
+    /// `IPrefetchableSupport` has it.
+    prefetchable: AtomicU32,
     label: Mutex<String>,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
     transport: Mutex<Option<Vst3Transport>>,
@@ -700,7 +709,12 @@ struct GainAudio {
 struct GainComponent(Arc<Gain>);
 
 impl Class for GainComponent {
-    type Interfaces = (IComponent, IAudioProcessor, IConnectionPoint);
+    type Interfaces = (
+        IComponent,
+        IAudioProcessor,
+        IConnectionPoint,
+        IPrefetchableSupport,
+    );
 }
 
 impl Gain {
@@ -711,6 +725,10 @@ impl Gain {
             values: [AtomicU64::new(0.5f64.to_bits()), AtomicU64::new(0)],
             latency: AtomicU32::new(0),
             sidechain: AtomicBool::new(false),
+            prefetchable: AtomicU32::new(match crate::LIVE.load(Ordering::SeqCst) {
+                true => kIsNeverPrefetchable,
+                false => kIsYetPrefetchable,
+            } as PrefetchableSupport),
             label: Mutex::new(String::new()),
             peer: Mutex::new(None),
             transport: Mutex::new(None),
@@ -1064,6 +1082,18 @@ impl IConnectionPointTrait for GainComponent {
             }
             None => kResultFalse,
         }
+    }
+}
+
+impl IPrefetchableSupportTrait for GainComponent {
+    unsafe fn getPrefetchableSupport(&self, prefetchable: *mut PrefetchableSupport) -> tresult {
+        self.0.checks.ui("getPrefetchableSupport");
+        if prefetchable.is_null() {
+            return kInvalidArgument;
+        }
+        // SAFETY: checked non-null; the host passes somewhere to write.
+        unsafe { prefetchable.write(self.0.prefetchable.load(Ordering::SeqCst)) };
+        kResultOk
     }
 }
 
@@ -3528,6 +3558,30 @@ pub unsafe extern "C" fn musicable_test_vst3_sidechain(object: *mut c_void, on: 
     };
     // SAFETY: the caller's promise.
     unsafe { on.write(gain.sidechain.load(Ordering::SeqCst)) };
+    true
+}
+
+/// Has Test Gain say `support` of rendering in prefetch mode from now on,
+/// as VST3's `IPrefetchableSupport` has it, as a plugin whose mode changed
+/// does. A plugin asks the host to look again with a restart, which
+/// [`musicable_test_vst3_restart`] asks for. Returns whether `object` is
+/// Test Gain's component.
+///
+/// # Safety
+///
+/// As for [`musicable_test_vst3_gui`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn musicable_test_vst3_set_prefetchable(
+    object: *mut c_void,
+    support: u32,
+) -> bool {
+    let Some(Object::Gain(gain)) = find(object) else {
+        return false;
+    };
+    let Some(gain) = gain.upgrade() else {
+        return false;
+    };
+    gain.prefetchable.store(support, Ordering::SeqCst);
     true
 }
 

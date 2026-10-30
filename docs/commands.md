@@ -834,10 +834,13 @@ there too. A file is named by its full path.
 | `browser.rescan` | Rescan Library | Looks through `folder` again, or every folder and the presets | none | none |
 | `browser.focus_search` | Search in Browser | Shows the browser, with the keys in the search field of the list showing | Ctrl+F | Ctrl+F |
 | `browser.set_plugin_kind` | Set Plugin Kind | Marks the installed plugin `plugin` of the format `format` as `kind`, `instrument`, `midi_effect` or `audio_effect`, for when the scan's rule gets it wrong: the browser lists it in that kind's folder from then on, and adds it as that kind. Marking it as the kind the scan found takes the mark away | none | none |
+| `browser.set_plugin_render_ahead` | Set Plugin Render Ahead | Sets the installed plugin `plugin` of the format `format` to `render_ahead`: `auto`, where it renders ahead of the audio device with the rest of the project unless it says it must render live, or `never`, where it renders live wherever it is, with what it plays into, in every project | none | none |
 
 The library's changes aren't the project's, so they aren't in its undo
-history: a tag is taken away with `browser.tag` too, and a plugin marked
-as another kind is marked back with `browser.set_plugin_kind`. Add Folder without a
+history: a tag is taken away with `browser.tag` too, a plugin marked as
+another kind is marked back with `browser.set_plugin_kind`, and a
+plugin's Render Ahead is set back with `browser.set_plugin_render_ahead`.
+Add Folder without a
 folder and Search in Browser ask the app, with `Request::AddLibraryFolder`
 and `Request::FocusBrowserSearch`.
 

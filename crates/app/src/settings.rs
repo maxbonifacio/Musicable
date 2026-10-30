@@ -51,6 +51,9 @@
 //! [plugins.kinds]
 //! "vst3:ABCDEF0123456789ABCDEF0123456789" = "midi_effect"
 //!
+//! [plugins.render_ahead]
+//! "clap:com.example.hardware-synth" = "never"
+//!
 //! [recording]
 //! capture_minutes = 5
 //!
@@ -69,7 +72,7 @@
 //! other profiles has a settings file of its own, in its folder, that holds
 //! only them ([`crate::profiles`]). `[profiles]` says which is in use.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -321,9 +324,11 @@ impl BrowserSettings {
 }
 
 /// What kind of plugin the user marked plugins as, where the scan's rule
-/// gets them wrong ([`browser::SET_PLUGIN_KIND`]).
+/// gets them wrong ([`browser::SET_PLUGIN_KIND`]), and the plugins they set
+/// to Render Ahead Never ([`browser::SET_PLUGIN_RENDER_AHEAD`]).
 ///
 /// [`browser::SET_PLUGIN_KIND`]: musicable_commands::browser::SET_PLUGIN_KIND
+/// [`browser::SET_PLUGIN_RENDER_AHEAD`]: musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginsSettings {
@@ -332,41 +337,73 @@ pub struct PluginsSettings {
     /// `midi_effect` or `audio_effect`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub kinds: BTreeMap<String, String>,
+    /// Each plugin set to Render Ahead Never, by its format and its id, as
+    /// `never`. The others are at Auto.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub render_ahead: BTreeMap<String, String>,
+}
+
+/// What the settings call the plugin `id` in `format`: `"clap:org.example.arp"`.
+fn plugin_key(format: PluginFormat, id: &str) -> String {
+    let format = match format {
+        PluginFormat::Clap => "clap",
+        PluginFormat::Vst3 => "vst3",
+    };
+    format!("{format}:{id}")
+}
+
+/// The plugin the settings call `key`, by format and id, if the format is
+/// one there is.
+fn parse_plugin_key(key: &str) -> Option<(PluginFormat, String)> {
+    let (format, id) = key.split_once(':')?;
+    let format = match format {
+        "clap" => PluginFormat::Clap,
+        "vst3" => PluginFormat::Vst3,
+        _ => return None,
+    };
+    Some((format, id.to_owned()))
 }
 
 impl PluginsSettings {
-    /// Whether no plugin is marked.
+    /// Whether no plugin is marked or set.
     pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
+        self.kinds.is_empty() && self.render_ahead.is_empty()
     }
 
     /// The marks, by format and id, leaving out those the file has wrong.
     pub fn marks(&self) -> BTreeMap<(PluginFormat, String), PluginKind> {
         (self.kinds.iter())
             .filter_map(|(plugin, kind)| {
-                let (format, id) = plugin.split_once(':')?;
-                let format = match format {
-                    "clap" => PluginFormat::Clap,
-                    "vst3" => PluginFormat::Vst3,
-                    _ => return None,
-                };
-                Some(((format, id.to_owned()), PluginKind::from_key(kind)?))
+                Some((parse_plugin_key(plugin)?, PluginKind::from_key(kind)?))
             })
             .collect()
     }
 
-    /// The settings that hold `marks`.
-    pub fn from_marks(marks: &BTreeMap<(PluginFormat, String), PluginKind>) -> Self {
+    /// The plugins set to Render Ahead Never, by format and id, leaving out
+    /// those the file has wrong.
+    pub fn never_ahead(&self) -> BTreeSet<(PluginFormat, String)> {
+        (self.render_ahead.iter())
+            .filter(|(_, render_ahead)| *render_ahead == "never")
+            .filter_map(|(plugin, _)| parse_plugin_key(plugin))
+            .collect()
+    }
+
+    /// The settings that hold `marks` and the plugins set to Render Ahead
+    /// Never, `never`.
+    pub fn new(
+        marks: &BTreeMap<(PluginFormat, String), PluginKind>,
+        never: &BTreeSet<(PluginFormat, String)>,
+    ) -> Self {
         let kinds = (marks.iter())
-            .map(|((format, id), kind)| {
-                let format = match format {
-                    PluginFormat::Clap => "clap",
-                    PluginFormat::Vst3 => "vst3",
-                };
-                (format!("{format}:{id}"), kind.key().to_owned())
-            })
+            .map(|((format, id), kind)| (plugin_key(*format, id), kind.key().to_owned()))
             .collect();
-        Self { kinds }
+        let render_ahead = (never.iter())
+            .map(|(format, id)| (plugin_key(*format, id), "never".to_owned()))
+            .collect();
+        Self {
+            kinds,
+            render_ahead,
+        }
     }
 }
 
@@ -750,6 +787,10 @@ mod tests {
                     "vst3:ABCDEF0123456789ABCDEF0123456789".to_owned(),
                     "midi_effect".to_owned(),
                 )]),
+                render_ahead: BTreeMap::from([(
+                    "clap:com.example.hardware-synth".to_owned(),
+                    "never".to_owned(),
+                )]),
             },
         };
         let text = settings.to_toml();
@@ -830,11 +871,32 @@ mod tests {
             ),
         ]);
         assert_eq!(marks, expected);
-        let kept = PluginsSettings::from_marks(&marks);
+        let kept = PluginsSettings::new(&marks, &BTreeSet::new());
         assert_eq!(kept.marks(), marks);
         assert_eq!(kept.kinds.len(), 2);
         // None at first, and none written.
         assert!(!Settings::default().to_toml().contains("plugins"));
+    }
+
+    #[test]
+    fn plugins_set_to_render_ahead_never_go_by_format_and_id() {
+        let text = "[plugins.render_ahead]\n\
+                    \"clap:com.example.hardware\" = \"never\"\n\
+                    \"vst3:ABCD\" = \"auto\"\n\
+                    \"au:com.example.old\" = \"never\"\n";
+        let plugins = Settings::parse(text).unwrap().plugins;
+        let never = plugins.never_ahead();
+        let hardware = (PluginFormat::Clap, "com.example.hardware".to_owned());
+        assert_eq!(never, BTreeSet::from([hardware]));
+        let kept = PluginsSettings::new(&BTreeMap::new(), &never);
+        assert_eq!(kept.never_ahead(), never);
+        let text = Settings {
+            plugins: kept,
+            ..Settings::default()
+        }
+        .to_toml();
+        assert!(text.contains("[plugins.render_ahead]\n\"clap:com.example.hardware\" = \"never\""));
+        assert!(!text.contains("[plugins.kinds]"));
     }
 
     #[test]

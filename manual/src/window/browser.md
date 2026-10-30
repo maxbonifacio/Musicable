@@ -95,7 +95,9 @@ the best matches first.
 A plugin's right-click menu has its **Kind**, for a plugin Musicable takes
 for the wrong one: pick another and the browser lists it in that kind's
 folder from then on, and adds it as that kind
-([Plugins](../using/plugins.md#finding-them)).
+([Plugins](../using/plugins.md#finding-them)). It has its **Render Ahead**
+too: **Never** has it render live wherever it is, for one that
+misbehaves rendered ahead ([Plugins](../using/plugins.md#rendering-ahead)).
 
 Double-click a device to put it at the end of the selected track's devices,
 or the master's while the master track is selected. Or drag it: into the

@@ -47,6 +47,11 @@ pub struct PluginEntry {
     ///
     /// [`browser::SET_PLUGIN_KIND`]: musicable_commands::browser::SET_PLUGIN_KIND
     pub kind: PluginKind,
+    /// Whether the user set it to Render Ahead Never, so it renders live
+    /// wherever it is ([`browser::SET_PLUGIN_RENDER_AHEAD`]).
+    ///
+    /// [`browser::SET_PLUGIN_RENDER_AHEAD`]: musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD
+    pub never_ahead: bool,
 }
 
 /// How a plugin device's plugin is doing.
@@ -557,8 +562,9 @@ fn drag(ui: &Ui, title: &Response, devices: &[DeviceId], name: &str, mouse: &Mou
 /// A device's menu, which works on `targets`: the selected devices if it's
 /// one of them, or else the device alone. Bypass is ticked while they're
 /// all bypassed, and Activate shows while any is deactivated. The edit
-/// commands select them first, so they take them, and Save as Preset
-/// saves the device itself, `name`, which `saving` asks the name of.
+/// commands select them first, so they take them, Save as Preset saves the
+/// device itself, `name`, which `saving` asks the name of, and Render Ahead
+/// sets the device's plugin's, if it's an installed plugin's.
 fn menu(
     ui: &mut Ui,
     device: &Device,
@@ -607,6 +613,15 @@ fn menu(
     let delete = with_keys(Button::new("Delete"), view, &edit::DELETE);
     if ui.add(delete).clicked() {
         actions.extend([select(targets.to_vec(), false), Action::Run(edit::DELETE)]);
+    }
+    // The device's own plugin's, which holds for all of its devices.
+    let installed = device.kind.plugin().and_then(|plugin| {
+        (view.plugins.installed.iter())
+            .find(|entry| entry.format == plugin.format && entry.id == plugin.id)
+    });
+    if let Some(plugin) = installed {
+        ui.separator();
+        render_ahead_items(ui, plugin, actions);
     }
 }
 
@@ -987,7 +1002,7 @@ impl Browser {
                     if row.double_clicked() {
                         actions.push(Action::RunWith(device::ADD_PLUGIN, add(plugin, chain)));
                     }
-                    row.context_menu(|ui| kind_menu(ui, plugin, actions));
+                    row.context_menu(|ui| plugin_menu(ui, plugin, actions));
                 }
             });
         ui.separator();
@@ -1015,8 +1030,9 @@ impl Browser {
 }
 
 /// A plugin's menu in the browser, which marks it as an instrument, a MIDI
-/// effect or an audio effect, for when the scan's rule gets it wrong.
-fn kind_menu(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
+/// effect or an audio effect, for when the scan's rule gets it wrong, and
+/// sets its Render Ahead.
+fn plugin_menu(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
     ui.label(RichText::new("Kind").weak());
     for kind in PluginKind::ALL {
         if ui.radio(plugin.kind == kind, kind.name()).clicked() {
@@ -1026,6 +1042,45 @@ fn kind_menu(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
                 .with("kind", kind.key());
             actions.push(Action::RunWith(
                 musicable_commands::browser::SET_PLUGIN_KIND,
+                args,
+            ));
+            ui.close();
+        }
+    }
+    ui.separator();
+    render_ahead_items(ui, plugin, actions);
+}
+
+/// The items of a plugin's menus that set its Render Ahead, for every
+/// project: Auto or Never.
+fn render_ahead_items(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
+    ui.label(RichText::new("Render Ahead").weak());
+    let items = [
+        (
+            "Auto",
+            false,
+            "Renders ahead of the audio device with the rest of the project, unless the \
+             plugin says it must render live",
+        ),
+        (
+            "Never",
+            true,
+            "Renders live wherever it is, as the audio device asks for each buffer, with what \
+             it plays into: for a plugin that misbehaves rendered ahead, such as one that \
+             talks to its other copies",
+        ),
+    ];
+    for (name, never, tip) in items {
+        if (ui.radio(plugin.never_ahead == never, name))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            let args = Args::new()
+                .with("format", format_key(plugin.format))
+                .with("plugin", plugin.id.as_str())
+                .with("render_ahead", if never { "never" } else { "auto" });
+            actions.push(Action::RunWith(
+                musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD,
                 args,
             ));
             ui.close();
@@ -1114,6 +1169,7 @@ mod tests {
             name: name.to_owned(),
             vendor: vendor.to_owned(),
             kind,
+            never_ahead: false,
         }
     }
 
@@ -2096,6 +2152,61 @@ mod tests {
                 run(RE_ENABLE, eq::ON),
                 run(SHOW_LANE, band2)
             ]
+        );
+    }
+
+    #[test]
+    fn a_plugins_menus_set_its_render_ahead() {
+        let mut project = Project::new();
+        let outboard = plugin(&mut project, "Outboard", PluginKind::AudioEffect);
+        let missing = plugin(&mut project, "Missing", PluginKind::AudioEffect);
+        let both = [outboard.id, missing.id].into();
+        let mut harness = showing(vec![outboard, missing], project);
+        let state = harness.state_mut();
+        state.plugins = vec![PluginEntry {
+            never_ahead: true,
+            ..entry("Outboard", "Example", PluginKind::AudioEffect)
+        }];
+        // Selected, so their menus don't select them.
+        state.editor.devices.selected = both;
+        state.shell.toggle_panel(BROWSER);
+        harness.run();
+        let set = |render_ahead| {
+            let args = Args::new()
+                .with("format", "clap")
+                .with("plugin", "org.example.outboard")
+                .with("render_ahead", render_ahead);
+            Action::RunWith(musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD, args)
+        };
+        // The device's menu says the plugin's, which is Never, and sets it.
+        harness
+            .get_by_label("Device Outboard, selected")
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("Render Ahead");
+        let never = harness.get_by_label("Never");
+        assert_eq!(never.accesskit_node().toggled(), Some(Toggled::True));
+        harness.get_by_label("Auto").click();
+        harness.run();
+        assert_eq!(actions(&mut harness), [set("auto")]);
+        // Not for a plugin that isn't installed.
+        harness
+            .get_by_label("Device Missing, selected")
+            .click_secondary();
+        harness.run();
+        assert!(harness.query_by_label("Render Ahead").is_none());
+        harness.key_press(Key::Escape);
+        harness.run();
+        // The browser's.
+        click(&mut harness, "Devices");
+        harness.get_by_label("Outboard").click_secondary();
+        harness.run();
+        harness.get_by_label("Never").click();
+        harness.run();
+        assert_eq!(actions(&mut harness), [set("never")]);
+        assert!(
+            harness.query_by_label("Render Ahead").is_none(),
+            "the menu closes"
         );
     }
 

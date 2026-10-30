@@ -1181,6 +1181,15 @@ impl musicable_commands::Library for LibraryLink<'_> {
         self.plugins.set_kind(format, id, kind)
     }
 
+    fn set_plugin_render_ahead(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        never: bool,
+    ) -> Result<(), String> {
+        self.plugins.set_render_ahead(format, id, never)
+    }
+
     /// Saved from the plugin as it plays, as a preset saves it.
     fn plugin_state(&mut self, id: DeviceId) -> Option<PluginState> {
         match self.plugins.instance(id)?.save_state() {

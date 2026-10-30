@@ -1,14 +1,15 @@
 //! The browser commands: searching the library of samples, previewing and
-//! tagging samples, finding ones alike, the folders the library holds, and
-//! what kind of plugin each plugin is.
+//! tagging samples, finding ones alike, the folders the library holds, what
+//! kind of plugin each plugin is, and whether it renders ahead.
 //!
 //! The library is the app's, as the transport is: the files are on its disk,
 //! and its engine plays the previews. Commands reach it through
 //! [`Library`]. What a search or [`FIND_SIMILAR`] finds is what the browser
 //! shows, so an agent's search shows there too. The library's changes, such
 //! as tags, aren't the project's, so they aren't in its undo history: a tag
-//! is taken away with [`TAG`] too, and a plugin marked as another kind is
-//! marked back with [`SET_PLUGIN_KIND`].
+//! is taken away with [`TAG`] too, a plugin marked as another kind is
+//! marked back with [`SET_PLUGIN_KIND`], and a plugin's Render Ahead is set
+//! back with [`SET_PLUGIN_RENDER_AHEAD`].
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,14 @@ pub const FOCUS_SEARCH: CommandId = CommandId::new("browser.focus_search");
 /// that kind's folder from then on, and devices added from it are of that
 /// kind.
 pub const SET_PLUGIN_KIND: CommandId = CommandId::new("browser.set_plugin_kind");
+/// Sets an installed plugin's Render Ahead, for every project: at Auto, it
+/// renders ahead of the audio device with the rest of the project, unless
+/// it says it must render live, and at Never, it renders live wherever it
+/// is, as the device asks for each buffer, with what it plays into.
+pub const SET_PLUGIN_RENDER_AHEAD: CommandId = CommandId::new("browser.set_plugin_render_ahead");
+
+/// What a plugin's Render Ahead can be: see [`SET_PLUGIN_RENDER_AHEAD`].
+const RENDER_AHEAD: &[&str] = &["auto", "never"];
 
 /// How many files a search gives back without a limit.
 const LIMIT: usize = 100;
@@ -97,6 +106,17 @@ pub trait Library {
         _format: PluginFormat,
         _id: &str,
         _kind: PluginKind,
+    ) -> Result<(), String> {
+        Err(NO_LIBRARY.to_owned())
+    }
+    /// Sets the installed plugin `id` in `format` to Render Ahead Never,
+    /// which has it render live wherever it is, or with `never` false back
+    /// to Auto, for good.
+    fn set_plugin_render_ahead(
+        &mut self,
+        _format: PluginFormat,
+        _id: &str,
+        _never: bool,
     ) -> Result<(), String> {
         Err(NO_LIBRARY.to_owned())
     }
@@ -293,6 +313,33 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
+        Command::new(SET_PLUGIN_RENDER_AHEAD, "Set Plugin Render Ahead").with_params(&[
+            FORMAT,
+            Param::required(
+                "plugin",
+                Type::Text,
+                "The plugin's id in its format, such as org.surge-synth-team.surge-xt.",
+            ),
+            Param::required(
+                "render_ahead",
+                Type::Choice(RENDER_AHEAD),
+                "Auto renders it ahead of the audio device with the rest of the project, unless \
+                 it says it must render live, and Never renders it live wherever it is, for a \
+                 plugin that misbehaves rendered ahead, such as one that talks to its other \
+                 copies.",
+            ),
+        ]),
+        |ctx, args| {
+            let format = plugin_format(args)?;
+            let id: String = args.get("plugin")?;
+            let never = args.get::<String>("render_ahead")? == "never";
+            ctx.library
+                .set_plugin_render_ahead(format, &id, never)
+                .map_err(CommandError::invalid)?;
+            Ok(Value::None)
+        },
+    );
+    registry.add(
         Command::new(FOCUS_SEARCH, "Search in Browser").not_for_agents(),
         |ctx, _| {
             ctx.requests.push(Request::FocusBrowserSearch);
@@ -430,6 +477,30 @@ mod tests {
             Err(CommandError::invalid(
                 "there's no plugin format \"au\": it's clap or vst3"
             ))
+        );
+        // It's the app's, not the project's.
+        assert_eq!(setup.committed_names(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn plugins_are_set_to_render_ahead_or_not_in_the_library() {
+        let mut setup = Setup::new(musicable_model::Project::new());
+        let args = |render_ahead| {
+            Args::new()
+                .with("format", "clap")
+                .with("plugin", "org.example.hardware")
+                .with("render_ahead", render_ahead)
+        };
+        let set = &SET_PLUGIN_RENDER_AHEAD;
+        assert_eq!(setup.run_with(set, args("never")), Ok(Value::None));
+        assert_eq!(setup.run_with(set, args("auto")), Ok(Value::None));
+        assert!(setup.run_with(set, args("sometimes")).is_err());
+        assert_eq!(
+            setup.library.calls,
+            [
+                "render ahead Clap org.example.hardware never",
+                "render ahead Clap org.example.hardware auto"
+            ]
         );
         // It's the app's, not the project's.
         assert_eq!(setup.committed_names(), Vec::<String>::new());

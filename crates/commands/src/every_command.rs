@@ -264,6 +264,14 @@ fn examples() -> Vec<Example> {
                     .with("kind", "midi_effect"),
             )
         }),
+        leaves(browser::SET_PLUGIN_RENDER_AHEAD, |_| {
+            Some(
+                Args::new()
+                    .with("format", "clap")
+                    .with("plugin", "org.example.arp")
+                    .with("render_ahead", "never"),
+            )
+        }),
         leaves(browser::STOP_PREVIEW, bare),
         leaves(browser::TAG, |_| {
             Some(Args::new().with("file", KICK).with("tag", "dusty"))

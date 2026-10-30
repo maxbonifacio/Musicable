@@ -158,6 +158,23 @@ gets a row in the plugin's box in the devices panel, under the plugin's
 name for it, and takes its signal from a point on any track, as the
 Compressor's Sidechain does ([Sidechains](sidechains.md#plugins-side-inputs)).
 
+## Rendering ahead
+
+With [Render Ahead](../getting-started/audio.md#render-ahead) on, plugins
+render ahead of the audio device with the rest of the project. A plugin
+that says it must render live, as one that talks to hardware does,
+renders live instead, as the device asks for each buffer, with what it
+plays into, and its track's header has a LIVE mark that says so. A VST3
+plugin can change its mind as it plays, and its track changes over with
+it.
+
+**Render Ahead**, in a plugin's right-click menu in the browser, or in its
+device's in the devices panel, is **Auto** at first, which does as the
+plugin says. **Never** renders it live wherever it is, for a plugin that
+misbehaves rendered ahead, such as one that talks to its copies on other
+tracks to compare them, which a lead ahead of some of them throws out. It
+holds for every device of the plugin, in every project.
+
 ## Undo, saving and timing
 
 Adding a plugin, moving it, copying it, deleting it and every change made

@@ -10,6 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap_sys::plugin::clap_plugin;
+use vst3::Steinberg::Vst::PrefetchableSupport;
+use vst3::Steinberg::Vst::RestartFlags_::kPrefetchableSupportChanged;
+use vst3::Steinberg::Vst::ePrefetchableSupport_::{kIsNotYetPrefetchable, kIsYetPrefetchable};
 
 use crate::vst3::Vst3Transport;
 
@@ -552,6 +555,33 @@ impl Library {
         let mut on = false;
         // SAFETY: the caller's promise.
         unsafe { get(object, &mut on) }.then_some(on)
+    }
+
+    /// Has Test Gain say it can render in VST3's prefetch mode, or can't
+    /// for now, from now on, and ask the host to look again with a
+    /// restart, as a plugin whose mode changed does. `component` and
+    /// `controller` are its. Says whether they were.
+    ///
+    /// # Safety
+    ///
+    /// As for [`vst3_gui`](Self::vst3_gui), for both.
+    pub unsafe fn vst3_set_prefetchable(
+        &self,
+        component: *mut c_void,
+        controller: *mut c_void,
+        prefetchable: bool,
+    ) -> bool {
+        let set = self.hook::<unsafe extern "C" fn(*mut c_void, u32) -> bool>(
+            "musicable_test_vst3_set_prefetchable",
+        );
+        let support = match prefetchable {
+            true => kIsYetPrefetchable,
+            false => kIsNotYetPrefetchable,
+        } as PrefetchableSupport;
+        // SAFETY: the caller's promise.
+        unsafe {
+            set(component, support) && self.vst3_restart(controller, kPrefetchableSupportChanged)
+        }
     }
 
     /// Has a VST3 plugin ask the host to restart it with VST3's `flags`.

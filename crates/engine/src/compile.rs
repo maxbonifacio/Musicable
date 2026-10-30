@@ -75,7 +75,7 @@
 //! parameter ([`keys::param`], [`Graph::automate`]), which follows it as the
 //! song plays.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter;
 use std::sync::Arc;
@@ -657,11 +657,12 @@ pub trait NodeMaker: Send + Sync {
 }
 
 /// What makes the nodes of the devices the engine can't make itself, by
-/// device: plugins now, extension devices later. The app fills it from the
-/// plugin instances it holds.
+/// device: plugins now, extension devices later, and which of them render
+/// live. The app fills it from the plugin instances it holds.
 #[derive(Clone, Default)]
 pub struct Devices {
     makers: HashMap<DeviceId, Arc<dyn NodeMaker>>,
+    live: HashSet<DeviceId>,
 }
 
 impl Devices {
@@ -677,6 +678,19 @@ impl Devices {
         self.makers.get(&device).map(|maker| &**maker)
     }
 
+    /// Has `device` render live, as the audio device asks for each block,
+    /// with what it plays into, while it's in the signal: a plugin that
+    /// must run in real time, or one the user has render live. See
+    /// [`Graph::set_live`].
+    pub fn set_live(&mut self, device: DeviceId) {
+        self.live.insert(device);
+    }
+
+    /// Whether `device` renders live: see [`set_live`](Self::set_live).
+    pub fn renders_live(&self, device: DeviceId) -> bool {
+        self.live.contains(&device)
+    }
+
     pub fn len(&self) -> usize {
         self.makers.len()
     }
@@ -690,8 +704,11 @@ impl fmt::Debug for Devices {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut devices: Vec<_> = self.makers.keys().collect();
         devices.sort();
+        let mut live: Vec<_> = self.live.iter().collect();
+        live.sort();
         f.debug_struct("Devices")
             .field("devices", &devices)
+            .field("live", &live)
             .finish()
     }
 }
@@ -1426,6 +1443,9 @@ impl Strip<'_> {
                     Some(node) => {
                         let node = self.graph.add(key, NoteSwitch::new(node, device.bypassed));
                         (self.graph.plays_notes(node)).expect("the node was just added");
+                        if devices.renders_live(device.id) {
+                            (self.graph.set_live(node)).expect("the node was just added");
+                        }
                         midi_effects.push(node);
                         note_ports.push((device.id, node));
                     }
@@ -1446,6 +1466,9 @@ impl Strip<'_> {
                 None => None,
             };
             if let Some(node) = node {
+                if devices.renders_live(device.id) {
+                    (self.graph.set_live(node)).expect("the node was just added");
+                }
                 switches.push((device.id, node));
                 if device.kind.is_instrument() {
                     note_ports.push((device.id, node));
@@ -3937,6 +3960,60 @@ mod tests {
         for key in [keys::track_clips(keys), keys::track_clips(bass)] {
             assert!(!graph.renders_live(key), "{key:?}");
         }
+    }
+
+    #[test]
+    fn a_plugin_that_renders_live_has_what_it_plays_into_render_live() {
+        let mut p = project();
+        let (drums, bass, reverb) = (p.tracks[0].id, p.tracks[1].id, p.tracks[2].id);
+        let device = p.new_device(plugin(false));
+        let id = device.id;
+        let send = p.new_send(reverb);
+        let track = p.track_mut(bass).unwrap();
+        track.devices.push(device);
+        track.sends.push(send);
+        let mut devices = Devices::new();
+        devices.insert(id, Arc::new(Halves));
+        devices.set_live(id);
+        let prepared = |p: &Project| {
+            compile_with_devices(p, &Meters::new(), &Media::new(), &devices)
+                .prepare(&CONFIG)
+                .unwrap()
+        };
+        let graph = prepared(&p);
+        // From the plugin on, with what it sends to and the master, while
+        // what plays into it renders ahead, as the drums do.
+        for key in [
+            keys::device(id),
+            keys::track_output(bass),
+            keys::track_bus(reverb),
+            keys::master_output(),
+        ] {
+            assert!(graph.renders_live(key), "{key:?}");
+        }
+        for key in [keys::track_clips(bass), keys::track_clips(drums)] {
+            assert!(graph.contains(key) && !graph.renders_live(key), "{key:?}");
+        }
+        // Out of the signal, it has nothing render live.
+        p.device_mut(id).unwrap().active = false;
+        assert!(!prepared(&p).renders_live(keys::master_output()));
+
+        // A MIDI effect that renders live has the instrument it plays into
+        // render live, and the clips that play into it ahead.
+        let synth = DeviceKind::TestInstrument { level: 0.5 };
+        let p = note_through(vec![midi_effect(), synth]);
+        let (track, effect) = (p.tracks[0].id, p.tracks[0].devices[0].id);
+        let instrument = p.tracks[0].devices[1].id;
+        let mut devices = Devices::new();
+        devices.insert(effect, Transposes::new(Some(12)));
+        devices.set_live(effect);
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices);
+        let graph = graph.prepare(&CONFIG).unwrap();
+        for key in [keys::device(effect), keys::device(instrument)] {
+            assert!(graph.renders_live(key), "{key:?}");
+        }
+        let clips = keys::track_clips(track);
+        assert!(graph.contains(clips) && !graph.renders_live(clips));
     }
 
     #[test]

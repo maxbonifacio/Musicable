@@ -30,6 +30,10 @@
 //! after an instrument or audio effect plugin with one carries the notes
 //! it plays out.
 //!
+//! A plugin that must render live, as the audio device asks for each block,
+//! has its device render live, as does one the user set to Render Ahead
+//! Never ([`Plugins::set_render_ahead`]): see [`Plugins::devices`].
+//!
 //! A plugin's own bypass parameter, if it has one, is its device's Bypass:
 //! it follows the device's `bypassed`, rather than the plugin's settings,
 //! and clicking it in the plugin's window bypasses the device. Musicable
@@ -88,6 +92,9 @@ pub(crate) enum Change {
     /// The plugin restarted with another latency, so the graph needs
     /// building again for delay compensation.
     Latency,
+    /// The plugin started or stopped saying it must render live, so the
+    /// graph needs building again, with its device on the other side.
+    Live,
     /// The plugin's side inputs, as it lists them now, for its device to
     /// take.
     Inputs(Vec<PluginInput>),
@@ -133,9 +140,16 @@ pub(crate) struct Plugins {
     /// What the user marked plugins as, by format and id, where the scan's
     /// rule gets them wrong ([`set_kind`](Self::set_kind)).
     kinds: BTreeMap<(PluginFormat, String), PluginKind>,
-    /// Whether `kinds` changed since [`take_kinds_changed`](Self::take_kinds_changed)
-    /// last said.
-    kinds_changed: bool,
+    /// The plugins the user set to Render Ahead Never, by format and id,
+    /// which render live wherever they are
+    /// ([`set_render_ahead`](Self::set_render_ahead)).
+    never_ahead: BTreeSet<(PluginFormat, String)>,
+    /// Whether `kinds` or `never_ahead` changed since
+    /// [`take_marks_changed`](Self::take_marks_changed) last said.
+    marks_changed: bool,
+    /// Whether a device's plugin was set to render live or ahead since
+    /// [`take_live_changed`](Self::take_live_changed) last said.
+    live_changed: bool,
     hosted: BTreeMap<DeviceId, Hosted>,
     /// Plugin devices whose plugin didn't load, and why. They're tried
     /// again when the installed plugins change.
@@ -161,6 +175,8 @@ struct Hosted {
     /// Whether the device has a note output from the plugin, as it last
     /// said.
     note_output: bool,
+    /// Whether the plugin must render live, as it last said.
+    must_render_live: bool,
     /// Each parameter's value in the state the plugin last loaded, or as it
     /// started.
     base: BTreeMap<u32, f64>,
@@ -195,7 +211,9 @@ impl Plugins {
         Self {
             installed: None,
             kinds: BTreeMap::new(),
-            kinds_changed: false,
+            never_ahead: BTreeSet::new(),
+            marks_changed: false,
+            live_changed: false,
             hosted: BTreeMap::new(),
             failed: BTreeMap::new(),
             config,
@@ -234,6 +252,19 @@ impl Plugins {
         id: &str,
         kind: PluginKind,
     ) -> Result<(), String> {
+        let plugin = self.find_installed(format, id)?;
+        let key = (format, plugin.id.clone());
+        let changed = match kind == plugin.kind() {
+            true => self.kinds.remove(&key).is_some(),
+            false => self.kinds.insert(key, kind) != Some(kind),
+        };
+        self.marks_changed |= changed;
+        Ok(())
+    }
+
+    /// The installed plugin `id` in `format`, whose class id, for VST3,
+    /// can come in either case.
+    fn find_installed(&self, format: PluginFormat, id: &str) -> Result<&PluginInfo, String> {
         let found = self.installed().iter().find(|plugin| {
             plugin.format == format
                 && match format {
@@ -241,16 +272,7 @@ impl Plugins {
                     PluginFormat::Clap => plugin.id == id,
                 }
         });
-        let Some(plugin) = found else {
-            return Err(format!("there's no plugin {id:?} installed in that format"));
-        };
-        let key = (format, plugin.id.clone());
-        let changed = match kind == plugin.kind() {
-            true => self.kinds.remove(&key).is_some(),
-            false => self.kinds.insert(key, kind) != Some(kind),
-        };
-        self.kinds_changed |= changed;
-        Ok(())
+        found.ok_or_else(|| format!("there's no plugin {id:?} installed in that format"))
     }
 
     /// What the user marked plugins as, by format and id.
@@ -263,10 +285,63 @@ impl Plugins {
         self.kinds = kinds;
     }
 
-    /// Whether the user marked a plugin as another kind since this last
-    /// said.
-    pub fn take_kinds_changed(&mut self) -> bool {
-        std::mem::take(&mut self.kinds_changed)
+    /// Whether `plugin` is set to Render Ahead Never, so it renders live
+    /// wherever it is.
+    pub fn never_ahead(&self, plugin: &PluginInfo) -> bool {
+        self.never_ahead
+            .contains(&(plugin.format, plugin.id.clone()))
+    }
+
+    /// Sets the installed plugin `id` in `format` to Render Ahead Never, so
+    /// its devices render live, as the audio device asks for each block,
+    /// with what they play into, or with `never` false back to Auto, where
+    /// they render ahead unless the plugin says it must render live. A VST3
+    /// plugin's class id can come in either case.
+    pub fn set_render_ahead(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        never: bool,
+    ) -> Result<(), String> {
+        let key = (format, self.find_installed(format, id)?.id.clone());
+        let changed = match never {
+            true => self.never_ahead.insert(key.clone()),
+            false => self.never_ahead.remove(&key),
+        };
+        self.marks_changed |= changed;
+        let plays = |h: &Hosted| h.instance.info().format == key.0 && h.instance.info().id == key.1;
+        self.live_changed |= changed && self.hosted.values().any(plays);
+        Ok(())
+    }
+
+    /// The plugins the user set to Render Ahead Never, by format and id.
+    pub fn never_ahead_marks(&self) -> &BTreeSet<(PluginFormat, String)> {
+        &self.never_ahead
+    }
+
+    /// Has the plugins set to Render Ahead Never as in `never`, as the
+    /// settings file had them.
+    pub fn set_never_ahead_marks(&mut self, never: BTreeSet<(PluginFormat, String)>) {
+        self.never_ahead = never;
+    }
+
+    /// Whether the user marked a plugin as another kind, or set its Render
+    /// Ahead, since this last said.
+    pub fn take_marks_changed(&mut self) -> bool {
+        std::mem::take(&mut self.marks_changed)
+    }
+
+    /// Whether the user set the plugin of one of the devices to render
+    /// live, or ahead, since this last said, so the graph needs building
+    /// again.
+    pub fn take_live_changed(&mut self) -> bool {
+        std::mem::take(&mut self.live_changed)
+    }
+
+    /// Whether the device `id`'s plugin says it must render live, as it
+    /// last said, rather than being set to.
+    pub fn must_render_live(&self, id: DeviceId) -> bool {
+        self.hosted.get(&id).is_some_and(|h| h.must_render_live)
     }
 
     /// Plugins loaded from now on call `waker` when they need
@@ -385,6 +460,7 @@ impl Plugins {
             applied: PluginSettings::default(),
             inputs: plugin.inputs.clone(),
             note_output: plugin.note_output,
+            must_render_live: false,
             fresh,
             automated: BTreeSet::new(),
             bypassed: false,
@@ -405,15 +481,22 @@ impl Plugins {
         if let Err(e) = hosted.instance.activate(self.config) {
             self.problems.push(format!("{e}: it plays nothing"));
         }
+        // Set up, as VST3 plugins may say.
+        hosted.must_render_live = hosted.instance.must_render_live();
         hosted.settle();
         Ok(hosted)
     }
 
-    /// The nodes the compiler makes for the plugin devices.
+    /// The nodes the compiler makes for the plugin devices, and which of
+    /// them render live: those whose plugin says it must, and those set to
+    /// Render Ahead Never.
     pub fn devices(&self) -> Devices {
         let mut devices = Devices::new();
         for (&id, hosted) in &self.hosted {
             devices.insert(id, Arc::clone(&hosted.nodes));
+            if hosted.must_render_live || self.never_ahead(hosted.instance.info()) {
+                devices.set_live(id);
+            }
         }
         devices
     }
@@ -713,6 +796,10 @@ impl Hosted {
         if self.instance.note_output() != self.note_output {
             self.note_output = self.instance.note_output();
             changes.push(Change::NoteOutput(self.note_output));
+        }
+        if self.instance.must_render_live() != self.must_render_live {
+            self.must_render_live = self.instance.must_render_live();
+            changes.push(Change::Live);
         }
         changes
     }

@@ -929,10 +929,36 @@ impl Session {
         self.plugins.set_kinds(kinds);
     }
 
-    /// Whether the user marked a plugin as another kind since this last
-    /// said, for the app to save and list it.
-    pub fn take_plugin_kinds_changed(&mut self) -> bool {
-        self.plugins.take_kinds_changed()
+    /// Whether `plugin` is set to Render Ahead Never
+    /// ([`browser::SET_PLUGIN_RENDER_AHEAD`]), so it renders live wherever
+    /// it is.
+    ///
+    /// [`browser::SET_PLUGIN_RENDER_AHEAD`]: musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD
+    pub fn plugin_never_ahead(&self, plugin: &PluginInfo) -> bool {
+        self.plugins.never_ahead(plugin)
+    }
+
+    /// The plugins set to Render Ahead Never, by format and id.
+    pub fn plugins_never_ahead(&self) -> &BTreeSet<(PluginFormat, String)> {
+        self.plugins.never_ahead_marks()
+    }
+
+    /// Has the plugins set to Render Ahead Never as in `never`, as the
+    /// settings file has them.
+    pub fn set_plugins_never_ahead(&mut self, never: BTreeSet<(PluginFormat, String)>) {
+        self.plugins.set_never_ahead_marks(never);
+    }
+
+    /// Whether the plugin of the device `device` says it must render live,
+    /// rather than being set to Render Ahead Never.
+    pub fn plugin_must_render_live(&self, device: DeviceId) -> bool {
+        self.plugins.must_render_live(device)
+    }
+
+    /// Whether the user marked a plugin as another kind, or set its Render
+    /// Ahead, since this last said, for the app to save and list it.
+    pub fn take_plugin_marks_changed(&mut self) -> bool {
+        self.plugins.take_marks_changed()
     }
 
     /// Plugins loaded from now on call `waker`, from any thread but an
@@ -1091,7 +1117,9 @@ impl Session {
     /// as changes the project follows, which aren't steps in the undo
     /// history.
     fn follow_plugins(&mut self, changes: Vec<(DeviceId, Change)>) {
-        let mut latency = false;
+        // A plugin's latency, or whether it must render live, is in how the
+        // graph is built.
+        let mut rebuild = false;
         for (device, change) in changes {
             let name = format!("Change {}", self.plugins.name(device).unwrap_or("Plugin"));
             match change {
@@ -1132,7 +1160,7 @@ impl Session {
                 Change::Settings { settings, .. } => self.document.follow(&name, |tx| {
                     tx.set_plugin_settings(device, settings);
                 }),
-                Change::Latency => latency = true,
+                Change::Latency | Change::Live => rebuild = true,
                 Change::Inputs(inputs) => self.document.follow(&name, |tx| {
                     tx.set_plugin_inputs(device, inputs);
                 }),
@@ -1143,7 +1171,7 @@ impl Session {
                 Change::Failed(problem) => self.problems.push(problem),
             }
         }
-        if latency {
+        if rebuild {
             self.rebuild();
         }
         self.sync();
@@ -1422,6 +1450,10 @@ impl Session {
         // Plugins load for new devices, and go with the ones that went, in
         // tracks too, and take in their settings.
         if changed && self.plugins.sync(self.document.project()) {
+            recompile = true;
+        }
+        // A plugin set to render live, or ahead.
+        if self.plugins.take_live_changed() {
             recompile = true;
         }
         if let Some(tempo) = tempo {
