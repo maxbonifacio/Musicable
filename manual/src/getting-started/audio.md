@@ -67,10 +67,11 @@ device asks for each buffer, so what you play reaches your ears at the
 buffer's latency. So does everything it plays into: the buses its sends go
 to, a track or a sidechain taking it as an input, and the master, whose
 knobs then change what you hear at once. The rest of the project still
-renders ahead, and the live part plays on top of it. A track taking its
-input from another track renders live only if that track does. Exports
-aren't played through the device, so Render Ahead makes no difference to
-them.
+renders ahead, and the live part plays on top of it, with two of
+Musicable's threads kept for it besides the audio device's, so the rest
+doesn't hold it up. A track taking its input from another track renders
+live only if that track does. Exports aren't played through the device,
+so Render Ahead makes no difference to them.
 
 Render Ahead changes at once, with no **Apply**, since the device needn't
 open again.

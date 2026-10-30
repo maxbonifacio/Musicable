@@ -1803,6 +1803,25 @@ ahead of the device between callbacks: a second kind of work, which a
 worker takes on when the engine asks and puts down when the audio thread
 needs the engine ([Rendering ahead](#rendering-ahead)).
 
+**Two boards.** The pool has two boards, each with a block of its own, so
+a graph's live half renders on the audio thread while workers render the
+rest ahead: the main board for what the engine's ahead side renders, and
+the live board for the live half, which the renderer's
+`Renderer::live_renderer` renders on the same workers. Each board has its
+own queues, counters and failure, and a thread works on one at a time.
+While the graph has a live half, a block rendered ahead leaves out the
+last two workers, `KEPT`, which never take on rendering ahead either, so
+the live half has the audio thread and them however much the rest takes:
+all workers but two render ahead, as the [hybrid buffering
+design](#rendering-ahead) has it. With three workers or fewer it leaves
+out one fewer, so a worker still renders ahead. The live board's wake-up
+tree starts from the last worker and goes down, so it wakes those two
+first. A worker with nothing to do on the main board works on the live
+board's block meanwhile, as the device waits for that, and a thread helps
+only with the tasks of nodes on its own board. A block rendered ahead of
+a graph without a live half, or one the audio thread renders as the device
+asks, has every worker.
+
 ## Rendering ahead
 
 With a lead (`EngineHandle::set_lead`), the engine renders the graph ahead
@@ -1867,9 +1886,10 @@ notes and modulation. A graph without live sources is one half, which
 renders ahead.
 
 **The live half** renders on the audio thread, stretch by stretch as each
-callback plays, with the renderer `Renderer::live_renderer` gives, a
-`ReferenceRenderer` for now: with only the armed tracks, their buses and
-the master live, most live halves are too light to share between threads.
+callback plays, with the renderer `Renderer::live_renderer` gives: the
+parallel renderer's shares it with the workers, on a board of its own
+([Parallel rendering](#parallel-rendering)), and the others give a
+`ReferenceRenderer`.
 It renders frames the ahead side has rendered, from the rings, or, when
 the lead runs out, right after the ahead side renders them as the device
 asks. The ahead side tells the live side what it needs in a queue of its
@@ -1882,8 +1902,9 @@ before each stretch, as far as the ahead side has rendered.
 the engine asks the renderer's workers for more (`Renderer::render_ahead`).
 One worker takes it on, starts each block from its own lane as the audio
 thread does from lane 0, and the others help as they would with any block,
-until the lead is whole. Every worker can help, as the live half renders
-on the audio thread alone. A renderer without workers, such as
+until the lead is whole. While the graph has a live half, the last two
+workers stay out of it, for the live half's blocks. A renderer without
+workers, such as
 `ReferenceRenderer`, has the audio thread render ahead at the end of each
 callback instead. When a callback needs frames that aren't rendered yet,
 the audio thread takes the ahead side and renders the next block itself,

@@ -851,6 +851,186 @@ fn a_worker_rendering_ahead_has_as_many_threads_on_a_block_as_it_can_use() {
     assert_eq!(alone.load(Relaxed), 0);
 }
 
+/// The lane of the thread running this: the test's own, which plays the
+/// audio thread, is lane 0.
+fn lane() -> usize {
+    let thread = thread::current();
+    let worker = (thread.name()).and_then(|name| name.strip_prefix("musicable-worker-"));
+    worker.map_or(0, |lane| lane.parse().unwrap())
+}
+
+/// Which lanes ran a set of [`Gather`] nodes, in blocks rendered as the
+/// device asked and in blocks rendered ahead, and how often they found
+/// themselves short of each other.
+#[derive(Default)]
+struct Gathered {
+    lanes: [[AtomicBool; 8]; 2],
+    arrived: AtomicU64,
+    short: AtomicU64,
+}
+
+impl Gathered {
+    /// The lanes that ran them, ahead or not.
+    fn lanes(&self, ahead: bool) -> Vec<usize> {
+        let lanes = self.lanes[usize::from(ahead)].iter().enumerate();
+        lanes
+            .filter(|(_, ran)| ran.load(Relaxed))
+            .map(|(lane, _)| lane)
+            .collect()
+    }
+}
+
+/// One of `want` nodes that wait for each other in every block, for up to
+/// a second, so they only finish in time on that many lanes at once, and
+/// then keep their lane `hold` longer.
+struct Gather {
+    want: u64,
+    hold: Duration,
+    blocks: u64,
+    seen: Arc<Gathered>,
+}
+
+impl Gather {
+    fn new(want: u64, seen: &Arc<Gathered>) -> Self {
+        Self {
+            want,
+            hold: Duration::ZERO,
+            blocks: 0,
+            seen: seen.clone(),
+        }
+    }
+
+    /// One alone, which keeps its lane for `hold`.
+    fn busy(hold: Duration, seen: &Arc<Gathered>) -> Self {
+        Self {
+            hold,
+            ..Self::new(1, seen)
+        }
+    }
+}
+
+impl Node for Gather {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+        let seen = &*self.seen;
+        seen.lanes[usize::from(ctx.ahead)][lane()].store(true, Relaxed);
+        self.blocks += 1;
+        seen.arrived.fetch_add(1, Release);
+        let started = Instant::now();
+        let until = started + Duration::from_secs(1);
+        while seen.arrived.load(Acquire) < self.want * self.blocks {
+            if Instant::now() > until {
+                seen.short.fetch_add(1, Relaxed);
+                return;
+            }
+            spin_loop();
+        }
+        while started.elapsed() < self.hold {
+            spin_loop();
+        }
+    }
+}
+
+/// An engine rendering up to `lead` ahead with four workers, the last two
+/// of which a block rendered ahead leaves the live half, if there's one.
+fn four_workers(lead: Lead) -> (Engine, EngineHandle) {
+    let options = ParallelOptions {
+        threads: 4,
+        ..workers()
+    };
+    let renderer = ParallelRenderer::new(options);
+    let (engine, handle) = Engine::with_renderer(CONFIG, Box::new(renderer));
+    handle.set_lead(lead);
+    (engine, handle)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_live_half_renders_on_the_last_workers_while_the_rest_renders_ahead() {
+    let (mut engine, mut handle) = four_workers(Lead::Normal);
+    let (live, ahead, busy) = (Arc::default(), Arc::default(), Arc::default());
+    let mut g = Graph::new();
+    // The live half: a track monitoring its input, into two nodes that
+    // finish in time only together, into the output.
+    let track = InputMonitor::new(Monitor::In, false).with_input(0, 1);
+    let track = g.add(NodeKey(0), track);
+    let mix = g.add(NodeKey(1), Probe::new(0, 1));
+    for key in 2..4 {
+        let node = g.add(NodeKey(key), Gather::new(2, &live));
+        g.connect(track, node).unwrap();
+        g.connect(node, mix).unwrap();
+    }
+    // The rest: two more that finish in time only together, and four that
+    // keep a lane a while, enough for every worker, into the live half's
+    // mix.
+    for key in 4..6 {
+        let node = g.add(NodeKey(key), Gather::new(2, &ahead));
+        g.connect(node, mix).unwrap();
+    }
+    for key in 6..10 {
+        let node = g.add(
+            NodeKey(key),
+            Gather::busy(Duration::from_micros(100), &busy),
+        );
+        g.connect(node, mix).unwrap();
+    }
+    g.set_output(mix).unwrap();
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    handle.send(play()).unwrap();
+    for _ in 0..40 {
+        render(&mut engine, 256, 256);
+        assert!(eventually(|| engine.shared().lead() >= 2400));
+    }
+    assert_eq!(handle.stats().lead_target, 2400, "the rest renders ahead");
+    // Each half's blocks had two lanes on them, and those rendered ahead
+    // had neither of the last two: those the live half had besides the
+    // audio thread's.
+    assert_eq!(
+        (live.short.load(Relaxed), ahead.short.load(Relaxed)),
+        (0, 0)
+    );
+    assert!(
+        live.lanes(false).iter().any(|&lane| lane >= 3),
+        "{:?}",
+        live.lanes(false)
+    );
+    assert!(live.lanes(true).is_empty());
+    for seen in [&ahead, &busy] {
+        let lanes = seen.lanes(true);
+        assert!(
+            !lanes.is_empty() && lanes.iter().all(|&lane| lane < 3),
+            "{lanes:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn without_a_live_half_blocks_rendered_ahead_have_every_worker() {
+    let (mut engine, mut handle) = four_workers(Lead::Normal);
+    let seen = Arc::default();
+    // Four nodes that finish in time only together: on every worker.
+    let mut g = Graph::new();
+    let mix = g.add(NodeKey(0), Probe::new(0, 1));
+    for key in 1..5 {
+        let node = g.add(NodeKey(key), Gather::new(4, &seen));
+        g.connect(node, mix).unwrap();
+    }
+    g.set_output(mix).unwrap();
+    handle.swap_graph(g.prepare(&CONFIG).unwrap()).unwrap();
+    handle.send(play()).unwrap();
+    for _ in 0..20 {
+        render(&mut engine, 256, 256);
+        assert!(eventually(|| engine.shared().lead() >= 2400));
+    }
+    assert_eq!(seen.short.load(Relaxed), 0);
+    assert_eq!(seen.lanes(true), [1, 2, 3, 4]);
+}
+
 /// Panics in the first block it renders from engine time 1024 on.
 #[derive(Default)]
 struct PanicsLater {

@@ -315,7 +315,9 @@ where a part has started, what's built.
   device asks ([engine.md](engine.md#rendering-ahead)), as far ahead as the
   Audio settings' Render Ahead says, with a gauge under the CPU meter
   ([app.md](app.md#meters)). Arming a track builds the graph again with
-  the track live. Next, the live half shares the workers, and the app
+  the track live, and the live half renders on the same workers as the
+  rest, on a board of its own, with two workers that blocks rendered ahead
+  leave it ([engine.md](engine.md#parallel-rendering)). Next, the app
   marks tracks Always Live. Exports render on the workers already, in the
   app engine's block size (`export::Job`).
 - **Plugin sandboxing.** Scanning loads each new library in a process of

@@ -2039,6 +2039,12 @@ impl PreparedGraph {
                 .is_some_and(|live| live.can_be_live(key))
     }
 
+    /// Whether the graph has a live half, which the engine may have taken
+    /// out: this is the half that renders ahead then.
+    pub(crate) fn has_live_half(&self) -> bool {
+        !self.live_ids.is_empty()
+    }
+
     /// Whether the node with `key` renders in the graph's live half, which
     /// the engine may have taken out.
     pub(crate) fn renders_live(&self, key: NodeKey) -> bool {
