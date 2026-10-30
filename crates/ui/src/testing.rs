@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{
-    Event, ImmediateViewport, Pos2, RawInput, Rect, ViewportBuilder, ViewportCommand, ViewportId,
-    ViewportInfo, pos2, vec2,
+    CursorIcon, Event, ImmediateViewport, Pos2, RawInput, Rect, ViewportBuilder, ViewportCommand,
+    ViewportId, ViewportInfo, pos2, vec2,
 };
 use egui_kittest::{Harness, HarnessBuilder};
 use musicable_commands::{
@@ -469,6 +469,13 @@ pub(crate) fn click_at(harness: &mut Harness<'_, State>, at: Pos2) {
     harness.run();
     harness.drop_at(at);
     harness.run();
+}
+
+/// What the pointer looks like with the mouse moved to `at`.
+pub(crate) fn cursor_at<S>(harness: &mut Harness<'_, S>, at: Pos2) -> CursorIcon {
+    harness.hover_at(at);
+    harness.run();
+    harness.output().platform_output.cursor_icon
 }
 
 /// A key pressed and let go of, as a window of its own gets it.

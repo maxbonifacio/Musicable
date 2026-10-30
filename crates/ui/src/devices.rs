@@ -29,7 +29,7 @@ use crate::performance::{self, Cpu};
 use crate::search::score;
 use crate::shell::{Action, View, with_keys};
 use crate::theme::Theme;
-use crate::widgets::{Face, name_box, paint_toggle};
+use crate::widgets::{Face, name_box, paint_toggle, placeholder};
 
 /// The plugin search field's id, so a key can focus it.
 pub(crate) const PLUGIN_SEARCH: &str = "plugin search";
@@ -175,18 +175,14 @@ impl DevicesPanel {
         self.sight = None;
         let shown = chain.and_then(|chain| Some((chain, project.devices(chain)?)));
         let Some((chain, devices)) = shown else {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(NO_TRACK).weak());
-            });
+            placeholder(ui, NO_TRACK);
             return browse;
         };
         let modulators = project
             .modulation(chain)
             .is_some_and(|m| !m.modulators.is_empty());
         if devices.is_empty() && !modulators {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(NO_DEVICES).weak());
-            });
+            placeholder(ui, NO_DEVICES);
             return browse;
         }
         let reveal = self.reveal.take();
@@ -1144,7 +1140,7 @@ mod tests {
     use super::*;
     use crate::panels::{BROWSER, DEVICES};
     use crate::performance::Row;
-    use crate::testing::{State, quick_harness as harness};
+    use crate::testing::{State, cursor_at, quick_harness as harness};
 
     fn id(name: &str) -> String {
         format!("org.example.{}", name.to_lowercase().replace(' ', "-"))
@@ -1331,6 +1327,24 @@ mod tests {
         click(&mut harness, "Add Device...");
         harness.get_by_label("Plugins");
         assert!(actions(&mut harness).is_empty());
+    }
+
+    #[test]
+    fn what_the_empty_panel_says_takes_the_text_cursor_only_over_its_words() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut harness = harness(project);
+        // Under Add Device, in the room the words are in the middle of.
+        let add = harness.get_by_label("Add Device...").rect();
+        let beside = add.right_bottom() + vec2(-5.0, 30.0);
+        for (words, chain) in [(NO_TRACK, None), (NO_DEVICES, Some(Chain::Track(keys)))] {
+            harness.state_mut().editor.selected_track = chain;
+            harness.run();
+            let shown = harness.get_by_label(words).rect();
+            assert_eq!(cursor_at(&mut harness, shown.center()), CursorIcon::Text);
+            let cursor = cursor_at(&mut harness, beside);
+            assert_eq!(cursor, CursorIcon::Default, "{words}");
+        }
     }
 
     #[test]
