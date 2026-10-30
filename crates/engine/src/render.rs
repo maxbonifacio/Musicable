@@ -1,5 +1,7 @@
 //! Renderers run every node of a graph once per block.
 
+use std::ops::Range;
+
 use musicable_model::time::TempoMap;
 
 use crate::{
@@ -25,6 +27,34 @@ pub struct Block<'a> {
 }
 
 impl<'a> Block<'a> {
+    /// Frames `frames` of the block, as a block of their own: from its
+    /// frame `frames.start` on, with its inputs there and the MIDI messages
+    /// for those frames. The first part has those that came late too, and
+    /// the last any for after the block, as the block has.
+    pub(crate) fn part(&self, frames: Range<usize>) -> Block<'a> {
+        let (start, end) = (
+            self.time + frames.start as u64,
+            self.time + frames.end as u64,
+        );
+        let from = match frames.start {
+            0 => 0,
+            _ => self.midi.partition_point(|m| m.time < start),
+        };
+        let to = match frames.end == self.frames {
+            true => self.midi.len(),
+            false => self.midi.partition_point(|m| m.time < end),
+        };
+        Block {
+            frames: frames.len(),
+            time: start,
+            transport: self.transport.after(frames.start as u64),
+            tempo: self.tempo,
+            input: self.input.range(frames),
+            midi: &self.midi[from..to],
+            ahead: self.ahead,
+        }
+    }
+
     /// What a node with `events` knows about this block. Every renderer
     /// builds node contexts here, so they all give nodes the same ones.
     pub(crate) fn context(&self, sample_rate: u32, events: &'a [NodeEvent]) -> ProcessContext<'a> {
@@ -173,6 +203,60 @@ mod tests {
         let out = graph.output(64);
         assert_eq!(out.channels(), 2);
         assert!(out.iter().flatten().all(|&s| s == 0.75));
+    }
+
+    #[test]
+    fn a_part_of_a_block_is_a_block_of_its_own() {
+        let tempo = TempoMap::default();
+        let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let message = |time| MidiMessage {
+            time,
+            input: 0,
+            bytes: [0x90, 60, 100],
+        };
+        // One late, and one for after the block.
+        let midi = [9, 10, 12, 13, 20].map(message);
+        let block = Block {
+            frames: 4,
+            time: 10,
+            transport: TransportState {
+                playing: true,
+                position: 100,
+                ..TransportState::default()
+            },
+            tempo: &tempo,
+            input: AudioRef::from_planar(&input, 2),
+            midi: &midi,
+            ahead: true,
+        };
+        let times = |part: &Block<'_>| part.midi.iter().map(|m| m.time).collect::<Vec<_>>();
+        let first = block.part(0..2);
+        assert_eq!(
+            (first.frames, first.time, first.transport.position),
+            (2, 10, 100)
+        );
+        assert_eq!(first.input.channel(1), [5.0, 6.0]);
+        assert_eq!(times(&first), [9, 10]);
+        let middle = block.part(1..3);
+        assert_eq!((middle.time, middle.transport.position), (11, 101));
+        assert_eq!(times(&middle), [12]);
+        let last = block.part(2..4);
+        assert_eq!(
+            (last.frames, last.time, last.transport.position),
+            (2, 12, 102)
+        );
+        assert_eq!(last.input.channel(0), [3.0, 4.0]);
+        assert_eq!(times(&last), [12, 13, 20]);
+        assert!(last.ahead);
+        // Stopped, the song doesn't move on.
+        let stopped = Block {
+            transport: TransportState {
+                position: 100,
+                ..TransportState::default()
+            },
+            ..block
+        };
+        assert_eq!(stopped.part(2..4).transport.position, 100);
     }
 
     #[test]

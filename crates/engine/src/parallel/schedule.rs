@@ -4,6 +4,7 @@
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::{AcqRel, Relaxed};
 
+use super::PARTS;
 use crate::NodeId;
 use crate::buffer::{AudioBuffer, RawBuffer};
 
@@ -20,6 +21,10 @@ use crate::buffer::{AudioBuffer, RawBuffer};
 /// each stage is run as a graph of its own: a node's inputs in a stage
 /// before its own have finished by the time it starts, and only those in
 /// its own stage count, as do only the nodes it feeds there.
+///
+/// A block the renderer pipelines runs in parts ([`PARTS`] at most), and
+/// each part of a node waits for that part of each of its inputs and for
+/// its own part before, so each part of each node has a counter too.
 #[derive(Debug)]
 pub(crate) struct Schedule {
     /// `dependents[offsets[n]..offsets[n + 1]]` are the nodes node `n` feeds
@@ -32,12 +37,22 @@ pub(crate) struct Schedule {
     /// Connections into each node whose source hasn't finished this block.
     /// Unused for nodes with one input.
     pending: Box<[AtomicU32]>,
+    /// For part `p` of node `n`, at `n * PARTS + p`, in a pipelined block:
+    /// what it waits for that hasn't finished, its inputs' part `p` and
+    /// its own part before. Unused for those that wait for one.
+    parts: Box<[AtomicU32]>,
+    /// Where each node's events for its next part start, in a pipelined
+    /// block: only the lane running one of the node's parts uses it.
+    pub(super) cursors: Box<[AtomicU32]>,
     /// Each stage's nodes without inputs in it, the ones with the longest
     /// way to go last: they are taken from the end.
     sources: Box<[Box<[u32]>]>,
     /// The most nodes of each stage that can run at once: the widest level
     /// of the stage. An estimate of how many threads it can use.
     widths: Box<[usize]>,
+    /// Each stage's nodes, and the most on any path through it: how many
+    /// can run at once on average is the one over the other.
+    lengths: Box<[(usize, usize)]>,
     /// Each node's output buffer, set before each block the parallel renderer
     /// runs.
     pub(super) buffers: Box<[RawBuffer]>,
@@ -100,8 +115,20 @@ impl Schedule {
         let widths = (per_level.into_iter())
             .map(|levels| levels.into_iter().max().unwrap_or(0))
             .collect();
+        let mut lengths = vec![(0, 0); stages];
+        for &node in order {
+            let (nodes, longest) = &mut lengths[stage_of[node.0] as usize];
+            *nodes += 1;
+            *longest = (*longest).max(height[node.0] as usize);
+        }
+        let parts = (in_degree.iter())
+            .flat_map(|&d| (0..PARTS).map(move |part| AtomicU32::new(d + u32::from(part > 0))))
+            .collect();
         Self {
             pending: in_degree.iter().map(|&d| AtomicU32::new(d)).collect(),
+            parts,
+            cursors: (0..len).map(|_| AtomicU32::new(0)).collect(),
+            lengths: lengths.into(),
             in_degree,
             offsets: offsets.into(),
             dependents: dependents.into(),
@@ -120,6 +147,22 @@ impl Schedule {
     /// The most nodes of stage `stage` that can run at once.
     pub(super) fn width(&self, stage: usize) -> usize {
         self.widths[stage]
+    }
+
+    /// How many parts stage `stage` keeps `lanes` threads busy in, about.
+    /// Whole, a block takes about as long as the longer of its longest path
+    /// and its nodes spread over the threads. A graph whose longest path
+    /// takes less than half as long again as that keeps them busy whole,
+    /// near enough, in one part. Others take enough for twice as many
+    /// pieces able to run at once as there are threads, so one that falls
+    /// behind holds up none of the others: a long chain takes two parts for
+    /// each thread.
+    pub(super) fn parts(&self, stage: usize, lanes: usize) -> usize {
+        let (nodes, longest) = self.lengths[stage];
+        if 2 * longest * lanes < 3 * nodes {
+            return 1;
+        }
+        (2 * lanes * longest).div_ceil(nodes.max(1))
     }
 
     /// The nodes `node` feeds in its stage, once per connection.
@@ -145,6 +188,26 @@ impl Schedule {
         // That was the last. Nothing else counts this node down this block,
         // so reset it for the next one.
         pending.store(in_degree, Relaxed);
+        true
+    }
+
+    /// Counts one of the things part `part` of `node` waits for as
+    /// finished in the current block: that part of one of its inputs, or
+    /// its own part before. Returns whether that was the last. A part that
+    /// waits for one thing needs no counting: a source's after its first,
+    /// and the first of a node with one input.
+    pub(super) fn part_done(&self, node: u32, part: usize) -> bool {
+        let n = node as usize;
+        let waits = self.in_degree[n] + u32::from(part > 0);
+        if waits == 1 {
+            return true;
+        }
+        let pending = &self.parts[n * PARTS + part];
+        if pending.fetch_sub(1, AcqRel) != 1 {
+            return false;
+        }
+        // As in `input_done`.
+        pending.store(waits, Relaxed);
         true
     }
 
@@ -201,6 +264,55 @@ mod tests {
         assert_eq!(s.in_degree(b.0 as u32), 2);
         // Levels: {a, d, e}, {b}, {c}, {out}.
         assert_eq!(s.width(0), 3);
+    }
+
+    #[test]
+    fn a_chain_takes_two_parts_for_each_lane_and_a_wide_graph_none() {
+        let mut chain = Graph::new();
+        let nodes = [0, 1, 2, 3].map(|k| chain.add(NodeKey(k), Sum::default()));
+        for pair in nodes.windows(2) {
+            chain.connect(pair[0], pair[1]).unwrap();
+        }
+        chain.set_output(nodes[3]).unwrap();
+        let s = chain.prepare(&CONFIG).unwrap().schedule;
+        assert_eq!(s.parts(0, 4), 8);
+        assert_eq!(s.parts(0, 12), 24);
+
+        let mut wide = Graph::new();
+        let out = wide.add(NodeKey(0), Sum::default());
+        for k in 1..=32 {
+            let source = wide.add(NodeKey(k), Sum::default());
+            wide.connect(source, out).unwrap();
+        }
+        wide.set_output(out).unwrap();
+        let s = wide.prepare(&CONFIG).unwrap().schedule;
+        // 33 nodes, two on the longest path.
+        assert_eq!(s.parts(0, 4), 1);
+        assert_eq!(s.parts(0, 12), 1);
+    }
+
+    #[test]
+    fn a_part_waits_for_its_inputs_and_its_part_before() {
+        // a → c ← b
+        let mut g = Graph::new();
+        let [a, b, c] = [0, 1, 2].map(|k| g.add(NodeKey(k), Sum::default()));
+        g.connect(a, c).unwrap();
+        g.connect(b, c).unwrap();
+        g.set_output(c).unwrap();
+        let s = g.prepare(&CONFIG).unwrap().schedule;
+        let [a, c] = [a, c].map(|n| n.0 as u32);
+        // A source's parts after its first wait only for the one before.
+        assert!(s.part_done(a, 1));
+        // The first part of c waits for both inputs' first parts.
+        assert!(!s.part_done(c, 0));
+        assert!(s.part_done(c, 0));
+        // Its second for theirs and its own first, in any order.
+        assert!(!s.part_done(c, 1));
+        assert!(!s.part_done(c, 1));
+        assert!(s.part_done(c, 1));
+        // And it's ready to count again for the next block.
+        assert!(!s.part_done(c, 0));
+        assert!(s.part_done(c, 0));
     }
 
     #[test]

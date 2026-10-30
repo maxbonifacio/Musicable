@@ -91,6 +91,18 @@ pub struct TransportState {
     pub jumps: u64,
 }
 
+impl TransportState {
+    /// The state `frames` on in the same block, which has one state
+    /// throughout: the position moves on while it plays.
+    pub(crate) fn after(self, frames: u64) -> Self {
+        let position = match self.playing {
+            true => self.position + frames,
+            false => self.position,
+        };
+        Self { position, ..self }
+    }
+}
+
 /// An event for one node, `offset` frames into the block being rendered.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodeEvent {

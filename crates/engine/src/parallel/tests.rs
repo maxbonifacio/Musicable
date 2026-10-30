@@ -235,6 +235,19 @@ fn render(
     time: u64,
     tempo: &TempoMap,
 ) {
+    render_at(renderer, graph, ids, block, time, time / 2, tempo);
+}
+
+/// The same, with the song at `position`.
+fn render_at(
+    renderer: &mut dyn Renderer,
+    graph: &mut PreparedGraph,
+    ids: &[NodeId],
+    block: &BlockSpec,
+    time: u64,
+    position: u64,
+    tempo: &TempoMap,
+) {
     let mut routed: Vec<Routed> = block
         .events
         .iter()
@@ -255,7 +268,7 @@ fn render(
     graph.load_events(&mut routed);
     let transport = TransportState {
         playing: block.playing,
-        position: time / 2,
+        position,
         ..TransportState::default()
     };
     let block = Block {
@@ -326,6 +339,110 @@ fn check(
     Ok(())
 }
 
+/// Renders `block` of a graph with the reference renderer as the parallel
+/// renderer does pipelining it in `parts` parts: each part as a block of
+/// its own, from its frame on, with the events in its frames, the last
+/// with those after them too. Each node's output for a part goes where the
+/// part is in its buffer in `expected`.
+fn render_parts(
+    graph: &mut PreparedGraph,
+    expected: &mut [AudioBuffer],
+    ids: &[NodeId],
+    block: &BlockSpec,
+    time: u64,
+    tempo: &TempoMap,
+    parts: usize,
+) {
+    let parts = parts.min(block.frames);
+    for part in 0..parts {
+        let frames = part_frames(block.frames, parts, part);
+        let last = part + 1 == parts;
+        let events = (block.events.iter())
+            .filter(|&&(_, offset, ..)| offset >= frames.start && (offset < frames.end || last))
+            .map(|&(node, offset, param, value)| (node, offset - frames.start, param, value))
+            .collect();
+        let spec = BlockSpec {
+            frames: frames.len(),
+            playing: block.playing,
+            events,
+        };
+        let moved = if block.playing {
+            frames.start as u64
+        } else {
+            0
+        };
+        let start = time + frames.start as u64;
+        let mut reference = ReferenceRenderer;
+        render_at(
+            &mut reference,
+            graph,
+            ids,
+            &spec,
+            start,
+            time / 2 + moved,
+            tempo,
+        );
+        for (expected, buffer) in expected.iter_mut().zip(&graph.buffers) {
+            let mut whole = expected.view_mut(block.frames);
+            whole
+                .range_mut(frames.clone())
+                .copy_from(buffer.view(frames.len()));
+        }
+    }
+}
+
+/// Renders `blocks` of `spec`'s graph with each of `renderers`, which
+/// pipeline every block in `parts` parts, and checks that after each block
+/// every node's output is what the reference renderer renders part by part,
+/// bit for bit.
+fn check_parts(
+    spec: &Spec,
+    blocks: &[BlockSpec],
+    parts: usize,
+    renderers: &mut [ParallelRenderer],
+) -> Result<(), TestCaseError> {
+    let tempo = TempoMap::default();
+    let (mut reference, ids) = build(spec);
+    let mut expected = reference.buffers.clone();
+    let mut graphs: Vec<_> = renderers.iter().map(|_| build(spec).0).collect();
+    let mut time = 0;
+    for (b, block) in blocks.iter().enumerate() {
+        render_parts(
+            &mut reference,
+            &mut expected,
+            &ids,
+            block,
+            time,
+            &tempo,
+            parts,
+        );
+        for (renderer, graph) in renderers.iter_mut().zip(&mut graphs) {
+            renderer.force_parts(parts);
+            render(renderer, graph, &ids, block, time, &tempo);
+            // Every node's, and the delays' that delay compensation added.
+            for (n, (buffer, expected)) in graph.buffers.iter().zip(&expected).enumerate() {
+                prop_assert!(
+                    same(buffer, expected, block.frames),
+                    "node {n} differs in block {b} in {parts} parts with {} workers",
+                    renderer.threads(),
+                );
+            }
+        }
+        time += block.frames as u64;
+    }
+    Ok(())
+}
+
+/// Renderers that pipeline every block, as for an export, and share any
+/// graph a test makes between threads.
+fn pipelining(threads: usize, spin: Duration) -> ParallelRenderer {
+    ParallelRenderer::new(ParallelOptions {
+        pipeline: Pipeline::Always,
+        max_nodes: 1 << 10,
+        ..options(threads, spin)
+    })
+}
+
 fn options(threads: usize, spin: Duration) -> ParallelOptions {
     ParallelOptions {
         threads,
@@ -333,6 +450,7 @@ fn options(threads: usize, spin: Duration) -> ParallelOptions {
         inline_below: None,
         max_nodes: 64,
         realtime: false,
+        ..ParallelOptions::default()
     }
 }
 
@@ -396,6 +514,41 @@ fn random_graphs_render_like_the_reference() {
     }
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn random_graphs_render_in_parts_as_the_reference_renders_the_parts() {
+    // As above, each block pipelined in any number of parts, some of a
+    // frame each. Set PROPTEST_CASES to try more.
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(1000);
+    let mut runner = TestRunner::new(Config {
+        cases,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    let renderers = RefCell::new(
+        [
+            (1, Duration::ZERO),
+            (2, Duration::from_micros(50)),
+            (3, Duration::ZERO),
+            (7, Duration::from_millis(1)),
+        ]
+        .map(|(threads, spin)| pipelining(threads, spin)),
+    );
+    let strategy = spec(48).prop_flat_map(|spec| {
+        let nodes = spec.nodes.len();
+        (Just(spec), blocks(nodes), 2..=PARTS)
+    });
+    let result = runner.run(&strategy, |(spec, blocks, parts)| {
+        check_parts(&spec, &blocks, parts, &mut *renderers.borrow_mut())
+    });
+    if let Err(error) = result {
+        panic!("{error}");
+    }
+}
+
 fn mix(seed: u8, channels: usize) -> Kind {
     Kind::Mix { seed, channels }
 }
@@ -437,6 +590,18 @@ fn a_small_graph_renders_like_the_reference() {
         ParallelRenderer::new(options(2, Duration::from_micros(100))),
     ];
     check(&spec, &blocks, &mut renderers).unwrap();
+}
+
+#[test]
+fn a_small_graph_renders_in_parts_as_the_reference_renders_the_parts() {
+    let (spec, blocks) = small();
+    let mut renderers = [
+        pipelining(1, Duration::ZERO),
+        pipelining(2, Duration::from_micros(100)),
+    ];
+    for parts in [2, 3] {
+        check_parts(&spec, &blocks, parts, &mut renderers).unwrap();
+    }
 }
 
 #[test]
@@ -1083,4 +1248,207 @@ fn a_nodes_tasks_count_towards_it_on_any_thread() {
         assert_eq!(load.take_longest(), Duration::ZERO);
         Ok(())
     });
+}
+
+/// For graphs rendered in blocks long enough to pipeline.
+const LONG: EngineConfig = EngineConfig {
+    sample_rate: 48_000,
+    max_block: 1024,
+};
+
+/// A chain of nodes made by `node`, prepared for `config`: the last is the
+/// output.
+fn chain(
+    length: usize,
+    config: &EngineConfig,
+    mut node: impl FnMut(usize) -> Box<dyn Node>,
+) -> PreparedGraph {
+    let mut g = Graph::new();
+    let mut last = None;
+    for i in 0..length {
+        let next = g.add_boxed(NodeKey(i as u64), node(i));
+        if let Some(last) = last {
+            g.connect(last, next).unwrap();
+        }
+        last = Some(next);
+    }
+    g.set_output(last.unwrap()).unwrap();
+    g.prepare(config).unwrap()
+}
+
+/// A block of `frames` from engine time 0, rendered ahead or not.
+fn ahead_block(frames: usize, tempo: &TempoMap, ahead: bool) -> Block<'_> {
+    Block {
+        ahead,
+        ..block(frames, tempo)
+    }
+}
+
+/// Passes its input on after spinning for a while, and keeps the most nodes
+/// like it that were rendering at once.
+struct Overlaps {
+    running: Arc<AtomicUsize>,
+    most: Arc<AtomicUsize>,
+}
+
+impl Node for Overlaps {
+    fn process(&mut self, _: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
+        let now = self.running.fetch_add(1, AcqRel) + 1;
+        self.most.fetch_max(now, AcqRel);
+        let until = Instant::now() + Duration::from_micros(500);
+        while Instant::now() < until {
+            spin_loop();
+        }
+        self.running.fetch_sub(1, AcqRel);
+        output.clear();
+        for input in inputs.iter() {
+            output.add_from(input);
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_pipelined_chain_renders_on_several_threads_at_once() {
+    let tempo = TempoMap::default();
+    let most = |pipeline: Pipeline| {
+        let (running, most) = (Arc::default(), Arc::<AtomicUsize>::default());
+        let mut graph = chain(4, &LONG, |_| {
+            Box::new(Overlaps {
+                running: Arc::clone(&running),
+                most: Arc::clone(&most),
+            })
+        });
+        let mut renderer = ParallelRenderer::new(ParallelOptions {
+            pipeline,
+            ..options(3, Duration::ZERO)
+        });
+        for _ in 0..5 {
+            renderer.render(&mut graph, &ahead_block(1024, &tempo, true));
+        }
+        most.load(Acquire)
+    };
+    // Whole, each node of a chain waits for the one before.
+    assert_eq!(most(Pipeline::Never), 1);
+    // In parts, each renders one part as the next renders the part before.
+    assert!(most(Pipeline::Ahead) >= 2);
+}
+
+#[test]
+fn which_blocks_are_pipelined_follows_the_option() {
+    let tempo = TempoMap::default();
+    let pipelined = |pipeline, graph: &mut PreparedGraph, frames, ahead| {
+        let mut renderer = ParallelRenderer::new(ParallelOptions {
+            pipeline,
+            ..options(3, Duration::ZERO)
+        });
+        for _ in 0..3 {
+            renderer.render(graph, &ahead_block(frames, &tempo, ahead));
+        }
+        let stats = renderer.monitor().stats();
+        assert_eq!(stats.parallel_blocks, 3, "every block is shared");
+        stats.pipelined_blocks
+    };
+    let mut long = chain(4, &LONG, |i| Box::new(Mix::new(i as u8, 2)));
+    assert_eq!(pipelined(Pipeline::Never, &mut long, 1024, true), 0);
+    assert_eq!(pipelined(Pipeline::Ahead, &mut long, 1024, false), 0);
+    assert_eq!(pipelined(Pipeline::Ahead, &mut long, 1024, true), 3);
+    assert_eq!(pipelined(Pipeline::Always, &mut long, 1024, false), 3);
+    // Too short for two parts of the shortest.
+    let short = 2 * SHORTEST_PART - 1;
+    assert_eq!(pipelined(Pipeline::Always, &mut long, short, true), 0);
+    // A wide graph keeps the threads busy whole.
+    let mut g = Graph::new();
+    let sum = g.add(NodeKey(0), Sum::default());
+    for i in 1..=16 {
+        let source = g.add(NodeKey(i), Mix::new(i as u8, 2));
+        g.connect(source, sum).unwrap();
+    }
+    g.set_output(sum).unwrap();
+    let mut wide = g.prepare(&LONG).unwrap();
+    assert_eq!(pipelined(Pipeline::Always, &mut wide, 1024, true), 0);
+
+    // The renderer of a graph's live half never pipelines.
+    let mut renderer = ParallelRenderer::new(ParallelOptions {
+        pipeline: Pipeline::Always,
+        ..options(3, Duration::ZERO)
+    });
+    let mut live = renderer.live_renderer();
+    for _ in 0..3 {
+        live.render(&mut long, &ahead_block(1024, &tempo, true));
+    }
+    assert_eq!(renderer.monitor().stats().pipelined_blocks, 0);
+}
+
+#[test]
+fn a_stage_with_a_node_that_makes_notes_renders_whole() {
+    let mut g = Graph::new();
+    let maker = g.add(NodeKey(0), Mix::new(0, 2));
+    let after = g.add(NodeKey(1), Mix::new(1, 2));
+    let played = g.add(NodeKey(2), Mix::new(2, 2));
+    g.connect(maker, after).unwrap();
+    g.connect(after, played).unwrap();
+    g.send_made_notes(maker, played).unwrap();
+    g.set_output(played).unwrap();
+    let mut graph = g.prepare(&LONG).unwrap();
+    let mut renderer = pipelining(3, Duration::ZERO);
+    renderer.force_parts(4);
+    let tempo = TempoMap::default();
+    for n in 0..3 {
+        let block = Block {
+            time: n * 1024,
+            ..block(1024, &tempo)
+        };
+        rt::scope(|| graph.run(&mut renderer, &block));
+    }
+    // Two stages each block: the maker's whole, and the one it plays into
+    // in parts.
+    let stats = renderer.monitor().stats();
+    assert_eq!((stats.parallel_blocks, stats.pipelined_blocks), (6, 3));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn each_part_of_a_pipelined_node_counts_towards_its_load() {
+    // A part left out would read an eighth short. Each part spins long
+    // enough that the lane's time between parts, which counts towards the
+    // part it goes on to, is next to nothing.
+    timed(|| {
+        let mut spun = Vec::new();
+        let mut graph = chain(3, &LONG, |_| {
+            let (node, time) = spin(Duration::from_millis(1));
+            spun.push(time);
+            Box::new(node)
+        });
+        let loads = graph.loads();
+        let mut renderer = ParallelRenderer::new(options(3, Duration::from_millis(5)));
+        play_ahead(&mut renderer, &mut graph, 0, 10);
+        assert_eq!(renderer.monitor().stats().pipelined_blocks, 10);
+        for (key, spun) in (0..).zip(&spun) {
+            let load = loads.get(NodeKey(key)).unwrap();
+            reads(load, spun)?;
+            assert_eq!(load.frames(), 10 * 1024);
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn a_panic_in_a_part_reaches_the_audio_thread() {
+    let tempo = TempoMap::default();
+    let mut renderer = pipelining(3, Duration::ZERO);
+    renderer.force_parts(4);
+    for broken in [0, 2, 4] {
+        let mut graph = chain(5, &LONG, |i| match i == broken {
+            true => Box::new(PanicsOnce::default()),
+            false => Box::new(Mix::new(i as u8, 2)),
+        });
+        let failed = panic::catch_unwind(AssertUnwindSafe(|| {
+            renderer.render(&mut graph, &block(1024, &tempo));
+        }));
+        let payload = failed.expect_err("the block should have failed");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"a node failed"));
+        // The rest of the block ran, and the renderer carries on.
+        renderer.render(&mut graph, &block(1024, &tempo));
+    }
 }

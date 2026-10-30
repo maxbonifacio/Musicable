@@ -37,6 +37,10 @@ CLAP names two threads, and Musicable's are:
   thread pool tasks (a thread-local count), not for a thread fixed at the
   start, since the thread processing a plugin can change from block to
   block, and an ASIO driver can make its first call from another thread.
+  A block the renderer pipelines reaches a plugin as a process call for
+  each part, in order, each with the frames, events and transport of its
+  part, on whichever thread renders that part
+  ([engine.md](engine.md#parallel-rendering), Pipelining).
 - **The thread pool.** A plugin that asks the host to run tasks while it
   processes gets them run on the renderer's threads, as many at once as are
   free, through the engine's `tasks::run` (see
